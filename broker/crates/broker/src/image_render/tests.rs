@@ -2805,3 +2805,28 @@ mod tests {
         );
     }
 }
+#[test]
+fn cleanup_contained_report_contract_rejects_mutations() {
+    let valid = json!({
+        "inspection_status": "parameters_inspected_cleanup_contained",
+        "global_setup_error": 0,
+        "params_setup_error": 0,
+        "global_setdown_error": -1,
+    });
+    assert!(cleanup_contained_report_is_valid(&valid));
+    for (field, replacement) in [
+        ("inspection_status", json!("parameters_inspected")),
+        ("global_setup_error", json!(4)),
+        ("params_setup_error", json!(4)),
+        ("global_setdown_error", json!(0)),
+    ] {
+        let mut mutated = valid.clone();
+        mutated[field] = replacement;
+        assert!(!cleanup_contained_report_is_valid(&mutated), "{field}");
+        mutated.as_object_mut().unwrap().remove(field);
+        assert!(
+            !cleanup_contained_report_is_valid(&mutated),
+            "missing {field}"
+        );
+    }
+}

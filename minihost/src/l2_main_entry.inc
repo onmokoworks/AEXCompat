@@ -1045,6 +1045,36 @@ int run_discovery_session(const std::wstring& manifest_argument,
       current_setdown_pending = current_global_error == 0;
       const bool defaults_disposed = dispose_arbitrary_defaults(
           current_entry, effect_state.input, effect_state.output);
+      const bool inspect_ready = current_global_error == 0 &&
+          bootstrap.params_error == 0 &&
+          bootstrap.parameter_count_contract_valid && defaults_disposed;
+      bool checkpoint_written = true;
+      // Keep the serialized checkpoint storage alive across GLOBAL_SETDOWN.
+      // After a successful pipe write, the selector call below is the next
+      // potentially faulting operation; string destruction cannot be mistaken
+      // for a cleanup-selector crash.
+      std::string checkpoint_report;
+      std::string checkpoint;
+      if (inspect_ready) {
+        checkpoint_report = build_l2_report_json(
+            "parameters_inspected_pre_setdown", current_global_error,
+            bootstrap.params_error, -1, effect_state.output,
+            bootstrap.about_message, {-1, -1, -1, -1, -1}, true,
+            /*include_module_audit=*/false);
+        while (!checkpoint_report.empty() &&
+               (checkpoint_report.back() == '\n' ||
+                checkpoint_report.back() == '\r'))
+          checkpoint_report.pop_back();
+        const std::string& plugin_sha256 =
+            manifest.plugins[static_cast<std::size_t>(plugin_index)].sha256;
+        checkpoint =
+            "{\"v\":1,\"type\":\"inspect_checkpoint\",\"plugin_index\":" +
+            std::to_string(plugin_index) + ",\"request_index\":" +
+            std::to_string(request_index) + ",\"plugin_sha256\":\"" +
+            plugin_sha256 + "\",\"report\":" + checkpoint_report + "}";
+        checkpoint_written = !checkpoint_report.empty() &&
+            pipes.write_message(checkpoint);
+      }
       const int32_t setdown_error = current_setdown_pending
           ? invoke_global_setdown(current_entry, effect_state.input.data(),
                                   effect_state.output.data())
@@ -1060,6 +1090,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
           effect_state.output, bootstrap.about_message, {-1, -1, -1, -1, -1},
           true, /*include_module_audit=*/false);
       if (!ok) error_kind = "selector_error";
+      if (!checkpoint_written) protocol_violation = true;
     };
     if (plugin_index != current_index) {
       // Swap to plugins[N] (design §4.2): the same column as the render
@@ -1170,6 +1201,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
       inspect_column();
     }
 
+    if (protocol_violation) break;
     // Embed the report as a JSON value: the one-shot report ends with a
     // newline, which must not travel inside the message.
     while (!report_json.empty() &&
@@ -1776,13 +1808,24 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return session.finish(3);
   }
   const auto early_mode = aexcompat::l2mode::select_early_mode(
-      invocation.auto_dialog_mode, invocation.do_dialog_mode, invocation.external_dependencies_mode, invocation.params_only_mode);
+      invocation.auto_dialog_mode, invocation.do_dialog_mode,
+      invocation.external_dependencies_mode, invocation.params_only_mode,
+      invocation.cleanup_contained_params_only_mode);
   if (!is_rendering_worker() && early_mode != aexcompat::l2mode::EarlyMode::None) {
     EarlyModeBridge bridge{entry, &input, &output, &session, &about_message};
     const int early_result = aexcompat::l2mode::run_early_mode(
         {early_mode, &bridge, early_mode_hooks(), global_error, params_error,
          parameter_count_contract_valid,
          invocation.external_dependencies_mode ? argv[4] : nullptr});
+    if (invocation.cleanup_contained_params_only_mode) {
+      // Do not return through WorkerSession destruction: that would unload the
+      // plug-in and re-enter the teardown race this mode exists to contain.
+      std::cout.flush();
+      std::cerr.flush();
+      if (!TerminateProcess(GetCurrentProcess(), static_cast<UINT>(early_result)))
+        ExitProcess(static_cast<UINT>(early_result));
+      return early_result;  // Unreachable when TerminateProcess succeeds.
+    }
     return session.finish(early_result);
   }
   if (is_render_worker() && invocation.audio_session_mode) {

@@ -3203,4 +3203,69 @@ mod windows_e2e {
         let close = session.close();
         assert_eq!(close["invalidated"], true, "close: {close}");
     }
+
+    #[test]
+    fn discovery_session_authenticates_checkpoint_before_cleanup_crash() {
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster, behavior("checkpoint_then_crash"));
+        let outcome = session
+            .inspect_plugin(0, 0)
+            .expect("authenticated checkpoint plus crash is a typed outcome");
+        let InspectOutcome::CleanupCrashCheckpoint { .. } = outcome else {
+            panic!("expected cleanup crash checkpoint, got {outcome:?}");
+        };
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+        assert_eq!(
+            close["invalidated_reason"]["reason"],
+            "cleanup_crash_checkpoint"
+        );
+    }
+
+    #[test]
+    fn discovery_session_checkpoint_does_not_replace_clean_terminal_response() {
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster, behavior("checkpoint_then_done"));
+        let outcome = session
+            .inspect_plugin(0, 0)
+            .expect("terminal response wins");
+        assert!(matches!(outcome, InspectOutcome::Inspected { .. }));
+        assert_eq!(session.close()["session_clean"], true);
+    }
+
+    #[test]
+    fn discovery_session_rejects_duplicate_or_wrong_identity_checkpoint() {
+        for behavior_name in [
+            "duplicate_checkpoint",
+            "wrong_checkpoint_sha",
+            "checkpoint_bad_status",
+            "checkpoint_bad_setup",
+            "checkpoint_bad_params",
+            "checkpoint_bad_setdown",
+            "checkpoint_missing_parameters",
+        ] {
+            let cluster = temp_cluster_repository();
+            let mut session = open_discovery_session(&cluster, behavior(behavior_name));
+            let error = session
+                .inspect_plugin(0, 0)
+                .expect_err("invalid checkpoint must fail closed");
+            assert!(
+                error.to_string().contains("checkpoint"),
+                "{behavior_name}: {error}"
+            );
+            assert_eq!(session.close()["invalidated"], true);
+        }
+    }
+
+    #[test]
+    fn discovery_session_checkpoint_followed_by_noncrash_exit_fails_closed() {
+        let cluster = temp_cluster_repository();
+        let mut session =
+            open_discovery_session(&cluster, behavior("checkpoint_then_noncrash_exit"));
+        let error = session
+            .inspect_plugin(0, 0)
+            .expect_err("a checkpoint cannot convert a non-crash exit to success");
+        assert!(error.to_string().contains("worker_exited"), "{error}");
+        assert_eq!(session.close()["invalidated"], true);
+    }
 }

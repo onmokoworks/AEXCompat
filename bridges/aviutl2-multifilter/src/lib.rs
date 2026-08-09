@@ -27,7 +27,8 @@ use std::time::{Duration, Instant};
 
 use aexcompat_broker::image_render::{
     InteractiveParameter, RenderGpuBackend, RenderPixelFormat, encode_default_interactive_payload,
-    initialize_experimental_aegp_in_place, inspect_experimental_in_place,
+    initialize_experimental_aegp_in_place, inspect_experimental_cleanup_contained_in_place,
+    inspect_experimental_in_place,
 };
 use aexcompat_broker::plugin_dependency_closure::{
     DependencyProvenance, survey_dependency_closure,
@@ -37,7 +38,6 @@ use aexcompat_broker::render_session::{
     InspectOutcome, RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome,
 };
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
-use aexcompat_broker::worker_module_audit::MAX_AUDITED_MODULES as ONESHOT_AUDIT_MODULE_LIMIT;
 use aviutl2_sys::filter2::{
     FILTER_ITEM_CHECKBOX, FILTER_ITEM_COLOR, FILTER_ITEM_COLOR_VALUE, FILTER_ITEM_SELECT,
     FILTER_ITEM_SELECT_ITEM, FILTER_ITEM_TRACK, FILTER_PLUGIN_TABLE, FILTER_PROC_VIDEO,
@@ -94,21 +94,10 @@ const MAX_CLUSTER_MODULE_BOUND: usize = 4096;
 /// open (issue #751).
 const MAX_CLUSTER_ADMITTED_DIRS: usize =
     aexcompat_broker::cluster_manifest::MAX_CLUSTER_ADMITTED_DIRS;
-/// The one-shot module-audit cap (the broker's `MAX_AUDITED_MODULES`): total
-/// modules across every category in one snapshot. A singleton whose closure
-/// cannot fit it is exactly the case the cluster session's declared-set
-/// audit exists for (issue #362), so discovery routes it to a one-member
-/// cluster session instead of the one-shot inspect.
-/// Estimated non-declared modules in a one-shot audit snapshot (the worker
-/// image plus the System32/WinSxS tail), measured ~65 for built-in AE
-/// effects. A singleton with `deps + SYSTEM_TAIL_ESTIMATE` over the one-shot
-/// cap would fail the audit there, so it goes to a one-member cluster
-/// session whose module bound is declared instead (issue #362).
-const SYSTEM_TAIL_ESTIMATE: usize = 66;
 /// Per-inspect watchdog deadline for a cluster discovery session (design §7).
-/// The one-shot inspect carries no deadline (#354: mapping a large closure
-/// must not be decided by wall-clock), so this stays generous — its job is to
-/// catch a hung resident worker, not to time a plugin.
+/// Every validated identity now takes this session route, including singleton
+/// and sharded-tail members. The bound stays generous: its job is to catch a
+/// hung worker, not to classify an otherwise slow plug-in as incompatible.
 const CLUSTER_INSPECT_DEADLINE: Duration = Duration::from_secs(300);
 
 /// References to every registered filter's session map, so `UninitializePlugin`

@@ -325,23 +325,16 @@ enum DiscoveryTask {
     Cluster(Vec<usize>),
 }
 
-/// What the planner needs to know about one prepared plug-in: its closure
-/// identity (when the closure resolved) and how many dependency modules that
-/// closure carries.
+/// What the planner needs to know about one prepared plug-in: its validated
+/// in-place search-root identity, when one could be established.
 struct PlannedMember {
     identity: Option<String>,
-    dependency_count: usize,
 }
 
-/// Groups the prepared plug-ins into tasks by closure identity. Identities
-/// with 2..=MAX_CLUSTER_PLUGINS members form one cluster task; singletons
-/// whose closure would exceed the one-shot module-audit cap form a
-/// one-member cluster task (issue #362: the cluster session's declared-set
-/// audit replaces the fixed 512-module cap with the launch-authenticated
-/// module bound); everything else — small singletons, failed resolutions (no
-/// identity), oversized clusters — stays on the per-plugin path
-/// (fail-closed, design §6). Deterministic: clusters in first-seen identity
-/// order, then the remaining singles in scan order.
+/// Groups prepared plug-ins by validated identity. Groups within the manifest
+/// bound share one session; every other validated member uses a one-member
+/// session so its cleanup-crash checkpoint has the same authenticated launch
+/// boundary. Only unresolved identities remain on the one-shot path.
 fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
     let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut first_seen: Vec<&str> = Vec::new();
@@ -370,13 +363,9 @@ fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
         if clustered.contains(&index) {
             continue;
         }
-        // A singleton whose closure would trip the one-shot audit cap takes a
-        // one-member cluster session (issue #362): same launch trust, but the
-        // audit is validated against the declared module bound instead of the
-        // fixed 512-module one-shot cap.
-        if member.identity.is_some()
-            && member.dependency_count + SYSTEM_TAIL_ESTIMATE > ONESHOT_AUDIT_MODULE_LIMIT
-        {
+        // A validated singleton (including a member of an oversized group)
+        // still needs a session checkpoint before cleanup can be contained.
+        if member.identity.is_some() {
             tasks.push(DiscoveryTask::Cluster(vec![index]));
         } else {
             tasks.push(DiscoveryTask::Single(index));
@@ -390,8 +379,8 @@ fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
 /// and a single session would sweep it serially; splitting it into up to
 /// `parallelism` chunks keeps the per-session amortization (one search-set
 /// admission, one Adobe runtime init per chunk) while restoring the parallel
-/// sweep the staged planner got from its many closure identities. Chunks
-/// that would shrink to one member become per-plugin tasks.
+/// sweep the staged planner got from its many closure identities. A one-member
+/// tail remains a session so the checkpoint contract does not change by size.
 fn shard_in_place_clusters(tasks: Vec<DiscoveryTask>, parallelism: usize) -> Vec<DiscoveryTask> {
     let parallelism = parallelism.max(1);
     let mut sharded = Vec::with_capacity(tasks.len());
@@ -401,11 +390,7 @@ fn shard_in_place_clusters(tasks: Vec<DiscoveryTask>, parallelism: usize) -> Vec
                 let chunk_count = parallelism.min(members.len() / 2).max(1);
                 let chunk_size = members.len().div_ceil(chunk_count);
                 for chunk in members.chunks(chunk_size) {
-                    if chunk.len() == 1 {
-                        sharded.push(DiscoveryTask::Single(chunk[0]));
-                    } else {
-                        sharded.push(DiscoveryTask::Cluster(chunk.to_vec()));
-                    }
+                    sharded.push(DiscoveryTask::Cluster(chunk.to_vec()));
                 }
             }
             other => sharded.push(other),
@@ -524,19 +509,31 @@ fn discover_cluster_in_place(
     };
 
     let mut results: Vec<(PathBuf, CacheEntry)> = Vec::with_capacity(member_count);
-    let mut invalidated: Option<(u32, String)> = None;
+    let mut invalidated: Option<(u32, String, bool)> = None;
     for (index, (path, prepared)) in members.into_iter().enumerate() {
-        if let Some((at_member, reason)) = &invalidated {
-            let (path, entry) = fallback_members_in_place(
-                repository,
-                vec![(path, prepared)],
-                dependency,
-                *at_member,
-                reason,
-            )
-            .into_iter()
-            .next()
-            .expect("one member yields one entry");
+        if let Some((at_member, reason, cleanup_crash)) = &invalidated {
+            let (path, entry) = if *cleanup_crash {
+                // A cleanup crash consumes the worker, but does not demote
+                // later members to the ordinary one-shot path (which would
+                // repeat the same uncontained setdown). Give each remaining
+                // member a fresh ordinary session so it must independently
+                // earn its own checkpoint before the one-shot fallback.
+                discover_cluster_in_place(repository, dependency, build, vec![(path, prepared)])
+                    .into_iter()
+                    .next()
+                    .expect("one member yields one entry")
+            } else {
+                fallback_members_in_place(
+                    repository,
+                    vec![(path, prepared)],
+                    dependency,
+                    *at_member,
+                    reason,
+                )
+                .into_iter()
+                .next()
+                .expect("one member yields one entry")
+            };
             results.push((path, entry));
             continue;
         }
@@ -607,6 +604,47 @@ fn discover_cluster_in_place(
                     });
                 results.push((path, entry));
             }
+            Ok(InspectOutcome::CleanupCrashCheckpoint { authorization }) => {
+                let mut entry = prepared.entry;
+                match inspect_experimental_cleanup_contained_in_place(authorization, repository) {
+                    Ok((parameters, diagnostics)) => {
+                        // The fallback is authorized by the authenticated
+                        // in-flight checkpoint, but only its independently
+                        // recomputed and fully validated report is accepted.
+                        // Retain generic evidence that cleanup was contained;
+                        // neither the checkpoint alone nor partial worker
+                        // output can make discovery succeed.
+                        entry.out_flags2 = diagnostics
+                            .get("advertised_out_flags2")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0) as u32;
+                        entry.smart = entry.out_flags2 & (1 << 10) != 0;
+                        entry.params = parameters;
+                        normalize_parameters_for_cache(&mut entry.params);
+                        entry.ok = true;
+                        entry.failure_diagnostics = Some(serde_json::json!({
+                            "classification": "cleanup_crash_contained",
+                            "fallback_status": diagnostics.get("inspection_status"),
+                        }));
+                        results.push((path, entry));
+                    }
+                    Err(error) => {
+                        entry.failure_classification =
+                            Some("cleanup_contained_retry_failed".to_owned());
+                        entry.failure_diagnostics = Some(serde_json::json!({
+                            "classification": "cleanup_contained_retry_failed",
+                            "error": error.to_string(),
+                        }));
+                        results.push((path, entry));
+                    }
+                }
+                invalidated = Some((
+                    request_index,
+                    "worker crashed during GLOBAL_SETDOWN after an authenticated checkpoint"
+                        .to_owned(),
+                    true,
+                ));
+            }
             Err(error) => {
                 let reason = format!("{error}");
                 let mut entry = prepared.entry;
@@ -617,7 +655,7 @@ fn discover_cluster_in_place(
                     resolution: "invalidated".to_owned(),
                 });
                 results.push((path, entry));
-                invalidated = Some((request_index, reason));
+                invalidated = Some((request_index, reason, false));
             }
         }
     }
@@ -841,16 +879,12 @@ fn discover_all(
     let planned: Vec<PlannedMember> = slots
         .iter()
         .map(|slot| {
-            slot.as_ref().map_or(
-                PlannedMember {
-                    identity: None,
-                    dependency_count: 0,
-                },
-                |(_, prepared)| PlannedMember {
-                    identity: prepared.identity.clone(),
-                    dependency_count: 0,
-                },
-            )
+            slot.as_ref()
+                .map_or(PlannedMember { identity: None }, |(_, prepared)| {
+                    PlannedMember {
+                        identity: prepared.identity.clone(),
+                    }
+                })
         })
         .collect();
     let tasks = shard_in_place_clusters(plan_tasks(&planned), parallelism);
@@ -912,20 +946,6 @@ fn discover_all(
                             // one-member cluster (issue #362) has
                             // `indices.len() == 1` by construction and goes
                             // to the session below.
-                            if members.len() == 1 && indices.len() > 1 {
-                                let (plugin, prepared) = members.pop().expect("one member");
-                                let entry =
-                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        finish_one_shot_in_place(
-                                            repository, &plugin, prepared, dependency,
-                                        )
-                                    }))
-                                    .unwrap_or_else(|_| negative_entry(&plugin, build));
-                                if let Ok(mut results) = results.lock() {
-                                    results.push((plugin, entry));
-                                }
-                                continue;
-                            }
                             let member_paths: Vec<PathBuf> =
                                 members.iter().map(|(path, _)| path.clone()).collect();
                             let cluster_results =

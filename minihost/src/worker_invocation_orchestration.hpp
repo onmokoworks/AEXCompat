@@ -90,6 +90,11 @@ struct InvocationState {
     bool mask_attribute_mode{};
     bool user_changed_mode{};
     bool params_only_mode{};
+    // Broker-authorized, one-shot recovery for an inspection whose ordinary
+    // lifecycle was already proven to crash only in GLOBAL_SETDOWN. It emits
+    // the inspected parameter schema and terminates the process without
+    // invoking plug-in cleanup; it is never a resident/session mode.
+    bool cleanup_contained_params_only_mode{};
     bool runtime_module_authorization_mode{};
     bool external_dependencies_mode{};
     bool do_dialog_mode{};

@@ -340,6 +340,13 @@ add_executable(worker_report_json_selftest
 target_compile_features(worker_report_json_selftest PRIVATE cxx_std_17)
 target_include_directories(worker_report_json_selftest PRIVATE src)
 
+add_executable(l2_mode_execution_selftest
+    ../tests/native/l2_mode_execution_selftest.cpp
+    src/l2_mode_execution.cpp)
+target_compile_features(l2_mode_execution_selftest PRIVATE cxx_std_17)
+target_include_directories(l2_mode_execution_selftest PRIVATE src)
+target_compile_options(l2_mode_execution_selftest PRIVATE /UNDEBUG)
+
 add_executable(worker_temporal_checkout_report_selftest
     ../tests/native/worker_temporal_checkout_report_selftest.cpp)
 target_compile_features(worker_temporal_checkout_report_selftest PRIVATE cxx_std_17)

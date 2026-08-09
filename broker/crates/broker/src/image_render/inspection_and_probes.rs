@@ -12,6 +12,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         dependencies,
         Vec::new(),
         runtime_policy,
+        "--l2-params-only",
     )
 }
 
@@ -23,6 +24,7 @@ fn inspect_experimental_impl(
     mut dependencies: Vec<ApprovedImageArtifact>,
     dependency_search_dirs: Vec<std::path::PathBuf>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
+    inspection_mode: &'static str,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     // In-place inspection (issue #751): the loader resolves the closure, so
     // staged dependencies and resources cannot ride the same launch. Runtime
@@ -34,7 +36,7 @@ fn inspect_experimental_impl(
         ));
     }
     let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
-    let args_before_plugin = vec!["--l2-params-only".into()];
+    let args_before_plugin = vec![inspection_mode.into()];
     let mut args_after_plugin = vec![actual.to_ascii_lowercase()];
     let authorization = runtime_policy
         .map(|(policy, backend)| {
@@ -109,6 +111,18 @@ fn inspect_experimental_impl(
         )));
     }
     let report = worker_report.ok_or_else(|| invalid("inspection worker report is invalid"))?;
+    if let Some(status) = report.get("status").and_then(Value::as_str) {
+        diagnostics["inspection_status"] = json!(status);
+    }
+    for field in [
+        "global_setup_error",
+        "params_setup_error",
+        "global_setdown_error",
+    ] {
+        if let Some(value) = report.get(field).and_then(Value::as_i64) {
+            diagnostics[field] = json!(value);
+        }
+    }
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }

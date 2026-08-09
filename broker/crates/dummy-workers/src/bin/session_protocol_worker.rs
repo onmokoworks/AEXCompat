@@ -1138,6 +1138,69 @@ mod worker {
                 std::process::exit(0xC000_0005_u32 as i32);
             }
             let new_index = plugin_index as usize;
+            if matches!(
+                behavior,
+                "checkpoint_then_crash"
+                    | "checkpoint_then_done"
+                    | "duplicate_checkpoint"
+                    | "wrong_checkpoint_sha"
+                    | "checkpoint_bad_status"
+                    | "checkpoint_bad_setup"
+                    | "checkpoint_bad_params"
+                    | "checkpoint_bad_setdown"
+                    | "checkpoint_missing_parameters"
+                    | "checkpoint_then_noncrash_exit"
+            ) {
+                let (_, manifest_sha256) = &manifest.plugins[new_index];
+                let mut checkpoint = json!({
+                    "v": 1,
+                    "type": "inspect_checkpoint",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "plugin_sha256": if behavior == "wrong_checkpoint_sha" {
+                        "00".repeat(32)
+                    } else {
+                        manifest_sha256.clone()
+                    },
+                    "report": {
+                        "status": "parameters_inspected_pre_setdown",
+                        "global_setup_error": 0,
+                        "params_setup_error": 0,
+                        "global_setdown_error": -1,
+                        "parameters": []
+                    }
+                });
+                match behavior {
+                    "checkpoint_bad_status" => checkpoint["report"]["status"] = json!("wrong"),
+                    "checkpoint_bad_setup" => checkpoint["report"]["global_setup_error"] = json!(4),
+                    "checkpoint_bad_params" => {
+                        checkpoint["report"]["params_setup_error"] = json!(4)
+                    }
+                    "checkpoint_bad_setdown" => {
+                        checkpoint["report"]["global_setdown_error"] = json!(0)
+                    }
+                    "checkpoint_missing_parameters" => {
+                        checkpoint["report"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("parameters");
+                    }
+                    _ => {}
+                }
+                let checkpoint = checkpoint.to_string();
+                if !write_message(response, &checkpoint) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                if behavior == "duplicate_checkpoint" && !write_message(response, &checkpoint) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                if behavior == "checkpoint_then_crash" {
+                    std::process::exit(0xC000_0005_u32 as i32);
+                }
+                if behavior == "checkpoint_then_noncrash_exit" {
+                    std::process::exit(7);
+                }
+            }
             if current != Some(new_index) {
                 if let Some(old_index) = current {
                     epochs.push((old_index, new_index));

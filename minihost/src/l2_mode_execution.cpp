@@ -1,9 +1,15 @@
 #include "l2_mode_execution.hpp"
 
 #include <cstring>
+#include <cwchar>
 #include <iostream>
 
 namespace aexcompat::l2mode {
+bool cleanup_contained_params_only_command(int argc, wchar_t** argv) {
+  return argc == 4 && argv && argv[1] &&
+      std::wcscmp(argv[1], L"--l2-params-inspect-cleanup-contained-v1") == 0;
+}
+
 namespace {
 constexpr uint32_t kOutFlagIDoDialog = 1u << 5;
 constexpr uint32_t kOutFlagSendDoDialog = 1u << 7;
@@ -170,6 +176,26 @@ int parameters_only(const Request& r) {
   return r.global_error == 0 && r.params_error == 0 && r.parameter_count_contract_valid &&
       defaults_disposed && setdown_error == 0 ? 0 : 20;
 }
+
+int cleanup_contained_parameters_only(const Request& r) {
+  // This mode is entered only after the broker observed an ordinary attempt
+  // reach GLOBAL_SETDOWN and crash there. Dispose the host-owned parameter
+  // defaults exactly as the ordinary params-only path does, but deliberately
+  // omit the plug-in selector whose cleanup is being process-contained.
+  const bool defaults_disposed = r.hooks.dispose_arbitrary_defaults(r.context);
+  if (!r.hooks.prepare_protocol_report(r.context)) return 14;
+  r.hooks.report_parameters(
+      r.context,
+      r.global_error == 0 && r.params_error == 0 &&
+              r.parameter_count_contract_valid && defaults_disposed
+          ? "parameters_inspected_cleanup_contained"
+          : "selector_error",
+      r.global_error, r.params_error, -1);
+  return r.global_error == 0 && r.params_error == 0 &&
+          r.parameter_count_contract_valid && defaults_disposed
+      ? 0
+      : 20;
+}
 }  // namespace
 
 int run_early_mode(const Request& r) {
@@ -179,16 +205,21 @@ int run_early_mode(const Request& r) {
     case EarlyMode::DoDialog: return do_dialog(r);
     case EarlyMode::ExternalDependencies: return external_dependencies(r);
     case EarlyMode::ParametersOnly: return parameters_only(r);
+    case EarlyMode::CleanupContainedParametersOnly:
+      return cleanup_contained_parameters_only(r);
   }
   return -1;
 }
 
 EarlyMode select_early_mode(bool automatic_dialog, bool do_dialog,
-                            bool external_dependencies, bool parameters_only) {
+                            bool external_dependencies, bool parameters_only,
+                            bool cleanup_contained_parameters_only) {
   if (automatic_dialog) return EarlyMode::AutomaticDialog;
   if (do_dialog) return EarlyMode::DoDialog;
   if (external_dependencies) return EarlyMode::ExternalDependencies;
   if (parameters_only) return EarlyMode::ParametersOnly;
+  if (cleanup_contained_parameters_only)
+    return EarlyMode::CleanupContainedParametersOnly;
   return EarlyMode::None;
 }
 }  // namespace aexcompat::l2mode
