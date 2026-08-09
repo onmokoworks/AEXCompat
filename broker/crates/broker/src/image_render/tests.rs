@@ -2512,7 +2512,10 @@ mod tests {
         }
         let diagnostics = worker_diagnostics(&trace, false, "nonzero_exit", 1, 2);
         assert_eq!(
-            diagnostics["callback_addr_denials"].as_array().unwrap().len(),
+            diagnostics["callback_addr_denials"]
+                .as_array()
+                .unwrap()
+                .len(),
             MAX_CALLBACK_ADDR_DENIALS
         );
         assert_eq!(diagnostics["callback_addr_denials_truncated"], true);
@@ -2527,10 +2530,12 @@ mod tests {
             0,
             2,
         );
-        assert!(diagnostics["callback_addr_denials"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert!(
+            diagnostics["callback_addr_denials"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
     }
 
