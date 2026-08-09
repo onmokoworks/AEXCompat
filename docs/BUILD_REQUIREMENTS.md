@@ -105,6 +105,20 @@ uv run python -m pytest -q
     (「CI (GitHub Actions)」の節を参照)。ローカルでは minihost の Ninja ビルド、
     worker の複製配置、probe ビルド、入力 fixture 生成 (workflow
     `ae-sdk-tests.yml` の該当 step と同じ手順) の後にフラグを付けて実行する。
+    加えて `abi_layout_probe` が要る (issue #981)。`tools/build-*.ps1` は
+    `target\pf-*-probe-build` を configure するので、この probe は別に
+    ビルドする:
+    ```powershell
+    cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release
+    cmake --build target\instruments-build --target abi_layout_probe
+    ```
+    これを飛ばすと `test_abi_layout_observation_matches_probe.py` が
+    `abi_layout_probe is not built` で skip され、`analysis/` の ABI 観測を
+    実 SDK に繋ぎ止めている唯一の照合が走らないまま 0 failed になる。
+    **`tools\refresh-aex-abi-layout-evidence.ps1` で代用しないこと**: あれは
+    probe をビルドしたうえで観測 JSON を**上書き**するので、直後にこの
+    テストを回しても「今書いた文書」と「それを書いた probe」を比べるだけに
+    なる。観測を更新する意図があるときだけ使う。
   - `tests/local_artifact_tests.txt` (`--run-local-artifact-tests`): 記録済み
     evidence (sha256 / receipt) をローカル現物と照合する machine-bound テスト。
     evidence を採取したビルド状態でのみ成立するため CI 対象外。対象のビルド /

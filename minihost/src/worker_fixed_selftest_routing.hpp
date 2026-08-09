@@ -46,6 +46,7 @@ struct SimpleHooks {
   bool (*pf_ae_channel_native_provider)(){};
   bool (*aegp_layer_render_options_suite2)(){};
   bool (*pf_utils_handle_callbacks)(){};
+  bool (*utility_callback_table)(){};
   bool (*flt_blur_suite1)(){};
   bool (*aefx_ace_suite1)(){};
   bool (*aegp_persistent_data_suite3)(){};

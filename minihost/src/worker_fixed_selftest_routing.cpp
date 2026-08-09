@@ -167,7 +167,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 29> simple_commands{{
+  const std::array<selftest::SimpleCommand, 30> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -220,6 +220,14 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-pf-utils-handle-callbacks", "pf_utils_handle_callbacks",
        hooks.simple.pf_utils_handle_callbacks, 1,
        ",\"reached_via_in_data_utils\":true,\"offsets\":[160,168,176,184,440,464]"},
+      // The production callback-table wiring: every generated offset the host
+      // installs has a pointer behind it (issue #981). No metadata - a width
+      // written here by hand is a number an operator would read as "this many
+      // slots were checked" with nothing able to fail when it drifts, and the
+      // offsets that matter are the holes, which the check itself puts on
+      // stderr.
+      {L"--self-test-utility-callback-table", "utility_callback_table",
+       hooks.simple.utility_callback_table},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",

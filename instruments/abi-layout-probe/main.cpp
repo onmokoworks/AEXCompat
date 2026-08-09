@@ -147,6 +147,19 @@ static_assert(offsetof(PF_UtilCallbacks, iterate_generic) == 456);
 static_assert(offsetof(PF_UtilCallbacks, host_resize_handle) == 464);
 static_assert(offsetof(PF_UtilCallbacks, subpixel_sample16) == 472);
 static_assert(offsetof(PF_UtilCallbacks, area_sample16) == 480);
+// The ANSI block's remaining eight entries (issue #981). Eleven of the
+// nineteen were emitted, so the host wired eleven and left the rest null;
+// Basic_3D calls `fmod` and Bulge/Spherize call `floor` from FRAME_SETUP and
+// each jumped to address 0, which the worker's SEH guard then reported as
+// error 512 - the same shape as the 16-bit sampling pair in issue #777.
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, atan) == 208);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, atan2) == 216);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, exp) == 240);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, floor) == 256);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, fmod) == 264);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log) == 280);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log10) == 288);
+static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, tan) == 320);
 
 template <typename T>
 void field(const char* name, std::size_t offset, bool& first) {
@@ -315,6 +328,22 @@ int main() {
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, asin), first);
   field<decltype(PF_ANSICallbacks::acos)>("utils.ansi_acos",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, acos), first);
+  field<decltype(PF_ANSICallbacks::atan)>("utils.ansi_atan",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, atan), first);
+  field<decltype(PF_ANSICallbacks::atan2)>("utils.ansi_atan2",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, atan2), first);
+  field<decltype(PF_ANSICallbacks::exp)>("utils.ansi_exp",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, exp), first);
+  field<decltype(PF_ANSICallbacks::floor)>("utils.ansi_floor",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, floor), first);
+  field<decltype(PF_ANSICallbacks::fmod)>("utils.ansi_fmod",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, fmod), first);
+  field<decltype(PF_ANSICallbacks::log)>("utils.ansi_log",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log), first);
+  field<decltype(PF_ANSICallbacks::log10)>("utils.ansi_log10",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log10), first);
+  field<decltype(PF_ANSICallbacks::tan)>("utils.ansi_tan",
+      offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, tan), first);
   field<decltype(PF_UtilCallbacks::colorCB)>("utils.color_callbacks", offsetof(PF_UtilCallbacks, colorCB), first);
   field<decltype(PF_UtilCallbacks::blend)>("utils.blend", offsetof(PF_UtilCallbacks, blend), first);
   field<decltype(PF_UtilCallbacks::convolve)>("utils.convolve", offsetof(PF_UtilCallbacks, convolve), first);

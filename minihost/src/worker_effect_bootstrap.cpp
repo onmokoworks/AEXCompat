@@ -1,5 +1,6 @@
 #include "worker_effect_bootstrap.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 
@@ -33,6 +34,37 @@ void install_callback_tables(State& state, const AbiHooks& abi) {
   write<void*>(state.input, contract::IN_UTILS_OFFSET, state.utils.data());
   write(state.input, contract::IN_PICA_BASICP_OFFSET, abi.basic_suite);
   write(state.input, contract::IN_EFFECT_REF_OFFSET, abi.effect_ref);
+}
+
+std::vector<UnwiredSlot> unwired_installed_offsets(const State& state) {
+  std::vector<UnwiredSlot> slots;
+  const auto collect = [&slots](const char* block, const std::byte* bytes,
+                                std::size_t offset) {
+    void* callback{};
+    std::memcpy(&callback, bytes + offset, sizeof(callback));
+    if (!callback) slots.push_back({block, offset});
+  };
+  // The three links `install_callback_tables` writes into in_data beside the
+  // inter table. A plug-in reaches `pica_basicP` from GLOBAL_SETUP to acquire
+  // every suite it uses, so a null there is the earliest and widest form of
+  // this defect; `effect_ref` is the last member of `AbiHooks` and therefore
+  // the one a short or reordered initializer drops first.
+  for (const std::size_t offset : {contract::IN_UTILS_OFFSET,
+                                   contract::IN_PICA_BASICP_OFFSET,
+                                   contract::IN_EFFECT_REF_OFFSET})
+    collect("in", state.input.data(), offset);
+  for (const std::size_t offset : contract::INPUT_CALLBACK_OFFSETS)
+    collect("inter", state.input.data(), offset);
+  for (const std::size_t offset : contract::UTILITY_CALLBACK_OFFSETS)
+    collect("utils", state.utils.data(), offset);
+  // The color block is copied whole, so a size the installer refuses leaves
+  // every entry zero; walking it pointer by pointer reports that case and also
+  // a single null inside a block that was copied.
+  for (std::size_t offset = 0; offset + sizeof(void*) <= contract::UTILS_COLOR_CALLBACKS_SIZE;
+       offset += sizeof(void*))
+    collect("utils.color_callbacks",
+            state.utils.data() + contract::UTILS_COLOR_CALLBACKS_OFFSET, offset);
+  return slots;
 }
 
 Result run(State& state, EffectEntry entry, const AbiHooks& abi,
