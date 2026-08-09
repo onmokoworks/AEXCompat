@@ -5,6 +5,7 @@
 #include "worker_suite_registry.hpp"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -225,9 +226,43 @@ int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x
   std::memcpy(&edge_behavior, params + 24, sizeof(edge_behavior));
   const double radius_x = fixed_radius_x / 65536.0;
   const double radius_y = fixed_radius_y / 65536.0;
-  if (fixed_area <= 0 || edge_behavior != 0 || radius_x <= 0.0 || radius_y <= 0.0 ||
-      radius_x >= 128.0 || radius_y >= 128.0)
+  // Which term refused, with the plug-in's value (the #1032
+  // `stage:callback_denied` shape): eight of the 516 bucket's plug-ins died on
+  // this predicate and the collapsed `invalid_area` could not say which term
+  // or what they passed (issue #1033). The radii are raw 1/65536 fixed-point,
+  // as received. One line per distinct reason per worker, not per call:
+  // area_sample is a per-pixel callback, and a plug-in that ignores the
+  // refusal would otherwise turn a frame into millions of flushed pipe
+  // writes; the broker parser deduplicates anyway.
+  static std::array<std::atomic<bool>, 4> reason_emitted{};
+  const auto denied = [&](std::size_t index, const char* reason, int64_t value) {
+    if (!reason_emitted[index].exchange(true))
+      std::cerr << "stage:callback_denied callback=area_sample reason=" << reason
+                << " value=" << value << "\n" << std::flush;
     return finish_callback(Callback::Sampling, kPfBadCallbackParam, Reason::InvalidArea);
+  };
+  // `area` is not validated, because nothing here uses it: the footprint is
+  // computed from the radii below, and the measured corpus passes zero
+  // (LightSweep), negative (Blobbylize, Glass) and garbage values in a field
+  // AE demonstrably tolerates - refusing them was the whole frame error for
+  // three plug-ins AE renders (issue #1033). `nearest`/`subpixel` above
+  // already read only `src` out of the same struct on the same reasoning.
+  (void)fixed_area;
+  // Out-of-image samples follow the PF_SampleEdgeBehav values the SDK header
+  // documents - ZERO, and the commented-out REPEAT (clamp to nearest edge)
+  // and WRAP the header marks "not supported". Clamp/wrap is this host's
+  // reading of those doc lines, not observed AE behavior; AE may treat both
+  // as ZERO, which issue #1039 exists to measure. Anything else (BallAction,
+  // GlueGun, MrSmoothie and Smear pass uninitialized garbage here, and AE
+  // renders all four) is read as ZERO rather than refused: the field plainly
+  // is not validated by AE, and it only steers where out-of-bounds samples
+  // read from.
+  constexpr uint32_t kEdgeZero = 0, kEdgeRepeat = 1, kEdgeWrap = 2;
+  const uint32_t edge = edge_behavior <= kEdgeWrap ? edge_behavior : kEdgeZero;
+  if (radius_x <= 0.0) return denied(0, "x_radius_nonpositive", fixed_radius_x);
+  if (radius_y <= 0.0) return denied(1, "y_radius_nonpositive", fixed_radius_y);
+  if (radius_x >= 128.0) return denied(2, "x_radius_over_128", fixed_radius_x);
+  if (radius_y >= 128.0) return denied(3, "y_radius_over_128", fixed_radius_y);
   unsigned char* source{};
   int32_t rowbytes{}, width{}, height{};
   if (!resolve_world(source_world, pixel_bytes, source, rowbytes, width, height))
@@ -240,18 +275,34 @@ int32_t area_sample_typed(int32_t pixel_bytes, void* effect_ref, int32_t fixed_x
   double weighted_alpha = 0.0;
   std::array<double, 3> weighted_color{};
   const double maximum = pixel_bytes == 4 ? 255.0 : (pixel_bytes == 8 ? 32768.0 : 1.0);
-  const int32_t first_x = std::max(0, static_cast<int32_t>(std::floor(left - 0.5)));
-  const int32_t last_x = std::min(width - 1, static_cast<int32_t>(std::ceil(right + 0.5)));
-  const int32_t first_y = std::max(0, static_cast<int32_t>(std::floor(top - 0.5)));
-  const int32_t last_y = std::min(height - 1, static_cast<int32_t>(std::ceil(bottom + 0.5)));
+  // ZERO clips the walk to the image, so pixels outside contribute nothing.
+  // REPEAT and WRAP walk the whole footprint (bounded by the radius check
+  // above, not by the image) and map each coordinate into the image below;
+  // on an empty world there is nothing to clamp or wrap a sample to, so both
+  // degrade to the clipped walk, which is then empty.
+  const bool clip_to_image = edge == kEdgeZero || width <= 0 || height <= 0;
+  const int32_t span_first_x = static_cast<int32_t>(std::floor(left - 0.5));
+  const int32_t span_last_x = static_cast<int32_t>(std::ceil(right + 0.5));
+  const int32_t span_first_y = static_cast<int32_t>(std::floor(top - 0.5));
+  const int32_t span_last_y = static_cast<int32_t>(std::ceil(bottom + 0.5));
+  const int32_t first_x = clip_to_image ? std::max(0, span_first_x) : span_first_x;
+  const int32_t last_x = clip_to_image ? std::min(width - 1, span_last_x) : span_last_x;
+  const int32_t first_y = clip_to_image ? std::max(0, span_first_y) : span_first_y;
+  const int32_t last_y = clip_to_image ? std::min(height - 1, span_last_y) : span_last_y;
+  const auto edge_mapped = [&](int32_t value, int32_t extent) {
+    if (edge == kEdgeRepeat) return std::clamp(value, 0, extent - 1);
+    return ((value % extent) + extent) % extent;
+  };
   for (int32_t y = first_y; y <= last_y; ++y) {
     const double overlap_y = std::max(0.0, std::min(bottom, y + 0.5) - std::max(top, y - 0.5));
     for (int32_t x = first_x; x <= last_x; ++x) {
       const double overlap_x = std::max(0.0, std::min(right, x + 0.5) - std::max(left, x - 0.5));
       const double weight = overlap_x * overlap_y;
       if (weight == 0.0) continue;
-      const auto* pixel = source + static_cast<std::size_t>(y) * rowbytes +
-          static_cast<std::size_t>(x) * pixel_bytes;
+      const int32_t sample_x = clip_to_image ? x : edge_mapped(x, width);
+      const int32_t sample_y = clip_to_image ? y : edge_mapped(y, height);
+      const auto* pixel = source + static_cast<std::size_t>(sample_y) * rowbytes +
+          static_cast<std::size_t>(sample_x) * pixel_bytes;
       const auto read_channel = [&](int channel) {
         return pixel_bytes == 4 ? static_cast<double>(pixel[channel]) :
             (pixel_bytes == 8 ? static_cast<double>(reinterpret_cast<const uint16_t*>(pixel)[channel]) :

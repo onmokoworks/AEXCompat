@@ -256,6 +256,93 @@ void the_utility_table_is_wired_one_to_one() {
   check(contract::UTILS_ANSI_TAN_OFFSET == 320, "ansi.tan sits at 320");
 }
 
+// PF_AREA_SAMPLE's field handling as issue #1033 settled it. The measured
+// corpus passes zero, negative and garbage in `area` and uninitialized garbage
+// in `samp_behave`, and AE renders all of it, so `area` is not validated (the
+// footprint is computed from the radii) and an out-of-enum edge behavior reads
+// as ZERO. At the edges: ZERO samples nothing outside the image; REPEAT clamps
+// to the nearest edge pixel and WRAP wraps, which is the host's reading of the
+// SDK header's commented-out doc lines for those values ("not supported"
+// there), pending AE oracle evidence (issue #1039). The radii stay validated -
+// they bound the sampling walk.
+void area_sample_edge_behaviors_follow_the_sdk_and_lax_fields_pass() {
+  PfSamplingHostHooks hooks{};
+  hooks.resolve_world = &resolve_world;
+  configure_pf_sampling_runtime(hooks);
+  g_world.pixel_bytes = 4;
+  g_world.pixels.fill(0);
+  // 2x2 ARGB8: opaque, red channel distinguishes the columns of row 0.
+  const auto paint = [&](int x, int y, unsigned char red) {
+    g_world.pixels[static_cast<std::size_t>(y) * 8 + static_cast<std::size_t>(x) * 4] = 255;
+    g_world.pixels[static_cast<std::size_t>(y) * 8 + static_cast<std::size_t>(x) * 4 + 1] = red;
+  };
+  paint(0, 0, 10);
+  paint(1, 0, 20);
+  paint(0, 1, 30);
+  paint(1, 1, 40);
+
+  const int32_t half = 32768;  // 0.5 in 16.16
+  const auto params_with = [&](int32_t area, uint32_t edge_behavior) {
+    auto params = area_sampling_params(&g_world);
+    std::memcpy(params.data() + 8, &area, sizeof(area));
+    std::memcpy(params.data() + 24, &edge_behavior, sizeof(edge_behavior));
+    return params;
+  };
+  std::array<unsigned char, 4> destination{};
+
+  // Zero, negative and garbage `area` values, and garbage `samp_behave`, all
+  // sample: these are Blobbylize's, Glass's, LightSweep's and BallAction's
+  // measured frame-enders.
+  for (const auto [area, edge] : std::array{
+           std::pair{0, 0u}, std::pair{-45044, 0u}, std::pair{65536, 1461732944u}}) {
+    auto params = params_with(area, edge);
+    destination.fill(1);
+    check(area_sample8(nullptr, 0, 0, params.data(), destination.data()) == 0,
+          "area_sample8 samples despite an unvalidated area/edge field");
+    check(destination[1] == 10, "in-image sample reads the pixel under the center");
+  }
+
+  // Center one pixel left of the image: ZERO answers transparent, REPEAT the
+  // clamped edge pixel (0,0), WRAP the wrapped pixel (1,0). -1 in 16.16.
+  auto zero_params = params_with(65536, 0);
+  destination.fill(1);
+  check(area_sample8(nullptr, -65536, 0, zero_params.data(), destination.data()) == 0,
+        "area_sample8 samples outside the image under ZERO");
+  check(destination[0] == 0, "ZERO answers transparent outside the image");
+  auto repeat_params = params_with(65536, 1);
+  destination.fill(1);
+  check(area_sample8(nullptr, -65536, 0, repeat_params.data(), destination.data()) == 0,
+        "area_sample8 samples outside the image under REPEAT");
+  check(destination[0] == 255 && destination[1] == 10,
+        "REPEAT clamps the sample to the nearest edge pixel");
+  auto wrap_params = params_with(65536, 2);
+  destination.fill(1);
+  check(area_sample8(nullptr, -65536, 0, wrap_params.data(), destination.data()) == 0,
+        "area_sample8 samples outside the image under WRAP");
+  check(destination[0] == 255 && destination[1] == 20,
+        "WRAP wraps the sample around the image");
+  // More than one extent out (-3 on width 2): the double-modulo mapping, not
+  // a single subtraction, is what lands it back inside.
+  destination.fill(1);
+  check(area_sample8(nullptr, -3 * 65536, 0, wrap_params.data(), destination.data()) == 0,
+        "area_sample8 samples far outside the image under WRAP");
+  check(destination[0] == 255 && destination[1] == 20,
+        "WRAP maps a center more than one extent out back into the image");
+
+  // The radius checks are load-bearing (they bound the walk) and must survive
+  // the relaxation above.
+  auto degenerate = params_with(65536, 0);
+  const int32_t zero_radius = 0;
+  std::memcpy(degenerate.data(), &zero_radius, sizeof(zero_radius));
+  check(area_sample8(nullptr, half, half, degenerate.data(), destination.data()) == 516,
+        "area_sample8 still refuses a nonpositive radius");
+  auto oversized = params_with(65536, 0);
+  const int32_t huge_radius = 128 * 65536;
+  std::memcpy(oversized.data(), &huge_radius, sizeof(huge_radius));
+  check(area_sample8(nullptr, half, half, oversized.data(), destination.data()) == 516,
+        "area_sample8 still refuses a radius of 128 or more");
+}
+
 void get_callback_addr_is_typed_bounded_and_clears_failures() {
   for (const auto [id, expected] : std::array{
            std::pair{2, reinterpret_cast<void*>(&subpixel_sample8)},
@@ -400,6 +487,7 @@ void unwired_installed_slots_are_named_by_their_generated_offset() {
 int main() {
   aexcompat::callback_diagnostics::reset();
   a_null_effect_ref_still_samples();
+  area_sample_edge_behaviors_follow_the_sdk_and_lax_fields_pass();
   the_utility_table_is_wired_one_to_one();
   get_callback_addr_is_typed_bounded_and_clears_failures();
   production_utility_builder_is_offset_indexed();
