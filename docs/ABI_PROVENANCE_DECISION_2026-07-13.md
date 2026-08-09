@@ -82,11 +82,14 @@ difference from the previous refresh is those eight entries. The functions
 themselves were already independently written in
 `minihost/src/worker_pf_ansi_runtime.cpp`; nothing but numeric offsets crossed.
 
-`tests/test_abi_layout_observation_matches_probe.py` is that refresh runner's
-`--check`: it runs the compiled probe and requires the committed document to
-equal its output, and CI builds the probe on any run that provisioned the SDK.
-So a document refreshed against a different SDK, or edited by hand, fails rather
-than reaching the generator. What it does not cover is a `PF_UtilCallbacks`
-member nothing has taught the probe to emit - such a member is outside the
-probe, the document, and the host's install alike; issue #991 tracks the ones
-that are still there.
+`tests/test_abi_layout_observation_matches_probe.py` supplies the check the
+refresh runner itself does not have - the runner only ever rewrites the
+document - by running the compiled probe and requiring the committed document to
+equal its output. CI builds the probe on any run that provisioned the SDK, so a
+document refreshed against a different SDK, or edited by hand, fails there.
+Locally it is a built-artifact test (`tests/built_artifact_tests.txt`), so a
+plain `uv run python -m pytest -q` skips it: reaching the generator with a
+drifted document is caught in CI, not by the canonical local run. What neither
+covers is a `PF_UtilCallbacks` member nothing has taught the probe to emit -
+such a member is outside the probe, the document, and the host's install alike;
+issue #991 tracks the ones that are still there.

@@ -11,10 +11,15 @@ source-only test, and reaches the worker as a callback pointer written at the
 wrong slot. That is the shape of issues #777 and #981, except that a
 half-overwritten pointer crashes somewhere worse than a null one.
 
-This is the refresh runner's `--check`: run the probe and require the committed
-document to equal its output. The runner writes stdout verbatim plus a trailing
-newline, so the comparison is on parsed JSON rather than bytes - a re-run on
-another line-ending setting is not drift.
+The refresh runner has no check mode - it only ever rewrites the document - so
+this supplies one: run the probe and require the committed document to equal its
+output. Do not reach for the runner to satisfy this test; it would rewrite the
+document from the local SDK and leave the comparison checking that file against
+the probe that just produced it.
+
+The runner writes stdout verbatim plus a trailing newline, so the comparison is
+on parsed JSON rather than bytes - a re-run on another line-ending setting is
+not drift.
 """
 
 import json
@@ -70,6 +75,10 @@ def probe_is_stale() -> bool:
 
 
 class AbiLayoutObservationMatchesProbeTests(unittest.TestCase):
+    # The wording matters: the workflow's "Fail if SDK or built-artifact tests
+    # were skipped" step greps skip reasons for "is not built", so on a run that
+    # provisioned the SDK and built the probe, a silent skip here fails CI
+    # instead of reading as a pass.
     @unittest.skipUnless(
         PROBE.exists() or PROBE_IS_OVERRIDDEN, "abi_layout_probe is not built"
     )
@@ -92,14 +101,22 @@ class AbiLayoutObservationMatchesProbeTests(unittest.TestCase):
         probe = json.loads(printed)
         document = json.loads(OBSERVATION.read_text(encoding="utf-8"))
 
-        # Field by field before the whole-document compare: a mismatch has to
-        # name the field, because the point is telling an operator which offset
-        # is wrong rather than printing two 450-line documents.
+        # Key by key before the whole-document compare: a mismatch has to name
+        # what drifted, because the point is telling an operator which offset or
+        # size is wrong rather than printing two 450-line documents. The final
+        # equality is what catches a key present on one side only.
         for name, value in probe["fields"].items():
             self.assertIn(name, document["fields"], f"{name} is missing from the observation")
             self.assertEqual(
                 document["fields"][name],
                 value,
                 f"{name} does not match what the SDK-compiled probe reports",
+            )
+        for key, value in probe.items():
+            if key == "fields":
+                continue
+            self.assertIn(key, document, f"{key} is missing from the observation")
+            self.assertEqual(
+                document[key], value, f"{key} does not match the SDK-compiled probe"
             )
         self.assertEqual(document, probe)
