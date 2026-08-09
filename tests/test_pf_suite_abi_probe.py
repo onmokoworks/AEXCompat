@@ -46,9 +46,6 @@ def test_pf_suite_abi_probe_builds_and_records_sdk_layouts():
         ]
         assert all(entry["size"] == report["scalars"]["pointer"] for entry in members)
 
-def test_pf_suite_abi_probe_records_receipt_suite_member_names():
-    report = json.loads(RESULT.read_text(encoding="utf-8"))
-
     assert list(report["suites"]["AEGP_RenderSuite4"]["members"]) == [
         "AEGP_RenderAndCheckoutFrame",
         "AEGP_RenderAndCheckoutLayerFrame",
