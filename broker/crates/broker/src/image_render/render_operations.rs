@@ -1468,7 +1468,65 @@ pub fn inspect_experimental_in_place(
         Vec::new(),
         dependency_search_dirs,
         None,
+        "--l2-params-only",
     )
+}
+
+/// Performs the single cleanup-contained retry authorized by an authenticated
+/// discovery-session checkpoint followed by an OS-classified cleanup crash.
+/// The worker recomputes the report and deliberately does not enter
+/// `GLOBAL_SETDOWN`; this route must never be used as ordinary discovery.
+pub fn inspect_experimental_cleanup_contained_in_place(
+    authorization: crate::render_session::CleanupCrashAuthorization,
+    repository: &Path,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    let (plugin_path, approved_sha256, expected_size, dependency_search_dirs) =
+        authorization.into_retry_identity();
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "cleanup-contained inspection requires dependency search directories",
+        ));
+    }
+    if fs::metadata(&plugin_path)?.len() != expected_size {
+        return Err(invalid(
+            "cleanup-contained authorized plugin size changed before retry",
+        ));
+    }
+    let inspected = inspect_experimental_impl(
+        repository,
+        &plugin_path,
+        &approved_sha256,
+        Vec::new(),
+        dependency_search_dirs,
+        None,
+        "--l2-params-inspect-cleanup-contained-v1",
+    )?;
+    let diagnostics = &inspected.1;
+    if !cleanup_contained_report_is_valid(diagnostics) {
+        return Err(invalid(
+            "cleanup-contained inspection report failed its mode-specific contract",
+        ));
+    }
+    Ok(inspected)
+}
+
+fn cleanup_contained_report_is_valid(diagnostics: &Value) -> bool {
+    diagnostics
+        .get("inspection_status")
+        .and_then(Value::as_str)
+        == Some("parameters_inspected_cleanup_contained")
+        && diagnostics
+            .get("global_setup_error")
+            .and_then(Value::as_i64)
+            == Some(0)
+        && diagnostics
+            .get("params_setup_error")
+            .and_then(Value::as_i64)
+            == Some(0)
+        && diagnostics
+            .get("global_setdown_error")
+            .and_then(Value::as_i64)
+            == Some(-1)
 }
 
 pub fn inspect_experimental_with_runtime_policy(

@@ -1,5 +1,6 @@
 #include "worker_invocation_orchestration.hpp"
 
+#include "l2_mode_execution.hpp"
 #include "render_subsystem.h"
 #include "worker_classic_render_entry.hpp"
 #include "worker_classic_runtime.hpp"
@@ -77,6 +78,8 @@ int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
       target.aegp_comp_idle_roundtrip_mode;
   target.params_only_mode = (argc == 4 || argc == 6) &&
       std::wstring(argv[1]) == L"--l2-params-only";
+  target.cleanup_contained_params_only_mode =
+      aexcompat::l2mode::cleanup_contained_params_only_command(argc, argv);
   target.runtime_module_authorization_mode = target.params_only_mode && argc == 6 &&
       std::wstring(argv[4]) == L"--runtime-module-authorization-v1";
   target.external_dependencies_mode = argc == 5 &&
@@ -128,6 +131,7 @@ int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
        (target.keydown_code & 0x3fff0000u) != 0 || target.keydown_modifiers > 0xffffu)) return 3;
   target.skip_about_mode = (argc == 4 && std::wstring(argv[1]) == L"--l2-no-about") ||
       target.params_only_mode || target.external_dependencies_mode || target.do_dialog_mode ||
+      target.cleanup_contained_params_only_mode ||
       target.auto_dialog_mode || target.adjust_cursor_mode || target.draw_event_mode ||
       target.click_event_mode || target.drag_event_mode || target.ui_lifecycle_mode ||
       target.ui_idle_mode || target.ui_keydown_mode || target.ui_mouse_exited_mode;

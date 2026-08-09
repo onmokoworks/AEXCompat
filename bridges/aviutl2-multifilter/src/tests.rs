@@ -2815,10 +2815,9 @@ mod tests {
         assert_ne!(closure_identity_of(&first), closure_identity_of(&missing));
     }
 
-    fn planned(identity: Option<&str>, dependency_count: usize) -> PlannedMember {
+    fn planned(identity: Option<&str>, _dependency_count: usize) -> PlannedMember {
         PlannedMember {
             identity: identity.map(str::to_owned),
-            dependency_count,
         }
     }
 
@@ -2832,23 +2831,19 @@ mod tests {
             planned(Some("cluster"), 2),
         ];
         let tasks = plan_tasks(&members);
-        // One cluster over members 0/1/4 (first-seen), then singles in scan
-        // order for the singleton identity and the failed resolution.
+        // One shared cluster, one authenticated singleton session, then the
+        // unresolved member on the per-plugin path.
         assert_eq!(tasks.len(), 3);
         match &tasks[0] {
             DiscoveryTask::Cluster(members) => assert_eq!(members, &[0, 1, 4]),
             _ => panic!("first task must be the cluster"),
         }
-        for (task, expected) in tasks[1..].iter().zip([2usize, 3usize]) {
-            match task {
-                DiscoveryTask::Single(index) => assert_eq!(*index, expected),
-                _ => panic!("expected a singleton task"),
-            }
-        }
+        assert!(matches!(&tasks[1], DiscoveryTask::Cluster(indices) if indices == &[2]));
+        assert!(matches!(&tasks[2], DiscoveryTask::Single(3)));
     }
 
     #[test]
-    fn plan_tasks_keeps_oversized_clusters_on_the_per_plugin_path() {
+    fn plan_tasks_splits_oversized_groups_into_authenticated_singletons() {
         let members: Vec<PlannedMember> = (0..=MAX_CLUSTER_PLUGINS)
             .map(|_| planned(Some("huge"), 2))
             .collect();
@@ -2856,16 +2851,13 @@ mod tests {
         assert!(
             tasks
                 .iter()
-                .all(|task| matches!(task, DiscoveryTask::Single(_)))
+                .all(|task| matches!(task, DiscoveryTask::Cluster(indices) if indices.len() == 1))
         );
         assert_eq!(tasks.len(), MAX_CLUSTER_PLUGINS + 1);
     }
 
     #[test]
-    fn plan_tasks_routes_oversized_singleton_closures_to_a_one_member_cluster() {
-        // The threshold: deps + the measured system tail past the one-shot
-        // 512-module audit cap. 446 deps still fits (446 + 66 = 512, not
-        // over); 447 does not (issue #362/#478).
+    fn plan_tasks_routes_all_validated_singletons_to_one_member_sessions() {
         let members = vec![
             planned(Some("small"), 446),
             planned(Some("large"), 447),
@@ -2878,10 +2870,7 @@ mod tests {
             DiscoveryTask::Cluster(members) => members.clone(),
             _ => panic!("task {index} must be a cluster"),
         };
-        match &tasks[0] {
-            DiscoveryTask::Single(index) => assert_eq!(*index, 0),
-            _ => panic!("446 deps stays on the one-shot path"),
-        }
+        assert_eq!(cluster_of(0), vec![0]);
         assert_eq!(cluster_of(1), vec![1]);
         assert_eq!(cluster_of(2), vec![2]);
         // A failed closure resolution never clusters, however large the walk
@@ -2890,10 +2879,7 @@ mod tests {
             DiscoveryTask::Single(index) => assert_eq!(*index, 3),
             _ => panic!("an unresolved closure stays on the one-shot path"),
         }
-        match &tasks[4] {
-            DiscoveryTask::Single(index) => assert_eq!(*index, 4),
-            _ => panic!("a zero-dependency singleton stays on the one-shot path"),
-        }
+        assert_eq!(cluster_of(4), vec![4]);
     }
 
     #[test]
@@ -3169,18 +3155,17 @@ mod tests {
         }
 
         #[test]
-        fn in_place_cluster_sharding_keeps_membership_and_degrades_singletons() {
+        fn in_place_cluster_sharding_keeps_singleton_tails_authenticated() {
             let cluster = |indices: &[usize]| DiscoveryTask::Cluster(indices.to_vec());
             let members: Vec<usize> = (0..7).collect();
-            // parallelism 3 over 7 members: 3 chunks (3/3/1), the remainder
-            // degrading to a per-plugin task; membership is preserved.
+            // parallelism 3 over 7 members: 3 chunks (3/3/1), with the tail
+            // remaining a one-member session; membership is preserved.
             let sharded = shard_in_place_clusters(vec![cluster(&members)], 3);
             let mut seen = Vec::new();
             let mut cluster_count = 0;
             for task in &sharded {
                 match task {
                     DiscoveryTask::Cluster(chunk) => {
-                        assert!(chunk.len() >= 2, "no one-member cluster chunks");
                         cluster_count += 1;
                         seen.extend(chunk.iter().copied());
                     }
@@ -3188,7 +3173,7 @@ mod tests {
                 }
             }
             assert_eq!(seen, members, "sharding preserves order and membership");
-            assert_eq!(cluster_count, 2);
+            assert_eq!(cluster_count, 3);
             // Two-member clusters and singles pass through untouched.
             let untouched = shard_in_place_clusters(vec![cluster(&[0, 1])], 8);
             assert!(matches!(&untouched[0], DiscoveryTask::Cluster(chunk) if chunk.len() == 2));

@@ -101,6 +101,47 @@ pub enum InspectOutcome {
         error_kind: String,
         report: Option<Value>,
     },
+    /// The host completed setup/parameter inspection and authenticated that
+    /// snapshot on the control pipe, but the worker then crashed during
+    /// cleanup. This is not ordinary discovery success: callers may use it
+    /// only to authorize the dedicated one-shot cleanup-contained retry.
+    CleanupCrashCheckpoint {
+        authorization: CleanupCrashAuthorization,
+    },
+}
+
+/// Single-use proof minted only after a manifest-bound checkpoint is followed
+/// by an OS-classified worker crash. Its fields are private so callers cannot
+/// bypass the ordinary lifecycle and manufacture cleanup-contained retries.
+#[derive(Debug)]
+pub struct CleanupCrashAuthorization {
+    plugin_sha256: String,
+    plugin_path: PathBuf,
+    expected_size: u64,
+    dependency_search_dirs: Vec<PathBuf>,
+}
+
+impl CleanupCrashAuthorization {
+    pub(crate) fn into_retry_identity(self) -> (PathBuf, String, u64, Vec<PathBuf>) {
+        (
+            self.plugin_path,
+            self.plugin_sha256,
+            self.expected_size,
+            self.dependency_search_dirs,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectCheckpoint {
+    v: u32,
+    #[serde(rename = "type")]
+    kind: String,
+    plugin_index: u32,
+    request_index: u32,
+    plugin_sha256: String,
+    report: Value,
 }
 
 #[derive(Deserialize)]
@@ -127,6 +168,10 @@ pub struct DiscoverySession {
     inspect_deadline: Duration,
     invalidation: Option<SessionInvalidation>,
     plugin_count: u32,
+    plugin_sha256: Vec<String>,
+    plugin_paths: Vec<PathBuf>,
+    plugin_sizes: Vec<u64>,
+    dependency_search_dirs: Vec<PathBuf>,
     next_request_index: u32,
     inspects_ok: u32,
     inspects_errored: u32,
@@ -188,6 +233,28 @@ impl DiscoverySession {
             layers: Vec::new(),
         };
         let dependency_search_dirs = request.dependency_search_dirs;
+        let authorized_dependency_search_dirs = dependency_search_dirs.clone();
+        let plugin_paths = request
+            .plugins
+            .iter()
+            .map(|plugin| plugin.path.clone())
+            .collect();
+        let plugin_sizes = request
+            .plugins
+            .iter()
+            .map(|plugin| plugin.expected_size)
+            .collect();
+        let plugin_sha256 = request
+            .plugins
+            .iter()
+            .map(|plugin| {
+                plugin
+                    .expected_sha256
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect()
+            })
+            .collect();
         let (process, plugin_count, in_place_transport) = {
             let dispatch = crate::secure_image_dispatch::SecureInPlaceClusterDispatch {
                 repository: request.repository,
@@ -226,6 +293,10 @@ impl DiscoverySession {
             inspect_deadline: request.inspect_deadline,
             invalidation: None,
             plugin_count: plugin_count as u32,
+            plugin_sha256,
+            plugin_paths,
+            plugin_sizes,
+            dependency_search_dirs: authorized_dependency_search_dirs,
             next_request_index: 0,
             inspects_ok: 0,
             inspects_errored: 0,
@@ -270,8 +341,7 @@ impl DiscoverySession {
         ))
     }
 
-    fn await_response(&mut self) -> FrameWait {
-        let deadline = Instant::now() + self.inspect_deadline;
+    fn await_response_until(&mut self, deadline: Instant) -> FrameWait {
         loop {
             let mut remaining = deadline.saturating_duration_since(Instant::now());
             if self.process_exit_observed {
@@ -372,32 +442,129 @@ impl DiscoverySession {
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
         }
-        let body = match self.await_response() {
-            FrameWait::Message(body) => body,
-            FrameWait::Deadline => {
+        let mut checkpoint: Option<InspectCheckpoint> = None;
+        // An interim checkpoint does not reset the per-inspect watchdog.
+        let response_deadline = Instant::now() + self.inspect_deadline;
+        let body = loop {
+            let frame = match self.await_response_until(response_deadline) {
+                FrameWait::Message(body) => body,
+                FrameWait::Deadline => {
+                    return Err(self.invalidate(
+                        "inspect_deadline",
+                        format!(
+                            "request {request_index} exceeded the {}ms deadline",
+                            self.inspect_deadline.as_millis()
+                        ),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                FrameWait::WorkerGone => {
+                    if let Some(checkpoint) = checkpoint.take() {
+                        self.collect_exit(POST_TERMINATION_COLLECT_TIMEOUT);
+                        let crashed = self
+                            .collected
+                            .as_ref()
+                            .and_then(|collected| collected.result.as_ref())
+                            .is_some_and(|result| {
+                                result.classification == crate::ExitClassification::Crashed
+                            });
+                        if crashed {
+                            self.invalidation = Some(SessionInvalidation {
+                                reason: "cleanup_crash_checkpoint",
+                                detail: format!(
+                                    "request {request_index} crashed after its authenticated pre-setdown checkpoint"
+                                ),
+                            });
+                            return Ok(InspectOutcome::CleanupCrashCheckpoint {
+                                authorization: CleanupCrashAuthorization {
+                                    plugin_sha256: checkpoint.plugin_sha256,
+                                    plugin_path: self.plugin_paths[plugin_index as usize].clone(),
+                                    expected_size: self.plugin_sizes[plugin_index as usize],
+                                    dependency_search_dirs: self.dependency_search_dirs.clone(),
+                                },
+                            });
+                        }
+                    }
+                    return Err(self.invalidate(
+                        "worker_exited",
+                        format!("the worker was gone before request {request_index} completed"),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                FrameWait::FramingViolation => {
+                    return Err(self.invalidate(
+                        "response_framing_violation",
+                        format!(
+                            "the worker broke the response framing during request {request_index}"
+                        ),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            };
+            let value: Value = match serde_json::from_slice(&frame) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(self.invalidate(
+                        "malformed_inspect_response",
+                        format!("request {request_index} response was not JSON: {error}"),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            };
+            if value.get("type").and_then(Value::as_str) != Some("inspect_checkpoint") {
+                break frame;
+            }
+            if checkpoint.is_some() {
                 return Err(self.invalidate(
-                    "inspect_deadline",
-                    format!(
-                        "request {request_index} exceeded the {}ms deadline",
-                        self.inspect_deadline.as_millis()
-                    ),
+                    "duplicate_inspect_checkpoint",
+                    format!("request {request_index} received more than one checkpoint"),
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
             }
-            FrameWait::WorkerGone => {
+            let parsed: InspectCheckpoint = match serde_json::from_value(value) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    return Err(self.invalidate(
+                        "malformed_inspect_checkpoint",
+                        format!(
+                            "request {request_index} checkpoint did not parse strictly: {error}"
+                        ),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+            };
+            let expected_sha256 = &self.plugin_sha256[plugin_index as usize];
+            if parsed.v != PROTOCOL_VERSION
+                || parsed.kind != "inspect_checkpoint"
+                || parsed.plugin_index != plugin_index
+                || parsed.request_index != request_index
+                || !parsed.plugin_sha256.eq_ignore_ascii_case(expected_sha256)
+                || parsed.report.get("status").and_then(Value::as_str)
+                    != Some("parameters_inspected_pre_setdown")
+                || parsed
+                    .report
+                    .get("global_setup_error")
+                    .and_then(Value::as_i64)
+                    != Some(0)
+                || parsed
+                    .report
+                    .get("params_setup_error")
+                    .and_then(Value::as_i64)
+                    != Some(0)
+                || parsed
+                    .report
+                    .get("global_setdown_error")
+                    .and_then(Value::as_i64)
+                    != Some(-1)
+                || !parsed.report.get("parameters").is_some_and(Value::is_array)
+            {
                 return Err(self.invalidate(
-                    "worker_exited",
-                    format!("the worker was gone before request {request_index} completed"),
+                    "inspect_checkpoint_mismatch",
+                    format!("request {request_index} checkpoint identity did not match the in-flight manifest entry"),
                     POST_TERMINATION_COLLECT_TIMEOUT,
                 ));
             }
-            FrameWait::FramingViolation => {
-                return Err(self.invalidate(
-                    "response_framing_violation",
-                    format!("the worker broke the response framing during request {request_index}"),
-                    POST_TERMINATION_COLLECT_TIMEOUT,
-                ));
-            }
+            checkpoint = Some(parsed);
         };
         let done: InspectDone = match serde_json::from_slice(&body) {
             Ok(done) => done,
