@@ -515,3 +515,14 @@ target_compile_features(worker_aegp_init_runtime_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_aegp_init_runtime_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_aegp_init_runtime_selftest PRIVATE src)
+
+add_executable(worker_aegp_register_suite_selftest
+  ../tests/native/worker_aegp_register_suite_selftest.cpp
+  src/worker_aegp_command_suites.cpp
+  src/worker_aegp_init_runtime.cpp
+)
+target_compile_features(worker_aegp_register_suite_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_aegp_register_suite_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_aegp_register_suite_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_aegp_register_suite_selftest PRIVATE src)
