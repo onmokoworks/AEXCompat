@@ -1,4 +1,5 @@
 #include "worker_parameter_execution.hpp"
+#include "worker_parameter_limits.hpp"
 
 #include "worker_extended_diag.hpp"
 
@@ -775,7 +776,8 @@ std::string requested_parameters_json(const parameters::RequestedAssignments& re
 namespace aexcompat::l2_detail {
 extern "C" int32_t __cdecl set_options_button_name(void*, const char*);
 namespace {
-constexpr std::size_t kMaxParams = 1024;
+constexpr std::size_t kMaxParams =
+    aexcompat::worker_runtime::parameters::kMaxParameterCount;
 constexpr std::size_t kParamSize =
     aexcompat::worker_runtime::parameters::kDefinitionSize;
 constexpr std::size_t kParamType = 12;

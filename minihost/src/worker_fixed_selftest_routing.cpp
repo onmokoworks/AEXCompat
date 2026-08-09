@@ -167,7 +167,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 30> simple_commands{{
+  const std::array<selftest::SimpleCommand, 31> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -176,6 +176,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        hooks.simple.aegp_loaded_plugin_effect_streams},
       {L"--self-test-parameter-animation", "parameter_animation_transport",
        hooks.simple.parameter_animation},
+      {L"--self-test-parameter-registry-capacity", "parameter_registry_capacity",
+       hooks.simple.parameter_registry_capacity},
       {L"--self-test-pf-param-utils-suite", "pf_param_utils_suite3",
        hooks.simple.pf_param_utils},
       {L"--self-test-pf-pre-checkout-result", "pf_pre_checkout_result",

@@ -25,6 +25,7 @@ struct SimpleHooks {
   bool (*aegp_layer_suite1_slots)(){};
   bool (*aegp_loaded_plugin_effect_streams)(){};
   bool (*parameter_animation)(){};
+  bool (*parameter_registry_capacity)(){};
   bool (*pf_param_utils)(){};
   bool (*pf_pre_checkout_result)(){};
   bool (*pf_checkout_intersection)(){};
