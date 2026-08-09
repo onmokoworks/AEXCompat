@@ -141,7 +141,10 @@ void WorkerSession::release_directory_cookies() noexcept {
 
 void WorkerSession::restore_stdout() noexcept {
   if (!stdout_redirected_) return;
+  std::cout.flush();
   if (restore_native_stdout_) restore_native_stdout_();
+  std::cout.clear();
+  std::cout.flush();
   stdout_redirected_ = false;
 }
 

@@ -19,6 +19,8 @@ pub struct TrustedWorkerStage {
     temp_parent: PathBuf,
     worker: PathBuf,
     handles: Option<(File, File, File)>,
+    auxiliary_files: Vec<PathBuf>,
+    auxiliary_dirs: Vec<PathBuf>,
 }
 
 impl TrustedWorkerStage {
@@ -79,7 +81,49 @@ impl TrustedWorkerStage {
             temp_parent,
             worker,
             handles: Some((source, staged_handle, root_handle)),
+            auxiliary_files: Vec::new(),
+            auxiliary_dirs: Vec::new(),
         })
+    }
+
+    /// Copies one explicitly selected, dependency-owned data file beside the
+    /// staged worker. This is for runtimes which resolve data relative to the
+    /// executable rather than through the DLL search path.
+    pub fn stage_auxiliary_file(&mut self, source: &Path, relative: &Path) -> io::Result<()> {
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(invalid("staged auxiliary path must stay relative"));
+        }
+        let mut source_file = open_source_no_reparse(source)?;
+        validate_regular_no_reparse(&source_file)?;
+        let destination = self.root.join(relative);
+        destination
+            .parent()
+            .ok_or_else(|| invalid("staged auxiliary path has no parent"))?;
+        let mut cursor = self.root.clone();
+        for component in relative.parent().into_iter().flat_map(Path::components) {
+            cursor.push(component.as_os_str());
+            if !cursor.exists() {
+                fs::create_dir(&cursor)?;
+                self.auxiliary_dirs.push(cursor.clone());
+            }
+            reject_reparse_path(&cursor)?;
+        }
+        let mut destination_file = create_destination(&destination)?;
+        io::copy(&mut source_file, &mut destination_file)?;
+        destination_file.flush()?;
+        destination_file.sync_all()?;
+        validate_regular_no_reparse(&destination_file)?;
+        self.auxiliary_files.push(destination);
+        Ok(())
     }
 
     pub fn root(&self) -> &Path {
@@ -101,6 +145,12 @@ impl Drop for TrustedWorkerStage {
             .is_some_and(|v| v.starts_with(ROOT_PREFIX));
         let safe_parent = self.root.parent() == Some(self.temp_parent.as_path());
         if safe_name && safe_parent && reject_reparse_path(&self.root).is_ok() {
+            for file in self.auxiliary_files.iter().rev() {
+                let _ = fs::remove_file(file);
+            }
+            for directory in self.auxiliary_dirs.iter().rev() {
+                let _ = fs::remove_dir(directory);
+            }
             // Windows can signal the process before the image section has
             // released the staged executable. Retry only this owned file/root
             // pair for a short bounded interval; never broaden cleanup to a

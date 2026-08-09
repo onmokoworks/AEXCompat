@@ -102,6 +102,7 @@ pub fn run(repository: &Path, worker: &Path, id: &str, output: &Path) -> io::Res
         repository,
         require_module_audit: true,
         launch_environment: Default::default(),
+        staged_worker_assets: &[],
     };
     let result = secure_launch_in_place(
         &plugin_path,

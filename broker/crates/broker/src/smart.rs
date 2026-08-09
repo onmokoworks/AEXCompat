@@ -118,6 +118,7 @@ pub fn run(
                 repository,
                 require_module_audit: true,
                 launch_environment: Default::default(),
+                staged_worker_assets: &[],
             },
             Some(timeout),
             None,

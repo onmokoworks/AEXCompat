@@ -612,6 +612,24 @@ fn render_classic_via_length_one_session(
         Err(error) => return SessionWrapperOutcome::Failure(error),
     };
     let output_checksum_detail = output_checksum_detail_requested();
+    let mut dependency_search_dirs = match request.plugin_path.parent() {
+        Some(parent) => vec![parent.to_path_buf()],
+        None => {
+            return SessionWrapperOutcome::Failure(invalid(
+                "plugin path has no parent directory to search for dependencies",
+            ));
+        }
+    };
+    for dependency in request.dependencies {
+        let Some(parent) = dependency.path.parent() else {
+            return SessionWrapperOutcome::Failure(invalid(
+                "approved dependency has no parent directory",
+            ));
+        };
+        if !dependency_search_dirs.iter().any(|root| root == parent) {
+            dependency_search_dirs.push(parent.to_path_buf());
+        }
+    }
     let session_request = SessionOpenRequest {
         repository: request.repository,
         plugin_path: request.plugin_path,
@@ -629,17 +647,10 @@ fn render_classic_via_length_one_session(
         audio_trailer: request.audio.as_ref().map(|audio| audio.trailer.clone()),
         alpha_as_coverage_params: request.alpha_as_coverage_params,
         conformance_render_settings: request.conformance_render_settings,
-        dependencies: request.dependencies.to_vec(),
+        dependencies: Vec::new(),
         // #816 made a non-empty search root set part of the in-place protocol,
         // so an empty one fails session open for every route that reaches here.
-        dependency_search_dirs: match request.plugin_path.parent() {
-            Some(parent) => vec![parent.to_path_buf()],
-            None => {
-                return SessionWrapperOutcome::Failure(invalid(
-                    "plugin path has no parent directory to search for dependencies",
-                ));
-            }
-        },
+        dependency_search_dirs,
         width: request.width,
         height: request.height,
         pixel_format: request.pixel_format,

@@ -49,6 +49,28 @@ bool DispatchWorldFormatScope::register_world(const void* world,
   return true;
 }
 
+bool DispatchWorldFormatScope::register_gpu_world(const void* world,
+                                                  int32_t pixel_format) {
+  if (!world || g_dispatch_world_formats.empty()) return false;
+  DispatchWorldFormat entry{};
+  entry.world = world;
+  entry.pixel_format = pixel_format;
+  entry.generation = ++g_dispatch_world_generation;
+  void* platform_ref{};
+  std::memcpy(&platform_ref, static_cast<const std::byte*>(world) + 64,
+              sizeof(platform_ref));
+  if (!read_world_layout(world, entry.data, entry.rowbytes, entry.width,
+                         entry.height) || entry.data || !platform_ref ||
+      entry.width <= 0 || entry.height <= 0 || entry.rowbytes < 0)
+    return false;
+  auto& entries = g_dispatch_world_formats.back();
+  entries.erase(std::remove_if(entries.begin(), entries.end(),
+                               [&](const auto& old) { return old.world == world; }),
+                entries.end());
+  entries.push_back(entry);
+  return true;
+}
+
 bool resolve_dispatch_world_format(const void* world,
                                    OwnedWorldResolver owned_resolver,
                                    DispatchWorldFormat& result) {

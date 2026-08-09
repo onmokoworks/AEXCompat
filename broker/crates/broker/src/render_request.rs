@@ -493,6 +493,7 @@ fn launch_approved_in_place(
             repository,
             require_module_audit: true,
             launch_environment: Default::default(),
+            staged_worker_assets: &[],
         },
         Some(Duration::from_millis(timeout_ms)),
         None,

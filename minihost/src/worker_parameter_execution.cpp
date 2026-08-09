@@ -21,6 +21,20 @@ Hooks& hooks() { return g_hooks; }
 parameters::State& runtime() { return parameters::state(); }
 template <typename T, std::size_t N> T read(const std::array<std::byte, N>& b, std::size_t o) { T v{}; std::memcpy(&v, b.data()+o, sizeof(v)); return v; }
 template <typename T, std::size_t N> void write(std::array<std::byte, N>& b, std::size_t o, const T& v) { std::memcpy(b.data()+o, &v, sizeof(v)); }
+
+bool dispose_arbitrary_handle(EffectEntry entry, BufferIn& input, BufferOut& output,
+                              int16_t id, void* refcon, void* value) {
+  if (!value) return true;
+  std::array<std::byte, 48> extra{};
+  write<int32_t>(extra, 0, 1);
+  write<int16_t>(extra, 4, id);
+  write<void*>(extra, 8, refcon);
+  write<void*>(extra, 16, value);
+  uint32_t exception_code = 0;
+  return hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(),
+      nullptr, nullptr, extra.data(), &exception_code) == 0 && exception_code == 0;
+}
+
 }  // namespace
 
 bool configure_hooks(const Hooks& value) noexcept { if (!value.invoke_entry || !value.handle_is_live || !value.active_mask_count || !value.active_mask_id) return false; g_hooks=value; return true; }
@@ -127,15 +141,11 @@ bool dispose_arbitrary_values(EffectEntry entry,
     const std::size_t u = 56;
     void* value = read<void*>(definitions[i + 1], u + 16);
     if (!value) continue;
-    std::array<std::byte, 48> extra{};
-    write<int32_t>(extra, 0, 1);
-    write<int16_t>(extra, 4, read<int16_t>(definitions[i + 1], u));
-    write<void*>(extra, 8, read<void*>(definitions[i + 1], u + 24));
-    write<void*>(extra, 16, value);
-    const int32_t error = entry(kArbitraryCallback, input.data(), output.data(),
-                                nullptr, nullptr, extra.data());
+    const bool disposed = dispose_arbitrary_handle(entry, input, output,
+        read<int16_t>(definitions[i + 1], u),
+        read<void*>(definitions[i + 1], u + 24), value);
     write<void*>(definitions[i + 1], u + 16, nullptr);
-    if (error == 0) ++runtime().arbitrary.dispose_calls;
+    if (disposed) ++runtime().arbitrary.dispose_calls;
     else { ++runtime().arbitrary.invalid_operations; valid = false; }
   }
   return valid;
@@ -150,15 +160,10 @@ bool dispose_arbitrary_defaults(EffectEntry entry,
     const std::size_t u = 56;
     void* value = read<void*>(param.raw, u + 8);
     if (!value) continue;
-    std::array<std::byte, 48> extra{};
-    write<int32_t>(extra, 0, 1);
-    write<int16_t>(extra, 4, read<int16_t>(param.raw, u));
-    write<void*>(extra, 8, read<void*>(param.raw, u + 24));
-    write<void*>(extra, 16, value);
-    const int32_t error = entry(kArbitraryCallback, input.data(), output.data(),
-                                nullptr, nullptr, extra.data());
+    const bool disposed = dispose_arbitrary_handle(entry, input, output,
+        read<int16_t>(param.raw, u), read<void*>(param.raw, u + 24), value);
     write<void*>(param.raw, u + 8, nullptr);
-    if (error == 0) ++runtime().arbitrary.dispose_calls;
+    if (disposed) ++runtime().arbitrary.dispose_calls;
     else { ++runtime().arbitrary.invalid_operations; valid = false; }
   }
   return valid;
@@ -184,12 +189,7 @@ bool apply_arbitrary_parameter_animation(EffectEntry entry,
     void* refcon = read<void*>(definition, u + 24);
     const auto dispose = [&](void* value) {
       if (!hooks().handle_is_live(value)) return false;
-      std::array<std::byte, 48> extra{};
-      write<int32_t>(extra, 0, 1); write<int16_t>(extra, 4, id);
-      write<void*>(extra, 8, refcon); write<void*>(extra, 16, value);
-      uint32_t exception_code = 0;
-      const bool ok = hooks().invoke_entry(entry, kArbitraryCallback, input.data(), output.data(),
-          nullptr, nullptr, extra.data(), &exception_code) == 0 && exception_code == 0;
+      const bool ok = dispose_arbitrary_handle(entry, input, output, id, refcon, value);
       if (ok) ++runtime().arbitrary.dispose_calls; else ++runtime().arbitrary.invalid_operations;
       return ok;
     };
@@ -448,13 +448,7 @@ bool interpolate_arbitrary_values(EffectEntry entry,
     }
     const auto dispose = [&](void* value) {
       if (!hooks().handle_is_live(value)) return false;
-      std::array<std::byte, 48> extra{};
-      write<int32_t>(extra, 0, 1);
-      write<int16_t>(extra, 4, id);
-      write<void*>(extra, 8, refcon);
-      write<void*>(extra, 16, value);
-      const bool ok = entry(kArbitraryCallback, input.data(), output.data(), nullptr,
-                            nullptr, extra.data()) == 0;
+      const bool ok = dispose_arbitrary_handle(entry, input, output, id, refcon, value);
       if (ok) ++runtime().arbitrary.dispose_calls;
       return ok;
     };
@@ -605,13 +599,7 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
       ++runtime().arbitrary.roundtrip_failures;
       continue;
     }
-    std::array<std::byte, 48> dispose_extra{};
-    write<int32_t>(dispose_extra, 0, 1);
-    write<int16_t>(dispose_extra, 4, id);
-    write<void*>(dispose_extra, 8, refcon);
-    write<void*>(dispose_extra, 16, source);
-    if (entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr,
-              dispose_extra.data()) != 0) {
+    if (!dispose_arbitrary_handle(entry, input, output, id, refcon, source)) {
       ++runtime().arbitrary.invalid_operations;
       return false;
     }

@@ -135,6 +135,8 @@ fn dispatch_secure_image_session_with_policy(
         .join(input.worker_kind.repository_relative_program());
     validate_in_place_input(&input.dependencies, &input.plugin)?;
     let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
+    let staged_worker_assets =
+        executable_relative_kernel_assets(&input.plugin.path, &input.dependency_search_dirs)?;
     let admitted = admit_local_worker(input.repository, &worker_program)?;
     let mut args_after_plugin = input.args_after_plugin.to_vec();
     args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
@@ -147,6 +149,7 @@ fn dispatch_secure_image_session_with_policy(
         repository: input.repository,
         require_module_audit: true,
         launch_environment: input.launch_environment,
+        staged_worker_assets: &staged_worker_assets,
     };
     let mut process = crate::secure_launch::secure_launch_session_in_place(
         Some(&input.plugin.path),
@@ -283,6 +286,7 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
         // validator at collection.
         require_module_audit: false,
         launch_environment: input.launch_environment,
+        staged_worker_assets: &[],
     };
     let mut process = crate::secure_launch::secure_launch_session_in_place(
         positional,
@@ -397,6 +401,38 @@ fn validate_in_place_input(
     Ok(())
 }
 
+/// Adobe GPUFoundation resolves per-effect kernels relative to its executable
+/// directory, independently of the admitted DLL search directories. Select
+/// only files whose basename matches the admitted plug-in, and copy those
+/// dependency-owned files into the temporary worker root for this launch.
+fn executable_relative_kernel_assets(
+    plugin: &Path,
+    dependency_search_dirs: &[PathBuf],
+) -> io::Result<Vec<(PathBuf, PathBuf)>> {
+    let stem = plugin
+        .file_stem()
+        .ok_or_else(|| invalid("in-place plugin has no basename"))?;
+    let mut assets = Vec::new();
+    for root in dependency_search_dirs {
+        let root = std::fs::canonicalize(root)?;
+        for (backend, extension) in [("CUDA", "cubin"), ("CL", "clz"), ("HLSL", "csod")] {
+            let relative = PathBuf::from("PTX")
+                .join(backend)
+                .join(Path::new(stem).with_extension(extension));
+            let candidate = root.join(&relative);
+            if !candidate.is_file() {
+                continue;
+            }
+            let canonical = std::fs::canonicalize(&candidate)?;
+            if !canonical.starts_with(&root) {
+                return Err(invalid("kernel asset escaped dependency search directory"));
+            }
+            assets.push((canonical, relative));
+        }
+    }
+    Ok(assets)
+}
+
 fn dispatch_secure_image_impl(
     input: SecureImageDispatch<'_>,
     process_memory_limit: Option<usize>,
@@ -407,6 +443,8 @@ fn dispatch_secure_image_impl(
         .join(input.worker_kind.repository_relative_program());
     validate_in_place_input(&input.dependencies, &input.plugin)?;
     let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
+    let staged_worker_assets =
+        executable_relative_kernel_assets(&input.plugin.path, &input.dependency_search_dirs)?;
     let admitted = admit_local_worker(input.repository, &worker_program)?;
     let mut args_after_plugin = input.args_after_plugin.to_vec();
     args_after_plugin.extend(["--dependency-dirs-v1".to_owned(), joined]);
@@ -421,6 +459,7 @@ fn dispatch_secure_image_impl(
         repository: input.repository,
         require_module_audit: true,
         launch_environment: input.launch_environment,
+        staged_worker_assets: &staged_worker_assets,
     };
     let mut result = crate::secure_launch::secure_launch_in_place(
         &input.plugin.path,
