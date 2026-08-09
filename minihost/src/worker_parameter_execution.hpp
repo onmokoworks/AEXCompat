@@ -44,8 +44,12 @@ bool validate_requested_assignments(const parameters::RequestedAssignments&);
 // raw value, preserving those untested paths (issue #326-adjacent, #1061 chain).
 void initialize_parameter_definitions(Definitions&, int32_t layer_width = 0,
                                       int32_t layer_height = 0);
+// layer_width/height convert POINT/POINT_3D percentage overrides to pixels
+// (same contract as initialize_parameter_definitions); zero keeps the raw
+// value for the point-less audio/UI/L2 paths.
 bool apply_requested_assignments(Definitions&,
-                                 const parameters::RequestedAssignments&);
+                                 const parameters::RequestedAssignments&,
+                                 int32_t layer_width = 0, int32_t layer_height = 0);
 double requested_value(const parameters::RequestedAssignments&, const wchar_t*);
 std::string requested_parameters_json(
     const parameters::RequestedAssignments&);

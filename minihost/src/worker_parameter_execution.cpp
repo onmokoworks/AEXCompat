@@ -701,8 +701,20 @@ void initialize_parameter_definitions(
 
 bool apply_requested_assignments(
     std::vector<std::array<std::byte, parameters::kDefinitionSize>>& definitions,
-    const parameters::RequestedAssignments& requested) {
+    const parameters::RequestedAssignments& requested,
+    int32_t layer_width, int32_t layer_height) {
   if (!validate_requested_assignments(requested)) return false;
+  // Point assignments carry the same percentage-of-layer unit as their
+  // defaults (the multifilter sources them from discovery, which reads the
+  // SDK `x_dephault` percentage); convert to the pixel `x_value` the plug-in
+  // reads, matching initialize_parameter_definitions. Zero dims keep the raw
+  // value for the point-less audio/UI/L2 paths (issue #1061 chain).
+  const auto point_pixels = [&](double percent, int32_t extent) {
+    return layer_width > 0 && layer_height > 0 ? percent / 100.0 * extent : percent;
+  };
+  const auto to_fixed = [](double pixels) {
+    return static_cast<int32_t>(std::round(std::clamp(pixels, -32768.0, 32767.0) * 65536.0));
+  };
   for (const auto& assignment : requested) {
     const auto slot = static_cast<std::size_t>(assignment.index);
     const auto type = runtime().records[slot - 1].type;
@@ -730,11 +742,14 @@ bool apply_requested_assignments(
     else if (type == 3)
       write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(assignment.components[0] * 65536.0)));
     else if (type == 6) {
-      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(assignment.components[0] * 65536.0)));
-      write<int32_t>(definitions[slot], 60, static_cast<int32_t>(std::round(assignment.components[1] * 65536.0)));
-    } else if (type == 18)
+      write<int32_t>(definitions[slot], 56, to_fixed(point_pixels(assignment.components[0], layer_width)));
+      write<int32_t>(definitions[slot], 60, to_fixed(point_pixels(assignment.components[1], layer_height)));
+    } else if (type == 18) {
+      const std::array<int32_t, 3> extents{layer_width, layer_height, layer_height};
       for (int component = 0; component < 3; ++component)
-        write<double>(definitions[slot], 56 + component * 8, assignment.components[component]);
+        write<double>(definitions[slot], 56 + component * 8,
+            point_pixels(assignment.components[component], extents[component]));
+    }
     else
       return false;
   }

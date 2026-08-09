@@ -1,5 +1,7 @@
 #include "worker_smart_setup.hpp"
 
+#include "generated/aex_abi_contract.hpp"
+
 #include "gpu_device_info_registry.hpp"
 #include "worker_smart_runtime.hpp"
 #include "render_pixel_transport.hpp"
@@ -235,8 +237,15 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
     }
   }
   if (request.requested) {
+    // POINT/POINT_3D overrides are percentages of the layer size (issue
+    // #1061 chain); the input world's extent turns them into pixels.
+    int32_t layer_width = 0, layer_height = 0;
+    std::memcpy(&layer_width, request.input_world->data() +
+                aexcompat::abi::x86_64_windows::LAYER_WIDTH_OFFSET, sizeof(layer_width));
+    std::memcpy(&layer_height, request.input_world->data() +
+                aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET, sizeof(layer_height));
     if (!parameter_execution::apply_requested_assignments(
-            definitions, *request.requested)) return false;
+            definitions, *request.requested, layer_width, layer_height)) return false;
   } else if (definitions.size() > 7) {
     const auto profile = render::prepare_parameter_profile(*request.case_id);
     auto write_i32 = [&](std::size_t slot, int32_t value) {
