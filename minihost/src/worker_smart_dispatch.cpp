@@ -1,5 +1,6 @@
 #include "worker_smart_dispatch.hpp"
 
+#include "generated/aex_abi_contract.hpp"
 #include "render_subsystem.h"
 #include "worker_selector_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
@@ -290,8 +291,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
     // inside that buffer, i.e. the negated result_rect top-left.
     write<int32_t>(*request.output_world, 104, smart_bounds.origin_x);
     write<int32_t>(*request.output_world, 108, smart_bounds.origin_y);
-    write<int32_t>(*request.input, 276, -smart_bounds.result_rect[0]);
-    write<int32_t>(*request.input, 280, -smart_bounds.result_rect[1]);
+    write<int32_t>(*request.input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET,
+                   -smart_bounds.result_rect[0]);
+    write<int32_t>(*request.input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET,
+                   -smart_bounds.result_rect[1]);
     result.output_width = smart_bounds.width;
     result.output_height = smart_bounds.height;
     result.output_rowbytes = smart_bounds.rowbytes;

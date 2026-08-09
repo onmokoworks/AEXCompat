@@ -102,6 +102,100 @@ bool validate_output_extent(int32_t current_width, int32_t current_height,
                             int32_t requested_width, int32_t requested_height,
                             uint32_t output_flags);
 
+// The two ways an effect declines to resize: leaving the extent at zero, and
+// restating the extent it was offered before FRAME_SETUP (issue #984). Both
+// mean the host keeps the output world it already laid out - re-laying it would
+// repack a padded stride and swap the guarded buffer out from under a pointer
+// the plug-in may have taken during FRAME_SETUP.
+//
+// Deliberately exact. Anything else, including a negative extent or one axis
+// zeroed, is a malformed answer that `validate_output_extent` must still refuse
+// as a reproducible diagnostic rather than being absorbed as "no resize".
+bool output_extent_unchanged(int32_t current_width, int32_t current_height,
+                             int32_t requested_width, int32_t requested_height);
+
+// Plausibility of PF_OutData::origin, which AE_Effect.h defines (on
+// PF_InData::output_origin_x/y, the field it is copied into) as "the position
+// of the top left corner of the input buffer in the output buffer". So it is
+// positive when the effect expanded - the input is inset inside a bigger buffer
+// - and negative when it cropped, because the output is then a window taken out
+// of the input and the input's corner sits above/left of it (issue #984).
+//
+// Deliberately weak, and not a host-protection bound. The host never indexes
+// with this value; it writes it into in_data for the plug-in that stated it,
+// and the plug-in's own writes are contained by the guarded buffer's sentinels
+// and guard page. Two tighter rules were tried and both were wrong: requiring
+// the whole source to fit is unsatisfiable for any declared shrink, and
+// requiring a non-negative origin refuses the canonical crop answer. What
+// remains is what a stated origin cannot be: absurd in magnitude, or placing
+// the input rectangle entirely off the output so that nothing it describes is
+// in the buffer.
+bool validate_output_origin(int32_t origin_x, int32_t origin_y,
+                            int32_t source_width, int32_t source_height,
+                            int32_t output_width, int32_t output_height);
+
+// What the host learned about a Classic frame's output while dispatching it.
+//
+// One bundle rather than parallel out-parameters: the classic entry point's
+// signature is hand-mirrored across three translation units, so every new
+// out-parameter is three edits plus a fourth (threading it to the code that
+// fills it) that nothing forces. Issue #984 first added the origin as two
+// out-params and the fourth edit was missed - the parameters linked, and were
+// dropped on the floor inside the entry point. Growing this struct cannot
+// repeat that, because the pointer is already threaded.
+struct ClassicFrameOutput {
+  // The host refused or failed the plug-in's requested output resize. Lets a
+  // caller tell host-side output validation apart from selector errors that
+  // share the same numeric codes.
+  bool validation_failed{};
+  // PF_OutData::origin as the effect stated it, in the plug-in's own
+  // convention: the position of the input buffer's top-left corner in the
+  // output buffer, so positive when the effect expanded and negative when it
+  // cropped. Deliberately NOT the layer-relative origin the frame report
+  // carries (SessionFrameOutput::origin_x, which is negative when the output
+  // grew) - the conversion is the reporting side's, and keeping the plug-in's
+  // own convention here is what makes the sign visible at it.
+  //
+  // Filled only when the host accepted a resize, and only after it accepted
+  // one: AE_Effect.h says this is "non-zero only when effect changes buffer
+  // size", so an origin stated without a resize is not the frame's geometry and
+  // a refused resize leaves none behind. Zero on every other path.
+  int32_t input_origin_x{};
+  int32_t input_origin_y{};
+};
+
+// `PF_InData::extent_hint` brought inside an output buffer that just shrank.
+//
+// The hint is written from the source extent before the lifecycle runs, and an
+// accepted shrink leaves it naming more rows and columns than the new buffer
+// holds. The SDK invites an effect to iterate exactly this rect ("copying just
+// this rectangle from the source image to the destination image is sufficient"),
+// so a hint left too large is an invitation to write past the guarded buffer
+// into its sentinel band (issue #984).
+//
+// Only ever shrinks, and never below an empty rect at the origin it already
+// had: growing it would name rows the input never had, and moving its top-left
+// would put it in a different coordinate frame than the one the effect was
+// handed. Which frame AE states the hint in after a resize is issue #997.
+std::array<int32_t, 4> extent_hint_within(const std::array<int32_t, 4>& hint,
+                                          int32_t output_width, int32_t output_height);
+
+// The frame report's origin from the one the plug-in stated. The two describe
+// the same geometry from opposite ends: PF_OutData::origin is where the input
+// buffer's top-left sits in the output buffer, while the report's origin is
+// where the output buffer's top-left sits relative to the layer. An effect that
+// grew its output by 4 and placed the input 3px inside it stated 3 and is
+// reported at -3, which is where its buffer starts.
+//
+// A named function rather than a `-` at the call site because it is the one
+// place the two conventions meet, the SmartFX path reaches the same field from
+// the other direction (`result_rect`'s top-left, already layer-relative), and a
+// sign error here places every resized classic frame on the wrong side of the
+// layer origin without failing anything (issue #984).
+constexpr int32_t layer_origin_from_input_origin(int32_t input_origin) {
+  return -input_origin;
+}
+
 struct SmartOutputBounds {
   bool valid{};
   // SDK: PF_PreRenderOutput.result_rect "can be empty". An empty result rect

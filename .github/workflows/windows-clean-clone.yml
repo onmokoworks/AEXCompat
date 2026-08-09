@@ -214,6 +214,7 @@ jobs:
             'build-pf-transfer-rect-probe'
             'build-pf-transform-affine-probe'
             'build-pf-custom-ui-probe'
+            'build-pf-frame-origin-probe'
             'build-pf-frame-resize-probe'
             'build-pf-visual-audio-probe'
             'build-pf-color-settings-abi-probe'

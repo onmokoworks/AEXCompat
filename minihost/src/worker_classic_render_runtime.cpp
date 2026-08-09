@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include "generated/aex_abi_contract.hpp"
 #include "render_lifecycle.hpp"
 #include "render_pixel_buffer.hpp"
 #include "render_pixel_transport.hpp"
@@ -10,6 +11,7 @@
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_staged_item_runtime.hpp"
 #include "worker_classic_execution.hpp"
+#include "worker_classic_render_entry.hpp"
 #include "worker_classic_runtime.hpp"
 #include "worker_l2_render_abi.hpp"
 #include "worker_param_checkout_runtime.hpp"
@@ -26,6 +28,7 @@
 #include "worker_suite_abi.hpp"
 #include "worker_world_safety.hpp"
 
+#include <algorithm>
 #include <array>
 #include <iostream>
 #include <cstddef>
@@ -108,6 +111,32 @@ constexpr std::size_t kOutHeight = 84;
 constexpr std::size_t kOutOrigin = 88;
 constexpr std::size_t kOutFlags = 96;
 constexpr std::size_t kOutFlags2 = 400;
+// PF_InData::output_origin_x/y from the generated contract, so a regeneration
+// that moves the field moves this use with it. The smart route writes the same
+// field through the same contract constants (worker_smart_dispatch.cpp).
+constexpr std::size_t kInOutputOriginX =
+    aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET;
+constexpr std::size_t kInOutputOriginY =
+    aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET;
+// The PF_OutData offsets this file writes through are in the contract too, and
+// `offer_output_extent` memcpys into three of them before FRAME_SETUP. A
+// regeneration that moved PF_OutData::width would otherwise leave the offer
+// writing an extent over whatever field took its place - a sequence handle, say
+// - and the plug-in dereferencing it, with nothing having failed to build.
+static_assert(kOutWidth == aexcompat::abi::x86_64_windows::OUT_WIDTH_OFFSET);
+static_assert(kOutHeight == aexcompat::abi::x86_64_windows::OUT_HEIGHT_OFFSET);
+static_assert(kOutOrigin == aexcompat::abi::x86_64_windows::OUT_ORIGIN_OFFSET);
+static_assert(kOutFlags == aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET);
+// `offer_output_extent` clears both halves of the in_data origin with one
+// 8-byte store from `Layout::in_origin`, and `PF_OutData::origin` is read as a
+// pair the same way, so the two fields being adjacent is load-bearing in the
+// binary that performs the writes - not only in the self-test. A regeneration
+// that inserted a reserved slot between them would otherwise have the clear
+// zeroing whatever now follows output_origin_x before every FRAME_SETUP.
+static_assert(kInOutputOriginY == kInOutputOriginX + 4);
+constexpr std::size_t kInExtentHint =
+    aexcompat::abi::x86_64_windows::IN_EXTENT_HINT_OFFSET;
+static_assert(aexcompat::abi::x86_64_windows::IN_EXTENT_HINT_SIZE == 4 * sizeof(int32_t));
 constexpr uint32_t kOutFlagWideTimeInput = 1u << 1;
 constexpr uint32_t kOutFlagNopRender = 1u << 18;
 constexpr uint32_t kOutFlagIWriteInputBuffer = 1u << 11;
@@ -153,9 +182,40 @@ void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
 
 struct LifecycleContext { EffectEntry effect_entry; };
 
-constexpr aexcompat::render_lifecycle::Layout kRenderLifecycleLayout{
-    kInSequenceData, kOutSequenceData, kInFrameData, kOutFrameData,
-    kSequenceSetup, kSequenceSetdown, kFrameSetup, kFrameSetdown};
+// The classic layout offers FRAME_SETUP the output world's extent to revise
+// (issue #984); `prepare_output` below is what reads the answer back.
+//
+// Filled by name rather than positionally: Layout is a 14-member aggregate of
+// which 13 are std::size_t, so a field inserted into it compiles cleanly with
+// positional init and shifts every later offset one role along - the host would
+// memcpy an extent into whatever PF_OutData field the shifted offset lands on.
+constexpr aexcompat::render_lifecycle::Layout make_render_lifecycle_layout() {
+  aexcompat::render_lifecycle::Layout layout{};
+  layout.in_sequence_data = kInSequenceData;
+  layout.out_sequence_data = kOutSequenceData;
+  layout.in_frame_data = kInFrameData;
+  layout.out_frame_data = kOutFrameData;
+  layout.sequence_setup = kSequenceSetup;
+  layout.sequence_setdown = kSequenceSetdown;
+  layout.frame_setup = kFrameSetup;
+  layout.frame_setdown = kFrameSetdown;
+  layout.out_width = kOutWidth;
+  layout.out_height = kOutHeight;
+  layout.out_origin = kOutOrigin;
+  layout.in_origin = kInOutputOriginX;
+  layout.world_width = aexcompat::abi::x86_64_windows::LAYER_WIDTH_OFFSET;
+  layout.world_height = aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET;
+  return layout;
+}
+constexpr aexcompat::render_lifecycle::Layout kRenderLifecycleLayout =
+    make_render_lifecycle_layout();
+
+// SmartFX states its geometry through SMART_PRE_RENDER's result and max_result
+// rects, and nothing on that route reads `out_data->width/height` back or has a
+// resize step. It names no extent offsets, so FRAME_SETUP is not invited to
+// revise an extent whose answer would be discarded.
+constexpr aexcompat::render_lifecycle::Layout kSmartLifecycleLayout =
+    aexcompat::render_lifecycle::without_extent_negotiation(kRenderLifecycleLayout);
 
 int32_t lifecycle_invoke_frame(void* opaque, int32_t selector, void* input,
                                void* output, void** params, void* world) {
@@ -185,42 +245,81 @@ aexcompat::render_lifecycle::Hooks lifecycle_hooks(LifecycleContext& context) {
           &lifecycle_activate_aux, &lifecycle_cleanup_aux};
 }
 
-RenderLifecycle begin_frame_lifecycle(EffectEntry effect_entry,
+// The four lifecycle entries, each taking the layout its caller renders under.
+// One definition per lifecycle step rather than one per (step, layout): a begin
+// and an end that disagreed about the layout is a class of bug the smart route
+// walked into the first time these were duplicated.
+RenderLifecycle begin_frame_lifecycle(
+    const aexcompat::render_lifecycle::Layout& layout, EffectEntry effect_entry,
     std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, void** params, void* world) {
   LifecycleContext context{effect_entry};
   return aexcompat::render_lifecycle::begin_frame(
-      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
-      params, world);
+      lifecycle_hooks(context), layout, input.data(), output.data(), params, world);
 }
 
-int32_t end_frame_lifecycle(EffectEntry effect_entry,
+int32_t end_frame_lifecycle(
+    const aexcompat::render_lifecycle::Layout& layout, EffectEntry effect_entry,
     std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, void** params, void* world,
     const RenderLifecycle& lifecycle, int32_t primary_error) {
   LifecycleContext context{effect_entry};
   return aexcompat::render_lifecycle::end_frame(
-      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
-      params, world, lifecycle, primary_error);
+      lifecycle_hooks(context), layout, input.data(), output.data(), params, world,
+      lifecycle, primary_error);
 }
 
-RenderLifecycle begin_render_lifecycle(EffectEntry effect_entry,
+RenderLifecycle begin_render_lifecycle(
+    const aexcompat::render_lifecycle::Layout& layout, EffectEntry effect_entry,
     std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, void** params, void* world) {
   LifecycleContext context{effect_entry};
   return aexcompat::render_lifecycle::begin_render(
-      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
-      params, world);
+      lifecycle_hooks(context), layout, input.data(), output.data(), params, world);
 }
 
-int32_t end_render_lifecycle(EffectEntry effect_entry,
+int32_t end_render_lifecycle(
+    const aexcompat::render_lifecycle::Layout& layout, EffectEntry effect_entry,
     std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, void** params, void* world,
     const RenderLifecycle& lifecycle, int32_t primary_error) {
   LifecycleContext context{effect_entry};
   return aexcompat::render_lifecycle::end_render(
-      lifecycle_hooks(context), kRenderLifecycleLayout, input.data(), output.data(),
-      params, world, lifecycle, primary_error);
+      lifecycle_hooks(context), layout, input.data(), output.data(), params, world,
+      lifecycle, primary_error);
+}
+
+// The smart route under the layout that names no extent offsets. One-line
+// forwarders rather than copies, and both halves named here so a begin and an
+// end cannot drift onto different layouts.
+RenderLifecycle begin_smart_frame_lifecycle(EffectEntry effect_entry,
+    std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params, void* world) {
+  return begin_frame_lifecycle(kSmartLifecycleLayout, effect_entry, input, output,
+                               params, world);
+}
+
+RenderLifecycle begin_smart_render_lifecycle(EffectEntry effect_entry,
+    std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params, void* world) {
+  return begin_render_lifecycle(kSmartLifecycleLayout, effect_entry, input, output,
+                                params, world);
+}
+
+int32_t end_smart_frame_lifecycle(EffectEntry effect_entry,
+    std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params, void* world,
+    const RenderLifecycle& lifecycle, int32_t primary_error) {
+  return end_frame_lifecycle(kSmartLifecycleLayout, effect_entry, input, output, params,
+                             world, lifecycle, primary_error);
+}
+
+int32_t end_smart_render_lifecycle(EffectEntry effect_entry,
+    std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params, void* world,
+    const RenderLifecycle& lifecycle, int32_t primary_error) {
+  return end_render_lifecycle(kSmartLifecycleLayout, effect_entry, input, output, params,
+                              world, lifecycle, primary_error);
 }
 
 bool dispatch_conditional_ui_selectors(EffectEntry entry,
@@ -254,8 +353,10 @@ struct ClassicLifecycleOwner {
         +[](void* opaque) -> void* {
           auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
           const auto lifecycle = h.manage_sequence
-              ? begin_render_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data())
-              : begin_frame_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data());
+              ? begin_render_lifecycle(kRenderLifecycleLayout, h.entry, h.input,
+                                       h.output, h.params.data(), h.world.data())
+              : begin_frame_lifecycle(kRenderLifecycleLayout, h.entry, h.input,
+                                      h.output, h.params.data(), h.world.data());
           return new (std::nothrow) RenderLifecycle(lifecycle);
         },
         +[](void* lifecycle) {
@@ -272,9 +373,11 @@ struct ClassicLifecycleOwner {
           return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
         +[](void* opaque, void* lifecycle, int32_t error) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
           return h.manage_sequence
-              ? end_render_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data(),
+              ? end_render_lifecycle(kRenderLifecycleLayout, h.entry, h.input, h.output,
+                                     h.params.data(), h.world.data(),
                     *static_cast<RenderLifecycle*>(lifecycle), error)
-              : end_frame_lifecycle(h.entry, h.input, h.output, h.params.data(), h.world.data(),
+              : end_frame_lifecycle(kRenderLifecycleLayout, h.entry, h.input, h.output,
+                                    h.params.data(), h.world.data(),
                     *static_cast<RenderLifecycle*>(lifecycle), error); },
         +[](void* lifecycle) { delete static_cast<RenderLifecycle*>(lifecycle); }};
     return value;
@@ -302,10 +405,20 @@ struct ClassicRenderDispatchOwner {
   int32_t external_width; int32_t external_height;
   aexcompat::worker_runtime::classic::Context& classic_context;
   std::vector<unsigned char>& logical_source;
-  // When set, records that the host itself rejected or failed the plug-in's
-  // requested output resize, so callers can tell host-side output validation
-  // failures apart from selector errors sharing the same numeric codes.
-  bool* output_validation_failed{};
+  // The extent `logical_source` was filled at. `width`/`height` are references
+  // that `prepare_output` moves to the *output* extent when an effect expands,
+  // and the AEGP layer-render context describes `logical_source` with whatever
+  // it is handed - a pair that disagrees makes every source checkout fail
+  // closed with error 4 (worker_aegp_layer_render_runtime's size check). The
+  // resize path only became reachable once FRAME_SETUP started being offered a
+  // real extent (issue #984), so these carry the source extent unchanged.
+  int32_t source_width; int32_t source_height;
+  // What the caller learns about this frame's output. Optional: the one-shot
+  // routes that do not report frame geometry pass nullptr.
+  aexcompat::render::ClassicFrameOutput* frame_output{};
+  // Why `prepare_output` returned what it did, for the stage marker its caller
+  // emits. Static strings only; null means it had nothing to add.
+  const char* resize_reason{};
 
   int32_t run(int32_t error) {
     return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
@@ -335,9 +448,18 @@ struct ClassicRenderDispatchOwner {
         // output pixels came back empty, still at the 0xCC fill, or non-finite.
         // A different condition, so a different name.
         +[](void* opaque) {
-          const int32_t error = static_cast<ClassicRenderDispatchOwner*>(opaque)->prepare_output();
-          if (error != 0)
-            std::cerr << "stage:classic_output_resize_end error=" << error << "\n" << std::flush;
+          auto& owner = *static_cast<ClassicRenderDispatchOwner*>(opaque);
+          const int32_t error = owner.prepare_output();
+          // One line, and the reason rides it. Several refusals in there report
+          // 4, so the code alone cannot say which; the broker parses `reason=`
+          // off this same marker into the stage event (issue #984). A separate
+          // line would be dropped by that parser, and a second `_end` would
+          // double-count the stage for every consumer that reads the events.
+          if (error != 0 || owner.resize_reason) {
+            std::cerr << "stage:classic_output_resize_end error=" << error;
+            if (owner.resize_reason) std::cerr << " reason=" << owner.resize_reason;
+            std::cerr << "\n" << std::flush;
+          }
           return error; },
         // The plug-in's RENDER. The unbalanced `_begin` left by a crash or hang
         // in here is what lets active_stage name this frame's selector.
@@ -350,24 +472,123 @@ struct ClassicRenderDispatchOwner {
           return !g_render_ui_context_active || close_render_ui_context(h.entry, h.input, h.output, h.definitions); }};
     return value;
   }
+  // Bring `in_data->extent_hint` inside the buffer that now backs the output.
+  void shrink_extent_hint(int32_t output_width, int32_t output_height) {
+    std::array<int32_t, 4> hint{};
+    std::memcpy(hint.data(), input.data() + kInExtentHint, sizeof(hint));
+    hint = aexcompat::render::extent_hint_within(hint, output_width, output_height);
+    std::memcpy(input.data() + kInExtentHint, hint.data(), sizeof(hint));
+  }
   int32_t prepare_output() {
     const auto fail = [this](int32_t error) {
-      if (output_validation_failed) *output_validation_failed = true;
+      if (frame_output) frame_output->validation_failed = true;
       return error;
     };
     const int32_t next_width = read<int32_t>(output, kOutWidth);
     const int32_t next_height = read<int32_t>(output, kOutHeight);
+    // Declining the extent comes first, and is not validated: a zero or
+    // half-zero pair is not an extent, and the pair `begin_frame` offered is the
+    // extent the host already laid the world out at. Validating it would turn
+    // "I want nothing" written as a lone zero into a refused frame.
+    // The origin travels with the resize or not at all. Both halves of it - what
+    // in_data tells the plug-in, and what `ClassicFrameOutput` tells the frame
+    // report - have to say the same thing: relaying an inset to the plug-in
+    // while reporting the frame at the layer's top-left makes RENDER draw as if
+    // its buffer were displaced and the host place it as if it were not, which
+    // is a shifted picture with no error anywhere. AE_Effect.h's "non-zero only
+    // when effect changes buffer size" is what picks which of the two agreeing
+    // answers is right when nothing resized.
+    //
+    // The offer makes "restated the extent it was handed" indistinguishable from
+    // "wrote nothing", so an origin stated alongside a restated extent declines
+    // with it. Recorded, because that is a real difference from AE if AE honours
+    // it, and a diagnostic is what makes the difference findable.
+    if (aexcompat::render::output_extent_unchanged(width, height, next_width, next_height)) {
+      if (read<int32_t>(output, kOutOrigin) != 0 || read<int32_t>(output, kOutOrigin + 4) != 0)
+        resize_reason = "origin_without_resize";
+      return 0;
+    }
     if (!aexcompat::render::validate_output_extent(width, height, next_width, next_height,
-            read<uint32_t>(output, kOutFlags))) return fail(4);
-    if (next_width <= 0 || next_height <= 0) return 0;
-    width = next_width; height = next_height; rowbytes = width * pixel_bytes;
-    if (!guarded.reset(static_cast<std::size_t>(rowbytes) * height)) return fail(-3);
+            read<uint32_t>(output, kOutFlags))) {
+      resize_reason = "extent_not_allowed";
+      return fail(4);
+    }
+    const int32_t origin_x = read<int32_t>(output, kOutOrigin);
+    const int32_t origin_y = read<int32_t>(output, kOutOrigin + 4);
+    // Frame-local, not `fail`: this runs before `guarded.reset` and before the
+    // world is re-laid or re-registered, so nothing the session owns has moved
+    // and the next frame can run. `validation_failed` is the session's
+    // output-bounds invariant and ends the session on the frame that sets it,
+    // which would turn one implausible origin into a dead session and a
+    // respawned worker per frame.
+    if (!aexcompat::render::validate_output_origin(origin_x, origin_y, source_width,
+                                                   source_height, next_width, next_height)) {
+      resize_reason = "origin_not_plausible";
+      return 4;
+    }
+    // The buffer about to be released was handed to FRAME_SETUP, so an overrun
+    // committed there is only observable now - `guarded.reset` frees it and
+    // `finalize` would only ever see the replacement's sentinels. Nothing is
+    // recorded here: `finalize` reads `guarded.sentinels_intact()` off this same
+    // un-reset buffer (the `fail` below returns before `reset`) and is what
+    // writes the flag, so a second writer would only be another thing to keep
+    // in agreement.
+    if (!guarded.sentinels_intact()) {
+      resize_reason = "sentinels_broken";
+      return fail(4);
+    }
+    // The extent moves only once the buffer that backs it exists. `width`,
+    // `height`, `rowbytes` and `destination` are references the caller's
+    // `finalize` reads whatever this returns, so committing the new extent
+    // before a `reset` that can fail would leave it scanning the enlarged
+    // extent across the old, smaller allocation and straight into the guard
+    // page that follows it.
+    const int32_t next_rowbytes = next_width * pixel_bytes;
+    // Through `fail`, which stops the session. The label is wrong - this is host
+    // resource exhaustion, not the plug-in asking for something invalid - but
+    // stopping is the property that matters: the host cannot give this frame an
+    // output buffer, so it cannot give the next one either, and a session that
+    // keeps going returns a whole range of frame-local -3s and closes reporting
+    // no error at all. The marker below is what separates the two causes until
+    // there is a channel that stops the session without claiming validation.
+    if (!guarded.reset(static_cast<std::size_t>(next_rowbytes) * next_height)) {
+      resize_reason = "output_allocation_failed";
+      return fail(-3);
+    }
+    width = next_width; height = next_height; rowbytes = next_rowbytes;
     destination = guarded.data();
     if (!aexcompat::render::prepare_world_layout(world,
-            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination)) return fail(-3);
-    if (!worlds.register_world(world.data(), pixel_format)) return fail(4);
-    write<int32_t>(input, 276, read<int32_t>(output, kOutOrigin));
-    write<int32_t>(input, 280, read<int32_t>(output, kOutOrigin + 4));
+            {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination))
+      return fail(-3);
+    if (!worlds.register_world(world.data(), pixel_format)) {
+      resize_reason = "world_registration_failed";
+      return fail(4);
+    }
+    // The rect the SDK invites the effect to iterate ("copying just this
+    // rectangle ... is sufficient", AE_Effect.h on extent_hint) was written from
+    // the source extent before the lifecycle, and a shrink leaves it naming more
+    // rows than the new buffer holds - an effect that honours it writes past the
+    // guarded buffer into the sentinel band. Shrinking it back is the whole of
+    // what this does.
+    //
+    // Deliberately not translated by the accepted origin, which was tried and
+    // withdrawn. This host's own PF_Iterate refuses (rather than clamps) an area
+    // wider than the *input* world - `bound_width = min(source, destination)` in
+    // worker_pf_suites.cpp - so a hint rewritten into output coordinates makes
+    // the canonical `iterate(..., &in_data->extent_hint, ...)` call fail for
+    // every expanding effect, where leaving it in input coordinates works. Which
+    // coordinate frame AE states the hint in after a resize is issue #997's
+    // question, and it is not answerable from this host's behaviour alone.
+    shrink_extent_hint(width, height);
+    // Only now: this is the frame's geometry, and only an accepted resize has
+    // one. A refused resize leaves nothing here for the frame report, and
+    // nothing in in_data either - the two have to agree.
+    write<int32_t>(input, kInOutputOriginX, origin_x);
+    write<int32_t>(input, kInOutputOriginY, origin_y);
+    if (frame_output) {
+      frame_output->input_origin_x = origin_x;
+      frame_output->input_origin_y = origin_y;
+    }
     return 0;
   }
   int32_t dispatch_selector() {
@@ -382,7 +603,7 @@ struct ClassicRenderDispatchOwner {
     LayerRenderContext next{
         entry, &input, &output, current_time, static_cast<int32_t>(time_scale), case_id,
         requested, external_rgba, external_layers, external_width, external_height,
-        time_step, total_time, pixel_bytes, &logical_source, width, height};
+        time_step, total_time, pixel_bytes, &logical_source, source_width, source_height};
     void* render_ref = nullptr;
     std::memcpy(&render_ref, input.data() + kInEffectRef, sizeof(render_ref));
     next.active_effect_instance =
@@ -408,7 +629,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
                     int32_t external_pixel_bytes = 4,
                     bool manage_sequence = true,
                     std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr) {
+                    aexcompat::render::ClassicFrameOutput* frame_output = nullptr) {
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
   if (!classic_context) return -1;
   aexcompat::render::ImageRequest image_request;
@@ -533,10 +754,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   write<int32_t>(input, 252, g_full_resolution_width > 0 ? g_full_resolution_width : width);
   write<int32_t>(input, 256, g_full_resolution_height > 0 ? g_full_resolution_height : height);
   const int32_t full_extent[4] = {0, 0, width, height};
-  std::memcpy(input.data() + 260, full_extent, sizeof(full_extent));
+  std::memcpy(input.data() + kInExtentHint, full_extent, sizeof(full_extent));
   if (partial_extent_hint) {
     const int32_t extent[4] = {3, 2, 11, 8};
-    std::memcpy(input.data() + 260, extent, sizeof(extent));
+    std::memcpy(input.data() + kInExtentHint, extent, sizeof(extent));
   }
   struct RenderUiContextScope {
     EffectEntry entry;
@@ -569,26 +790,61 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
   if (nop_render) {
+    // PF_OutFlag_NOP_RENDER means the host copies the input through instead of
+    // dispatching RENDER, so there is no `prepare_output` on this branch and no
+    // buffer to re-lay. FRAME_SETUP is still offered the extent (the offer is
+    // made before the branch is known), so an effect that advertised NOP_RENDER
+    // alongside a resize flag can now answer with a revision nothing here can
+    // honour. Copying the input through at the old extent and reporting success
+    // would ship a frame that is silently missing whatever the revision asked
+    // for, so this is a refusal with a name instead (issue #984).
+    // A frame-local diagnostic, not `frame_output->validation_failed`. That flag
+    // is the session's output-bounds invariant (worker_render_session.cpp) and
+    // tears the whole session down on the frame that sets it; nothing here
+    // touched the guarded buffer or the world registration, so the host's state
+    // is intact and the next frame can run. Escalating would turn one effect's
+    // unanswerable request into a dead session and a respawned worker per frame.
+    const int32_t revised_width = read<int32_t>(command_output, kOutWidth);
+    const int32_t revised_height = read<int32_t>(command_output, kOutHeight);
+    if (error == 0 && !aexcompat::render::output_extent_unchanged(
+                          width, height, revised_width, revised_height)) {
+      // Emitted here rather than through RenderHooks: this branch never reaches
+      // `prepare_output`, so nothing else files the stage. Without it the
+      // broker's stage parser sees only the plug-in's own `render_end` and
+      // attributes the host's refusal to the plug-in (the #722 shape).
+      std::cerr << "stage:classic_output_resize_end error=4 reason=nop_render_resize\n"
+                << std::flush;
+      error = 4;
+    }
     if (error == 0) {
       for (int32_t y = 0; y < height; ++y)
         std::memcpy(destination + y * rowbytes,
                     logical_source.data() + y * width * pixel_bytes,
                     width * pixel_bytes);
     }
-    error = lifecycle_owner.finish(lifecycle);
+    // A failing setdown still wins. Main reported `finish` unconditionally
+    // here, so keeping the refusal above only when setdown was clean is what
+    // stops a plug-in that corrupts its sequence handle at FRAME_SETDOWN from
+    // being reported as an output-resize refusal instead.
+    const int32_t finish_error = lifecycle_owner.finish(lifecycle);
+    if (finish_error != 0) error = finish_error;
   } else {
     ClassicRenderDispatchOwner dispatch_owner{entry, input, command_output, output_world,
         guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
         pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
-        output_validation_failed};
+        width, height, frame_output};
     // The `stage:classic_render_*` and `stage:classic_output_resize_end` markers are
     // emitted per frame from inside RenderHooks (see ClassicRenderDispatchOwner)
     // so each brackets only the step it names. The session-wide `stage:render_*`
     // pair in worker_invocation_orchestration.cpp is emitted once, so before
     // this a classic session's frame errors carried no stage at all and every
     // one of them came back with `first_failure_stage: null` (issue #722).
+    // `dispatch_owner` fills `frame_output` in place: where an expand put the
+    // source inside the enlarged output, and whether the host refused the
+    // resize. Without the origin a resized buffer is composited at the layer's
+    // top-left and the picture is shifted by the inset (issue #984).
     error = dispatch_owner.run(error);
     lifecycle.error = error;
     error = lifecycle_owner.finish(lifecycle);
@@ -662,7 +918,7 @@ struct ClassicRenderRequest {
   int32_t external_pixel_bytes;
   bool manage_sequence;
   std::vector<unsigned char>* captured_argb;
-  bool* output_validation_failed;
+  aexcompat::render::ClassicFrameOutput* frame_output;
 };
 
 bool classic_render_dependencies_ready(void* opaque) {
@@ -679,7 +935,7 @@ int classic_render_guarded_effect_main(void* opaque) {
       request.external_width, request.external_height, request.external_layers,
       request.external_current_time, request.external_time_step, request.external_total_time,
       request.external_time_scale, request.external_pixel_bytes, request.manage_sequence,
-      request.captured_argb, request.output_validation_failed);
+      request.captured_argb, request.frame_output);
 }
 
 int classic_render_cleanup(void*) {
@@ -688,24 +944,25 @@ int classic_render_cleanup(void*) {
   return 0;
 }
 
+// Declared in worker_classic_render_entry.hpp; the defaults live there.
 int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::array<std::byte, kOutSize>& output,
                     const std::string& case_id, int32_t& width, int32_t& height,
                     int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact, const RequestedAssignments* requested = nullptr,
-                    const std::vector<unsigned char>* external_rgba = nullptr,
-                    int32_t external_width = 0, int32_t external_height = 0,
-                    const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                    int32_t external_current_time = 0, int32_t external_time_step = 1,
-                    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                    int32_t external_pixel_bytes = 4, bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr) {
+                    bool& guards_intact, const RequestedAssignments* requested,
+                    const std::vector<unsigned char>* external_rgba,
+                    int32_t external_width, int32_t external_height,
+                    const std::vector<ExternalLayerInput>* external_layers,
+                    int32_t external_current_time, int32_t external_time_step,
+                    int32_t external_total_time, uint32_t external_time_scale,
+                    int32_t external_pixel_bytes, bool manage_sequence,
+                    std::vector<unsigned char>* captured_argb,
+                    aexcompat::render::ClassicFrameOutput* frame_output) {
   ClassicRenderRequest request{entry, input, output, case_id, width, height, rowbytes,
       input_hash, output_hash, guards_intact, requested, external_rgba,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale, external_pixel_bytes,
-      manage_sequence, captured_argb, output_validation_failed};
+      manage_sequence, captured_argb, frame_output};
   aexcompat::worker_runtime::classic::Request context{
       &request,
       {&classic_render_guarded_effect_main, &classic_render_cleanup,
@@ -842,8 +1099,11 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   // Session frames run under a hoisted SEQUENCE owned by the session loop
   // (protocol v1.1): only the FRAME pair is managed here, mirroring the
   // classic render_once(manage_sequence=false) boundary.
-  const auto begin_lifecycle = session ? &begin_frame_lifecycle : &begin_render_lifecycle;
-  const auto end_lifecycle = session ? &end_frame_lifecycle : &end_render_lifecycle;
+  // Both halves under the smart layout, which names no extent offsets.
+  const auto begin_lifecycle =
+      session ? &begin_smart_frame_lifecycle : &begin_smart_render_lifecycle;
+  const auto end_lifecycle =
+      session ? &end_smart_frame_lifecycle : &end_smart_render_lifecycle;
   const RenderLifecycle lifecycle = begin_lifecycle(
       entry, input, command_output, params.data(), output_world.data());
   if (lifecycle.setup_error != 0) {

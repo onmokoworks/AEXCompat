@@ -476,6 +476,16 @@ target_compile_definitions(worker_classic_execution_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_classic_execution_selftest PRIVATE src)
 
+add_executable(worker_render_lifecycle_selftest
+  ../tests/native/worker_render_lifecycle_selftest.cpp
+  src/render_lifecycle.cpp
+  src/render_subsystem.cpp
+)
+target_compile_features(worker_render_lifecycle_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_render_lifecycle_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_render_lifecycle_selftest PRIVATE src)
+
 add_executable(worker_classic_runtime_selftest
   ../tests/native/worker_classic_runtime_selftest.cpp
   $<TARGET_OBJECTS:aex_worker_runtime_core>

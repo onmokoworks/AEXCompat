@@ -136,10 +136,22 @@ ParameterProfile prepare_parameter_profile(const std::string& case_id) {
   return profile;
 }
 
+bool output_extent_unchanged(int32_t current_width, int32_t current_height,
+                             int32_t requested_width, int32_t requested_height) {
+  if (requested_width == 0 && requested_height == 0) return true;
+  return requested_width == current_width && requested_height == current_height;
+}
+
 bool validate_output_extent(int32_t current_width, int32_t current_height,
                             int32_t requested_width, int32_t requested_height,
                             uint32_t output_flags) {
-  if (requested_width == 0 && requested_height == 0) return true;
+  // Declining is not a malformed extent, and it is one rule rather than two:
+  // the call site checks the same predicate to decide whether to resize at all,
+  // so stating it twice would let the two disagree about what a 0x0 answer
+  // means - a frame that renders in one build and fails validation in the next.
+  if (output_extent_unchanged(current_width, current_height, requested_width,
+                              requested_height))
+    return true;
   if (requested_width <= 0 || requested_height <= 0 || requested_width > 4096 ||
       requested_height > 4096 ||
       static_cast<int64_t>(requested_width) * requested_height > 16'777'216)
@@ -150,6 +162,39 @@ bool validate_output_extent(int32_t current_width, int32_t current_height,
   constexpr uint32_t kShrinkBuffer = 1u << 12;
   return (!expands || (output_flags & kExpandBuffer) != 0) &&
       (!shrinks || (output_flags & kShrinkBuffer) != 0);
+}
+
+std::array<int32_t, 4> extent_hint_within(const std::array<int32_t, 4>& hint,
+                                          int32_t output_width, int32_t output_height) {
+  if (output_width < 0 || output_height < 0) return hint;
+  std::array<int32_t, 4> shrunk = hint;
+  // The top-left only moves if it is already outside the buffer, and then only
+  // as far as the buffer's own edge; the bottom-right comes back to the edge or
+  // to the top-left, whichever is further in. That keeps the rect non-inverted
+  // without ever growing it or shifting a rect that already fitted.
+  shrunk[0] = std::min(shrunk[0], output_width);
+  shrunk[1] = std::min(shrunk[1], output_height);
+  shrunk[2] = std::min(std::max(shrunk[2], shrunk[0]), output_width);
+  shrunk[3] = std::min(std::max(shrunk[3], shrunk[1]), output_height);
+  return shrunk;
+}
+
+bool validate_output_origin(int32_t origin_x, int32_t origin_y,
+                            int32_t source_width, int32_t source_height,
+                            int32_t output_width, int32_t output_height) {
+  if (source_width < 0 || source_height < 0) return false;
+  if (output_width < 0 || output_height < 0) return false;
+  if (origin_x < -kMaxSmartRectMagnitude || origin_x > kMaxSmartRectMagnitude ||
+      origin_y < -kMaxSmartRectMagnitude || origin_y > kMaxSmartRectMagnitude)
+    return false;
+  // The input rectangle, placed at this origin, has to reach the output at all.
+  // Both directions are the same statement: an expand insets the input inside a
+  // larger output (positive origin), a crop-shrink takes a window out of it
+  // (negative origin), and either way the two overlap.
+  return static_cast<int64_t>(origin_x) < output_width &&
+      static_cast<int64_t>(origin_x) + source_width > 0 &&
+      static_cast<int64_t>(origin_y) < output_height &&
+      static_cast<int64_t>(origin_y) + source_height > 0;
 }
 
 SmartOutputBounds prepare_smart_output_bounds(const void* pre_render_output,

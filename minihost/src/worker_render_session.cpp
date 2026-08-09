@@ -5,6 +5,7 @@
 #include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
 #include "strict_json.hpp"
+#include "worker_classic_render_entry.hpp"
 #include "worker_invocation_orchestration.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_request_parser.hpp"
@@ -321,19 +322,6 @@ constexpr int32_t kSequenceSetdown = 8;
 
 int32_t invoke_sequence_selector(EffectEntry entry, int32_t selector, void* input,
                                  void* output, uint32_t* exception_code = nullptr);
-int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                    std::array<std::byte, kOutSize>& output,
-                    const std::string& case_id, int32_t& width, int32_t& height,
-                    int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact, const RequestedAssignments* requested = nullptr,
-                    const std::vector<unsigned char>* external_rgba = nullptr,
-                    int32_t external_width = 0, int32_t external_height = 0,
-                    const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                    int32_t external_current_time = 0, int32_t external_time_step = 1,
-                    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                    int32_t external_pixel_bytes = 4, bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr);
 worker_runtime::smart_execution::Result smart_render_once(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const std::string& case_id,
@@ -466,8 +454,11 @@ struct SessionFrameOutput {
   // with a result_rect whose top-left is negative, and the pixels start
   // there rather than at the layer's (0,0). A caller that has to place the
   // frame back into a fixed-size image needs this to know which part of it
-  // covers the layer (issue #914). Classic frames leave it at zero, which is
-  // where their output already starts.
+  // covers the layer (issue #914). A Classic effect that expands its buffer
+  // states the same geometry the other way round - PF_OutData::origin is where
+  // the input's (0,0) landed inside the grown output, so positive - and the
+  // classic callback negates it into this field rather than reporting it raw
+  // (issue #984). Zero when nothing resized, which is where the output starts.
   int32_t origin_x{0};
   int32_t origin_y{0};
   std::string input_hash;
@@ -1231,16 +1222,24 @@ RenderSessionOutcome run_render_session(
         // false: render_once's early host-side failures return before touching
         // it, while every path that allocates the guarded buffer overwrites it.
         bool frame_guards = true;
-        bool output_validation_failed = false;
+        aexcompat::render::ClassicFrameOutput classic_output;
         frame.frame_error = render_once(
             entry, input, output, "request", frame.width, frame.height,
             frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
             frame_override ? frame_override : requested, &frame_rgba,
             max_width, max_height, frame_layers,
             current_time, time_step, total_time, time_scale, pixel_bytes, false,
-            &captured, &output_validation_failed);
+            &captured, &classic_output);
         frame.guard_violation = !frame_guards;
-        frame.output_validation_failed = output_validation_failed;
+        frame.output_validation_failed = classic_output.validation_failed;
+        // Sign conversion, not a copy: `ClassicFrameOutput::input_origin_*` is
+        // PF_OutData::origin, and this field is the layer-relative origin the
+        // smart path feeds from `result_rect[0]`. The rule itself lives in
+        // render_subsystem so the self-test can pin it (issue #984).
+        frame.origin_x =
+            aexcompat::render::layer_origin_from_input_origin(classic_output.input_origin_x);
+        frame.origin_y =
+            aexcompat::render::layer_origin_from_input_origin(classic_output.input_origin_y);
         return frame;
       },
       swap_hook);
