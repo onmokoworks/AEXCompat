@@ -25,6 +25,9 @@
 //!   --json <path>        write the report here at the end, and one record per
 //!                        line to <path>.partial.jsonl while the sweep runs, so
 //!                        a killed sweep still leaves what it had
+//!   --discovery-only     stop after shipping discovery. With --json, completed
+//!                        discovery tasks are appended to the partial sidecar,
+//!                        so a long or interrupted pass retains exact progress
 //!   --limit <n>          sweep at most n plug-ins
 //!   --skip <n>           start at the n-th, to sweep the corpus in slices.
 //!                        Each run reports exactly what it swept and overwrites
@@ -64,11 +67,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use aexcompat_aviutl2_multifilter::{
-    DiagnosticDiscovery, DiagnosticScan, PluginName, discover_records_for_diagnostics,
-    layer_slots_of, pf_error_name, plugin_name, scan_for_diagnostics, smart_render_route_supported,
+    DiagnosticDiscovery, DiagnosticScan, PluginName,
+    discover_records_for_diagnostics_with_progress, layer_slots_of, pf_error_name, plugin_name,
+    scan_for_diagnostics, smart_render_route_supported,
 };
 use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::render_session::{
@@ -103,6 +109,7 @@ struct Options {
     close_report: bool,
     plugin_defaults: bool,
     frames: u32,
+    discovery_only: bool,
     dirs: Vec<PathBuf>,
 }
 
@@ -122,6 +129,7 @@ fn parse_options() -> Options {
         close_report: false,
         plugin_defaults: false,
         frames: 1,
+        discovery_only: false,
         dirs: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -168,6 +176,7 @@ fn parse_options() -> Options {
                 options.frames = value().parse().expect("--frames takes a count");
                 assert!(options.frames >= 1, "--frames takes at least 1");
             }
+            "--discovery-only" => options.discovery_only = true,
             other if other.starts_with("--") => panic!("unknown option {other}"),
             other => options.dirs.push(PathBuf::from(other)),
         }
@@ -233,8 +242,23 @@ fn main() {
     let started = Instant::now();
     eprintln!("discovering {} plug-in(s)...", targets.len());
     let discovery_started = Instant::now();
-    let mut records =
-        discover_records_for_diagnostics(&repository, &targets, scan.dependency_dirs.clone());
+    let partial = options
+        .discovery_only
+        .then(|| options.json.as_ref().map(|path| partial_path(path)))
+        .flatten();
+    if let Some(path) = &partial {
+        let _ = std::fs::remove_file(path);
+    }
+    let partial = Mutex::new(partial);
+    let completed = AtomicUsize::new(0);
+    let mut records = discover_records_for_diagnostics_with_progress(
+        &repository,
+        &targets,
+        scan.dependency_dirs.clone(),
+        |batch| {
+            record_discovery_progress(&batch, &scan, &partial, &completed, targets.len());
+        },
+    );
     records.sort_by(|left, right| left.path.cmp(&right.path));
     let discovery_elapsed = discovery_started.elapsed();
     eprintln!(
@@ -243,6 +267,18 @@ fn main() {
         records.len(),
         discovery_elapsed.as_secs_f64(),
     );
+
+    if options.discovery_only {
+        let report = discovery_only_report(
+            &options,
+            &scan,
+            &records,
+            discovery_elapsed,
+            started.elapsed(),
+        );
+        finish_report(&options, &report);
+        return;
+    }
 
     // Built once: they depend only on the session geometry, and rebuilding them
     // per plug-in would memcpy the same few hundred KB a few hundred times.
@@ -320,12 +356,57 @@ fn main() {
         buckets,
         plugins,
     );
+    finish_report(&options, &report);
+}
+
+fn record_discovery_progress(
+    batch: &[DiagnosticDiscovery],
+    scan: &DiagnosticScan,
+    partial: &Mutex<Option<PathBuf>>,
+    completed: &AtomicUsize,
+    total: usize,
+) {
+    let done = completed.fetch_add(batch.len(), Ordering::Relaxed) + batch.len();
+    eprintln!("discovery progress: {done}/{total}");
+    let Ok(partial) = partial.lock() else {
+        return;
+    };
+    let Some(path) = partial.as_ref() else {
+        return;
+    };
+    for record in batch {
+        let name = plugin_name(&record.path, &scan.dirs);
+        let value = plugin_record(record, &name, discovery_outcome(record), 0);
+        if let Ok(mut line) = serde_json::to_vec(&value) {
+            line.push(b'\n');
+            append_line(path, &line);
+        }
+    }
+}
+
+fn discovery_only_report(
+    options: &Options,
+    scan: &DiagnosticScan,
+    records: &[DiagnosticDiscovery],
+    discovery_elapsed: Duration,
+    elapsed: Duration,
+) -> Value {
+    let mut buckets = BTreeMap::new();
+    let plugins = records
+        .iter()
+        .map(|record| {
+            let name = plugin_name(&record.path, &scan.dirs);
+            let outcome = discovery_outcome(record);
+            *buckets.entry(outcome.bucket.clone()).or_default() += 1;
+            plugin_record(record, &name, outcome, 0)
+        })
+        .collect();
+    report(options, scan, discovery_elapsed, elapsed, buckets, plugins)
+}
+
+fn finish_report(options: &Options, report: &Value) {
     if let Some(path) = &options.json {
-        if write_report(path, &report) {
-            // The per-plug-in lines were the crash insurance; the whole report
-            // supersedes them, so leaving them behind would age into a second,
-            // stale answer beside the first. Only once it is actually on disk:
-            // deleting them after a failed write throws away the run.
+        if write_report(path, report) {
             let _ = std::fs::remove_file(partial_path(path));
             eprintln!("wrote {}", path.display());
         } else {
@@ -342,8 +423,19 @@ fn main() {
     eprintln!(
         "total={} elapsed={:.1}s",
         report["plugins"].as_array().map_or(0, Vec::len),
-        started.elapsed().as_secs_f64()
+        report["elapsed_ms"].as_u64().unwrap_or_default() as f64 / 1000.0
     );
+}
+
+fn discovery_outcome(record: &DiagnosticDiscovery) -> Outcome {
+    Outcome::bare(if record.ok {
+        "discovery_ok"
+    } else {
+        return Outcome::bare(&discovery_failure_bucket(
+            record.failure_diagnostics.as_ref(),
+            record.failure_classification.as_deref(),
+        ));
+    })
 }
 
 /// What one plug-in's sweep concluded: the bucket it is counted under and the
@@ -741,6 +833,22 @@ fn report(
     buckets: BTreeMap<String, usize>,
     plugins: Vec<Value>,
 ) -> Value {
+    let render = (!options.discovery_only).then(|| {
+        json!({
+            "width": options.width,
+            "height": options.height,
+            "pixel_format": options.pixel_format.report_name(),
+            "current_time": options.current_time,
+            "frames": options.frames,
+            "secondary_layer": !options.no_layer,
+            "force_classic": options.force_classic,
+            "plugin_defaults": options.plugin_defaults,
+            "frame_deadline_ms": FRAME_DEADLINE.as_millis(),
+            "time_step": TIME_STEP,
+            "total_time": TOTAL_TIME,
+            "time_scale": TIME_SCALE,
+        })
+    });
     json!({
         "schema_version": 1,
         "scan": {
@@ -766,20 +874,8 @@ fn report(
                     .collect::<Vec<String>>()
             }),
         },
-        "render": {
-            "width": options.width,
-            "height": options.height,
-            "pixel_format": options.pixel_format.report_name(),
-            "current_time": options.current_time,
-            "frames": options.frames,
-            "secondary_layer": !options.no_layer,
-            "force_classic": options.force_classic,
-            "plugin_defaults": options.plugin_defaults,
-            "frame_deadline_ms": FRAME_DEADLINE.as_millis(),
-            "time_step": TIME_STEP,
-            "total_time": TOTAL_TIME,
-            "time_scale": TIME_SCALE,
-        },
+        "mode": if options.discovery_only { "discovery_only" } else { "render" },
+        "render": render,
         "discovery_elapsed_ms": discovery_elapsed.as_millis(),
         "elapsed_ms": elapsed.as_millis(),
         "buckets": buckets,
@@ -833,6 +929,49 @@ fn write_report(path: &Path, report: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aexcompat_aviutl2_multifilter::DiscoveredPluginKind;
+
+    fn discovery_options(json: PathBuf) -> Options {
+        Options {
+            json: Some(json),
+            limit: None,
+            skip: 0,
+            filter: None,
+            pixel_format: RenderPixelFormat::Argb8,
+            width: 1,
+            height: 1,
+            current_time: 0,
+            no_layer: false,
+            force_classic: false,
+            include_scan_paths: false,
+            close_report: false,
+            plugin_defaults: false,
+            frames: 1,
+            discovery_only: true,
+            dirs: Vec::new(),
+        }
+    }
+
+    fn failed_discovery(path: PathBuf) -> DiagnosticDiscovery {
+        DiagnosticDiscovery {
+            path,
+            ok: false,
+            plugin_kind: DiscoveredPluginKind::Effect,
+            sha256: "00".repeat(32),
+            byte_size: 123,
+            smart: false,
+            out_flags2: 0,
+            category: None,
+            parameters: Vec::new(),
+            search_roots: Vec::new(),
+            failure_classification: Some("nonzero_exit".to_owned()),
+            failure_diagnostics: Some(json!({
+                "classification": "nonzero_exit",
+                "exit_code": 11,
+            })),
+            cluster_fallback: Some("worker_exited/invalidated".to_owned()),
+        }
+    }
 
     #[test]
     fn discovery_buckets_preserve_exit_12_plugin_kind() {
@@ -854,5 +993,79 @@ mod tests {
             discovery_failure_bucket(Some(&diagnostics), Some("nonzero_exit")),
             "exit_11_load_library"
         );
+    }
+
+    #[test]
+    fn discovery_only_report_replaces_partial_only_after_final_write() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-render-sweep-{}-{nonce:032x}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plugin = root.join("failed.aex");
+        let records = vec![failed_discovery(plugin.clone())];
+        let scan = DiagnosticScan {
+            dirs: vec![root.clone()],
+            plugins: vec![plugin],
+            seen: 1,
+            dependency_dirs: Vec::new(),
+            incomplete_reason: None,
+        };
+        let report_path = root.join("discovery.json");
+        let options = discovery_options(report_path.clone());
+        let partial = partial_path(&report_path);
+        let completed = AtomicUsize::new(0);
+        record_discovery_progress(
+            &records,
+            &scan,
+            &Mutex::new(Some(partial.clone())),
+            &completed,
+            1,
+        );
+        assert_eq!(completed.load(Ordering::Relaxed), 1);
+        assert!(
+            partial.is_file(),
+            "completed failure survives in the sidecar"
+        );
+        let partial_bytes = std::fs::read(&partial).unwrap();
+        let partial_row: Value = serde_json::from_slice(&partial_bytes).unwrap();
+        assert_eq!(partial_row["discovery"]["ok"], false);
+        assert_eq!(partial_row["bucket"], "exit_11_load_library");
+
+        let report = discovery_only_report(
+            &options,
+            &scan,
+            &records,
+            Duration::from_millis(4),
+            Duration::from_millis(5),
+        );
+        finish_report(&options, &report);
+        assert!(report_path.is_file());
+        assert!(
+            !partial.exists(),
+            "a successful final report supersedes the sidecar"
+        );
+        let final_report: Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert_eq!(final_report["mode"], "discovery_only");
+        assert!(final_report["render"].is_null());
+        assert_eq!(final_report["buckets"]["exit_11_load_library"], 1);
+        assert_eq!(final_report["plugins"][0]["discovery"]["ok"], false);
+
+        let blocked_path = root.join("blocked.json");
+        std::fs::create_dir(&blocked_path).unwrap();
+        let blocked_partial = partial_path(&blocked_path);
+        std::fs::write(&blocked_partial, &partial_bytes).unwrap();
+        let blocked_options = discovery_options(blocked_path);
+        finish_report(&blocked_options, &report);
+        assert!(
+            blocked_partial.is_file(),
+            "a failed final replacement must retain crash evidence"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
