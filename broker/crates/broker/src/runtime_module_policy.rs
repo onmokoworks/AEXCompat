@@ -727,10 +727,9 @@ fn validate_regular_unique(file: &File) -> io::Result<()> {
 }
 #[cfg(unix)]
 fn validate_regular_unique(file: &File) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
     let m = file.metadata()?;
-    if !m.is_file() || m.nlink() != 1 {
-        return Err(invalid("runtime module must be regular and single-link"));
+    if !m.is_file() {
+        return Err(invalid("runtime module must be a regular file"));
     }
     Ok(())
 }
