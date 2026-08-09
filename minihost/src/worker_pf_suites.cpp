@@ -416,14 +416,37 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
                      destination_rowbytes, destination_width, destination_height))
     return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
                            Reason::MissingWorld);
-  LegacyRect bounds{};
   const int32_t bound_width = has_source
       ? std::min(source_width, destination_width) : destination_width;
   const int32_t bound_height = has_source
       ? std::min(source_height, destination_height) : destination_height;
-  if (!normalize_legacy_rect(area, bound_width, bound_height, bounds))
-    return finish_callback(Callback::Iterate, kPfErrBadCallbackParam,
-                           Reason::InvalidArea);
+  // An area outside the walkable box is clipped to it, not refused (issue
+  // #1034): PowerPin hands the full output extent with a smaller intermediate
+  // world, Slant an extent one column past its source, and both die on a
+  // refusal that AE evidently does not make. Clipping the source walk is also
+  // what the utility table's own vocabulary implies the default is - the SDK
+  // names a separate `iterate_origin_non_clip_src` slot for not doing it. An
+  // empty or inverted intersection writes nothing and succeeds, the same
+  // answer PF_COPY gives a wholly-outside rectangle (issue #962); the row
+  // loop can still tick progress/abort callbacks for a rect empty in x only,
+  // which is what the pre-clip code did for an accepted empty rect too. The
+  // walk stays inside both worlds, so the clip loses no bounds protection.
+  const LegacyRect requested = area ? *area : LegacyRect{0, 0, bound_width, bound_height};
+  LegacyRect bounds{};
+  bounds.left = std::max(requested.left, 0);
+  bounds.top = std::max(requested.top, 0);
+  bounds.right = std::min(requested.right, bound_width);
+  bounds.bottom = std::min(requested.bottom, bound_height);
+  if (bounds.right < bounds.left) bounds.right = bounds.left;
+  if (bounds.bottom < bounds.top) bounds.bottom = bounds.top;
+  if (aexcompat::l2_detail::extended_diag_enabled() &&
+      (bounds.left != requested.left || bounds.top != requested.top ||
+       bounds.right != requested.right || bounds.bottom != requested.bottom))
+    std::cerr << "extended_diag:iterate area clipped l=" << requested.left
+              << " t=" << requested.top << " r=" << requested.right
+              << " b=" << requested.bottom << " bound=" << bound_width << "x"
+              << bound_height << " bytes=" << pixel_bytes
+              << " src=" << (has_source ? 1 : 0) << "\n" << std::flush;
   IterateAbortCallback abort_callback{};
   IterateProgressCallback progress_callback{};
   void* effect_ref{};
@@ -703,6 +726,32 @@ bool verify_iterate_suites() {
                    nullptr, nullptr, &destination_world) != 0 ||
       destination != std::array<unsigned char, 8>{{10, 235, 30, 40, 50, 195, 70, 80}})
     return false;
+
+  // An area past the walkable box is clipped, not refused (issue #1034):
+  // the walk covers exactly the intersection, and a wholly-outside or
+  // inverted rect walks nothing and succeeds, like PF_COPY (issue #962).
+  // Shapes from the corpus: Slant's rect one column past the source,
+  // PowerPin's full output extent against a smaller world.
+  {
+    IterateInteractionTestState clip{};
+    const LegacyRect oversized{-3, -2, 9, 7};
+    if (iterate_world_typed(nullptr, 0, 1, 4, &source_world, &oversized, &clip,
+                            &iterate_test_pixel, &destination_world) != 0 ||
+        clip.pixel_calls != 2) return false;
+    clip = {};
+    const LegacyRect shifted{1, 0, 3, 1};
+    if (iterate_world_typed(nullptr, 0, 1, 4, &source_world, &shifted, &clip,
+                            &iterate_test_pixel, &destination_world) != 0 ||
+        clip.pixel_calls != 1) return false;
+    clip = {};
+    const LegacyRect outside{5, 5, 9, 9};
+    const LegacyRect inverted{2, 1, 0, 0};
+    if (iterate_world_typed(nullptr, 0, 1, 4, &source_world, &outside, &clip,
+                            &iterate_test_pixel, &destination_world) != 0 ||
+        iterate_world_typed(nullptr, 0, 1, 4, &source_world, &inverted, &clip,
+                            &iterate_test_pixel, &destination_world) != 0 ||
+        clip.pixel_calls != 0) return false;
+  }
 
   struct GenericState { int32_t calls{}, expected{}; } state{};
   const auto generic_callback = [](void* opaque, int32_t thread_index, int32_t index,
