@@ -112,9 +112,47 @@ fn finish_one_shot_in_place(
             entry.ok = true;
         }
         Err(error) => {
+            if inspection_failure_diagnostics(&error)
+                .and_then(|value| value.get("plugin_kind").cloned())
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .as_deref()
+                == Some("aegp_candidate")
+            {
+                return finish_aegp_discovery(repository, plugin, entry, &roots);
+            }
             entry.failure_classification = inspection_failure_classification(&error);
             entry.failure_diagnostics = inspection_failure_diagnostics(&error);
             record_survey_for_failed_in_place(&mut entry, plugin, &roots);
+        }
+    }
+    entry
+}
+
+/// Completes discovery for a PiPL that the PF worker positively identified as
+/// an AEGP. A successful AEGP initialization is a readable AEX, but not an
+/// effect: the cache kind keeps it out of AviUtl2 filter registration and PF
+/// render sessions while allowing the shipping discovery report to distinguish
+/// it from an entrypoint failure.
+fn finish_aegp_discovery(
+    repository: &Path,
+    plugin: &Path,
+    mut entry: CacheEntry,
+    roots: &[PathBuf],
+) -> CacheEntry {
+    match initialize_experimental_aegp_in_place(repository, plugin, &entry.sha, roots.to_vec()) {
+        Ok(_) => {
+            entry.ok = true;
+            entry.plugin_kind = DiscoveredPluginKind::Aegp;
+            entry.smart = false;
+            entry.out_flags2 = 0;
+            entry.params.clear();
+            entry.failure_classification = None;
+            entry.failure_diagnostics = None;
+        }
+        Err(error) => {
+            entry.failure_classification = inspection_failure_classification(&error);
+            entry.failure_diagnostics = inspection_failure_diagnostics(&error);
+            record_survey_for_failed_in_place(&mut entry, plugin, roots);
         }
     }
     entry
@@ -547,6 +585,11 @@ fn discover_cluster_in_place(
                             "aegp_candidate" | "invalid_pipl" | "unknown_no_effect_entrypoint"
                         )
                     });
+                if plugin_kind == Some("aegp_candidate") {
+                    entry = finish_aegp_discovery(repository, &path, entry, &search_dirs);
+                    results.push((path, entry));
+                    continue;
+                }
                 entry.failure_diagnostics =
                     entry.failure_classification.as_ref().map(|classification| {
                         let mut diagnostics = serde_json::Map::new();
@@ -686,6 +729,7 @@ pub struct DiagnosticDiscovery {
     pub path: PathBuf,
     /// The plug-in was inspected and its parameters are the declared ones.
     pub ok: bool,
+    pub plugin_kind: DiscoveredPluginKind,
     pub sha256: String,
     pub byte_size: u64,
     /// `PF_OutFlag2_SUPPORTS_SMART_RENDER`; which render path a session opens on.
@@ -728,6 +772,7 @@ pub fn discover_records_for_diagnostics(
         .map(|(path, entry)| DiagnosticDiscovery {
             path,
             ok: entry.ok,
+            plugin_kind: entry.plugin_kind,
             sha256: entry.sha,
             byte_size: entry.len,
             smart: entry.smart,

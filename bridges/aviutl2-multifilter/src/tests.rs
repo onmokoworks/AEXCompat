@@ -19,6 +19,7 @@ mod tests {
             mtime: (mtime_secs, 0),
             len,
             ok: true,
+            plugin_kind: DiscoveredPluginKind::Effect,
             sha: "aa".into(),
             smart: true,
             out_flags2: 1 << 10,
@@ -45,6 +46,53 @@ mod tests {
             smart: false,
             ..discovered(mtime_secs, len, build)
         }
+    }
+
+    #[test]
+    fn a_readable_aegp_is_cached_but_never_registered_as_an_effect() {
+        let mut entry = discovered(5, 64, build(9));
+        entry.plugin_kind = DiscoveredPluginKind::Aegp;
+
+        assert!(entry.ok, "AEGP initialization is a successful discovery");
+        assert!(!is_registerable_effect(&entry));
+        assert_eq!(discovery_result_kind(&entry), DiscoveryResultKind::Aegp);
+        assert_eq!(
+            classify(Some(&entry), META, build(9)),
+            LoadDecision {
+                register: false,
+                discover: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_readable_aegp_does_not_hide_an_all_effects_rejected_alarm() {
+        let mut aegp = discovered(5, 64, build(9));
+        aegp.plugin_kind = DiscoveredPluginKind::Aegp;
+        let rejected_effect = failed(5, 64, build(9));
+        let results = [aegp, rejected_effect];
+        let effects = results
+            .iter()
+            .filter(|entry| discovery_result_kind(entry) == DiscoveryResultKind::Effect)
+            .count();
+        let rejected = results
+            .iter()
+            .filter(|entry| discovery_result_kind(entry) == DiscoveryResultKind::Rejected)
+            .count();
+
+        assert_eq!(effects, 0);
+        assert_eq!(rejected, 1);
+        assert!(discovery_is_alarming(effects, rejected));
+    }
+
+    #[test]
+    fn a_pre_kind_cache_entry_defaults_to_an_effect() {
+        let mut value = serde_json::to_value(discovered(5, 64, build(9))).unwrap();
+        value.as_object_mut().unwrap().remove("plugin_kind");
+        let entry: CacheEntry = serde_json::from_value(value).unwrap();
+
+        assert_eq!(entry.plugin_kind, DiscoveredPluginKind::Effect);
+        assert!(is_registerable_effect(&entry));
     }
 
     #[test]
@@ -1568,6 +1616,49 @@ mod tests {
         );
     }
 
+    /// A legacy alias can deserialize without `plugin_kind` and therefore look
+    /// like an Effect. It must never override a current direct AEGP result for
+    /// the same canonical file.
+    #[cfg(windows)]
+    #[test]
+    fn a_direct_aegp_never_adopts_a_registerable_effect_alias() {
+        let root = temp_root("resolve-aegp-terminal");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("foo.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = real.join("foo.aex");
+        let other = root
+            .join("link")
+            .join("foo.aex")
+            .to_string_lossy()
+            .into_owned();
+
+        let mut aegp = discovered(5, 64, build(1));
+        aegp.plugin_kind = DiscoveredPluginKind::Aegp;
+        let mut cache = HashMap::new();
+        cache.insert(walked.to_string_lossy().into_owned(), aegp);
+        cache.insert(other, discovered(5, 64, build(1)));
+
+        let mut aliases = None;
+        let (entry, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            META,
+            build(1),
+            std::slice::from_ref(&root),
+            true,
+            &mut aliases,
+        );
+        assert_eq!(
+            entry.map(|entry| entry.plugin_kind),
+            Some(DiscoveredPluginKind::Aegp)
+        );
+        assert_eq!(alias, None);
+        assert!(aliases.is_none(), "the conflicting alias was never consulted");
+    }
+
     /// A spelling that already registers must not pay for the alias lookup.
     #[test]
     fn a_usable_direct_hit_never_consults_the_index() {
@@ -1891,6 +1982,28 @@ mod tests {
         let diagnostics = inspection_failure_diagnostics(&error).expect("diagnostics");
         assert_eq!(diagnostics["exit_code"], 12);
         assert_eq!(diagnostics["plugin_kind"], "aegp_candidate");
+    }
+
+    #[test]
+    fn aegp_worker_failures_preserve_the_broker_diagnostics() {
+        let error = std::io::Error::other(
+            r#"AEGP initialization failed safely: {"classification":"nonzero_exit","exit_code":23,"failure_stage":"aegp_init"}"#,
+        );
+        let diagnostics = inspection_failure_diagnostics(&error).expect("diagnostics");
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["exit_code"], 23);
+        assert_eq!(diagnostics["failure_stage"], "aegp_init");
+    }
+
+    #[test]
+    fn aegp_contract_failures_preserve_init_error_and_stage() {
+        let error = std::io::Error::other(
+            r#"AEGP initialization contract failed safely: {"classification":"aegp_init_contract","stage":"aegp_init","init_error":4,"suite_leases_balanced":true}"#,
+        );
+        let diagnostics = inspection_failure_diagnostics(&error).expect("diagnostics");
+        assert_eq!(diagnostics["classification"], "aegp_init_contract");
+        assert_eq!(diagnostics["stage"], "aegp_init");
+        assert_eq!(diagnostics["init_error"], 4);
     }
 
     /// The same entry does converge as soon as a re-check succeeds.
