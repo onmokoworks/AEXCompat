@@ -83,8 +83,9 @@ pub const EXIT_INVARIANT_FAILURE: u32 = 24;
 /// (`kSessionSequenceSetupFailed`, -47: the session can never render). The
 /// worker exits fail-closed right after sending such a response, so the
 /// broker must invalidate the session rather than surface them as reusable
-/// frame-local diagnostics. Time-scale (-40) and time-range (-46) rejections
-/// stay frame-local by the worker's contract.
+/// frame-local diagnostics. Time-scale (-40), time-range (-46) and the
+/// audio-passthrough ui_action refusal (-48, issue #1048) stay frame-local by
+/// the worker's contract.
 fn is_fatal_session_error(render_error: i64) -> bool {
     matches!(render_error, -47 | -45..=-41)
 }

@@ -693,9 +693,12 @@ fn fatal_session_error_codes_match_the_worker_contract() {
     for code in [-41, -42, -43, -44, -45, -47] {
         assert!(is_fatal_session_error(code), "{code} is session-fatal");
     }
-    // Time-scale (-40) and time-range (-46) rejections are frame-local,
-    // as are ordinary positive selector errors.
-    for code in [-40, -46, 516, 25, -1] {
+    // Time-scale (-40), time-range (-46) and the audio-passthrough ui_action
+    // refusal (-48, issue #1048) are frame-local, as are ordinary positive
+    // selector errors. -48 is listed so a later widening of the fatal range
+    // cannot silently convert the deliberate frame-local refusal into a
+    // session invalidation.
+    for code in [-40, -46, -48, 516, 25, -1] {
         assert!(!is_fatal_session_error(code), "{code} stays frame-local");
     }
 }

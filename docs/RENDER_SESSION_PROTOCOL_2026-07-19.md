@@ -395,6 +395,16 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
   送信した後、以降の `render_frame` を受理せず終了列 (§7) に入る。broker は
   該当 frame_done (または worker 死) を観測した時点でセッションを無効化
   する。壊れた可能性のある worker 状態を次フレームへ引き回さない。
+- **AUDIO_EFFECT_ONLY passthrough (#1048)**: `PF_OutFlag_AUDIO_EFFECT_ONLY`
+  (bit 31) を宣言したプラグインの classic セッションは、AE と同様に映像へ
+  一切手を触れない。worker は映像セレクタを発行せず、各フレームを入力の
+  複製 (深度 16/32f では RGBA8 transport を `build_argb_input` と同じ
+  スケーリングで展開) として `status:"ok"` で返す。SEQUENCE lifecycle は
+  通常どおり発行され、その失敗は上の -47 のままセッションを無効化する。
+  passthrough フレームに `ui_action` が載っていた場合は、イベントを黙って
+  落とす代わりにフレーム局所の専用コード **-48** の error 応答を返す
+  (セッションは継続可能)。cluster swap セッションは passthrough の対象外
+  (launch プラグイン固定の状態のため、per-plugin 化は #1049)。
 - `status:"error"` の応答は `output` と `generation` を持たない専用形:
 
 ```json

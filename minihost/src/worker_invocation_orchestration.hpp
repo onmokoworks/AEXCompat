@@ -179,6 +179,13 @@ struct FinalDispatchRequest {
   // null on every non-cluster path, where a swap_plugin message stays a
   // protocol violation.
   const worker_render_session::SwapPluginHook* cluster_swap{};
+  // PF_OutFlag_AUDIO_EFFECT_ONLY: the classic render session serves such an
+  // effect's frames as input passthrough instead of failing the session for
+  // having no video selector to dispatch (issue #1048). Appended after the
+  // pointer member on purpose - the call sites initialize this aggregate
+  // positionally, and a bool inserted before `cluster_swap` would silently
+  // swallow the pointer through pointer-to-bool conversion.
+  bool audio_effect_only{};
 };
 
 struct ClassicFinalDispatchResult {

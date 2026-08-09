@@ -79,6 +79,10 @@ struct Result {
   uint32_t advertised_out_flags{};
   uint32_t advertised_out_flags2{};
   bool image_render_supported{};
+  // PF_OutFlag_AUDIO_EFFECT_ONLY (bit 31): the plug-in processes audio and
+  // never renders video. AE leaves such an effect's video untouched, which is
+  // what the render session's passthrough mode reproduces (issue #1048).
+  bool audio_effect_only{};
   bool nop_render_advertised{};
   bool input_write_advertised{};
   bool expand_buffer_advertised{};
