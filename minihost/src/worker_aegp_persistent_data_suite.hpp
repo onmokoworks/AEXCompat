@@ -29,6 +29,7 @@ using A_u_long = uint32_t;
 using A_char = char;
 using A_FpLong = double;
 using A_Boolean = unsigned char;
+using AEGP_PersistentType = int32_t;
 using AEGP_PluginID = A_long;
 // Opaque in the SDK (`struct _AEGP_PersistentBlob**`); opaque here too. Only
 // the handle this host hands out is accepted back, so a stale or foreign
@@ -48,6 +49,18 @@ inline constexpr A_Err kErrAlloc = 4;
 
 inline constexpr char kSuiteName[] = "AEGP Persistent Data Suite";
 inline constexpr int32_t kSuiteVersion3 = 3;
+inline constexpr int32_t kSuiteVersion4 = 4;
+inline constexpr AEGP_PersistentType kMachineSpecific = 0;
+inline constexpr AEGP_PersistentType kMachineIndependent = 1;
+inline constexpr AEGP_PersistentType kMachineIndependentRender = 2;
+inline constexpr AEGP_PersistentType kMachineIndependentOutput = 3;
+inline constexpr AEGP_PersistentType kMachineIndependentComposition = 4;
+inline constexpr AEGP_PersistentType kMachineSpecificText = 5;
+inline constexpr AEGP_PersistentType kMachineSpecificPaint = 6;
+inline constexpr AEGP_PersistentType kMachineSpecificEffects = 7;
+inline constexpr AEGP_PersistentType kMachineSpecificExpressionSnippets = 8;
+inline constexpr AEGP_PersistentType kMachineSpecificScriptSnippets = 9;
+inline constexpr AEGP_PersistentType kPersistentTypeCount = 10;
 
 // Bounds. A plug-in drives every one of these, so each has a ceiling that
 // turns a runaway or malformed caller into a refused call with a diagnostic
@@ -81,6 +94,8 @@ inline constexpr std::size_t kMaxBlobBytes = 16u << 20;
 enum class ValueKind : uint8_t { data = 0, string = 1, integer = 2, floating = 3 };
 
 using GetApplicationBlob = A_Err(__cdecl*)(AEGP_PersistentBlobH*);
+using GetApplicationBlob4 = A_Err(__cdecl*)(AEGP_PersistentType,
+                                             AEGP_PersistentBlobH*);
 using GetNumSections = A_Err(__cdecl*)(AEGP_PersistentBlobH, A_long*);
 using GetSectionKeyByIndex = A_Err(__cdecl*)(AEGP_PersistentBlobH, A_long,
                                              A_long, A_char*);
@@ -139,6 +154,29 @@ struct Suite3 {
   GetPrefsDirectory AEGP_GetPrefsDirectory;
 };
 
+// v4 preserves the v3 slot order and changes only the first callback by adding
+// the preference-domain selector. Every public domain is a separate blob.
+struct Suite4 {
+  GetApplicationBlob4 AEGP_GetApplicationBlob;
+  GetNumSections AEGP_GetNumSections;
+  GetSectionKeyByIndex AEGP_GetSectionKeyByIndex;
+  DoesKeyExist AEGP_DoesKeyExist;
+  GetNumKeys AEGP_GetNumKeys;
+  GetValueKeyByIndex AEGP_GetValueKeyByIndex;
+  GetDataHandle AEGP_GetDataHandle;
+  GetData AEGP_GetData;
+  GetString AEGP_GetString;
+  GetLong AEGP_GetLong;
+  GetFpLong AEGP_GetFpLong;
+  SetDataHandle AEGP_SetDataHandle;
+  SetData AEGP_SetData;
+  SetString AEGP_SetString;
+  SetLong AEGP_SetLong;
+  SetFpLong AEGP_SetFpLong;
+  DeleteEntry AEGP_DeleteEntry;
+  GetPrefsDirectory AEGP_GetPrefsDirectory;
+};
+
 static_assert(sizeof(Suite3) == 18 * sizeof(void*));
 static_assert(offsetof(Suite3, AEGP_GetApplicationBlob) == 0);
 static_assert(offsetof(Suite3, AEGP_GetNumSections) == 1 * sizeof(void*));
@@ -158,8 +196,28 @@ static_assert(offsetof(Suite3, AEGP_SetLong) == 14 * sizeof(void*));
 static_assert(offsetof(Suite3, AEGP_SetFpLong) == 15 * sizeof(void*));
 static_assert(offsetof(Suite3, AEGP_DeleteEntry) == 16 * sizeof(void*));
 static_assert(offsetof(Suite3, AEGP_GetPrefsDirectory) == 17 * sizeof(void*));
+static_assert(sizeof(Suite4) == 18 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetApplicationBlob) == 0);
+static_assert(offsetof(Suite4, AEGP_GetNumSections) == 1 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetSectionKeyByIndex) == 2 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_DoesKeyExist) == 3 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetNumKeys) == 4 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetValueKeyByIndex) == 5 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetDataHandle) == 6 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetData) == 7 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetString) == 8 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetLong) == 9 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetFpLong) == 10 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_SetDataHandle) == 11 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_SetData) == 12 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_SetString) == 13 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_SetLong) == 14 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_SetFpLong) == 15 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_DeleteEntry) == 16 * sizeof(void*));
+static_assert(offsetof(Suite4, AEGP_GetPrefsDirectory) == 17 * sizeof(void*));
 
 const void* provide_suite3(void*) noexcept;
+const void* provide_suite4(void*) noexcept;
 
 // How the blob was driven, and every refusal. A kind mismatch and a refused
 // call are the two ways this host can answer a plug-in differently from AE, so
@@ -185,5 +243,6 @@ struct Telemetry {
 Telemetry telemetry() noexcept;
 void reset_for_selftest() noexcept;
 bool selftest();
+bool selftest4();
 
 }  // namespace aexcompat::worker_runtime::persistent_data

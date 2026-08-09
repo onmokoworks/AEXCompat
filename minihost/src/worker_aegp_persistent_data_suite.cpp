@@ -17,6 +17,11 @@
 #include <utility>
 #include <vector>
 
+namespace aexcompat::l2_detail {
+int32_t __cdecl acquire_suite(const char*, int32_t, const void**);
+int32_t __cdecl release_suite(const char*, int32_t);
+}  // namespace aexcompat::l2_detail
+
 namespace aexcompat::worker_runtime::persistent_data {
 namespace {
 
@@ -38,24 +43,28 @@ struct Blob {
   Telemetry telemetry;
 };
 
-Blob& blob() {
-  static Blob instance;
-  return instance;
+std::array<Blob, kPersistentTypeCount>& blobs() {
+  static std::array<Blob, kPersistentTypeCount> instances;
+  return instances;
 }
 
-// The one handle this host hands out. AE's blob handle is an opaque
-// `struct _AEGP_PersistentBlob**`; the value only has to be stable, non-null
-// and recognizable on the way back, so it is the address of a private object.
-// Every entry point checks against it, which makes a stale or foreign handle a
-// refused call rather than a dereference of plug-in-chosen memory.
-const int g_blob_token = 0;
+Blob& blob() {
+  return blobs()[kMachineSpecific];
+}
 
-void* blob_handle() noexcept {
-  return const_cast<int*>(&g_blob_token);
+Blob* blob_for_handle(AEGP_PersistentBlobH handle) noexcept {
+  for (Blob& candidate : blobs())
+    if (handle == &candidate) return &candidate;
+  return nullptr;
+}
+
+Blob& state_for_handle(AEGP_PersistentBlobH handle) noexcept {
+  if (Blob* const found = blob_for_handle(handle)) return *found;
+  return blob();
 }
 
 bool valid_blob(AEGP_PersistentBlobH handle) noexcept {
-  return handle == blob_handle();
+  return blob_for_handle(handle) != nullptr;
 }
 
 // Plug-in memory, so every read of it is guarded: a caller may pass an
@@ -354,13 +363,27 @@ A_Err __cdecl get_application_blob(AEGP_PersistentBlobH* handle) {
   Blob& state = blob();
   std::lock_guard<std::mutex> lock(state.mutex);
   if (!handle) return reject(state, kErrParameter);
-  if (!store_seh<void*>(handle, blob_handle()))
+  if (!store_seh<void*>(handle, &state))
+    return reject(state, kErrParameter);
+  return kErrNone;
+}
+
+A_Err __cdecl get_application_blob4(AEGP_PersistentType type,
+                                    AEGP_PersistentBlobH* handle) {
+  if (type < kMachineSpecific || type >= kPersistentTypeCount) {
+    Blob& state = blob();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    return reject(state, kErrParameter);
+  }
+  Blob& state = blobs()[static_cast<std::size_t>(type)];
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (!handle || !store_seh<void*>(handle, &state))
     return reject(state, kErrParameter);
   return kErrNone;
 }
 
 A_Err __cdecl get_num_sections(AEGP_PersistentBlobH handle, A_long* count) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   if (!valid_blob(handle) || !count) return reject(state, kErrParameter);
   if (!store_seh<A_long>(count, static_cast<A_long>(state.sections.size())))
@@ -384,7 +407,7 @@ A_Err copy_key_out(Blob& state, const std::string& key, A_long max_size,
 A_Err __cdecl get_section_key_by_index(AEGP_PersistentBlobH handle,
                                        A_long section_index, A_long max_size,
                                        A_char* section_key) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   if (!valid_blob(handle) || section_index < 0 ||
       static_cast<std::size_t>(section_index) >= state.sections.size())
@@ -396,7 +419,7 @@ A_Err __cdecl get_section_key_by_index(AEGP_PersistentBlobH handle,
 A_Err __cdecl does_key_exist(AEGP_PersistentBlobH handle,
                              const A_char* section_key,
                              const A_char* value_key, A_Boolean* exists) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string value;
@@ -411,7 +434,7 @@ A_Err __cdecl does_key_exist(AEGP_PersistentBlobH handle,
 
 A_Err __cdecl get_num_keys(AEGP_PersistentBlobH handle,
                            const A_char* section_key, A_long* count) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   if (!valid_blob(handle) || !count || !read_key(section_key, section))
@@ -429,7 +452,7 @@ A_Err __cdecl get_value_key_by_index(AEGP_PersistentBlobH handle,
                                      const A_char* section_key,
                                      A_long key_index, A_long max_size,
                                      A_char* value_key) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   if (!valid_blob(handle) || !read_key(section_key, section))
@@ -451,7 +474,7 @@ A_Err __cdecl get_data_handle(AEGP_PluginID, AEGP_PersistentBlobH handle,
   // allocates are owned by the worker's memory suite, which registers them
   // under its single host id, so the argument is not a second identity to
   // check against.
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
@@ -524,7 +547,7 @@ A_Err __cdecl get_data_handle(AEGP_PluginID, AEGP_PersistentBlobH handle,
 A_Err __cdecl get_data(AEGP_PersistentBlobH handle, const A_char* section_key,
                        const A_char* value_key, A_u_long data_size,
                        const void* default_value, void* buffer) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
@@ -570,7 +593,7 @@ A_Err __cdecl get_string(AEGP_PersistentBlobH handle,
                          const A_char* section_key, const A_char* value_key,
                          const A_char* default_value, A_u_long buffer_size,
                          A_char* buffer, A_u_long* actual_size) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
@@ -625,7 +648,7 @@ A_Err __cdecl get_string(AEGP_PersistentBlobH handle,
 template <typename T, ValueKind Kind>
 A_Err get_scalar(AEGP_PersistentBlobH handle, const A_char* section_key,
                  const A_char* value_key, T default_value, T* value) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
@@ -669,7 +692,7 @@ A_Err __cdecl set_data_handle(AEGP_PersistentBlobH handle,
                               const A_char* section_key,
                               const A_char* value_key,
                               const AEGP_MemHandle value) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
@@ -705,7 +728,7 @@ A_Err __cdecl set_data_handle(AEGP_PersistentBlobH handle,
 A_Err __cdecl set_data(AEGP_PersistentBlobH handle, const A_char* section_key,
                        const A_char* value_key, A_u_long data_size,
                        const void* data) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
@@ -733,7 +756,7 @@ A_Err __cdecl set_data(AEGP_PersistentBlobH handle, const A_char* section_key,
 A_Err __cdecl set_string(AEGP_PersistentBlobH handle,
                          const A_char* section_key, const A_char* value_key,
                          const A_char* text) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
@@ -755,7 +778,7 @@ A_Err __cdecl set_string(AEGP_PersistentBlobH handle,
 template <typename T, ValueKind Kind>
 A_Err set_scalar(AEGP_PersistentBlobH handle, const A_char* section_key,
                  const A_char* value_key, T value) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section;
   std::string key;
@@ -785,7 +808,7 @@ A_Err __cdecl set_fp_long(AEGP_PersistentBlobH handle,
 A_Err __cdecl delete_entry(AEGP_PersistentBlobH handle,
                            const A_char* section_key,
                            const A_char* value_key) {
-  Blob& state = blob();
+  Blob& state = state_for_handle(handle);
   std::lock_guard<std::mutex> lock(state.mutex);
   std::string section_name;
   std::string key;
@@ -859,9 +882,18 @@ const Suite3 g_suite3{
     &set_data,             &set_string,            &set_long,
     &set_fp_long,          &delete_entry,          &get_prefs_directory};
 
+const Suite4 g_suite4{
+    &get_application_blob4, &get_num_sections,      &get_section_key_by_index,
+    &does_key_exist,        &get_num_keys,          &get_value_key_by_index,
+    &get_data_handle,       &get_data,              &get_string,
+    &get_long,              &get_fp_long,           &set_data_handle,
+    &set_data,              &set_string,            &set_long,
+    &set_fp_long,           &delete_entry,          &get_prefs_directory};
+
 }  // namespace
 
 const void* provide_suite3(void*) noexcept { return &g_suite3; }
+const void* provide_suite4(void*) noexcept { return &g_suite4; }
 
 Telemetry telemetry() noexcept {
   Blob& state = blob();
@@ -870,11 +902,12 @@ Telemetry telemetry() noexcept {
 }
 
 void reset_for_selftest() noexcept {
-  Blob& state = blob();
-  std::lock_guard<std::mutex> lock(state.mutex);
-  state.sections.clear();
-  state.stored_bytes = 0;
-  state.telemetry = Telemetry{};
+  for (Blob& state : blobs()) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.sections.clear();
+    state.stored_bytes = 0;
+    state.telemetry = Telemetry{};
+  }
 }
 
 // Drives the published table the way a plug-in does, so the checks are over
@@ -1275,6 +1308,75 @@ bool selftest() {
 
   reset_for_selftest();
   return true;
+}
+
+bool selftest4() {
+  reset_for_selftest();
+  const void* suite3_raw = nullptr;
+  const void* suite4_raw = nullptr;
+  if (aexcompat::l2_detail::acquire_suite(kSuiteName, kSuiteVersion3,
+                                         &suite3_raw) != kErrNone ||
+      !suite3_raw)
+    return false;
+  const A_Err acquired4 = aexcompat::l2_detail::acquire_suite(
+      kSuiteName, kSuiteVersion4, &suite4_raw);
+  if (acquired4 != kErrNone || !suite4_raw || suite4_raw == suite3_raw) {
+    if (acquired4 == kErrNone)
+      aexcompat::l2_detail::release_suite(kSuiteName, kSuiteVersion4);
+    aexcompat::l2_detail::release_suite(kSuiteName, kSuiteVersion3);
+    return false;
+  }
+
+  const auto exercise = [&]() {
+    const Suite3& suite3 = *static_cast<const Suite3*>(suite3_raw);
+    const Suite4& suite4 = *static_cast<const Suite4*>(suite4_raw);
+    std::array<AEGP_PersistentBlobH, kPersistentTypeCount> handles{};
+    for (AEGP_PersistentType type = kMachineSpecific;
+         type < kPersistentTypeCount; ++type) {
+      if (suite4.AEGP_GetApplicationBlob(type, &handles[type]) != kErrNone ||
+          !handles[type])
+        return false;
+      for (AEGP_PersistentType prior = kMachineSpecific; prior < type; ++prior)
+        if (handles[type] == handles[prior]) return false;
+    }
+    AEGP_PersistentBlobH invalid = nullptr;
+    if (suite4.AEGP_GetApplicationBlob(-1, &invalid) != kErrParameter ||
+        invalid ||
+        suite4.AEGP_GetApplicationBlob(kPersistentTypeCount, &invalid) !=
+            kErrParameter ||
+        suite4.AEGP_GetApplicationBlob(kMachineSpecific, nullptr) !=
+            kErrParameter)
+      return false;
+
+    // Every public preference domain has an independent store. Driving the
+    // last public enum value also prevents a four-domain partial implementation
+    // from satisfying this test.
+    for (AEGP_PersistentType type = kMachineSpecific;
+         type < kPersistentTypeCount; ++type)
+      if (suite4.AEGP_SetLong(handles[type], "domain", "value", type + 10) !=
+          kErrNone)
+        return false;
+    for (AEGP_PersistentType type = kMachineSpecific;
+         type < kPersistentTypeCount; ++type) {
+      A_long value = 0;
+      if (suite4.AEGP_GetLong(handles[type], "domain", "value", 0, &value) !=
+              kErrNone ||
+          value != type + 10)
+        return false;
+    }
+
+    // v3 remains the machine-specific view used before v4 existed.
+    AEGP_PersistentBlobH legacy = nullptr;
+    return suite3.AEGP_GetApplicationBlob(&legacy) == kErrNone &&
+        legacy == handles[kMachineSpecific];
+  };
+
+  const bool passed = exercise();
+  const bool released4 =
+      aexcompat::l2_detail::release_suite(kSuiteName, kSuiteVersion4) == kErrNone;
+  const bool released3 =
+      aexcompat::l2_detail::release_suite(kSuiteName, kSuiteVersion3) == kErrNone;
+  return passed && released4 && released3;
 }
 
 }  // namespace aexcompat::worker_runtime::persistent_data
