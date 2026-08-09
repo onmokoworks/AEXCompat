@@ -511,6 +511,13 @@ struct ClassicRenderDispatchOwner {
     if (!aexcompat::render::validate_output_extent(width, height, next_width, next_height,
             read<uint32_t>(output, kOutFlags))) {
       resize_reason = "extent_not_allowed";
+      // What the plug-in asked for against what it was, and which resize flags
+      // it declared: the collapsed `extent_not_allowed` could not say whether
+      // an expand/shrink lacked its flag or the extent was out of range
+      // (issue #984 family). Always on, integers only.
+      std::cerr << "stage:classic_output_resize_denied from=" << width << "x" << height
+                << " to=" << next_width << "x" << next_height
+                << " out_flags=" << read<uint32_t>(output, kOutFlags) << "\n" << std::flush;
       return fail(4);
     }
     const int32_t origin_x = read<int32_t>(output, kOutOrigin);
