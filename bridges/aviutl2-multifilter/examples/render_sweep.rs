@@ -415,6 +415,9 @@ fn sweep_one(
         }
         return outcome;
     }
+    if record.plugin_kind == aexcompat_aviutl2_multifilter::DiscoveredPluginKind::Aegp {
+        return Outcome::bare("discovered:aegp");
+    }
     if record.search_roots.is_empty() {
         return Outcome::bare("no_search_roots");
     }
@@ -705,6 +708,7 @@ fn plugin_record(
         "category": record.category,
         "discovery": {
             "ok": record.ok,
+            "plugin_kind": record.plugin_kind,
             "smart": record.smart,
             "out_flags2": record.out_flags2,
             "smart_route_supported":

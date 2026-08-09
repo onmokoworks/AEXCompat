@@ -748,22 +748,72 @@ pub fn initialize_experimental_aegp(
     plugin_path: &Path,
     approved_sha256: &str,
 ) -> io::Result<Value> {
+    initialize_experimental_aegp_impl(repository, plugin_path, approved_sha256, Vec::new())
+}
+
+/// In-place AEGP discovery variant. The AEGP image stays in its configured
+/// install tree and resolves imports only through the same broker-approved
+/// search roots used by PF discovery.
+pub fn initialize_experimental_aegp_in_place(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+) -> io::Result<Value> {
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "in-place AEGP initialization requires at least one dependency search directory",
+        ));
+    }
+    initialize_experimental_aegp_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        dependency_search_dirs,
+    )
+}
+
+fn initialize_experimental_aegp_impl(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+) -> io::Result<Value> {
     let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec!["--aegp-init".into()];
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
-    let isolated = dispatch_approved_image(
-        repository,
-        WorkerKind::L2,
-        plugin_path,
-        approved_sha256,
-        &args_before_plugin,
-        &args_after_plugin,
-        Some(Duration::from_millis(5_000)),
-    )?;
+    let started = Instant::now();
+    let isolated = if dependency_search_dirs.is_empty() {
+        dispatch_approved_image(
+            repository,
+            WorkerKind::L2,
+            plugin_path,
+            approved_sha256,
+            &args_before_plugin,
+            &args_after_plugin,
+            Some(Duration::from_millis(5_000)),
+        )?
+    } else {
+        crate::secure_image_dispatch::dispatch_secure_image(SecureImageDispatch {
+            repository,
+            worker_kind: WorkerKind::L2,
+            plugin: ApprovedImageArtifact {
+                path: plugin_path.to_path_buf(),
+                expected_sha256: decode_sha256_hex(approved_sha256)?,
+                expected_size: fs::metadata(plugin_path)?.len(),
+            },
+            dependencies: Vec::new(),
+            dependency_search_dirs,
+            args_before_plugin: &args_before_plugin,
+            args_after_plugin: &args_after_plugin,
+            timeout: Some(Duration::from_millis(5_000)),
+            launch_environment: Default::default(),
+        })?
+    };
     if isolated.classification.as_str() != "ok" {
+        let diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
         return Err(invalid(format!(
-            "AEGP initialization failed safely: {}",
-            isolated.stderr.trim()
+            "AEGP initialization failed safely: {diagnostics}"
         )));
     }
     let report: Value = serde_json::from_str(isolated.stdout.trim())
@@ -772,7 +822,18 @@ pub fn initialize_experimental_aegp(
         || report.get("init_error") != Some(&json!(0))
         || report.get("suite_leases_balanced") != Some(&json!(true))
     {
-        return Err(invalid("AEGP initialization contract failed"));
+        let diagnostics = json!({
+            "classification": "aegp_init_contract",
+            "stage": report.get("stage"),
+            "status": report.get("status"),
+            "init_error": report.get("init_error"),
+            "entry_fault": report.get("entry_fault"),
+            "entry_exception_code": report.get("entry_exception_code"),
+            "suite_leases_balanced": report.get("suite_leases_balanced"),
+        });
+        return Err(invalid(format!(
+            "AEGP initialization contract failed safely: {diagnostics}"
+        )));
     }
     Ok(report)
 }

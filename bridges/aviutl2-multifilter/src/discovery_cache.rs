@@ -544,7 +544,7 @@ fn cached_fallback_plugins(
     cache
         .iter()
         .filter_map(|(key, entry)| {
-            if !entry.ok || seen_keys.contains(key) {
+            if !is_registerable_effect(entry) || seen_keys.contains(key) {
                 return None;
             }
             let path = PathBuf::from(key);
@@ -665,8 +665,11 @@ fn resolve_cached<'a>(
     // registers, but on a payload that may describe older bytes, so its sessions
     // fail to open and its frames pass through unrendered. Another spelling can
     // hold a sound entry for the same file.
-    let direct_is_sound =
-        direct_registers && direct_matches && direct.is_some_and(|entry| !entry.stale);
+    let direct_is_sound = direct_matches
+        && direct.is_some_and(|entry| {
+            (direct_registers && !entry.stale)
+                || (entry.ok && entry.plugin_kind == DiscoveredPluginKind::Aegp)
+        });
     if !alias_possible || direct_is_sound {
         return (direct, None);
     }
@@ -710,7 +713,7 @@ fn resolve_cached<'a>(
 fn alias_rank(entry: Option<&CacheEntry>, build: BuildFingerprint) -> (bool, bool, bool) {
     match entry {
         Some(entry) => (
-            entry.ok,
+            is_registerable_effect(entry),
             !entry.stale,
             build.is_known() && entry.build == build,
         ),
@@ -786,7 +789,7 @@ fn classify(
         // `BuildFingerprint::is_known`, or one failed stat costs two full passes)
         // and this host has not already spent its [`RETRY_BUDGET`] on it.
         Some((mtime, len)) if entry.mtime == mtime && entry.len == len => LoadDecision {
-            register: entry.ok,
+            register: is_registerable_effect(entry),
             discover: entry.stale
                 || (build.is_known()
                     && entry.build != build
@@ -798,12 +801,12 @@ fn classify(
         // then fails closed on the SHA instead of AviUtl2 dropping the object
         // before the replacement result is available (issue #309).
         Some(_) => LoadDecision {
-            register: entry.ok,
+            register: is_registerable_effect(entry),
             discover: true,
         },
         // Unknown: keep what we have and re-check in the background.
         None => LoadDecision {
-            register: entry.ok,
+            register: is_registerable_effect(entry),
             discover: true,
         },
     }
@@ -903,7 +906,7 @@ fn run_discovery_pass(
     // Each entry carries the build that produced it, so an interrupted pass
     // leaves the not-yet-redone entries on the old build and they are queued
     // again next launch (issue #307).
-    let (mut effects, mut rejected) = (0usize, 0usize);
+    let (mut effects, mut aegps, mut rejected) = (0usize, 0usize, 0usize);
     let mut interrupted = false;
     let mut persisted = true;
     for chunk in pending.chunks(DISCOVERY_SAVE_CHUNK) {
@@ -914,10 +917,10 @@ fn run_discovery_pass(
         let results = discover_all(repository, chunk, dependency, build);
         let discovered = results.len();
         for (plugin, entry) in results {
-            if entry.ok {
-                effects += 1;
-            } else {
-                rejected += 1;
+            match discovery_result_kind(&entry) {
+                DiscoveryResultKind::Effect => effects += 1,
+                DiscoveryResultKind::Aegp => aegps += 1,
+                DiscoveryResultKind::Rejected => rejected += 1,
             }
             let key = plugin.to_string_lossy().into_owned();
             // `None` means there was nothing trustworthy to write; the existing
@@ -938,7 +941,22 @@ fn run_discovery_pass(
             break;
         }
     }
-    report_discovery(effects, rejected, interrupted, persisted, kind);
+    report_discovery(effects, aegps, rejected, interrupted, persisted, kind);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiscoveryResultKind {
+    Effect,
+    Aegp,
+    Rejected,
+}
+
+fn discovery_result_kind(entry: &CacheEntry) -> DiscoveryResultKind {
+    match (entry.ok, entry.plugin_kind) {
+        (true, DiscoveredPluginKind::Effect) => DiscoveryResultKind::Effect,
+        (true, DiscoveredPluginKind::Aegp) => DiscoveryResultKind::Aegp,
+        (false, _) => DiscoveryResultKind::Rejected,
+    }
 }
 
 /// Where a discovery pass runs, which is also when its results become visible:
@@ -1799,14 +1817,19 @@ struct FilterCtx {
 }
 
 /// The cached discovery result for one AEX. Keyed in the cache file by the AEX
-/// path; `(mtime, len)` invalidates the entry when the file changes. `ok` records
-/// a non-discoverable `.aex` (e.g. a format/codec plug-in, not an effect) so it
-/// is skipped without being re-probed every launch.
+/// path; `(mtime, len)` invalidates the entry when the file changes. `ok` means
+/// the AEX was identified and initialized through its matching ABI. `plugin_kind`
+/// separately decides whether that readable AEX is an AviUtl2 effect filter.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct CacheEntry {
     mtime: (u64, u32),
     len: u64,
     ok: bool,
+    /// The successfully identified plug-in ABI. AEGPs are readable by the
+    /// shipping discovery pass but are not AviUtl2 video filters, so they must
+    /// not be registered or handed to a PF render session.
+    #[serde(default)]
+    plugin_kind: DiscoveredPluginKind,
     sha: String,
     smart: bool,
     /// Exact PF_OutFlags2 observed during discovery. Zero means an older cache
@@ -1880,6 +1903,18 @@ struct CacheEntry {
     /// session failed — never silently rounded into a plain success.
     #[serde(default)]
     cluster_fallback: Option<ClusterFallback>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveredPluginKind {
+    #[default]
+    Effect,
+    Aegp,
+}
+
+fn is_registerable_effect(entry: &CacheEntry) -> bool {
+    entry.ok && entry.plugin_kind == DiscoveredPluginKind::Effect
 }
 
 /// How one cache entry relates to a failed cluster discovery session
@@ -2383,6 +2418,7 @@ fn registration_summary(
 /// Sends a discovery pass's outcome to the host log.
 fn report_discovery(
     effects: usize,
+    aegps: usize,
     rejected: usize,
     interrupted: bool,
     persisted: bool,
@@ -2393,6 +2429,11 @@ fn report_discovery(
         log_warn(&summary);
     } else {
         log_info(&summary);
+    }
+    if aegps > 0 {
+        log_info(&format!(
+            "{aegps} AEGP plug-in(s) initialized and cached without AviUtl2 filter registration"
+        ));
     }
     // For the background pass, what the *next* launch reads back is the whole
     // point; for the first-launch pass this launch already registered the
@@ -2750,6 +2791,7 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         mtime,
         len,
         ok: false,
+        plugin_kind: DiscoveredPluginKind::Effect,
         sha: String::new(),
         smart: false,
         out_flags2: 0,
@@ -2829,6 +2871,8 @@ fn inspection_failure_diagnostics(error: &std::io::Error) -> Option<serde_json::
     let message = error.to_string();
     let payload = [
         "AEX parameter inspection worker failed safely: ",
+        "AEGP initialization failed safely: ",
+        "AEGP initialization contract failed safely: ",
         "diagnostics=",
     ]
     .into_iter()
