@@ -506,6 +506,9 @@ const void* provide_color_settings7(void*) {
 const void* provide_flt_blur1(void*) {
   return aexcompat::flt_blur::suite1();
 }
+const void* provide_aegp_register6(void*) {
+  return aegp_register_suite_for_mode(g_aegp_init_mode);
+}
 // One catalog entry serves this name and version: the opt-in slot probe when
 // it is armed, the implementation otherwise. Registering both as separate
 // entries would leave which one answers up to catalog ordering.
@@ -699,8 +702,7 @@ bool configure_component_suite_catalog() {
       {"AEGP Duck Suite", 1, nullptr, &provide_duck1},
       {"AEGP Command Suite", 1, &g_aegp_command_suite, nullptr, nullptr,
        &aegp_init_suite_provider_available},
-      {"AEGP Register Suite", 6, &g_aegp_register_suite, nullptr, nullptr,
-       &aegp_init_suite_provider_available},
+      {"AEGP Register Suite", 6, nullptr, &provide_aegp_register6},
       {"PF Effect UI Suite", 1, nullptr, &provide_effect_ui1},
       {"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1},
       {"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2},
