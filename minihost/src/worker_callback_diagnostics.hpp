@@ -56,6 +56,10 @@ enum class Reason : std::size_t {
   AlreadyCheckedOut,
   NotCheckedOut,
   EmptyResult,
+  // For area_sample this counts radius refusals only: the `area` field is not
+  // validated at all since #1033 (nothing uses it), so the name is narrower
+  // than it reads. The per-term `stage:callback_denied` marker carries which
+  // radius check refused.
   InvalidArea,
   PixelCallback,
   ProgressCallback,
