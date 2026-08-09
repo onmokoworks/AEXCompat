@@ -25,6 +25,7 @@ PROBES = (
     "pf-aegp-owned-world-probe",
     "pf-convolve-depth-probe",
     "pf-fill-premultiply-probe",
+    "pf-frame-origin-probe",
     "pf-transfer-mask-probe",
     "pf-transfer-rect-probe",
     "pf-transform-affine-probe",
@@ -42,6 +43,7 @@ OUT_FLAGS_ASSIGNMENT = re.compile(
 PASCAL_PROPERTIES = {"eman", "gtac", "ANMe"}
 OUT_FLAG_VALUES = {
     "PF_OutFlag_PIX_INDEPENDENT": 1 << 10,
+    "PF_OutFlag_I_EXPAND_BUFFER": 1 << 9,
     "PF_OutFlag_DEEP_COLOR_AWARE": 1 << 25,
 }
 
@@ -50,6 +52,19 @@ def _single_source(probe: str, suffix: str) -> Path:
     paths = list((INSTRUMENTS / probe).glob(f"*{suffix}"))
     assert len(paths) == 1, f"{probe}: expected one {suffix} source, found {paths}"
     return paths[0]
+
+
+def _resource_sources(probe: str) -> list[Path]:
+    """Every PiPL in the probe directory.
+
+    One .cpp can back several .aex variants that differ only by compile
+    definition, and each variant needs its own PiPL so an effect registry keyed
+    by match name sees distinct identities. Each of those PiPLs has to satisfy
+    the contract, so they are all checked rather than requiring exactly one.
+    """
+    paths = sorted((INSTRUMENTS / probe).glob("*.rc"))
+    assert paths, f"{probe}: no PiPL resource found"
+    return paths
 
 
 def _decode_rc_string(value: str) -> bytes:
@@ -89,30 +104,45 @@ def _runtime_out_flags(source: str) -> int:
 
 @pytest.mark.parametrize("probe", PROBES)
 def test_probe_pipl_string_properties_match_their_payloads(probe: str):
-    source = _single_source(probe, ".rc").read_text(encoding="utf-8")
-    properties = {
-        match.group("key"): (int(match.group("length")), _decode_rc_string(match.group("value")))
-        for match in STRING_PROPERTY.finditer(source)
-    }
-    assert {"dnik", "eman", "gtac", "4668", "ANMe"} <= properties.keys()
-
-    for key, (declared_length, payload) in properties.items():
-        assert declared_length == len(payload), (
-            f"{probe} {key}: declared {declared_length}, actual {len(payload)}"
-        )
-        assert declared_length % 4 == 0, f"{probe} {key}: payload is not DWORD-aligned"
-        if key in PASCAL_PROPERTIES:
-            text_end = 1 + payload[0]
-            assert text_end <= len(payload), f"{probe} {key}: Pascal length overflows payload"
-            assert payload[text_end:] == bytes(len(payload) - text_end), (
-                f"{probe} {key}: non-NUL Pascal padding"
+    for resource in _resource_sources(probe):
+        source = resource.read_text(encoding="utf-8")
+        label = f"{probe}/{resource.name}"
+        properties = {
+            match.group("key"): (
+                int(match.group("length")),
+                _decode_rc_string(match.group("value")),
             )
+            for match in STRING_PROPERTY.finditer(source)
+        }
+        assert {"dnik", "eman", "gtac", "4668", "ANMe"} <= properties.keys()
+
+        for key, (declared_length, payload) in properties.items():
+            assert declared_length == len(payload), (
+                f"{label} {key}: declared {declared_length}, actual {len(payload)}"
+            )
+            assert declared_length % 4 == 0, f"{label} {key}: payload is not DWORD-aligned"
+            if key in PASCAL_PROPERTIES:
+                text_end = 1 + payload[0]
+                assert text_end <= len(payload), f"{label} {key}: Pascal length overflows payload"
+                assert payload[text_end:] == bytes(len(payload) - text_end), (
+                    f"{label} {key}: non-NUL Pascal padding"
+                )
 
 
 @pytest.mark.parametrize("probe", PROBES)
 def test_probe_pipl_olge_matches_global_setup_out_flags(probe: str):
-    rc_source = _single_source(probe, ".rc").read_text(encoding="utf-8")
     cpp_source = _single_source(probe, ".cpp").read_text(encoding="utf-8")
-    olge = OLGE_PROPERTY.search(rc_source)
-    assert olge is not None, f"{probe}: missing numeric OLGe property"
-    assert int(olge.group("value")) == _runtime_out_flags(cpp_source)
+    # One source, so one answer to compare every PiPL against. `_runtime_out_flags`
+    # reads the first `out_flags =` it finds and knows nothing about #if, so a
+    # source that varied its flags per build variant would have every PiPL checked
+    # against whichever branch came first. Refusing that shape here keeps the
+    # comparison meaningful instead of silently weakening it.
+    assignments = OUT_FLAGS_ASSIGNMENT.findall(cpp_source)
+    assert len(assignments) == 1, (
+        f"{probe}: {len(assignments)} out_flags assignments; per-variant flags need "
+        "per-variant sources before this test can check them"
+    )
+    for resource in _resource_sources(probe):
+        olge = OLGE_PROPERTY.search(resource.read_text(encoding="utf-8"))
+        assert olge is not None, f"{probe}/{resource.name}: missing numeric OLGe property"
+        assert int(olge.group("value")) == _runtime_out_flags(cpp_source)

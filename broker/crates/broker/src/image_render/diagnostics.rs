@@ -668,12 +668,37 @@ fn worker_diagnostics(
             .split_whitespace()
             .filter_map(|item| {
                 let (name, value) = item.split_once('=')?;
-                if !matches!(name, "error" | "pre_error" | "render_error") {
-                    return None;
+                match name {
+                    "error" | "pre_error" | "render_error" => {
+                        value.parse::<i64>().ok().map(|value| (name, json!(value)))
+                    }
+                    // Why the host refused, when the numeric code alone cannot
+                    // say: the classic output resize has several refusals that
+                    // all report 4, and without this they are distinguishable
+                    // only in a stderr tail that most runs do not carry
+                    // (issue #984).
+                    //
+                    // Shape-checked, not merely length-capped. The plug-in
+                    // shares the worker's stderr and can print any `stage:` line
+                    // it likes, so an unconstrained value would let plug-in
+                    // authored text - a user's file path, say - into a report
+                    // the repository treats as shareable. Every reason the host
+                    // emits is a lower-case identifier, which is what this
+                    // admits; anything else is dropped rather than truncated,
+                    // because a truncated path is still a path.
+                    "reason"
+                        if !value.is_empty()
+                            && value.len() <= 32
+                            && value
+                                .bytes()
+                                .all(|byte| byte.is_ascii_lowercase() || byte == b'_') =>
+                    {
+                        Some((name, json!(value)))
+                    }
+                    _ => None,
                 }
-                value.parse::<i64>().ok().map(|value| (name, value))
             })
-            .map(|(name, value)| (name.to_owned(), json!(value)))
+            .map(|(name, value)| (name.to_owned(), value))
             .collect::<serde_json::Map<_, _>>();
         if state == "begin" {
             active_stages.push(stage.to_owned());

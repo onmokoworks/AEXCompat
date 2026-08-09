@@ -34,9 +34,12 @@ mod windows_e2e {
     #[cfg(debug_assertions)]
     use aexcompat_broker::image_render::FORCE_SESSION_FALLBACK_ENV;
     use aexcompat_broker::render_request::HostContext;
+    use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
+    use aexcompat_broker::secure_launch::LaunchEnvironment;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     fn repository_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1592,6 +1595,243 @@ mod windows_e2e {
             plain.get("output_sha256"),
             drawn.get("output_sha256"),
             "the draw changed the rendered frame: {drawn}"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The offer itself, through a real AEX rather than a recording fake.
+    ///
+    /// `pf_frame_origin_offered_probe` derives its FRAME_SETUP answer from what
+    /// it finds in `out_data->width/height` on entry, which is the shape issue
+    /// #984 is about (AE's Basic_3D does the same and answered 1x1 from zero),
+    /// and returns PF_Err_INTERNAL_STRUCT_DAMAGED if it finds zero. Every other
+    /// fixture derives its answer from the layer parameter, so without this a
+    /// regression that stopped the offer reaching a plug-in's out_data - the
+    /// classic layout losing `world_width`, say - would leave every AEX-backed
+    /// test green and only the native self-test, which drives `begin_frame`
+    /// directly, would notice.
+    #[test]
+    fn frame_setup_is_offered_the_output_extent_through_a_real_plugin() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root
+            .join("target/pf-frame-origin-probe-build/Release/pf_frame_origin_offered_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping offered-extent render: build the worker and pf_frame_origin_offered_probe.aex"
+            );
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-offered-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let output = scratch.join("out.png");
+        let report = render_experimental_image(&root, &aex, &sha, &input, &output, &[])
+            .expect("session-route offered-extent render");
+        assert_session_render_is_healthy(&report, "offered-extent render");
+        // 64x48 was offered and the probe added its delta to it. Had the offer
+        // not happened the probe would have refused the frame outright.
+        assert_eq!(report.get("width"), Some(&serde_json::json!(68)));
+        assert_eq!(report.get("height"), Some(&serde_json::json!(52)));
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// A classic expand that also states PF_OutData::origin has to come back
+    /// with the frame report's own convention, which is the negation of it.
+    ///
+    /// The resize probes never state an origin, so before this the classic
+    /// negation at `frame.origin_x = -classic_output.input_origin_x` had no
+    /// end-to-end coverage at all: a sign error would have placed every
+    /// expanded classic frame on the opposite side of the layer origin with the
+    /// whole suite green. The probe also fails its own RENDER with
+    /// PF_Err_INTERNAL_STRUCT_DAMAGED unless the host relayed the origin back
+    /// through `in_data->output_origin_x/y`, so a healthy render is itself the
+    /// evidence that the relay happened.
+    #[test]
+    fn a_classic_expand_reports_its_origin_in_layer_coordinates() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-frame-origin-probe-build/Release/pf_frame_origin_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping origin render: build the worker and pf_frame_origin_probe.aex");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-origin-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let output = scratch.join("out.png");
+        let report = render_experimental_image(&root, &aex, &sha, &input, &output, &[])
+            .expect("session-route origin render");
+        assert_session_render_is_healthy(&report, "origin render");
+
+        // The probe grows by 4 on each axis and states origin (3,3).
+        assert_eq!(report.get("width"), Some(&serde_json::json!(68)));
+        assert_eq!(report.get("height"), Some(&serde_json::json!(52)));
+        // What the host put into in_data for the plug-in, in PF_OutData::origin's
+        // own convention. The probe already refuses to render unless it reads
+        // back what it stated; this pins it in the report too, so a relay that
+        // silently stopped happening is visible here and not only as a changed
+        // error code.
+        assert_eq!(
+            report.get("output_origin"),
+            Some(&serde_json::json!([3, 3])),
+            "the stated origin did not reach in_data: {report}"
+        );
+
+        // The negated, layer-relative origin never reaches the image report -
+        // `image_render::session` destructures FrameStatus::Rendered and drops it
+        // - so the conversion has to be read off the session frame directly.
+        // Without this the sign could be flipped in worker_render_session.cpp and
+        // nothing in the suite would notice: in_data holds 3 either way.
+        let mut session = RenderSession::open(SessionOpenRequest {
+            repository: &root,
+            plugin_path: &aex,
+            plugin_sha256: &sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            dependencies: Vec::new(),
+            dependency_search_dirs: vec![aex.parent().unwrap().to_path_buf()],
+            width: 64,
+            height: 48,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 1,
+            time_scale: 1,
+            frame_deadline: Duration::from_secs(30),
+            smart: false,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default(),
+        })
+        .expect("open a classic session on the origin probe");
+        let frame = session
+            .render_frame(0, 0, &vec![0x7fu8; 64 * 48 * 4])
+            .expect("the origin probe renders one session frame");
+        match frame.status {
+            FrameStatus::Rendered {
+                width,
+                height,
+                origin_x,
+                origin_y,
+                ..
+            } => {
+                assert_eq!(
+                    (width, height),
+                    (68, 52),
+                    "the session frame did not expand"
+                );
+                // The input's top-left sits 3px inside the grown buffer, so the
+                // buffer's own top-left sits 3px outside the layer.
+                assert_eq!(
+                    (origin_x, origin_y),
+                    (-3, -3),
+                    "PF_OutData::origin was not negated into layer coordinates"
+                );
+            }
+            FrameStatus::FrameError { render_error, .. } => {
+                panic!("the origin probe frame failed with {render_error}")
+            }
+        }
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// The sibling of the expand test below, for the other direction. An effect
+    /// that declared PF_OutFlag_I_SHRINK_BUFFER and answers a smaller extent at
+    /// FRAME_SETUP must render at that extent rather than be refused by the
+    /// host's output validation.
+    ///
+    /// This exists because it was missing. The shrink fixture has been built
+    /// alongside the expand one since #262 with nothing consuming it, so when
+    /// issue #984's origin bound was first written as "the whole source has to
+    /// fit inside the output" - unsatisfiable for any shrink - every declared
+    /// shrink began failing output validation and tearing down the session, and
+    /// the whole suite stayed green.
+    #[test]
+    fn shrink_output_renders_at_the_smaller_extent() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex =
+            root.join("target/pf-frame-resize-probe-build/Release/pf_shrink_allowed_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping shrink render: build the worker and pf_shrink_allowed_probe.aex");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-shrink-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+
+        let output = scratch.join("out.png");
+        let report = render_experimental_image(&root, &aex, &sha, &input, &output, &[])
+            .expect("session-route shrink render");
+        assert_session_render_is_healthy(&report, "shrink render");
+
+        // The probe answers `params[0]->u.ld.width + AEXCOMPAT_RESIZE_DELTA`
+        // with a negative delta of 4, so 64x48 becomes 60x44. The report has to
+        // describe the shrunk frame while still naming the full-size input.
+        assert_eq!(report.get("width"), Some(&serde_json::json!(60)));
+        assert_eq!(report.get("height"), Some(&serde_json::json!(44)));
+        assert_eq!(report.get("input_width"), Some(&serde_json::json!(64)));
+        assert_eq!(report.get("input_height"), Some(&serde_json::json!(48)));
+
+        let decoded = image::open(&output).expect("decode the shrunk PNG");
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (60, 44),
+            "the written PNG is not the shrunk frame"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }

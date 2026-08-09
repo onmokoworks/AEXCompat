@@ -644,8 +644,12 @@ pub enum FrameStatus {
         /// effect (#261); `pixels` is packed at exactly `width*height*bpp`.
         width: u32,
         height: u32,
-        /// The frame's top-left relative to the layer origin. Negative when a
-        /// SmartFX effect grew its output past the layer (#914).
+        /// The frame's top-left relative to the layer origin. Negative when an
+        /// effect grew its output past the layer (#914), and positive when a
+        /// classic effect cropped: both render paths fill it now, the smart one
+        /// from `result_rect`'s top-left and the classic one by negating
+        /// `PF_OutData::origin` (#984). Zero when nothing resized, which is
+        /// where the output already starts.
         origin_x: i32,
         origin_y: i32,
     },
@@ -694,12 +698,15 @@ struct FrameDoneOutput {
     /// the layout cross-check the per-frame SHA-256 used to carry (#690).
     packed_bytes: u64,
     guards_intact: bool,
-    /// Where the frame sits relative to the layer origin. A SmartFX effect that
-    /// grows its output answers with a result_rect whose top-left is negative,
-    /// and these pixels start there rather than at the layer's (0,0). A caller
-    /// placing the frame back into a fixed-size image needs it to know which
-    /// part covers the layer (#914). Absent (0) on classic frames and on any
-    /// worker that predates it, which is where their output already starts.
+    /// Where the frame sits relative to the layer origin. An effect that grows
+    /// its output starts these pixels above and left of the layer's (0,0), so
+    /// this is negative; a classic effect that crops starts them inside it, so
+    /// this is positive. A caller placing the frame back into a fixed-size
+    /// image needs it to know which part covers the layer (#914). SmartFX fills
+    /// it from `result_rect`'s top-left; classic negates `PF_OutData::origin`
+    /// on an accepted resize (#984). Absent (0) when nothing resized and on any
+    /// worker that predates the field, which is where the output already
+    /// starts.
     #[serde(default)]
     origin_x: i32,
     #[serde(default)]

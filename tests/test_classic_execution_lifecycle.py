@@ -17,37 +17,8 @@ The native self-test drives the same functions with counting fakes, so it needs
 no plug-in and no AEX - only the build.
 """
 
-import json
-import subprocess
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "target" / "minihost-build"
-NAME = "worker_classic_execution_selftest.exe"
-# Ninja puts the binary flat; a multi-config generator puts it under the config
-# directory. CI uses Ninja, so the flat path comes first.
-CANDIDATES = [BUILD / NAME, BUILD / "Release" / NAME, BUILD / "RelWithDebInfo" / NAME]
-
-
-def locate() -> Path:
-    for candidate in CANDIDATES:
-        if candidate.exists():
-            return candidate
-    raise AssertionError(
-        "missing self-test binary, looked in: "
-        + ", ".join(str(candidate) for candidate in CANDIDATES)
-    )
+from _native_selftest import run
 
 
 def test_a_refused_setup_stops_the_classic_dispatch():
-    selftest = locate()
-    completed = subprocess.run(
-        [str(selftest)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stderr
-    report = json.loads(completed.stdout)
-    assert report["classic_execution_selftest"] == "passed"
+    run("worker_classic_execution_selftest.exe", "classic_execution_selftest")

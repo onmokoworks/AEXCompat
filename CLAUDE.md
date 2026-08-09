@@ -132,8 +132,8 @@ and bounded image input/output are now the main implementation path.
 - The After Effects installation is an exclusive machine resource. Before any
   capture or aerender run, verify no AfterFX/aerender/aerendercore process is
   running; if one is, another session owns it — wait instead of killing it.
-- Review happens locally, before the PR exists. Run a local agent review over
-  the working diff (`/code-review` or an equivalent adversarial agent pass),
+- Review happens locally, before the PR exists. Spawn a separate background
+  agent of your own to run an adversarial review pass over the working diff,
   fix what it finds, and re-run it on the amended diff. The loop ends when a
   fresh review of the current diff leaves no finding you accepted unaddressed.
   Judge each finding on its merits rather than obeying it; a finding you reject

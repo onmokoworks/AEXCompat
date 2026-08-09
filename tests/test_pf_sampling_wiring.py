@@ -24,19 +24,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "target" / "minihost-build"
+from _native_selftest import ROOT, candidates, locate_optional
+
 NAME = "worker_pf_sampling_wiring_selftest.exe"
-# Ninja puts the binary flat; a multi-config generator puts it under the config
-# directory. CI uses Ninja, so the flat path comes first.
-CANDIDATES = [BUILD / NAME, BUILD / "Release" / NAME, BUILD / "RelWithDebInfo" / NAME]
-
-
-def locate() -> Path | None:
-    for candidate in CANDIDATES:
-        if candidate.exists():
-            return candidate
-    return None
 
 
 def build_portable_selftest(tmp_path: Path) -> Path:
@@ -64,11 +54,11 @@ def build_portable_selftest(tmp_path: Path) -> Path:
 
 
 def test_sampling_accepts_a_null_effect_ref_and_the_utility_slots_are_wired(tmp_path):
-    selftest = locate()
+    selftest = locate_optional(NAME)
     if selftest is None:
         assert sys.platform != "win32", (
             "missing native self-test binary, looked in: "
-            + ", ".join(str(candidate) for candidate in CANDIDATES)
+            + ", ".join(str(candidate) for candidate in candidates(NAME))
         )
         selftest = build_portable_selftest(tmp_path)
     completed = subprocess.run(

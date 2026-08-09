@@ -1,5 +1,7 @@
 #include "worker_invocation_orchestration.hpp"
 
+#include "render_subsystem.h"
+#include "worker_classic_render_entry.hpp"
 #include "worker_classic_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
@@ -232,19 +234,6 @@ constexpr int32_t kGetFlattenedSequenceData = 28;
 bool configure_mask_scene(const std::string& scene_id);
 int32_t invoke_sequence_selector(EffectEntry entry, int32_t selector, void* input,
                                  void* output, uint32_t* exception_code = nullptr);
-int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
-                    std::array<std::byte, kOutSize>& output,
-                    const std::string& case_id, int32_t& width, int32_t& height,
-                    int32_t& rowbytes, std::string& input_hash, std::string& output_hash,
-                    bool& guards_intact, const RequestedAssignments* requested = nullptr,
-                    const std::vector<unsigned char>* external_rgba = nullptr,
-                    int32_t external_width = 0, int32_t external_height = 0,
-                    const std::vector<ExternalLayerInput>* external_layers = nullptr,
-                    int32_t external_current_time = 0, int32_t external_time_step = 1,
-                    int32_t external_total_time = 1, uint32_t external_time_scale = 1,
-                    int32_t external_pixel_bytes = 4, bool manage_sequence = true,
-                    std::vector<unsigned char>* captured_argb = nullptr,
-                    bool* output_validation_failed = nullptr);
 SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                               std::array<std::byte, kOutSize>& output,
                               const std::string& case_id,

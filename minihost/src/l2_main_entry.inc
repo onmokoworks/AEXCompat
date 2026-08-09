@@ -2010,7 +2010,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       read<int32_t>(input, 248), read<int32_t>(input, 400)};
   classic_inputs.context_zoom = {read<int32_t>(input, 252), read<int32_t>(input, 256)};
   classic_inputs.context_origin = {read<int32_t>(input, 392), read<int32_t>(input, 396)};
-  classic_inputs.context_extent = {read<int32_t>(input, 276), read<int32_t>(input, 280)};
+  // Through the generated contract, like the two sites that write the field
+  // (worker_classic_render_runtime.cpp, worker_smart_dispatch.cpp): a
+  // regeneration that moved it would otherwise leave the reader describing
+  // whatever now lives at 276 while the writers followed the move.
+  classic_inputs.context_extent = {
+      read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET),
+      read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET)};
   emit_classic_completion_report(classic_inputs);
   } else if (is_smart_worker()) {
   restore_native_stdout();
@@ -2064,7 +2070,9 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       read<int32_t>(input, 248), read<int32_t>(input, 400)};
   smart_inputs.context_zoom = {read<int32_t>(input, 252), read<int32_t>(input, 256)};
   smart_inputs.context_origin = {read<int32_t>(input, 392), read<int32_t>(input, 396)};
-  smart_inputs.context_extent = {read<int32_t>(input, 276), read<int32_t>(input, 280)};
+  smart_inputs.context_extent = {
+      read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET),
+      read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET)};
   emit_smart_completion_report(smart_inputs);
   std::cout.flush();
   } else {

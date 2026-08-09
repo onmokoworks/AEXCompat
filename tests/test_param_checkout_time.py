@@ -15,37 +15,8 @@ The native self-test drives the gate directly, so it needs no plug-in and no
 AEX - only the build.
 """
 
-import json
-import subprocess
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "target" / "minihost-build"
-NAME = "worker_param_checkout_time_selftest.exe"
-# Ninja puts the binary flat; a multi-config generator puts it under the config
-# directory. CI uses Ninja, so the flat path comes first.
-CANDIDATES = [BUILD / NAME, BUILD / "Release" / NAME, BUILD / "RelWithDebInfo" / NAME]
-
-
-def locate() -> Path:
-    for candidate in CANDIDATES:
-        if candidate.exists():
-            return candidate
-    raise AssertionError(
-        "missing self-test binary, looked in: "
-        + ", ".join(str(candidate) for candidate in CANDIDATES)
-    )
+from _native_selftest import run
 
 
 def test_a_checkout_is_answerable_at_the_frame_being_rendered():
-    selftest = locate()
-    completed = subprocess.run(
-        [str(selftest)],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert completed.returncode == 0, completed.stderr
-    report = json.loads(completed.stdout)
-    assert report["param_checkout_time_selftest"] == "passed"
+    run("worker_param_checkout_time_selftest.exe", "param_checkout_time_selftest")
