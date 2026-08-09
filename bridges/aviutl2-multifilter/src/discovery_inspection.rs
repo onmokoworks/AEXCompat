@@ -799,12 +799,7 @@ pub fn discover_records_for_diagnostics(
     paths: &[PathBuf],
     dependency_dirs: Vec<PathBuf>,
 ) -> Vec<DiagnosticDiscovery> {
-    discover_records_for_diagnostics_with_progress(
-        repository,
-        paths,
-        dependency_dirs,
-        |_| {},
-    )
+    discover_records_for_diagnostics_with_progress(repository, paths, dependency_dirs, |_| {})
 }
 
 /// Diagnostic entry point with task-completion evidence. The callback runs
