@@ -2937,6 +2937,11 @@ SceneSuiteAcquireResult scene_acquire_suite(
     effect_suite[8] = reinterpret_cast<void*>(&aegp_dispose_effect);
     effect_suite[9] = reinterpret_cast<void*>(&aegp_apply_effect);
     effect_suite[10] = reinterpret_cast<void*>(&aegp_delete_layer_effect);
+    effect_suite[11] = reinterpret_cast<void*>(&aegp_get_num_installed_effects);
+    effect_suite[12] = reinterpret_cast<void*>(&aegp_get_next_installed_effect);
+    effect_suite[13] = reinterpret_cast<void*>(&aegp_get_effect_name);
+    effect_suite[14] = reinterpret_cast<void*>(&aegp_get_effect_match_name);
+    effect_suite[15] = reinterpret_cast<void*>(&aegp_get_effect_category);
     effect_suite[16] = reinterpret_cast<void*>(&aegp_duplicate_effect);
     *suite = effect_suite.data();
     return SceneSuiteAcquireResult::acquired;

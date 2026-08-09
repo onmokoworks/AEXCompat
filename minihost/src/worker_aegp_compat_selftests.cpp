@@ -2202,45 +2202,76 @@ bool verify_aegp_loaded_plugin_effect_streams() {
 }
 
 bool verify_aegp_installed_effect_catalog_suite4() {
+  using GetNumInstalledEffects = int32_t (__cdecl*)(int32_t*);
+  using GetNextInstalledEffect = int32_t (__cdecl*)(int32_t, int32_t*);
+  using GetInstalledEffectText = int32_t (__cdecl*)(int32_t, char*);
+
   const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
   g_aegp_comp_idle_roundtrip_mode = true;
-  const void* acquired = nullptr;
-  bool ok = acquire_suite("AEGP Effect Suite", 4, &acquired) == 0 &&
-            acquired == g_aegp_effect_suite4.data();
+  const void* acquired2 = nullptr;
+  const void* acquired3 = nullptr;
+  const void* acquired4 = nullptr;
+  bool ok = acquire_suite("AEGP Effect Suite", 2, &acquired2) == 0 &&
+            acquire_suite("AEGP Effect Suite", 3, &acquired3) == 0 &&
+            acquire_suite("AEGP Effect Suite", 4, &acquired4) == 0 &&
+            acquired2 == g_aegp_effect_suite2.data() &&
+            acquired3 == g_aegp_effect_suite3.data() &&
+            acquired4 == g_aegp_effect_suite4.data();
+  const auto* slots2 = static_cast<void* const*>(acquired2);
+  const auto* slots3 = static_cast<void* const*>(acquired3);
+  const auto* slots4 = static_cast<void* const*>(acquired4);
+  for (std::size_t slot = 11; slot <= 15; ++slot) {
+    ok = ok && slots2 && slots3 && slots4 &&
+         slots2[slot] == slots3[slot] && slots3[slot] == slots4[slot];
+  }
+  const auto get_num = slots3
+      ? reinterpret_cast<GetNumInstalledEffects>(slots3[11]) : nullptr;
+  const auto get_next = slots3
+      ? reinterpret_cast<GetNextInstalledEffect>(slots3[12]) : nullptr;
+  const auto get_name = slots3
+      ? reinterpret_cast<GetInstalledEffectText>(slots3[13]) : nullptr;
+  const auto get_match_name = slots3
+      ? reinterpret_cast<GetInstalledEffectText>(slots3[14]) : nullptr;
+  const auto get_category = slots3
+      ? reinterpret_cast<GetInstalledEffectText>(slots3[15]) : nullptr;
+  ok = ok && get_num && get_next && get_name && get_match_name && get_category;
   int32_t count = -1;
-  ok = ok && aegp_get_num_installed_effects(&count) == 0 &&
+  ok = ok && get_num(&count) == 0 &&
        count == static_cast<int32_t>(kAegpInstalledEffects.size());
   count = 0x12345678;
-  ok = ok && aegp_get_num_installed_effects(nullptr) == 4 && count == 0x12345678;
+  ok = ok && get_num(nullptr) == 4 && count == 0x12345678;
 
   int32_t key = -1;
-  ok = ok && aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, &key) == 0 &&
+  ok = ok && get_next(kAegpInstalledEffectKeyNone, &key) == 0 &&
        key == kAegpInstalledEffects[0].key;
   const int32_t installed_key = key;
   for (std::size_t index = 1; index < kAegpInstalledEffects.size(); ++index)
-    ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
+    ok = ok && get_next(key, &key) == 0 &&
          key == kAegpInstalledEffects[index].key;
-  ok = ok && aegp_get_next_installed_effect(key, &key) == 0 &&
+  ok = ok && get_next(key, &key) == 0 &&
        key == kAegpInstalledEffectKeyNone;
   key = 0x12345678;
-  ok = ok && aegp_get_next_installed_effect(9999, &key) == 4 &&
+  ok = ok && get_next(9999, &key) == 4 &&
        key == 0x12345678 &&
-       aegp_get_next_installed_effect(kAegpInstalledEffectKeyNone, nullptr) == 4;
+       get_next(kAegpInstalledEffectKeyNone, nullptr) == 4;
 
   std::array<char, kAegpMaxEffectCategoryNameSize> name{};
   std::array<char, kAegpMaxEffectCategoryNameSize> match_name{};
   std::array<char, kAegpMaxEffectCategoryNameSize> category{};
-  ok = ok && aegp_get_effect_name(installed_key, name.data()) == 0 &&
+  ok = ok && get_name(installed_key, name.data()) == 0 &&
        std::strcmp(name.data(), kAegpInstalledEffects[0].name) == 0 &&
-       aegp_get_effect_match_name(installed_key, match_name.data()) == 0 &&
+       get_match_name(installed_key, match_name.data()) == 0 &&
        std::strcmp(match_name.data(), kAegpInstalledEffects[0].match_name) == 0 &&
-       aegp_get_effect_category(installed_key, category.data()) == 0 &&
+       get_category(installed_key, category.data()) == 0 &&
        std::strcmp(category.data(), kAegpInstalledEffects[0].category) == 0 &&
        category[std::strlen(kAegpInstalledEffects[0].category)] == '\0';
   category.fill('Z');
-  ok = ok && aegp_get_effect_category(9999, category.data()) == 4 &&
+  ok = ok && get_category(9999, category.data()) == 4 &&
        std::all_of(category.begin(), category.end(), [](char value) { return value == 'Z'; }) &&
-       aegp_get_effect_category(installed_key, nullptr) == 4;
+       get_category(installed_key, nullptr) == 4;
+  ok = release_suite("AEGP Effect Suite", 4) == 0 && ok;
+  ok = release_suite("AEGP Effect Suite", 3) == 0 && ok;
+  ok = release_suite("AEGP Effect Suite", 2) == 0 && ok;
   g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
   return ok;
 }
