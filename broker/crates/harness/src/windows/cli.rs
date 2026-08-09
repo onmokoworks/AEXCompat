@@ -588,12 +588,45 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
         };
-        let parameters = required_plugin_parameters(&repository, plugin, &hash);
         // The preflight seals the same approved dependency artifacts the render
         // dispatches with, so a plug-in that imports one loads in both.
-        let render_dependencies: Vec<
-            aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact,
-        > = Vec::new();
+        let dependency_roots = std::env::var_os("AEXCOMPAT_MULTIFILTER_DEPENDENCY_DIRS")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let render_dependencies = if dependency_roots.is_empty() {
+            Vec::new()
+        } else {
+            match aexcompat_broker::plugin_dependency_closure::resolve_dependency_closure(
+                aexcompat_broker::plugin_dependency_closure::DependencyClosureRequest::new(
+                    plugin,
+                    &dependency_roots,
+                ),
+            ) {
+                Ok(closure) => closure.dependencies().to_vec(),
+                Err(error) => {
+                    eprintln!("GPU dependency closure resolution failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        };
+        let parameters = if dependency_roots.is_empty() {
+            required_plugin_parameters(&repository, plugin, &hash)
+        } else {
+            match aexcompat_broker::image_render::inspect_experimental_in_place(
+                &repository,
+                plugin,
+                &hash,
+                dependency_roots.clone(),
+            ) {
+                Ok((parameters, _)) => parameters,
+                Err(error) => {
+                    eprintln!("GPU parameter inspection failed: {error}");
+                    std::process::exit(1);
+                }
+            }
+        };
+        let parameters =
+            aexcompat_broker::image_render::normalize_default_interactive_parameters(&parameters);
         let prepared = match aexcompat_broker::image_render::prepare_gpu_runtime_policy(
             &repository,
             plugin,
@@ -805,16 +838,50 @@ fn main() -> eframe::Result {
         };
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let approved_dependencies = match approved_adjacent_dependencies(plugin, &hash) {
-            Ok(dependencies) => dependencies,
-            Err(error) if auto_path => {
-                eprintln!("automatic dependency approval failed: {error}");
-                std::process::exit(1);
+        let dependency_roots = std::env::var_os("AEXCOMPAT_MULTIFILTER_DEPENDENCY_DIRS")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let approved_dependencies = if dependency_roots.is_empty() {
+            match approved_adjacent_dependencies(plugin, &hash) {
+                Ok(dependencies) => dependencies,
+                Err(error) if auto_path => {
+                    eprintln!("automatic dependency approval failed: {error}");
+                    std::process::exit(1);
+                }
+                Err(_) => Vec::new(),
             }
-            Err(_) => Vec::new(),
+        } else {
+            match aexcompat_broker::plugin_dependency_closure::resolve_dependency_closure(
+                aexcompat_broker::plugin_dependency_closure::DependencyClosureRequest::new(
+                    plugin,
+                    &dependency_roots,
+                ),
+            ) {
+                Ok(closure) => closure.dependencies().to_vec(),
+                Err(error) => {
+                    eprintln!("dependency closure resolution failed: {error}");
+                    std::process::exit(1);
+                }
+            }
         };
         let use_approved_dependencies = auto_path || !approved_dependencies.is_empty();
-        let (parameters, inspection) = if use_approved_dependencies {
+        let (parameters, inspection) = if !dependency_roots.is_empty() {
+            match aexcompat_broker::image_render::inspect_experimental_in_place(
+                &repository,
+                plugin,
+                &hash,
+                dependency_roots.clone(),
+            ) {
+                Ok(inspected) => inspected,
+                Err(error) => {
+                    eprintln!(
+                        "automatic render-path selection needs a successful parameter \
+                         inspection: {error}"
+                    );
+                    std::process::exit(1);
+                }
+            }
+        } else if use_approved_dependencies {
             match aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
                 &repository,
                 plugin,
@@ -840,6 +907,8 @@ fn main() -> eframe::Result {
                 Err(_) => Default::default(),
             }
         };
+        let parameters =
+            aexcompat_broker::image_render::normalize_default_interactive_parameters(&parameters);
         let smart_advertised = inspection["smart_render_advertised"]
             .as_bool()
             .unwrap_or(false);

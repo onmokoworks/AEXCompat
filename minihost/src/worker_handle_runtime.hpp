@@ -27,6 +27,7 @@ void** __cdecl new_handle(std::uint64_t size);
 void* __cdecl lock_handle(void** handle);
 void __cdecl unlock_handle(void** handle);
 void __cdecl dispose_handle(void** handle);
+void dispose_all_live_handles();
 std::uint64_t __cdecl handle_size(void** handle);
 std::int32_t __cdecl resize_handle(std::uint64_t size, void*** handle);
 

@@ -108,6 +108,7 @@ class SessionChannels {
   SessionChannels(const SessionChannels&) = delete;
   SessionChannels& operator=(const SessionChannels&) = delete;
   ~SessionChannels();
+  void close();
 
   // Parses the three AEXCOMPAT_RENDER_SESSION_*_HANDLE variables, validates
   // handle types, maps the section, and checks the mapped size covers the

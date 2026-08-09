@@ -720,20 +720,16 @@ fn validate_regular_unique(file: &File) -> io::Result<()> {
     if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut i) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    if i.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-        || i.nNumberOfLinks != 1
-        || !file.metadata()?.is_file()
-    {
-        return Err(invalid("runtime module must be regular and single-link"));
+    if i.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !file.metadata()?.is_file() {
+        return Err(invalid("runtime module must be a regular non-reparse file"));
     }
     Ok(())
 }
 #[cfg(unix)]
 fn validate_regular_unique(file: &File) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
     let m = file.metadata()?;
-    if !m.is_file() || m.nlink() != 1 {
-        return Err(invalid("runtime module must be regular and single-link"));
+    if !m.is_file() {
+        return Err(invalid("runtime module must be a regular file"));
     }
     Ok(())
 }

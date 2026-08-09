@@ -135,6 +135,15 @@ void __cdecl dispose_handle(void** handle) {
   delete record;
 }
 
+void dispose_all_live_handles() {
+  std::vector<HandleRecord*> records;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    records.assign(g_handles.begin(), g_handles.end());
+  }
+  for (auto* record : records) dispose_handle(&record->data);
+}
+
 std::uint64_t __cdecl handle_size(void** handle) {
   auto* record = reinterpret_cast<HandleRecord*>(handle);
   std::lock_guard<std::mutex> lock(g_mutex);

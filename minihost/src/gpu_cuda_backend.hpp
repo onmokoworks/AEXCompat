@@ -13,7 +13,7 @@ class CudaBackend {
   CudaBackend(const CudaBackend&) = delete;
   CudaBackend& operator=(const CudaBackend&) = delete;
 
-  bool begin(uint32_t active_device_index);
+  bool begin(uint32_t active_device_index, void* borrowed_context = nullptr);
   bool end();
 
   bool active() const;
