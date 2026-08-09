@@ -1,5 +1,6 @@
 #include "worker_pf_world_transform_runtime.hpp"
 
+#include "worker_extended_diag.hpp"
 #include "worker_pf_suites_internal.hpp"
 #include "worker_world_registry.hpp"
 
@@ -803,6 +804,22 @@ int32_t transform_world_denied(const char* reason, int64_t value) {
   return kPfErrBadCallbackParam;
 }
 
+// TRANSFER_RECT's twin (issue #1041): Lightning's 516 wobble came out of this
+// callback and the collapsed callback_error could not say which of its checks
+// refused, or with what. Per call, like transform_world's: TRANSFER_RECT is
+// strip-shaped (per bolt segment for Lightning), not per-pixel.
+int32_t transfer_rect_denied(const char* reason) {
+  std::cerr << "stage:callback_denied callback=transfer_rect reason=" << reason
+            << "\n" << std::flush;
+  return kPfErrBadCallbackParam;
+}
+
+int32_t transfer_rect_denied(const char* reason, int64_t value) {
+  std::cerr << "stage:callback_denied callback=transfer_rect reason=" << reason
+            << " value=" << value << "\n" << std::flush;
+  return kPfErrBadCallbackParam;
+}
+
 }  // namespace
 
 int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode_flags,
@@ -945,8 +962,8 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
   const auto floor_to_sample_coord = [](double value, int* result) -> bool {
     if (!result || !std::isfinite(value)) return false;
     const double floored = std::floor(value);
-    constexpr double minimum = static_cast<double>(std::numeric_limits<int>::min()) + 1.0;
-    constexpr double maximum = static_cast<double>(std::numeric_limits<int>::max()) - 1.0;
+    constexpr double minimum = static_cast<double>((std::numeric_limits<int>::min)()) + 1.0;
+    constexpr double maximum = static_cast<double>((std::numeric_limits<int>::max)()) - 1.0;
     if (floored < minimum || floored > maximum) return false;
     *result = static_cast<int>(floored);
     return true;
@@ -1124,39 +1141,67 @@ int32_t transfer_rect_registered(int32_t quality, uint32_t mode_flags, int32_t f
   constexpr double maximum = std::is_same_v<Channel, uint8_t> ? 255.0 :
       (std::is_same_v<Channel, uint16_t> ? 32768.0 : 1.0);
   DispatchWorldFormat source_info{}, destination_info{};
-  if (quality < 0 || quality > 1 || mode_flags > 1 || field < 0 || field > 2 ||
-      !resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info) ||
-      source_info.pixel_format != PixelFormat || destination_info.pixel_format != PixelFormat ||
-      source_info.width > 4096 || source_info.height > 4096 ||
-      destination_info.width > 4096 || destination_info.height > 4096 ||
-      source_info.rowbytes < static_cast<int64_t>(source_info.width) * sizeof(Channel) * 4 ||
+  if (quality < 0 || quality > 1) return transfer_rect_denied("quality_range", quality);
+  if (mode_flags > 1) return transfer_rect_denied("mode_flags_range", mode_flags);
+  if (field < 0 || field > 2) return transfer_rect_denied("field_range", field);
+  // Validated here because this is where it is read: the 8-bit instantiation
+  // consumes `opacity8` and must not refuse garbage in a field it never
+  // touches (issue #1041, Lightning).
+  if constexpr (!std::is_same_v<Channel, uint8_t>) {
+    if (opacity16 > 32768) return transfer_rect_denied("opacity16_range", opacity16);
+  }
+  if (!resolve_dispatch_world_format(source_world, source_info))
+    return transfer_rect_denied("source_world_unresolved");
+  if (!resolve_dispatch_world_format(destination_world, destination_info))
+    return transfer_rect_denied("destination_world_unresolved");
+  if (source_info.pixel_format != PixelFormat || destination_info.pixel_format != PixelFormat)
+    return transfer_rect_denied("pixel_format_mismatch");
+  if (source_info.width > 4096 || source_info.height > 4096 ||
+      destination_info.width > 4096 || destination_info.height > 4096)
+    return transfer_rect_denied("extent_over_4096");
+  if (source_info.rowbytes < static_cast<int64_t>(source_info.width) * sizeof(Channel) * 4 ||
       destination_info.rowbytes <
           static_cast<int64_t>(destination_info.width) * sizeof(Channel) * 4)
-    return kPfErrBadCallbackParam;
-  LegacyRect bounds{};
-  if (!normalize_legacy_rect(source_rect, source_info.width, source_info.height, bounds))
-    return kPfErrBadCallbackParam;
-  const int64_t clipped_left = (std::max<int64_t>)(bounds.left,
-      static_cast<int64_t>(bounds.left) - destination_x);
-  const int64_t clipped_top = (std::max<int64_t>)(bounds.top,
-      static_cast<int64_t>(bounds.top) - destination_y);
-  const int64_t clipped_right = (std::min<int64_t>)(bounds.right,
-      static_cast<int64_t>(bounds.left) - destination_x + destination_info.width);
-  const int64_t clipped_bottom = (std::min<int64_t>)(bounds.bottom,
-      static_cast<int64_t>(bounds.top) - destination_y + destination_info.height);
+    return transfer_rect_denied("rowbytes_underrun");
+  // A source rect outside the source world is clipped, not refused (issue
+  // #1041): Lightning's randomly-placed bolt rect leaves the frame on some
+  // runs, and the refusal turned exactly those runs into frame_error:516 -
+  // the mechanism behind its #993 wobble. The destination side already
+  // clipped below; the source world's bounds join the same intersection, and
+  // the anchor stays the requested rect's top-left so a surviving source
+  // pixel still lands where it corresponds (the #962 rule). An empty or
+  // inverted intersection transfers nothing and succeeds, like PF_COPY.
+  const LegacyRect bounds = source_rect
+      ? *source_rect : LegacyRect{0, 0, source_info.width, source_info.height};
+  const int64_t clipped_left = (std::max)({static_cast<int64_t>(bounds.left),
+      static_cast<int64_t>(bounds.left) - destination_x, int64_t{0}});
+  const int64_t clipped_top = (std::max)({static_cast<int64_t>(bounds.top),
+      static_cast<int64_t>(bounds.top) - destination_y, int64_t{0}});
+  const int64_t clipped_right = (std::min)({static_cast<int64_t>(bounds.right),
+      static_cast<int64_t>(bounds.left) - destination_x + destination_info.width,
+      static_cast<int64_t>(source_info.width)});
+  const int64_t clipped_bottom = (std::min)({static_cast<int64_t>(bounds.bottom),
+      static_cast<int64_t>(bounds.top) - destination_y + destination_info.height,
+      static_cast<int64_t>(source_info.height)});
   if (clipped_right <= clipped_left || clipped_bottom <= clipped_top) return 0;
+  if (aexcompat::l2_detail::extended_diag_enabled() &&
+      (bounds.left < 0 || bounds.top < 0 || bounds.right > source_info.width ||
+       bounds.bottom > source_info.height))
+    std::cerr << "extended_diag:transfer_rect source clipped l=" << bounds.left
+              << " t=" << bounds.top << " r=" << bounds.right << " b=" << bounds.bottom
+              << " source=" << source_info.width << "x" << source_info.height << "\n"
+              << std::flush;
   const std::size_t width = static_cast<std::size_t>(clipped_right - clipped_left);
   const std::size_t height = static_cast<std::size_t>(clipped_bottom - clipped_top);
   if (width > SIZE_MAX / height || width * height > 16'777'216)
-    return kPfErrBadCallbackParam;
+    return transfer_rect_denied("area_over_limit");
   using Pixel = std::array<Channel, 4>;
   std::vector<Pixel> snapshot;
   std::vector<double> mask_coverage;
   try {
     snapshot.resize(width * height);
     if (mask_world) mask_coverage.resize(width * height);
-  } catch (...) { return kPfErrBadCallbackParam; }
+  } catch (...) { return transfer_rect_denied("allocation_failed"); }
   const auto* source = static_cast<const unsigned char*>(source_info.data);
   for (std::size_t row = 0; row < height; ++row)
     std::memcpy(snapshot.data() + row * width,
@@ -1176,7 +1221,7 @@ int32_t transfer_rect_registered(int32_t quality, uint32_t mode_flags, int32_t f
     std::memcpy(&mask_flags, mask_bytes + kEffectWorldSize + 8, sizeof(mask_flags));
     if (!mask_data || mask_width <= 0 || mask_height <= 0 || mask_width > 4096 ||
         mask_height > 4096 || mask_rowbytes < static_cast<int64_t>(mask_width) * sizeof(Pixel) ||
-        (mask_flags & ~3u) != 0) return kPfErrBadCallbackParam;
+        (mask_flags & ~3u) != 0) return transfer_rect_denied("mask_invalid");
     const auto* mask_pixels = static_cast<const unsigned char*>(mask_data);
     for (std::size_t row = 0; row < height; ++row) {
       const int64_t mask_y = clipped_top + static_cast<int64_t>(row) - mask_offset_y;
@@ -1443,9 +1488,12 @@ int32_t __cdecl transfer_rect(void* effect_ref, int32_t quality, uint32_t mode_f
                               const void* composite_mode, const void* mask_world,
                               int32_t destination_x, int32_t destination_y,
                               void* destination_world) {
-  if (!effect_ref || !source_world || !composite_mode ||
-      destination_x < -4096 || destination_x > 4096 ||
-      destination_y < -4096 || destination_y > 4096) return kPfErrBadCallbackParam;
+  if (!effect_ref || !source_world || !composite_mode)
+    return transfer_rect_denied("null_argument");
+  if (destination_x < -4096 || destination_x > 4096)
+    return transfer_rect_denied("destination_x_range", destination_x);
+  if (destination_y < -4096 || destination_y > 4096)
+    return transfer_rect_denied("destination_y_range", destination_y);
   int32_t transfer_mode{};
   int32_t random_seed{};
   uint8_t opacity{}, rgb_only{};
@@ -1456,13 +1504,23 @@ int32_t __cdecl transfer_rect(void* effect_ref, int32_t quality, uint32_t mode_f
   std::memcpy(&opacity, static_cast<const std::byte*>(composite_mode) + 8, sizeof(opacity));
   std::memcpy(&rgb_only, static_cast<const std::byte*>(composite_mode) + 9, sizeof(rgb_only));
   std::memcpy(&opacity16, static_cast<const std::byte*>(composite_mode) + 10, sizeof(opacity16));
-  if (transfer_mode < 0 || transfer_mode > 38 || rgb_only > 1 || opacity16 > 32768)
-    return kPfErrBadCallbackParam;
+  if (transfer_mode < 0 || transfer_mode > 38)
+    return transfer_rect_denied("transfer_mode_range", transfer_mode);
+  if (rgb_only > 1) return transfer_rect_denied("rgb_only_range", rgb_only);
+  // `opacity16` is validated where it is read - the deep-colour paths in
+  // transfer_rect_registered - not here. On an 8-bit session only `opacity8`
+  // is consumed, and Lightning leaves random garbage in the 16-bit field
+  // (measured 36950..59342 across runs); refusing it here turned exactly the
+  // runs where the garbage exceeded 32768 into frame errors, which was the
+  // whole mechanism of Lightning's #993 wobble (issue #1041). The same shape
+  // as area_sample's unread `area` field (issue #1033).
   DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info) ||
-      source_info.pixel_format != destination_info.pixel_format)
-    return kPfErrBadCallbackParam;
+  if (!resolve_dispatch_world_format(source_world, source_info))
+    return transfer_rect_denied("source_world_unresolved");
+  if (!resolve_dispatch_world_format(destination_world, destination_info))
+    return transfer_rect_denied("destination_world_unresolved");
+  if (source_info.pixel_format != destination_info.pixel_format)
+    return transfer_rect_denied("pixel_format_mismatch");
   if (source_info.pixel_format == kPixelFormatArgb32)
     return transfer_rect_registered<uint8_t, kPixelFormatArgb32>(quality, mode_flags, field,
         source_rect, source_world, transfer_mode, random_seed, opacity, rgb_only, opacity16,
@@ -1478,7 +1536,7 @@ int32_t __cdecl transfer_rect(void* effect_ref, int32_t quality, uint32_t mode_f
         source_rect, source_world, transfer_mode, random_seed, opacity, rgb_only, opacity16,
         mask_world,
         destination_x, destination_y, destination_world);
-  return kPfErrBadCallbackParam;
+  return transfer_rect_denied("pixel_format_unknown", source_info.pixel_format);
 }
 
 bool verify_world_transform_transfer_mask() {
@@ -1579,6 +1637,38 @@ bool verify_world_transform_transfer_mask() {
                    {255, 0, 64, 160}) ||
       !verify_mode(17, {128, 128, 64, 32}, {200, 64, 128, 192},
                    {100, 64, 128, 192})) return false;
+  // Issue #1041, both halves of Lightning's frame-ender. First: garbage in
+  // the unread 16-bit opacity field must not refuse an 8-bit transfer - the
+  // plug-in leaves random values there (measured 36950..59342) and only the
+  // runs where the garbage topped 32768 died, which was its #993 wobble.
+  const int32_t copy_mode = 0;
+  const uint16_t garbage_opacity16 = 59342;
+  std::memcpy(composite.data(), &copy_mode, sizeof(copy_mode));
+  std::memcpy(composite.data() + 8, &opacity, sizeof(opacity));
+  std::memcpy(composite.data() + 10, &garbage_opacity16, sizeof(garbage_opacity16));
+  source_pixels = {255, 11, 0, 0, 255, 22, 0, 0, 255, 33, 0, 0};
+  destination_pixels.fill(0);
+  if (transfer_rect(&source, 0, 0, 0, &one_pixel, &source, composite.data(), nullptr,
+                    0, 0, &destination) != 0 ||
+      destination_pixels[0] != 255 || destination_pixels[1] != 11) return false;
+  // Second: a source rect outside the source world is clipped with its anchor
+  // preserved, not refused. The anchor is the requested top-left, so the
+  // surviving source pixels land where they correspond (#962): with a rect
+  // one column left of the world, source column 0 lands at destination
+  // column 1.
+  destination_pixels.fill(0);
+  const LegacyRect one_left_outside{-1, 0, 2, 1};
+  if (transfer_rect(&source, 0, 0, 0, &one_left_outside, &source, composite.data(), nullptr,
+                    0, 0, &destination) != 0 ||
+      destination_pixels[0] != 0 || destination_pixels[5] != 11 ||
+      destination_pixels[9] != 22) return false;
+  // Wholly outside: a transfer of nothing, and nothing written.
+  destination_pixels.fill(0);
+  const LegacyRect past_the_end{5, 0, 9, 1};
+  if (transfer_rect(&source, 0, 0, 0, &past_the_end, &source, composite.data(), nullptr,
+                    0, 0, &destination) != 0 ||
+      destination_pixels != std::array<uint8_t, 12>{}) return false;
+
   destination_pixels.fill(0x5a);
   flags = 4;
   std::memcpy(mask.data() + kEffectWorldSize + 8, &flags, sizeof(flags));
