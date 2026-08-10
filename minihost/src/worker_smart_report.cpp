@@ -134,6 +134,20 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       smart.output_hash, smart.rects_valid, world_debug_report_json(),
       smart.empty_layer_param_checkouts,
       smart.empty_layer_param_pixel_checkouts});
+  const auto& audio = audio_telemetry();
+  report::append_audio(report_snapshot, {
+      audio.usage_advertised, audio.checkout_allowed, audio.source_available,
+      audio.unadvertised_checkout_calls,
+      audio.rejected_unadvertised_checkouts, audio.rejected_format_requests,
+      audio.handle_exhaustions, audio.peak_live_handles,
+      audio.last_checkout_index, audio.checkout_calls, audio.checkin_calls,
+      audio.automatic_checkins, audio.get_data_calls, audio.invalid_operations,
+      audio.last_checkout_start_time, audio.last_checkout_duration,
+      audio.last_checkout_time_scale, audio.last_window_start_sample,
+      audio.last_window_sample_count, audio.last_window_silence_samples,
+      audio.last_output_rate, audio.last_output_bytes_per_sample,
+      audio.last_output_channels, audio.last_output_format,
+      audio.last_returned_sample_frames, audio_handle_lifetimes_balanced()});
   if (in.session_mode)
     report::append_smart_session(report_snapshot, {
         in.session_frames_attempted, in.session_sequence_setup_error,

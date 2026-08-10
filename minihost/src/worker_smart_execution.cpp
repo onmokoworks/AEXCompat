@@ -1,6 +1,7 @@
 #include "worker_smart_execution.hpp"
 
 #include "render_subsystem.h"
+#include "host_audio_runtime.hpp"
 
 namespace aexcompat::worker_runtime::smart_execution {
 namespace {
@@ -46,7 +47,6 @@ int execute(void* opaque) {
   return request.result.render_error;
 }
 
-int cleanup(void*) { return 0; }
 }  // namespace
 
 bool configure(const Hooks& hooks) noexcept {
@@ -70,7 +70,8 @@ Result render_once(EffectEntry entry, Input& input, Output& output,
       external_time_scale, external_pixel_bytes, session, {}};
   render::RenderContext context{
       render::RenderKind::SmartPreRenderAndRender, &request,
-      {&execute, &cleanup, &dependencies_ready},
+      {&execute, &aexcompat::host_audio::cleanup_after_render,
+       &dependencies_ready},
       g_hooks.module_audit_required()};
   const int dispatch_error = render::dispatch(context);
   if (!context.selector_started && dispatch_error != 0)

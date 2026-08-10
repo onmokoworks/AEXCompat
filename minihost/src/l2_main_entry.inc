@@ -661,7 +661,12 @@ aexcompat::worker_runtime::effect_bootstrap::RuntimeHooks make_bootstrap_runtime
   return {&invoke_entry_seh, &reset_effect_lifetime,
    +[](bool active) { g_global_setup_active = active; },
    +[](bool requested, bool advertised) {
-     aexcompat::host_audio::runtime().configure_admission(requested, advertised);
+     std::vector<int32_t> layer_indices{0};
+     for (const auto& parameter : g_params) {
+       if (parameter.type == 0) layer_indices.push_back(parameter.index);
+     }
+     aexcompat::host_audio::runtime().configure_admission(
+         requested, advertised, layer_indices);
    },
    +[](EffectEntry callback,
        aexcompat::worker_runtime::effect_bootstrap::State& state) {

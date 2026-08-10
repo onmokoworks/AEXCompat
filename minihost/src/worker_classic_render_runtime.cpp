@@ -5,6 +5,7 @@
 #include "render_pixel_buffer.hpp"
 #include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
+#include "host_audio_runtime.hpp"
 #include "runtime_module_audit.hpp"
 #include "worker_aegp_layer_render_runtime.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
@@ -969,12 +970,6 @@ int classic_render_guarded_effect_main(void* opaque) {
       request.captured_argb, request.frame_output);
 }
 
-int classic_render_cleanup(void*) {
-  // classic_render_runtime performs sequence/frame/UI/world cleanup before it
-  // returns.  This explicit hook documents the completed cleanup boundary.
-  return 0;
-}
-
 // Declared in worker_classic_render_entry.hpp; the defaults live there.
 int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
                     std::array<std::byte, kOutSize>& output,
@@ -996,7 +991,8 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
       manage_sequence, captured_argb, frame_output};
   aexcompat::worker_runtime::classic::Request context{
       &request,
-      {&classic_render_guarded_effect_main, &classic_render_cleanup,
+      {&classic_render_guarded_effect_main,
+       &aexcompat::host_audio::cleanup_after_render,
        &classic_render_dependencies_ready},
       g_module_audit.required};
   return aexcompat::worker_runtime::classic::dispatch(context);

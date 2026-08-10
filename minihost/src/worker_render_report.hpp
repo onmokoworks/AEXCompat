@@ -98,12 +98,15 @@ struct ClassicReport {
     bool usage_advertised{};
     bool checkout_allowed{};
     bool source_available{};
+    uint64_t unadvertised_checkout_calls{};
     uint64_t rejected_unadvertised_checkouts{};
     uint64_t rejected_format_requests{};
     uint64_t handle_exhaustions{};
     uint64_t peak_live_handles{};
+    int32_t last_checkout_index{-1};
     uint64_t checkout_calls{};
     uint64_t checkin_calls{};
+    uint64_t automatic_checkins{};
     uint64_t get_data_calls{};
     uint64_t invalid_operations{};
     int64_t last_checkout_start_time{};
@@ -161,7 +164,7 @@ struct ClassicReport {
 
 void begin_classic(ReportSnapshot& report, const ClassicReport::Head& snapshot);
 void append_classic_sequence(ReportSnapshot& report, const ClassicReport::Sequence& snapshot);
-void append_classic_audio(ReportSnapshot& report, const ClassicReport::Audio& snapshot);
+void append_audio(ReportSnapshot& report, const ClassicReport::Audio& snapshot);
 void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& snapshot);
 void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& snapshot);
 void append_classic_callbacks(ReportSnapshot& report, const ClassicReport::Callbacks& snapshot);
