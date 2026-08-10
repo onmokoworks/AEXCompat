@@ -11,6 +11,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <string_view>
 
 namespace aexcompat::worker_runtime {
 namespace {
@@ -166,6 +167,7 @@ int32_t SuiteRegistry::acquire(const char* name, int32_t version,
   switch (resolver(resolver_context, safe_name, version, suite)) {
     case SuiteResolveResult::acquired:
       lease_tracker_.acquire(safe_name, version);
+      record_successful_acquire(safe_name, version);
       if (trace_writer) trace_writer->suite_acquire(safe_name, version, true);
       record(0);
       return 0;
@@ -199,7 +201,15 @@ int32_t SuiteRegistry::release(const char* name, int32_t version,
   // matching successful or failed acquisition remains a fault.
   const bool matched_failed_acquire = !released && valid_name &&
       consume_failed_acquire(safe_name, version);
-  if (!released && !matched_failed_acquire)
+  // A bounded close-time duplicate is a plug-in cleanup defect, but not a host
+  // lifetime fault when this exact suite/version was successfully acquired and
+  // released to zero earlier in the same session. Keep returning rejection and
+  // recording it in the timeline. Only the first duplicate per key is
+  // contained; never-acquired, non-close, and repeated duplicates remain
+  // faults.
+  const bool contained_close_duplicate = !released && !matched_failed_acquire &&
+      valid_name && contain_close_duplicate_release(safe_name, version);
+  if (!released && !matched_failed_acquire && !contained_close_duplicate)
     rejected_releases_.fetch_add(1, std::memory_order_relaxed);
   record_suite_timeline(false, owned_name.text.data(), owned_name.length,
                         valid_name, version, released ? 0 : 1);
@@ -300,6 +310,29 @@ bool SuiteRegistry::consume_failed_acquire(const std::string& name,
   const auto found = failed_acquires_.find(std::make_pair(name, version));
   if (found == failed_acquires_.end()) return false;
   if (--found->second == 0) failed_acquires_.erase(found);
+  return true;
+}
+
+void SuiteRegistry::record_successful_acquire(const std::string& name,
+                                              int32_t version) {
+  std::lock_guard<std::mutex> lock(failed_acquires_mutex_);
+  const auto key = std::make_pair(name, version);
+  if (successful_acquires_.find(key) != successful_acquires_.end() ||
+      successful_acquires_.size() < kMaxFailedAcquireKeys)
+    successful_acquires_[key] = true;
+}
+
+bool SuiteRegistry::contain_close_duplicate_release(const std::string& name,
+                                                    int32_t version) {
+  if (!g_suite_selector ||
+      std::string_view(g_suite_selector) != "GLOBAL_SETDOWN")
+    return false;
+  const auto key = std::make_pair(name, version);
+  std::lock_guard<std::mutex> lock(failed_acquires_mutex_);
+  if (successful_acquires_.find(key) == successful_acquires_.end() ||
+      contained_close_releases_.find(key) != contained_close_releases_.end())
+    return false;
+  contained_close_releases_[key] = true;
   return true;
 }
 

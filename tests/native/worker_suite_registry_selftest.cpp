@@ -861,6 +861,48 @@ int main() {
   }
 
   {
+    SuiteRegistry close_duplicate_registry;
+    suite = nullptr;
+    bool close_duplicate_passed =
+        close_duplicate_registry.acquire("Known Suite", 1, &suite,
+                                         &resolve_known, nullptr, nullptr) == 0 &&
+        close_duplicate_registry.release("Known Suite", 1, nullptr) == 0;
+
+    const char* previous = set_suite_timeline_selector("GLOBAL_SETDOWN");
+    const auto close_first =
+        close_duplicate_registry.release("Known Suite", 1, nullptr);
+    const auto close_first_faults =
+        close_duplicate_registry.rejected_release_count();
+    const auto close_second =
+        close_duplicate_registry.release("Known Suite", 1, nullptr);
+    const auto close_second_faults =
+        close_duplicate_registry.rejected_release_count();
+    close_duplicate_passed = close_duplicate_passed &&
+        close_first == 1 && close_first_faults == 0 &&
+        close_second == 1 && close_second_faults == 1;
+    set_suite_timeline_selector(previous);
+
+    SuiteRegistry non_close_duplicate_registry;
+    suite = nullptr;
+    bool non_close_duplicate_passed =
+        non_close_duplicate_registry.acquire("Known Suite", 1, &suite,
+                                             &resolve_known, nullptr, nullptr) == 0 &&
+        non_close_duplicate_registry.release("Known Suite", 1, nullptr) == 0 &&
+        non_close_duplicate_registry.release("Known Suite", 1, nullptr) == 1 &&
+        non_close_duplicate_registry.rejected_release_count() == 1;
+
+    SuiteRegistry never_acquired_close_registry;
+    previous = set_suite_timeline_selector("GLOBAL_SETDOWN");
+    const bool never_acquired_close_passed =
+        never_acquired_close_registry.release("Known Suite", 1, nullptr) ==
+            1 &&
+        never_acquired_close_registry.rejected_release_count() == 1;
+    set_suite_timeline_selector(previous);
+    passed = passed && close_duplicate_passed && non_close_duplicate_passed &&
+        never_acquired_close_passed;
+  }
+
+  {
     const auto baseline = registry.snapshot();
     suite = nullptr;
     passed = passed &&
