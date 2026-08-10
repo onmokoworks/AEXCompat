@@ -296,7 +296,14 @@ jobs:
           $artifacts = @(Get-ChildItem $targetRoot -Recurse -Filter *.aex -File)
           if ($artifacts.Count -eq 0) { throw 'no generated AEX artifacts were found after workspace tests' }
           $candidateBuildDirs = @($artifacts | ForEach-Object {
-            if ($_.Directory.Name -eq 'Release') { $_.Directory.Parent.FullName } else { $_.Directory.FullName }
+            $candidate = $_.Directory
+            while ($candidate.FullName -ne $targetRoot -and -not (Test-Path -LiteralPath (Join-Path $candidate.FullName 'CMakeCache.txt') -PathType Leaf)) {
+              $candidate = $candidate.Parent
+            }
+            if ($candidate.FullName -eq $targetRoot) {
+              throw "generated AEX has no containing CMake build root: $($_.FullName)"
+            }
+            $candidate.FullName
           } | Sort-Object -Unique)
           $buildDirs = @($candidateBuildDirs | ForEach-Object {
             $resolved = (Resolve-Path $_).Path
