@@ -2807,6 +2807,93 @@
     }
 
     #[test]
+    fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
+        const GET_MODULE_EX: u64 = STUB_BASE + 0x410;
+        const PIN: u64 = 0x1;
+        const UNCHANGED_REFCOUNT: u64 = 0x2;
+        const FROM_ADDRESS: u64 = 0x4;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            dispatch_win64_import("kernel32.dll", "GetModuleHandleExA"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetModuleHandleExA)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "GetModuleHandleExA"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_MODULE_EX,
+            "kernel32.dll",
+            "GetModuleHandleExA",
+        )
+        .unwrap();
+
+        let name = DATA_BASE + 0xa40;
+        let output = DATA_BASE + 0xa80;
+        engine.write(name, b"KeRnEl32.DlL\0").unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE_EX, [PIN, name, output, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        let mut module_bytes = [0; 8];
+        engine.read(output, &mut module_bytes).unwrap();
+        assert_eq!(
+            u64::from_le_bytes(module_bytes),
+            WINDOWS_KERNEL32_MODULE_TOKEN
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+        engine.write(output, &[0; 8]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    GET_MODULE_EX,
+                    [FROM_ADDRESS | UNCHANGED_REFCOUNT, TEST_CODE, output, 0, 0, 0],
+                )
+                .unwrap(),
+            1
+        );
+        engine.read(output, &mut module_bytes).unwrap();
+        assert_eq!(u64::from_le_bytes(module_bytes), TEST_CODE);
+
+        engine.write(name, b"missing.dll\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE_EX, [0, name, output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE_EX, [FROM_ADDRESS, DATA_BASE, output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+        for flags in [PIN | UNCHANGED_REFCOUNT, 0x8] {
+            assert_eq!(
+                engine
+                    .call_win64(GET_MODULE_EX, [flags, name, output, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+        }
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE_EX, [0, name, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
     fn deterministic_getenv_and_openmp_dynamic_policy_are_bounded() {
         const GETENV: u64 = STUB_BASE + 0x410;
         const OMP_SET_DYNAMIC: u64 = STUB_BASE + 0x420;
