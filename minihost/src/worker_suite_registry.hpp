@@ -126,11 +126,16 @@ class SuiteRegistry final {
                          TraceWriter* trace_writer);
   void record_failed_acquire(const std::string& name, int32_t version);
   bool consume_failed_acquire(const std::string& name, int32_t version);
+  void record_successful_acquire(const std::string& name, int32_t version);
+  bool contain_close_duplicate_release(const std::string& name,
+                                       int32_t version);
 
   suite_runtime::SuiteLeaseTracker lease_tracker_;
   std::atomic<uint32_t> rejected_releases_{};
   mutable std::mutex failed_acquires_mutex_;
   std::map<std::pair<std::string, int32_t>, uint32_t> failed_acquires_;
+  std::map<std::pair<std::string, int32_t>, bool> successful_acquires_;
+  std::map<std::pair<std::string, int32_t>, bool> contained_close_releases_;
   mutable std::mutex missing_suites_mutex_;
   std::vector<std::pair<std::string, int32_t>> missing_suites_;
   bool missing_suites_truncated_{};
