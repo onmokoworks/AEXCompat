@@ -841,7 +841,7 @@ fn render_classic_via_length_one_session(
         }
     }
     let mut deep_overrange_samples = None;
-    let artifact_metadata = if empty_smart_result {
+    let artifact_metadata = if empty_smart_result || request.artifact_kind.is_none() {
         None
     } else {
         let premultiplication = final_report
@@ -899,7 +899,7 @@ fn render_classic_via_length_one_session(
                 Ok(metadata) => Some(metadata),
                 Err(error) => return SessionWrapperOutcome::Failure(error),
             },
-            None => None,
+            None => unreachable!("artifact kind was checked above"),
         }
     };
     let png_written = if empty_smart_result || request.artifact_kind.is_some() {
