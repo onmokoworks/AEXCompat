@@ -147,7 +147,23 @@ bool bounded_typed_world(void* world, int32_t pixel_bytes,
   std::memcpy(&height, bytes + 40, sizeof(height));
   int32_t flags{};
   std::memcpy(&flags, bytes + 16, sizeof(flags));
-  const bool depth_matches = pixel_bytes == 4 ? (flags & 1) == 0 : (flags & 1) != 0;
+  // The world_flags DEEP bit (bit 0) separates 8-bit from 16-bit; AE does not
+  // set it on 32-bit float worlds. The video-frame float path builds its input
+  // and output through AE's own PPix/pixel-format suites, and those worlds come
+  // back with world_flags 0x02000000 (bit 0 clear) - so requiring the DEEP bit
+  // for a float iterate rejected a valid AE float world and failed the callback
+  // with missing_world (issue #1035, observed on Cartoon's iterateFloat). Keep
+  // the 8-vs-16 distinction on the DEEP bit; accept float regardless of it.
+  // Dropping the bit does not weaken buffer safety: that never came from the
+  // DEEP bit (this function cannot see the real allocation) but from the
+  // rowbytes >= width * pixel_bytes and rowbytes <= 4096 * 16 bounds below,
+  // which cap every per-row walk at the declared stride for the whole declared
+  // height. A caller that passes a shallower world to the float suite (its own
+  // pixel_bytes choice) is read at its declared stride, in bounds, just with
+  // the wrong depth semantics - the same latitude the pre-change code gave an
+  // 8-bit world handed to the 8-bit suite.
+  const bool depth_matches = pixel_bytes == 4 ? (flags & 1) == 0
+      : pixel_bytes == 8 ? (flags & 1) != 0 : true;
   return pixels && (pixel_bytes == 4 || pixel_bytes == 8 || pixel_bytes == 16) &&
       width > 0 && height > 0 && width <= 4096 && height <= 4096 &&
       static_cast<int64_t>(width) * height <= 16'777'216 &&
