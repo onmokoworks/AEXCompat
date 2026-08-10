@@ -2244,19 +2244,13 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         };
         let fixed_radius_x = read_guest_i32(unicorn, params, "AreaSample8 radius x")?;
         let fixed_radius_y = read_guest_i32(unicorn, params + 4, "AreaSample8 radius y")?;
-        let fixed_area = read_guest_i32(unicorn, params + 8, "AreaSample8 area")?;
+        let _fixed_area = read_guest_i32(unicorn, params + 8, "AreaSample8 area")?;
         let source_world = read_guest_u64(unicorn, params + 16, "AreaSample8 source world")?;
         let edge_behavior =
             read_guest_i32(unicorn, params + 24, "AreaSample8 edge behavior")? as u32;
         let radius_x = fixed_radius_x as f64 / 65536.0;
         let radius_y = fixed_radius_y as f64 / 65536.0;
-        if fixed_area <= 0
-            || edge_behavior != 0
-            || radius_x <= 0.0
-            || radius_y <= 0.0
-            || radius_x >= 128.0
-            || radius_y >= 128.0
-        {
+        if radius_x <= 0.0 || radius_y <= 0.0 || radius_x >= 128.0 || radius_y >= 128.0 {
             return Ok(false);
         }
         let Some(world) = read_argb8_world(unicorn, source_world, "AreaSample8")? else {
@@ -2269,10 +2263,39 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         let top = center_y - radius_y;
         let bottom = center_y + radius_y;
         let footprint = (right - left) * (bottom - top);
-        let first_x = 0.max((left - 0.5).floor() as i32);
-        let last_x = (world.width - 1).min((right + 0.5).ceil() as i32);
-        let first_y = 0.max((top - 0.5).floor() as i32);
-        let last_y = (world.height - 1).min((bottom + 0.5).ceil() as i32);
+        const EDGE_ZERO: u32 = 0;
+        const EDGE_REPEAT: u32 = 1;
+        const EDGE_WRAP: u32 = 2;
+        let edge = if edge_behavior <= EDGE_WRAP {
+            edge_behavior
+        } else {
+            EDGE_ZERO
+        };
+        let clip_to_image = edge == EDGE_ZERO || world.width <= 0 || world.height <= 0;
+        let span_first_x = (left - 0.5).floor() as i32;
+        let span_last_x = (right + 0.5).ceil() as i32;
+        let span_first_y = (top - 0.5).floor() as i32;
+        let span_last_y = (bottom + 0.5).ceil() as i32;
+        let first_x = if clip_to_image {
+            0.max(span_first_x)
+        } else {
+            span_first_x
+        };
+        let last_x = if clip_to_image {
+            (world.width - 1).min(span_last_x)
+        } else {
+            span_last_x
+        };
+        let first_y = if clip_to_image {
+            0.max(span_first_y)
+        } else {
+            span_first_y
+        };
+        let last_y = if clip_to_image {
+            (world.height - 1).min(span_last_y)
+        } else {
+            span_last_y
+        };
         let mut weighted_alpha = 0.0;
         let mut weighted_color = [0.0; 3];
         for y in first_y..=last_y {
@@ -2283,7 +2306,24 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
                 if weight == 0.0 {
                     continue;
                 }
-                let pixel = read_argb8_pixel(unicorn, world, x, y, "AreaSample8")?;
+                let edge_mapped = |value: i32, extent: i32| {
+                    if edge == EDGE_REPEAT {
+                        value.clamp(0, extent - 1)
+                    } else {
+                        value.rem_euclid(extent)
+                    }
+                };
+                let sample_x = if clip_to_image {
+                    x
+                } else {
+                    edge_mapped(x, world.width)
+                };
+                let sample_y = if clip_to_image {
+                    y
+                } else {
+                    edge_mapped(y, world.height)
+                };
+                let pixel = read_argb8_pixel(unicorn, world, sample_x, sample_y, "AreaSample8")?;
                 let alpha = f64::from(pixel[0]) / 255.0;
                 weighted_alpha += weight * alpha;
                 for channel in 0..3 {
