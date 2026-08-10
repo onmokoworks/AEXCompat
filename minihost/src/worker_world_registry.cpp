@@ -46,11 +46,27 @@ const char* trace_pixel_format(int32_t pixel_format) {
 
 constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024;
 constexpr std::size_t kMaxWorldCount = 64;
+// AE's PF_NewWorld leaves a non-null pointer in the world's reserved_long4
+// (offset 0x50), and some effects dereference it without a null check: Channel
+// Blur's SMART_RENDER writes the scratch world's origin to
+// *(reserved_long4 + 0x70 / 0x74) right after creating it (issue #1090, found by
+// disassembly). The host never reads reserved_long4 - every callback resolves a
+// world by its pixel pointer - so this companion is inert bookkeeping that only
+// receives the plug-in's own writes; it exists so that dereference lands on real
+// memory instead of null. The observed reach is 0x78 bytes; a full page is
+// allocated so an effect outside the corpus that touches more of AE's internal
+// structure than Channel Blur does still lands in bounds (the size is a guess
+// about an AE-internal layout, so the margin is deliberate). Bounded by
+// kMaxWorldCount the total is at most 256 KiB. The full-corpus sweep is what
+// vouches that nothing needs a specific layout here, only presence.
+constexpr std::size_t kReservedLong4Offset = 0x50;
+constexpr std::size_t kNewWorldCompanionBytes = 4096;
 
 struct OwnedWorld {
   void* pixels{};
   uint64_t size{};
   int32_t pixel_format{};
+  void* companion{};
 };
 
 struct AegpWorldView {
@@ -167,7 +183,13 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   }
   void* pixels = ::operator new(static_cast<std::size_t>(size), std::nothrow);
   if (!pixels) return 1;
+  void* companion = ::operator new(kNewWorldCompanionBytes, std::nothrow);
+  if (!companion) {
+    ::operator delete(pixels);
+    return 1;
+  }
   std::memset(pixels, clear_pixels ? 0 : 0xcd, static_cast<std::size_t>(size));
+  std::memset(companion, 0, kNewWorldCompanionBytes);
   std::memset(world, 0, world_safety::kEffectWorldSize);
   auto* bytes = static_cast<std::byte*>(world);
   const int32_t flags = 2 | (pixel_format == kPixelFormatArgb32 ? 0 : 1);
@@ -183,7 +205,8 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   std::memcpy(bytes + 44, extent.data(), sizeof(extent));
   std::memcpy(bytes + 88, &aspect_num, sizeof(aspect_num));
   std::memcpy(bytes + 92, &aspect_den, sizeof(aspect_den));
-  g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format});
+  std::memcpy(bytes + kReservedLong4Offset, &companion, sizeof(companion));
+  g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
   ++g_created;
   g_live_bytes += size;
   if (aexcompat::l2_detail::g_trace_writer &&
@@ -218,6 +241,7 @@ int32_t __cdecl dispose_world(void*, void* world) {
     return 4;
   }
   ::operator delete(found->second.pixels);
+  ::operator delete(found->second.companion);
   g_live_bytes -= found->second.size;
   g_worlds.erase(found);
   ++g_disposed;
