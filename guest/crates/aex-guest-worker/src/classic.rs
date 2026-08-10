@@ -194,6 +194,162 @@ pub struct RenderReport {
     pub raw_pixels: Vec<u8>,
 }
 
+fn write_ansi_numeric_callbacks(engine: &GuestEngine<'static>, utility_bytes: &mut [u8]) {
+    for (offset, callback) in [
+        (
+            abi::UTILS_ANSI_ATAN_OFFSET,
+            engine.ansi_atan_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_ATAN2_OFFSET,
+            engine.ansi_atan2_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_CEIL_OFFSET,
+            engine.ansi_ceil_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_COS_OFFSET,
+            engine.ansi_cos_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_EXP_OFFSET,
+            engine.ansi_exp_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_FABS_OFFSET,
+            engine.ansi_fabs_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_FLOOR_OFFSET,
+            engine.ansi_floor_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_FMOD_OFFSET,
+            engine.ansi_fmod_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_HYPOT_OFFSET,
+            engine.ansi_hypot_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_LOG_OFFSET,
+            engine.ansi_log_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_LOG10_OFFSET,
+            engine.ansi_log10_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_POW_OFFSET,
+            engine.ansi_pow_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_SIN_OFFSET,
+            engine.ansi_sin_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_SQRT_OFFSET,
+            engine.ansi_sqrt_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_TAN_OFFSET,
+            engine.ansi_tan_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_ASIN_OFFSET,
+            engine.ansi_asin_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_ACOS_OFFSET,
+            engine.ansi_acos_callback_address(),
+        ),
+    ] {
+        write_u64(utility_bytes, offset, callback);
+    }
+}
+
+pub(crate) fn build_utility_callbacks(engine: &GuestEngine<'static>) -> Vec<u8> {
+    let mut utility_bytes = vec![0u8; abi::PF_UTIL_CALLBACKS_SIZE];
+    for (offset, callback) in [
+        (
+            abi::UTILS_SUBPIXEL_SAMPLE_OFFSET,
+            engine.subpixel_sample8_callback_address(),
+        ),
+        (
+            abi::UTILS_AREA_SAMPLE_OFFSET,
+            engine.area_sample8_callback_address(),
+        ),
+        (
+            abi::UTILS_TRANSFER_RECT_OFFSET,
+            engine.transfer_rect8_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_STRCPY_OFFSET,
+            engine.ansi_strcpy_callback_address(),
+        ),
+        (
+            abi::UTILS_ANSI_SPRINTF_OFFSET,
+            engine.ansi_sprintf_callback_address(),
+        ),
+        (abi::UTILS_COPY_OFFSET, engine.copy_callback_address()),
+        (abi::UTILS_BLEND_OFFSET, engine.blend_callback_address()),
+        (abi::UTILS_FILL_OFFSET, engine.fill8_callback_address()),
+        (
+            abi::UTILS_NEW_WORLD_OFFSET,
+            engine.new_world8_callback_address(),
+        ),
+        (
+            abi::UTILS_DISPOSE_WORLD_OFFSET,
+            engine.dispose_world_callback_address(),
+        ),
+        (
+            abi::UTILS_GET_CALLBACK_ADDR_OFFSET,
+            engine.get_callback_addr_callback_address(),
+        ),
+        (
+            abi::UTILS_ITERATE_OFFSET,
+            engine.iterate8_callback_address(),
+        ),
+        (
+            abi::UTILS_ITERATE_ORIGIN_OFFSET,
+            engine.iterate8_origin_callback_address(),
+        ),
+        (
+            abi::UTILS_ITERATE16_OFFSET,
+            engine.iterate16_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_NEW_HANDLE_OFFSET,
+            engine.new_handle_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_LOCK_HANDLE_OFFSET,
+            engine.lock_handle_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_UNLOCK_HANDLE_OFFSET,
+            engine.unlock_handle_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_DISPOSE_HANDLE_OFFSET,
+            engine.dispose_handle_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_GET_HANDLE_SIZE_OFFSET,
+            engine.handle_size_callback_address(),
+        ),
+        (
+            abi::UTILS_HOST_RESIZE_HANDLE_OFFSET,
+            engine.resize_handle_callback_address(),
+        ),
+    ] {
+        write_u64(&mut utility_bytes, offset, callback);
+    }
+    write_ansi_numeric_callbacks(engine, &mut utility_bytes);
+    utility_bytes
+}
+
 pub struct ClassicHost {
     engine: GuestEngine<'static>,
     entry: u64,
@@ -308,145 +464,7 @@ impl ClassicHost {
         write_u64(&mut pica_bytes, 0, engine.acquire_suite_callback_address());
         write_u64(&mut pica_bytes, 8, engine.noop_callback_address());
         engine.write(pica_basic, &pica_bytes)?;
-        let mut utility_bytes = vec![0u8; abi::PF_UTIL_CALLBACKS_SIZE];
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_SUBPIXEL_SAMPLE_OFFSET,
-            engine.subpixel_sample8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_AREA_SAMPLE_OFFSET,
-            engine.area_sample8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_TRANSFER_RECT_OFFSET,
-            engine.transfer_rect8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ANSI_STRCPY_OFFSET,
-            engine.ansi_strcpy_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ANSI_SPRINTF_OFFSET,
-            engine.ansi_sprintf_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_COPY_OFFSET,
-            engine.copy_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_BLEND_OFFSET,
-            engine.blend_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_FILL_OFFSET,
-            engine.fill8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_NEW_WORLD_OFFSET,
-            engine.new_world8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_DISPOSE_WORLD_OFFSET,
-            engine.dispose_world_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_GET_CALLBACK_ADDR_OFFSET,
-            engine.get_callback_addr_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ITERATE_OFFSET,
-            engine.iterate8_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ITERATE_ORIGIN_OFFSET,
-            engine.iterate8_origin_callback_address(),
-        );
-        write_u64(
-            &mut utility_bytes,
-            abi::UTILS_ITERATE16_OFFSET,
-            engine.iterate16_callback_address(),
-        );
-        for (offset, callback) in [
-            (
-                abi::UTILS_ANSI_CEIL_OFFSET,
-                engine.ansi_ceil_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_COS_OFFSET,
-                engine.ansi_cos_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_FABS_OFFSET,
-                engine.ansi_fabs_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_HYPOT_OFFSET,
-                engine.ansi_hypot_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_POW_OFFSET,
-                engine.ansi_pow_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_SIN_OFFSET,
-                engine.ansi_sin_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_SQRT_OFFSET,
-                engine.ansi_sqrt_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_ASIN_OFFSET,
-                engine.ansi_asin_callback_address(),
-            ),
-            (
-                abi::UTILS_ANSI_ACOS_OFFSET,
-                engine.ansi_acos_callback_address(),
-            ),
-        ] {
-            write_u64(&mut utility_bytes, offset, callback);
-        }
-        for (offset, callback) in [
-            (
-                abi::UTILS_HOST_NEW_HANDLE_OFFSET,
-                engine.new_handle_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_LOCK_HANDLE_OFFSET,
-                engine.lock_handle_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_UNLOCK_HANDLE_OFFSET,
-                engine.unlock_handle_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_DISPOSE_HANDLE_OFFSET,
-                engine.dispose_handle_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_GET_HANDLE_SIZE_OFFSET,
-                engine.handle_size_callback_address(),
-            ),
-            (
-                abi::UTILS_HOST_RESIZE_HANDLE_OFFSET,
-                engine.resize_handle_callback_address(),
-            ),
-        ] {
-            write_u64(&mut utility_bytes, offset, callback);
-        }
+        let utility_bytes = build_utility_callbacks(&engine);
         engine.write(utils, &utility_bytes)?;
         let entry = engine.resolve_effect_entry(image, effect_selector, pica_basic)?;
         Ok(Self {

@@ -1816,16 +1816,44 @@ impl GuestEngine<'static> {
         HOST_PF_ANSI_CEIL
     }
 
+    pub fn ansi_atan_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_ATAN
+    }
+
+    pub fn ansi_atan2_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_ATAN2
+    }
+
     pub fn ansi_cos_callback_address(&self) -> u64 {
         HOST_PF_ANSI_COS
+    }
+
+    pub fn ansi_exp_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_EXP
     }
 
     pub fn ansi_fabs_callback_address(&self) -> u64 {
         HOST_PF_ANSI_FABS
     }
 
+    pub fn ansi_floor_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_FLOOR
+    }
+
+    pub fn ansi_fmod_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_FMOD
+    }
+
     pub fn ansi_hypot_callback_address(&self) -> u64 {
         HOST_PF_ANSI_HYPOT
+    }
+
+    pub fn ansi_log_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_LOG
+    }
+
+    pub fn ansi_log10_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_LOG10
     }
 
     pub fn ansi_pow_callback_address(&self) -> u64 {
@@ -1838,6 +1866,10 @@ impl GuestEngine<'static> {
 
     pub fn ansi_sqrt_callback_address(&self) -> u64 {
         HOST_PF_ANSI_SQRT
+    }
+
+    pub fn ansi_tan_callback_address(&self) -> u64 {
+        HOST_PF_ANSI_TAN
     }
 
     pub fn ansi_asin_callback_address(&self) -> u64 {
