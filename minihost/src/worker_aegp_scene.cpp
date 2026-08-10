@@ -2516,6 +2516,7 @@ std::array<void*, 53> g_aegp_layer_suite9{};
 std::array<void*, 17> g_aegp_effect_suite2{};
 std::array<void*, 17> g_aegp_effect_suite3{};
 std::array<void*, 22> g_aegp_effect_suite4{};
+std::array<void*, 20> g_aegp_stream_suite1{};
 std::array<void*, 22> g_aegp_stream_suite2{};
 std::array<void*, 22> g_aegp_stream_suite3{};
 std::array<void*, 23> g_aegp_stream_suite6{};
@@ -2535,6 +2536,7 @@ static_assert(sizeof(g_aegp_layer_suite9) == 424);
 static_assert(sizeof(g_aegp_effect_suite4) == 176);
 static_assert(sizeof(g_aegp_effect_suite2) == 136);
 static_assert(sizeof(g_aegp_effect_suite3) == 136);
+static_assert(sizeof(g_aegp_stream_suite1) == 160);
 static_assert(sizeof(g_aegp_stream_suite2) == 176);
 static_assert(sizeof(g_aegp_stream_suite3) == 176);
 static_assert(sizeof(g_aegp_stream_suite6) == 184);
@@ -2994,6 +2996,28 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_stream_suite2[15] = factory.legacy_stream_callbacks[6];
     g_aegp_stream_suite2[16] = reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2);
     *suite = g_aegp_stream_suite2.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
+  if (named("AEGP Stream Suite") && version == 4) {
+    // AEGP_StreamSuite1 (numeric version 4, frozen AE 5.0). It is v7
+    // (AEGP_StreamSuite2) without GetValidInterpolations at slot 2 and without
+    // the appended DuplicateStreamRef, so every shared function keeps its v7
+    // signature and its slot index is shifted down by one from slot 3 onward.
+    // The legacy_stream_callbacks and the two v2 shims are exactly the ones the
+    // v7 branch installs, wired at the v4-appropriate slots (PW.aex acquires
+    // this suite, issue #1053).
+    g_aegp_stream_suite1 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_4, 20>();
+    g_aegp_stream_suite1[3] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v2);
+    g_aegp_stream_suite1[4] = factory.legacy_stream_callbacks[0];
+    g_aegp_stream_suite1[6] = factory.legacy_stream_callbacks[1];
+    g_aegp_stream_suite1[7] = factory.legacy_stream_callbacks[2];
+    g_aegp_stream_suite1[11] = factory.legacy_stream_callbacks[3];
+    g_aegp_stream_suite1[12] = factory.legacy_stream_callbacks[4];
+    g_aegp_stream_suite1[13] = factory.legacy_stream_callbacks[5];
+    g_aegp_stream_suite1[14] = factory.legacy_stream_callbacks[6];
+    g_aegp_stream_suite1[15] = reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2);
+    *suite = g_aegp_stream_suite1.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Keyframe Suite") && version == 5 && state().comp_idle_roundtrip_mode) {

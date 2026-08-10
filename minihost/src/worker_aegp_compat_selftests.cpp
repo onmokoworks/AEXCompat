@@ -1055,6 +1055,7 @@ bool verify_aegp_resizer_3d_chain() {
   const void* layer_suite = nullptr;
   const void* stream_suite = nullptr;
   const void* stream_suite3 = nullptr;
+  const void* stream_suite1 = nullptr;
   const void* iterate_suite1 = nullptr;
   const void* comp_suite = nullptr;
   const void* comp_suite1 = nullptr;
@@ -1086,6 +1087,17 @@ bool verify_aegp_resizer_3d_chain() {
       stream_suite3 == g_aegp_stream_suite3.data() &&
       g_aegp_stream_suite3[3] == reinterpret_cast<void*>(&aegp_get_new_layer_stream) &&
       g_aegp_stream_suite3[12] == reinterpret_cast<void*>(&aegp_get_stream_type) &&
+      // v4 (AEGP_StreamSuite1) reuses the v7 legacy callbacks at slots shifted
+      // down by one (no GetValidInterpolations at slot 2), issue #1053.
+      acquire_suite("AEGP Stream Suite", 4, &stream_suite1) == 0 &&
+      stream_suite1 == g_aegp_stream_suite1.data() &&
+      g_aegp_stream_suite1[3] == g_aegp_stream_suite2[4] &&
+      g_aegp_stream_suite1[4] == g_aegp_stream_suite2[5] &&
+      g_aegp_stream_suite1[6] == g_aegp_stream_suite2[7] &&
+      g_aegp_stream_suite1[7] == g_aegp_stream_suite2[8] &&
+      g_aegp_stream_suite1[11] == g_aegp_stream_suite2[12] &&
+      g_aegp_stream_suite1[14] == g_aegp_stream_suite2[15] &&
+      g_aegp_stream_suite1[15] == reinterpret_cast<void*>(&aegp_get_layer_stream_value_v2) &&
       acquire_suite("AEGP Iterate Suite", 1, &iterate_suite1) == 0 &&
       iterate_suite1 == g_aegp_iterate_suite1.data() &&
       g_aegp_iterate_suite1[0] == reinterpret_cast<void*>(&aegp_get_num_threads) &&
@@ -1310,6 +1322,7 @@ bool verify_aegp_resizer_3d_chain() {
   ok = release_suite("AEGP Iterate Suite", 1) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 8) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 7) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Layer Suite", 14) == 0 && ok;
   g_aegp_active_camera_layer_index = saved_camera_index;
   g_hooks.set_dimensions(saved_width, saved_height);

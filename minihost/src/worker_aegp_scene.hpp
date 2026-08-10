@@ -186,6 +186,7 @@ extern std::array<void*, 53> g_aegp_layer_suite9;
 extern std::array<void*, 17> g_aegp_effect_suite2;
 extern std::array<void*, 17> g_aegp_effect_suite3;
 extern std::array<void*, 22> g_aegp_effect_suite4;
+extern std::array<void*, 20> g_aegp_stream_suite1;
 extern std::array<void*, 22> g_aegp_stream_suite2;
 extern std::array<void*, 22> g_aegp_stream_suite3;
 extern std::array<void*, 23> g_aegp_stream_suite6;
