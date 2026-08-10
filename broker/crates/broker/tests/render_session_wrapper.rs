@@ -19,8 +19,9 @@ mod windows_e2e {
     use aexcompat_broker::image_render::{
         AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
         ParameterAnimation, ParameterAnimationKey, RENDER_SESSION_WRAPPER_RENDERS,
-        RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction, TimedLayerImage,
-        render_experimental_audio, render_experimental_image, render_experimental_image_at_time,
+        RenderArtifactKind, RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction,
+        TimedLayerImage, render_experimental_artifact_at_time, render_experimental_audio,
+        render_experimental_image, render_experimental_image_at_time,
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
         render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend,
@@ -441,6 +442,147 @@ mod windows_e2e {
             std::fs::read(&out_auto).unwrap(),
             std::fs::read(&out_cpu).unwrap(),
             "the Auto fold PNG differs from the explicit-CPU PNG"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn render_artifact_pipeline_commits_raw_and_exr_sets_after_a_clean_session() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let aex =
+            root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping render artifact pipeline: build smart worker and geometry probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-render-artifact-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([(x * 31) as u8, (y * 47) as u8, (x + y) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let timing = RenderTiming {
+            current_time: 0,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        let mut pf32_identity = None;
+        for format in [
+            RenderPixelFormat::Argb8,
+            RenderPixelFormat::Argb16,
+            RenderPixelFormat::Argb32f,
+        ] {
+            let output = scratch.join(format!("raw-{}", format.report_name()));
+            let report = render_experimental_artifact_at_time(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                &output,
+                &[],
+                timing,
+                true,
+                format,
+                RenderArtifactKind::Raw,
+            )
+            .unwrap();
+            assert_eq!(report["passed"], true);
+            assert!(report["output_png"].is_null());
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(output.join("output.json")).unwrap())
+                    .unwrap();
+            let raw = std::fs::read(output.join("output.bin")).unwrap();
+            assert_eq!(metadata, report["render_artifact"]);
+            assert_eq!(metadata["pixel_format"], format.report_name());
+            assert_eq!(metadata["data_size_bytes"], raw.len());
+            assert_eq!(
+                metadata["data_sha256"],
+                format!("{:x}", Sha256::digest(&raw))
+            );
+            assert_eq!(metadata["premultiplication"], report["premultiplication"]);
+            assert_eq!(metadata["working_space"], "None");
+            assert_eq!(metadata["render_mode"], "software");
+            assert_eq!(metadata["row_padding"], "excluded");
+            if format == RenderPixelFormat::Argb32f {
+                pf32_identity = Some(metadata["comparison_identity"].clone());
+            }
+        }
+        let exr_output = scratch.join("exr");
+        let exr_report = render_experimental_artifact_at_time(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &exr_output,
+            &[],
+            timing,
+            true,
+            RenderPixelFormat::Argb32f,
+            RenderArtifactKind::Float32Exr,
+        )
+        .unwrap();
+        assert_eq!(exr_report["passed"], true);
+        let exr_metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(exr_output.join("output.json")).unwrap())
+                .unwrap();
+        assert_eq!(exr_metadata["compression"], "none");
+        assert_eq!(exr_metadata["storage"], "scanline");
+        assert_eq!(
+            exr_metadata["comparison_identity"],
+            pf32_identity.expect("PF32 raw comparison identity")
+        );
+        assert_eq!(
+            exr_metadata["premultiplication"],
+            exr_report["premultiplication"]
+        );
+        let exr = exr_output.join("output.exr");
+        let script = "import OpenEXR,sys; f=OpenEXR.File(sys.argv[1]); h=f.header(); assert str(h['compression'])=='Compression.NO_COMPRESSION'; assert str(h['type'])=='Storage.scanlineimage'; assert 'RGBA' in f.channels()";
+        let decoded = std::process::Command::new("uv")
+            .args(["run", "--project"])
+            .arg(&root)
+            .args(["python", "-c", script])
+            .arg(&exr)
+            .status()
+            .expect("launch independent OpenEXR decoder");
+        assert!(decoded.success(), "OpenEXR rejected {}", exr.display());
+        let raw32 = scratch.join("raw-argb32f");
+        let compared = std::process::Command::new("uv")
+            .args(["run", "--project"])
+            .arg(&root)
+            .arg("python")
+            .arg(root.join("tools/compare-pixel-oracles.py"))
+            .args(["--raw-u32", "--raw"])
+            .arg(raw32.join("output.bin"))
+            .arg("--render")
+            .arg(&exr)
+            .arg("--raw-metadata")
+            .arg(raw32.join("output.json"))
+            .arg("--render-metadata")
+            .arg(exr_output.join("output.json"))
+            .output()
+            .unwrap();
+        assert!(
+            compared.status.success(),
+            "artifact-bound raw-u32 comparison failed: {}",
+            String::from_utf8_lossy(&compared.stderr)
+        );
+        let comparison: serde_json::Value = serde_json::from_slice(&compared.stdout).unwrap();
+        assert_eq!(comparison["match"], true);
+        assert_eq!(
+            comparison["comparison_boundary"]["claim_level"],
+            "raw_u32_exact"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }

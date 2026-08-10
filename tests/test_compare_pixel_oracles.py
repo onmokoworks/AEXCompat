@@ -1,11 +1,13 @@
 import importlib.util
 import json
+import math
 import struct
 import subprocess
 import sys
 import tempfile
 import unittest
 import zlib
+import hashlib
 from pathlib import Path
 
 from PIL import Image
@@ -37,6 +39,147 @@ def write_rgba16_png(path: Path, width: int, height: int, samples: tuple[int, ..
 
 
 class ComparePixelOraclesTests(unittest.TestCase):
+    def test_raw_u32_binds_metadata_and_detects_special_word_mutations(self):
+        try:
+            import OpenEXR
+            import numpy as np
+        except ImportError:
+            self.skipTest("OpenEXR dev dependency unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "output.bin"
+            exr = root / "output.exr"
+            raw_meta_path = root / "raw.json"
+            exr_meta_path = root / "exr.json"
+            rgba_words = np.array([
+                [0x7FC12345, 0x80000000, 0x00000001, 0x3F800000],
+                [0x3F000000, 0x40000000, 0x40400000, 0x00000000],
+            ], dtype=np.uint32)
+            argb_words = rgba_words[:, [3, 0, 1, 2]].reshape(-1)
+            raw.write_bytes(argb_words.astype("<u4").tobytes())
+
+            def write_exr(words):
+                pixels = words.view(np.float32).reshape(1, 2, 4)
+                with OpenEXR.File({}, {"RGBA": pixels}) as outfile:
+                    outfile.write(str(exr))
+
+            def metadata(schema, data_path, **extra):
+                identity = {
+                    "plugin_sha256": "11" * 32, "input_sha256": "22" * 32,
+                    "world_sha256": "33" * 32, "render_path": "smartfx",
+                    "pixel_format": "argb32f",
+                    "timing": {"current_time": 0, "time_step": 1,
+                               "total_time": 300, "time_scale": 30},
+                    "requested_parameters": [], "origin": {"x": 0, "y": 0},
+                }
+                value = {
+                    "schema": schema, "schema_version": 1, "width": 2, "height": 1,
+                    "channel_order": "ARGB" if schema.endswith("raw") else "RGBA",
+                    "endianness": "little", "premultiplication": "straight",
+                    "working_space": "None", "render_mode": "software",
+                    "data_file": data_path.name, "data_size_bytes": data_path.stat().st_size,
+                    "data_sha256": hashlib.sha256(data_path.read_bytes()).hexdigest(),
+                    "comparison_identity": identity, **extra,
+                    "origin": {"x": 0, "y": 0},
+                }
+                if schema.endswith("raw"):
+                    value.update({
+                        "component_bytes": 4,
+                        "component_representation": "ieee754_binary32_raw_words",
+                        "rowbytes": 32, "row_padding": "excluded",
+                        "source_world_rowbytes": None,
+                        "source_world_row_padding": "not_transported",
+                        "comparison_boundaries": {"aex_arithmetic": "internal_world_raw",
+                                                  "host_export": "not_applicable"},
+                    })
+                else:
+                    value.update({
+                        "exr_file_channel_order": ["A", "B", "G", "R"],
+                        "channel_type": "FLOAT32", "storage": "scanline",
+                        "compression": "none", "rgb_policy": "preserve",
+                        "word_comparison": "raw_u32_little_endian",
+                        "source_world_rowbytes": None,
+                        "source_world_row_padding": "not_transported",
+                        "source_transport_order": "RGBA",
+                        "comparison_boundaries": {
+                            "aex_arithmetic": "compare_source_raw_world",
+                            "host_export": "compare_float32_exr_raw_u32"},
+                    })
+                return value
+
+            raw_meta_path.write_text(json.dumps(metadata(
+                "aexcompat.render_raw", raw, pixel_format="argb32f")))
+            write_exr(rgba_words.copy())
+            exr_meta_path.write_text(json.dumps(metadata(
+                "aexcompat.render_exr", exr, pixel_format="float32")))
+            report = MODULE.compare_raw_u32(raw, exr, raw_meta_path, exr_meta_path)
+            self.assertTrue(report["match"])
+            self.assertEqual(report["difference_layers"]["host_export"]["status"], "exact")
+
+            for index, mutated in enumerate((0x7FC12346, 0x00000000, 0x00000002, 0x3F000000)):
+                changed = rgba_words.copy()
+                changed[0, index] = mutated
+                write_exr(changed)
+                exr_meta_path.write_text(json.dumps(metadata(
+                    "aexcompat.render_exr", exr, pixel_format="float32")))
+                report = MODULE.compare_raw_u32(raw, exr, raw_meta_path, exr_meta_path)
+                self.assertFalse(report["match"])
+                self.assertEqual(report["first_mismatch"]["channel"], MODULE.CHANNELS[index])
+
+            write_exr(rgba_words[:, [2, 1, 0, 3]].copy())
+            exr_meta_path.write_text(json.dumps(metadata(
+                "aexcompat.render_exr", exr, pixel_format="float32")))
+            self.assertFalse(MODULE.compare_raw_u32(
+                raw, exr, raw_meta_path, exr_meta_path)["match"])
+
+            broken = json.loads(raw_meta_path.read_text())
+            broken["data_sha256"] = "0" * 64
+            raw_meta_path.write_text(json.dumps(broken))
+            with self.assertRaisesRegex(MODULE.InputError, "sha256"):
+                MODULE.compare_raw_u32(raw, exr, raw_meta_path, exr_meta_path)
+
+            for key, bad_value in (("working_space", "sRGB"),
+                                   ("compression", "zip"),
+                                   ("comparison_boundaries", {})):
+                good_raw = metadata("aexcompat.render_raw", raw, pixel_format="argb32f")
+                raw_meta_path.write_text(json.dumps(good_raw))
+                broken_exr = metadata("aexcompat.render_exr", exr, pixel_format="float32")
+                broken_exr[key] = bad_value
+                exr_meta_path.write_text(json.dumps(broken_exr))
+                with self.assertRaisesRegex(MODULE.InputError, "canonical"):
+                    MODULE.compare_raw_u32(raw, exr, raw_meta_path, exr_meta_path)
+
+            good_exr = metadata("aexcompat.render_exr", exr, pixel_format="float32")
+            exr_meta_path.write_text(json.dumps(good_exr))
+            wrong_identity = metadata("aexcompat.render_raw", raw, pixel_format="argb32f")
+            wrong_identity["comparison_identity"]["world_sha256"] = "44" * 32
+            raw_meta_path.write_text(json.dumps(wrong_identity))
+            with self.assertRaisesRegex(MODULE.InputError, "comparison_identity"):
+                MODULE.compare_raw_u32(raw, exr, raw_meta_path, exr_meta_path)
+
+            wrong_origin = metadata("aexcompat.render_raw", raw, pixel_format="argb32f")
+            wrong_origin["origin"] = {"x": 1, "y": 0}
+            raw_meta_path.write_text(json.dumps(wrong_origin))
+            with self.assertRaisesRegex(MODULE.InputError, "origin"):
+                MODULE.compare_raw_u32(raw, exr, raw_meta_path, exr_meta_path)
+
+    def test_render_raw_argb_formats_are_reinterpreted_without_word_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            argb8 = root / "pf8.bin"
+            argb16 = root / "pf16.bin"
+            argb32 = root / "pf32.bin"
+            argb8.write_bytes(bytes((4, 1, 2, 3)))
+            argb16.write_bytes(struct.pack("<4H", 32768, 1, 2, 3))
+            words = (0x3f800000, 0x7fc12345, 0x80000000, 0x00000001)
+            argb32.write_bytes(struct.pack("<4I", *words))
+            self.assertEqual(MODULE.load_raw(argb8, 1, 1, "argb8"), [1/255, 2/255, 3/255, 4/255])
+            self.assertEqual(MODULE.load_raw(argb16, 1, 1, "argb16le-ae"), [1/32768, 2/32768, 3/32768, 1.0])
+            values = MODULE.load_raw(argb32, 1, 1, "argb32f-le")
+            self.assertTrue(math.isnan(values[0]))
+            self.assertEqual(struct.unpack("<I", struct.pack("<f", values[1]))[0], 0x80000000)
+            self.assertEqual(struct.unpack("<I", struct.pack("<f", values[2]))[0], 1)
+            self.assertEqual(values[3], 1.0)
     def test_exact_rgba8_match(self):
         pixels = bytes((1, 2, 3, 4, 250, 100, 0, 255))
         with tempfile.TemporaryDirectory() as directory:
@@ -48,6 +191,11 @@ class ComparePixelOraclesTests(unittest.TestCase):
         self.assertTrue(report["match"])
         self.assertEqual(report["comparison_boundary"]["claim_level"], "export_exact")
         self.assertFalse(report["comparison_boundary"]["raw_world_exact"])
+        self.assertEqual(
+            report["difference_layers"]["aex_arithmetic"]["status"],
+            "not_evaluated_by_export_comparison",
+        )
+        self.assertEqual(report["difference_layers"]["host_export"]["status"], "exact")
         self.assertEqual(report["exact_mismatched_channels"], 0)
         self.assertIsNone(report["first_mismatch"])
         self.assertEqual(report["hashes"]["raw_sha256"],

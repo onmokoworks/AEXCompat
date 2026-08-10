@@ -279,6 +279,16 @@ fn cli_contract() -> serde_json::Value {
                 "note": "The final slot/value pair is required only for --render-experimental-session-param."
             },
             {
+                "name": "--render-raw",
+                "argv": ["--render-raw", "<aex>", "<input-image>", "<output-directory>", "argb8|argb16|argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
+                "result": "native-argb-raw-artifact-report-json"
+            },
+            {
+                "name": "--render-exr",
+                "argv": ["--render-exr", "<aex>", "<input-image>", "<output-directory>", "argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
+                "result": "uncompressed-scanline-float32-exr-artifact-report-json"
+            },
+            {
                 "name": "--render-experimental",
                 "argv": ["--render-experimental|--render-experimental-auto|--render-experimental-16|--render-experimental-16-deep|--render-experimental-32|--render-experimental-smart|--render-experimental-smart-16|--render-experimental-smart-16-deep|--render-experimental-smart-32|--render-experimental-smart-32-cpu", "<aex>", "<input-image>", "<output-image>"],
                 "result": "render-report-json"
@@ -327,6 +337,33 @@ fn cli_contract() -> serde_json::Value {
             "use_conformance_bundle_for_hashed_reproducible_artifacts": true
         }
     })
+}
+
+#[cfg(test)]
+mod artifact_cli_contract_tests {
+    use super::cli_contract;
+
+    #[test]
+    fn raw_and_exr_commands_publish_exact_argument_and_result_contracts() {
+        let contract = cli_contract();
+        let commands = contract["commands"].as_array().unwrap();
+        let command = |name: &str| {
+            commands
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name} command"))
+        };
+        assert_eq!(command("--render-raw")["argv"].as_array().unwrap().len(), 9);
+        assert_eq!(
+            command("--render-raw")["result"],
+            "native-argb-raw-artifact-report-json"
+        );
+        assert_eq!(command("--render-exr")["argv"][4], "argb32f");
+        assert_eq!(
+            command("--render-exr")["result"],
+            "uncompressed-scanline-float32-exr-artifact-report-json"
+        );
+    }
 }
 
 fn read_plugin_hash(plugin: &Path) -> Result<String, std::io::Error> {
@@ -711,7 +748,9 @@ fn main() -> eframe::Result {
     }
     let session_command = args.get(1).and_then(|value| value.to_str());
     let session_with_parameter = session_command == Some("--render-experimental-session-param");
-    if (args.len() == 10 && session_command == Some("--render-experimental-session"))
+    let artifact_command = matches!(session_command, Some("--render-raw" | "--render-exr"));
+    if (args.len() == 10
+        && (session_command == Some("--render-experimental-session") || artifact_command))
         || (args.len() == 12 && session_with_parameter)
     {
         // Built-artifact probes use this explicit session-only adapter.  The
@@ -790,17 +829,23 @@ fn main() -> eframe::Result {
             }
             parameter.value = value;
         }
-        let report = aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
-            &repository,
-            plugin,
-            &hash,
-            Path::new(&args[3]),
-            Path::new(&args[4]),
-            &parameters,
-            timing,
-            smart,
-            pixel_format,
-        );
+        let report = if artifact_command {
+            use aexcompat_broker::image_render::RenderArtifactKind;
+            let kind = if session_command == Some("--render-exr") {
+                RenderArtifactKind::Float32Exr
+            } else {
+                RenderArtifactKind::Raw
+            };
+            aexcompat_broker::image_render::render_experimental_artifact_at_time(
+                &repository, plugin, &hash, Path::new(&args[3]), Path::new(&args[4]),
+                &parameters, timing, smart, pixel_format, kind,
+            )
+        } else {
+            aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
+                &repository, plugin, &hash, Path::new(&args[3]), Path::new(&args[4]),
+                &parameters, timing, smart, pixel_format,
+            )
+        };
         match report {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
             Err(error) => {

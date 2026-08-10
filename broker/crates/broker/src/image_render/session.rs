@@ -20,6 +20,7 @@ fn render_with_artifact(
     dependencies: Vec<ApprovedImageArtifact>,
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
     deep_png_output: bool,
+    artifact_kind: Option<RenderArtifactKind>,
 ) -> io::Result<Value> {
     if !timing.is_valid() {
         return Err(invalid("render timing is invalid"));
@@ -37,6 +38,11 @@ fn render_with_artifact(
         return Err(invalid(
             "16-bit deep PNG output requires the Argb16 render format",
         ));
+    }
+    if artifact_kind == Some(RenderArtifactKind::Float32Exr)
+        && pixel_format != RenderPixelFormat::Argb32f
+    {
+        return Err(invalid("FLOAT32 EXR output requires the Argb32f render format"));
     }
     const MAX_AUDIO_SAMPLES: usize = 10_000_000;
     let audio = if let Some(path) = audio_sidecar {
@@ -109,8 +115,7 @@ fn render_with_artifact(
             "output image already exists",
         ));
     }
-    let preserved_output = pixel_format
-        .raw_extension()
+    let preserved_output = artifact_kind.is_none().then(|| pixel_format.raw_extension()).flatten()
         .map(|extension| output_path.with_extension(extension));
     if preserved_output.as_ref().is_some_and(|path| path.exists()) {
         return Err(io::Error::new(
@@ -431,6 +436,7 @@ fn render_with_artifact(
             // to CPU when the policy is absent, requires one for any real GPU
             // attempt, and ignores it entirely below float32 or on classic.
             gpu_runtime_policy,
+            artifact_kind,
         });
         match session_outcome {
             SessionWrapperOutcome::Report(report) => return Ok(report),
@@ -570,6 +576,7 @@ struct SessionWrapperRequest<'a> {
     /// transport. `None` for CPU or policy-less renders; the session-eligibility
     /// gate only sets `Some` for Argb32f with a GPU backend.
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
+    artifact_kind: Option<RenderArtifactKind>,
 }
 
 enum SessionWrapperOutcome {
@@ -776,13 +783,14 @@ fn render_classic_via_length_one_session(
     };
     // The frame's actual (possibly expanded/shrunk) dimensions drive the PNG
     // encode and the public report, not the launch render dimensions (#261).
-    let (pixels, rendered_width, rendered_height) = match outcome.status {
+    let (pixels, rendered_width, rendered_height, origin_x, origin_y) = match outcome.status {
         FrameStatus::Rendered {
             pixels,
             width,
             height,
-            ..
-        } => (pixels, width, height),
+            origin_x,
+            origin_y,
+        } => (pixels, width, height, origin_x, origin_y),
         FrameStatus::FrameError { render_error, .. } => {
             // The gate above rejects any final report carrying a render
             // error, so this arm is defensive only.
@@ -798,8 +806,13 @@ fn render_classic_via_length_one_session(
     // one-shot smart path applies. Only a smart session can produce this
     // (validate_ok_frame requires it).
     let empty_smart_result = request.smart && rendered_width == 0 && rendered_height == 0;
+    if empty_smart_result && request.artifact_kind.is_some() {
+        return SessionWrapperOutcome::Failure(invalid(
+            "render artifact output requires a non-empty rendered world",
+        ));
+    }
     if !empty_smart_result {
-        if let Some(path) = request.preserved_output {
+        if request.artifact_kind.is_none() && let Some(path) = request.preserved_output {
             if let Some(parent) = path.parent() {
                 if let Err(error) = fs::create_dir_all(parent) {
                     return SessionWrapperOutcome::Failure(error);
@@ -821,7 +834,57 @@ fn render_classic_via_length_one_session(
         }
     }
     let mut deep_overrange_samples = None;
-    let png_written = if empty_smart_result {
+    let artifact_metadata = if empty_smart_result {
+        None
+    } else {
+        let premultiplication = final_report
+            .get("premultiplication")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "straight" | "premultiplied" | "opaque"))
+            .ok_or_else(|| invalid("worker report lacks a valid premultiplication state"));
+        let premultiplication = match premultiplication {
+            Ok(value) => value,
+            Err(error) => return SessionWrapperOutcome::Failure(error),
+        };
+        let conditions = RenderArtifactConditions {
+            premultiplication: premultiplication.into(),
+            working_space: "None".into(),
+            render_mode: "software".into(),
+            comparison_identity: json!({
+                "plugin_sha256": request.plugin_sha256.to_ascii_lowercase(),
+                "input_sha256": final_report.get("input_sha256"),
+                "world_sha256": final_report.get("output_sha256"),
+                "render_path": if request.smart { "smartfx" } else { "classic" },
+                "pixel_format": request.pixel_format.report_name(),
+                "timing": {
+                    "current_time": request.timing.current_time,
+                    "time_step": request.timing.time_step,
+                    "total_time": request.timing.total_time,
+                    "time_scale": request.timing.time_scale,
+                },
+                "requested_parameters": final_report.get("requested_parameters"),
+                "origin": {"x": origin_x, "y": origin_y},
+            }),
+        };
+        match request.artifact_kind {
+            Some(RenderArtifactKind::Raw) => match write_raw_world_artifact(
+                request.output_path, &pixels, rendered_width, rendered_height,
+                request.pixel_format, origin_x, origin_y, conditions,
+            ) {
+                Ok(metadata) => Some(metadata),
+                Err(error) => return SessionWrapperOutcome::Failure(error),
+            },
+            Some(RenderArtifactKind::Float32Exr) => match write_float32_exr_artifact(
+                request.output_path, &pixels, rendered_width, rendered_height,
+                origin_x, origin_y, conditions,
+            ) {
+                Ok(metadata) => Some(metadata),
+                Err(error) => return SessionWrapperOutcome::Failure(error),
+            },
+            None => None,
+        }
+    };
+    let png_written = if empty_smart_result || request.artifact_kind.is_some() {
         Ok(())
     } else if request.deep_png_output {
         rgba16_transport_to_png16(&pixels).and_then(|(samples, overrange)| {
@@ -906,7 +969,18 @@ fn render_classic_via_length_one_session(
             .map(|audio| audio.input_sha256.clone()),
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    SessionWrapperOutcome::Report(build_interactive_image_report(&final_report, facts))
+    let mut report = build_interactive_image_report(&final_report, facts);
+    if let Some(metadata) = artifact_metadata {
+        report["output_transport"] = json!(match request.artifact_kind {
+            Some(RenderArtifactKind::Raw) => "native_argb_raw+strict_metadata",
+            Some(RenderArtifactKind::Float32Exr) => "float32_exr+strict_metadata",
+            None => unreachable!(),
+        });
+        report["output_png"] = Value::Null;
+        report["output_raw"] = Value::Null;
+        report["render_artifact"] = metadata;
+    }
+    SessionWrapperOutcome::Report(report)
 }
 
 /// A bounded failure summary for the public one-shot-compatible wrapper.  The
