@@ -481,7 +481,8 @@ int configure_worker_entry_bootstrap() {
       &g_aegp_comp_item, &g_aegp_comp, &g_layer, &g_effect,
       &g_full_resolution_width,
       &g_full_resolution_height, &aexcompat::worker_runtime::smart::width,
-      &aexcompat::worker_runtime::smart::height};
+      &aexcompat::worker_runtime::smart::height,
+      &g_render_context_state.pixel_aspect_ratio};
   const SceneRuntimeContext scene_runtime_host{
       {&suite_leases_balanced}, &g_aegp_comp_item, &g_aegp_comp,
       &g_full_resolution_width, &g_full_resolution_height,
