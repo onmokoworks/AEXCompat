@@ -480,6 +480,9 @@ uint32_t bib_termination_attempt_count() noexcept {
 }
 
 bool mask_suite_provider_available(void*) { return aexcompat::mask_runtime::model_enabled(); }
+bool mask_stream_suite4_provider_available(void*) {
+  return aexcompat::mask_runtime::model_enabled() && !scene_context();
+}
 
 bool render_options4_provider_available(void*) {
   return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
@@ -687,6 +690,8 @@ bool configure_component_suite_catalog() {
        &mask_suite_provider_available},
       {"AEGP Stream Suite", 11, &g_stream_suite, nullptr, nullptr,
        &mask_suite_provider_available},
+      {"AEGP Stream Suite", 9, &g_stream_suite4, nullptr, nullptr,
+       &mask_stream_suite4_provider_available},
       {"AEGP Keyframe Suite", 5, &g_keyframe_suite, nullptr, nullptr,
        &mask_suite_provider_available},
       {"AEGP Dynamic Stream Suite", 5, &g_dynamic_stream_suite,

@@ -117,6 +117,35 @@ struct StreamSuite {
 };
 static_assert(sizeof(StreamSuite) == 23 * sizeof(void*));
 
+// AEGP_StreamSuite4, acquired as numeric version 9 (frozen in AE 9).  Its
+// first 19 slots match the current suite.  Expression text is the legacy
+// A_char ABI at slots 19/20, and DuplicateStreamRef is its final slot.
+struct StreamSuite4 {
+  decltype(&is_stream_legal) is_stream_legal;
+  decltype(&can_vary_over_time) can_vary_over_time;
+  decltype(&get_valid_interpolations) get_valid_interpolations;
+  decltype(&unsupported_new_layer_stream) get_new_layer_stream;
+  decltype(&unsupported_effect_stream_count) get_effect_num_param_streams;
+  decltype(&unsupported_new_effect_stream) get_new_effect_stream_by_index;
+  decltype(&get_new_mask_stream) get_new_mask_stream;
+  decltype(&dispose_stream) dispose_stream;
+  decltype(&unsupported_stream_name) get_stream_name;
+  decltype(&get_stream_units_text) get_stream_units_text;
+  decltype(&get_stream_properties) get_stream_properties;
+  decltype(&is_stream_timevarying) is_stream_timevarying;
+  decltype(&get_stream_type) get_stream_type;
+  decltype(&get_new_stream_value) get_new_stream_value;
+  decltype(&dispose_stream_value) dispose_stream_value;
+  decltype(&set_stream_value) set_stream_value;
+  decltype(&unsupported_layer_stream_value) get_layer_stream_value;
+  decltype(&get_expression_state) get_expression_state;
+  decltype(&reject_expression_state) set_expression_state;
+  decltype(&reject_get_expression_ansi) get_expression;
+  decltype(&reject_set_expression_ansi) set_expression;
+  decltype(&duplicate_stream_ref) duplicate_stream_ref;
+};
+static_assert(sizeof(StreamSuite4) == 22 * sizeof(void*));
+
 struct KeyframeSuite {
   decltype(&get_stream_num_keyframes) get_stream_num_keyframes;
   decltype(&get_keyframe_time) get_keyframe_time;
