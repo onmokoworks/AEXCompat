@@ -71,6 +71,7 @@ pub fn render_scattermap_fixture(
         dependencies,
         None,
         false,
+        None,
     )
 }
 
@@ -562,6 +563,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
         dependencies,
         gpu_runtime_policy,
         false,
+        None,
     )
 }
 
@@ -627,6 +629,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
         dependencies,
         None,
         true,
+        None,
     )
 }
 
@@ -666,6 +669,7 @@ pub fn render_experimental_image_with_timed_layers(
         Vec::new(),
         None,
         false,
+        None,
     )
 }
 
@@ -718,6 +722,7 @@ pub fn render_experimental_image_with_parameter_animation(
         Vec::new(),
         None,
         false,
+        None,
     )
 }
 
@@ -755,6 +760,51 @@ pub fn render_experimental_image_with_audio_sidecar(
         Vec::new(),
         None,
         false,
+        None,
+    )
+}
+
+pub fn render_experimental_artifact_at_time(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_directory: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    artifact_kind: RenderArtifactKind,
+) -> io::Result<Value> {
+    if artifact_kind == RenderArtifactKind::Float32Exr && pixel_format != RenderPixelFormat::Argb32f
+    {
+        return Err(invalid("render-exr requires argb32f"));
+    }
+    let bytes = fs::read(plugin_path)?;
+    let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
+    render_with_artifact(
+        repository,
+        "experimental",
+        plugin_path,
+        &actual,
+        INTERACTIVE_RENDER_TIMEOUT_MS,
+        input_path,
+        output_directory,
+        Some(encode_interactive_payload(parameters)?),
+        Some(parameters),
+        None,
+        timing,
+        smart,
+        pixel_format,
+        RenderGpuBackend::Cpu,
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        false,
+        Some(artifact_kind),
     )
 }
 
