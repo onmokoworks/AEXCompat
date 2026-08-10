@@ -9,7 +9,8 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+const TRANSPORT_DIRECTORY_ATTEMPTS: usize = 16;
 
 /// Session-wide caps shared by the in-place cluster manifest and worker.
 pub const MAX_CLUSTER_PLUGINS: usize = 256;
@@ -31,16 +32,29 @@ pub struct ClusterManifestTransport {
 }
 
 impl ClusterManifestTransport {
+    fn create_directory(root: &Path, mut next_nonce: impl FnMut() -> u128) -> io::Result<PathBuf> {
+        for _ in 0..TRANSPORT_DIRECTORY_ATTEMPTS {
+            let dir = root.join(format!("cluster-manifest-{:032x}", next_nonce()));
+            match fs::create_dir(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "cluster manifest transport namespace exhausted",
+        ))
+    }
+
     fn write_named(repository: &Path, json: &str, basename: &str) -> io::Result<Self> {
         let root = repository.join("target/image-transport");
         fs::create_dir_all(&root)?;
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| invalid(error.to_string()))?
-            .as_nanos();
-        // A nonce directory keeps concurrent in-place sessions apart.
-        let dir = root.join(format!("cluster-manifest-{nonce}"));
-        fs::create_dir(&dir)?;
+        // Random per-attempt identities avoid the coarse Windows clock
+        // collision that a timestamp-only name permits between concurrent
+        // discovery sessions. AlreadyExists is retried, while every other
+        // filesystem error remains fail-closed.
+        let dir = Self::create_directory(&root, rand::random::<u128>)?;
         let path = dir.join(basename);
         let mut output = match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(output) => output,
@@ -402,6 +416,27 @@ mod tests {
         let json = manifest.to_json().unwrap();
         let reparsed = ValidatedInPlaceClusterManifest::parse(json.as_bytes()).unwrap();
         assert_eq!(manifest, reparsed);
+    }
+
+    #[test]
+    fn transport_directory_retries_an_existing_nonce() {
+        let repository = source_dir();
+        let root = repository.join("target/image-transport");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(root.join(format!("cluster-manifest-{:032x}", 7u128))).unwrap();
+        let mut nonces = [7u128, 8u128].into_iter();
+        let created = ClusterManifestTransport::create_directory(&root, || {
+            nonces
+                .next()
+                .expect("bounded retry consumed only supplied nonces")
+        })
+        .unwrap();
+        assert_eq!(
+            created.file_name().and_then(|name| name.to_str()),
+            Some("cluster-manifest-00000000000000000000000000000008")
+        );
+        fs::remove_dir(&created).unwrap();
+        fs::remove_dir_all(&repository).unwrap();
     }
 
     #[test]
