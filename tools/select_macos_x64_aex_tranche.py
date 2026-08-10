@@ -22,7 +22,9 @@ MAX_PLUGIN_BYTES = 256 * 1024
 REGISTRATION_EXPORTS = {
     "v1": "PluginDataEntryFunction",
     "v2": "PluginDataEntryFunction2",
+    "v3": "PluginDataEntryFunction3",
 }
+REGISTRATION_ABIS = tuple(REGISTRATION_EXPORTS)
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -102,15 +104,13 @@ def registration_abi(entry: dict[str, object]) -> str | None:
         isinstance(value, str) for value in exports
     ):
         raise SweepError("inventory entry export_names must be a string array")
-    has_v1 = REGISTRATION_EXPORTS["v1"] in exports
-    has_v2 = REGISTRATION_EXPORTS["v2"] in exports
-    if has_v1 and has_v2:
-        raise SweepError("inventory entry ambiguously exports PluginData v1 and v2")
-    if has_v2:
-        return "v2"
-    if has_v1:
-        return "v1"
-    return None
+    matches = [
+        abi for abi, export_name in REGISTRATION_EXPORTS.items()
+        if export_name in exports
+    ]
+    if len(matches) > 1:
+        raise SweepError("inventory entry ambiguously exports multiple PluginData ABIs")
+    return matches[0] if matches else None
 
 
 def is_eligible(entry: dict[str, object]) -> bool:
@@ -224,7 +224,7 @@ def select_tranche(
         )
 
     selected: list[dict[str, object]] = []
-    for abi in ("v1", "v2"):
+    for abi in REGISTRATION_ABIS:
         candidates = [
             entry
             for sha, entry in eligible.items()
@@ -303,9 +303,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, object]:
             "root_prefix": "Effects\\",
             "max_bytes": MAX_PLUGIN_BYTES,
             "exclude_audio_prefix": True,
-            "registration_abis": ["v1", "v2"],
+            "registration_abis": list(REGISTRATION_ABIS),
             "per_registration_abi": args.per_registration_abi,
-            "selection_partition_order": ["v1", "v2"],
+            "selection_partition_order": list(REGISTRATION_ABIS),
             "selection_rank_order": ["size", "sha256"],
             "output_order": ["sha256"],
         },
