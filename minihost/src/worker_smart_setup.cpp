@@ -176,6 +176,20 @@ ParameterState::~ParameterState() {
   parameters::state().checkout.definitions.clear();
 }
 
+void publish_frame_times(const ParameterRequest& request) {
+  const auto& plan = *request.plan;
+  const int32_t current_time = plan.temporal_context ? 42 :
+      request.external_current_time;
+  const int32_t time_step = plan.temporal_context ? 2 : request.external_time_step;
+  const uint32_t time_scale = plan.temporal_context ? 24 : request.external_time_scale;
+  const int32_t total_time = plan.temporal_context ? 240 : request.external_total_time;
+  auto write_input = [&](std::size_t offset, const auto& value) {
+    std::memcpy(request.input->data() + offset, &value, sizeof(value));
+  };
+  write_input(224, current_time); write_input(228, time_step);
+  write_input(232, total_time); write_input(236, time_step); write_input(240, time_scale);
+}
+
 bool prepare_parameters(const ParameterRequest& request, ParameterState& prepared,
                         const ParameterHooks& hooks) {
   if (!request.entry || !request.input || !request.output || !request.case_id ||
@@ -280,16 +294,10 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
   prepared.params.resize(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i)
     prepared.params[i] = definitions[i].data();
-  const int32_t current_time = plan.temporal_context ? 42 :
-      request.external_current_time;
-  const int32_t time_step = plan.temporal_context ? 2 : request.external_time_step;
-  const uint32_t time_scale = plan.temporal_context ? 24 : request.external_time_scale;
+  publish_frame_times(request);
   auto write_input = [&](std::size_t offset, const auto& value) {
     std::memcpy(request.input->data() + offset, &value, sizeof(value));
   };
-  write_input(224, current_time); write_input(228, time_step);
-  const int32_t total_time = plan.temporal_context ? 240 : request.external_total_time;
-  write_input(232, total_time); write_input(236, time_step); write_input(240, time_scale);
   const int32_t full_width = request.full_resolution_width > 0 ?
       request.full_resolution_width : plan.width;
   const int32_t full_height = request.full_resolution_height > 0 ?

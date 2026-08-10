@@ -108,6 +108,13 @@ struct ParameterRequest {
   render_safety::InputPixelBuffer* source{};
 };
 
+// Publishes the frame's time fields (current time, step, total, scale) into
+// the command input buffer. prepare_parameters calls this itself; the smart
+// render path additionally calls it before interpolate_arbitrary_values runs,
+// because that runs ahead of prepare_parameters (issue #993) and reads the
+// current/total time from these offsets.
+void publish_frame_times(const ParameterRequest&);
+
 bool prepare_parameters(const ParameterRequest&, ParameterState&,
                         const ParameterHooks&);
 

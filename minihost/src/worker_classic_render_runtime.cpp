@@ -1091,13 +1091,37 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET));
   if (!initialize_arbitrary_values(entry, input, command_output, definitions)) return result;
   ArbitraryValuesScope arbitrary_scope{entry, &input, &command_output, &definitions};
+  const aexcompat::worker_runtime::smart_setup::ParameterRequest parameter_request{
+      entry, &input, &command_output, &case_id, &plan, requested,
+      external_layers, external_current_time, external_time_step,
+      external_total_time, external_time_scale, g_full_resolution_width,
+      g_full_resolution_height, dispatch_pixel_format, &input_world,
+      &dispatch_worlds, &source};
+  // Interpolate and roundtrip the arbitrary values BEFORE prepare_parameters
+  // snapshots the definitions into `params`. In the smart path the plug-in
+  // renders from that `params` snapshot, so churning definitions[u+16] after
+  // the snapshot (each of these disposes the old value handle and swaps in a
+  // freshly allocated one) strands the handle `params` still points at; the
+  // plug-in's render-time lock of it then fails closed with
+  // PF_Err_INTERNAL_STRUCT_DAMAGED (issue #993). ARB callbacks do not require
+  // an active SEQUENCE here: initialize_arbitrary_values just above already
+  // exercises ARB_COPY before begin_lifecycle. The classic path keeps these
+  // after render_click because its dispatch_render_draw reads `definitions`
+  // directly, so there is no earlier snapshot to go stale there.
+  // interpolate reads the frame's current/total time from the input buffer,
+  // which prepare_parameters no longer populates first, so publish the times
+  // here (prepare_parameters re-publishes the same values, idempotently).
+  aexcompat::worker_runtime::smart_setup::publish_frame_times(parameter_request);
+  if (!interpolate_arbitrary_values(entry, input, command_output, definitions) ||
+      !roundtrip_arbitrary_values(entry, input, command_output, definitions)) {
+    // Same failure code as before the move; the lifecycle has not begun yet,
+    // so unlike the old call site there is nothing to tear down.
+    result.pre_error = -5;
+    return result;
+  }
   if (!aexcompat::worker_runtime::smart_setup::prepare_parameters(
-          {entry, &input, &command_output, &case_id, &plan, requested,
-           external_layers, external_current_time, external_time_step,
-           external_total_time, external_time_scale, g_full_resolution_width,
-           g_full_resolution_height, dispatch_pixel_format, &input_world,
-           &dispatch_worlds, &source},
-          parameter_state, {&apply_parameter_animation, &dump_world_snapshot}))
+          parameter_request, parameter_state,
+          {&apply_parameter_animation, &dump_world_snapshot}))
     return result;
   auto& params = parameter_state.params;
   auto& pre_render_source = parameter_state.pre_render_source;
@@ -1133,13 +1157,6 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     return result;
   }
   if (!dispatch_render_click(entry, input, command_output, definitions)) {
-    result.pre_error = -5;
-    result.render_error = end_lifecycle(entry, input, command_output, params.data(),
-                                        output_world.data(), lifecycle, -5);
-    return result;
-  }
-  if (!interpolate_arbitrary_values(entry, input, command_output, definitions) ||
-      !roundtrip_arbitrary_values(entry, input, command_output, definitions)) {
     result.pre_error = -5;
     result.render_error = end_lifecycle(entry, input, command_output, params.data(),
                                         output_world.data(), lifecycle, -5);
