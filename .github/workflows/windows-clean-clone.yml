@@ -293,8 +293,11 @@ jobs:
           if ((Get-Item -LiteralPath $targetRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "native artifact root is a reparse point: $targetRoot"
           }
-          $artifacts = @(Get-ChildItem $targetRoot -Recurse -Filter *.aex -File)
-          if ($artifacts.Count -eq 0) { throw 'no generated AEX artifacts were found after workspace tests' }
+          $artifacts = @(Get-ChildItem $targetRoot -Recurse -Filter *.aex -File | Where-Object {
+            $relative = [IO.Path]::GetRelativePath($targetRoot, $_.FullName)
+            $relative.Split([IO.Path]::DirectorySeparatorChar)[0] -like '*-probe-build'
+          })
+          if ($artifacts.Count -eq 0) { throw 'no generated probe AEX artifacts were found after workspace tests' }
           $candidateBuildDirs = @($artifacts | ForEach-Object {
             $candidate = $_.Directory
             while ($candidate.FullName -ne $targetRoot -and -not (Test-Path -LiteralPath (Join-Path $candidate.FullName 'CMakeCache.txt') -PathType Leaf)) {
