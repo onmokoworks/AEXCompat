@@ -3,6 +3,7 @@
 #include "worker_parameter_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_mask_runtime.hpp"
+#include "worker_mask_suite_tables.hpp"
 #include "worker_aegp_scene.hpp"
 #include "worker_aegp_scene_model.hpp"
 #include "worker_aegp_scene_transaction.hpp"
@@ -1578,6 +1579,8 @@ bool verify_aegp_scene_mutation_transactions() {
   using SetDynamicName = int32_t (__cdecl*)(void*, const uint16_t*);
   using AddDynamic = int32_t (__cdecl*)(
       int32_t, void*, const char*, void**);
+  using GetExpressionAnsi = int32_t (__cdecl*)(int32_t, void*, void**);
+  using SetExpressionAnsi = int32_t (__cdecl*)(int32_t, void*, const char*);
 
   ok = configure_mask_scene("rectangle") && ok;
   const bool saved_mask_model_enabled =
@@ -1586,10 +1589,12 @@ bool verify_aegp_scene_mutation_transactions() {
   g_aegp_comp_idle_roundtrip_mode = false;
   const void* mask_suite_raw = nullptr;
   const void* mask_stream_suite_raw = nullptr;
+  const void* mask_stream_suite4_raw = nullptr;
   const void* keyframe_suite_raw = nullptr;
   const void* dynamic_suite_raw = nullptr;
   ok = acquire_suite("AEGP Layer Mask Suite", 7, &mask_suite_raw) == 0 &&
       acquire_suite("AEGP Stream Suite", 11, &mask_stream_suite_raw) == 0 &&
+      acquire_suite("AEGP Stream Suite", 9, &mask_stream_suite4_raw) == 0 &&
       acquire_suite("AEGP Keyframe Suite", 5, &keyframe_suite_raw) == 0 &&
       acquire_suite("AEGP Dynamic Stream Suite", 5, &dynamic_suite_raw) == 0 &&
       ok;
@@ -1597,6 +1602,8 @@ bool verify_aegp_scene_mutation_transactions() {
       static_cast<void* const*>(const_cast<void*>(mask_suite_raw));
   const auto* mask_stream_slots =
       static_cast<void* const*>(const_cast<void*>(mask_stream_suite_raw));
+  const auto* mask_stream4_slots =
+      static_cast<void* const*>(const_cast<void*>(mask_stream_suite4_raw));
   const auto* key_slots =
       static_cast<void* const*>(const_cast<void*>(keyframe_suite_raw));
   const auto* dynamic_slots =
@@ -1612,6 +1619,17 @@ bool verify_aegp_scene_mutation_transactions() {
   const auto dispose_mask_value = mask_stream_slots
       ? reinterpret_cast<int32_t (__cdecl*)(StreamValue*)>(
             mask_stream_slots[14]) : nullptr;
+  const auto get_expression_ansi = mask_stream4_slots
+      ? reinterpret_cast<GetExpressionAnsi>(mask_stream4_slots[19]) : nullptr;
+  const auto set_expression_ansi = mask_stream4_slots
+      ? reinterpret_cast<SetExpressionAnsi>(mask_stream4_slots[20]) : nullptr;
+  void* rejected_ansi_expression = reinterpret_cast<void*>(1);
+  ok = mask_stream4_slots &&
+      mask_stream_suite4_raw == g_aegp_stream_suite4.data() &&
+      get_expression_ansi && set_expression_ansi &&
+      get_expression_ansi(1, nullptr, &rejected_ansi_expression) == 4 &&
+      rejected_ansi_expression == nullptr &&
+      set_expression_ansi(1, nullptr, "x") == 4 && ok;
   const auto key_count = key_slots
       ? reinterpret_cast<KeyframeCount>(key_slots[0]) : nullptr;
   const auto insert_key = key_slots
@@ -2064,6 +2082,7 @@ bool verify_aegp_scene_mutation_transactions() {
 
   ok = release_suite("AEGP Dynamic Stream Suite", 5) == 0 && ok;
   ok = release_suite("AEGP Keyframe Suite", 5) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 9) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 11) == 0 && ok;
   ok = release_suite("AEGP Layer Mask Suite", 7) == 0 && ok;
   g_mask_scene.clear();
@@ -2119,16 +2138,90 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   matte.type = 0;  // PF_Param_LAYER
   matte.name = "Matte";
   records.push_back(matte);
+  records[0].name = u8"量";
   scene_runtime_state().effect_live = false;
 
   void* effect = nullptr;
   bool ok = g_hooks.get_new_effect_for_effect(0, g_hooks.effect, &effect) == 0 &&
       effect == &scene_runtime_state().effect;
 
+  const void* stream_suite4_raw = nullptr;
+  ok = ok && acquire_suite("AEGP Stream Suite", 9, &stream_suite4_raw) == 0 &&
+      stream_suite4_raw == g_aegp_stream_suite4.data();
+  const auto* stream_suite4_slots =
+      static_cast<void* const*>(const_cast<void*>(stream_suite4_raw));
+  using GetEffectStreamCount = int32_t (__cdecl*)(void*, int32_t*);
+  using GetEffectStream = int32_t (__cdecl*)(int32_t, void*, int32_t, void**);
+  using DisposeStream = int32_t (__cdecl*)(void*);
+  using GetStreamName = int32_t (__cdecl*)(int32_t, void*, uint8_t, void**);
+  using GetStreamType = int32_t (__cdecl*)(void*, int32_t*);
+  using GetStreamValue = int32_t (__cdecl*)(
+      int32_t, void*, int32_t, const suite_abi::AegpTime*, uint8_t,
+      scene_runtime::AegpStreamValue*);
+  using DisposeStreamValue = int32_t (__cdecl*)(scene_runtime::AegpStreamValue*);
+  const auto get_v9_stream_count = stream_suite4_slots
+      ? reinterpret_cast<GetEffectStreamCount>(stream_suite4_slots[4]) : nullptr;
+  const auto get_v9_effect_stream = stream_suite4_slots
+      ? reinterpret_cast<GetEffectStream>(stream_suite4_slots[5]) : nullptr;
+  const auto dispose_v9_stream = stream_suite4_slots
+      ? reinterpret_cast<DisposeStream>(stream_suite4_slots[7]) : nullptr;
+  const auto get_v9_stream_name = stream_suite4_slots
+      ? reinterpret_cast<GetStreamName>(stream_suite4_slots[8]) : nullptr;
+  const auto get_v9_stream_type = stream_suite4_slots
+      ? reinterpret_cast<GetStreamType>(stream_suite4_slots[12]) : nullptr;
+  const auto get_v9_stream_value = stream_suite4_slots
+      ? reinterpret_cast<GetStreamValue>(stream_suite4_slots[13]) : nullptr;
+  const auto dispose_v9_stream_value = stream_suite4_slots
+      ? reinterpret_cast<DisposeStreamValue>(stream_suite4_slots[14]) : nullptr;
+
   // Counted the way AE counts: the input layer plus one per declared
   // parameter. Keyed on the fixture instead, this answered 5.
   int32_t count = -1;
-  ok = ok && g_hooks.get_effect_num_param_streams_v2(effect, &count) == 0 && count == 3;
+  ok = ok && get_v9_stream_count && get_v9_effect_stream &&
+      dispose_v9_stream && get_v9_stream_name && get_v9_stream_type &&
+      get_v9_stream_value && dispose_v9_stream_value &&
+      get_v9_stream_count(effect, &count) == 0 && count == 3;
+
+  void* v9_amount = nullptr;
+  ok = ok && get_v9_effect_stream(0, effect, 1, &v9_amount) == 0 && v9_amount;
+  void* v9_name_handle = nullptr;
+  void* v9_name_data = nullptr;
+  int32_t v9_type = -1;
+  scene_runtime::AegpStreamValue v9_value{};
+  suite_abi::AegpTime v9_time{0, 30};
+  const int32_t v9_name_error =
+      get_v9_stream_name(0, v9_amount, 1, &v9_name_handle);
+  const int32_t v9_lock_error = v9_name_handle
+      ? aexcompat::worker_runtime::handles::lock_aegp_mem_handle(
+            v9_name_handle, &v9_name_data)
+      : 4;
+  const int32_t v9_type_error = get_v9_stream_type(v9_amount, &v9_type);
+  const int32_t v9_value_error =
+      get_v9_stream_value(0, v9_amount, 1, &v9_time, 1, &v9_value);
+  ok = ok && v9_name_error == 0 &&
+      v9_name_handle &&
+      v9_lock_error == 0 &&
+      v9_name_data &&
+      std::char_traits<char16_t>::compare(
+          static_cast<const char16_t*>(v9_name_data), u"量", 2) == 0 &&
+      aexcompat::worker_runtime::handles::unlock_aegp_mem_handle(
+          v9_name_handle) == 0 &&
+      v9_type_error == 0 && v9_type == 5 && v9_value_error == 0;
+  ok = dispose_v9_stream_value(&v9_value) == 0 && ok;
+  ok = aexcompat::worker_runtime::handles::free_aegp_mem_handle(
+           v9_name_handle) == 0 && ok;
+  ok = dispose_v9_stream(v9_amount) == 0 && ok;
+  records[0].name.assign("\xc0\xaf", 2);
+  void* invalid_name_stream = nullptr;
+  void* invalid_name_handle = reinterpret_cast<void*>(1);
+  ok = ok &&
+      get_v9_effect_stream(0, effect, 1, &invalid_name_stream) == 0 &&
+      invalid_name_stream &&
+      get_v9_stream_name(
+          0, invalid_name_stream, 1, &invalid_name_handle) == 4 &&
+      invalid_name_handle == nullptr;
+  ok = dispose_v9_stream(invalid_name_stream) == 0 && ok;
+  records[0].name = "Amount";
 
   // Index 0 is the input layer, which has no record of its own and still
   // opens, as a layer stream.
@@ -2198,6 +2291,7 @@ bool verify_aegp_loaded_plugin_effect_streams() {
 
   ok = g_hooks.dispose_stream_v2(amount) == 0 && ok;
   ok = g_hooks.dispose_stream_v2(input) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", 9) == 0 && ok;
 
   // Restored whether or not the checks passed: a failed run must not leave the
   // scene holding this test's streams and leases, the way the mutation

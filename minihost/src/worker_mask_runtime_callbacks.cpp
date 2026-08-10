@@ -579,6 +579,15 @@ int32_t __cdecl unsupported_set_expression(int32_t plugin_id, void* stream, cons
       },
       []() noexcept { bump_render_project_timestamp(); }) ? 0 : 4;
 }
+int32_t __cdecl reject_get_expression_ansi(int32_t, void*, void** expression) {
+  if (expression) *expression = nullptr;
+  ++g_invalid_stream_operations;
+  return 4;
+}
+int32_t __cdecl reject_set_expression_ansi(int32_t, void*, const char*) {
+  ++g_invalid_stream_operations;
+  return 4;
+}
 int32_t __cdecl duplicate_stream_ref(int32_t plugin_id, void* stream, void** duplicate) {
   HostStreamRef* original = find_stream(stream);
   if (plugin_id != 1 || !original || !duplicate || g_stream_refs.size() >= 64) {

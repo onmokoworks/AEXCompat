@@ -190,6 +190,8 @@ int32_t __cdecl get_expression_state(int32_t, void*, uint8_t*);
 int32_t __cdecl reject_expression_state(int32_t, void*, uint8_t);
 int32_t __cdecl unsupported_get_expression(int32_t, void*, void**);
 int32_t __cdecl unsupported_set_expression(int32_t, void*, const uint16_t*);
+int32_t __cdecl reject_get_expression_ansi(int32_t, void*, void**);
+int32_t __cdecl reject_set_expression_ansi(int32_t, void*, const char*);
 int32_t __cdecl duplicate_stream_ref(int32_t, void*, void**);
 int32_t __cdecl get_unique_stream_id(void*, int32_t*);
 bool time_equal(const HostTime&, const HostTime&);

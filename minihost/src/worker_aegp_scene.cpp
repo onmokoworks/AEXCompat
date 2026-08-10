@@ -21,6 +21,7 @@
 #include <numeric>
 #include <thread>
 #include <utility>
+#include <windows.h>
 
 using aexcompat::scene_runtime::scene_runtime_state;
 using aexcompat::scene_model::Identity;
@@ -29,6 +30,11 @@ using aexcompat::scene_model::ObjectKind;
 using aexcompat::scene_model::ObjectSnapshot;
 using aexcompat::worker_runtime::UnsupportedSuiteId;
 using aexcompat::worker_runtime::unsupported_suite_slots;
+
+namespace aexcompat::l2_detail {
+int32_t __cdecl aegp_get_stream_name_v4(
+    int32_t, void*, uint8_t, void**);
+}
 
 namespace {
 SceneContext g_scene_context{};
@@ -2540,6 +2546,7 @@ std::array<void*, 22> g_aegp_effect_suite4{};
 std::array<void*, 20> g_aegp_stream_suite1{};
 std::array<void*, 22> g_aegp_stream_suite2{};
 std::array<void*, 22> g_aegp_stream_suite3{};
+std::array<void*, 22> g_aegp_stream_suite4{};
 std::array<void*, 23> g_aegp_stream_suite6{};
 std::array<void*, 2> g_aegp_iterate_suite1{};
 std::array<void*, 22> g_aegp_keyframe_suite5{};
@@ -2560,6 +2567,7 @@ static_assert(sizeof(g_aegp_effect_suite3) == 136);
 static_assert(sizeof(g_aegp_stream_suite1) == 160);
 static_assert(sizeof(g_aegp_stream_suite2) == 176);
 static_assert(sizeof(g_aegp_stream_suite3) == 176);
+static_assert(sizeof(g_aegp_stream_suite4) == 176);
 static_assert(sizeof(g_aegp_stream_suite6) == 184);
 static_assert(sizeof(g_aegp_iterate_suite1) == 16);
 static_assert(sizeof(g_aegp_keyframe_suite5) == 176);
@@ -3006,6 +3014,31 @@ SceneSuiteAcquireResult scene_acquire_suite(
     *suite = g_aegp_stream_suite6.data();
     return SceneSuiteAcquireResult::acquired;
   }
+  if (named("AEGP Stream Suite") && version == 9) {
+    // AEGP_StreamSuite4 (frozen in AE 9) retains the v8 22-slot layout.
+    // Its expression text ABI is the legacy A_char form, so those two slots
+    // use explicit fail-closed adapters rather than the current UTF-16 ABI.
+    g_aegp_stream_suite4 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_9, 22>();
+    g_aegp_stream_suite4[3] = reinterpret_cast<void*>(&aegp_get_new_layer_stream);
+    g_aegp_stream_suite4[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v6);
+    g_aegp_stream_suite4[5] = factory.legacy_stream_callbacks[0];
+    g_aegp_stream_suite4[6] =
+        reinterpret_cast<void*>(&aexcompat::l2_detail::get_new_mask_stream);
+    g_aegp_stream_suite4[7] = factory.legacy_stream_callbacks[1];
+    g_aegp_stream_suite4[8] = reinterpret_cast<void*>(
+        &aexcompat::l2_detail::aegp_get_stream_name_v4);
+    g_aegp_stream_suite4[12] = factory.legacy_stream_callbacks[3];
+    g_aegp_stream_suite4[13] = factory.legacy_stream_callbacks[4];
+    g_aegp_stream_suite4[14] = factory.legacy_stream_callbacks[5];
+    g_aegp_stream_suite4[15] = factory.legacy_stream_callbacks[6];
+    g_aegp_stream_suite4[19] =
+        reinterpret_cast<void*>(&aexcompat::l2_detail::reject_get_expression_ansi);
+    g_aegp_stream_suite4[20] =
+        reinterpret_cast<void*>(&aexcompat::l2_detail::reject_set_expression_ansi);
+    *suite = g_aegp_stream_suite4.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
   if (named("AEGP Stream Suite") && version == 8) {
     g_aegp_stream_suite3 =
         unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_8, 22>();
@@ -3242,6 +3275,40 @@ int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
   std::memcpy(name, parameter->name, length);
   name[length] = '\0';
   return 0;
+}
+int32_t __cdecl aegp_get_stream_name_v4(
+    int32_t plugin_id, void* stream, uint8_t, void** name_handle) {
+  auto* value = legacy_effect_stream(stream);
+  if (plugin_id < 0 || !value ||
+      (plugin_id != 0 && plugin_id != value->owner_plugin_id) ||
+      !legacy_effect_stream_parent_live(*value) || !name_handle)
+    return 4;
+  *name_handle = nullptr;
+  const auto& instance =
+      g_aegp_effect_instances[value->effect_instance_index];
+  const auto* parameter = find_effect_parameter(instance, value->param_index);
+  if (!parameter) return 4;
+  constexpr std::size_t kAegpMaxStreamNameSize = 32;
+  const std::size_t length =
+      strnlen_s(parameter->name, kAegpMaxStreamNameSize - 1);
+  std::u16string name;
+  if (length != 0) {
+    const int required = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, parameter->name,
+        static_cast<int>(length), nullptr, 0);
+    if (required <= 0) return 4;
+    std::wstring converted(static_cast<std::size_t>(required), L'\0');
+    if (MultiByteToWideChar(
+            CP_UTF8, MB_ERR_INVALID_CHARS, parameter->name,
+            static_cast<int>(length), converted.data(), required) != required)
+      return 4;
+    static_assert(sizeof(wchar_t) == sizeof(char16_t));
+    name.assign(
+        reinterpret_cast<const char16_t*>(converted.data()),
+        reinterpret_cast<const char16_t*>(converted.data()) + converted.size());
+  }
+  return make_utf16_handle(name, "effect parameter name", name_handle) == 0
+      ? 0 : 4;
 }
 int32_t __cdecl aegp_get_stream_type_v2(void* stream, int32_t* type) {
   auto* value = legacy_effect_stream(stream);
