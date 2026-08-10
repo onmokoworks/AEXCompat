@@ -4767,22 +4767,13 @@ mod tests {
             ],
             swap_payloads: vec![None, None],
         };
-        let selected = classic_fallback_identity(
-            Path::new("opener.aex"),
-            "opener-sha",
-            Some(&cluster),
-            1,
-        )
-        .expect("the active nonzero cluster member is selectable");
+        let selected =
+            classic_fallback_identity(Path::new("opener.aex"), "opener-sha", Some(&cluster), 1)
+                .expect("the active nonzero cluster member is selectable");
         assert_eq!(selected, (PathBuf::from("second.aex"), "second-sha".into()));
         assert!(
-            classic_fallback_identity(
-                Path::new("opener.aex"),
-                "opener-sha",
-                Some(&cluster),
-                2,
-            )
-            .is_err()
+            classic_fallback_identity(Path::new("opener.aex"), "opener-sha", Some(&cluster), 2,)
+                .is_err()
         );
     }
 
@@ -4912,7 +4903,11 @@ mod tests {
             launches.set(launches.get() + 1);
             Ok((Some(frame()), unclean_classic))
         });
-        assert_eq!(launches.get(), 2, "each authorization permits exactly one launch");
+        assert_eq!(
+            launches.get(),
+            2,
+            "each authorization permits exactly one launch"
+        );
         assert!(matches!(rejected_classic.reply, FrameReply::SessionLost(_)));
     }
 }

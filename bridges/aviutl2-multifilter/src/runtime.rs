@@ -1278,9 +1278,8 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                                 // Smart: this closure never calls the host.
                                 let mut fallback_layers = config.layers.clone();
                                 if let Some((slot, pixels)) = &retained.layer
-                                    && let Some(layer) = fallback_layers
-                                        .iter_mut()
-                                        .find(|layer| layer.slot == *slot)
+                                    && let Some(layer) =
+                                        fallback_layers.iter_mut().find(|layer| layer.slot == *slot)
                                 {
                                     layer.rgba.clone_from(pixels);
                                 }
@@ -1328,8 +1327,8 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                                     payload_override: None,
                                     launch_environment: Default::default(),
                                 };
-                                let mut classic = RenderSession::open(classic_request)
-                                    .map_err(|error| {
+                                let mut classic =
+                                    RenderSession::open(classic_request).map_err(|error| {
                                         format!("Classic fallback open failed: {error}")
                                     })?;
                                 let classic_outcome = classic.render_frame_with_parameters(
