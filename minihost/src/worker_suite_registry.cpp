@@ -191,6 +191,7 @@ int32_t SuiteRegistry::release(const char* name, int32_t version,
   const char* const safe_name = owned_name.text.data();
   const bool valid_name = owned_name.readable && owned_name.terminated;
   const bool released = valid_name && lease_tracker_.release(safe_name, version);
+  if (!released) rejected_releases_.fetch_add(1, std::memory_order_relaxed);
   record_suite_timeline(false, owned_name.text.data(), owned_name.length,
                         valid_name, version, released ? 0 : 1);
   if (trace_writer && valid_name && owned_name.length != 0)
@@ -279,6 +280,10 @@ uint32_t SuiteRegistry::acquire_count() const {
 }
 uint32_t SuiteRegistry::release_count() const {
   return lease_tracker_.release_count();
+}
+
+uint32_t SuiteRegistry::rejected_release_count() const {
+  return rejected_releases_.load(std::memory_order_relaxed);
 }
 std::string SuiteRegistry::live_summary() const {
   return lease_tracker_.live_summary();
