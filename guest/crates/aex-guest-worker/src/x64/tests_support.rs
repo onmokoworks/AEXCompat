@@ -2973,6 +2973,101 @@
     }
 
     #[test]
+    fn load_library_w_only_resolves_loaded_modules_and_counts_stable_handles() {
+        const LOAD_LIBRARY: u64 = STUB_BASE + 0x430;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            dispatch_win64_import("kernel32.dll", "LoadLibraryW"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LoadLibraryW)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "LoadLibraryW"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        install_win64_import(
+            &mut engine.unicorn,
+            LOAD_LIBRARY,
+            "kernel32.dll",
+            "LoadLibraryW",
+        )
+        .unwrap();
+        let name = DATA_BASE + 0xc00;
+        let write_wide = |engine: &mut GuestEngine<'static>, value: &str| {
+            let bytes = value
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>();
+            engine.write(name, &bytes).unwrap();
+        };
+
+        engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+        write_wide(&mut engine, r"C:\Windows\System32\KERNEL32.DLL");
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            WINDOWS_KERNEL32_MODULE_TOKEN
+        );
+        write_wide(&mut engine, "kernel32.dll");
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            WINDOWS_KERNEL32_MODULE_TOKEN
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .get_data()
+                .windows_module_refcounts
+                .get(&WINDOWS_KERNEL32_MODULE_TOKEN),
+            Some(&2)
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+        write_wide(&mut engine, r"C:\AEXCompat\guest-plugin.aex");
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            TEST_CODE
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .get_data()
+                .windows_module_refcounts
+                .get(&TEST_CODE),
+            Some(&1)
+        );
+
+        write_wide(&mut engine, "opencv_core_parallel_onetbb455_64.dll");
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+        engine.write(name, &[0x00, 0xd8, 0, 0]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [0, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
     fn deterministic_getenv_and_openmp_dynamic_policy_are_bounded() {
         const GETENV: u64 = STUB_BASE + 0x410;
         const OMP_SET_DYNAMIC: u64 = STUB_BASE + 0x420;
