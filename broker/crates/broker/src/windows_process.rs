@@ -44,8 +44,8 @@ const PROCESS_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 // Resident render sessions carry the plug-in, its inference/runtime closure,
 // and one or more frame worlds at the same time. Keep that path bounded while
 // allowing models whose measured working set legitimately exceeds the
-// one-shot/discovery budget (issue #1138).
-const RENDER_SESSION_PROCESS_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
+// one-shot/discovery budget (issues #1138 and #1142).
+const RENDER_SESSION_PROCESS_MEMORY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
 const MAX_PROBE_PROCESS_MEMORY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
 const TERMINATION_GRACE_MS: u32 = 5_000;
 // See memory_limit_reached: the largest single failed allocation the
