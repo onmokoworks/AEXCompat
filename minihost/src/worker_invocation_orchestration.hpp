@@ -186,6 +186,11 @@ struct FinalDispatchRequest {
   // positionally, and a bool inserted before `cluster_swap` would silently
   // swallow the pointer through pointer-to-bool conversion.
   bool audio_effect_only{};
+  // Native behavioral seam for the spawned-thread activation boundary. The
+  // production caller leaves this null; self-tests substitute a bounded probe
+  // for render_once so the thread/context contract can be tested without a
+  // loaded AEX or the process-global selector diagnostics it would require.
+  void (*concurrent_thread_context_probe)(){};
 };
 
 struct ClassicFinalDispatchResult {

@@ -1003,9 +1003,6 @@ int32_t __cdecl host_extended_free(void** ptr) {
 }
 
 constexpr std::uintmax_t kMaxAexStringTableFileBytes = 256u * 1024u * 1024u;
-thread_local const aexcompat::aex_strings::StringTable*
-    g_active_aex_string_table = nullptr;
-thread_local HMODULE g_active_effect_module = nullptr;
 
 bool load_aex_string_table(
     HMODULE module, aexcompat::aex_strings::StringTable& table) {
@@ -1074,18 +1071,20 @@ const char* __cdecl host_extended_lookup(void* table, int32_t id, void* arg2,
   // provenance; resource ownership and lookup behavior remain unchanged.
   const ExtendedLookupOpaqueTableClassification table_classification =
       aexcompat::worker_runtime::classify_extended_lookup_table(
-          table, g_active_effect_module, nullptr,
+          table, aexcompat::worker_runtime::active_plugin::effect_module, nullptr,
           &classify_other_lookup_module);
-  const char* result = g_active_aex_string_table
-      ? g_active_aex_string_table->lookup(id)
+  const auto* active_string_table =
+      aexcompat::worker_runtime::active_plugin::string_table;
+  const char* result = active_string_table
+      ? active_string_table->lookup(id)
       : nullptr;
   // LoadString semantics for a valid table (issue #362): bundled effects
   // probe optional string ids and use the result unchecked (Three-Way Color
   // Corrector strlens the answer for the absent id 610), so a missing id in
   // a valid table yields an empty string, never null. An absent/invalid
   // table stays fail-closed and keeps returning null.
-  if (!result && g_active_aex_string_table &&
-      g_active_aex_string_table->status ==
+  if (!result && active_string_table &&
+      active_string_table->status ==
           aexcompat::aex_strings::ParseStatus::Valid) {
     static constexpr char kEmptyString[] = "";
     result = kEmptyString;
@@ -1099,8 +1098,8 @@ const char* __cdecl host_extended_lookup(void* table, int32_t id, void* arg2,
   }
   const ExtendedLookupStringTableState raw_private_table_state =
       extended_lookup_table_state(
-          g_active_aex_string_table
-              ? g_active_aex_string_table->status
+          active_string_table
+              ? active_string_table->status
               : aexcompat::aex_strings::ParseStatus::NoEntries);
   const ExtendedLookupStringTableState windows_resource_source_state =
       ExtendedLookupStringTableState::none;
