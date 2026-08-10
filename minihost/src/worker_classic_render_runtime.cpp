@@ -788,6 +788,21 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   } render_ui_context_scope{entry, input, command_output, definitions};
   publish_alpha_coverage_provider(logical_source, width, height, pixel_bytes,
                                   external_current_time, external_time_scale);
+  // FRAME_SETUP is already plug-in code and may checkout parameters. Publish
+  // this frame's time before the first lifecycle selector, using the static
+  // capability flags available at entry. QUERY_DYNAMIC_FLAGS runs inside
+  // lifecycle_owner.begin(); its answer is applied again below for the rest of
+  // the frame (issue #839).
+  const uint32_t static_out_flags = read<uint32_t>(command_output, kOutFlags);
+  const uint32_t static_out_flags2 = read<uint32_t>(command_output, kOutFlags2);
+  const bool static_wide_time_allowed =
+      (static_out_flags & kOutFlagWideTimeInput) != 0 ||
+      ((static_out_flags2 & kOutFlag2AutomaticWideTimeInput) != 0 &&
+       (static_out_flags2 & kOutFlag2SupportsSmartRender) == 0);
+  classic_context->configure_checkout_time(
+      read<int32_t>(input, kInCurrentTime), read<uint32_t>(input, kInTimeScale),
+      static_wide_time_allowed,
+      (static_out_flags & kOutFlagIUseShutterAngle) != 0);
   ClassicLifecycleOwner lifecycle_owner{entry, input, command_output, definitions, params,
                                         output_world, manage_sequence};
   auto lifecycle = lifecycle_owner.begin();

@@ -57,6 +57,9 @@ class Context final {
                                bool wide_time_allowed,
                                bool shutter_dependency_advertised) noexcept;
   bool checkout_time_allowed(int32_t time, uint32_t time_scale) noexcept;
+  bool shutter_dependency_advertised() const noexcept {
+    return diagnostics_.shutter_dependency_advertised;
+  }
   void record_checkout(void* definition, int32_t index, int32_t time,
                        int32_t time_step, uint32_t time_scale);
   int32_t checkin(void* definition);

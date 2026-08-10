@@ -123,6 +123,7 @@ using aexcompat::pf_world_transform::transform_world;
 using aexcompat::pf_world_transform::verify_legacy_fill_matte_callbacks;
 using aexcompat::pf_world_transform::verify_world_transform_affine;
 using aexcompat::pf_world_transform::verify_world_transform_blend;
+using aexcompat::pf_world_transform::verify_world_transform_convolve;
 using aexcompat::pf_world_transform::verify_world_transform_composite_rect;
 using aexcompat::pf_world_transform::verify_world_transform_transfer_mask;
 
