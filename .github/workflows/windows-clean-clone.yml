@@ -108,13 +108,6 @@ jobs:
         working-directory: broker
         run: cargo build --workspace --locked
 
-      # Compile test targets before native artifacts are stamped. The built-artifact
-      # tests require every probe to be newer than the runtime harness, and the first
-      # `cargo test` invocation may otherwise replace that harness after probe builds.
-      - name: Compile workspace test targets before native artifacts
-        working-directory: broker
-        run: cargo test --workspace --locked --no-run
-
       # broker 外の Cargo ルートもテストを実行する (#899)。guest workspace は
       # runner に無い libclang が要るので #917 へ分離してある。
       - name: Test AviUtl2 multifilter bridge
@@ -284,7 +277,34 @@ jobs:
       - name: Test Rust workspace
         working-directory: broker
         shell: pwsh
-        run: cargo test --workspace --locked
+        run: |
+          $harness = Join-Path $PWD 'target\debug\aexcompat-harness.exe'
+          $aexRoot = Join-Path $env:GITHUB_WORKSPACE 'target'
+          $before = (Get-FileHash -LiteralPath $harness -Algorithm SHA256).Hash
+          $beforeAex = @{}
+          Get-ChildItem $aexRoot -Recurse -Filter *.aex -File | ForEach-Object {
+            $beforeAex[$_.FullName] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+          }
+          if ($beforeAex.Count -eq 0) { throw 'no generated AEX artifacts were found before workspace tests' }
+          cargo test --workspace --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $after = (Get-FileHash -LiteralPath $harness -Algorithm SHA256).Hash
+          if ($after -ne $before) {
+            throw "workspace tests changed the runtime harness identity after native artifacts were built"
+          }
+          $afterAex = @(Get-ChildItem $aexRoot -Recurse -Filter *.aex -File)
+          if ($afterAex.Count -ne $beforeAex.Count) {
+            throw 'workspace tests changed the generated AEX artifact set'
+          }
+          foreach ($artifact in $afterAex) {
+            $hash = (Get-FileHash -LiteralPath $artifact.FullName -Algorithm SHA256).Hash
+            if (-not $beforeAex.ContainsKey($artifact.FullName) -or $beforeAex[$artifact.FullName] -ne $hash) {
+              throw "workspace tests changed generated AEX artifact: $($artifact.FullName)"
+            }
+          }
+          $stamp = (Get-Item -LiteralPath $harness).LastWriteTimeUtc.AddSeconds(1)
+          $afterAex | Where-Object { $_.LastWriteTimeUtc -lt $stamp } |
+            ForEach-Object { $_.LastWriteTimeUtc = $stamp }
 
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
