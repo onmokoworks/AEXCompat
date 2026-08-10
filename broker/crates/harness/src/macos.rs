@@ -1079,7 +1079,13 @@ fn write_resident_input_slot(
     Ok((width, height))
 }
 
-fn save_argb8_slot(slot: &Path, output: &Path, width: u32, height: u32) -> Result<String, String> {
+fn save_argb8_slot(
+    slot: &Path,
+    output: &Path,
+    width: u32,
+    height: u32,
+    expected_checksum: &str,
+) -> Result<String, String> {
     let argb =
         std::fs::read(slot).map_err(|error| format!("read resident output slot: {error}"))?;
     let expected = width as usize * height as usize * 4;
@@ -1087,6 +1093,12 @@ fn save_argb8_slot(slot: &Path, output: &Path, width: u32, height: u32) -> Resul
         return Err(format!(
             "resident output has {} bytes, expected {expected}",
             argb.len()
+        ));
+    }
+    let checksum = format!("{:x}", Sha256::digest(&argb));
+    if checksum != expected_checksum {
+        return Err(format!(
+            "resident output checksum mismatch: response={expected_checksum} slot={checksum}"
         ));
     }
     let mut rgba = Vec::with_capacity(argb.len());
@@ -1098,7 +1110,7 @@ fn save_argb8_slot(slot: &Path, output: &Path, width: u32, height: u32) -> Resul
     image
         .save(output)
         .map_err(|error| format!("save resident output PNG: {error}"))?;
-    Ok(format!("{:x}", Sha256::digest(&argb)))
+    Ok(checksum)
 }
 
 fn save_argb32f_exr_slot(
@@ -1110,6 +1122,7 @@ fn save_argb32f_exr_slot(
     input_sha256: &str,
     parameters: &str,
     render_path: &str,
+    expected_checksum: &str,
 ) -> Result<String, String> {
     let argb = std::fs::read(slot)
         .map_err(|error| format!("read resident ARGB32F output slot: {error}"))?;
@@ -1120,12 +1133,17 @@ fn save_argb32f_exr_slot(
             argb.len()
         ));
     }
+    let world_sha256 = format!("{:x}", Sha256::digest(&argb));
+    if world_sha256 != expected_checksum {
+        return Err(format!(
+            "resident output checksum mismatch: response={expected_checksum} slot={world_sha256}"
+        ));
+    }
     let mut rgba = Vec::with_capacity(argb.len());
     for pixel in argb.chunks_exact(16) {
         rgba.extend_from_slice(&pixel[4..16]);
         rgba.extend_from_slice(&pixel[0..4]);
     }
-    let world_sha256 = format!("{:x}", Sha256::digest(&argb));
     let conditions = RenderArtifactConditions {
         premultiplication: "premultiplied".into(),
         working_space: "None".into(),
@@ -1158,6 +1176,8 @@ struct StartedResidentWorker {
     height: u32,
     security_tier: SecurityTier,
     fallback_reasons: Vec<String>,
+    plugin_sha256: String,
+    input_sha256: String,
 }
 
 fn start_resident_worker(
@@ -1268,6 +1288,19 @@ fn launch_resident_candidate(
         .root()
         .join(format!("output.{}", format.pixel_format()));
     let (width, height) = write_resident_input_slot(input, &input_slot, format)?;
+    let plugin_sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            std::fs::read(&plugin).map_err(|error| format!("hash staged AEX: {error}"))?
+        )
+    );
+    let input_sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            std::fs::read(&input_slot)
+                .map_err(|error| format!("hash staged resident input: {error}"))?
+        )
+    );
     std::fs::write(
         &output_slot,
         vec![0u8; width as usize * height as usize * format.bytes_per_pixel()],
@@ -1363,6 +1396,8 @@ fn launch_resident_candidate(
         height,
         security_tier: candidate.security_tier(),
         fallback_reasons: Vec::new(),
+        plugin_sha256,
+        input_sha256,
     })
 }
 
@@ -1529,15 +1564,9 @@ fn start_resident_session(
     _output_directory: &Path,
     format: MacRenderFormat,
 ) -> Result<ResidentSessionHandle, String> {
-    let plugin_sha256 = format!(
-        "{:x}",
-        Sha256::digest(std::fs::read(aex).map_err(|error| format!("hash AEX: {error}"))?)
-    );
-    let input_sha256 = format!(
-        "{:x}",
-        Sha256::digest(std::fs::read(input).map_err(|error| format!("hash input: {error}"))?)
-    );
     let started = start_resident_worker(candidates, aex, input, format)?;
+    let plugin_sha256 = started.plugin_sha256.clone();
+    let input_sha256 = started.input_sha256.clone();
     let width = started.width;
     let height = started.height;
     let output_slot = started.output_slot.clone();
@@ -1592,7 +1621,13 @@ fn start_resident_session(
                         session.audit_tree()?;
                         let (observed_checksum, final_output, preview) = match format {
                             MacRenderFormat::PngArgb8 => (
-                                save_argb8_slot(&output_slot, &output, width, height)?,
+                                save_argb8_slot(
+                                    &output_slot,
+                                    &output,
+                                    width,
+                                    height,
+                                    &expected_checksum,
+                                )?,
                                 output.clone(),
                                 Some(output.clone()),
                             ),
@@ -1606,15 +1641,12 @@ fn start_resident_session(
                                     &input_sha256,
                                     &payload,
                                     render_path,
+                                    &expected_checksum,
                                 )?;
                                 (checksum, output.join("output.exr"), None)
                             }
                         };
-                        if observed_checksum != expected_checksum {
-                            return Err(format!(
-                                "resident output checksum mismatch: response={expected_checksum} slot={observed_checksum}"
-                            ));
-                        }
+                        debug_assert_eq!(observed_checksum, expected_checksum);
                         Ok(RenderResult {
                             report: serde_json::to_string_pretty(&json!({
                                 "schema": "aexcompat.macos-resident-render",
@@ -2464,6 +2496,23 @@ mod tests {
             .flat_map(|word| word.to_le_bytes())
             .collect::<Vec<_>>();
         std::fs::write(&slot, &bytes).unwrap();
+        let expected_checksum = format!("{:x}", Sha256::digest(&bytes));
+        let rejected = root.join("rejected");
+        assert!(
+            save_argb32f_exr_slot(
+                &slot,
+                &rejected,
+                1,
+                1,
+                &"11".repeat(32),
+                &"22".repeat(32),
+                "v2",
+                "smartfx",
+                &"00".repeat(32),
+            )
+            .is_err()
+        );
+        assert!(!rejected.exists());
         let checksum = save_argb32f_exr_slot(
             &slot,
             &artifact,
@@ -2473,9 +2522,10 @@ mod tests {
             &"22".repeat(32),
             "v2",
             "smartfx",
+            &expected_checksum,
         )
         .unwrap();
-        assert_eq!(checksum, format!("{:x}", Sha256::digest(&bytes)));
+        assert_eq!(checksum, expected_checksum);
         assert!(artifact.join("output.exr").is_file());
         let metadata: Value =
             serde_json::from_slice(&std::fs::read(artifact.join("output.json")).unwrap()).unwrap();
