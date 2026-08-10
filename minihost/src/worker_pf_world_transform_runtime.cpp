@@ -134,6 +134,17 @@ bool normalize_legacy_rect(const LegacyRect* requested, int32_t width, int32_t h
       result.bottom >= result.top && result.right <= width && result.bottom <= height;
 }
 
+bool clip_legacy_rect(const LegacyRect* requested, int32_t width, int32_t height,
+                      LegacyRect& result) {
+  if (width <= 0 || height <= 0) return false;
+  const LegacyRect candidate = requested ? *requested : LegacyRect{0, 0, width, height};
+  result.left = std::clamp(candidate.left, 0, width);
+  result.top = std::clamp(candidate.top, 0, height);
+  result.right = std::clamp(candidate.right, result.left, width);
+  result.bottom = std::clamp(candidate.bottom, result.top, height);
+  return true;
+}
+
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
   T value{};
@@ -490,7 +501,7 @@ int32_t __cdecl convolve_world(void*, void* source_world, const LegacyRect* requ
       source_width != destination_width || source_height != destination_height)
     return kPfErrBadCallbackParam;
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(requested, source_width, source_height, bounds))
+  if (!clip_legacy_rect(requested, source_width, source_height, bounds))
     return kPfErrBadCallbackParam;
   const auto kernels = std::array<const void*, 4>{
       alpha_kernel, red_kernel, green_kernel, blue_kernel};
@@ -511,6 +522,7 @@ int32_t __cdecl convolve_world(void*, void* source_world, const LegacyRect* requ
     divisors[channel] = flags & kNormalized ? sum : coefficient_scale * tap_count;
     if (std::abs(divisors[channel]) < 1e-12) return kPfErrBadCallbackParam;
   }
+  if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) return 0;
   const uint64_t packed_rowbytes = static_cast<uint64_t>(source_width) * pixel_bytes;
   const uint64_t source_bytes = packed_rowbytes * source_height;
   if (!source_bytes || source_bytes > kMaxAsyncReceiptBytes)
@@ -663,6 +675,53 @@ int32_t __cdecl blend_world(void*, const void* source_world1, const void* source
     }
   }
   return 0;
+}
+
+bool verify_world_transform_convolve() {
+  DispatchWorldFormatScope formats;
+  std::array<uint8_t, 12> source{{255, 10, 0, 0, 255, 20, 0, 0, 255, 30, 0, 0}};
+  std::array<uint8_t, 12> destination{};
+  LocalEffectWorld source_world{}, destination_world{};
+  source_world.data = source.data();
+  source_world.rowbytes = 12;
+  source_world.width = 3;
+  source_world.height = 1;
+  destination_world.data = destination.data();
+  destination_world.rowbytes = 12;
+  destination_world.width = 3;
+  destination_world.height = 1;
+  if (!formats.register_world(&source_world, kPixelFormatArgb32) ||
+      !formats.register_world(&destination_world, kPixelFormatArgb32))
+    return false;
+  std::array<uint8_t, 1> kernel{{255}};
+  constexpr uint32_t flags = (1u << 1) | (1u << 3);  // normalized, byte kernel
+  const auto run = [&](const LegacyRect& area) {
+    return convolve_world(nullptr, &source_world, &area, flags, 1, kernel.data(),
+                          kernel.data(), kernel.data(), kernel.data(),
+                          &destination_world);
+  };
+  const LegacyRect partial{-4, 0, 2, 1};
+  destination.fill(0x5a);
+  if (run(partial) != 0 || destination[1] != 10 || destination[5] != 20 ||
+      destination[9] != 0x5a)
+    return false;
+  const LegacyRect oversized{-4, -3, 9, 7};
+  destination.fill(0);
+  if (run(oversized) != 0 || destination != source) return false;
+  const LegacyRect outside{4, 0, 8, 1};
+  destination.fill(0x5a);
+  const auto sentinel = destination;
+  if (run(outside) != 0 || destination != sentinel) return false;
+  const LegacyRect inverted{2, 1, 1, 0};
+  if (run(inverted) != 0 || destination != sentinel) return false;
+  std::array<uint8_t, 1> zero_kernel{};
+  if (convolve_world(nullptr, &source_world, &outside, flags, 1, zero_kernel.data(),
+                     zero_kernel.data(), zero_kernel.data(), zero_kernel.data(),
+                     &destination_world) != kPfErrBadCallbackParam)
+    return false;
+  return convolve_world(nullptr, &source_world, &oversized, flags, 0, kernel.data(),
+                        kernel.data(), kernel.data(), kernel.data(),
+                        &destination_world) == kPfErrBadCallbackParam;
 }
 
 bool verify_world_transform_blend() {
@@ -982,8 +1041,8 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
             homogeneous};
   };
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(destination_rect, destination_info.width,
-                             destination_info.height, bounds))
+  if (!clip_legacy_rect(destination_rect, destination_info.width,
+                        destination_info.height, bounds))
     return transform_world_denied("destination_rect_invalid");
   const std::size_t packed_row = static_cast<std::size_t>(source_info.width) * pixel_bytes;
   std::vector<unsigned char> source_copy, mask_copy;
@@ -1158,11 +1217,32 @@ bool verify_world_transform_affine() {
   const auto red = [&](int x, int y) { return destination_pixels[(y * 4 + x) * 4 + 1]; };
   if (red(1,1) != 10 || red(2,1) != 20 || red(3,1) != 30 ||
       red(1,2) != 40 || red(2,2) != 50 || red(3,2) != 60 || red(0,0) != 0) return false;
+  // The destination rect is an absolute write area. Clip it to the world
+  // without rebasing matrix coordinates, and treat an empty intersection as a
+  // successful no-op.
+  const std::array<double, 9> identity{{1,0,0, 0,1,0, 0,0,1}};
+  LegacyRect partial{-5, 0, 2, 1};
+  destination_pixels.fill(0x5a);
+  if (transform_world(&source, 0, 1, 0, &source, composite.data(), nullptr,
+                      identity.data(), 1, 0, &partial, &destination) != 0 ||
+      red(0, 0) != 10 || red(1, 0) != 20 || red(2, 0) != 0x5a ||
+      red(0, 1) != 0x5a)
+    return false;
+  const LegacyRect outside{6, 0, 9, 1};
+  const auto sentinel = destination_pixels;
+  if (transform_world(&source, 0, 1, 0, &source, composite.data(), nullptr,
+                      identity.data(), 1, 0, &outside, &destination) != 0 ||
+      destination_pixels != sentinel)
+    return false;
+  const LegacyRect inverted{3, 2, 1, 0};
+  if (transform_world(&source, 0, 1, 0, &source, composite.data(), nullptr,
+                      identity.data(), 1, 0, &inverted, &destination) != 0 ||
+      destination_pixels != sentinel)
+    return false;
   // ARGB8 does not consume opacity16, whereas both deep-color paths do.
   const uint16_t garbage_opacity16 = 59342;
   std::memcpy(composite.data() + 10, &garbage_opacity16, sizeof(garbage_opacity16));
   destination_pixels.fill(0);
-  const std::array<double, 9> identity{{1,0,0, 0,1,0, 0,0,1}};
   if (transform_world(&source, 0, 1, 0, &source, composite.data(), nullptr,
                       identity.data(), 1, 0, &bounds, &destination) != 0 ||
       red(0,0) != 10) return false;
@@ -1923,8 +2003,7 @@ int32_t composite_rect_registered(void* effect_ref, LegacyRect* source_rect,
                                   int32_t field, int32_t transfer_mode,
                                   void* destination_world) {
   if (!effect_ref || !source_rect || source_opacity < 0 || source_opacity > 255 ||
-      field < 0 || field > 2 || transfer_mode < 0 || transfer_mode > 2 ||
-      source_rect->right < source_rect->left || source_rect->bottom < source_rect->top)
+      field < 0 || field > 2 || transfer_mode < 0 || transfer_mode > 2)
     return kPfErrBadCallbackParam;
   DispatchWorldFormat source_info{}, destination_info{};
   if (!resolve_dispatch_world_format(source_world, source_info) ||
@@ -2161,6 +2240,20 @@ bool verify_world_transform_composite_rect() {
   if (composite_rect8(&alias_world, &alias_rect, 255, &alias_world, 1, 0, 0, 0,
                       &alias_world) != 0 || alias_pixels[5] != 1 || alias_pixels[9] != 2) {
     std::cerr << "composite diagnostic: alias\n";
+    return false;
+  }
+  alias_pixels.fill(0x5a);
+  const auto alias_sentinel = alias_pixels;
+  LegacyRect outside_rect{5, 0, 9, 1};
+  if (composite_rect8(&alias_world, &outside_rect, 255, &alias_world, 0, 0, 0, 0,
+                      &alias_world) != 0 || alias_pixels != alias_sentinel) {
+    std::cerr << "composite diagnostic: outside no-op\n";
+    return false;
+  }
+  LegacyRect inverted_rect{2, 1, 1, 0};
+  if (composite_rect8(&alias_world, &inverted_rect, 255, &alias_world, 0, 0, 0, 0,
+                      &alias_world) != 0 || alias_pixels != alias_sentinel) {
+    std::cerr << "composite diagnostic: inverted no-op\n";
     return false;
   }
   if (composite_rect8(nullptr, &alias_rect, 255, &alias_world, 0, 0, 0, 0,
