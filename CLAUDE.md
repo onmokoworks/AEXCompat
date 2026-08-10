@@ -210,7 +210,6 @@ uv sync --locked
 uv run python -m pytest -q
 cargo test --manifest-path broker\Cargo.toml --workspace
 cargo fmt --manifest-path broker\Cargo.toml --all --check
-cargo check --manifest-path bridges\aviutl2\Cargo.toml --all-targets --locked
 cargo check --manifest-path bridges\aviutl2-multifilter\Cargo.toml --all-targets --locked
 ```
 
