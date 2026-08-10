@@ -98,35 +98,26 @@ fn schedule_iterate_progress(unicorn: &mut Unicorn<'_, GuestState>) -> Result<()
         .ok_or_else(|| "PF iterate progress has no pending call".to_string())?;
     let rows = i64::from(pending.bottom - pending.top);
     let completed_rows = i64::from(pending.y - pending.top);
-    let reverse_progress = pending.progress_final < pending.progress_base;
-    let progress_span = if reverse_progress {
-        i64::from(pending.progress_base) - i64::from(pending.progress_final)
-    } else {
-        i64::from(pending.progress_final) - i64::from(pending.progress_base)
-    };
-    if progress_span > i64::from(i32::MAX) {
+    let Some((current, total)) = crate::compose_iterate_progress(
+        pending.progress_base,
+        pending.progress_final,
+        completed_rows as i32,
+        rows as i32,
+    )
+    .map_err(|()| format!("{} progress span exceeds i32", pending.callback_name))?
+    else {
         return Err(format!(
-            "{} progress span exceeds i32",
+            "{} progress callback scheduled without a positive total",
             pending.callback_name
         ));
-    }
-    let current = if reverse_progress {
-        progress_span * completed_rows / rows
-    } else {
-        i64::from(pending.progress_base) + progress_span * completed_rows / rows
-    };
-    let total = if reverse_progress {
-        progress_span
-    } else {
-        i64::from(pending.progress_final)
     };
     schedule_iterate_host_callback(
         unicorn,
         &pending,
         pending.progress_function,
         pending.effect_ref,
-        current as i32 as u32 as u64,
-        total as i32 as u32 as u64,
+        current as u32 as u64,
+        total as u32 as u64,
         IterateCallbackPhase::Progress,
     )
 }
@@ -439,67 +430,78 @@ fn emulate_iterate_common(
 }
 
 fn continue_iterate(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
-    let result =
-        (|| {
-            let callback_error = unicorn
-                .reg_read(RegisterX86::RAX)
-                .map_err(|error| format!("PF iterate callback return: {error}"))?;
-            if callback_error as u32 != 0 {
-                return finish_iterate(unicorn, callback_error as u32 as u64);
-            }
-            let phase = unicorn
-                .get_data()
-                .pending_iterate
-                .as_ref()
-                .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?
-                .callback_phase;
-            match phase {
-                IterateCallbackPhase::Pixel => {
-                    let row_completed =
-                        {
-                            let pending =
-                                unicorn.get_data_mut().pending_iterate.as_mut().ok_or_else(
-                                    || "PF iterate continuation has no pending call".to_string(),
-                                )?;
-                            pending.x += 1;
-                            if pending.x >= pending.right {
-                                pending.x = pending.left;
-                                pending.y += 1;
-                                true
-                            } else {
-                                false
-                            }
-                        };
-                    let pending =
-                        unicorn.get_data().pending_iterate.as_ref().ok_or_else(|| {
-                            "PF iterate continuation has no pending call".to_string()
-                        })?;
-                    if row_completed && pending.progress_function != 0 {
-                        schedule_iterate_progress(unicorn)
-                    } else if pending.y >= pending.bottom {
-                        finish_iterate(unicorn, 0)
-                    } else if row_completed && pending.abort_function != 0 {
-                        schedule_iterate_abort(unicorn)
+    let result = (|| {
+        let callback_error = unicorn
+            .reg_read(RegisterX86::RAX)
+            .map_err(|error| format!("PF iterate callback return: {error}"))?;
+        if callback_error as u32 != 0 {
+            return finish_iterate(unicorn, callback_error as u32 as u64);
+        }
+        let phase = unicorn
+            .get_data()
+            .pending_iterate
+            .as_ref()
+            .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?
+            .callback_phase;
+        match phase {
+            IterateCallbackPhase::Pixel => {
+                let row_completed = {
+                    let pending = unicorn
+                        .get_data_mut()
+                        .pending_iterate
+                        .as_mut()
+                        .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
+                    pending.x += 1;
+                    if pending.x >= pending.right {
+                        pending.x = pending.left;
+                        pending.y += 1;
+                        true
                     } else {
-                        schedule_iterate_pixel(unicorn)
+                        false
                     }
+                };
+                let pending = unicorn
+                    .get_data()
+                    .pending_iterate
+                    .as_ref()
+                    .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
+                let progress_is_reportable = row_completed
+                    && pending.progress_function != 0
+                    && crate::compose_iterate_progress(
+                        pending.progress_base,
+                        pending.progress_final,
+                        pending.y - pending.top,
+                        pending.bottom - pending.top,
+                    )
+                    .map_err(|()| format!("{} progress span exceeds i32", pending.callback_name))?
+                    .is_some();
+                if progress_is_reportable {
+                    schedule_iterate_progress(unicorn)
+                } else if pending.y >= pending.bottom {
+                    finish_iterate(unicorn, 0)
+                } else if row_completed && pending.abort_function != 0 {
+                    schedule_iterate_abort(unicorn)
+                } else {
+                    schedule_iterate_pixel(unicorn)
                 }
-                IterateCallbackPhase::Progress => {
-                    let pending =
-                        unicorn.get_data().pending_iterate.as_ref().ok_or_else(|| {
-                            "PF iterate continuation has no pending call".to_string()
-                        })?;
-                    if pending.y < pending.bottom && pending.abort_function != 0 {
-                        schedule_iterate_abort(unicorn)
-                    } else if pending.y >= pending.bottom {
-                        finish_iterate(unicorn, 0)
-                    } else {
-                        schedule_iterate_pixel(unicorn)
-                    }
-                }
-                IterateCallbackPhase::Abort => schedule_iterate_pixel(unicorn),
             }
-        })();
+            IterateCallbackPhase::Progress => {
+                let pending = unicorn
+                    .get_data()
+                    .pending_iterate
+                    .as_ref()
+                    .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
+                if pending.y < pending.bottom && pending.abort_function != 0 {
+                    schedule_iterate_abort(unicorn)
+                } else if pending.y >= pending.bottom {
+                    finish_iterate(unicorn, 0)
+                } else {
+                    schedule_iterate_pixel(unicorn)
+                }
+            }
+            IterateCallbackPhase::Abort => schedule_iterate_pixel(unicorn),
+        }
+    })();
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
         let _ = unicorn.emu_stop();
@@ -943,10 +945,7 @@ fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) ->
     unicorn.mem_read(type_name + 16, &mut name).is_ok() && name == *b".H\0"
 }
 
-fn msvc_throw_type_name(
-    unicorn: &Unicorn<'_, GuestState>,
-    throw_info: u64,
-) -> Option<String> {
+fn msvc_throw_type_name(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) -> Option<String> {
     const MAX_TYPE_NAME_BYTES: u64 = 128;
 
     let (image_start, image_end) = unicorn.get_data().image_region?;
@@ -986,10 +985,7 @@ fn msvc_throw_type_name(
     None
 }
 
-fn read_msvc_x64_string(
-    unicorn: &Unicorn<'_, GuestState>,
-    object: u64,
-) -> Option<String> {
+fn read_msvc_x64_string(unicorn: &Unicorn<'_, GuestState>, object: u64) -> Option<String> {
     const SSO_CAPACITY: u64 = 15;
     const MAX_STRING_BYTES: u64 = 512;
     const MAX_CAPACITY: u64 = 1 << 20;
@@ -1012,7 +1008,9 @@ fn read_msvc_x64_string(
         u64::from_le_bytes(bytes[..8].try_into().ok()?)
     };
     let byte_count = size.checked_add(1)?;
-    let text = unicorn.mem_read_as_vec(data, usize::try_from(byte_count).ok()?).ok()?;
+    let text = unicorn
+        .mem_read_as_vec(data, usize::try_from(byte_count).ok()?)
+        .ok()?;
     if text.last() != Some(&0) {
         return None;
     }

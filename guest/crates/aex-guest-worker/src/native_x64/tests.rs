@@ -1,5 +1,132 @@
 use super::*;
 
+thread_local! {
+    static ITERATE_PROGRESS_CALLS: std::cell::RefCell<Vec<(i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static ITERATE_EVENTS: std::cell::RefCell<Vec<(i32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static ITERATE_PROGRESS_ERROR: Cell<i32> = const { Cell::new(0) };
+    static ITERATE_ABORT_CALLS: Cell<u32> = const { Cell::new(0) };
+    static ITERATE_ABORT_ERROR: Cell<i32> = const { Cell::new(0) };
+}
+
+unsafe extern "win64" fn test_iterate_pixel(
+    _refcon: u64,
+    _x: i32,
+    _y: i32,
+    _input: u64,
+    output: u64,
+) -> i32 {
+    unsafe { ptr::write(output as *mut [u8; 4], [1, 2, 3, 4]) };
+    0
+}
+
+unsafe extern "win64" fn test_iterate_progress(_effect_ref: u64, current: i32, total: i32) -> i32 {
+    ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow_mut().push((current, total)));
+    ITERATE_EVENTS.with(|events| events.borrow_mut().push((current, total)));
+    ITERATE_PROGRESS_ERROR.with(Cell::get)
+}
+
+unsafe extern "win64" fn test_iterate_abort(_effect_ref: u64) -> i32 {
+    ITERATE_ABORT_CALLS.with(|calls| calls.set(calls.get() + 1));
+    ITERATE_EVENTS.with(|events| events.borrow_mut().push((-1, -1)));
+    ITERATE_ABORT_ERROR.with(Cell::get)
+}
+
+#[test]
+fn iterate_progress_matches_forward_reverse_and_degenerate_contract() {
+    let mut arena = vec![0u8; 2048];
+    let base = arena.as_mut_ptr() as u64;
+    let destination = write_blend_world(&mut arena, 0, base + 1024, 4, 1, 2);
+    let mut state = NativeState {
+        arena_next: base,
+        arena_end: base + arena.len() as u64,
+        ..NativeState::default()
+    };
+    state.worlds.insert(
+        destination,
+        NativeWorld {
+            pixel_format: crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+            size: 8,
+            data: base + 1024,
+            mapping_size: 8,
+        },
+    );
+    let mut in_data = vec![0u8; abi::PF_IN_DATA_SIZE];
+    in_data[abi::INTER_PROGRESS_OFFSET..abi::INTER_PROGRESS_OFFSET + 8]
+        .copy_from_slice(&callback_address!(test_iterate_progress).to_le_bytes());
+    in_data[abi::INTER_ABORT_OFFSET..abi::INTER_ABORT_OFFSET + 8]
+        .copy_from_slice(&callback_address!(test_iterate_abort).to_le_bytes());
+    ACTIVE_STATE.with(|slot| slot.set(&mut state));
+
+    let run = |input: &[u8], progress_base, progress_final| unsafe {
+        iterate_world8(
+            input.as_ptr() as u64,
+            progress_base,
+            progress_final,
+            0,
+            0,
+            0,
+            callback_address!(test_iterate_pixel),
+            destination,
+        )
+    };
+    ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow_mut().clear());
+    ITERATE_EVENTS.with(|events| events.borrow_mut().clear());
+    ITERATE_ABORT_CALLS.with(|calls| calls.set(0));
+    assert_eq!(run(&in_data, 10, 14), 0);
+    assert_eq!(
+        ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow().clone()),
+        [(12, 14), (14, 14)]
+    );
+    assert_eq!(ITERATE_ABORT_CALLS.with(Cell::get), 1);
+    assert_eq!(
+        ITERATE_EVENTS.with(|events| events.borrow().clone()),
+        [(12, 14), (-1, -1), (14, 14)]
+    );
+
+    ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow_mut().clear());
+    ITERATE_EVENTS.with(|events| events.borrow_mut().clear());
+    assert_eq!(run(&in_data, 14, 10), 0);
+    assert_eq!(
+        ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow().clone()),
+        [(2, 4), (4, 4)]
+    );
+
+    ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow_mut().clear());
+    ITERATE_EVENTS.with(|events| events.borrow_mut().clear());
+    ITERATE_ABORT_CALLS.with(|calls| calls.set(0));
+    assert_eq!(run(&in_data, 0, 0), 0);
+    assert!(ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow().is_empty()));
+    assert_eq!(ITERATE_ABORT_CALLS.with(Cell::get), 1);
+    assert_eq!(
+        ITERATE_EVENTS.with(|events| events.borrow().clone()),
+        [(-1, -1)]
+    );
+    assert_eq!(&arena[1024..1032], &[1, 2, 3, 4, 1, 2, 3, 4]);
+
+    ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow_mut().clear());
+    ITERATE_PROGRESS_ERROR.with(|error| error.set(23));
+    assert_eq!(run(&in_data, 10, 14), 23);
+    ITERATE_PROGRESS_ERROR.with(|error| error.set(0));
+
+    ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow_mut().clear());
+    ITERATE_EVENTS.with(|events| events.borrow_mut().clear());
+    ITERATE_ABORT_ERROR.with(|error| error.set(29));
+    assert_eq!(run(&in_data, 10, 14), 29);
+    assert_eq!(
+        ITERATE_EVENTS.with(|events| events.borrow().clone()),
+        [(12, 14), (-1, -1)]
+    );
+    ITERATE_ABORT_ERROR.with(|error| error.set(0));
+
+    in_data[abi::INTER_PROGRESS_OFFSET..abi::INTER_PROGRESS_OFFSET + 8]
+        .copy_from_slice(&0u64.to_le_bytes());
+    ITERATE_ABORT_CALLS.with(|calls| calls.set(0));
+    assert_eq!(run(&in_data, i32::MIN, i32::MAX), 0);
+    assert_eq!(ITERATE_ABORT_CALLS.with(Cell::get), 1);
+
+    ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+}
+
 #[test]
 fn loaded_image_snapshot_is_stable_without_guest_execution() {
     let first = loaded_image_snapshot();
