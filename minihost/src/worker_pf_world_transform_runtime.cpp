@@ -926,7 +926,6 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
   std::memcpy(&opacity16, static_cast<const std::byte*>(composite_mode) + 10, sizeof(opacity16));
   if (transfer_mode != 0) return transform_world_denied("transfer_mode", transfer_mode);
   if (rgb_only > 1) return transform_world_denied("rgb_only_range");
-  if (opacity16 > 32768) return transform_world_denied("opacity16_range", opacity16);
   std::array<double, 9> matrix{};
   std::memcpy(matrix.data(), matrices, sizeof(matrix));
   if (!std::all_of(matrix.begin(), matrix.end(),
@@ -943,6 +942,10 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
       (source_info.pixel_format == kPixelFormatArgb64 ? 8 :
        (source_info.pixel_format == kPixelFormatArgb128 ? 16 : 0));
   if (!pixel_bytes) return transform_world_denied("pixel_format_unknown");
+  // ARGB8 consumes only opacity8. Some plug-ins leave the adjacent deep-color
+  // field uninitialized, so validate opacity16 only on paths that read it.
+  if (pixel_bytes != 4 && opacity16 > 32768)
+    return transform_world_denied("opacity16_range", opacity16);
   if (source_info.width > 4096 || source_info.height > 4096 ||
       destination_info.width > 4096 || destination_info.height > 4096)
     return transform_world_denied("extent_over_4096");
@@ -1155,6 +1158,42 @@ bool verify_world_transform_affine() {
   const auto red = [&](int x, int y) { return destination_pixels[(y * 4 + x) * 4 + 1]; };
   if (red(1,1) != 10 || red(2,1) != 20 || red(3,1) != 30 ||
       red(1,2) != 40 || red(2,2) != 50 || red(3,2) != 60 || red(0,0) != 0) return false;
+  // ARGB8 does not consume opacity16, whereas both deep-color paths do.
+  const uint16_t garbage_opacity16 = 59342;
+  std::memcpy(composite.data() + 10, &garbage_opacity16, sizeof(garbage_opacity16));
+  destination_pixels.fill(0);
+  const std::array<double, 9> identity{{1,0,0, 0,1,0, 0,0,1}};
+  if (transform_world(&source, 0, 1, 0, &source, composite.data(), nullptr,
+                      identity.data(), 1, 0, &bounds, &destination) != 0 ||
+      red(0,0) != 10) return false;
+  std::array<uint16_t, 4> source64{{32768, 1000, 2000, 3000}};
+  std::array<uint16_t, 4> destination64{{123, 456, 789, 1011}};
+  const auto destination64_before = destination64;
+  LocalEffectWorld world64_source{}, world64_destination{};
+  world64_source.data = source64.data(); world64_source.rowbytes = 8;
+  world64_source.width = 1; world64_source.height = 1;
+  world64_destination.data = destination64.data(); world64_destination.rowbytes = 8;
+  world64_destination.width = 1; world64_destination.height = 1;
+  std::array<float, 4> source128{{1.0f, 0.25f, 0.5f, 0.75f}};
+  std::array<float, 4> destination128{{0.1f, 0.2f, 0.3f, 0.4f}};
+  const auto destination128_before = destination128;
+  LocalEffectWorld world128_source{}, world128_destination{};
+  world128_source.data = source128.data(); world128_source.rowbytes = 16;
+  world128_source.width = 1; world128_source.height = 1;
+  world128_destination.data = destination128.data(); world128_destination.rowbytes = 16;
+  world128_destination.width = 1; world128_destination.height = 1;
+  const LegacyRect one_pixel{0, 0, 1, 1};
+  if (!formats.register_world(&world64_source, kPixelFormatArgb64) ||
+      !formats.register_world(&world64_destination, kPixelFormatArgb64) ||
+      !formats.register_world(&world128_source, kPixelFormatArgb128) ||
+      !formats.register_world(&world128_destination, kPixelFormatArgb128) ||
+      transform_world(&world64_source, 0, 1, 0, &world64_source, composite.data(), nullptr,
+                      identity.data(), 1, 0, &one_pixel, &world64_destination) !=
+          kPfErrBadCallbackParam || destination64 != destination64_before ||
+      transform_world(&world128_source, 0, 1, 0, &world128_source, composite.data(), nullptr,
+                      identity.data(), 1, 0, &one_pixel, &world128_destination) !=
+          kPfErrBadCallbackParam || destination128 != destination128_before) return false;
+  std::memcpy(composite.data() + 10, &opacity16, sizeof(opacity16));
   destination_pixels.fill(0);
   const std::array<double, 9> destination_to_source{{1,0,0, 0,1,0, -1,-1,1}};
   if (transform_world(&source, 0, 1, 0, &source, composite.data(), nullptr,
@@ -1181,7 +1220,6 @@ bool verify_world_transform_affine() {
   std::memcpy(mask.data() + 32, &mask_rowbytes, sizeof(mask_rowbytes));
   std::memcpy(mask.data() + 36, &mask_width, sizeof(mask_width));
   std::memcpy(mask.data() + 40, &mask_height, sizeof(mask_height));
-  const std::array<double, 9> identity{{1,0,0, 0,1,0, 0,0,1}};
   if (transform_world(&source, 0, 1, 0, &source, composite.data(), mask.data(),
                       identity.data(), 1, 1, &bounds, &destination) != 0 ||
       red(0,0) != 0 || red(1,0) != 10 || red(2,0) != 30 ||
