@@ -50,6 +50,13 @@ bool initialize_arbitrary_values(EffectEntry entry,
     const int16_t id = read<int16_t>(definitions[i + 1], u);
     void* source = read<void*>(definitions[i + 1], u + 8);
     void* refcon = read<void*>(definitions[i + 1], u + 24);
+    // PF_ADD_ARBITRARY2 initializes the current value to null independently
+    // from its optional default handle.  A null default therefore represents
+    // an uninitialized value; there is no source object for COPY to duplicate.
+    if (!source) {
+      write<void*>(definitions[i + 1], u + 16, nullptr);
+      continue;
+    }
     void* destination = nullptr;
     std::array<std::byte, 48> extra{};
     write<int32_t>(extra, 0, 2);
@@ -57,9 +64,8 @@ bool initialize_arbitrary_values(EffectEntry entry,
     write<void*>(extra, 8, refcon);
     write<void*>(extra, 16, source);
     write<void*>(extra, 24, &destination);
-    const int32_t error = source
-        ? entry(kArbitraryCallback, input.data(), output.data(), nullptr, nullptr, extra.data())
-        : 4;
+    const int32_t error = entry(kArbitraryCallback, input.data(), output.data(),
+                                nullptr, nullptr, extra.data());
     if (error != 0 || !destination || destination == source) {
       ++runtime().arbitrary.print_failures;
       return false;
@@ -443,6 +449,7 @@ bool interpolate_arbitrary_values(EffectEntry entry,
     const int16_t id = read<int16_t>(definition, u);
     void* refcon = read<void*>(definition, u + 24);
     void* source = read<void*>(definition, u + 16);
+    if (!source) continue;
     if (!hooks().handle_is_live(source)) {
       ++runtime().arbitrary.interpolation_failures;
       return false;
@@ -519,6 +526,7 @@ bool roundtrip_arbitrary_values(EffectEntry entry,
     const int16_t id = read<int16_t>(definition, u);
     void* refcon = read<void*>(definition, u + 24);
     void* source = read<void*>(definition, u + 16);
+    if (!source) continue;
     uint32_t exception_code = 0;
     uint32_t flat_size = 0;
     std::array<std::byte, 48> size_extra{};

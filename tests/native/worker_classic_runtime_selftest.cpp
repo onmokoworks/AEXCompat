@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstring>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -19,6 +20,12 @@ const aexcompat::aex_strings::StringTable* g_expected_table{};
 HMODULE g_expected_module{};
 std::mutex g_thread_ids_mutex;
 std::vector<std::thread::id> g_thread_ids;
+int g_arbitrary_copy_calls{};
+int g_arbitrary_dispose_calls{};
+int g_arbitrary_source_token{};
+int g_arbitrary_destination_token{};
+int g_arbitrary_refcon_token{};
+constexpr int16_t kArbitraryId = 73;
 
 void observe_concurrent_render_context() {
   using namespace aexcompat::worker_runtime;
@@ -37,6 +44,43 @@ void observe_concurrent_render_context() {
 
 int32_t __cdecl fail_synthetic_render(
     int32_t, void*, void*, void**, void*, void*) { return 4; }
+
+int32_t __cdecl copy_synthetic_arbitrary(
+    int32_t command, void*, void*, void**, void*, void* extra) {
+  if (command != 22 || !extra) return 4;
+  auto* bytes = static_cast<std::byte*>(extra);
+  int32_t which{};
+  void* source{};
+  void** destination{};
+  int16_t id{};
+  void* refcon{};
+  std::memcpy(&which, bytes, sizeof(which));
+  std::memcpy(&id, bytes + 4, sizeof(id));
+  std::memcpy(&refcon, bytes + 8, sizeof(refcon));
+  std::memcpy(&source, bytes + 16, sizeof(source));
+  if (id != kArbitraryId || refcon != &g_arbitrary_refcon_token) return 4;
+  if (which == 1) {
+    if (source != &g_arbitrary_destination_token) return 4;
+    ++g_arbitrary_dispose_calls;
+    return 0;
+  }
+  std::memcpy(&destination, bytes + 24, sizeof(destination));
+  if (which != 2 || source != &g_arbitrary_source_token || !destination) return 4;
+  *destination = &g_arbitrary_destination_token;
+  ++g_arbitrary_copy_calls;
+  return 0;
+}
+int32_t invoke_synthetic_arbitrary(
+    aexcompat::worker_runtime::parameter_execution::EffectEntry entry,
+    int32_t command, void* input,
+    void* output, void** params, void* world, void* extra,
+    uint32_t* exception_code) {
+  if (exception_code) *exception_code = 0;
+  return entry(command, input, output, params, world, extra);
+}
+bool synthetic_handle_is_live(const void* value) { return value != nullptr; }
+std::size_t no_active_masks() { return 0; }
+bool no_active_mask_id(std::size_t, int32_t*) { return false; }
 }  // namespace
 
 int main() {
@@ -104,6 +148,48 @@ int main() {
       last_selector_dispatched())) return 3;
 
   using namespace aexcompat::worker_runtime;
+
+  // An arbitrary parameter may have no default handle.  It must remain null
+  // without dispatching COPY, while a non-null default is still copied into a
+  // distinct caller-owned handle.
+  auto& parameter_state = parameters::state();
+  parameter_state.records.assign(2, {});
+  parameter_state.records[0].type = 11;
+  parameter_state.records[1].type = 11;
+  parameter_execution::Definitions arbitrary_definitions(3);
+  void* source_value = &g_arbitrary_source_token;
+  void* refcon_value = &g_arbitrary_refcon_token;
+  std::memcpy(arbitrary_definitions[2].data() + 56,
+              &kArbitraryId, sizeof(kArbitraryId));
+  std::memcpy(arbitrary_definitions[2].data() + 64,
+              &source_value, sizeof(source_value));
+  std::memcpy(arbitrary_definitions[2].data() + 80,
+              &refcon_value, sizeof(refcon_value));
+  parameter_execution::BufferIn arbitrary_input{};
+  parameter_execution::BufferOut arbitrary_output{};
+  parameter_execution::configure_hooks({&invoke_synthetic_arbitrary,
+      &synthetic_handle_is_live, &no_active_masks, &no_active_mask_id});
+  if (!parameter_execution::initialize_arbitrary_values(
+          &copy_synthetic_arbitrary, arbitrary_input, arbitrary_output,
+          arbitrary_definitions) ||
+      g_arbitrary_copy_calls != 1) return 4;
+  void* null_value = reinterpret_cast<void*>(1);
+  void* copied_value{};
+  std::memcpy(&null_value, arbitrary_definitions[1].data() + 72,
+              sizeof(null_value));
+  std::memcpy(&copied_value, arbitrary_definitions[2].data() + 72,
+              sizeof(copied_value));
+  if (null_value != nullptr || copied_value != &g_arbitrary_destination_token)
+    return 5;
+  if (!parameter_execution::dispose_arbitrary_values(
+          &copy_synthetic_arbitrary, arbitrary_input, arbitrary_output,
+          arbitrary_definitions) ||
+      g_arbitrary_dispose_calls != 1) return 6;
+  std::memcpy(&copied_value, arbitrary_definitions[2].data() + 72,
+              sizeof(copied_value));
+  if (copied_value != nullptr) return 7;
+  parameter_state.records.clear();
+
   aexcompat::aex_strings::StringTable caller_table;
   g_expected_table = &caller_table;
   g_expected_module = reinterpret_cast<HMODULE>(static_cast<uintptr_t>(0x1082));
@@ -154,7 +240,25 @@ int main() {
       two_distinct_render_threads &&
       active_plugin::string_table == g_expected_table &&
       active_plugin::effect_module == g_expected_module;
-  if (concurrent_context_passed)
+  parameter_state.records.assign(1, {});
+  parameter_state.records[0].type = 11;
+  parameter_execution::Definitions null_arbitrary_definitions(2);
+  const auto interpolation_failures_before =
+      parameter_state.arbitrary.interpolation_failures;
+  const auto roundtrip_failures_before =
+      parameter_state.arbitrary.roundtrip_failures;
+  const bool null_arbitrary_passed =
+      parameter_execution::interpolate_arbitrary_values(
+          &copy_synthetic_arbitrary, arbitrary_input, arbitrary_output,
+          null_arbitrary_definitions) &&
+      parameter_execution::roundtrip_arbitrary_values(
+          &copy_synthetic_arbitrary, arbitrary_input, arbitrary_output,
+      null_arbitrary_definitions) &&
+      parameter_state.arbitrary.interpolation_failures ==
+          interpolation_failures_before &&
+      parameter_state.arbitrary.roundtrip_failures == roundtrip_failures_before;
+  parameter_state.records.clear();
+  if (concurrent_context_passed && null_arbitrary_passed)
     std::cout << "{\"classic_runtime_selftest\":\"passed\"}\n";
-  return concurrent_context_passed ? 0 : 4;
+  return concurrent_context_passed && null_arbitrary_passed ? 0 : 8;
 }
