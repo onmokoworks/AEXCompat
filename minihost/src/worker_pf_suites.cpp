@@ -405,6 +405,10 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
   const bool has_source = source_world != nullptr;
   using aexcompat::callback_diagnostics::Callback;
   using aexcompat::callback_diagnostics::Reason;
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:iterate_args base=" << progress_base
+              << " final=" << progress_final << " bytes=" << pixel_bytes
+              << " src=" << (has_source ? 1 : 0) << "\n" << std::flush;
   // On a resolve_world failure the close report only records "missing_world",
   // which does not say which side failed or why bounded_typed_world rejected it
   // (issue #1035). Dump the rejected world's raw fields under extended diag so a
@@ -513,7 +517,14 @@ int32_t iterate_world_typed(void* in_data, int32_t progress_base, int32_t progre
     const int32_t callback_total = reverse_progress
         ? static_cast<int32_t>(progress_span)
         : progress_final;
-    if (progress_callback) {
+    // progress_base == progress_final == 0 is the SDK's "no progress
+    // contribution" idiom (Bevel_Edges and Drop_Shadow iterate that way), and
+    // the callback here is the host's own report_progress read back out of
+    // in_data. Synthesizing a (0, 0) report would trip that callback's own
+    // total<=0 validation and fail the whole iterate with 4 (issue #1054), so
+    // only report when there is a progress range to report. A plug-in calling
+    // the callback directly still gets the full fail-closed validation.
+    if (progress_callback && callback_total > 0) {
       const int32_t error = progress_callback(effect_ref, current, callback_total);
       if (error != 0)
         return finish_callback(Callback::Iterate, error, Reason::ProgressCallback);
@@ -864,6 +875,16 @@ bool verify_iterate_suites() {
             &interaction, &iterate_test_pixel, &typed_destination_world) != 73 ||
         interaction.pixel_calls != 2 || interaction.abort_calls != 1 ||
         interaction.progress != std::vector<int32_t>({11})) return false;
+
+    // progress_base == progress_final == 0 is the "no progress contribution"
+    // idiom (Bevel_Edges, Drop_Shadow iterate that way): the host must not
+    // synthesize a (0, 0) report that its own progress callback rejects as
+    // total<=0, and the abort cadence stays unchanged (issue #1054).
+    interaction = {};
+    if (iterate_world_typed(input.data(), 0, 0, pixel_bytes, &typed_source_world, &four_rows,
+            &interaction, &iterate_test_pixel, &typed_destination_world) != 0 ||
+        interaction.pixel_calls != 4 || interaction.abort_calls != 3 ||
+        !interaction.progress.empty()) return false;
   }
 
   // A float world that leaves the DEEP bit clear must still resolve for a float
