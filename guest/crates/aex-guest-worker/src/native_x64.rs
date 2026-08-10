@@ -1713,15 +1713,25 @@ unsafe extern "win64" fn iterate_world8(
         }
         let completed = y - top + 1;
         if progress != 0 {
-            let callback: IterateProgress = unsafe { std::mem::transmute(progress as usize) };
-            let current = progress_base as i64
-                + (progress_final as i64 - progress_base as i64) * completed as i64 / rows as i64;
-            let error = unsafe { callback(effect_ref, current as i32, progress_final) };
-            if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true) {
-                if error != 0 {
-                    return error as u32 as u64;
+            let composed_progress = match crate::compose_iterate_progress(
+                progress_base,
+                progress_final,
+                completed,
+                rows,
+            ) {
+                Ok(progress) => progress,
+                Err(()) => return 4,
+            };
+            if let Some((current, total)) = composed_progress {
+                let callback: IterateProgress = unsafe { std::mem::transmute(progress as usize) };
+                let error = unsafe { callback(effect_ref, current, total) };
+                if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true)
+                {
+                    if error != 0 {
+                        return error as u32 as u64;
+                    }
+                    return 4;
                 }
-                return 4;
             }
         }
         if completed < rows && abort != 0 {

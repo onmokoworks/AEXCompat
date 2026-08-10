@@ -96,10 +96,11 @@
             0xff, 0x41, 0x0c, 0x48, 0x8b, 0x44, 0x24, 0x28, 0x49, 0x8b, 0x11, 0x48, 0x89, 0x10,
             0x31, 0xc0, 0xc3,
         ];
-        // Progress: store current/total; increment [effect_ref+16]; return
-        // the test-controlled value at effect_ref+20.
+        // Progress: preserve the first current/total at +28/+32, store the
+        // latest pair at +0/+4, increment +16, and return the controlled +20.
         let progress = [
-            0x89, 0x11, 0x44, 0x89, 0x41, 0x04, 0xff, 0x41, 0x10, 0x8b, 0x41, 0x14, 0xc3,
+            0x83, 0x79, 0x10, 0x00, 0x75, 0x07, 0x89, 0x51, 0x1c, 0x44, 0x89, 0x41, 0x20, 0x89,
+            0x11, 0x44, 0x89, 0x41, 0x04, 0xff, 0x41, 0x10, 0x8b, 0x41, 0x14, 0xc3,
         ];
         // Abort: increment [effect_ref+8]; return the test-controlled value at +24.
         let abort = [0xff, 0x41, 0x08, 0x8b, 0x41, 0x18, 0xc3];
@@ -120,7 +121,7 @@
         world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
             .copy_from_slice(&2i32.to_le_bytes());
         engine.write(destination_world, &world).unwrap();
-        let counters = engine.allocate(28, 4).unwrap();
+        let counters = engine.allocate(36, 4).unwrap();
         let in_data = engine.allocate(abi::PF_IN_DATA_SIZE, 8).unwrap();
         let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
         input[abi::INTER_ABORT_OFFSET..abi::INTER_ABORT_OFFSET + 8]
@@ -148,7 +149,7 @@
             )
         };
         assert_eq!(call(&mut engine, 10, 14).unwrap(), 0);
-        let mut observed = [0u8; 20];
+        let mut observed = [0u8; 36];
         engine.read(counters, &mut observed).unwrap();
         let value = |bytes: &[u8], offset| {
             i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
@@ -160,11 +161,13 @@
                 value(&observed, 8),
                 value(&observed, 12),
                 value(&observed, 16),
+                value(&observed, 28),
+                value(&observed, 32),
             ],
-            [14, 14, 1, 2, 2]
+            [14, 14, 1, 2, 2, 12, 14]
         );
 
-        engine.write(counters, &[0; 28]).unwrap();
+        engine.write(counters, &[0; 36]).unwrap();
         assert_eq!(call(&mut engine, 14, 10).unwrap(), 0);
         engine.read(counters, &mut observed).unwrap();
         assert_eq!(
@@ -174,15 +177,31 @@
                 value(&observed, 8),
                 value(&observed, 12),
                 value(&observed, 16),
+                value(&observed, 28),
+                value(&observed, 32),
             ],
-            [4, 4, 1, 2, 2]
+            [4, 4, 1, 2, 2, 2, 4]
         );
 
-        engine.write(counters, &[0; 28]).unwrap();
+        engine.write(counters, &[0; 36]).unwrap();
+        assert_eq!(call(&mut engine, 0, 0).unwrap(), 0);
+        engine.read(counters, &mut observed).unwrap();
+        assert_eq!(
+            [
+                value(&observed, 0),
+                value(&observed, 4),
+                value(&observed, 8),
+                value(&observed, 12),
+                value(&observed, 16),
+            ],
+            [0, 0, 1, 2, 0]
+        );
+
+        engine.write(counters, &[0; 36]).unwrap();
         engine.write(counters + 20, &23i32.to_le_bytes()).unwrap();
         assert_eq!(call(&mut engine, 10, 14).unwrap(), 23);
 
-        engine.write(counters, &[0; 28]).unwrap();
+        engine.write(counters, &[0; 36]).unwrap();
         engine.write(counters + 24, &29i32.to_le_bytes()).unwrap();
         assert_eq!(call(&mut engine, 10, 14).unwrap(), 29);
     }

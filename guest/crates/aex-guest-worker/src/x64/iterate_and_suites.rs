@@ -98,35 +98,26 @@ fn schedule_iterate_progress(unicorn: &mut Unicorn<'_, GuestState>) -> Result<()
         .ok_or_else(|| "PF iterate progress has no pending call".to_string())?;
     let rows = i64::from(pending.bottom - pending.top);
     let completed_rows = i64::from(pending.y - pending.top);
-    let reverse_progress = pending.progress_final < pending.progress_base;
-    let progress_span = if reverse_progress {
-        i64::from(pending.progress_base) - i64::from(pending.progress_final)
-    } else {
-        i64::from(pending.progress_final) - i64::from(pending.progress_base)
-    };
-    if progress_span > i64::from(i32::MAX) {
+    let Some((current, total)) = crate::compose_iterate_progress(
+        pending.progress_base,
+        pending.progress_final,
+        completed_rows as i32,
+        rows as i32,
+    )
+    .map_err(|()| format!("{} progress span exceeds i32", pending.callback_name))?
+    else {
         return Err(format!(
-            "{} progress span exceeds i32",
+            "{} progress callback scheduled without a positive total",
             pending.callback_name
         ));
-    }
-    let current = if reverse_progress {
-        progress_span * completed_rows / rows
-    } else {
-        i64::from(pending.progress_base) + progress_span * completed_rows / rows
-    };
-    let total = if reverse_progress {
-        progress_span
-    } else {
-        i64::from(pending.progress_final)
     };
     schedule_iterate_host_callback(
         unicorn,
         &pending,
         pending.progress_function,
         pending.effect_ref,
-        current as i32 as u32 as u64,
-        total as i32 as u32 as u64,
+        current as u32 as u64,
+        total as u32 as u64,
         IterateCallbackPhase::Progress,
     )
 }
@@ -474,7 +465,19 @@ fn continue_iterate(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
                         unicorn.get_data().pending_iterate.as_ref().ok_or_else(|| {
                             "PF iterate continuation has no pending call".to_string()
                         })?;
-                    if row_completed && pending.progress_function != 0 {
+                    let progress_is_reportable = row_completed
+                        && pending.progress_function != 0
+                        && crate::compose_iterate_progress(
+                            pending.progress_base,
+                            pending.progress_final,
+                            pending.y - pending.top,
+                            pending.bottom - pending.top,
+                        )
+                        .map_err(|()| {
+                            format!("{} progress span exceeds i32", pending.callback_name)
+                        })?
+                        .is_some();
+                    if progress_is_reportable {
                         schedule_iterate_progress(unicorn)
                     } else if pending.y >= pending.bottom {
                         finish_iterate(unicorn, 0)
