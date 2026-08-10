@@ -32,7 +32,10 @@ int invoke_render(void* opaque) {
 
 int invoke_cleanup(void* opaque) {
   const auto& request = *static_cast<const Request*>(opaque);
-  return request.hooks.cleanup ? request.hooks.cleanup(request.opaque) : 0;
+  const int cleanup_error =
+      request.hooks.cleanup ? request.hooks.cleanup(request.opaque) : 0;
+  if (auto* context = active_context()) context->automatic_checkin();
+  return cleanup_error;
 }
 
 bool dependencies_ready(void* opaque) {

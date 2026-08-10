@@ -35,6 +35,11 @@ bool g_expect_frame_wide_time{};
 bool g_expect_frame_shutter_dependency{};
 bool g_advertise_dynamic_wide_time{};
 int g_render_wide_time_observations{};
+int g_checkout_token{};
+int g_selector_result{};
+int g_cleanup_result{};
+bool g_explicit_checkin{};
+bool g_invalid_double_checkin{};
 
 void observe_concurrent_render_context() {
   using namespace aexcompat::worker_runtime;
@@ -92,6 +97,18 @@ std::size_t no_active_masks() { return 0; }
 bool no_active_mask_id(std::size_t, int32_t*) { return false; }
 void capture_clean_audit() {}
 bool audit_stays_clean() { return true; }
+
+int render_with_parameter_checkout(void*) {
+  auto* context = active_context();
+  if (!context) return 4;
+  context->record_checkout(&g_checkout_token, 1, 0, 1, 24);
+  if (g_explicit_checkin && context->checkin(&g_checkout_token) != 0) return 4;
+  if (g_invalid_double_checkin) return context->checkin(&g_checkout_token);
+  return g_selector_result;
+}
+
+int cleanup_after_parameter_checkout(void*) { return g_cleanup_result; }
+bool dependencies_are_ready(void*) { return true; }
 
 int32_t __cdecl observe_frame_setup_checkout_time(
     int32_t command, void*, void* output, void**, void*, void*) {
@@ -189,6 +206,51 @@ int main() {
       result.rejected_temporal_checkouts == 0 && result.balanced &&
       result.shutter_dependency_advertised &&
       last_selector_dispatched())) return 3;
+
+  // The shipping Classic dispatch boundary must reclaim a successful
+  // checkout left live by the selector, while preserving the primary selector
+  // error. An explicit plug-in checkin remains explicit rather than being
+  // counted as host reclamation, and a cleanup error remains observable when
+  // the selector itself succeeded.
+  reset_selector_diagnostic();
+  g_selector_result = 37;
+  g_cleanup_result = 41;
+  g_explicit_checkin = false;
+  g_invalid_double_checkin = false;
+  Request leaked_checkout_request{
+      nullptr,
+      {&render_with_parameter_checkout, &cleanup_after_parameter_checkout,
+       &dependencies_are_ready},
+      false};
+  if (dispatch(leaked_checkout_request) != 37) return 34;
+  const auto reclaimed = diagnostics();
+  if (reclaimed.checkout_calls != 1 || reclaimed.checkin_calls != 1 ||
+      reclaimed.automatic_checkins != 1 || reclaimed.invalid_checkins != 0 ||
+      !reclaimed.balanced)
+    return 35;
+
+  reset_selector_diagnostic();
+  g_selector_result = 0;
+  g_cleanup_result = 41;
+  g_explicit_checkin = true;
+  if (dispatch(leaked_checkout_request) != 41) return 36;
+  const auto explicit_checkin = diagnostics();
+  if (explicit_checkin.checkout_calls != 1 ||
+      explicit_checkin.checkin_calls != 1 ||
+      explicit_checkin.automatic_checkins != 0 ||
+      explicit_checkin.invalid_checkins != 0 || !explicit_checkin.balanced)
+    return 37;
+
+  reset_selector_diagnostic();
+  g_cleanup_result = 0;
+  g_explicit_checkin = true;
+  g_invalid_double_checkin = true;
+  if (dispatch(leaked_checkout_request) != 4) return 38;
+  const auto invalid_checkin = diagnostics();
+  if (invalid_checkin.checkout_calls != 1 || invalid_checkin.checkin_calls != 1 ||
+      invalid_checkin.automatic_checkins != 0 ||
+      invalid_checkin.invalid_checkins != 1 || invalid_checkin.balanced)
+    return 39;
 
   // Exercise the shipping render_once boundary: FRAME_SETUP must observe the
   // current nonzero frame time, not Context's default or the previous frame.
