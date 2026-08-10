@@ -60,6 +60,17 @@ MODES = {
         "width": 0,
         "height": 0,
     },
+    4: {  # a large availability envelope does not size the output allocation
+        "result_rect": [0, 0, WIDTH, HEIGHT],
+        "max_result_rect": [-5000, -5000, 5000, 5000],
+        "returns_extra_pixels": False,
+        "result_within_request": True,
+        "extra_pixels_contract_violation": False,
+        "empty_result_rect": False,
+        "smart_render_selector_dispatched": True,
+        "width": WIDTH,
+        "height": HEIGHT,
+    },
 }
 
 
@@ -75,7 +86,7 @@ def _run(tmp_path, pixel_format, mode):
     return run_session_render(
         tmp_path, PROBE, input_path, output_path, width=WIDTH, height=HEIGHT,
         pixel_format=pixel_format, smart=True, current_time=mode,
-        total_time=4, time_scale=1,
+        total_time=5, time_scale=1,
     )
 
 

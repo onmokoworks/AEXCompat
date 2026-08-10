@@ -21,6 +21,7 @@ constexpr std::size_t kMaxSuiteNameBytes = 96;
 constexpr std::size_t kMaxTelemetrySuiteNameBytes = 64;
 constexpr std::size_t kMaxSuiteSelectorBytes = 64;
 constexpr std::size_t kMaxSuiteTimeline = 512;
+constexpr std::size_t kMaxFailedAcquireKeys = 512;
 constexpr int32_t kMaxSuiteVersion = 65535;
 constexpr uint32_t kMaxUnsupportedSuiteSlot = 1023;
 thread_local const char* g_suite_selector = "HOST";
@@ -191,7 +192,15 @@ int32_t SuiteRegistry::release(const char* name, int32_t version,
   const char* const safe_name = owned_name.text.data();
   const bool valid_name = owned_name.readable && owned_name.terminated;
   const bool released = valid_name && lease_tracker_.release(safe_name, version);
-  if (!released) rejected_releases_.fetch_add(1, std::memory_order_relaxed);
+  // Some plug-ins pair every AcquireSuite attempt with ReleaseSuite, including
+  // versions the host reported as unavailable. Preserve the rejected return
+  // and timeline event, but do not misclassify that exact, previously failed
+  // acquisition as a release-without-acquire host fault. A release with no
+  // matching successful or failed acquisition remains a fault.
+  const bool matched_failed_acquire = !released && valid_name &&
+      consume_failed_acquire(safe_name, version);
+  if (!released && !matched_failed_acquire)
+    rejected_releases_.fetch_add(1, std::memory_order_relaxed);
   record_suite_timeline(false, owned_name.text.data(), owned_name.length,
                         valid_name, version, released ? 0 : 1);
   if (trace_writer && valid_name && owned_name.length != 0)
@@ -255,6 +264,7 @@ int32_t SuiteRegistry::reject_unknown(const char* name, int32_t version,
                                       TraceWriter* trace_writer) {
   const std::string safe_name = safe_missing_name(name);
   record_missing_suite(safe_name, version);
+  record_failed_acquire(safe_name, version);
   if (trace_writer && !safe_name.empty()) {
     trace_writer->suite_acquire(safe_name, std::max<int32_t>(version, 0), false);
     // An unknown suite is an unimplemented host capability (issue #17). Record
@@ -266,6 +276,31 @@ int32_t SuiteRegistry::reject_unknown(const char* name, int32_t version,
   std::cerr << "stage:suite_acquire_failed name=" << safe_name
             << " version=" << version << "\n" << std::flush;
   return 1;
+}
+
+void SuiteRegistry::record_failed_acquire(const std::string& name,
+                                          int32_t version) {
+  if (!valid_schema_text(name, kMaxTelemetrySuiteNameBytes, true) ||
+      version <= 0 || version > kMaxSuiteVersion)
+    return;
+  std::lock_guard<std::mutex> lock(failed_acquires_mutex_);
+  const auto key = std::make_pair(name, version);
+  auto found = failed_acquires_.find(key);
+  if (found != failed_acquires_.end()) {
+    if (found->second != std::numeric_limits<uint32_t>::max()) ++found->second;
+    return;
+  }
+  if (failed_acquires_.size() < kMaxFailedAcquireKeys)
+    failed_acquires_.emplace(key, 1);
+}
+
+bool SuiteRegistry::consume_failed_acquire(const std::string& name,
+                                           int32_t version) {
+  std::lock_guard<std::mutex> lock(failed_acquires_mutex_);
+  const auto found = failed_acquires_.find(std::make_pair(name, version));
+  if (found == failed_acquires_.end()) return false;
+  if (--found->second == 0) failed_acquires_.erase(found);
+  return true;
 }
 
 bool SuiteRegistry::balanced() const { return lease_tracker_.balanced(); }
