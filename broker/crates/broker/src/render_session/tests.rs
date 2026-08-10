@@ -279,7 +279,7 @@ fn smart_final_report_clean_requires_the_session_fields() {
 }
 
 #[test]
-fn classic_final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() {
+fn final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() {
     let mut warned = serde_json::json!({
         "status": "render_completed",
         "global_setdown_error": 0,
@@ -324,7 +324,11 @@ fn classic_final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() 
     smart_warned["session_sequence_setdown_error"] = serde_json::json!(0);
     assert_eq!(
         validate_final_report(&smart_warned, true),
-        Err(CloseReportInvariant::UnexpectedLiveSuiteLease)
+        Ok(FinalReportValidation::CleanWithSuiteLeaseWarning {
+            suite_acquires: 33,
+            suite_releases: 24,
+            live_suite_lease_count: 1,
+        })
     );
 
     for (key, value) in [
