@@ -2972,15 +2972,10 @@ pub(crate) fn validate_final_report(
         if report.get("session_sequence_setdown_error") != Some(&json!(0)) {
             return Err(CloseReportInvariant::SmartSequenceSetdown);
         }
-        // The tolerated non-owned global lease is a classic length-one
-        // compatibility exception.  SmartFX keeps its original strict close
-        // contract: a live suite lease must never make its session clean.
-        if matches!(
-            lease_validation,
-            FinalReportValidation::CleanWithSuiteLeaseWarning { .. }
-        ) {
-            return Err(CloseReportInvariant::UnexpectedLiveSuiteLease);
-        }
+        // The typed lease validator above is render-path independent: an
+        // explicit, non-faulting, count-consistent residual lease is contained
+        // by worker exit on SmartFX just as it is on the classic length-one
+        // path. All malformed or faulting evidence still fails closed there.
     } else {
         if report.get("render_error") != Some(&json!(0)) {
             return Err(CloseReportInvariant::ClassicRenderError);

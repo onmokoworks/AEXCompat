@@ -848,6 +848,19 @@ int main() {
           std::string::npos;
 
   {
+    SuiteRegistry failed_pair_registry;
+    suite = reinterpret_cast<const void*>(0x5678);
+    passed = passed &&
+        failed_pair_registry.acquire("Unavailable Suite", 7, &suite,
+                                     &resolve_known, nullptr, nullptr) == 1 &&
+        suite == nullptr &&
+        failed_pair_registry.release("Unavailable Suite", 7, nullptr) == 1 &&
+        failed_pair_registry.rejected_release_count() == 0 &&
+        failed_pair_registry.release("Unavailable Suite", 7, nullptr) == 1 &&
+        failed_pair_registry.rejected_release_count() == 1;
+  }
+
+  {
     const auto baseline = registry.snapshot();
     suite = nullptr;
     passed = passed &&
