@@ -363,6 +363,16 @@ target_compile_features(aex_smart_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_smart_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_smart_worker PRIVATE bcrypt aexcompat_trace_writer)
 
+add_executable(worker_classic_suite_report_selftest
+    ../tests/native/worker_classic_suite_report_selftest.cpp
+    $<TARGET_OBJECTS:aex_worker_runtime_core>)
+target_compile_features(worker_classic_suite_report_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_classic_suite_report_selftest PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_classic_suite_report_selftest PRIVATE src)
+target_link_libraries(worker_classic_suite_report_selftest PRIVATE
+    bcrypt aexcompat_trace_writer)
+
 add_executable(worker_suite_registry_selftest
   ../tests/native/worker_suite_registry_selftest.cpp
   src/suite_lease_tracker.cpp

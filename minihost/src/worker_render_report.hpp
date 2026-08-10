@@ -303,6 +303,7 @@ struct ClassicSubsystemDiagnostics {
   std::array<int64_t, 4> suite_counts{};  // acquires, releases, live leases, references
   std::string missing_suites_json;
   std::string live_suite_leases;
+  bool suite_fault{};
   bool handle_balanced{};
   bool path_balanced{};
   std::array<int64_t, 8> path_counts{};
