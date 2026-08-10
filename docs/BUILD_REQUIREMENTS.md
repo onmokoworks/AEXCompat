@@ -60,11 +60,10 @@ cargo build -p aexcompat-harness --release
 cargo test --workspace
 ```
 
-When a broker API changes, check both AviUtl2 bridge crates and their examples
+When a broker API changes, check the AviUtl2 multifilter bridge and its examples
 as well as the broker workspace:
 
 ```powershell
-cargo check --manifest-path bridges\aviutl2\Cargo.toml --all-targets --locked
 cargo check --manifest-path bridges\aviutl2-multifilter\Cargo.toml --all-targets --locked
 ```
 
