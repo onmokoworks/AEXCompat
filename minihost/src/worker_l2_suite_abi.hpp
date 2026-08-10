@@ -14,6 +14,8 @@ int32_t __cdecl report_progress(void*, int32_t, int32_t);
 int32_t __cdecl register_custom_ui(void*, const void*);
 int32_t __cdecl adv_app_info_text(const char*, const char*);
 int32_t __cdecl adv_app_info_text3(const char*, const char*, const char*);
+int32_t __cdecl adv_app_info_text3_plus(const char*, const char*, const char*,
+                                        const char*, const char*);
 }
 double __cdecl ansi_atan(double);
 double __cdecl ansi_atan2(double, double);

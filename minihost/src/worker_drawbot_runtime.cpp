@@ -314,6 +314,8 @@ extern "C" {
 int32_t __cdecl register_custom_ui(void*, const void*);
 int32_t __cdecl adv_app_info_text(const char*, const char*);
 int32_t __cdecl adv_app_info_text3(const char*, const char*, const char*);
+int32_t __cdecl adv_app_info_text3_plus(const char*, const char*, const char*,
+                                        const char*, const char*);
 }
 using CustomUiRegistration =
     aexcompat::worker_runtime::ui_event_execution::CustomUiRegistration;
@@ -371,6 +373,36 @@ int32_t __cdecl adv_app_info_text3(const char* first, const char* second,
       strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256) return 4;
   g_last_adv_app_info_text = std::string(first) + " | " + second;
   if (third) g_last_adv_app_info_text += std::string(" | ") + third;
+  ++g_adv_app_info_text_calls;
+  return 0;
+}
+
+// PF_InfoDrawText3Plus (PF_AdvAppSuite1/2 slot 9): three lines, where line 2 and
+// line 3 each carry separate right- and left-justified halves. The info palette
+// does not exist in a headless render, so this joins whatever parts were given
+// into telemetry and reports success like its two-line siblings above, instead
+// of leaving the slot a recorder stub that returns 4 (issue #1055). Every
+// argument is declared `...Z0` in the SDK, i.e. an optional zero-terminated
+// string that may be null, so none is required; only over-long strings are
+// rejected. Rejecting a null the way the two/three-line variants reject their
+// first arguments would fail effects (Environment, Overbrights) that leave a
+// justification half empty.
+int32_t __cdecl adv_app_info_text3_plus(const char* line1, const char* line2_jr,
+                                        const char* line2_jl, const char* line3_jr,
+                                        const char* line3_jl) {
+  const auto bounded = [](const char* text) {
+    return !text || strnlen_s(text, 256) < 256;
+  };
+  if (!bounded(line1) || !bounded(line2_jr) || !bounded(line2_jl) ||
+      !bounded(line3_jr) || !bounded(line3_jl))
+    return 4;
+  std::string joined;
+  for (const char* part : {line1, line2_jr, line2_jl, line3_jr, line3_jl}) {
+    if (!part) continue;
+    if (!joined.empty()) joined += " | ";
+    joined += part;
+  }
+  g_last_adv_app_info_text = joined;
   ++g_adv_app_info_text_calls;
   return 0;
 }

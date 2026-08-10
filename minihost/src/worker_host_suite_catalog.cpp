@@ -58,7 +58,8 @@ OwnedCatalog& state() {
 
 bool configure_suite_assembly(const AssemblyHooks& hooks) {
   if (!hooks.duck || !hooks.effect_ui ||
-      !hooks.adv_info || !hooks.adv_info3 || !hooks.dynamic_stream_set_flag)
+      !hooks.adv_info || !hooks.adv_info3 || !hooks.adv_info3_plus ||
+      !hooks.dynamic_stream_set_flag)
     return false;
   auto& catalog = state();
   std::lock_guard<std::mutex> lock(catalog.mutex);
@@ -91,8 +92,8 @@ const void* provide_path_query1(void*) { auto& c=state(); c.path_query=c.assembl
 const void* provide_path_data1(void*) { auto& c=state(); c.path_data=c.assembly.path_data; return c.path_data.data(); }
 const void* provide_duck1(void*) { auto& c=state(); c.duck[0]=c.assembly.duck; return c.duck.data(); }
 const void* provide_effect_ui1(void*) { auto& c=state(); c.effect_ui[0]=c.assembly.effect_ui; return c.effect_ui.data(); }
-const void* provide_adv_app1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_1>(c.adv_app1); c.adv_app1[6]=c.assembly.adv_info; c.adv_app1[8]=c.assembly.adv_info3; return c.adv_app1.data(); }
-const void* provide_adv_app2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_2>(c.adv_app2); c.adv_app2[6]=c.assembly.adv_info; c.adv_app2[8]=c.assembly.adv_info3; return c.adv_app2.data(); }
+const void* provide_adv_app1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_1>(c.adv_app1); c.adv_app1[6]=c.assembly.adv_info; c.adv_app1[8]=c.assembly.adv_info3; c.adv_app1[9]=c.assembly.adv_info3_plus; return c.adv_app1.data(); }
+const void* provide_adv_app2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_2>(c.adv_app2); c.adv_app2[6]=c.assembly.adv_info; c.adv_app2[8]=c.assembly.adv_info3; c.adv_app2[9]=c.assembly.adv_info3_plus; return c.adv_app2.data(); }
 const void* provide_drawbot_draw1(void*) { auto& c=state(); c.drawbot_draw=c.assembly.drawbot_draw; return c.drawbot_draw.data(); }
 const void* provide_drawbot_supplier1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::drawbot_supplier_1>(c.drawbot_supplier); c.drawbot_supplier[0]=c.assembly.drawbot_new_pen; c.drawbot_supplier[1]=c.assembly.drawbot_new_brush; c.drawbot_supplier[6]=c.assembly.drawbot_new_path; c.drawbot_supplier[12]=c.assembly.drawbot_release; return c.drawbot_supplier.data(); }
 const void* provide_drawbot_surface2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::drawbot_surface_2>(c.drawbot_surface); c.drawbot_surface[2]=c.assembly.drawbot_paint_rect; c.drawbot_surface[3]=c.assembly.drawbot_fill_path; c.drawbot_surface[4]=c.assembly.drawbot_stroke_path; return c.drawbot_surface.data(); }

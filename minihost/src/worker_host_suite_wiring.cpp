@@ -581,6 +581,7 @@ bool configure_component_suite_catalog() {
       reinterpret_cast<void*>(&set_options_button_name),
       reinterpret_cast<void*>(&adv_app_info_text),
       reinterpret_cast<void*>(&adv_app_info_text3),
+      reinterpret_cast<void*>(&adv_app_info_text3_plus),
       {reinterpret_cast<void*>(&drawbot_get_supplier),
        reinterpret_cast<void*>(&drawbot_get_surface)},
       reinterpret_cast<void*>(&drawbot_new_pen),

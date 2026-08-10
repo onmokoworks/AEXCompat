@@ -20,6 +20,7 @@ struct AssemblyHooks {
   void* effect_ui{};
   void* adv_info{};
   void* adv_info3{};
+  void* adv_info3_plus{};
   std::array<void*, 2> drawbot_draw{};
   void* drawbot_new_pen{};
   void* drawbot_new_brush{};
