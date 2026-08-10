@@ -90,9 +90,12 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
   const auto& audio_report = audio_telemetry();
   classic_report.audio = {
       audio_report.usage_advertised, audio_report.checkout_allowed, audio_report.source_available,
+      audio_report.unadvertised_checkout_calls,
       audio_report.rejected_unadvertised_checkouts, audio_report.rejected_format_requests,
-      audio_report.handle_exhaustions, audio_report.peak_live_handles, audio_report.checkout_calls,
-      audio_report.checkin_calls, audio_report.get_data_calls, audio_report.invalid_operations,
+      audio_report.handle_exhaustions, audio_report.peak_live_handles,
+      audio_report.last_checkout_index, audio_report.checkout_calls,
+      audio_report.checkin_calls, audio_report.automatic_checkins,
+      audio_report.get_data_calls, audio_report.invalid_operations,
       audio_report.last_checkout_start_time, audio_report.last_checkout_duration,
       audio_report.last_checkout_time_scale, audio_report.last_window_start_sample,
       audio_report.last_window_sample_count, audio_report.last_window_silence_samples,

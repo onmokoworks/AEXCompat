@@ -113,7 +113,7 @@ void finish_requested_parameters(
 
 void emit_classic_complete(ReportSnapshot& output, const ClassicEmission& value) {
   begin_classic(output, value.report.head);
-  append_classic_audio(output, value.report.audio);
+  append_audio(output, value.report.audio);
   output.stream() << ",\"render_selector_dispatched\":"
       << (value.selector_dispatched ? "true" : "false")
       << ",\"depth_supported\":" << (value.depth_supported ? "true" : "false")
@@ -167,17 +167,20 @@ void append_classic_sequence(ReportSnapshot& report, const ClassicReport::Sequen
       << ",\"original_sequence_preserved\":" << (value.original_preserved ? "true" : "false");
 }
 
-void append_classic_audio(ReportSnapshot& report, const ClassicReport::Audio& value) {
+void append_audio(ReportSnapshot& report, const ClassicReport::Audio& value) {
   report.stream()
       << ",\"audio_usage_advertised\":" << (value.usage_advertised ? "true" : "false")
       << ",\"audio_checkout_allowed\":" << (value.checkout_allowed ? "true" : "false")
       << ",\"audio_source_available\":" << (value.source_available ? "true" : "false")
+      << ",\"unadvertised_audio_checkout_calls\":" << value.unadvertised_checkout_calls
       << ",\"rejected_unadvertised_audio_checkouts\":" << value.rejected_unadvertised_checkouts
       << ",\"rejected_audio_format_requests\":" << value.rejected_format_requests
       << ",\"audio_handle_exhaustions\":" << value.handle_exhaustions
       << ",\"peak_live_audio_handles\":" << value.peak_live_handles
+      << ",\"last_audio_checkout_index\":" << value.last_checkout_index
       << ",\"audio_checkout_calls\":" << value.checkout_calls
       << ",\"audio_checkin_calls\":" << value.checkin_calls
+      << ",\"automatic_audio_checkins\":" << value.automatic_checkins
       << ",\"audio_get_data_calls\":" << value.get_data_calls
       << ",\"invalid_audio_operations\":" << value.invalid_operations
       << ",\"last_audio_checkout_start_time\":" << value.last_checkout_start_time

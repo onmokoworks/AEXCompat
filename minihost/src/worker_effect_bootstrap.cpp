@@ -115,9 +115,6 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
       read<uint32_t>(state.output, contract::OUT_OUT_FLAGS_OFFSET);
   result.advertised_out_flags2 =
       read<uint32_t>(state.output, contract::OUT_OUT_FLAGS2_OFFSET);
-  if (request.render_worker)
-    hooks.configure_audio_admission(request.audio_invocation,
-                                    (result.advertised_out_flags & (1u << 20)) != 0);
   // Complementary reads of the same bit (PF_OutFlag_AUDIO_EFFECT_ONLY): edit
   // them together or the passthrough gates drift (issue #1048).
   result.image_render_supported = (result.advertised_out_flags & (1u << 31)) == 0;
@@ -159,6 +156,9 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
   // would reject every effect that declares parameters (issue #177).
   const int32_t expected_num_params =
       hooks.discovered_parameter_count ? hooks.discovered_parameter_count() + 1 : 1;
+  if (request.render_worker || request.rendering_worker)
+    hooks.configure_audio_admission(request.audio_invocation,
+                                    (result.advertised_out_flags & (1u << 20)) != 0);
   result.parameter_count_contract_valid = result.params_error == 0 &&
       read<int32_t>(state.output, contract::OUT_NUM_PARAMS_OFFSET) ==
           expected_num_params;
