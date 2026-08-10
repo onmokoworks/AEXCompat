@@ -143,11 +143,13 @@ class VideoFrameCpuWorlds {
   using World = std::array<std::byte, 120>;
 
   bool available() {
-    if (resolved_)
-      return create_ && dispose_ && par_ctor_ && get_mapping_ && new_ppix_ &&
-          get_frame_ && init_gpu_ && dispose_gpu_ && get_primary_device_ &&
-          create_gpu_frame_ && ppix_lock_ && ppix_unlock_ && ppix_pixels_ &&
-          ppix_rowbytes_ && dispose_ppix_;
+    // Cache the full resolution result, not a re-derived subset: an earlier
+    // version recomputed a 15-of-30 proc AND on the resolved_ fast path, so if a
+    // proc that only the slow path checks failed to resolve, the first call
+    // returned false while every later call returned true. That split masked the
+    // two AE-2026 export renames this adapter needs (format_rowbytes and
+    // GF::Initialize) and made video_frame_worlds look ready when it was not.
+    if (resolved_) return available_;
     resolved_ = true;
     const HMODULE video_frame = GetModuleHandleW(L"VideoFrame.dll");
     const HMODULE dva_media_types = GetModuleHandleW(L"dvamediatypes.dll");
@@ -173,7 +175,7 @@ class VideoFrameCpuWorlds {
         dva_media_types, "??0PixelAspectRatio@dvamediatypes@@QEAA@II@Z"));
     format_rowbytes_ = reinterpret_cast<FormatRowbytes>(GetProcAddress(
         dva_media_types,
-        "?UncompressedPixelFormatRowBytes@dvamediatypes@@YA_KUPixelFormat@1@H@Z"));
+        "?UncompressedPixelFormatRowBytes@dvamediatypes@@YA_KAEBUPixelFormat@1@H@Z"));
     get_mapping_ = reinterpret_cast<GetWorldMapping>(GetProcAddress(video_frame,
         "?GetPFWorldFrameMapping@VF@@YA?AV?$InterfaceRef@"
         "UIVideoFrameMemoryAccess@VF@@@classref@dvacore@@PEAUPF_LayerDef@@@Z"));
@@ -198,7 +200,7 @@ class VideoFrameCpuWorlds {
         GetProcAddress(asl_foundation, "?Terminate@Foundation@ASL@@YAXXZ"));
     initialize_gpu_foundation_ = reinterpret_cast<InitializeGpuFoundation>(
         GetProcAddress(gpu_foundation,
-            "?Initialize@GF@@YAX_N0000W4KernelLoadAction@1@PEAX22@Z"));
+            "?Initialize@GF@@YAX_N0000W4KernelLoadAction@1@@Z"));
     terminate_gpu_foundation_ = reinterpret_cast<TerminateGpuFoundation>(
         GetProcAddress(gpu_foundation, "?Terminate@GF@@YAXXZ"));
     is_gpu_foundation_initialized_ =
@@ -253,7 +255,8 @@ class VideoFrameCpuWorlds {
         GetProcAddress(video_frame, "ppixCopy"));
     dispose_ppix_ = reinterpret_cast<DisposePpix>(GetProcAddress(video_frame,
         "?DisposePPixFromVideoFrame@VF@@YAXPEAPEAUPPix@@@Z"));
-    return create_ && dispose_ && par_ctor_ && format_rowbytes_ && get_mapping_ && new_ppix_ &&
+    available_ =
+        create_ && dispose_ && par_ctor_ && format_rowbytes_ && get_mapping_ && new_ppix_ &&
         get_frame_ && init_gpu_ && dispose_gpu_ && initialize_asl_foundation_ &&
         initialize_video_frame_ && shutdown_video_frame_ &&
         terminate_asl_foundation_ && initialize_gpu_foundation_ &&
@@ -263,6 +266,7 @@ class VideoFrameCpuWorlds {
         get_gpu_ppix_ && get_gpu_frame_ && convert_to_gpu_ &&
         convert_to_cpu_ && new_ppix_from_frame_ && ppix_lock_ && ppix_unlock_ && ppix_pixels_ &&
         ppix_rowbytes_ && ppix_copy_ && dispose_ppix_;
+    return available_;
   }
 
   bool create_input(int32_t width, int32_t height, const World& source,
@@ -363,7 +367,8 @@ class VideoFrameCpuWorlds {
                                       const void*, void*);
   using DisposeWorld = void(__cdecl*)(void*);
   using ParConstructor = void*(__cdecl*)(void*, uint32_t, uint32_t);
-  using FormatRowbytes = uint64_t(__cdecl*)(uint64_t, int32_t);
+  // AE 2026 passes the PixelFormat by const reference (a pointer), not by value.
+  using FormatRowbytes = uint64_t(__cdecl*)(const void*, int32_t);
   using GetWorldMapping = void*(__cdecl*)(void*, void*);
   using NewPPixFromMapping = void**(__cdecl*)(void*);
   using GetFrameFromPPix = void*(__cdecl*)(void*, void**);
@@ -374,7 +379,7 @@ class VideoFrameCpuWorlds {
   using InitializeAslFoundation = void(__cdecl*)();
   using TerminateAslFoundation = void(__cdecl*)();
   using InitializeGpuFoundation = void(__cdecl*)(
-      bool, bool, bool, bool, bool, int32_t, void*, void*, void*);
+      bool, bool, bool, bool, bool, int32_t);
   using TerminateGpuFoundation = void(__cdecl*)();
   using IsGpuFoundationInitialized = bool(__cdecl*)();
   using GetPrimaryDevice = void*(__cdecl*)(void*, int32_t);
@@ -522,8 +527,7 @@ class VideoFrameCpuWorlds {
       }
     }
     initialize_gpu_foundation_(true, true, true, true, true,
-                               /*kernel_load_action=*/1,
-                               nullptr, nullptr, nullptr);
+                               /*kernel_load_action=*/1);
     // GF creates and leaves its private CUDA context current. The transport
     // starts from the primary context immediately after this adapter returns;
     // keep the two owners separate by removing GF's context from this thread's
@@ -626,6 +630,7 @@ class VideoFrameCpuWorlds {
   }
 
   bool resolved_{};
+  bool available_{};
   bool input_live_{};
   bool output_live_{};
   bool input_cpu_staging_live_{};
