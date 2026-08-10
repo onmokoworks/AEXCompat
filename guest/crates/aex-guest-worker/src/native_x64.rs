@@ -898,13 +898,34 @@ impl GuestEngine<'static> {
     pub fn ansi_ceil_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
+    pub fn ansi_atan_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_atan2_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn ansi_cos_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_exp_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
     pub fn ansi_fabs_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
+    pub fn ansi_floor_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_fmod_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
     pub fn ansi_hypot_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_log_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_log10_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
     pub fn ansi_pow_callback_address(&self) -> u64 {
@@ -914,6 +935,9 @@ impl GuestEngine<'static> {
         callback_address!(poison_callback)
     }
     pub fn ansi_sqrt_callback_address(&self) -> u64 {
+        callback_address!(poison_callback)
+    }
+    pub fn ansi_tan_callback_address(&self) -> u64 {
         callback_address!(poison_callback)
     }
     pub fn ansi_asin_callback_address(&self) -> u64 {
