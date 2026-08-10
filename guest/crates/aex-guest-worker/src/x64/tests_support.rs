@@ -536,6 +536,47 @@
     }
 
     #[test]
+    fn win64_crt_tolower_uses_integer_abi_and_ascii_c_locale_semantics() {
+        const TOLOWER: u64 = STUB_BASE + 0x540;
+        let mut engine = test_engine(&[0xc3]);
+        for library in ["api-ms-win-crt-string-l1-1-0.dll", "UCRTBASE.DLL"] {
+            assert_eq!(
+                dispatch_win64_import(library, "tolower"),
+                Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtToLower)
+            );
+        }
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "tolower"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                TOLOWER,
+                "api-ms-win-crt-string-l1-1-0.dll",
+                "tolower",
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtToLower)
+        );
+
+        for (input, expected) in [
+            (b'A' as u64, b'a' as u64),
+            (b'Z' as u64, b'z' as u64),
+            (b'@' as u64, b'@' as u64),
+            (b'[' as u64, b'[' as u64),
+            (b'a' as u64, b'a' as u64),
+            (0xff, 0xff),
+            (u32::MAX as u64, u32::MAX as u64),
+        ] {
+            assert_eq!(
+                engine.call_win64(TOLOWER, [input, 0, 0, 0, 0, 0]).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn crt_aligned_allocation_honors_alignment_reuses_and_owns_free() {
         const ALLOC: u64 = STUB_BASE + 0x570;
         const FREE: u64 = STUB_BASE + 0x580;
