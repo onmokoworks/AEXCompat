@@ -404,6 +404,23 @@ target_compile_definitions(worker_aegp_compute_cache_selftest PRIVATE
 target_compile_options(worker_aegp_compute_cache_selftest PRIVATE /UNDEBUG)
 target_include_directories(worker_aegp_compute_cache_selftest PRIVATE src)
 target_link_libraries(worker_aegp_compute_cache_selftest PRIVATE
+    bcrypt aexcompat_trace_writer)
+
+add_library(worker_session_detach_fixture SHARED
+  ../tests/native/worker_session_detach_fixture.cpp)
+target_compile_features(worker_session_detach_fixture PRIVATE cxx_std_17)
+target_compile_definitions(worker_session_detach_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+add_executable(worker_session_contained_exit_selftest
+  ../tests/native/worker_session_contained_exit_selftest.cpp
+  $<TARGET_OBJECTS:aex_worker_runtime_core>)
+target_compile_features(worker_session_contained_exit_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_session_contained_exit_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_session_contained_exit_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_session_contained_exit_selftest PRIVATE src)
+target_link_libraries(worker_session_contained_exit_selftest PRIVATE
   bcrypt aexcompat_trace_writer)
 
 add_executable(worker_aegp_scene_model_selftest

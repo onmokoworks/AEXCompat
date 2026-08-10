@@ -5,6 +5,7 @@
 #include "worker_aegp_compute_cache.hpp"
 
 #include <iostream>
+#include <intrin.h>
 #include <utility>
 
 namespace aexcompat::worker_runtime {
@@ -160,7 +161,27 @@ bool WorkerSession::prepare_protocol_report() {
   const bool passed = capture_terminal_audit();
   restore_stdout();
   if (!passed) emit_audit_failure();
+  protocol_report_prepared_ = passed;
   return passed;
+}
+
+[[noreturn]] void WorkerSession::terminate_after_protocol_report(
+    int exit_code) noexcept {
+  // This must never become a shortcut around terminal audit/quiescence. A
+  // misuse is a host fault and fails without running plug-in detach code.
+  if (!protocol_report_prepared_ || !terminal_audit_captured_ ||
+      !terminal_audit_passed_ || stdout_redirected_) {
+    __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+  }
+  stop_trace();
+  std::cout.flush();
+  std::cerr.flush();
+  std::fflush(stdout);
+  std::fflush(stderr);
+  if (!std::cout.good()) __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+  if (!TerminateProcess(GetCurrentProcess(), static_cast<UINT>(exit_code)))
+    __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+  __assume(0);
 }
 
 bool WorkerSession::shutdown_before_report() {
