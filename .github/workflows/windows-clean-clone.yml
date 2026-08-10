@@ -277,34 +277,65 @@ jobs:
       - name: Test Rust workspace
         working-directory: broker
         shell: pwsh
+        run: cargo test --workspace --locked
+
+      - name: Rebuild native AEX artifacts after the runtime harness
+        if: steps.sdk.outcome == 'success'
+        shell: pwsh
         run: |
-          $harness = Join-Path $PWD 'target\debug\aexcompat-harness.exe'
-          $aexRoot = Join-Path $env:GITHUB_WORKSPACE 'target'
-          $before = (Get-FileHash -LiteralPath $harness -Algorithm SHA256).Hash
-          $beforeAex = @{}
-          Get-ChildItem $aexRoot -Recurse -Filter *.aex -File | ForEach-Object {
-            $beforeAex[$_.FullName] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+          $ErrorActionPreference = 'Stop'
+          $workspaceRoot = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          $targetRoot = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE 'target')).Path
+          $targetRelative = [IO.Path]::GetRelativePath($workspaceRoot, $targetRoot)
+          if ([IO.Path]::IsPathRooted($targetRelative) -or $targetRelative -eq '..' -or $targetRelative.StartsWith("..$([IO.Path]::DirectorySeparatorChar)")) {
+            throw "native artifact root escaped the workspace: $targetRoot"
           }
-          if ($beforeAex.Count -eq 0) { throw 'no generated AEX artifacts were found before workspace tests' }
-          cargo test --workspace --locked
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $after = (Get-FileHash -LiteralPath $harness -Algorithm SHA256).Hash
-          if ($after -ne $before) {
-            throw "workspace tests changed the runtime harness identity after native artifacts were built"
+          if ((Get-Item -LiteralPath $targetRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "native artifact root is a reparse point: $targetRoot"
           }
-          $afterAex = @(Get-ChildItem $aexRoot -Recurse -Filter *.aex -File)
-          if ($afterAex.Count -ne $beforeAex.Count) {
-            throw 'workspace tests changed the generated AEX artifact set'
+          $artifacts = @(Get-ChildItem $targetRoot -Recurse -Filter *.aex -File)
+          if ($artifacts.Count -eq 0) { throw 'no generated AEX artifacts were found after workspace tests' }
+          $candidateBuildDirs = @($artifacts | ForEach-Object {
+            if ($_.Directory.Name -eq 'Release') { $_.Directory.Parent.FullName } else { $_.Directory.FullName }
+          } | Sort-Object -Unique)
+          $buildDirs = @($candidateBuildDirs | ForEach-Object {
+            $resolved = (Resolve-Path $_).Path
+            $relative = [IO.Path]::GetRelativePath($targetRoot, $resolved)
+            if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith("..$([IO.Path]::DirectorySeparatorChar)")) {
+              throw "AEX build directory escaped target: $resolved"
+            }
+            $cursor = Get-Item -LiteralPath $resolved
+            while ($null -ne $cursor -and $cursor.FullName -ne $targetRoot) {
+              if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw "AEX build directory traverses a reparse point: $($cursor.FullName)"
+              }
+              $cursor = $cursor.Parent
+            }
+            if ($null -eq $cursor -or -not (Test-Path -LiteralPath (Join-Path $resolved 'CMakeCache.txt') -PathType Leaf)) {
+              throw "AEX build directory is not a verified CMake root: $resolved"
+            }
+            $resolved
+          })
+          $results = $buildDirs | ForEach-Object -Parallel {
+            $output = & cmake --build $_ --config Release --clean-first 2>&1 | Out-String
+            [pscustomobject]@{ BuildDir = $_; ExitCode = $LASTEXITCODE; Output = $output }
+          } -ThrottleLimit ([Math]::Min([Environment]::ProcessorCount, $buildDirs.Count))
+          $failed = @($results | Where-Object { $_.ExitCode -ne 0 })
+          foreach ($failure in $failed) {
+            Write-Host "::group::AEX rebuild failed: $($failure.BuildDir) (exit $($failure.ExitCode))"
+            Write-Host $failure.Output
+            Write-Host '::endgroup::'
           }
-          foreach ($artifact in $afterAex) {
-            $hash = (Get-FileHash -LiteralPath $artifact.FullName -Algorithm SHA256).Hash
-            if (-not $beforeAex.ContainsKey($artifact.FullName) -or $beforeAex[$artifact.FullName] -ne $hash) {
-              throw "workspace tests changed generated AEX artifact: $($artifact.FullName)"
+          if ($failed.Count -gt 0) { throw 'one or more generated AEX artifacts failed to rebuild' }
+          $harnessTime = (Get-Item (Join-Path $env:GITHUB_WORKSPACE 'broker\target\debug\aexcompat-harness.exe')).LastWriteTimeUtc
+          foreach ($artifact in $artifacts) {
+            if (-not (Test-Path -LiteralPath $artifact.FullName -PathType Leaf)) {
+              throw "rebuilt AEX artifact is missing: $($artifact.FullName)"
+            }
+            if ((Get-Item -LiteralPath $artifact.FullName).LastWriteTimeUtc -lt $harnessTime) {
+              throw "rebuilt AEX artifact is older than the runtime harness: $($artifact.FullName)"
             }
           }
-          $stamp = (Get-Item -LiteralPath $harness).LastWriteTimeUtc.AddSeconds(1)
-          $afterAex | Where-Object { $_.LastWriteTimeUtc -lt $stamp } |
-            ForEach-Object { $_.LastWriteTimeUtc = $stamp }
 
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
