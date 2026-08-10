@@ -206,14 +206,13 @@ fn secure_launch_impl(
 ) -> io::Result<SecureLaunchResult> {
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
-    let mut worker_stage =
-        TrustedWorkerStage::create(worker_program, worker_expected_sha256, worker_expected_size)
-            .map_err(|error| stage_error("trusted worker staging", error))?;
-    for (source, relative) in staged_worker_assets {
-        worker_stage
-            .stage_auxiliary_file(source, relative)
-            .map_err(|error| stage_error("trusted worker auxiliary staging", error))?;
-    }
+    let worker_stage = TrustedWorkerStage::create_with_assets(
+        worker_program,
+        worker_expected_sha256,
+        worker_expected_size,
+        staged_worker_assets,
+    )
+    .map_err(|error| stage_error("trusted worker staging", error))?;
     // Never expose the repository root as a worker CWD. The native sidecar
     // loader pins relative access to <cwd>/image-transport, which is the same
     // broker-owned <repository>/target/image-transport boundary as before.
@@ -393,17 +392,13 @@ fn secure_launch_session_impl(
 ) -> io::Result<SecureSessionProcess> {
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
-    let mut worker_stage = TrustedWorkerStage::create(
+    let worker_stage = TrustedWorkerStage::create_with_assets(
         request.worker_program,
         request.worker_expected_sha256,
         request.worker_expected_size,
+        request.staged_worker_assets,
     )
     .map_err(|error| stage_error("trusted worker staging", error))?;
-    for (source, relative) in request.staged_worker_assets {
-        worker_stage
-            .stage_auxiliary_file(source, relative)
-            .map_err(|error| stage_error("trusted worker auxiliary staging", error))?;
-    }
     // Session workers share the same non-root CWD and transport boundary as
     // one-shot workers.
     let worker_cwd = request.repository.join("target");
