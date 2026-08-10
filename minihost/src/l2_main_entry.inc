@@ -1596,7 +1596,9 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          // "requested audio" flag stays false and host_audio::Runtime rejects
          // unadvertised audio checkouts on the session path (Codex #252). It used
          // to be OR'd with the one-shot --render-audio mode, which #365 deleted.
-         invocation.audio_session_mode, g_skip_about},
+         invocation.audio_session_mode, g_skip_about,
+         invocation.external_current_time, invocation.external_time_step,
+         invocation.external_total_time, invocation.external_time_scale},
         make_bootstrap_runtime_hooks());
   };
   const auto bootstrap = [&] {

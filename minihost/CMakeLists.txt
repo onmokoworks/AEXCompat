@@ -524,6 +524,15 @@ target_compile_definitions(host_audio_runtime_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(host_audio_runtime_selftest PRIVATE src)
 
+add_executable(worker_effect_bootstrap_timing_selftest
+  ../tests/native/worker_effect_bootstrap_timing_selftest.cpp
+  src/worker_effect_bootstrap.cpp
+)
+target_compile_features(worker_effect_bootstrap_timing_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_effect_bootstrap_timing_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_effect_bootstrap_timing_selftest PRIVATE src)
+
 add_executable(worker_render_lifecycle_selftest
   ../tests/native/worker_render_lifecycle_selftest.cpp
   src/render_lifecycle.cpp

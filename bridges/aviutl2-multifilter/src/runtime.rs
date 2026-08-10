@@ -473,13 +473,16 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
     unsafe { ((*video).get_image_data)(pixels.as_mut_ptr()) };
     let rgba = pixels_to_bytes(&pixels);
 
-    // Overlay this frame's current config values onto the exposed defaults.
+    // Overlay this frame's current config values onto the exposed defaults,
+    // then transport only actual changes. An untouched UI must leave the
+    // PARAMS_SETUP definitions untouched, matching AE's parameter contract.
     let parameters = if ctx.defaults.is_empty() {
         None
     } else {
         let mut values = ctx.defaults.clone();
         apply_readers(&mut values, &ctx.readers);
-        Some(values)
+        let changed = changed_interactive_parameters(&ctx.defaults, &values);
+        (!changed.is_empty()).then_some(changed)
     };
 
     let effect_id = unsafe { (*object).effect_id };
@@ -839,27 +842,16 @@ fn pool_open_route(
         .position(|(path, _)| path == &ctx.plugin)
         .ok_or_else(|| "requester is not a cluster member".to_owned())?
         as u32;
-    // The swap payload for a member is its exposed defaults, encoded the way
-    // the launch payload is (design §2.1/§4.1); the entry for plugins[0] is
-    // ignored because the launch argv payload wins.
-    let swap_payloads: Vec<Option<String>> = members
-        .iter()
-        .enumerate()
-        .map(|(index, member)| {
-            if index == 0 || member.defaults.is_empty() {
-                None
-            } else {
-                encode_default_interactive_payload(&member.defaults).ok()
-            }
-        })
-        .collect();
+    // A swap preserves the member's PARAMS_SETUP state. Untouched discovered
+    // defaults are definitions, not host assignments; actual per-object
+    // changes arrive with the subsequent frame request.
+    let swap_payloads = vec![None; members.len()];
     let opened = open_mf_session(MfSessionConfig {
         repository: ctx.repository.clone(),
         plugin: ctx.plugin.clone(),
         dependency: ctx.dependency.clone(),
         sha: ctx.sha.clone(),
         smart: ctx.smart,
-        defaults: ctx.defaults.clone(),
         identity: key.geom.clone(),
         // No virtual-buffer layer on a pooled cluster session: the members share
         // one dependency closure but not a parameter layout, so the opener's
@@ -923,7 +915,6 @@ struct MfSessionConfig {
     dependency: DependencyConfig,
     sha: String,
     smart: bool,
-    defaults: Vec<InteractiveParameter>,
     identity: GeomIdentity,
     /// Secondary layers read once at open (issue #645): AviUtl2's virtual buffer
     /// feeding an AEX layer parameter. Read on the AviUtl2 callback thread (only
@@ -953,7 +944,11 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
     let join = std::thread::Builder::new()
         .name("aex-multifilter-session".into())
         .spawn(move || {
-            let baseline = (!config.defaults.is_empty()).then_some(&config.defaults[..]);
+            // PARAMS_SETUP already installed the plug-in's defaults. Sending
+            // the same values back as assignments is observably different
+            // from an untouched effect in AE. Frames carry only values that
+            // differ from these defaults.
+            let baseline = None;
             // Whether this session actually opened a layer the frames may
             // rewrite (issue #674). Read here, before `config` is borrowed into
             // the open request, and used by the frame loop below to tell "there
@@ -1317,7 +1312,6 @@ fn open_and_get_sender(
         dependency: ctx.dependency.clone(),
         sha: ctx.sha.clone(),
         smart: ctx.smart,
-        defaults: ctx.defaults.clone(),
         identity: identity.clone(),
         layers: open_layers(),
         cluster: None,
@@ -1423,6 +1417,35 @@ fn apply_readers(parameters: &mut [InteractiveParameter], readers: &[ItemReader]
             }
         }
     }
+}
+
+/// Selects values whose typed payload differs from the PARAMS_SETUP default.
+/// Metadata changes do not mutate a rendered parameter and are ignored.
+fn changed_interactive_parameters(
+    defaults: &[InteractiveParameter],
+    current: &[InteractiveParameter],
+) -> Vec<InteractiveParameter> {
+    current
+        .iter()
+        .filter(|value| {
+            let Some(default) = defaults.iter().find(|item| item.slot == value.slot) else {
+                return true;
+            };
+            if default.kind != value.kind {
+                return true;
+            }
+            match value.kind.as_str() {
+                "integer" | "path" | "float" => default.value != value.value,
+                "color" => default.color != value.color,
+                "angle" => default.components[0] != value.components[0],
+                "point" => default.components[..2] != value.components[..2],
+                "point3d" => default.components != value.components,
+                "arbitrary_data" => default.debug_summary != value.debug_summary,
+                _ => false,
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 fn pixels_to_bytes(pixels: &[PIXEL_RGBA]) -> Vec<u8> {

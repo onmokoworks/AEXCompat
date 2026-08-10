@@ -3241,7 +3241,6 @@ mod tests {
                 dependency: dependency(),
                 sha: sha_of(&one),
                 smart: false,
-                defaults: Vec::new(),
                 identity: GeomIdentity {
                     width: 8,
                     height: 4,
@@ -3431,6 +3430,45 @@ mod tests {
             aexcompat_broker::image_render::encode_interactive_payload(&[sent])
                 .expect("the selected popup value is sendable"),
             "v2|param_2@2:i32=1"
+        );
+    }
+
+    #[test]
+    fn untouched_defaults_are_not_render_assignments() {
+        let default = InteractiveParameter {
+            slot: 1,
+            name: "Amount".into(),
+            kind: "float".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 0.5,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        };
+        let mut metadata_only = default.clone();
+        metadata_only.visible = false;
+        assert!(
+            changed_interactive_parameters(std::slice::from_ref(&default), &[metadata_only])
+                .is_empty()
+        );
+
+        let mut changed = default.clone();
+        changed.value = 0.75;
+        assert_eq!(
+            changed_interactive_parameters(&[default], &[changed.clone()])
+                .into_iter()
+                .map(|item| item.slot)
+                .collect::<Vec<_>>(),
+            vec![changed.slot]
         );
     }
 
