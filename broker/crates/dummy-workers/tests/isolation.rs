@@ -37,6 +37,7 @@ fn timeout_kill_reports_timeout_reason_and_memory_peaks() {
     assert_eq!(result.classification.as_str(), "timeout_killed");
     assert_eq!(result.kill_reason, Some("timeout"));
     assert!(!result.memory_limit_reached);
+    assert_eq!(result.process_memory_limit_bytes, 512 * 1024 * 1024);
     let peak = result.peak_process_memory_bytes.expect("peak recorded");
     assert!(peak > 0 && peak < result.process_memory_limit_bytes);
 }

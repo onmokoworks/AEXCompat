@@ -108,6 +108,20 @@ pub fn dispatch_secure_image_session(
         input,
         session,
         crate::windows_process::WorkerDesktopPolicy::Dedicated,
+        crate::windows_process::SessionMemoryBudget::Render,
+    )
+}
+
+#[cfg(windows)]
+pub(crate) fn dispatch_secure_image_standard_session(
+    input: SecureImageDispatch<'_>,
+    session: &crate::windows_process::SessionChildHandles,
+) -> io::Result<crate::secure_launch::SecureSessionProcess> {
+    dispatch_secure_image_session_with_policy(
+        input,
+        session,
+        crate::windows_process::WorkerDesktopPolicy::Dedicated,
+        crate::windows_process::SessionMemoryBudget::Standard,
     )
 }
 
@@ -120,6 +134,7 @@ pub(crate) fn dispatch_secure_image_session_on_current_desktop(
         input,
         session,
         crate::windows_process::WorkerDesktopPolicy::Current,
+        crate::windows_process::SessionMemoryBudget::Render,
     )
 }
 
@@ -128,6 +143,7 @@ fn dispatch_secure_image_session_with_policy(
     input: SecureImageDispatch<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+    memory_budget: crate::windows_process::SessionMemoryBudget,
 ) -> io::Result<crate::secure_launch::SecureSessionProcess> {
     crate::trace_policy::validate_broker_trace_directory(input.repository)?;
     let worker_program = input
@@ -156,6 +172,7 @@ fn dispatch_secure_image_session_with_policy(
         request,
         session,
         desktop_policy,
+        memory_budget,
     )?;
     process.record_worker_freshness_warning(admitted.freshness_warning);
     Ok(process)
@@ -293,6 +310,11 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
         request,
         session,
         desktop_policy,
+        if input.positional_plugin {
+            crate::windows_process::SessionMemoryBudget::Render
+        } else {
+            crate::windows_process::SessionMemoryBudget::Standard
+        },
     )?;
     process.record_worker_freshness_warning(admitted.freshness_warning);
     Ok(SecureInPlaceClusterSessionLaunch {
