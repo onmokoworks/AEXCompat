@@ -26,7 +26,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use aexcompat_broker::image_render::{
-    InteractiveParameter, RenderGpuBackend, RenderPixelFormat, encode_default_interactive_payload,
+    InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
     initialize_experimental_aegp_in_place, inspect_experimental_cleanup_contained_in_place,
     inspect_experimental_in_place,
 };
@@ -108,13 +108,12 @@ static SESSION_MAPS: Mutex<Vec<&'static SessionMap>> = Mutex::new(Vec::new());
 
 /// One registered AEX in a closure-identity cluster (issue #405): what the
 /// render pool needs to put the member into a cluster manifest — its path,
-/// its discovered SHA-256, and its exposed defaults (the swap payload).
+/// its discovered SHA-256, and its supported render route.
 #[derive(Clone)]
 struct ClusterMember {
     plugin: PathBuf,
     sha: String,
     smart: bool,
-    defaults: Vec<InteractiveParameter>,
 }
 
 /// Registered AEXes grouped by dependency-closure identity (issue #405),

@@ -78,10 +78,16 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
   write<int16_t>(state.input, contract::IN_VERSION_OFFSET + sizeof(int16_t), 29);
   write<uint32_t>(state.input, contract::IN_APPL_ID_OFFSET, 0x46585443u);
   write<int32_t>(state.input, contract::IN_NUM_PARAMS_OFFSET, 1);
-  write<int32_t>(state.input, contract::IN_CURRENT_TIME_OFFSET, 0);
-  write<int32_t>(state.input, contract::IN_TIME_STEP_OFFSET, 1);
-  write<int32_t>(state.input, contract::IN_LOCAL_TIME_STEP_OFFSET, 1);
-  write<uint32_t>(state.input, contract::IN_TIME_SCALE_OFFSET, 1);
+  write<int32_t>(state.input, contract::IN_CURRENT_TIME_OFFSET,
+                 request.current_time);
+  write<int32_t>(state.input, contract::IN_TIME_STEP_OFFSET,
+                 request.time_step);
+  write<int32_t>(state.input, contract::IN_TOTAL_TIME_OFFSET,
+                 request.total_time);
+  write<int32_t>(state.input, contract::IN_LOCAL_TIME_STEP_OFFSET,
+                 request.time_step);
+  write<uint32_t>(state.input, contract::IN_TIME_SCALE_OFFSET,
+                  request.time_scale);
   write(state.input, contract::IN_FIELD_OFFSET, request.field);
   write(state.input, contract::IN_SHUTTER_ANGLE_OFFSET, request.shutter_angle);
   write(state.input, contract::IN_PRE_EFFECT_SOURCE_ORIGIN_X_OFFSET,

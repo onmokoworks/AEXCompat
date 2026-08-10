@@ -56,6 +56,15 @@ struct Request {
   /// mode that used to set it (the field was named audio_mode for that).
   bool audio_invocation{};
   bool skip_about{};
+  // Static timeline presented from GLOBAL_SETUP onward. Resident sessions
+  // already carry these values in their authenticated launch request; keeping
+  // bootstrap on the historical 0/1/0/1 defaults until the first frame makes
+  // PARAMS_SETUP observe a different composition contract from
+  // SEQUENCE_SETUP and RENDER.
+  int32_t current_time{};
+  int32_t time_step{1};
+  int32_t total_time{};
+  uint32_t time_scale{1};
 };
 
 struct RuntimeHooks {

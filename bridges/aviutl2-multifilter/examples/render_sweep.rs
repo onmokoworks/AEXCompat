@@ -517,18 +517,10 @@ fn sweep_one(
     let smart =
         smart_render_route_supported(record.smart, record.out_flags2) && !options.force_classic;
     let layers = probe_layers(record, options, layer_pixels);
-    // The bridge overlays each frame's current config values onto the exposed
-    // defaults and sends them with the frame; a sweep that instead relied on the
-    // open-time baseline would drive a path the bridge never drives (a frame
-    // with no `parameters` attribute takes different worker handling - issue
-    // #883's UPDATE_PARAMS_UI among it). The sweep has no host config to read,
-    // so it sends the discovered defaults after the same transport
-    // normalization used at session open.
-    let normalized_parameters =
-        aexcompat_broker::image_render::normalize_default_interactive_parameters(
-            &record.parameters,
-        );
-    let parameters = (!options.plugin_defaults).then_some(&normalized_parameters[..]);
+    // The sweep has no host edits, so it has no parameter assignments. This
+    // drives the same changed-only contract as an untouched bridge object;
+    // `--plugin-defaults` remains a compatible explicit spelling of it.
+    let parameters = None;
 
     let session = RenderSession::open(SessionOpenRequest {
         repository,
@@ -726,12 +718,13 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
     let bucket = match outcome {
         Ok(outcome) => match outcome.status {
             FrameStatus::Rendered {
+                pixels,
                 width,
                 height,
                 origin_x,
                 origin_y,
-                ..
             } => {
+                detail.insert("pixel_bytes".to_owned(), json!(pixels.len()));
                 detail.insert("width".to_owned(), json!(width));
                 detail.insert("height".to_owned(), json!(height));
                 detail.insert("origin_x".to_owned(), json!(origin_x));
@@ -739,7 +732,7 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
                 // A rendered frame of no pixels is not a render: an effect that
                 // answers 0x0 has produced nothing, and rounding it into
                 // `rendered` is how a sweep reports progress it did not make.
-                if width == 0 || height == 0 {
+                if pixels.is_empty() || width == 0 || height == 0 {
                     "rendered_empty".to_owned()
                 } else {
                     "rendered".to_owned()
@@ -975,6 +968,35 @@ mod tests {
             })),
             cluster_fallback: Some("worker_exited/invalidated".to_owned()),
         }
+    }
+
+    #[test]
+    fn rendered_bucket_requires_and_reports_pixel_bytes() {
+        let rendered = frame_outcome(Ok(FrameOutcome {
+            frame_index: 0,
+            status: FrameStatus::Rendered {
+                pixels: vec![0; 16],
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+            },
+        }));
+        assert_eq!(rendered.bucket, "rendered");
+        assert_eq!(rendered.detail["pixel_bytes"], 16);
+
+        let empty = frame_outcome(Ok(FrameOutcome {
+            frame_index: 0,
+            status: FrameStatus::Rendered {
+                pixels: Vec::new(),
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+            },
+        }));
+        assert_eq!(empty.bucket, "rendered_empty");
+        assert_eq!(empty.detail["pixel_bytes"], 0);
     }
 
     #[test]

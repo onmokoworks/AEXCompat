@@ -1171,7 +1171,6 @@ fn register_discovered(
                 plugin: plugin.to_path_buf(),
                 sha: entry.sha.clone(),
                 smart: entry.smart,
-                defaults,
             });
     }
 
