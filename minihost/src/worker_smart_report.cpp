@@ -194,6 +194,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   report::append_seh_diagnostics(report_snapshot, report::capture_seh_diagnostics());
   const auto directx_stats = directx_backend::diagnostics();
   const auto aegp_memory_stats = worker_runtime::handles::aegp_memory_statistics();
+  const auto pixel_format_stats = pixel_format_telemetry();
   report::append_smart_faults(report_snapshot, {
       {static_cast<int64_t>(gpu_transport::cuda_upload_bytes), static_cast<int64_t>(gpu_transport::cuda_download_bytes), static_cast<int64_t>(gpu_transport::cuda_sync_failures),
        gpu_transport::last_cuda_device_count, gpu_transport::last_cuda_device_index},
@@ -202,8 +203,10 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       {static_cast<int64_t>(directx_stats.device_count), static_cast<int64_t>(directx_stats.device_index), static_cast<int64_t>(directx_stats.upload_bytes),
        static_cast<int64_t>(directx_stats.download_bytes), static_cast<int64_t>(directx_stats.sync_failures)}, directx_stats.context_used,
       in.pixel_format_fault_observed,
-      {static_cast<int64_t>(g_pixel_format_add_calls), static_cast<int64_t>(g_pixel_format_clear_calls), static_cast<int64_t>(g_supported_pixel_formats.size()),
-       g_invalid_pixel_format_operations},
+      {static_cast<int64_t>(pixel_format_stats.add_calls),
+       static_cast<int64_t>(pixel_format_stats.clear_calls),
+       static_cast<int64_t>(pixel_format_stats.supported_count),
+       pixel_format_stats.invalid_operations},
       {in.outline_fault_observed, in.mask_attribute_fault_observed, in.stream_metadata_fault_observed,
        in.keyframe_fault_observed, in.dynamic_stream_fault_observed, in.aegp_memory_fault_observed, false},
       {mask_report.outline_mutations, mask_report.invalid_outline_operations,

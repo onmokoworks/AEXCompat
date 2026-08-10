@@ -135,3 +135,23 @@ def test_worker_v1_v2_tables_are_independent_non_null_fail_closed_and_balanced()
     }
 
 
+def test_pf_pixel_format_v1_v2_catalog_and_world_callbacks_are_behavioral():
+    result = subprocess.run(
+        [str(WORKER), "--self-test-pf-pixel-format-suite"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert json.loads(result.stdout.strip()) == {
+        "pf_pixel_format_suite_versions": "passed",
+        "v1_slots": 8,
+        "v2_slots": 2,
+        "independent_identity": True,
+        "shared_registration_slots": True,
+        "world_lifecycle_balanced": True,
+        "suite_leases_balanced": True,
+    }
+
+
