@@ -33,6 +33,14 @@ bool smart_geometry_rect_valid(const std::array<int32_t, 4>& rect) {
       width <= 4096 && height <= 4096 && width * height <= 16'777'216;
 }
 
+namespace {
+bool smart_geometry_envelope_valid(const std::array<int32_t, 4>& rect) {
+  return rect[2] >= rect[0] && rect[3] >= rect[1] &&
+      rect[0] >= -kMaxSmartRectMagnitude && rect[1] >= -kMaxSmartRectMagnitude &&
+      rect[2] <= kMaxSmartRectMagnitude && rect[3] <= kMaxSmartRectMagnitude;
+}
+}  // namespace
+
 bool smart_rect_contained(const std::array<int32_t, 4>& inner,
                           const std::array<int32_t, 4>& outer) {
   const bool inner_empty = inner[0] >= inner[2] || inner[1] >= inner[3];
@@ -207,8 +215,12 @@ SmartOutputBounds prepare_smart_output_bounds(const void* pre_render_output,
   std::memcpy(bounds.max_result_rect.data(),
               static_cast<const std::byte*>(pre_render_output) + 16,
               sizeof(bounds.max_result_rect));
+  // Only result_rect sizes the output allocation. max_result_rect is an
+  // availability envelope and may legitimately be much larger while still
+  // containing a small render result, so keep its coordinate/inversion checks
+  // without applying the allocation width/height/area caps.
   if (!smart_geometry_rect_valid(bounds.result_rect) ||
-      !smart_geometry_rect_valid(bounds.max_result_rect) ||
+      !smart_geometry_envelope_valid(bounds.max_result_rect) ||
       bounds.result_rect[0] < bounds.max_result_rect[0] ||
       bounds.result_rect[1] < bounds.max_result_rect[1] ||
       bounds.result_rect[2] > bounds.max_result_rect[2] ||
