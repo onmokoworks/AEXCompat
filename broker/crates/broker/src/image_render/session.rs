@@ -42,7 +42,9 @@ fn render_with_artifact(
     if artifact_kind == Some(RenderArtifactKind::Float32Exr)
         && pixel_format != RenderPixelFormat::Argb32f
     {
-        return Err(invalid("FLOAT32 EXR output requires the Argb32f render format"));
+        return Err(invalid(
+            "FLOAT32 EXR output requires the Argb32f render format",
+        ));
     }
     const MAX_AUDIO_SAMPLES: usize = 10_000_000;
     let audio = if let Some(path) = audio_sidecar {
@@ -115,7 +117,10 @@ fn render_with_artifact(
             "output image already exists",
         ));
     }
-    let preserved_output = artifact_kind.is_none().then(|| pixel_format.raw_extension()).flatten()
+    let preserved_output = artifact_kind
+        .is_none()
+        .then(|| pixel_format.raw_extension())
+        .flatten()
         .map(|extension| output_path.with_extension(extension));
     if preserved_output.as_ref().is_some_and(|path| path.exists()) {
         return Err(io::Error::new(
@@ -812,7 +817,9 @@ fn render_classic_via_length_one_session(
         ));
     }
     if !empty_smart_result {
-        if request.artifact_kind.is_none() && let Some(path) = request.preserved_output {
+        if request.artifact_kind.is_none()
+            && let Some(path) = request.preserved_output
+        {
             if let Some(parent) = path.parent() {
                 if let Err(error) = fs::create_dir_all(parent) {
                     return SessionWrapperOutcome::Failure(error);
@@ -868,15 +875,26 @@ fn render_classic_via_length_one_session(
         };
         match request.artifact_kind {
             Some(RenderArtifactKind::Raw) => match write_raw_world_artifact(
-                request.output_path, &pixels, rendered_width, rendered_height,
-                request.pixel_format, origin_x, origin_y, conditions,
+                request.output_path,
+                &pixels,
+                rendered_width,
+                rendered_height,
+                request.pixel_format,
+                origin_x,
+                origin_y,
+                conditions,
             ) {
                 Ok(metadata) => Some(metadata),
                 Err(error) => return SessionWrapperOutcome::Failure(error),
             },
             Some(RenderArtifactKind::Float32Exr) => match write_float32_exr_artifact(
-                request.output_path, &pixels, rendered_width, rendered_height,
-                origin_x, origin_y, conditions,
+                request.output_path,
+                &pixels,
+                rendered_width,
+                rendered_height,
+                origin_x,
+                origin_y,
+                conditions,
             ) {
                 Ok(metadata) => Some(metadata),
                 Err(error) => return SessionWrapperOutcome::Failure(error),

@@ -837,13 +837,28 @@ fn main() -> eframe::Result {
                 RenderArtifactKind::Raw
             };
             aexcompat_broker::image_render::render_experimental_artifact_at_time(
-                &repository, plugin, &hash, Path::new(&args[3]), Path::new(&args[4]),
-                &parameters, timing, smart, pixel_format, kind,
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                timing,
+                smart,
+                pixel_format,
+                kind,
             )
         } else {
             aexcompat_broker::image_render::render_experimental_image_at_time_with_format(
-                &repository, plugin, &hash, Path::new(&args[3]), Path::new(&args[4]),
-                &parameters, timing, smart, pixel_format,
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                timing,
+                smart,
+                pixel_format,
             )
         };
         match report {

@@ -776,8 +776,7 @@ pub fn render_experimental_artifact_at_time(
     pixel_format: RenderPixelFormat,
     artifact_kind: RenderArtifactKind,
 ) -> io::Result<Value> {
-    if artifact_kind == RenderArtifactKind::Float32Exr
-        && pixel_format != RenderPixelFormat::Argb32f
+    if artifact_kind == RenderArtifactKind::Float32Exr && pixel_format != RenderPixelFormat::Argb32f
     {
         return Err(invalid("render-exr requires argb32f"));
     }
