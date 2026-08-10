@@ -17,6 +17,7 @@ int main() {
   if (!aexcompat::pf_world_transform::verify_world_transform_blend()) return 1;
   if (!aexcompat::pf_world_transform::verify_bad_callback_param_contract()) return 2;
   if (!aexcompat::pf_world_transform::verify_copy_world_clipping()) return 3;
+  if (!aexcompat::pf_world_transform::verify_world_transform_affine()) return 4;
   std::cout << "{\"pf_bad_callback_param\":\"passed\"}\n";
   return 0;
 }

@@ -1212,10 +1212,7 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
     }
 }
 
-fn finish_msvcp_mutex_callback(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    result: Result<(), String>,
-) {
+fn finish_msvcp_mutex_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), String>) {
     match result {
         Ok(()) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
@@ -1257,9 +1254,7 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
             return Err(format!("MSVCP mutex {object:#x} is already initialized"));
         }
         if state.msvcp_mutexes.len() >= MAX_MSVCP_MUTEXES {
-            return Err(format!(
-                "MSVCP mutex count exceeds {MAX_MSVCP_MUTEXES}"
-            ));
+            return Err(format!("MSVCP mutex count exceeds {MAX_MSVCP_MUTEXES}"));
         }
         state.msvcp_mutexes.insert(
             object,
@@ -1431,7 +1426,8 @@ fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
         let allocation_size = (string.len() as u64)
             .checked_add(1)
             .ok_or_else(|| "VCRUNTIME exception string size overflow".to_string())?;
-        let copy = allocate_crt_region(unicorn, allocation_size).map_err(|error| error.to_string())?;
+        let copy =
+            allocate_crt_region(unicorn, allocation_size).map_err(|error| error.to_string())?;
         let mut terminated = string;
         terminated.push(0);
         if let Err(error) = unicorn.mem_write(copy, &terminated) {
@@ -2165,12 +2161,7 @@ fn legacy_sample_arguments(
         .reg_read(RegisterX86::R9)
         .map_err(|error| format!("{callback} params: {error}"))?;
     let destination = aegp_stack_arg(unicorn, 0x28)?;
-    Ok((params != 0 && destination != 0).then_some((
-        fixed_x,
-        fixed_y,
-        params,
-        destination,
-    )))
+    Ok((params != 0 && destination != 0).then_some((fixed_x, fixed_y, params, destination)))
 }
 
 fn finish_legacy_sample(unicorn: &mut Unicorn<'_, GuestState>, result: Result<bool, String>) {
@@ -2253,19 +2244,13 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         };
         let fixed_radius_x = read_guest_i32(unicorn, params, "AreaSample8 radius x")?;
         let fixed_radius_y = read_guest_i32(unicorn, params + 4, "AreaSample8 radius y")?;
-        let fixed_area = read_guest_i32(unicorn, params + 8, "AreaSample8 area")?;
+        let _fixed_area = read_guest_i32(unicorn, params + 8, "AreaSample8 area")?;
         let source_world = read_guest_u64(unicorn, params + 16, "AreaSample8 source world")?;
         let edge_behavior =
             read_guest_i32(unicorn, params + 24, "AreaSample8 edge behavior")? as u32;
         let radius_x = fixed_radius_x as f64 / 65536.0;
         let radius_y = fixed_radius_y as f64 / 65536.0;
-        if fixed_area <= 0
-            || edge_behavior != 0
-            || radius_x <= 0.0
-            || radius_y <= 0.0
-            || radius_x >= 128.0
-            || radius_y >= 128.0
-        {
+        if radius_x <= 0.0 || radius_y <= 0.0 || radius_x >= 128.0 || radius_y >= 128.0 {
             return Ok(false);
         }
         let Some(world) = read_argb8_world(unicorn, source_world, "AreaSample8")? else {
@@ -2278,10 +2263,39 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
         let top = center_y - radius_y;
         let bottom = center_y + radius_y;
         let footprint = (right - left) * (bottom - top);
-        let first_x = 0.max((left - 0.5).floor() as i32);
-        let last_x = (world.width - 1).min((right + 0.5).ceil() as i32);
-        let first_y = 0.max((top - 0.5).floor() as i32);
-        let last_y = (world.height - 1).min((bottom + 0.5).ceil() as i32);
+        const EDGE_ZERO: u32 = 0;
+        const EDGE_REPEAT: u32 = 1;
+        const EDGE_WRAP: u32 = 2;
+        let edge = if edge_behavior <= EDGE_WRAP {
+            edge_behavior
+        } else {
+            EDGE_ZERO
+        };
+        let clip_to_image = edge == EDGE_ZERO || world.width <= 0 || world.height <= 0;
+        let span_first_x = (left - 0.5).floor() as i32;
+        let span_last_x = (right + 0.5).ceil() as i32;
+        let span_first_y = (top - 0.5).floor() as i32;
+        let span_last_y = (bottom + 0.5).ceil() as i32;
+        let first_x = if clip_to_image {
+            0.max(span_first_x)
+        } else {
+            span_first_x
+        };
+        let last_x = if clip_to_image {
+            (world.width - 1).min(span_last_x)
+        } else {
+            span_last_x
+        };
+        let first_y = if clip_to_image {
+            0.max(span_first_y)
+        } else {
+            span_first_y
+        };
+        let last_y = if clip_to_image {
+            (world.height - 1).min(span_last_y)
+        } else {
+            span_last_y
+        };
         let mut weighted_alpha = 0.0;
         let mut weighted_color = [0.0; 3];
         for y in first_y..=last_y {
@@ -2292,7 +2306,24 @@ fn emulate_area_sample8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
                 if weight == 0.0 {
                     continue;
                 }
-                let pixel = read_argb8_pixel(unicorn, world, x, y, "AreaSample8")?;
+                let edge_mapped = |value: i32, extent: i32| {
+                    if edge == EDGE_REPEAT {
+                        value.clamp(0, extent - 1)
+                    } else {
+                        value.rem_euclid(extent)
+                    }
+                };
+                let sample_x = if clip_to_image {
+                    x
+                } else {
+                    edge_mapped(x, world.width)
+                };
+                let sample_y = if clip_to_image {
+                    y
+                } else {
+                    edge_mapped(y, world.height)
+                };
+                let pixel = read_argb8_pixel(unicorn, world, sample_x, sample_y, "AreaSample8")?;
                 let alpha = f64::from(pixel[0]) / 255.0;
                 weighted_alpha += weight * alpha;
                 for channel in 0..3 {
@@ -2366,8 +2397,7 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
             .map_err(|error| format!("TransferRect8 composite mode: {error}"))?;
         let opacity = mode_tail[0];
         let rgb_only = mode_tail[1];
-        let opacity16 = u16::from_le_bytes([mode_tail[2], mode_tail[3]]);
-        if !(0..=2).contains(&transfer_mode) || rgb_only > 1 || opacity16 > 32768 {
+        if !(0..=2).contains(&transfer_mode) || rgb_only > 1 {
             return Ok(false);
         }
         let Some(source) = read_argb8_world(unicorn, source_world, "TransferRect8 source")? else {
@@ -2388,27 +2418,22 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
                 read_guest_i32(unicorn, source_rect + 12, "TransferRect8 source bottom")?,
             ]
         };
-        if bounds[0] < 0
-            || bounds[1] < 0
-            || bounds[2] < bounds[0]
-            || bounds[3] < bounds[1]
-            || bounds[2] > source.width
-            || bounds[3] > source.height
-        {
-            return Ok(false);
-        }
-        let clipped_left = bounds[0].max(bounds[0].saturating_sub(destination_x));
-        let clipped_top = bounds[1].max(bounds[1].saturating_sub(destination_y));
-        let clipped_right = bounds[2].min(
-            bounds[0]
-                .saturating_sub(destination_x)
-                .saturating_add(destination.width),
-        );
-        let clipped_bottom = bounds[3].min(
-            bounds[1]
-                .saturating_sub(destination_y)
-                .saturating_add(destination.height),
-        );
+        // TransferRect8 consumes only the 8-bit opacity field. The adjacent
+        // 16-bit field is unspecified for this pixel format and must not make
+        // an otherwise valid 8-bit transfer fail. Clip the requested source
+        // rectangle against both worlds in 64-bit arithmetic while retaining
+        // its original top-left as the destination anchor.
+        let bounds = bounds.map(i64::from);
+        let destination_x = i64::from(destination_x);
+        let destination_y = i64::from(destination_y);
+        let clipped_left = bounds[0].max(bounds[0] - destination_x).max(0);
+        let clipped_top = bounds[1].max(bounds[1] - destination_y).max(0);
+        let clipped_right = bounds[2]
+            .min(bounds[0] - destination_x + i64::from(destination.width))
+            .min(i64::from(source.width));
+        let clipped_bottom = bounds[3]
+            .min(bounds[1] - destination_y + i64::from(destination.height))
+            .min(i64::from(source.height));
         if clipped_right <= clipped_left || clipped_bottom <= clipped_top {
             return Ok(true);
         }
@@ -2449,9 +2474,9 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
             }
             let mut coverage = vec![0.0; pixels];
             for row in 0..height {
-                let mask_y = i64::from(clipped_top) + row as i64 - i64::from(mask_offset_y);
+                let mask_y = clipped_top + row as i64 - i64::from(mask_offset_y);
                 for column in 0..width {
-                    let mask_x = i64::from(clipped_left) + column as i64 - i64::from(mask_offset_x);
+                    let mask_x = clipped_left + column as i64 - i64::from(mask_offset_x);
                     let mut value = if mask_x >= 0
                         && mask_y >= 0
                         && mask_x < i64::from(mask.width)
@@ -2492,12 +2517,14 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
         };
         let mut snapshot = vec![0u8; pixels * abi::PF_PIXEL_SIZE];
         for row in 0..height {
+            let source_y = u64::try_from(clipped_top + row as i64)
+                .map_err(|_| "TransferRect8 source y conversion failed".to_string())?;
+            let source_x = u64::try_from(clipped_left)
+                .map_err(|_| "TransferRect8 source x conversion failed".to_string())?;
             let address = source
                 .data
-                .checked_add((clipped_top as u64 + row as u64) * source.rowbytes)
-                .and_then(|address| {
-                    address.checked_add(clipped_left as u64 * abi::PF_PIXEL_SIZE as u64)
-                })
+                .checked_add(source_y * source.rowbytes)
+                .and_then(|address| address.checked_add(source_x * abi::PF_PIXEL_SIZE as u64))
                 .ok_or_else(|| "TransferRect8 source row address overflow".to_string())?;
             let row_start = row * width * abi::PF_PIXEL_SIZE;
             let bytes = &mut snapshot[row_start..row_start + width * abi::PF_PIXEL_SIZE];
@@ -2507,13 +2534,13 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
         }
         let opacity = f64::from(opacity) / 255.0;
         for row in 0..height {
-            let source_y = clipped_top + row as i32;
+            let source_y = clipped_top + row as i64;
             let output_y = destination_y + source_y - bounds[1];
             if (field == 1 && output_y & 1 != 0) || (field == 2 && output_y & 1 == 0) {
                 continue;
             }
             for column in 0..width {
-                let source_x = clipped_left + column as i32;
+                let source_x = clipped_left + column as i64;
                 let output_x = destination_x + source_x - bounds[0];
                 let address = destination
                     .data
