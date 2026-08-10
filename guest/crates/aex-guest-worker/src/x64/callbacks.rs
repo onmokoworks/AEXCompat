@@ -1212,10 +1212,7 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
     }
 }
 
-fn finish_msvcp_mutex_callback(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    result: Result<(), String>,
-) {
+fn finish_msvcp_mutex_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), String>) {
     match result {
         Ok(()) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
@@ -1257,9 +1254,7 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
             return Err(format!("MSVCP mutex {object:#x} is already initialized"));
         }
         if state.msvcp_mutexes.len() >= MAX_MSVCP_MUTEXES {
-            return Err(format!(
-                "MSVCP mutex count exceeds {MAX_MSVCP_MUTEXES}"
-            ));
+            return Err(format!("MSVCP mutex count exceeds {MAX_MSVCP_MUTEXES}"));
         }
         state.msvcp_mutexes.insert(
             object,
@@ -1431,7 +1426,8 @@ fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
         let allocation_size = (string.len() as u64)
             .checked_add(1)
             .ok_or_else(|| "VCRUNTIME exception string size overflow".to_string())?;
-        let copy = allocate_crt_region(unicorn, allocation_size).map_err(|error| error.to_string())?;
+        let copy =
+            allocate_crt_region(unicorn, allocation_size).map_err(|error| error.to_string())?;
         let mut terminated = string;
         terminated.push(0);
         if let Err(error) = unicorn.mem_write(copy, &terminated) {
@@ -2165,12 +2161,7 @@ fn legacy_sample_arguments(
         .reg_read(RegisterX86::R9)
         .map_err(|error| format!("{callback} params: {error}"))?;
     let destination = aegp_stack_arg(unicorn, 0x28)?;
-    Ok((params != 0 && destination != 0).then_some((
-        fixed_x,
-        fixed_y,
-        params,
-        destination,
-    )))
+    Ok((params != 0 && destination != 0).then_some((fixed_x, fixed_y, params, destination)))
 }
 
 fn finish_legacy_sample(unicorn: &mut Unicorn<'_, GuestState>, result: Result<bool, String>) {
@@ -2395,12 +2386,8 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
         let bounds = bounds.map(i64::from);
         let destination_x = i64::from(destination_x);
         let destination_y = i64::from(destination_y);
-        let clipped_left = bounds[0]
-            .max(bounds[0] - destination_x)
-            .max(0);
-        let clipped_top = bounds[1]
-            .max(bounds[1] - destination_y)
-            .max(0);
+        let clipped_left = bounds[0].max(bounds[0] - destination_x).max(0);
+        let clipped_top = bounds[1].max(bounds[1] - destination_y).max(0);
         let clipped_right = bounds[2]
             .min(bounds[0] - destination_x + i64::from(destination.width))
             .min(i64::from(source.width));
@@ -2497,9 +2484,7 @@ fn emulate_transfer_rect8(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32)
             let address = source
                 .data
                 .checked_add(source_y * source.rowbytes)
-                .and_then(|address| {
-                    address.checked_add(source_x * abi::PF_PIXEL_SIZE as u64)
-                })
+                .and_then(|address| address.checked_add(source_x * abi::PF_PIXEL_SIZE as u64))
                 .ok_or_else(|| "TransferRect8 source row address overflow".to_string())?;
             let row_start = row * width * abi::PF_PIXEL_SIZE;
             let bytes = &mut snapshot[row_start..row_start + width * abi::PF_PIXEL_SIZE];
