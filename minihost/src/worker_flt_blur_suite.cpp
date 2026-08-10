@@ -259,7 +259,39 @@ int32_t __cdecl box_blur(
                      iterations);
 }
 
-Suite1 g_suite1{&gaussian_blur, &box_blur};
+// AE's FLT_ComputeDirectionalBlurRadii, byte-for-byte from FLT.dll (0x1800324c0):
+//   rad = angle_degrees * (pi/180)
+//   *radius_x = (int)ceil(|sin(rad)| * x_scale * magnitude)
+//   *radius_y = (int)ceil(|cos(rad)| * y_scale * magnitude)
+// AE rounds toward +inf (vroundsd imm 2) then truncates to int, and returns 0
+// unconditionally. The host matches the math exactly for finite inputs and adds
+// two things AE lacks: a null-pointer guard (fail-closed, like the other slots)
+// and a bounded cast so a non-finite product cannot make the int conversion
+// undefined. Directional Blur is the only observed caller (issue #1093).
+constexpr double kDegreesToRadians =
+    3.14159265358979311599796346854418516159057617187500 / 180.0;
+
+int32_t bounded_ceil_to_int(double value) noexcept {
+  if (!std::isfinite(value)) return 0;
+  const double ceiled = std::ceil(value);
+  if (ceiled <= static_cast<double>(std::numeric_limits<int32_t>::min()))
+    return std::numeric_limits<int32_t>::min();
+  if (ceiled >= static_cast<double>(std::numeric_limits<int32_t>::max()))
+    return std::numeric_limits<int32_t>::max();
+  return static_cast<int32_t>(ceiled);
+}
+
+int32_t __cdecl compute_directional_blur_radii(
+    double x_scale, double y_scale, double angle_degrees, double magnitude,
+    int32_t* radius_x, int32_t* radius_y) {
+  if (!radius_x || !radius_y) return kBadCallbackParam;
+  const double radians = angle_degrees * kDegreesToRadians;
+  *radius_x = bounded_ceil_to_int(std::fabs(std::sin(radians)) * x_scale * magnitude);
+  *radius_y = bounded_ceil_to_int(std::fabs(std::cos(radians)) * y_scale * magnitude);
+  return 0;
+}
+
+Suite1 g_suite1{&gaussian_blur, &box_blur, &compute_directional_blur_radii};
 
 }  // namespace
 
@@ -285,7 +317,8 @@ bool selftest() {
       rejected_suite != nullptr)
     return false;
   const auto* suite = static_cast<const Suite1*>(raw_suite);
-  if (!suite->gaussian_blur || !suite->box_blur) {
+  if (!suite->gaussian_blur || !suite->box_blur ||
+      !suite->compute_directional_blur_radii) {
     g_hooks.release_suite(kSuiteName, kSuiteVersion1);
     return false;
   }
@@ -397,6 +430,29 @@ bool selftest() {
           g_hooks.effect_ref, nullptr, 1.0f, 0.0f, 1,
           kHorizontal | kAllChannels, 0, 1, &destination_world) ==
           kBadCallbackParam;
+
+  // compute_directional_blur_radii (slot 2): the smear projected onto x/y,
+  // rounded up. At 90 degrees the blur is horizontal, so x takes the whole
+  // magnitude (ceil(1*2*5)=10) while y is |cos(pi/2)|=6.1e-17 rounded up to 1 -
+  // AE's own ceil-of-epsilon result, reproduced here because the host runs the
+  // same sin/cos and ceil. At 0 degrees sin is exactly 0 so x collapses to 0
+  // and y takes it all; 45 degrees splits by 1/sqrt(2). These match AE's
+  // FLT_ComputeDirectionalBlurRadii exactly.
+  int32_t radius_x = -1, radius_y = -1;
+  ok = ok &&
+      suite->compute_directional_blur_radii(2.0, 3.0, 90.0, 5.0, &radius_x,
+                                            &radius_y) == 0 &&
+      radius_x == 10 && radius_y == 1 &&
+      suite->compute_directional_blur_radii(2.0, 3.0, 0.0, 5.0, &radius_x,
+                                            &radius_y) == 0 &&
+      radius_x == 0 && radius_y == 15 &&
+      suite->compute_directional_blur_radii(1.0, 1.0, 45.0, 10.0, &radius_x,
+                                            &radius_y) == 0 &&
+      radius_x == 8 && radius_y == 8 &&
+      suite->compute_directional_blur_radii(1.0, 1.0, 0.0, 1.0, nullptr,
+                                            &radius_y) == kBadCallbackParam &&
+      suite->compute_directional_blur_radii(1.0, 1.0, 0.0, 1.0, &radius_x,
+                                            nullptr) == kBadCallbackParam;
 
   return g_hooks.release_suite(kSuiteName, kSuiteVersion1) == 0 && ok;
 }
