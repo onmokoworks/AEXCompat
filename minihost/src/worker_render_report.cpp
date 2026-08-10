@@ -11,6 +11,7 @@
 #include "worker_render_receipts.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_suite_call_slot_probe.hpp"
+#include "worker_suite_registry.hpp"
 #include "worker_world_registry.hpp"
 
 #include <cstddef>
@@ -544,6 +545,7 @@ void append_classic_subsystems(
       << ",\"live_suite_lease_count\":" << value.suite_counts[2]
       << ",\"live_suite_reference_count\":" << value.suite_counts[3]
       << ",\"live_suite_leases\":\"" << value.live_suite_leases << '"'
+      << ",\"suite_fault_observed\":" << (value.suite_fault ? "true" : "false")
       << ",\"handle_lifetimes_balanced\":" << (value.handle_balanced ? "true" : "false")
       << ",\"pf_path_lifetimes_balanced\":" << (value.path_balanced ? "true" : "false")
       << ",\"pf_path_checkout_calls\":" << value.path_counts[0]
@@ -667,6 +669,7 @@ ClassicSubsystemDiagnostics capture_classic_subsystems() {
           l2_detail::suite_timeline_report_json() +
           worker_runtime::suite_call_slot_probe::report_json(),
       l2_detail::live_suite_lease_summary(),
+      worker_runtime::suite_registry().rejected_release_count() != 0,
       worker_runtime::handles::handle_lifetimes_balanced(),
       aexcompat::pf_path_runtime::lifetimes_balanced(),
       {i64(path.checkout_calls), i64(path.checkin_calls), i64(path.mask_calls),
