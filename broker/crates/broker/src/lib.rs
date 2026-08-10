@@ -17,6 +17,9 @@ pub mod plugin_dependency_closure;
 pub mod pnp_opencl_runtime_collector;
 #[cfg(windows)]
 pub mod render;
+#[path = "image_render/artifacts.rs"]
+pub mod render_artifacts;
+pub mod render_pixel_format;
 #[cfg(windows)]
 pub mod render_request;
 #[cfg(windows)]

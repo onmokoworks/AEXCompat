@@ -17,6 +17,7 @@ use crate::macos_worker_controller::{
     MAX_STDERR_BYTES, ResourceLimits, SecurityTier, WorkerSession, audit_process, read_bounded,
     run_staged_setup, terminate_process_group,
 };
+use aexcompat_broker::render_artifacts::{RenderArtifactConditions, write_float32_exr_artifact};
 
 const MAX_WIDTH: u32 = 1920;
 const MAX_HEIGHT: u32 = 1080;
@@ -30,6 +31,30 @@ const MAX_RESIDENT_PROTOCOL_BYTES: usize = 1024 * 1024;
 struct RenderResult {
     report: String,
     output: PathBuf,
+    preview: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum MacRenderFormat {
+    #[default]
+    PngArgb8,
+    ExrArgb32f,
+}
+
+impl MacRenderFormat {
+    fn pixel_format(self) -> &'static str {
+        match self {
+            Self::PngArgb8 => "argb8",
+            Self::ExrArgb32f => "argb32f",
+        }
+    }
+
+    fn bytes_per_pixel(self) -> usize {
+        match self {
+            Self::PngArgb8 => 4,
+            Self::ExrArgb32f => 16,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -39,6 +64,7 @@ struct ResidentFrameOutput {
     height: u32,
     rowbytes: u32,
     pixel_format: String,
+    render_path: String,
     checksum: String,
     guards_intact: bool,
 }
@@ -61,6 +87,7 @@ fn validate_resident_frame(
     frame_index: u64,
     width: u32,
     height: u32,
+    format: MacRenderFormat,
 ) -> Result<String, String> {
     let done: ResidentFrameDone = serde_json::from_value(value.clone())
         .map_err(|error| format!("malformed resident frame response: {error}"))?;
@@ -78,8 +105,9 @@ fn validate_resident_frame(
         || done.generation != Some(expected_generation)
         || output.width != width
         || output.height != height
-        || output.rowbytes != width * 4
-        || output.pixel_format != "argb8"
+        || output.rowbytes != width * format.bytes_per_pixel() as u32
+        || output.pixel_format != format.pixel_format()
+        || !matches!(output.render_path.as_str(), "classic" | "smartfx")
         || output.checksum.len() != 64
         || !output.checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
         || !output.guards_intact
@@ -168,6 +196,7 @@ enum ResidentCommand {
 struct ResidentSessionHandle {
     plugin_path: PathBuf,
     input: PathBuf,
+    format: MacRenderFormat,
     sender: Sender<ResidentCommand>,
     receiver: Receiver<Result<RenderResult, String>>,
     next_frame: u64,
@@ -181,11 +210,13 @@ type SharedResidentChild = Arc<Mutex<Option<Child>>>;
 struct PendingResidentRender {
     parameters: Vec<GuiParameter>,
     output: PathBuf,
+    format: MacRenderFormat,
 }
 
 struct ResidentAdmissionHandle {
     plugin_path: PathBuf,
     input: PathBuf,
+    format: MacRenderFormat,
     receiver: Receiver<Result<ResidentSessionHandle, String>>,
 }
 
@@ -285,6 +316,7 @@ struct MacHarnessApp {
     viewer_zoom: f32,
     viewer_pan: egui::Vec2,
     busy: bool,
+    render_format: MacRenderFormat,
     resident: ResidentState,
 }
 
@@ -313,6 +345,7 @@ impl MacHarnessApp {
             viewer_zoom: 1.0,
             viewer_pan: egui::Vec2::ZERO,
             busy: false,
+            render_format: MacRenderFormat::PngArgb8,
             resident: ResidentState::Idle,
         }
     }
@@ -421,20 +454,26 @@ impl MacHarnessApp {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or_default();
-        let output = output_directory.join(format!("mac-aex-{nonce}.png"));
+        let output = match self.render_format {
+            MacRenderFormat::PngArgb8 => output_directory.join(format!("mac-aex-{nonce}.png")),
+            MacRenderFormat::ExrArgb32f => {
+                output_directory.join(format!("mac-aex-{nonce}.exr-artifact"))
+            }
+        };
         let same_ready = matches!(
             &self.resident,
             ResidentState::Ready(session)
-                if session.plugin_path == aex && session.input == input
+                if session.plugin_path == aex && session.input == input && session.format == self.render_format
         );
         let same_starting = matches!(
             &self.resident,
             ResidentState::Starting { admission, .. }
-                if admission.plugin_path == aex && admission.input == input
+                if admission.plugin_path == aex && admission.input == input && admission.format == self.render_format
         );
         let pending = PendingResidentRender {
             parameters: self.parameters.clone(),
             output,
+            format: self.render_format,
         };
         if same_starting {
             if let ResidentState::Starting {
@@ -453,7 +492,13 @@ impl MacHarnessApp {
                 return;
             }
             self.resident = ResidentState::Starting {
-                admission: begin_resident_admission(workers, aex, input, output_directory),
+                admission: begin_resident_admission(
+                    workers,
+                    aex,
+                    input,
+                    output_directory,
+                    self.render_format,
+                ),
                 pending,
             };
             self.status = "Starting and probing resident x64 guest...".into();
@@ -467,6 +512,10 @@ impl MacHarnessApp {
         let ResidentState::Ready(session) = &mut self.resident else {
             return;
         };
+        if session.format != pending.format {
+            self.status = "Resident format changed; reopen the session.".into();
+            return;
+        }
         let frame_index = session.next_frame;
         session.next_frame += 1;
         if let Err(error) = session.sender.send(ResidentCommand::Render {
@@ -542,18 +591,27 @@ impl MacHarnessApp {
         };
         self.busy = false;
         match result {
-            Ok(result) => match load_texture(ctx, "mac-output", &result.output) {
-                Ok((texture, width, height)) => {
-                    let had_output = self.output_texture.is_some();
+            Ok(result) => match result.preview.as_deref() {
+                Some(preview) => match load_texture(ctx, "mac-output", preview) {
+                    Ok((texture, width, height)) => {
+                        let had_output = self.output_texture.is_some();
+                        self.output = Some(result.output);
+                        self.output_texture = Some(texture);
+                        self.viewer_mode = self.viewer_mode.after_successful_render(had_output);
+                        self.status = format!("Completed: {width}x{height} output");
+                        self.report = result.report;
+                    }
+                    Err(error) => {
+                        self.status =
+                            "Worker completed but output preview could not be opened.".into();
+                        self.report = error;
+                    }
+                },
+                None => {
                     self.output = Some(result.output);
-                    self.output_texture = Some(texture);
-                    self.viewer_mode = self.viewer_mode.after_successful_render(had_output);
-                    self.status = format!("Completed: {width}x{height} ARGB8 output");
+                    self.output_texture = None;
+                    self.status = "Completed: FLOAT32 EXR artifact".into();
                     self.report = result.report;
-                }
-                Err(error) => {
-                    self.status = "Worker completed but output PNG could not be opened.".into();
-                    self.report = error;
                 }
             },
             Err(error) => {
@@ -591,6 +649,25 @@ impl eframe::App for MacHarnessApp {
                 {
                     self.choose_input(ctx);
                 }
+                ui.add_enabled_ui(!occupied, |ui| {
+                    egui::ComboBox::from_id_salt("mac-render-format")
+                        .selected_text(match self.render_format {
+                            MacRenderFormat::PngArgb8 => "ARGB8 PNG",
+                            MacRenderFormat::ExrArgb32f => "FLOAT32 EXR",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.render_format,
+                                MacRenderFormat::PngArgb8,
+                                "ARGB8 PNG",
+                            );
+                            ui.selectable_value(
+                                &mut self.render_format,
+                                MacRenderFormat::ExrArgb32f,
+                                "FLOAT32 EXR",
+                            );
+                        });
+                });
                 let ready = !occupied && self.plugin_path.is_some() && self.input.is_some();
                 if ui.add_enabled(ready, egui::Button::new("Render")).clicked() {
                     self.render();
@@ -975,7 +1052,40 @@ fn write_argb8_slot(input: &Path, slot: &Path) -> Result<(u32, u32), String> {
     Ok((width, height))
 }
 
-fn save_argb8_slot(slot: &Path, output: &Path, width: u32, height: u32) -> Result<String, String> {
+fn write_resident_input_slot(
+    input: &Path,
+    slot: &Path,
+    format: MacRenderFormat,
+) -> Result<(u32, u32), String> {
+    if format == MacRenderFormat::PngArgb8 {
+        return write_argb8_slot(input, slot);
+    }
+    let image = image::open(input)
+        .map_err(|error| format!("open resident input PNG: {error}"))?
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 || width > MAX_WIDTH || height > MAX_HEIGHT {
+        return Err(format!(
+            "resident input dimensions must be 1x1..={MAX_WIDTH}x{MAX_HEIGHT}; got {width}x{height}"
+        ));
+    }
+    let mut argb32f = Vec::with_capacity(width as usize * height as usize * 16);
+    for pixel in image.as_raw().chunks_exact(4) {
+        for sample in [pixel[3], pixel[0], pixel[1], pixel[2]] {
+            argb32f.extend_from_slice(&(f32::from(sample) / 255.0).to_le_bytes());
+        }
+    }
+    std::fs::write(slot, argb32f).map_err(|error| format!("write resident input slot: {error}"))?;
+    Ok((width, height))
+}
+
+fn save_argb8_slot(
+    slot: &Path,
+    output: &Path,
+    width: u32,
+    height: u32,
+    expected_checksum: &str,
+) -> Result<String, String> {
     let argb =
         std::fs::read(slot).map_err(|error| format!("read resident output slot: {error}"))?;
     let expected = width as usize * height as usize * 4;
@@ -983,6 +1093,12 @@ fn save_argb8_slot(slot: &Path, output: &Path, width: u32, height: u32) -> Resul
         return Err(format!(
             "resident output has {} bytes, expected {expected}",
             argb.len()
+        ));
+    }
+    let checksum = format!("{:x}", Sha256::digest(&argb));
+    if checksum != expected_checksum {
+        return Err(format!(
+            "resident output checksum mismatch: response={expected_checksum} slot={checksum}"
         ));
     }
     let mut rgba = Vec::with_capacity(argb.len());
@@ -994,6 +1110,57 @@ fn save_argb8_slot(slot: &Path, output: &Path, width: u32, height: u32) -> Resul
     image
         .save(output)
         .map_err(|error| format!("save resident output PNG: {error}"))?;
+    Ok(checksum)
+}
+
+fn save_argb32f_exr_slot(
+    slot: &Path,
+    directory: &Path,
+    width: u32,
+    height: u32,
+    plugin_sha256: &str,
+    input_sha256: &str,
+    parameters: &str,
+    render_path: &str,
+    expected_checksum: &str,
+) -> Result<String, String> {
+    let argb = std::fs::read(slot)
+        .map_err(|error| format!("read resident ARGB32F output slot: {error}"))?;
+    let expected = width as usize * height as usize * 16;
+    if argb.len() != expected {
+        return Err(format!(
+            "resident ARGB32F output has {} bytes, expected {expected}",
+            argb.len()
+        ));
+    }
+    let world_sha256 = format!("{:x}", Sha256::digest(&argb));
+    if world_sha256 != expected_checksum {
+        return Err(format!(
+            "resident output checksum mismatch: response={expected_checksum} slot={world_sha256}"
+        ));
+    }
+    let mut rgba = Vec::with_capacity(argb.len());
+    for pixel in argb.chunks_exact(16) {
+        rgba.extend_from_slice(&pixel[4..16]);
+        rgba.extend_from_slice(&pixel[0..4]);
+    }
+    let conditions = RenderArtifactConditions {
+        premultiplication: "premultiplied".into(),
+        working_space: "None".into(),
+        render_mode: "software".into(),
+        comparison_identity: json!({
+            "plugin_sha256": plugin_sha256,
+            "input_sha256": input_sha256,
+            "world_sha256": world_sha256,
+            "render_path": render_path,
+            "pixel_format": "argb32f",
+            "timing": {"current_time": 0, "time_step": 1, "total_time": 1, "time_scale": 30},
+            "requested_parameters": [parameters],
+            "origin": {"x": 0, "y": 0}
+        }),
+    };
+    write_float32_exr_artifact(directory, &rgba, width, height, 0, 0, conditions)
+        .map_err(|error| format!("write FLOAT32 EXR artifact: {error}"))?;
     Ok(format!("{:x}", Sha256::digest(&argb)))
 }
 
@@ -1009,16 +1176,19 @@ struct StartedResidentWorker {
     height: u32,
     security_tier: SecurityTier,
     fallback_reasons: Vec<String>,
+    plugin_sha256: String,
+    input_sha256: String,
 }
 
 fn start_resident_worker(
     candidates: &[GuestWorkerCandidate],
     aex: &Path,
     input: &Path,
+    format: MacRenderFormat,
 ) -> Result<StartedResidentWorker, String> {
     let mut failures = Vec::new();
     for candidate in candidates {
-        let mut probe_worker = match launch_resident_candidate(candidate, aex, input) {
+        let mut probe_worker = match launch_resident_candidate(candidate, aex, input, format) {
             Ok(worker) => worker,
             Err(error) => {
                 failures.push(format!(
@@ -1078,7 +1248,7 @@ fn start_resident_worker(
             ));
             continue;
         }
-        match launch_resident_candidate(candidate, aex, input) {
+        match launch_resident_candidate(candidate, aex, input, format) {
             Ok(mut fresh_worker) => {
                 fresh_worker.fallback_reasons = failures;
                 return Ok(fresh_worker);
@@ -1106,16 +1276,34 @@ fn launch_resident_candidate(
     candidate: &GuestWorkerCandidate,
     aex: &Path,
     input: &Path,
+    format: MacRenderFormat,
 ) -> Result<StartedResidentWorker, String> {
     let session = WorkerSession::create()?;
     let worker = session.stage_file(&candidate.path, "worker")?;
     let plugin = session.stage_file(aex, "plugin.aex")?;
-    let input_slot = session.root().join("input.argb8");
-    let output_slot = session.root().join("output.argb8");
-    let (width, height) = write_argb8_slot(input, &input_slot)?;
+    let input_slot = session
+        .root()
+        .join(format!("input.{}", format.pixel_format()));
+    let output_slot = session
+        .root()
+        .join(format!("output.{}", format.pixel_format()));
+    let (width, height) = write_resident_input_slot(input, &input_slot, format)?;
+    let plugin_sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            std::fs::read(&plugin).map_err(|error| format!("hash staged AEX: {error}"))?
+        )
+    );
+    let input_sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            std::fs::read(&input_slot)
+                .map_err(|error| format!("hash staged resident input: {error}"))?
+        )
+    );
     std::fs::write(
         &output_slot,
-        vec![0u8; width as usize * height as usize * 4],
+        vec![0u8; width as usize * height as usize * format.bytes_per_pixel()],
     )
     .map_err(|error| format!("initialize resident output slot: {error}"))?;
     let arguments = [
@@ -1126,6 +1314,8 @@ fn launch_resident_candidate(
         width.to_string(),
         height.to_string(),
         "30".to_string(),
+        "--pixel-format".to_string(),
+        format.pixel_format().to_string(),
     ];
     let mut command = session.command(
         &worker,
@@ -1206,6 +1396,8 @@ fn launch_resident_candidate(
         height,
         security_tier: candidate.security_tier(),
         fallback_reasons: Vec::new(),
+        plugin_sha256,
+        input_sha256,
     })
 }
 
@@ -1305,15 +1497,17 @@ fn begin_resident_admission(
     aex: PathBuf,
     input: PathBuf,
     output_directory: PathBuf,
+    format: MacRenderFormat,
 ) -> ResidentAdmissionHandle {
     let plugin_path = aex.clone();
     let admission_input = input.clone();
     let receiver = spawn_resident_admission(move || {
-        start_resident_session(&candidates, &aex, &input, &output_directory)
+        start_resident_session(&candidates, &aex, &input, &output_directory, format)
     });
     ResidentAdmissionHandle {
         plugin_path,
         input: admission_input,
+        format,
         receiver,
     }
 }
@@ -1368,8 +1562,11 @@ fn start_resident_session(
     aex: &Path,
     input: &Path,
     _output_directory: &Path,
+    format: MacRenderFormat,
 ) -> Result<ResidentSessionHandle, String> {
-    let started = start_resident_worker(candidates, aex, input)?;
+    let started = start_resident_worker(candidates, aex, input, format)?;
+    let plugin_sha256 = started.plugin_sha256.clone();
+    let input_sha256 = started.input_sha256.clone();
     let width = started.width;
     let height = started.height;
     let output_slot = started.output_slot.clone();
@@ -1407,8 +1604,8 @@ fn start_resident_session(
                         "current_time": {"value": 0, "scale": 30},
                         "parameters": payload,
                         });
-                        write_control_message(&mut stdin, &request)
-                    }).and_then(|()| {
+                        write_control_message(&mut stdin, &request).map(|()| payload)
+                    }).and_then(|payload| {
                         let response = recv_resident_response(
                             &response_receiver,
                             &controller_child,
@@ -1417,15 +1614,39 @@ fn start_resident_session(
                         )?
                             .ok_or_else(|| "resident worker closed stdout".to_string())?;
                         let expected_checksum =
-                            validate_resident_frame(&response, frame_index, width, height)?;
+                            validate_resident_frame(&response, frame_index, width, height, format)?;
+                        let render_path = response["output"]["render_path"]
+                            .as_str()
+                            .expect("validated resident render path");
                         session.audit_tree()?;
-                        let observed_checksum =
-                            save_argb8_slot(&output_slot, &output, width, height)?;
-                        if observed_checksum != expected_checksum {
-                            return Err(format!(
-                                "resident output checksum mismatch: response={expected_checksum} slot={observed_checksum}"
-                            ));
-                        }
+                        let (observed_checksum, final_output, preview) = match format {
+                            MacRenderFormat::PngArgb8 => (
+                                save_argb8_slot(
+                                    &output_slot,
+                                    &output,
+                                    width,
+                                    height,
+                                    &expected_checksum,
+                                )?,
+                                output.clone(),
+                                Some(output.clone()),
+                            ),
+                            MacRenderFormat::ExrArgb32f => {
+                                let checksum = save_argb32f_exr_slot(
+                                    &output_slot,
+                                    &output,
+                                    width,
+                                    height,
+                                    &plugin_sha256,
+                                    &input_sha256,
+                                    &payload,
+                                    render_path,
+                                    &expected_checksum,
+                                )?;
+                                (checksum, output.join("output.exr"), None)
+                            }
+                        };
+                        debug_assert_eq!(observed_checksum, expected_checksum);
                         Ok(RenderResult {
                             report: serde_json::to_string_pretty(&json!({
                                 "schema": "aexcompat.macos-resident-render",
@@ -1437,7 +1658,8 @@ fn start_resident_session(
                                 "frame": response,
                             }))
                             .expect("resident report is serializable"),
-                            output,
+                            output: final_output,
+                            preview,
                         })
                     });
                     let _ = result_sender.send(result);
@@ -1503,6 +1725,7 @@ fn start_resident_session(
     Ok(ResidentSessionHandle {
         plugin_path: aex.to_path_buf(),
         input: input.to_path_buf(),
+        format,
         sender: command_sender,
         receiver: result_receiver,
         next_frame: 0,
@@ -2220,19 +2443,95 @@ mod tests {
                 "height": 1,
                 "rowbytes": 8,
                 "pixel_format": "argb8",
+                "render_path": "classic",
                 "checksum": "0".repeat(64),
                 "guards_intact": true
             },
             "render_error": 0,
             "generation": 1
         });
-        assert!(validate_resident_frame(&valid, 0, 2, 1).is_ok());
+        assert!(validate_resident_frame(&valid, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
         let mut stale = valid.clone();
         stale["generation"] = json!(0);
-        assert!(validate_resident_frame(&stale, 0, 2, 1).is_err());
+        assert!(validate_resident_frame(&stale, 0, 2, 1, MacRenderFormat::PngArgb8).is_err());
         let mut unknown = valid;
         unknown["unexpected"] = json!(true);
-        assert!(validate_resident_frame(&unknown, 0, 2, 1).is_err());
+        assert!(validate_resident_frame(&unknown, 0, 2, 1, MacRenderFormat::PngArgb8).is_err());
+    }
+
+    #[test]
+    fn resident_argb32f_response_and_exr_artifact_preserve_word_identity() {
+        let response = json!({
+            "v": 1,
+            "type": "frame_done",
+            "frame_index": 3,
+            "status": "ok",
+            "output": {
+                "width": 1,
+                "height": 1,
+                "rowbytes": 16,
+                "pixel_format": "argb32f",
+                "render_path": "smartfx",
+                "checksum": "a".repeat(64),
+                "guards_intact": true
+            },
+            "render_error": 0,
+            "generation": 4
+        });
+        assert!(validate_resident_frame(&response, 3, 1, 1, MacRenderFormat::ExrArgb32f).is_ok());
+        assert!(validate_resident_frame(&response, 3, 1, 1, MacRenderFormat::PngArgb8).is_err());
+
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-macos-exr-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let slot = root.join("output.argb32f");
+        let artifact = root.join("artifact");
+        let words = [0x8000_0000u32, 0x7fc1_2345, 0x0000_0001, 0x3f80_0000];
+        let bytes = words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect::<Vec<_>>();
+        std::fs::write(&slot, &bytes).unwrap();
+        let expected_checksum = format!("{:x}", Sha256::digest(&bytes));
+        let rejected = root.join("rejected");
+        assert!(
+            save_argb32f_exr_slot(
+                &slot,
+                &rejected,
+                1,
+                1,
+                &"11".repeat(32),
+                &"22".repeat(32),
+                "v2",
+                "smartfx",
+                &"00".repeat(32),
+            )
+            .is_err()
+        );
+        assert!(!rejected.exists());
+        let checksum = save_argb32f_exr_slot(
+            &slot,
+            &artifact,
+            1,
+            1,
+            &"11".repeat(32),
+            &"22".repeat(32),
+            "v2",
+            "smartfx",
+            &expected_checksum,
+        )
+        .unwrap();
+        assert_eq!(checksum, expected_checksum);
+        assert!(artifact.join("output.exr").is_file());
+        let metadata: Value =
+            serde_json::from_slice(&std::fs::read(artifact.join("output.json")).unwrap()).unwrap();
+        assert_eq!(metadata["pixel_format"], "float32");
+        assert_eq!(metadata["comparison_identity"]["world_sha256"], checksum);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2287,6 +2586,7 @@ mod tests {
         let mut session = ResidentSessionHandle {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
+            format: MacRenderFormat::PngArgb8,
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
@@ -2334,6 +2634,7 @@ mod tests {
         let mut session = ResidentSessionHandle {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
+            format: MacRenderFormat::PngArgb8,
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
@@ -2379,6 +2680,7 @@ mod tests {
         let mut session = ResidentSessionHandle {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
+            format: MacRenderFormat::PngArgb8,
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
@@ -2464,8 +2766,14 @@ mod tests {
                 native: true,
             },
         );
-        let mut session =
-            start_resident_session(&workers, &aex, &input, &output_directory).unwrap();
+        let mut session = start_resident_session(
+            &workers,
+            &aex,
+            &input,
+            &output_directory,
+            MacRenderFormat::PngArgb8,
+        )
+        .unwrap();
         let parameter = |value| GuiParameter {
             slot: 5,
             name: "Amount".into(),
@@ -2503,5 +2811,50 @@ mod tests {
         assert_eq!(reports[1]["frame"]["generation"], 2);
         assert_ne!(outputs[0], outputs[1]);
         session.shutdown().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_AEX and AEXCOMPAT_TEST_INPUT_PNG"]
+    fn real_resident_argb32f_render_commits_exr_artifact() {
+        let aex = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_AEX").unwrap());
+        let input = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_INPUT_PNG").unwrap());
+        let repository = repository_root().unwrap();
+        let output_directory = std::env::temp_dir().join(format!(
+            "aexcompat-resident-exr-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&output_directory);
+        std::fs::create_dir_all(&output_directory).unwrap();
+        let workers = guest_worker_candidates(&repository).unwrap();
+        let mut session = start_resident_session(
+            &workers,
+            &aex,
+            &input,
+            &output_directory,
+            MacRenderFormat::ExrArgb32f,
+        )
+        .unwrap();
+        let artifact = output_directory.join("frame-0.exr-artifact");
+        session
+            .sender
+            .send(ResidentCommand::Render {
+                frame_index: 0,
+                parameters: Vec::new(),
+                output: artifact.clone(),
+            })
+            .unwrap();
+        let result = session
+            .receiver
+            .recv_timeout(RESIDENT_RENDER_DEADLINE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.output, artifact.join("output.exr"));
+        assert!(result.output.is_file());
+        let metadata: Value =
+            serde_json::from_slice(&std::fs::read(artifact.join("output.json")).unwrap()).unwrap();
+        assert_eq!(metadata["pixel_format"], "float32");
+        assert_eq!(metadata["comparison_identity"]["pixel_format"], "argb32f");
+        session.shutdown().unwrap();
+        let _ = std::fs::remove_dir_all(output_directory);
     }
 }
