@@ -92,6 +92,11 @@ struct SceneContext {
   int32_t* full_resolution_height{};
   int32_t (__cdecl *smart_width)(){};
   int32_t (__cdecl *smart_height)(){};
+  // Render pixel aspect ratio as {int32_t numerator; uint32_t denominator}
+  // (SpatialRatio, layout-identical to the SDK A_Ratio). Trailing and
+  // optional: constructions that do not set it leave it null and the
+  // Item-suite reader falls back to 1:1 (issue #1059).
+  const void* pixel_aspect_ratio{};
 };
 
 enum class SceneSuiteAcquireResult {

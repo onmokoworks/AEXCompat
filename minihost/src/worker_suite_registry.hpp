@@ -28,6 +28,7 @@ using SuiteResolver = SuiteResolveResult (*)(
 enum class UnsupportedSuiteId : uint8_t {
   aegp_proj_9,
   aegp_item_14,
+  aegp_item_13,
   aegp_item_10,
   aegp_item_3,
   aegp_comp_25,

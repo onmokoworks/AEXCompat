@@ -799,6 +799,8 @@ int32_t __cdecl aegp_get_item_type(void* item, int16_t* item_type) {
   return 0;
 }
 AegpLegacyItemSuite6 g_aegp_legacy_item_suite6{};
+std::array<void*, 27> g_aegp_item_suite13{};
+static_assert(sizeof(g_aegp_item_suite13) == 27 * sizeof(void*));
 std::array<void*, 20> g_aegp_item_suite1{};
 static_assert(sizeof(g_aegp_item_suite1) == 20 * sizeof(void*));
 
@@ -984,6 +986,25 @@ int32_t __cdecl aegp_get_item_dimensions(
       result_width > 32768 || result_height > 32768) return 4;
   *width = result_width;
   *height = result_height;
+  return 0;
+}
+
+// AEGP_GetItemPixelAspectRatio: the composition's pixel aspect ratio as an
+// A_Ratio {A_long num; A_u_long den}. The render's ratio is carried in the
+// scene context as a layout-identical SpatialRatio; copy it out verbatim, or
+// answer square (1:1) when no ratio was wired (issue #1059).
+int32_t __cdecl aegp_get_item_pixel_aspect_ratio(void* item, void* ratio_out) {
+  ObjectSnapshot resolved{};
+  if (!ratio_out || !resolve_scene_item(item, resolved) ||
+      resolved.item_kind != ItemKind::composition)
+    return 4;
+  const void* ratio = scene_context()->pixel_aspect_ratio;
+  if (ratio) {
+    std::memcpy(ratio_out, ratio, sizeof(int32_t) + sizeof(uint32_t));
+  } else {
+    const int32_t square[2] = {1, 1};
+    std::memcpy(ratio_out, square, sizeof(square));
+  }
   return 0;
 }
 
@@ -2593,6 +2614,25 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_item_suite.after_get_item_type[14] =
         reinterpret_cast<void*>(&aegp_set_item_current_time);
     *suite = &g_aegp_item_suite;
+    return SceneSuiteAcquireResult::acquired;
+  }
+  if (named("AEGP Item Suite") && version == 13) {
+    // AEGP_ItemSuite8 (numeric 13, frozen AE 9.0). VRConverter/VRSphereToPlane
+    // acquire this during RENDER, so unlike the v14 branch above it is not
+    // gated on an idle-roundtrip mode. Provided stub-only for now: which slots
+    // those effects actually call is recorded through the aegp_item_13
+    // diagnostic descriptor, and only the ones observed get real callbacks
+    // wired (issue #1059). v13 == v14 plus AEGP_GetItemCommentLength inserted
+    // at index 21, so shared functions map to v14's index + (index >= 21 ? 1 : 0).
+    g_aegp_item_suite13 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_item_13, 27>();
+    // Observed calls (issue #1059): VRConverter/VRSphereToPlane read the
+    // composition dimensions (index 16) and pixel aspect ratio (index 17)
+    // during RENDER. Both resolve a composition item to the render extent/ratio
+    // and are safe outside idle mode; the remaining slots stay diagnostic stubs.
+    g_aegp_item_suite13[16] = reinterpret_cast<void*>(&aegp_get_item_dimensions);
+    g_aegp_item_suite13[17] = reinterpret_cast<void*>(&aegp_get_item_pixel_aspect_ratio);
+    *suite = g_aegp_item_suite13.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Item Suite") && version == 10) {
