@@ -215,6 +215,8 @@ struct NativeState {
     dropped_unsupported_suite_calls: u64,
     utility_suites: HashMap<u32, u64>,
     iterate8_suite: u64,
+    iterate16_suite: u64,
+    iterate_float_suite: u64,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
     smart_checkout_ids: HashMap<i32, NativeSmartCheckout>,
@@ -409,6 +411,12 @@ impl GuestEngine<'static> {
             engine.write_u64(iterate8_suite + (slot * 8) as u64, callback)?;
         }
         engine.state.iterate8_suite = iterate8_suite;
+        let iterate16_suite = engine.allocate(8, 8)?;
+        engine.write_u64(iterate16_suite, callback_address!(iterate_world16))?;
+        engine.state.iterate16_suite = iterate16_suite;
+        let iterate_float_suite = engine.allocate(8, 8)?;
+        engine.write_u64(iterate_float_suite, callback_address!(iterate_world_float))?;
+        engine.state.iterate_float_suite = iterate_float_suite;
         let color_param_suite = engine.allocate(8, 8)?;
         engine.write_u64(color_param_suite, callback_address!(color_param_value))?;
         engine.state.color_param_suite = color_param_suite;
@@ -1673,6 +1681,83 @@ unsafe extern "win64" fn iterate_world8(
     pixel_function: u64,
     destination_world: u64,
 ) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            4,
+        )
+    }
+}
+
+unsafe extern "win64" fn iterate_world16(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            8,
+        )
+    }
+}
+
+unsafe extern "win64" fn iterate_world_float(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            16,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn iterate_world_typed(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+    pixel_bytes: u64,
+) -> u64 {
     if pixel_function == 0 {
         return 4;
     }
@@ -1723,9 +1808,10 @@ unsafe extern "win64" fn iterate_world8(
     let rows = bottom - top;
     for y in top..bottom {
         for x in left..right {
-            let output = destination.data + y as u64 * destination.rowbytes as u64 + x as u64 * 4;
+            let output =
+                destination.data + y as u64 * destination.rowbytes as u64 + x as u64 * pixel_bytes;
             let input = source.map_or(0, |source| {
-                source.data + y as u64 * source.rowbytes as u64 + x as u64 * 4
+                source.data + y as u64 * source.rowbytes as u64 + x as u64 * pixel_bytes
             });
             let error = unsafe { pixel(refcon, x, y, input, output) };
             if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true) {
@@ -2272,6 +2358,16 @@ unsafe extern "win64" fn acquire_suite(
         } else if name == "PF Iterate8 Suite" && matches!(version, 1 | 2) && output != 0 {
             unsafe {
                 *(output as *mut u64) = state.iterate8_suite;
+            }
+            0
+        } else if name == "PF iterate16 Suite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.iterate16_suite;
+            }
+            0
+        } else if name == "PF iterateFloat Suite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.iterate_float_suite;
             }
             0
         } else if name == "PF ColorParamSuite" && version == 1 && output != 0 {
