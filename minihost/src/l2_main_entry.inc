@@ -1904,6 +1904,30 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   bool dynamic_stream_fault_observed = false;
   bool aegp_memory_fault_observed = false;
 
+  // The bootstrap cleared the active string table at its frame boundary above,
+  // but the plug-in's own RENDER selector may still look up its embedded
+  // strings (Basic_Text/Numbers/Path_Text read popup-menu ids during RENDER,
+  // not only PARAMS_SETUP), and a null active table returns null instead of the
+  // valid-table empty-string fallback, which those effects dereference and
+  // crash on (issue #1073). Re-activate the launch plug-in's table (still alive
+  // in this frame's scope) for the render dispatch and the setdown tail; a
+  // cluster swap re-activates the swapped member's own table during the
+  // session, so this only supplies the launch member's render, and GLOBAL_SETDOWN
+  // of a swapped member runs under its own table (left active by the last swap).
+  // The scope restores the thread-local to null on every exit of this function,
+  // including the case_id_rejected early returns below, so the pointer never
+  // dangles into the next invocation on this thread. The synchronous classic
+  // and smart render paths and the render session run the RENDER selector on
+  // this thread; the concurrent_render (threaded_default) path spawns render
+  // threads that this thread-local does not reach, tracked as a follow-up.
+  struct ActiveStringTableScope {
+    ~ActiveStringTableScope() {
+      g_active_aex_string_table = nullptr;
+      g_active_effect_module = nullptr;
+    }
+  } active_string_table_scope;
+  g_active_aex_string_table = &aex_string_table;
+  g_active_effect_module = module;
   if (is_render_worker()) {
     const auto dispatch = aexcompat::worker_runtime::invocation::run_classic_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
