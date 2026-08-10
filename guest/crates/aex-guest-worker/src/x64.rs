@@ -380,5 +380,6 @@ mod tests {
     include!("x64/tests_area_sample.rs");
     include!("x64/tests_transfer_rect.rs");
     include!("x64/tests_cases.rs");
+    include!("x64/tests_issue1077.rs");
     include!("x64/tests_gpu.rs");
 }
