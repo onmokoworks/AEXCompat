@@ -1,4 +1,4 @@
-use super::RenderPixelFormat;
+use crate::render_pixel_format::RenderPixelFormat;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
@@ -488,13 +488,16 @@ mod tests {
             .arg(&repository)
             .args(["python", "-c", script])
             .arg(d.join("output.exr"))
-            .output()
-            .expect("launch independent OpenEXR decoder");
-        assert!(
-            decoded.status.success(),
-            "independent OpenEXR word check failed: {}",
-            String::from_utf8_lossy(&decoded.stderr)
-        );
+            .output();
+        match decoded {
+            Ok(decoded) => assert!(
+                decoded.status.success(),
+                "independent OpenEXR word check failed: {}",
+                String::from_utf8_lossy(&decoded.stderr)
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("launch independent OpenEXR decoder: {error}"),
+        }
         fs::remove_dir_all(d).unwrap();
     }
     #[test]

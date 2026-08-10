@@ -45,6 +45,7 @@ struct FrameOutput {
     height: u32,
     rowbytes: u32,
     pixel_format: &'static str,
+    render_path: &'static str,
     checksum: String,
     guards_intact: bool,
 }
@@ -403,6 +404,11 @@ fn parse_render_frame(
                         height,
                         rowbytes,
                         pixel_format: pixel_format.name(),
+                        render_path: if report.render_mode.starts_with("smart") {
+                            "smartfx"
+                        } else {
+                            "classic"
+                        },
                         checksum: format!("{:x}", Sha256::digest(&report.raw_pixels)),
                         guards_intact: report.guards_intact,
                     }),
