@@ -13,6 +13,7 @@
 #include "worker_render_report.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_suite_call_slot_probe.hpp"
+#include "worker_suite_registry.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "worker_world_registry.hpp"
 
@@ -170,7 +171,9 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
           suite_timeline_report_json() +
           aexcompat::worker_runtime::suite_call_slot_probe::report_json(),
       live_suite_lease_summary(),
-      in.suite_fault_observed, worker_runtime::handles::handle_lifetimes_balanced(),
+      in.suite_fault_observed ||
+          worker_runtime::suite_registry().rejected_release_count() != 0,
+      worker_runtime::handles::handle_lifetimes_balanced(),
       {handle_stats.created, handle_stats.disposed},
       {arbitrary.copy_calls, arbitrary.dispose_calls, arbitrary.print_calls,
        arbitrary.print_failures, arbitrary.roundtrip_calls, arbitrary.roundtrip_failures,
