@@ -41,6 +41,7 @@ struct SimpleHooks {
   bool (*world_transform_composite)(){};
   bool (*world_transform_affine)(){};
   bool (*world_transform_blend)(){};
+  bool (*world_transform_convolve)(){};
   bool (*world_transform_transfer_mask)(){};
   bool (*aegp_world_suite3)(){};
   bool (*pf_batch_sampling_suite)(){};

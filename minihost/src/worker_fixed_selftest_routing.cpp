@@ -180,7 +180,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 32> simple_commands{{
+  const std::array<selftest::SimpleCommand, 33> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -219,6 +219,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        hooks.simple.world_transform_affine},
       {L"--self-test-world-transform-blend", "world_transform_blend",
        hooks.simple.world_transform_blend},
+      {L"--self-test-world-transform-convolve", "world_transform_convolve",
+       hooks.simple.world_transform_convolve},
       {L"--self-test-world-transform-transfer-mask", "world_transform_transfer_mask",
        hooks.simple.world_transform_transfer_mask},
       {L"--self-test-aegp-world-suite3", "aegp_world_suite3",

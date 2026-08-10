@@ -53,6 +53,7 @@ int32_t __cdecl transfer_rect(void*, int32_t, uint32_t, int32_t, const LegacyRec
 
 bool verify_legacy_fill_matte_callbacks();
 bool verify_world_transform_blend();
+bool verify_world_transform_convolve();
 bool verify_bad_callback_param_contract();
 bool verify_copy_world_clipping();
 bool verify_world_transform_affine();
