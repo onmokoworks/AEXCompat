@@ -381,8 +381,6 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
   // and is worse: 3DGlasses fails at both, where with the empty rect it renders.
   // Why a plug-in reads the pair that way is an oracle question (#962).
   if (checkout->empty_layer_param) {
-    if (checkout->checked_out)
-      return finish_callback(Callback::CheckoutPixels, 4, Reason::AlreadyCheckedOut);
     // Allocated on first need, through the hook the dispatch installs: the
     // world comes out of the same bounded registry a plug-in's own
     // PF_NEW_WORLD draws from, so a frame that never asks for an empty layer
@@ -393,6 +391,10 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
           runtime.allocate_empty_layer(runtime.empty_layer_world.data());
     if (!runtime.empty_layer_world_live)
       return finish_callback(Callback::CheckoutPixels, 4, Reason::MissingWorld);
+    if (checkout->checked_out) {
+      *world = runtime.empty_layer_world.data();
+      return finish_callback(Callback::CheckoutPixels, 0);
+    }
     ++runtime.empty_layer_param_pixel_checkouts;
     checkout->checked_out = true;
     *world = runtime.empty_layer_world.data();
@@ -400,14 +402,14 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
   }
   if (!checkout->world)
     return finish_callback(Callback::CheckoutPixels, 4, Reason::MissingWorld);
-  if (checkout->checked_out)
-    return finish_callback(Callback::CheckoutPixels, 4, Reason::AlreadyCheckedOut);
   if (checkout_promised_no_pixels(checkout->rect)) {
     ++runtime.empty_checkout_pixel_denials;
     return finish_callback(Callback::CheckoutPixels, 4, Reason::EmptyResult);
   }
   *world = use_views && checkout->view_world
       ? checkout->view_world : checkout->world;
+  if (checkout->checked_out)
+    return finish_callback(Callback::CheckoutPixels, 0);
   checkout->checked_out = true;
   return finish_callback(Callback::CheckoutPixels, 0);
 }
@@ -585,6 +587,14 @@ bool checkout_intersection_self_test() {
   passed = pre_checkout_layer(nullptr, 9, 7, hosted_request.data(), 7, 1, 30,
                               hosted_result.data()) == 4 &&
       registration_for(7) != runtime.pixel_checkouts.end() && passed;
+  // A non-empty registration without an admitted world remains a hard
+  // failure; repeated-checkout idempotency must not turn missing backing into
+  // a successful null answer.
+  runtime.pixel_checkouts.push_back({99, nullptr, nullptr, partial, false, false});
+  checked_out = input_world.data();
+  passed = checkout_pixels(nullptr, 99, &checked_out) == 4 &&
+      checked_out == nullptr && passed;
+  forget_checkout(runtime, 99);
   passed = pre_checkout_layer(nullptr, 3, 7, narrower_request.data(), 7, 1, 30,
                               hosted_result.data()) == 0 &&
       runtime.pixel_checkouts.size() == registrations_before &&
@@ -596,7 +606,8 @@ bool checkout_intersection_self_test() {
       checkin_pixels(nullptr, 999) == 4 &&
       checkout_pixels(nullptr, 7, &checked_out) == 0 &&
       checked_out == hosted_view.data() &&
-      checkout_pixels(nullptr, 7, &checked_out) == 4 &&
+      checkout_pixels(nullptr, 7, &checked_out) == 0 &&
+      checked_out == hosted_view.data() &&
       !pixel_checkouts_balanced() &&
       checkin_pixels(nullptr, 7) == 0 &&
       pixel_checkouts_balanced() &&
@@ -674,6 +685,9 @@ bool checkout_intersection_self_test() {
       checked_out == runtime.empty_layer_world.data() &&
       runtime.empty_layer_world_live &&
       g_empty_layer_allocations_for_self_test == 1 &&
+      runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 1 &&
+      checkout_pixels(nullptr, 21, &checked_out) == 0 &&
+      checked_out == runtime.empty_layer_world.data() &&
       runtime.empty_layer_param_pixel_checkouts == empty_pixels_before + 1 &&
       !pixel_checkouts_balanced() &&
       checkin_pixels(nullptr, 21) == 0 &&
