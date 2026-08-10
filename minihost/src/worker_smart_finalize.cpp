@@ -59,6 +59,7 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
   const bool untouched = !logical_output.empty() &&
       std::all_of(logical_output.begin(), logical_output.end(),
                   [](unsigned char value) { return value == 0xCC; });
+  result.output_untouched = untouched;
   const bool finite = r.pixel_bytes != 16 || render::finite_float_world(logical_output);
   // A legally empty result promised no pixels; zero output bytes are the
   // correct fulfillment of that contract, not a validation failure.

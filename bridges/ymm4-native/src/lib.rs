@@ -222,6 +222,9 @@ fn open_session(
                         .map(|value| format!("; {}: {}", value.selector, value.text))
                         .unwrap_or_default()
                 )),
+                FrameStatus::SmartOutputUntouched => {
+                    RenderReply::Error("AEX Smart frame produced no output".to_owned())
+                }
             },
             Err(error) => {
                 RenderReply::Error(format!("RenderSession::render_frame failed: {error}"))

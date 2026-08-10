@@ -665,6 +665,10 @@ pub enum FrameStatus {
         /// whole diagnosis (issue #707). Absent when the plug-in said nothing.
         return_message: Option<FrameReturnMessage>,
     },
+    /// The Smart selector returned success, but the guarded output retained
+    /// its initialization sentinel. This typed host observation is not a
+    /// plug-in-returned numeric -6.
+    SmartOutputUntouched,
     // An expand-output effect that overruns the launch slot no longer surfaces to
     // the caller: `render_frame` grows the shared section in place and waits for
     // the worker's follow-up ok (protocol §3, issue #262), so it always resolves
@@ -747,6 +751,8 @@ struct FrameDone {
     output: Option<FrameDoneOutput>,
     render_error: i64,
     #[serde(default)]
+    smart_output_untouched: bool,
+    #[serde(default)]
     missing_dependency: Option<String>,
     #[serde(default)]
     return_message: Option<FrameReturnMessage>,
@@ -803,6 +809,7 @@ pub struct RenderSession {
     last_output_generation: u32,
     frames_ok: u32,
     frames_errored: u32,
+    smart_output_untouched_frames: u32,
     parameter_update_frames: u32,
     opened: Instant,
     plugin_sha256: String,
@@ -1596,6 +1603,7 @@ impl RenderSession {
             last_output_generation: 0,
             frames_ok: 0,
             frames_errored: 0,
+            smart_output_untouched_frames: 0,
             parameter_update_frames: 0,
             opened: Instant::now(),
             plugin_sha256: request.plugin_sha256.to_ascii_lowercase(),
@@ -2141,6 +2149,11 @@ impl RenderSession {
                     if done.output.is_some()
                         || done.generation.is_some()
                         || done.render_error == 0
+                        || (done.smart_output_untouched
+                            && (!self.smart
+                                || done.render_error != -6
+                                || done.missing_dependency.is_some()
+                                || done.return_message.is_some()))
                         || carries_resize_fields
                     {
                         return Err(self.invalidate(
@@ -2201,12 +2214,19 @@ impl RenderSession {
                     // is still host-owned, so the session continues; whether to
                     // proceed is the caller's decision.
                     self.frames_errored += 1;
+                    if done.smart_output_untouched {
+                        self.smart_output_untouched_frames += 1;
+                    }
                     return Ok(FrameOutcome {
                         frame_index,
-                        status: FrameStatus::FrameError {
-                            render_error: done.render_error,
-                            missing_dependency: done.missing_dependency,
-                            return_message: done.return_message,
+                        status: if done.smart_output_untouched {
+                            FrameStatus::SmartOutputUntouched
+                        } else {
+                            FrameStatus::FrameError {
+                                render_error: done.render_error,
+                                missing_dependency: done.missing_dependency,
+                                return_message: done.return_message,
+                            }
                         },
                     });
                 }
@@ -2219,7 +2239,10 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     };
-                    if carries_resize_fields || done.missing_dependency.is_some() {
+                    if carries_resize_fields
+                        || done.missing_dependency.is_some()
+                        || done.smart_output_untouched
+                    {
                         return Err(self.invalidate(
                             "malformed_ok_response",
                             format!("frame {frame_index} ok response carried resize fields"),
@@ -2847,6 +2870,7 @@ impl RenderSession {
             "height": self.geometry.height,
             "frames_ok": self.frames_ok,
             "frames_errored": self.frames_errored,
+            "smart_output_untouched_frames": self.smart_output_untouched_frames,
             "parameter_update_frames": self.parameter_update_frames,
             "invalidated": self.invalidation.is_some(),
             "invalidated_reason": self.invalidation.as_ref().map(|invalidation| json!({
@@ -2940,6 +2964,20 @@ pub(crate) fn validate_final_report(
     report: &Value,
     smart: bool,
 ) -> Result<FinalReportValidation, CloseReportInvariant> {
+    validate_final_report_mode(report, smart, FinalReportMode::Normal)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FinalReportMode {
+    Normal,
+    AbandonedSmartOutputUntouched,
+}
+
+fn validate_final_report_mode(
+    report: &Value,
+    smart: bool,
+    mode: FinalReportMode,
+) -> Result<FinalReportValidation, CloseReportInvariant> {
     if report.get("status") != Some(&json!("render_completed")) {
         return Err(CloseReportInvariant::Status);
     }
@@ -2964,6 +3002,16 @@ pub(crate) fn validate_final_report(
             return Err(CloseReportInvariant::SmartSessionMode);
         }
         if report.get("session_render_error") != Some(&json!(0)) {
+            return Err(CloseReportInvariant::SmartRenderError);
+        }
+        if mode == FinalReportMode::AbandonedSmartOutputUntouched
+            && (report.get("pre_render_error") != Some(&json!(0))
+                || report.get("smart_render_selector_error") != Some(&json!(0))
+                || report.get("smart_render_error") != Some(&json!(-6))
+                || report.get("output_pixels_valid") != Some(&Value::Bool(false))
+                || report.get("empty_result_rect") != Some(&Value::Bool(false))
+                || report.get("result_rects_valid") != Some(&Value::Bool(true)))
+        {
             return Err(CloseReportInvariant::SmartRenderError);
         }
         if report.get("session_sequence_setup_error") != Some(&json!(0)) {
@@ -3162,6 +3210,44 @@ pub(crate) fn validate_close_report(
         .filter(|value| value.is_object())
         .ok_or(CloseReportInvariant::FinalReportMissing)?;
     validate_final_report(report, smart)
+}
+
+/// Validates a discarded Smart attempt whose only frame outcome was the
+/// broker-authenticated untouched-output condition. No pixels from this
+/// attempt are accepted; this authorization only permits one fresh Classic
+/// attempt under the caller's unchanged request.
+pub fn validate_abandoned_smart_untouched_close(close: &Value) -> Result<(), &'static str> {
+    if close.get("invalidated") != Some(&Value::Bool(false)) {
+        return Err("close_invalidated");
+    }
+    if close
+        .pointer("/worker/classification")
+        .and_then(Value::as_str)
+        != Some("ok")
+    {
+        return Err("worker_not_ok");
+    }
+    if close.get("frames_errored").and_then(Value::as_u64) != Some(1)
+        || close
+            .get("smart_output_untouched_frames")
+            .and_then(Value::as_u64)
+            != Some(1)
+    {
+        return Err("unexpected_frame_history");
+    }
+    let report = close.get("final_report").ok_or("final_report_missing")?;
+    validate_final_report_mode(report, true, FinalReportMode::AbandonedSmartOutputUntouched)
+        .map(|_| ())
+        .map_err(CloseReportInvariant::as_str)
+}
+
+/// Public close gate for a completed session whose pixels may be published.
+/// It reuses the canonical report validator rather than trusting the summary
+/// `session_clean` convenience bit.
+pub fn validate_completed_session_close(close: &Value, smart: bool) -> Result<(), &'static str> {
+    validate_close_report(close, smart)
+        .map(|_| ())
+        .map_err(CloseReportInvariant::as_str)
 }
 
 #[cfg(test)]
@@ -3429,6 +3515,12 @@ pub fn run_video_batch(
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
                     "return_message": return_message,
+                })),
+                FrameStatus::SmartOutputUntouched => Ok(json!({
+                    "frame_index": frame_index,
+                    "status": "error",
+                    "render_error": -6,
+                    "host_failure_reason": "smart_output_untouched",
                 })),
             }
         })();

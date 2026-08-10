@@ -79,6 +79,7 @@ use aexcompat_aviutl2_multifilter::{
 use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::render_session::{
     FrameOutcome, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
+    validate_abandoned_smart_untouched_close,
 };
 use serde_json::{Map, Value, json};
 
@@ -94,6 +95,7 @@ const TIME_STEP: i32 = 1;
 const TIME_SCALE: u32 = 30;
 const TOTAL_TIME: i32 = 300;
 
+#[derive(Clone)]
 struct Options {
     json: Option<PathBuf>,
     limit: Option<usize>,
@@ -607,6 +609,14 @@ fn sweep_one(
     }
 
     let close = session.close();
+    let close_clean = close.get("session_clean") == Some(&Value::Bool(true))
+        && close.get("invalidated") == Some(&Value::Bool(false));
+    let smart_output_untouched = smart
+        && outcome
+            .detail
+            .get("host_failure_reason")
+            .and_then(Value::as_str)
+            == Some("smart_output_untouched");
     // A frame the session refused is not one failure but several, and which one
     // decides who is at fault: `worker_exited` is the plug-in taking the process
     // down, `worker_invariant_failure` is the host refusing what came back, and
@@ -619,7 +629,46 @@ fn sweep_one(
     {
         outcome.bucket = format!("render_frame_failed:{reason}");
     }
+    let fallback_validation =
+        smart_output_untouched.then(|| validate_abandoned_smart_untouched_close(&close));
+    let fallback_authorized = fallback_validation.as_ref().is_some_and(Result::is_ok);
+    let smart_attempt_evidence = fallback_validation.as_ref().map(|validation| {
+        json!({
+            "close_validated": validation.is_ok(),
+            "rejection": validation.as_ref().err(),
+            "frames_ok": close.get("frames_ok"),
+            "frames_errored": close.get("frames_errored"),
+            "smart_output_untouched_frames": close.get("smart_output_untouched_frames"),
+            "worker_classification": close.pointer("/worker/classification"),
+            "invalidated": close.get("invalidated")
+        })
+    });
     attach_close(&mut outcome, close, options.close_report);
+    if smart_output_untouched && !fallback_authorized {
+        outcome.detail.insert(
+            "fallback_rejected".to_owned(),
+            json!("smart_attempt_close_invariant"),
+        );
+    }
+    if fallback_authorized {
+        let mut classic_options = options.clone();
+        classic_options.force_classic = true;
+        let mut fallback = sweep_one(repository, record, &classic_options, input, layer_pixels);
+        fallback.detail.insert(
+            "fallback_reason".to_owned(),
+            json!("smart_output_untouched"),
+        );
+        if let Some(evidence) = smart_attempt_evidence {
+            fallback.detail.insert("smart_attempt".to_owned(), evidence);
+        }
+        fallback
+            .detail
+            .insert("render_path".to_owned(), json!("classic_fallback"));
+        return fallback;
+    }
+    if outcome.bucket == "rendered" && !close_clean {
+        outcome.bucket = "session_close_failed".to_owned();
+    }
     outcome
 }
 
@@ -762,6 +811,14 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
                     Some(name) => format!("frame_error:{render_error}:{name}"),
                     None => format!("frame_error:{render_error}"),
                 }
+            }
+            FrameStatus::SmartOutputUntouched => {
+                detail.insert("render_error".to_owned(), json!(-6));
+                detail.insert(
+                    "host_failure_reason".to_owned(),
+                    json!("smart_output_untouched"),
+                );
+                "frame_error:-6".to_owned()
             }
         },
         Err(error) => {

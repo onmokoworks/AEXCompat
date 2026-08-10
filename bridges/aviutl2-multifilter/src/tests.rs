@@ -4757,4 +4757,157 @@ mod tests {
         assert_eq!(found, declared);
         assert!(at <= words.len());
     }
+
+    #[test]
+    fn classic_fallback_selects_the_active_pooled_member() {
+        let cluster = ClusterLaunch {
+            plugins: vec![
+                (PathBuf::from("first.aex"), "first-sha".to_owned()),
+                (PathBuf::from("second.aex"), "second-sha".to_owned()),
+            ],
+            swap_payloads: vec![None, None],
+        };
+        let selected =
+            classic_fallback_identity(Path::new("opener.aex"), "opener-sha", Some(&cluster), 1)
+                .expect("the active nonzero cluster member is selectable");
+        assert_eq!(selected, (PathBuf::from("second.aex"), "second-sha".into()));
+        assert!(
+            classic_fallback_identity(Path::new("opener.aex"), "opener-sha", Some(&cluster), 2,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn classic_fallback_retains_request_bytes_and_requires_clean_close() {
+        let (reply, _rx) = channel();
+        let request = RenderReq {
+            current_time: 37,
+            rgba: vec![1, 2, 3, 4],
+            parameters: Some(vec![InteractiveParameter {
+                slot: 1,
+                kind: "float".into(),
+                name: "amount".into(),
+                value: 0.25,
+                minimum: 0.0,
+                maximum: 1.0,
+                choices: Vec::new(),
+                color: [0; 4],
+                components: [0.0; 3],
+                component_count: 0,
+                layer_path: None,
+                enabled: true,
+                visible: true,
+                supervised: false,
+                debug_summary: None,
+                custom_ui_events: 0,
+                control_size: [0; 2],
+            }]),
+            layer: Some((2, vec![9, 8, 7, 6])),
+            plugin_index: 1,
+            reply,
+        };
+        let retained = retain_frame_request(&request);
+        assert_eq!(retained.current_time, request.current_time);
+        assert_eq!(retained.rgba, request.rgba);
+        let retained_parameter = &retained.parameters.as_ref().unwrap()[0];
+        let request_parameter = &request.parameters.as_ref().unwrap()[0];
+        assert_eq!(retained_parameter.slot, request_parameter.slot);
+        assert_eq!(retained_parameter.name, request_parameter.name);
+        assert_eq!(retained_parameter.value, request_parameter.value);
+        assert_eq!(retained.layer, request.layer);
+
+        let frame = || RenderedFrame {
+            pixels: vec![4, 3, 2, 1],
+            width: 1,
+            height: 1,
+            origin_x: 0,
+            origin_y: 0,
+        };
+        assert!(matches!(
+            completed_classic_fallback_reply(Some(frame()), false),
+            FrameReply::SessionLost(_)
+        ));
+        assert!(matches!(
+            completed_classic_fallback_reply(None, true),
+            FrameReply::SessionLost(_)
+        ));
+        assert!(matches!(
+            completed_classic_fallback_reply(Some(frame()), true),
+            FrameReply::RenderedClassicFallback(_)
+        ));
+    }
+
+    #[test]
+    fn classic_fallback_orchestrator_launches_once_only_after_smart_authorization() {
+        let smart_close = serde_json::json!({
+            "invalidated": false,
+            "worker": { "classification": "ok" },
+            "frames_ok": 0,
+            "frames_errored": 1,
+            "smart_output_untouched_frames": 1,
+            "final_report": {
+                "status": "render_completed", "global_setdown_error": 0,
+                "guard_bytes_intact": true, "suite_leases_balanced": true,
+                "handle_lifetimes_balanced": true, "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true, "session_mode": true,
+                "session_render_error": 0, "session_sequence_setup_error": 0,
+                "session_sequence_setdown_error": 0, "pre_render_error": 0,
+                "smart_render_selector_error": 0, "smart_render_error": -6,
+                "output_pixels_valid": false, "empty_result_rect": false,
+                "result_rects_valid": true
+            }
+        });
+        let classic_close = serde_json::json!({
+            "invalidated": false,
+            "worker": { "classification": "ok" },
+            "final_report": {
+                "status": "render_completed", "global_setdown_error": 0,
+                "guard_bytes_intact": true, "suite_leases_balanced": true,
+                "handle_lifetimes_balanced": true, "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true, "render_error": 0,
+                "persistent_sequence_setup_error": 0,
+                "persistent_sequence_setdown_error": 0
+            }
+        });
+        let launches = std::cell::Cell::new(0);
+        let rejected = orchestrate_classic_fallback(&serde_json::json!({}), || {
+            launches.set(launches.get() + 1);
+            Ok((None, classic_close.clone()))
+        });
+        assert!(!rejected.smart_authorized);
+        assert_eq!(launches.get(), 0, "invalid Smart close launches no Classic");
+
+        let frame = || RenderedFrame {
+            pixels: vec![1, 2, 3, 4],
+            width: 1,
+            height: 1,
+            origin_x: 0,
+            origin_y: 0,
+        };
+        let accepted = orchestrate_classic_fallback(&smart_close, || {
+            launches.set(launches.get() + 1);
+            Ok((Some(frame()), classic_close.clone()))
+        });
+        assert!(accepted.smart_authorized);
+        assert_eq!(launches.get(), 1, "authorized Smart close launches once");
+        assert!(matches!(
+            accepted.reply,
+            FrameReply::RenderedClassicFallback(_)
+        ));
+
+        let mut unclean_classic = classic_close;
+        *unclean_classic
+            .pointer_mut("/final_report/global_setdown_error")
+            .unwrap() = serde_json::json!(4);
+        let rejected_classic = orchestrate_classic_fallback(&smart_close, || {
+            launches.set(launches.get() + 1);
+            Ok((Some(frame()), unclean_classic))
+        });
+        assert_eq!(
+            launches.get(),
+            2,
+            "each authorization permits exactly one launch"
+        );
+        assert!(matches!(rejected_classic.reply, FrameReply::SessionLost(_)));
+    }
 }

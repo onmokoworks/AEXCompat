@@ -16,6 +16,7 @@ mod windows_e2e {
         AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, ClusterRenderPlugins,
         DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest, InspectOutcome,
         RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
+        validate_abandoned_smart_untouched_close,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use aexcompat_broker::secure_launch::LaunchEnvironment;
@@ -176,6 +177,46 @@ mod windows_e2e {
             launch_environment,
         })
         .expect("open render session")
+    }
+
+    fn open_smart_session(
+        repository: &Path,
+        plugin: &Path,
+        sha: &str,
+        launch_environment: LaunchEnvironment,
+    ) -> RenderSession {
+        RenderSession::open(SessionOpenRequest {
+            repository,
+            plugin_path: plugin,
+            plugin_sha256: sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            layers: &[],
+            dependencies: Vec::new(),
+            dependency_search_dirs: fixture_dependency_search_dirs(plugin),
+            width: WIDTH,
+            height: HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Cpu,
+            gpu_runtime_policy: None,
+            launch_environment,
+        })
+        .expect("open smart render session")
     }
 
     fn input_pattern(seed: u8) -> Vec<u8> {
@@ -1729,6 +1770,9 @@ mod windows_e2e {
                 FrameStatus::FrameError { render_error, .. } => {
                     panic!("frame {frame_index} unexpectedly errored: {render_error}")
                 }
+                FrameStatus::SmartOutputUntouched => {
+                    panic!("classic frame {frame_index} reported untouched Smart output")
+                }
             }
         }
         assert_ne!(
@@ -2098,6 +2142,118 @@ mod windows_e2e {
         assert_eq!(close["frames_ok"], 1);
         assert_eq!(close["frames_errored"], 1);
         assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn smart_untouched_output_is_a_typed_frame_local_outcome() {
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_smart_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            behavior("smart_output_untouched"),
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(1))
+            .expect("typed untouched output remains a frame-local outcome");
+        assert!(matches!(outcome.status, FrameStatus::SmartOutputUntouched));
+        let close = session.close();
+        assert_eq!(close["frames_errored"], 1);
+        assert_eq!(close["session_clean"], true, "close: {close}");
+    }
+
+    #[test]
+    fn abandoned_smart_untouched_close_requires_exact_history_and_final_evidence() {
+        let valid = serde_json::json!({
+            "invalidated": false,
+            "worker": { "classification": "ok" },
+            "frames_ok": 3,
+            "frames_errored": 1,
+            "smart_output_untouched_frames": 1,
+            "final_report": {
+                "status": "render_completed",
+                "global_setdown_error": 0,
+                "guard_bytes_intact": true,
+                "suite_leases_balanced": false,
+                "suite_lease_warning": true,
+                "suite_fault_observed": false,
+                "suite_acquires": 3,
+                "suite_releases": 2,
+                "live_suite_lease_count": 1,
+                "live_suite_reference_count": 1,
+                "live_suite_leases": "PF Handle Suite@2=1",
+                "handle_lifetimes_balanced": true,
+                "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true,
+                "session_mode": true,
+                "session_render_error": 0,
+                "session_sequence_setup_error": 0,
+                "session_sequence_setdown_error": 0,
+                "pre_render_error": 0,
+                "smart_render_selector_error": 0,
+                "smart_render_error": -6,
+                "output_pixels_valid": false,
+                "empty_result_rect": false,
+                "result_rects_valid": true
+            }
+        });
+        validate_abandoned_smart_untouched_close(&valid)
+            .expect("canonical abandoned-attempt evidence authorizes retry");
+
+        for (pointer, replacement) in [
+            ("/smart_output_untouched_frames", serde_json::json!(0)),
+            ("/frames_errored", serde_json::json!(2)),
+            ("/final_report/pre_render_error", serde_json::json!(4)),
+            (
+                "/final_report/smart_render_selector_error",
+                serde_json::json!(4),
+            ),
+            ("/final_report/smart_render_error", serde_json::json!(0)),
+            ("/final_report/output_pixels_valid", serde_json::json!(true)),
+            ("/final_report/empty_result_rect", serde_json::json!(true)),
+            ("/final_report/result_rects_valid", serde_json::json!(false)),
+            (
+                "/final_report/suite_fault_observed",
+                serde_json::json!(true),
+            ),
+        ] {
+            let mut mutated = valid.clone();
+            *mutated.pointer_mut(pointer).expect("test pointer exists") = replacement;
+            assert!(
+                validate_abandoned_smart_untouched_close(&mutated).is_err(),
+                "mutation {pointer} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn smart_untouched_marker_is_rejected_outside_its_exact_contract() {
+        for (smart, behavior_name) in [
+            (false, "smart_output_untouched"),
+            (true, "smart_output_untouched_wrong_error"),
+            (true, "smart_output_untouched_dependency"),
+            (true, "smart_output_untouched_return_message"),
+            (true, "smart_output_untouched_ok"),
+        ] {
+            let (repository, plugin, sha) = temp_repository();
+            let launch = behavior(behavior_name);
+            let mut session = if smart {
+                open_smart_session(&repository.0, &plugin, &sha, launch)
+            } else {
+                open_session(
+                    &repository.0,
+                    &plugin,
+                    &sha,
+                    Duration::from_secs(30),
+                    launch,
+                )
+            };
+            let error = session
+                .render_frame(0, 0, &input_pattern(1))
+                .expect_err("an ineligible untouched marker must fail closed");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(session.invalidation().is_some());
+        }
     }
 
     #[test]

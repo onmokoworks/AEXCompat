@@ -1912,6 +1912,9 @@ mod windows_e2e {
             FrameStatus::FrameError { render_error, .. } => {
                 panic!("the origin probe frame failed with {render_error}")
             }
+            FrameStatus::SmartOutputUntouched => {
+                panic!("the classic origin probe reported a Smart-only untouched output")
+            }
         }
         let close = session.close();
         assert_eq!(close["session_clean"], true, "close: {close}");

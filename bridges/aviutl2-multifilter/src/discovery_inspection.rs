@@ -1152,6 +1152,7 @@ fn register_discovered(
         defaults: defaults.clone(),
         readers,
         sessions: Mutex::new(HashMap::new()),
+        classic_fallbacks: Mutex::new(HashMap::new()),
     }));
     // Register this filter's session map so UninitializePlugin can drain it.
     if let Ok(mut maps) = SESSION_MAPS.lock() {

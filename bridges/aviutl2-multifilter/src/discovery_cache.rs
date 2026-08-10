@@ -1597,6 +1597,9 @@ struct RenderedFrame {
 /// one so the caller reopens only when necessary.
 enum FrameReply {
     Rendered(RenderedFrame),
+    /// Pixels from a fresh Classic retry whose worker has already closed and
+    /// passed the canonical close validator.
+    RenderedClassicFallback(RenderedFrame),
     /// A frame-local diagnostic; the session stays usable, leave pixels. The
     /// second field is what the plug-in wrote into `PF_OutData::return_msg`
     /// while failing, when it wrote anything (issue #707) - often the whole
@@ -1814,6 +1817,26 @@ struct FilterCtx {
     /// Live sessions keyed by AviUtl2 `effect_id`, so two objects of the same
     /// AEX filter each get their own session/worker (no cross-object thrash).
     sessions: Mutex<HashMap<i64, MfSession>>,
+    /// Per-object/config downgrade after one authenticated untouched-Smart
+    /// attempt. A geometry/timing change naturally invalidates the entry.
+    classic_fallbacks: Mutex<HashMap<i64, GeomIdentity>>,
+}
+
+#[derive(Clone, Debug)]
+struct RetainedFrameRequest {
+    current_time: i32,
+    rgba: Vec<u8>,
+    parameters: Option<Vec<InteractiveParameter>>,
+    layer: Option<(u32, Vec<u8>)>,
+}
+
+fn retain_frame_request(request: &RenderReq) -> RetainedFrameRequest {
+    RetainedFrameRequest {
+        current_time: request.current_time,
+        rgba: request.rgba.clone(),
+        parameters: request.parameters.clone(),
+        layer: request.layer.clone(),
+    }
 }
 
 /// The cached discovery result for one AEX. Keyed in the cache file by the AEX

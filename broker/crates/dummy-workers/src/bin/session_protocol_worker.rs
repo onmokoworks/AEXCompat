@@ -378,7 +378,13 @@ mod worker {
         })
     }
 
-    fn final_report(frames: u32, smart: bool, launch_payload: &str, module_audit: Value) -> String {
+    fn final_report(
+        frames: u32,
+        smart: bool,
+        launch_payload: &str,
+        module_audit: Value,
+        behavior: &str,
+    ) -> String {
         // The session-mechanics keys follow the worker flavor: the classic
         // report reuses its persistent-sequence fields while the smart report
         // carries dedicated session_* fields (protocol v1.1).
@@ -427,6 +433,21 @@ mod worker {
             .as_object_mut()
             .unwrap()
             .extend(mechanics.as_object().unwrap().clone());
+        if smart && behavior == "smart_output_untouched" {
+            report.as_object_mut().unwrap().extend(
+                serde_json::json!({
+                    "pre_render_error": 0,
+                    "smart_render_selector_error": 0,
+                    "smart_render_error": -6,
+                    "output_pixels_valid": false,
+                    "empty_result_rect": false,
+                    "result_rects_valid": true
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+        }
         report.to_string()
     }
 
@@ -901,6 +922,49 @@ mod worker {
                 }
                 continue;
             }
+            if matches!(
+                behavior.as_str(),
+                "smart_output_untouched"
+                    | "smart_output_untouched_wrong_error"
+                    | "smart_output_untouched_dependency"
+                    | "smart_output_untouched_return_message"
+                    | "smart_output_untouched_ok"
+            ) && frame_index == 0
+            {
+                let render_error = if behavior == "smart_output_untouched" {
+                    -6
+                } else {
+                    -40
+                };
+                let reply = match behavior.as_str() {
+                    "smart_output_untouched_dependency" => format!(
+                        "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                         \"status\":\"error\",\"render_error\":-6,\
+                         \"missing_dependency\":\"runtime.dll\",\
+                         \"smart_output_untouched\":true}}"
+                    ),
+                    "smart_output_untouched_return_message" => format!(
+                        "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                         \"status\":\"error\",\"render_error\":-6,\
+                         \"return_message\":{{\"text\":\"failed\",\"display_requested\":false}},\
+                         \"smart_output_untouched\":true}}"
+                    ),
+                    "smart_output_untouched_ok" => format!(
+                        "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                         \"status\":\"ok\",\"render_error\":0,\
+                         \"smart_output_untouched\":true}}"
+                    ),
+                    _ => format!(
+                        "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                         \"status\":\"error\",\"render_error\":{render_error},\
+                         \"smart_output_untouched\":true}}"
+                    ),
+                };
+                if !write_message(response, &reply) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                continue;
+            }
             if behavior == "fatal_error_frame_0" && frame_index == 0 {
                 // Mirrors the real worker's invariant path: a reserved fatal
                 // session error response followed by a fail-closed exit.
@@ -1038,7 +1102,8 @@ mod worker {
                             &visited,
                             &swap_epochs,
                             &behavior
-                        )
+                        ),
+                        &behavior
                     )
                 );
                 return 0;
@@ -1056,7 +1121,8 @@ mod worker {
                     &visited,
                     &swap_epochs,
                     &behavior
-                )
+                ),
+                &behavior
             )
         );
         0

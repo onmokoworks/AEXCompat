@@ -454,6 +454,10 @@ void apply_session_ui_action(const SessionUiAction* action) {
 // fail-closed decisions stay identical across both session flavors.
 struct SessionFrameOutput {
   int32_t frame_error{0};
+  // True only when a Smart selector returned success but the host's guarded
+  // output remained invalid/untouched. This is distinct from a plug-in
+  // returning the same numeric -6 itself.
+  bool smart_output_untouched{false};
   int32_t width{0};
   int32_t height{0};
   int32_t rowbytes{0};
@@ -909,10 +913,13 @@ void run_session_frame_loop(
     // Error responses carry no output or generation: a frame rejected before
     // or during rendering never updates the output slot, so there is no slot
     // metadata to report (protocol §4.3).
-    const auto respond_error = [&](int32_t frame_error) {
+    const auto respond_error = [&](int32_t frame_error,
+                                   bool smart_output_untouched = false) {
       std::string reply = "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":" +
           std::to_string(frame_index) + ",\"status\":\"error\",\"render_error\":" +
           std::to_string(frame_error);
+      if (smart_output_untouched)
+        reply += ",\"smart_output_untouched\":true";
       const auto& telemetry =
           aexcompat::worker_runtime::selector_dispatch_telemetry();
       const auto& missing = telemetry.missing_dependency;
@@ -1145,7 +1152,7 @@ void run_session_frame_loop(
     if (frame.frame_error != 0) {
       // Frame-local compatibility diagnostic; the sequence state is still
       // owned by the host, so the session may continue.
-      if (!respond_error(frame.frame_error)) {
+      if (!respond_error(frame.frame_error, frame.smart_output_untouched)) {
         outcome.protocol_violation = true;
         break;
       }
@@ -1384,6 +1391,9 @@ SmartRenderSessionOutcome run_smart_render_session(
                 ? frame_result.pre_error
                 : frame_result.render_error != 0 ? frame_result.render_error
                                                  : frame_result.gpu_setdown_error;
+        frame.smart_output_untouched = frame_result.selector_error == 0 &&
+            frame_result.pre_error == 0 && frame_result.render_error == -6 &&
+            frame_result.output_untouched && !frame_result.empty_result_rect;
         return frame;
       },
       // Smart sessions are out of cluster-swap scope (design §1): no hook.

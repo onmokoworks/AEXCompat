@@ -803,6 +803,11 @@ fn render_classic_via_length_one_session(
                 "session frame reported error {render_error} past a clean final report"
             )));
         }
+        FrameStatus::SmartOutputUntouched => {
+            return SessionWrapperOutcome::Failure(invalid(
+                "Smart session produced no output pixels",
+            ));
+        }
     };
     // A SmartFX render whose PreRender returned a legally empty result_rect
     // (#278) rendered no pixels: 0x0 geometry with no bytes is the contract's
@@ -1304,6 +1309,27 @@ impl InteractiveRenderSession {
                     "missing_dependency": missing_dependency,
                     // The plug-in's own account of the failure (issue #707).
                     "return_message": return_message,
+                    "passed": false,
+                });
+                annotate_interactive_selection(&mut report, self.selection);
+                Ok(report)
+            }
+            FrameStatus::SmartOutputUntouched => {
+                self.frames_errored += 1;
+                let mut report = json!({
+                    "schema_version": 1,
+                    "stage": "interactive_image_render",
+                    "plugin_id": self.plugin_id,
+                    "render_path": self.selection.path.report_name(),
+                    "smart_capability_source": self.selection.source.report_name(),
+                    "smart_capability_identity": self.selection.capability_identity,
+                    "smart_capability_version": self.selection.capability_version,
+                    "pixel_format": self.pixel_format.report_name(),
+                    "current_time": current_time,
+                    "worker_classification": "resident_session",
+                    "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "render_error": -6,
+                    "host_failure_reason": "smart_output_untouched",
                     "passed": false,
                 });
                 annotate_interactive_selection(&mut report, self.selection);
