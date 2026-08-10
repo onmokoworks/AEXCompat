@@ -108,6 +108,13 @@ jobs:
         working-directory: broker
         run: cargo build --workspace --locked
 
+      # Compile test targets before native artifacts are stamped. The built-artifact
+      # tests require every probe to be newer than the runtime harness, and the first
+      # `cargo test` invocation may otherwise replace that harness after probe builds.
+      - name: Compile workspace test targets before native artifacts
+        working-directory: broker
+        run: cargo test --workspace --locked --no-run
+
       # broker 外の Cargo ルートもテストを実行する (#899)。guest workspace は
       # runner に無い libclang が要るので #917 へ分離してある。
       - name: Test AviUtl2 multifilter bridge
