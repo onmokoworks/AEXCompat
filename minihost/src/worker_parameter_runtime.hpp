@@ -124,5 +124,7 @@ struct State {
 
 State& state() noexcept;
 const parameter_animation::ParameterTimeline* timeline(int32_t slot) noexcept;
+bool copy_definition_at_time(int32_t slot, int32_t time, uint32_t scale,
+                             const Definition& hosted, Definition& result);
 
 }  // namespace aexcompat::worker_runtime::parameters

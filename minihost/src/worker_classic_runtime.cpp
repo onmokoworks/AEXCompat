@@ -139,12 +139,10 @@ void Context::configure_checkout_time(int32_t current_time, uint32_t time_scale,
 }
 
 bool Context::checkout_time_allowed(int32_t time, uint32_t time_scale) noexcept {
-  const bool current = time_scale != 0 && current_time_scale_ != 0 &&
-      static_cast<int64_t>(time) * current_time_scale_ ==
-          static_cast<int64_t>(current_time_) * time_scale;
-  if (current || wide_time_allowed_) return true;
-  ++diagnostics_.rejected_temporal_checkouts;
-  return false;
+  (void)time;
+  // WIDE_TIME_INPUT is a cache-dependency declaration, not permission for a
+  // plug-in to request a parameter value at another valid time.
+  return time_scale != 0 && current_time_scale_ != 0;
 }
 
 void Context::record_checkout(void* definition, int32_t index, int32_t time,
