@@ -90,6 +90,12 @@ class WorkerSession final {
   // caller's result with the historical module-audit exit code (14).
   int finish(int exit_code) noexcept;
 
+  // Terminal boundary for isolated video render sessions whose complete
+  // protocol report has already been prepared and synchronously emitted.
+  // The process is deliberately ended without DLL/CRT detach so a plug-in's
+  // post-GLOBAL_SETDOWN unload cannot stall an otherwise clean close.
+  [[noreturn]] void terminate_after_protocol_report(int exit_code) noexcept;
+
  private:
   bool quiesce_once() noexcept;
   bool capture_terminal_audit() noexcept;
@@ -115,6 +121,7 @@ class WorkerSession final {
   bool pre_unload_hook_invoked_{};
   bool pre_unload_hook_passed_{true};
   bool audit_failure_reported_{};
+  bool protocol_report_prepared_{};
   // Per-swap quiescence hook (#405): invoked by swap_release_module before a
   // swapped plug-in is freed. Kept separate from the session-global
   // pre-unload hook (BIB teardown) so a swap never consumes the terminal

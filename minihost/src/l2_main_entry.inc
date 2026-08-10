@@ -2177,35 +2177,43 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     // invariant failures (24), and cluster swap failures (25, closure-session
     // design §7: quiescence/setdown/unload/audit; a contamination-suspect
     // abort, not a crash) from ordinary render failures (21).
-    if (session_swap_failure) return session.finish_integrated_report(25);
-    if (session_protocol_violation) return session.finish(23);
-    if (session_invariant_failure) return session.finish(24);
+    const int session_exit = session_swap_failure ? 25
+        : session_protocol_violation ? 23
+        : session_invariant_failure ? 24
+        : global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+              ((image_render_supported && depth_supported) || audio_effect_only) &&
+              render_error == 0 && guards_intact &&
+              handle_lifetimes_balanced() && world_lifetimes_balanced() &&
+              async_receipt_lifetimes_balanced() &&
+              async_layer_requests_balanced() &&
+              gpu_memory_lifetimes_balanced() &&
+              audio_handle_lifetimes_balanced() &&
+              audio_telemetry().invalid_operations == 0 &&
+              param_checkouts_balanced() &&
+              ((!g_render_click_enabled && !g_render_draw_enabled) ||
+               g_render_ui_context_closed)
+          ? 0 : 21;
+    if (invocation.render_session_mode && protocol_report_ready)
+      session.terminate_after_protocol_report(session_exit);
+    if (session_swap_failure) return session.finish_integrated_report(session_exit);
+    if (session_protocol_violation || session_invariant_failure)
+      return session.finish(session_exit);
     // An AUDIO_EFFECT_ONLY session succeeds by passthrough (issue #1048):
     // there is no video selector to support, so its exit is decided by the
     // session mechanics alone, like any other render.
-    return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
-      ((image_render_supported && depth_supported) || audio_effect_only) &&
-      render_error == 0 && guards_intact &&
-      handle_lifetimes_balanced() && world_lifetimes_balanced() &&
-      async_receipt_lifetimes_balanced() &&
-      async_layer_requests_balanced() &&
-      gpu_memory_lifetimes_balanced() &&
-      audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
-      param_checkouts_balanced() &&
-      ((!g_render_click_enabled && !g_render_draw_enabled) ||
-       g_render_ui_context_closed) ? 0 : 21);
+    return session.finish(session_exit);
   }
   if (is_smart_worker()) {
     // The smart session shares the render worker's dedicated fail-closed exit
     // codes: protocol violations (23) and host-protection invariant failures
     // (24) stay distinguishable from ordinary smart failures (22).
-    if (session_protocol_violation) return session.finish(23);
-    if (session_invariant_failure) return session.finish(24);
     if (invocation.render_session_mode) {
       // Frame-local selector errors were reported through frame_done and the
       // broker owned the continue decision; only session mechanics and host
       // state cleanliness decide the exit.
-      return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+      const int session_exit = session_protocol_violation ? 23
+          : session_invariant_failure ? 24
+          : global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
         image_render_supported && depth_supported && smart_render_supported &&
         smart_session_render_error == 0 && smart.guards_intact &&
         handle_lifetimes_balanced() && world_lifetimes_balanced() &&
@@ -2213,8 +2221,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
         param_checkouts_balanced() &&
         ((!g_render_click_enabled && !g_render_draw_enabled) ||
-         g_render_ui_context_closed) ? 0 : 22);
+         g_render_ui_context_closed) ? 0 : 22;
+      session.terminate_after_protocol_report(session_exit);
     }
+    if (session_protocol_violation) return session.finish(23);
+    if (session_invariant_failure) return session.finish(24);
     return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && smart.pre_error == 0 && smart.render_error == 0 &&
       smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
