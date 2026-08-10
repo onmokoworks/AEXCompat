@@ -1,6 +1,8 @@
 #include "worker_classic_runtime.hpp"
+#include "worker_classic_render_entry.hpp"
 #include "worker_active_plugin_context.hpp"
 #include "worker_invocation_orchestration.hpp"
+#include "worker_selector_dispatch.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -26,6 +28,13 @@ int g_arbitrary_source_token{};
 int g_arbitrary_destination_token{};
 int g_arbitrary_refcon_token{};
 constexpr int16_t kArbitraryId = 73;
+int32_t g_expected_frame_time{};
+int32_t g_previous_frame_time{};
+int g_frame_setup_time_observations{};
+bool g_expect_frame_wide_time{};
+bool g_expect_frame_shutter_dependency{};
+bool g_advertise_dynamic_wide_time{};
+int g_render_wide_time_observations{};
 
 void observe_concurrent_render_context() {
   using namespace aexcompat::worker_runtime;
@@ -81,6 +90,40 @@ int32_t invoke_synthetic_arbitrary(
 bool synthetic_handle_is_live(const void* value) { return value != nullptr; }
 std::size_t no_active_masks() { return 0; }
 bool no_active_mask_id(std::size_t, int32_t*) { return false; }
+void capture_clean_audit() {}
+bool audit_stays_clean() { return true; }
+
+int32_t __cdecl observe_frame_setup_checkout_time(
+    int32_t command, void*, void* output, void**, void*, void*) {
+  if (command == 18 && g_advertise_dynamic_wide_time) {
+    constexpr uint32_t kWideTimeInput = 1u << 1;
+    std::memcpy(static_cast<std::byte*>(output) + 96, &kWideTimeInput,
+                sizeof(kWideTimeInput));
+    return 0;
+  }
+  if (command == 11 && g_advertise_dynamic_wide_time) {
+    auto* context = active_context();
+    if (!context || !context->checkout_time_allowed(g_expected_frame_time + 1, 24))
+      return 4;
+    ++g_render_wide_time_observations;
+    return 0;
+  }
+  if (command != 10) return 0;
+  auto* context = active_context();
+  if (!context || !context->checkout_time_allowed(g_expected_frame_time, 24))
+    return 4;
+  if (context->shutter_dependency_advertised() !=
+      g_expect_frame_shutter_dependency)
+    return 4;
+  const bool foreign_allowed =
+      context->checkout_time_allowed(g_expected_frame_time + 1, 24);
+  if (foreign_allowed != g_expect_frame_wide_time ||
+      (!g_expect_frame_wide_time && g_previous_frame_time != 0 &&
+       context->checkout_time_allowed(g_previous_frame_time, 24)))
+    return 4;
+  ++g_frame_setup_time_observations;
+  return 0;
+}
 }  // namespace
 
 int main() {
@@ -146,6 +189,65 @@ int main() {
       result.rejected_temporal_checkouts == 2 && result.balanced &&
       result.shutter_dependency_advertised &&
       last_selector_dispatched())) return 3;
+
+  // Exercise the shipping render_once boundary: FRAME_SETUP must observe the
+  // current nonzero frame time, not Context's default or the previous frame.
+  aexcompat::l2_detail::BufferIn frame_input{};
+  aexcompat::l2_detail::BufferOut frame_output{};
+  int32_t frame_width{}, frame_height{}, frame_rowbytes{};
+  std::string frame_input_hash, frame_output_hash;
+  bool frame_guards{};
+  aexcompat::worker_runtime::configure_selector_dispatch_audit(
+      &capture_clean_audit, &audit_stays_clean);
+  g_expected_frame_time = 37;
+  if (aexcompat::l2_detail::render_once(
+          &observe_frame_setup_checkout_time, frame_input, frame_output, "default",
+          frame_width, frame_height, frame_rowbytes, frame_input_hash,
+          frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr,
+          g_expected_frame_time, 1, 100, 24) != 0 ||
+      g_frame_setup_time_observations != 1)
+    return 30;
+  g_previous_frame_time = g_expected_frame_time;
+  g_expected_frame_time = 41;
+  if (aexcompat::l2_detail::render_once(
+          &observe_frame_setup_checkout_time, frame_input, frame_output, "default",
+          frame_width, frame_height, frame_rowbytes, frame_input_hash,
+          frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr,
+          g_expected_frame_time, 1, 100, 24) != 0 ||
+      g_frame_setup_time_observations != 2)
+    return 31;
+  constexpr uint32_t kWideTimeInput = 1u << 1;
+  g_previous_frame_time = g_expected_frame_time;
+  g_expected_frame_time = 47;
+  g_expect_frame_wide_time = true;
+  g_expect_frame_shutter_dependency = true;
+  constexpr uint32_t kUsesShutterAngle = 1u << 19;
+  constexpr uint32_t kWideTimeAndShutter = kWideTimeInput | kUsesShutterAngle;
+  std::memcpy(frame_output.data() + 96, &kWideTimeAndShutter,
+              sizeof(kWideTimeAndShutter));
+  if (aexcompat::l2_detail::render_once(
+          &observe_frame_setup_checkout_time, frame_input, frame_output, "default",
+          frame_width, frame_height, frame_rowbytes, frame_input_hash,
+          frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr,
+          g_expected_frame_time, 1, 100, 24) != 0 ||
+      g_frame_setup_time_observations != 3)
+    return 32;
+  frame_output = {};
+  g_expect_frame_shutter_dependency = false;
+  g_previous_frame_time = g_expected_frame_time;
+  g_expected_frame_time = 53;
+  g_expect_frame_wide_time = false;
+  g_advertise_dynamic_wide_time = true;
+  aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = true;
+  if (aexcompat::l2_detail::render_once(
+          &observe_frame_setup_checkout_time, frame_input, frame_output, "default",
+          frame_width, frame_height, frame_rowbytes, frame_input_hash,
+          frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr,
+          g_expected_frame_time, 1, 100, 24) != 0 ||
+      g_frame_setup_time_observations != 4 ||
+      g_render_wide_time_observations != 1)
+    return 33;
+  aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = false;
 
   using namespace aexcompat::worker_runtime;
 
