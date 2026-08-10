@@ -69,24 +69,10 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
   if (!classic_context && aexcompat::worker_runtime::classic::dispatch_active())
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::NoActiveState);
-  if (classic_context && !classic_context->checkout_time_allowed(what_time, time_scale))
-    return finish_param_callback(
-        Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
-  if (!classic_context) {
-    // A zero ledger scale is not "no gate": it would reduce the comparison to
-    // 0 == current_time * time_scale, which admits every time when the frame is
-    // at 0 and refuses every time - including the frame's own - otherwise. Close
-    // the gate instead, the same way the classic context does
-    // (`Context::checkout_time_allowed`). Wide time still bypasses it below.
-    const bool current_time = g_checkout_current_time_scale != 0 &&
-        static_cast<int64_t>(what_time) * g_checkout_current_time_scale ==
-            static_cast<int64_t>(g_checkout_current_time) * time_scale;
-    if (!current_time && !g_wide_time_checkout_allowed) {
-      ++g_rejected_temporal_param_checkouts;
-      return finish_param_callback(
-          Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
-    }
-  }
+  if (classic_context &&
+      !classic_context->checkout_time_allowed(what_time, time_scale))
+    return finish_param_callback(Callback::CheckoutParam, 4,
+                                 Reason::InvalidArguments);
   const auto record_checkout = [&] {
     if (classic_context) {
       classic_context->record_checkout(definition, index, what_time, time_step, time_scale);
@@ -117,7 +103,14 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   }
   const auto hosted = g_checkout_layer_definitions.find(index);
   if (hosted != g_checkout_layer_definitions.end()) {
-    std::memcpy(definition, hosted->second.data(), hosted->second.size());
+    aexcompat::worker_runtime::parameters::Definition evaluated{};
+    if (!aexcompat::worker_runtime::parameters::copy_definition_at_time(
+            index, what_time, time_scale, hosted->second, evaluated)) {
+      ++g_rejected_temporal_param_checkouts;
+      return finish_param_callback(
+          Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
+    }
+    std::memcpy(definition, evaluated.data(), evaluated.size());
     record_checkout();
     return finish_param_callback(Callback::CheckoutParam, 0);
   }
@@ -126,11 +119,9 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
 
 void configure_hosted_checkout_time(int32_t current_time, uint32_t time_scale,
                                     bool wide_time_allowed) noexcept {
-  // A zero scale is stored as given; `checkout_param` treats it as a closed time
-  // gate rather than quietly substituting a scale the caller never meant. No
-  // shipped caller can reach that - `smart_setup::prepare` refuses a zero
-  // external time scale before the smart path gets here - so this only decides
-  // the direction a future caller bug fails in.
+  // Retain the frame and WIDE_TIME_INPUT declaration for diagnostics and cache
+  // policy. The flag describes temporal dependencies; it is not permission to
+  // call checkout_param at another time.
   g_checkout_current_time = current_time;
   g_checkout_current_time_scale = time_scale;
   g_wide_time_checkout_allowed = wide_time_allowed;

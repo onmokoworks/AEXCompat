@@ -1,29 +1,14 @@
-// The hosted parameter ledger's time gate (issue #828).
-//
-// `checkout_param` refuses a checkout whose time is not the frame's, unless the
-// plug-in advertised wide time input. The smart path serves its checkouts from
-// this hosted ledger rather than from a classic dispatch context, and nothing
-// ever set the ledger's frame time: it kept `current_time = 0`,
-// `current_time_scale = 1`, so the comparison
-//
-//     what_time * current_time_scale == current_time * time_scale
-//
-// admitted t=0 (0 == 0) and refused every other time (t*1 != 0*scale). Every
-// SmartFX frame past t=0 therefore had its first parameter checkout answered
-// with 4, and the plug-in returned that as PF_Err_OUT_OF_MEMORY. AviUtl2 renders
-// at the timeline cursor, so no smart effect worked anywhere but frame 0.
-//
-// These cases pin the gate itself, in both directions: what the ledger answers
-// once it is configured, and what a ledger left at its defaults answers. They do
-// not reach smart_render_runtime, so they cannot tell whether anything calls
-// configure_hosted_checkout_time - that is what
-// tests/test_smart_param_checkout_time_worker.py renders a real plug-in for.
+// Hosted temporal parameter checkout behavior. WIDE_TIME_INPUT describes cache
+// dependencies; it is not permission to request a value at another time.
 
 #include "render_subsystem.h"
+#include "worker_classic_runtime.hpp"
 #include "worker_param_checkout_runtime.hpp"
 #include "worker_parameter_runtime.hpp"
 
 #include <array>
+#include <cmath>
+#include <cstring>
 #include <cstdio>
 
 namespace params = aexcompat::worker_runtime::parameters;
@@ -52,7 +37,11 @@ constexpr uint32_t kScale = 30;
 // has something to answer with. Without this every checkout fails for a second,
 // unrelated reason and the test would pass for the wrong cause.
 void seed_definition() {
-  auto& ledger = params::state().checkout;
+  auto& state = params::state();
+  auto& ledger = state.checkout;
+  state.records.assign(kSlot, {});
+  state.records[kSlot - 1].type = 1;
+  state.timelines.clear();
   ledger.definitions.clear();
   ledger.definitions[kSlot] = {};
   ledger.live.clear();
@@ -61,10 +50,13 @@ void seed_definition() {
   ledger.rejected_temporal = 0;
 }
 
-int32_t checkout_at(int32_t what_time) {
-  std::array<std::byte, params::kDefinitionSize> definition{};
-  return aexcompat::l2_detail::checkout_param(nullptr, kSlot, what_time, 1, kScale,
-                                              definition.data());
+int32_t checkout_at(int32_t what_time, params::Definition* result = nullptr) {
+  params::Definition definition{};
+  const int32_t status =
+      aexcompat::l2_detail::checkout_param(nullptr, kSlot, what_time, 1, kScale,
+                                          definition.data());
+  if (result) *result = definition;
+  return status;
 }
 
 // The frame the host is actually rendering is the one that must be answerable.
@@ -79,17 +71,18 @@ void the_frames_own_time_is_answered() {
   }
 }
 
-// The gate still refuses another time - dropping it would let a plug-in read
-// parameters the host never evaluated for this frame.
-void another_time_is_refused_without_wide_time() {
+void another_time_is_answered_without_wide_time() {
   seed_definition();
   aexcompat::l2_detail::configure_hosted_checkout_time(34, kScale, false);
-  check(checkout_at(35) == 4, "a checkout at another time is refused");
-  check(params::state().checkout.rejected_temporal == 1, "the refusal is counted");
-  check(checkout_at(34) == 0, "the frame's own time still succeeds after a refusal");
+  params::Definition result{};
+  check(checkout_at(35, &result) == 0, "a static checkout at another time succeeds");
+  check(params::state().checkout.rejected_temporal == 0, "the checkout is not refused");
+  check(aexcompat::l2_detail::checkin_param(nullptr, result.data()) == 0,
+        "the static temporal checkout checks in");
+  check(aexcompat::l2_detail::param_checkouts_balanced(),
+        "the static temporal checkout ledger balances");
 }
 
-// ...and admits it when the plug-in advertised wide time input.
 void wide_time_admits_another_time() {
   seed_definition();
   aexcompat::l2_detail::configure_hosted_checkout_time(34, kScale, true);
@@ -97,49 +90,96 @@ void wide_time_admits_another_time() {
   check(params::state().checkout.rejected_temporal == 0, "nothing is counted as refused");
 }
 
-// The regression itself: a ledger left at its defaults answers only t=0. This is
-// what the smart path saw before #828, and what it must never see again.
-void an_unconfigured_ledger_answers_only_time_zero() {
+void an_unconfigured_ledger_still_answers_static_values() {
   seed_definition();
   auto& ledger = params::state().checkout;
   ledger.current_time = 0;
   ledger.current_time_scale = 1;
   ledger.wide_time_allowed = false;
   check(checkout_at(0) == 0, "the default ledger answers t=0");
-  check(checkout_at(1) == 4, "the default ledger refuses t=1 - the #828 symptom");
-  // Configuring it is what makes the same frame answerable.
-  aexcompat::l2_detail::configure_hosted_checkout_time(1, kScale, false);
-  check(checkout_at(1) == 0, "configuring the ledger makes t=1 answerable");
+  check(checkout_at(1) == 0, "the default ledger answers a static value at t=1");
 }
 
-// A zero ledger scale reduces the comparison to `0 == current_time * time_scale`,
-// which is true for every requested time once the frame sits at 0 - so left alone
-// it turns the gate off exactly where it looks harmless. It must close the gate
-// instead, including for the frame's own time. Wide time still bypasses it, the
-// way it bypasses every other time refusal; that is the last case here.
-void a_zero_scale_closes_the_time_gate() {
+void timeline_is_evaluated_at_requested_time() {
   seed_definition();
-  aexcompat::l2_detail::configure_hosted_checkout_time(0, 0, false);
-  check(checkout_at(5) == 4, "a zero scale at t=0 does not admit another time");
-  check(checkout_at(0) == 4, "a zero scale refuses even t=0");
+  params::state().records[kSlot - 1].type = 10;
+  aexcompat::parameter_animation::ParameterTimeline timeline{};
+  timeline.slot = kSlot;
+  timeline.keys.push_back({34, kScale, false,
+      aexcompat::parameter_animation::AnimationValueKind::Scalar, 10.0});
+  timeline.keys.push_back({36, kScale, false,
+      aexcompat::parameter_animation::AnimationValueKind::Scalar, 20.0});
+  params::state().timelines.push_back(timeline);
+  params::Definition result{};
+  check(checkout_at(35, &result) == 0, "animated checkout succeeds without wide time");
+  double value{};
+  std::memcpy(&value, result.data() + 56, sizeof(value));
+  check(std::abs(value - 15.0) < 0.0001,
+        "animated checkout returns the requested-time value");
+  check(aexcompat::l2_detail::checkin_param(nullptr, result.data()) == 0,
+        "the temporal checkout checks in");
+  check(aexcompat::l2_detail::param_checkouts_balanced(),
+        "the temporal checkout ledger balances");
+}
+
+void input_layer_slot_zero_remains_answerable() {
   seed_definition();
-  aexcompat::l2_detail::configure_hosted_checkout_time(34, 0, false);
-  check(checkout_at(35) == 4, "a zero scale away from t=0 refuses another time");
-  check(checkout_at(34) == 4, "a zero scale away from t=0 refuses its own time");
-  // Wide time still outranks the gate, as it does for any other refusal.
-  seed_definition();
-  aexcompat::l2_detail::configure_hosted_checkout_time(0, 0, true);
-  check(checkout_at(5) == 0, "wide time still admits a checkout under a zero scale");
+  auto& ledger = params::state().checkout;
+  ledger.definitions[0] = {};
+  params::Definition result{};
+  check(aexcompat::l2_detail::checkout_param(nullptr, 0, 35, 1, kScale,
+                                              result.data()) == 0,
+        "input layer slot zero is answered at another time");
+  check(aexcompat::l2_detail::checkin_param(nullptr, result.data()) == 0,
+        "input layer slot zero checks in");
+  check(aexcompat::l2_detail::param_checkouts_balanced(),
+        "input layer slot zero balances");
+}
+
+void classic_static_value_is_answered_without_wide_time() {
+  using aexcompat::worker_runtime::classic::Context;
+  Context context;
+  context.configure_checkout_time(34, kScale, false, false);
+  aexcompat::worker_runtime::classic::ParameterDefinition hosted{};
+  hosted[0] = std::byte{0x5a};
+  context.set_definition(kSlot, hosted);
+  params::Definition result{};
+  check(aexcompat::l2_detail::checkout_param(nullptr, kSlot, 35, 1, kScale,
+                                              result.data()) == 0,
+        "classic static checkout at another time succeeds without wide time");
+  check(result[0] == std::byte{0x5a},
+        "classic temporal checkout copies the hosted definition");
+  check(aexcompat::l2_detail::checkin_param(nullptr, result.data()) == 0,
+        "classic temporal checkout checks in");
+  check(aexcompat::l2_detail::param_checkouts_balanced(),
+        "classic temporal checkout ledger balances");
+}
+
+void classic_zero_configured_scale_fails_closed() {
+  using aexcompat::worker_runtime::classic::Context;
+  Context context;
+  context.configure_checkout_time(0, 0, false, false);
+  aexcompat::worker_runtime::classic::ParameterDefinition hosted{};
+  context.set_definition(kSlot, hosted);
+  params::Definition result{};
+  check(aexcompat::l2_detail::checkout_param(nullptr, kSlot, 35, 1, kScale,
+                                              result.data()) == 4,
+        "classic zero configured scale fails closed");
+  check(context.checkouts_balanced(),
+        "failed classic checkout leaves the ledger balanced");
 }
 
 }  // namespace
 
 int main() {
   the_frames_own_time_is_answered();
-  another_time_is_refused_without_wide_time();
+  another_time_is_answered_without_wide_time();
   wide_time_admits_another_time();
-  an_unconfigured_ledger_answers_only_time_zero();
-  a_zero_scale_closes_the_time_gate();
+  an_unconfigured_ledger_still_answers_static_values();
+  timeline_is_evaluated_at_requested_time();
+  input_layer_slot_zero_remains_answerable();
+  classic_static_value_is_answered_without_wide_time();
+  classic_zero_configured_scale_fails_closed();
   if (failures == 0) std::printf("{\"param_checkout_time_selftest\":\"passed\"}\n");
   return failures == 0 ? 0 : 1;
 }

@@ -117,9 +117,9 @@ int32_t __cdecl observe_frame_setup_checkout_time(
     return 4;
   const bool foreign_allowed =
       context->checkout_time_allowed(g_expected_frame_time + 1, 24);
-  if (foreign_allowed != g_expect_frame_wide_time ||
-      (!g_expect_frame_wide_time && g_previous_frame_time != 0 &&
-       context->checkout_time_allowed(g_previous_frame_time, 24)))
+  if (!foreign_allowed ||
+      (g_previous_frame_time != 0 &&
+       !context->checkout_time_allowed(g_previous_frame_time, 24)))
     return 4;
   ++g_frame_setup_time_observations;
   return 0;
@@ -165,7 +165,7 @@ int main() {
         local[0] != marker ||
         context.copy_definition(foreign_slot, local.data(), local.size()) ||
         !context.checkout_time_allowed(own_slot, 24) ||
-        context.checkout_time_allowed(foreign_slot, 24))
+        !context.checkout_time_allowed(foreign_slot, 24))
       isolated.store(false, std::memory_order_relaxed);
     context.record_checkout(local.data(), own_slot, own_slot, 1, 24);
     if (context.checkin(local.data()) != 0 || !context.checkouts_balanced())
@@ -186,7 +186,7 @@ int main() {
   const auto result = diagnostics();
   if (!(isolated.load(std::memory_order_relaxed) && off_thread_failed_closed &&
       result.checkout_calls == 2 && result.checkin_calls == 2 &&
-      result.rejected_temporal_checkouts == 2 && result.balanced &&
+      result.rejected_temporal_checkouts == 0 && result.balanced &&
       result.shutter_dependency_advertised &&
       last_selector_dispatched())) return 3;
 
