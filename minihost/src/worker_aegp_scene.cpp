@@ -34,6 +34,7 @@ using aexcompat::worker_runtime::unsupported_suite_slots;
 namespace aexcompat::l2_detail {
 int32_t __cdecl aegp_get_stream_name_v4(
     int32_t, void*, uint8_t, void**);
+int32_t __cdecl aegp_get_loaded_stream_num_keyframes_v4(void*, int32_t*);
 }
 
 namespace {
@@ -2313,6 +2314,11 @@ int32_t __cdecl aegp_get_keyframe_time(
   ++g_aegp_keyframe_time_calls;
   return 0;
 }
+int32_t __cdecl aegp_get_keyframe_time_v4(
+    void* stream, int32_t index, int16_t time_mode, AegpTime* time) {
+  return aegp_get_keyframe_time(
+      stream, index, static_cast<int32_t>(time_mode), time);
+}
 int32_t __cdecl aegp_get_new_keyframe_value(
     int32_t plugin_id, void* stream, int32_t index, AegpStreamValue* value) {
   if (aexcompat::l2_detail::find_stream(stream))
@@ -2550,6 +2556,7 @@ std::array<void*, 22> g_aegp_stream_suite4{};
 std::array<void*, 23> g_aegp_stream_suite6{};
 std::array<void*, 2> g_aegp_iterate_suite1{};
 std::array<void*, 22> g_aegp_keyframe_suite5{};
+std::array<void*, 20> g_aegp_keyframe_suite4{};
 static_assert(sizeof(g_aegp_project_suite6) == 14 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite10) == 41 * sizeof(void*));
 static_assert(sizeof(g_aegp_comp_suite4) == 28 * sizeof(void*));
@@ -2571,6 +2578,7 @@ static_assert(sizeof(g_aegp_stream_suite4) == 176);
 static_assert(sizeof(g_aegp_stream_suite6) == 184);
 static_assert(sizeof(g_aegp_iterate_suite1) == 16);
 static_assert(sizeof(g_aegp_keyframe_suite5) == 176);
+static_assert(sizeof(g_aegp_keyframe_suite4) == 160);
 
 int32_t __cdecl aegp_get_num_threads(int32_t* count) {
   if (!count) return 516;
@@ -3107,6 +3115,24 @@ SceneSuiteAcquireResult scene_acquire_suite(
     *suite = g_aegp_keyframe_suite5.data();
     return SceneSuiteAcquireResult::acquired;
   }
+  if (named("AEGP Keyframe Suite") && version == 4) {
+    g_aegp_keyframe_suite4 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_keyframe_4, 20>();
+    g_aegp_keyframe_suite4[0] = reinterpret_cast<void*>(
+        &aexcompat::l2_detail::aegp_get_loaded_stream_num_keyframes_v4);
+    g_aegp_keyframe_suite4[1] =
+        reinterpret_cast<void*>(&aegp_get_keyframe_time_v4);
+    g_aegp_keyframe_suite4[4] =
+        reinterpret_cast<void*>(&aegp_get_new_keyframe_value);
+    g_aegp_keyframe_suite4[14] =
+        reinterpret_cast<void*>(&aegp_get_keyframe_interpolation);
+    for (std::size_t slot = 0; slot < g_aegp_keyframe_suite4.size(); ++slot) {
+      if (factory.keyframe_callbacks[slot])
+        g_aegp_keyframe_suite4[slot] = factory.keyframe_callbacks[slot];
+    }
+    *suite = g_aegp_keyframe_suite4.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
   if (named("AEGP Iterate Suite") && version == 1) {
     g_aegp_iterate_suite1 =
         unsupported_suite_slots<UnsupportedSuiteId::aegp_iterate_1, 2>();
@@ -3257,6 +3283,18 @@ bool legacy_effect_stream_parent_live(const AegpLegacyEffectStream& stream) {
       instance.generation == stream.effect_instance_generation &&
       scene_registry().snapshot(stream.identity, resolved) &&
       resolved.owner == instance.identity;
+}
+int32_t __cdecl aegp_get_loaded_stream_num_keyframes_v4(
+    void* stream, int32_t* count) {
+  auto* value = legacy_effect_stream(stream);
+  if (!value)
+    return ::aegp_get_stream_num_keyframes(stream, count);
+  if (!legacy_effect_stream_parent_live(*value) || !count) return 4;
+  const auto* source =
+      aexcompat::worker_runtime::parameters::timeline(value->param_index);
+  if (source && !source->keys.empty()) return 4;
+  *count = 0;
+  return 0;
 }
 int32_t __cdecl aegp_get_stream_name_v2(void* stream, uint8_t, char* name) {
   auto* value = legacy_effect_stream(stream);

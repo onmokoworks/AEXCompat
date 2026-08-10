@@ -62,6 +62,15 @@ KeyframeSuite g_keyframe_suite{&get_stream_num_keyframes, &get_keyframe_time,
     &get_keyframe_interpolation, &set_keyframe_interpolation,
     &start_add_keyframes, &add_keyframes, &set_add_keyframe,
     &end_add_keyframes, &get_keyframe_label, &set_keyframe_label};
+KeyframeSuite4 g_keyframe_suite4{&get_stream_num_keyframes, &get_keyframe_time,
+    &insert_keyframe, &delete_keyframe, &get_new_keyframe_value,
+    &set_keyframe_value, &get_stream_value_dimensionality,
+    &get_stream_temporal_dimensionality, &get_new_keyframe_spatial_tangents,
+    &set_keyframe_spatial_tangents, &get_keyframe_temporal_ease,
+    &set_keyframe_temporal_ease, &get_keyframe_flags, &set_keyframe_flag,
+    &get_keyframe_interpolation, &set_keyframe_interpolation,
+    &start_add_keyframes, &add_keyframes, &set_add_keyframe,
+    &end_add_keyframes};
 
 bool keyframe_suite5_abi_wiring_valid() {
   const KeyframeSuite expected{&get_stream_num_keyframes, &get_keyframe_time,

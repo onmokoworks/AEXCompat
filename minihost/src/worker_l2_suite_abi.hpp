@@ -172,6 +172,30 @@ struct KeyframeSuite {
 };
 static_assert(sizeof(KeyframeSuite) == 22 * sizeof(void*));
 
+struct KeyframeSuite4 {
+  decltype(&get_stream_num_keyframes) get_stream_num_keyframes;
+  decltype(&get_keyframe_time) get_keyframe_time;
+  decltype(&insert_keyframe) insert_keyframe;
+  decltype(&delete_keyframe) delete_keyframe;
+  decltype(&get_new_keyframe_value) get_new_keyframe_value;
+  decltype(&set_keyframe_value) set_keyframe_value;
+  decltype(&get_stream_value_dimensionality) get_stream_value_dimensionality;
+  decltype(&get_stream_temporal_dimensionality) get_stream_temporal_dimensionality;
+  decltype(&get_new_keyframe_spatial_tangents) get_new_keyframe_spatial_tangents;
+  decltype(&set_keyframe_spatial_tangents) set_keyframe_spatial_tangents;
+  decltype(&get_keyframe_temporal_ease) get_keyframe_temporal_ease;
+  decltype(&set_keyframe_temporal_ease) set_keyframe_temporal_ease;
+  decltype(&get_keyframe_flags) get_keyframe_flags;
+  decltype(&set_keyframe_flag) set_keyframe_flag;
+  decltype(&get_keyframe_interpolation) get_keyframe_interpolation;
+  decltype(&set_keyframe_interpolation) set_keyframe_interpolation;
+  decltype(&start_add_keyframes) start_add_keyframes;
+  decltype(&add_keyframes) add_keyframes;
+  decltype(&set_add_keyframe) set_add_keyframe;
+  decltype(&end_add_keyframes) end_add_keyframes;
+};
+static_assert(sizeof(KeyframeSuite4) == 20 * sizeof(void*));
+
 struct DynamicStreamSuite {
   decltype(&get_new_dynamic_stream_for_layer) get_new_stream_ref_for_layer;
   decltype(&get_new_dynamic_stream_for_mask) get_new_stream_ref_for_mask;

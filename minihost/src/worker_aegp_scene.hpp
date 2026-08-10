@@ -199,6 +199,7 @@ extern std::array<void*, 23> g_aegp_stream_suite6;
 extern std::array<void*, 2> g_aegp_iterate_suite1;
 int32_t __cdecl aegp_get_num_threads(int32_t* count);
 extern std::array<void*, 22> g_aegp_keyframe_suite5;
+extern std::array<void*, 20> g_aegp_keyframe_suite4;
 
 const AegpEffectInstance* resolve_effect_instance(
     void* effect, int32_t owner = 0, std::size_t* index = nullptr);
