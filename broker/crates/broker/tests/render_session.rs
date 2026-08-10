@@ -475,7 +475,7 @@ mod windows_e2e {
         assert_eq!(close["session_clean"], true, "close: {close}");
         assert_eq!(
             close["worker"]["diagnostics"]["process_memory_limit_bytes"],
-            1024 * 1024 * 1024u64,
+            2 * 1024 * 1024 * 1024u64,
             "close: {close}"
         );
         // The smart clean verdict comes from the smart report's dedicated
@@ -3051,7 +3051,7 @@ mod windows_e2e {
         assert_eq!(close["frames_ok"], 2, "close: {close}");
         assert_eq!(
             close["worker"]["diagnostics"]["process_memory_limit_bytes"],
-            1024 * 1024 * 1024u64,
+            2 * 1024 * 1024 * 1024u64,
             "close: {close}"
         );
         // The swap rode the manifest: the final report's cluster module
