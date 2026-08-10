@@ -2,6 +2,7 @@
 
 #include "suite_lease_tracker.hpp"
 
+#include <atomic>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -100,6 +101,7 @@ class SuiteRegistry final {
   uint32_t live_reference_count() const;
   uint32_t acquire_count() const;
   uint32_t release_count() const;
+  uint32_t rejected_release_count() const;
   std::string live_summary() const;
   suite_runtime::SuiteLeaseSnapshot snapshot() const;
   uint32_t release_since(
@@ -123,6 +125,7 @@ class SuiteRegistry final {
                          TraceWriter* trace_writer);
 
   suite_runtime::SuiteLeaseTracker lease_tracker_;
+  std::atomic<uint32_t> rejected_releases_{};
   mutable std::mutex missing_suites_mutex_;
   std::vector<std::pair<std::string, int32_t>> missing_suites_;
   bool missing_suites_truncated_{};
