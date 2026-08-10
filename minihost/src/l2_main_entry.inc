@@ -704,8 +704,8 @@ void activate_plugin_string_table(HMODULE module,
               ? "none"
               : "invalid";
   std::cerr << "string_table_status:" << status << "\n" << std::flush;
-  g_active_effect_module = module;
-  g_active_aex_string_table = &table;
+  aexcompat::worker_runtime::active_plugin::effect_module = module;
+  aexcompat::worker_runtime::active_plugin::string_table = &table;
 }
 
 // Render-session cluster swap (closure-session design §4.1): the session
@@ -1567,8 +1567,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
               ? "none"
               : "invalid";
   std::cerr << "string_table_status:" << string_table_status << "\n" << std::flush;
-  g_active_effect_module = module;
-  g_active_aex_string_table = &aex_string_table;
+  aexcompat::worker_runtime::active_plugin::effect_module = module;
+  aexcompat::worker_runtime::active_plugin::string_table = &aex_string_table;
   aexcompat::worker_runtime::effect_bootstrap::State effect_state{};
   auto& input = effect_state.input;
   auto& output = effect_state.output;
@@ -1618,8 +1618,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     if (changed_directory) SetCurrentDirectoryW(original_directory.data());
     return result;
   }();
-  g_active_aex_string_table = nullptr;
-  g_active_effect_module = nullptr;
+  aexcompat::worker_runtime::active_plugin::string_table = nullptr;
+  aexcompat::worker_runtime::active_plugin::effect_module = nullptr;
   const int32_t global_error = bootstrap.global_error;
   const int32_t about_error = bootstrap.about_error;
   const int32_t params_error = bootstrap.params_error;
@@ -1918,16 +1918,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // including the case_id_rejected early returns below, so the pointer never
   // dangles into the next invocation on this thread. The synchronous classic
   // and smart render paths and the render session run the RENDER selector on
-  // this thread; the concurrent_render (threaded_default) path spawns render
-  // threads that this thread-local does not reach, tracked as a follow-up.
-  struct ActiveStringTableScope {
-    ~ActiveStringTableScope() {
-      g_active_aex_string_table = nullptr;
-      g_active_effect_module = nullptr;
-    }
-  } active_string_table_scope;
-  g_active_aex_string_table = &aex_string_table;
-  g_active_effect_module = module;
+  // this thread. The concurrent_render (threaded_default) path snapshots this
+  // context and activates it independently in each spawned render thread.
+  aexcompat::worker_runtime::active_plugin::Scope active_string_table_scope(
+      &aex_string_table, module);
   if (is_render_worker()) {
     const auto dispatch = aexcompat::worker_runtime::invocation::run_classic_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,

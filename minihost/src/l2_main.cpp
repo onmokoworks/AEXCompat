@@ -55,6 +55,7 @@
 #include "worker_extended_diag.hpp"
 #include "worker_callback_diagnostics.hpp"
 #include "aex_string_table.hpp"
+#include "worker_active_plugin_context.hpp"
 #include "l2_mode_execution.hpp"
 #include "parameter_animation_transport.hpp"
 #include "worker_parameter_runtime.hpp"

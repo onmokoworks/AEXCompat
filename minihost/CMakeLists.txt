@@ -267,6 +267,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_aegp_scene.cpp
     src/worker_aegp_scene_runtime.cpp
     src/worker_aegp_scene_selftests.cpp
+    src/worker_active_plugin_context.cpp
     src/worker_aegp_host_selftests.cpp
     src/worker_aegp_compat_selftests.cpp
     src/worker_classic_runtime.cpp
@@ -424,6 +425,15 @@ target_compile_features(aex_string_table_selftest PRIVATE cxx_std_17)
 target_include_directories(aex_string_table_selftest PRIVATE src)
 target_compile_definitions(aex_string_table_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+add_executable(worker_active_plugin_context_selftest
+  ../tests/native/worker_active_plugin_context_selftest.cpp
+  src/worker_active_plugin_context.cpp
+)
+target_compile_features(worker_active_plugin_context_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_active_plugin_context_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_active_plugin_context_selftest PRIVATE src)
 
 add_executable(rust_host_core_abi_selftest
   ../tests/native/rust_host_core_abi_selftest.cpp

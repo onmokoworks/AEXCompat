@@ -3,6 +3,7 @@
 #include "l2_mode_execution.hpp"
 #include "render_subsystem.h"
 #include "worker_classic_render_entry.hpp"
+#include "worker_active_plugin_context.hpp"
 #include "worker_classic_runtime.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
@@ -466,12 +467,27 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
   } else if (params_error == 0 && image_render_supported && depth_supported && concurrent_render) {
     std::array<int32_t, 2> widths{}, heights{}, rowbytes{};
     std::array<std::string, 2> input_hashes{};
+    const auto* active_string_table = active_plugin::string_table;
+    const HMODULE active_effect_module = active_plugin::effect_module;
     auto run_thread = [&](std::size_t index) {
-      auto thread_input = input;
-      auto thread_output = output;
-      thread_errors[index] = render_once(entry, thread_input, thread_output, "default",
-          widths[index], heights[index], rowbytes[index], input_hashes[index],
-          thread_hashes[index], thread_guards[index], nullptr);
+      active_plugin::with_context(active_string_table, active_effect_module, [&]() {
+        if (request.concurrent_thread_context_probe) {
+          request.concurrent_thread_context_probe();
+          widths[index] = 1;
+          heights[index] = 1;
+          rowbytes[index] = 4;
+          input_hashes[index] = "context-probe";
+          thread_hashes[index] = "context-probe";
+          thread_guards[index] = true;
+          thread_errors[index] = 0;
+          return;
+        }
+        auto thread_input = input;
+        auto thread_output = output;
+        thread_errors[index] = render_once(entry, thread_input, thread_output, "default",
+            widths[index], heights[index], rowbytes[index], input_hashes[index],
+            thread_hashes[index], thread_guards[index], nullptr);
+      });
     };
     std::thread first(run_thread, 0); std::thread second(run_thread, 1);
     first.join(); second.join();
