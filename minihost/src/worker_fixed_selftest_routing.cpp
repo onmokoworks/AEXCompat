@@ -104,6 +104,18 @@ int selftest_pf_adv_app(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+int selftest_pf_pixel_format(int, wchar_t**) {
+  const bool passed =
+      aexcompat::host_guard_selftests::verify_pf_pixel_format_suite_versions();
+  std::cout << "{\"pf_pixel_format_suite_versions\":\""
+            << (passed ? "passed" : "failed")
+            << "\",\"v1_slots\":8,\"v2_slots\":2,"
+               "\"independent_identity\":true,\"shared_registration_slots\":true,"
+               "\"world_lifecycle_balanced\":true,\"suite_leases_balanced\":"
+            << (g_host->suite_leases_balanced() ? "true" : "false") << "}\n";
+  return passed ? 0 : 1;
+}
+
 int selftest_effect_param_union(int, wchar_t**) {
   const bool passed = aexcompat::l2_detail::verify_aegp_effect_param_union_suite4();
   std::cout << "{\"aegp_effect_param_union_suite4\":\""
@@ -144,13 +156,14 @@ int selftest_compute_cache(int, wchar_t**) {
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 9> host_commands{{
+  const std::array<selftest::HostCommand, 10> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
       {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
       {L"--self-test-suite-entry-utility13", 2, &selftest_suite_entry_utility13},
       {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},
+      {L"--self-test-pf-pixel-format-suite", 2, &selftest_pf_pixel_format},
       {L"--self-test-aegp-effect-param-union-suite4", 2,
        &selftest_effect_param_union},
       {L"--self-test-compute-cache", 2, &selftest_compute_cache},
