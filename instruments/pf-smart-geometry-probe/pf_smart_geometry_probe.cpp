@@ -24,17 +24,18 @@ PF_Err CheckoutInput(PF_InData* in_data, PF_PreRenderExtra* extra,
 }
 
 // Probe modes are selected through the generic render time the host already
-// supplies (current_time modulo 4), so no host-side probe-specific branch is
+// supplies (current_time modulo 5), so no host-side probe-specific branch is
 // needed to reach any scenario.
 enum class Mode : A_long {
   VerifyIntersection = 0,
   ExtraPixels = 1,
   FlaglessOverrun = 2,
   EmptyResult = 3,
+  LargeEnvelope = 4,
 };
 
 Mode ProbeMode(const PF_InData* in_data) {
-  return static_cast<Mode>(((in_data->current_time % 4) + 4) % 4);
+  return static_cast<Mode>(((in_data->current_time % 5) + 5) % 5);
 }
 
 PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
@@ -89,6 +90,13 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
       if (err) return err;
       extra->output->result_rect = PF_LRect{0, 0, 0, 0};
       extra->output->max_result_rect = full;
+      return PF_Err_NONE;
+    }
+    case Mode::LargeEnvelope: {
+      const PF_Err err = CheckoutInput(in_data, extra, full, &checkout);
+      if (err) return err;
+      extra->output->result_rect = full;
+      extra->output->max_result_rect = PF_LRect{-5000, -5000, 5000, 5000};
       return PF_Err_NONE;
     }
     case Mode::ExtraPixels:
