@@ -350,6 +350,11 @@ mod windows_e2e {
         let close = session.close();
         assert_eq!(close["requests_ok"], 2);
         assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["process_memory_limit_bytes"],
+            512 * 1024 * 1024u64,
+            "close: {close}"
+        );
     }
 
     /// In-place parity (issue #751): an audio session opened with
@@ -468,6 +473,11 @@ mod windows_e2e {
         let close = session.close();
         assert_eq!(close["render_path"], "smart", "close: {close}");
         assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["process_memory_limit_bytes"],
+            1024 * 1024 * 1024u64,
+            "close: {close}"
+        );
         // The smart clean verdict comes from the smart report's dedicated
         // session_* fields, not the classic persistent-sequence keys.
         assert_eq!(close["final_report"]["session_mode"], true);
@@ -3039,6 +3049,11 @@ mod windows_e2e {
         assert_eq!(close["session_clean"], true, "close: {close}");
         assert_eq!(close["invalidated"], false, "close: {close}");
         assert_eq!(close["frames_ok"], 2, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["process_memory_limit_bytes"],
+            1024 * 1024 * 1024u64,
+            "close: {close}"
+        );
         // The swap rode the manifest: the final report's cluster module
         // audit records the epoch and stays inside the declared set.
         let epochs = close["final_report"]["module_audit"]["epochs"]
@@ -3232,6 +3247,11 @@ mod windows_e2e {
         let close = session.close();
         assert_eq!(close["session_clean"], true, "close: {close}");
         assert_eq!(close["inspects_ok"], 3, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["process_memory_limit_bytes"],
+            512 * 1024 * 1024u64,
+            "close: {close}"
+        );
         // The inspect swap rode the manifest: one epoch, declared-set audit.
         let epochs = close["final_report"]["module_audit"]["epochs"]
             .as_array()

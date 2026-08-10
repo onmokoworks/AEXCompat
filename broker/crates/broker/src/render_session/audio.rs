@@ -210,7 +210,10 @@ impl AudioRenderSession {
             // Audio sessions carry no layers.
             layers: Vec::new(),
         };
-        let process = dispatch_secure_image_session(dispatch, &child_handles)?;
+        let process = crate::secure_image_dispatch::dispatch_secure_image_standard_session(
+            dispatch,
+            &child_handles,
+        )?;
         drop(request_read);
         drop(response_write);
 

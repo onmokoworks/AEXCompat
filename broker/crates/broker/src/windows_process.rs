@@ -41,6 +41,11 @@ use windows_sys::Win32::System::Threading::{
 pub const STDOUT_CAPTURE_LIMIT: usize = 24 * 1024 * 1024;
 const STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
 const PROCESS_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
+// Resident render sessions carry the plug-in, its inference/runtime closure,
+// and one or more frame worlds at the same time. Keep that path bounded while
+// allowing models whose measured working set legitimately exceeds the
+// one-shot/discovery budget (issue #1138).
+const RENDER_SESSION_PROCESS_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
 const MAX_PROBE_PROCESS_MEMORY_LIMIT: usize = 2 * 1024 * 1024 * 1024;
 const TERMINATION_GRACE_MS: u32 = 5_000;
 // See memory_limit_reached: the largest single failed allocation the
@@ -347,6 +352,21 @@ pub struct SessionChildHandles {
     /// order. Inherited so their numeric values match in the worker; the trailer
     /// pairs each value with its layer's slot/geometry.
     pub layers: Vec<HANDLE>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionMemoryBudget {
+    Standard,
+    Render,
+}
+
+impl SessionMemoryBudget {
+    fn bytes(self) -> usize {
+        match self {
+            Self::Standard => PROCESS_MEMORY_LIMIT,
+            Self::Render => RENDER_SESSION_PROCESS_MEMORY_LIMIT,
+        }
+    }
 }
 
 /// Variables the broker owns at the launch boundary: the handle numbers it
@@ -870,6 +890,26 @@ pub fn launch_isolated_session_staged(
     repository: &Path,
     launch_environment: &LaunchEnvironment,
 ) -> io::Result<LaunchedIsolatedProcess> {
+    launch_isolated_session_staged_with_budget(
+        program,
+        args,
+        current_directory,
+        session,
+        repository,
+        launch_environment,
+        SessionMemoryBudget::Standard,
+    )
+}
+
+pub(crate) fn launch_isolated_session_staged_with_budget(
+    program: &Path,
+    args: &[String],
+    current_directory: &Path,
+    session: &SessionChildHandles,
+    repository: &Path,
+    launch_environment: &LaunchEnvironment,
+    memory_budget: SessionMemoryBudget,
+) -> io::Result<LaunchedIsolatedProcess> {
     launch_isolated_session_with_desktop_policy(
         program,
         args,
@@ -878,6 +918,7 @@ pub fn launch_isolated_session_staged(
         WorkerDesktopPolicy::Dedicated,
         repository,
         launch_environment,
+        memory_budget,
     )
 }
 
@@ -888,6 +929,7 @@ pub(crate) fn launch_isolated_session_on_current_desktop(
     session: &SessionChildHandles,
     repository: &Path,
     launch_environment: &LaunchEnvironment,
+    memory_budget: SessionMemoryBudget,
 ) -> io::Result<LaunchedIsolatedProcess> {
     launch_isolated_session_with_desktop_policy(
         program,
@@ -897,6 +939,7 @@ pub(crate) fn launch_isolated_session_on_current_desktop(
         WorkerDesktopPolicy::Current,
         repository,
         launch_environment,
+        memory_budget,
     )
 }
 
@@ -909,6 +952,7 @@ fn launch_isolated_session_with_desktop_policy(
     desktop_policy: WorkerDesktopPolicy,
     repository: &Path,
     launch_environment: &LaunchEnvironment,
+    memory_budget: SessionMemoryBudget,
 ) -> io::Result<LaunchedIsolatedProcess> {
     launch_isolated_impl(
         program,
@@ -918,7 +962,7 @@ fn launch_isolated_session_with_desktop_policy(
         desktop_policy,
         Some(repository),
         launch_environment,
-        PROCESS_MEMORY_LIMIT,
+        memory_budget.bytes(),
     )
 }
 

@@ -368,6 +368,7 @@ pub(crate) fn secure_launch_session_in_place(
     request: SecureLaunchRequest<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+    memory_budget: crate::windows_process::SessionMemoryBudget,
 ) -> io::Result<SecureSessionProcess> {
     let args = match plugin_path {
         Some(plugin_path) => build_in_place_launch_args(plugin_path, &request)?,
@@ -380,7 +381,7 @@ pub(crate) fn secure_launch_session_in_place(
             args
         }
     };
-    secure_launch_session_impl(args, request, session, desktop_policy)
+    secure_launch_session_impl(args, request, session, desktop_policy, memory_budget)
 }
 
 #[cfg(windows)]
@@ -389,6 +390,7 @@ fn secure_launch_session_impl(
     request: SecureLaunchRequest<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
+    memory_budget: crate::windows_process::SessionMemoryBudget,
 ) -> io::Result<SecureSessionProcess> {
     use crate::trusted_worker_stage::TrustedWorkerStage;
 
@@ -406,7 +408,7 @@ fn secure_launch_session_impl(
         .map_err(|error| stage_error("session worker cwd creation", error))?;
     let launched = match desktop_policy {
         crate::windows_process::WorkerDesktopPolicy::Dedicated => {
-            crate::windows_process::launch_isolated_session_staged(
+            crate::windows_process::launch_isolated_session_staged_with_budget(
                 worker_stage.worker_path(),
                 &args,
                 &worker_cwd,
@@ -414,6 +416,7 @@ fn secure_launch_session_impl(
                 // Repository root for the launch-boundary minidump handle (issue #18/#224).
                 request.repository,
                 &request.launch_environment,
+                memory_budget,
             )
         }
         crate::windows_process::WorkerDesktopPolicy::Current => {
@@ -424,6 +427,7 @@ fn secure_launch_session_impl(
                 session,
                 request.repository,
                 &request.launch_environment,
+                memory_budget,
             )
         }
     }
