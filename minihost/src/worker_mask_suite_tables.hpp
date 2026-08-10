@@ -12,6 +12,7 @@ struct MaskSuite5;
 struct StreamSuite;
 struct StreamSuite4;
 struct KeyframeSuite;
+struct KeyframeSuite4;
 struct DynamicStreamSuite;
 struct MaskOutlineSuite;
 
@@ -21,6 +22,7 @@ extern MaskSuite5 g_mask_suite5;
 extern StreamSuite g_stream_suite;
 extern StreamSuite4 g_stream_suite4;
 extern KeyframeSuite g_keyframe_suite;
+extern KeyframeSuite4 g_keyframe_suite4;
 extern DynamicStreamSuite g_dynamic_stream_suite;
 extern MaskOutlineSuite g_mask_outline_suite;
 

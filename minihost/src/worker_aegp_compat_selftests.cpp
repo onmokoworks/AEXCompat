@@ -1548,6 +1548,8 @@ bool verify_aegp_scene_mutation_transactions() {
       void*, int16_t, const HostTime*, int32_t*);
   using DeleteKeyframe = int32_t (__cdecl*)(void*, int32_t);
   using KeyframeCount = int32_t (__cdecl*)(void*, int32_t*);
+  using GetKeyframeTimeV4 = int32_t (__cdecl*)(
+      void*, int32_t, int16_t, HostTime*);
   using StartAdd = int32_t (__cdecl*)(void*, void**);
   using AddKey = int32_t (__cdecl*)(
       void*, int16_t, const HostTime*, int32_t*);
@@ -1591,11 +1593,13 @@ bool verify_aegp_scene_mutation_transactions() {
   const void* mask_stream_suite_raw = nullptr;
   const void* mask_stream_suite4_raw = nullptr;
   const void* keyframe_suite_raw = nullptr;
+  const void* keyframe_suite4_raw = nullptr;
   const void* dynamic_suite_raw = nullptr;
   ok = acquire_suite("AEGP Layer Mask Suite", 7, &mask_suite_raw) == 0 &&
       acquire_suite("AEGP Stream Suite", 11, &mask_stream_suite_raw) == 0 &&
       acquire_suite("AEGP Stream Suite", 9, &mask_stream_suite4_raw) == 0 &&
       acquire_suite("AEGP Keyframe Suite", 5, &keyframe_suite_raw) == 0 &&
+      acquire_suite("AEGP Keyframe Suite", 4, &keyframe_suite4_raw) == 0 &&
       acquire_suite("AEGP Dynamic Stream Suite", 5, &dynamic_suite_raw) == 0 &&
       ok;
   const auto* mask_slots =
@@ -1606,6 +1610,8 @@ bool verify_aegp_scene_mutation_transactions() {
       static_cast<void* const*>(const_cast<void*>(mask_stream_suite4_raw));
   const auto* key_slots =
       static_cast<void* const*>(const_cast<void*>(keyframe_suite_raw));
+  const auto* key4_slots =
+      static_cast<void* const*>(const_cast<void*>(keyframe_suite4_raw));
   const auto* dynamic_slots =
       static_cast<void* const*>(const_cast<void*>(dynamic_suite_raw));
   const auto get_mask = mask_slots
@@ -1632,6 +1638,8 @@ bool verify_aegp_scene_mutation_transactions() {
       set_expression_ansi(1, nullptr, "x") == 4 && ok;
   const auto key_count = key_slots
       ? reinterpret_cast<KeyframeCount>(key_slots[0]) : nullptr;
+  const auto get_keyframe_time_v4 = key4_slots
+      ? reinterpret_cast<GetKeyframeTimeV4>(key4_slots[1]) : nullptr;
   const auto insert_key = key_slots
       ? reinterpret_cast<InsertKeyframe>(key_slots[2]) : nullptr;
   const auto delete_key = key_slots
@@ -1676,7 +1684,8 @@ bool verify_aegp_scene_mutation_transactions() {
       ? reinterpret_cast<SetDynamicName>(dynamic_slots[12]) : nullptr;
   const auto add_dynamic = dynamic_slots
       ? reinterpret_cast<AddDynamic>(dynamic_slots[14]) : nullptr;
-  ok = ok && get_mask && dispose_mask_fn && get_mask_stream &&
+  ok = ok && keyframe_suite4_raw == g_aegp_keyframe_suite4.data() &&
+      get_keyframe_time_v4 && get_mask && dispose_mask_fn && get_mask_stream &&
       dispose_mask_stream && dispose_mask_value && key_count && insert_key &&
       delete_key && start_add && add_key && end_add && get_key_value &&
       set_key_value && get_tangents && set_tangents && set_ease &&
@@ -1730,6 +1739,11 @@ bool verify_aegp_scene_mutation_transactions() {
   HostKeyframe* key = keyframe_at(mask_stream_record, inserted_index);
   ok = ok && mask_stream_record && key &&
       key->identity.kind == aexcompat::scene_model::ObjectKind::keyframe;
+  HostTime observed_key_time{-1, 0};
+  ok = ok && get_keyframe_time_v4(
+                 mask_stream, inserted_index, 1, &observed_key_time) == 0 &&
+      observed_key_time.value == key_time.value &&
+      observed_key_time.scale == key_time.scale;
   const auto key_identity = key ? key->identity :
       aexcompat::scene_model::Identity{};
 
@@ -2082,6 +2096,7 @@ bool verify_aegp_scene_mutation_transactions() {
 
   ok = release_suite("AEGP Dynamic Stream Suite", 5) == 0 && ok;
   ok = release_suite("AEGP Keyframe Suite", 5) == 0 && ok;
+  ok = release_suite("AEGP Keyframe Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 9) == 0 && ok;
   ok = release_suite("AEGP Stream Suite", 11) == 0 && ok;
   ok = release_suite("AEGP Layer Mask Suite", 7) == 0 && ok;
@@ -2112,11 +2127,15 @@ bool verify_aegp_loaded_plugin_effect_streams() {
     return false;
   using aexcompat::worker_runtime::parameters::ParamRecord;
   auto& records = aexcompat::worker_runtime::parameters::state().records;
+  auto& timelines = aexcompat::worker_runtime::parameters::state().timelines;
   const auto saved_records = records;
+  const auto saved_timelines = timelines;
   const auto saved_instances = scene_runtime_state().effect_instances;
   const auto saved_streams = scene_runtime_state().legacy_effect_streams;
   const auto saved_leases = scene_runtime_state().effect_leases;
   const bool saved_effect_live = scene_runtime_state().effect_live;
+  const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_comp_idle_roundtrip_mode = false;
   // Every stream and value this test opens has to be handed back. The suite
   // lease balance says nothing about that - this test acquires no suite - so
   // the counters the stream paths keep are what closes the loop, the way the
@@ -2184,6 +2203,39 @@ bool verify_aegp_loaded_plugin_effect_streams() {
 
   void* v9_amount = nullptr;
   ok = ok && get_v9_effect_stream(0, effect, 1, &v9_amount) == 0 && v9_amount;
+  const void* keyframe_suite4_raw = nullptr;
+  ok = ok && acquire_suite(
+                 "AEGP Keyframe Suite", 4, &keyframe_suite4_raw) == 0 &&
+      keyframe_suite4_raw == g_aegp_keyframe_suite4.data();
+  const auto* keyframe4_slots =
+      static_cast<void* const*>(const_cast<void*>(keyframe_suite4_raw));
+  using GetStreamNumKeyframes = int32_t (__cdecl*)(void*, int32_t*);
+  using InsertKeyframe = int32_t (__cdecl*)(
+      void*, int16_t, const suite_abi::AegpTime*, int32_t*);
+  const auto get_v4_keyframe_count = keyframe4_slots
+      ? reinterpret_cast<GetStreamNumKeyframes>(keyframe4_slots[0]) : nullptr;
+  const auto insert_v4_keyframe = keyframe4_slots
+      ? reinterpret_cast<InsertKeyframe>(keyframe4_slots[2]) : nullptr;
+  int32_t v4_keyframe_count = -1;
+  int32_t rejected_keyframe_index = 0x12345678;
+  const suite_abi::AegpTime rejected_keyframe_time{1, 30};
+  ok = ok && get_v4_keyframe_count && insert_v4_keyframe &&
+      get_v4_keyframe_count(v9_amount, &v4_keyframe_count) == 0 &&
+      v4_keyframe_count == 0 &&
+      insert_v4_keyframe(
+          v9_amount, 1, &rejected_keyframe_time,
+          &rejected_keyframe_index) == 4 &&
+      rejected_keyframe_index == 0x12345678;
+  aexcompat::parameter_animation::ParameterTimeline animated{};
+  animated.slot = 1;
+  animated.keys.push_back({0, 30, false,
+      aexcompat::parameter_animation::AnimationValueKind::Scalar, 12.5});
+  timelines = {animated};
+  int32_t animated_count_sentinel = 0x12345678;
+  ok = ok &&
+      get_v4_keyframe_count(v9_amount, &animated_count_sentinel) == 4 &&
+      animated_count_sentinel == 0x12345678;
+  timelines.clear();
   void* v9_name_handle = nullptr;
   void* v9_name_data = nullptr;
   int32_t v9_type = -1;
@@ -2211,6 +2263,7 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   ok = aexcompat::worker_runtime::handles::free_aegp_mem_handle(
            v9_name_handle) == 0 && ok;
   ok = dispose_v9_stream(v9_amount) == 0 && ok;
+  ok = release_suite("AEGP Keyframe Suite", 4) == 0 && ok;
   records[0].name.assign("\xc0\xaf", 2);
   void* invalid_name_stream = nullptr;
   void* invalid_name_handle = reinterpret_cast<void*>(1);
@@ -2297,10 +2350,12 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   // scene holding this test's streams and leases, the way the mutation
   // transaction test beside it restores the same three tables.
   records = saved_records;
+  timelines = saved_timelines;
   scene_runtime_state().effect_instances = saved_instances;
   scene_runtime_state().legacy_effect_streams = saved_streams;
   scene_runtime_state().effect_leases = saved_leases;
   scene_runtime_state().effect_live = saved_effect_live;
+  g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
   return ok &&
       g_aegp_stream_acquires - streams_before ==
           g_aegp_stream_disposes - stream_disposes_before &&

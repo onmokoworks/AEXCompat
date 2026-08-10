@@ -483,6 +483,9 @@ bool mask_suite_provider_available(void*) { return aexcompat::mask_runtime::mode
 bool mask_stream_suite4_provider_available(void*) {
   return aexcompat::mask_runtime::model_enabled() && !scene_context();
 }
+bool mask_keyframe_suite4_provider_available(void*) {
+  return aexcompat::mask_runtime::model_enabled() && !scene_context();
+}
 
 bool render_options4_provider_available(void*) {
   return is_render_worker() && aexcompat::aegp_layer_render_runtime::active();
@@ -694,6 +697,8 @@ bool configure_component_suite_catalog() {
        &mask_stream_suite4_provider_available},
       {"AEGP Keyframe Suite", 5, &g_keyframe_suite, nullptr, nullptr,
        &mask_suite_provider_available},
+      {"AEGP Keyframe Suite", 4, &g_keyframe_suite4, nullptr, nullptr,
+       &mask_keyframe_suite4_provider_available},
       {"AEGP Dynamic Stream Suite", 5, &g_dynamic_stream_suite,
        nullptr, nullptr, &mask_suite_provider_available},
       {"AEGP Mask Outline Suite", 5, &g_mask_outline_suite,
