@@ -162,18 +162,97 @@ void configure(const Context& context) {
 
 bool configured() noexcept { return g_configured; }
 
+namespace {
+// PF Fill Matte Suite fill/premultiply answer 516 for a handful of distinct
+// reasons, and a plug-in that passes that through as its frame error
+// (SolidComposite, Unmultiply, issue #1086) was attributable only by rebuilding
+// the worker with prints. Same always-on marker as transform_world's (issue
+// #995/#1032); these callbacks are per-call, not per-pixel, so one line each.
+int32_t fill_matte_denied(const char* callback, const char* reason) {
+  std::cerr << "stage:callback_denied callback=" << callback << " reason=" << reason
+            << "\n" << std::flush;
+  return kPfErrBadCallbackParam;
+}
+
+// The world an effect hands fill/premultiply carries its own depth, which is
+// independent of the callback variant: PF_FillMatteSuite2's fill / fill16 /
+// fill_float and premultiply_color / _color16 / _color_float differ only in the
+// precision of the *colour* argument (PF_Pixel / PF_Pixel16 / PF_PixelFloat) -
+// all three take the same PF_EffectWorld, and AE fills it at the world's own
+// depth. Reading the depth off the world (issue #1086: SolidComposite calls the
+// float-colour fill and Unmultiply the float-colour premultiply on an 8-bit
+// world) rather than assuming it matches the colour is what this recovers.
+// world_flags cannot tell 16-bit from float apart (host-stamped deep worlds set
+// the DEEP bit for both), so the registered dispatch format is the authority: it
+// distinguishes all three depths and covers every world an effect is handed in
+// render (checkout worlds and new_world scratch worlds are both registered). A
+// world the scope has not seen - a bare PF_EffectWorld the caller filled in
+// itself (the fill/matte self-test) or a sub-world struct laid over a registered
+// buffer - reaches the fallback: the DEEP bit separates 8-bit (clear) from deep
+// (set), and the deep case is disambiguated 16-vs-float by the session format,
+// since an unregistered deep world almost always shares the render's depth.
+// That last step is a heuristic, not a proof: a deep sub-world whose depth
+// differs from the session (e.g. a float scratch strip in an 8-bit session) is
+// still mis-depthed here. It is depth-correct for every registered world and for
+// the depth-matching sessions that produce the observed callers.
+int32_t world_pixel_bytes(void* world) {
+  DispatchWorldFormat format{};
+  if (world && resolve_dispatch_world_format(world, format)) {
+    if (format.pixel_format == kPixelFormatArgb32) return 4;
+    if (format.pixel_format == kPixelFormatArgb64) return 8;
+    if (format.pixel_format == kPixelFormatArgb128) return 16;
+  }
+  if (world) {
+    int32_t flags{};
+    std::memcpy(&flags, static_cast<const std::byte*>(world) + 16, sizeof(flags));
+    if ((flags & 1) == 0) return 4;
+    return std::strcmp(pixel_format(), "argb32f") == 0 ? 16 : 8;
+  }
+  return 4;
+}
+
+// Rewrites one ARGB colour from the callback variant's precision (from_bytes)
+// into the world's depth (to_bytes) through a normalised [0,1] intermediate, so
+// the value written matches the world rather than the colour argument. AE's
+// 16-bit channel maximum is 0x8000 = 32768, not 65535.
+void convert_argb_color(int32_t from_bytes, int32_t to_bytes, const void* in, void* out) {
+  for (int channel = 0; channel < 4; ++channel) {
+    const double normalized =
+        from_bytes == 4 ? static_cast<const uint8_t*>(in)[channel] / 255.0 :
+        from_bytes == 8 ? static_cast<const uint16_t*>(in)[channel] / 32768.0 :
+                          static_cast<double>(static_cast<const float*>(in)[channel]);
+    // An integer destination cannot hold out-of-range or non-finite float
+    // channels, so bound to [0,1] before scaling: this both matches what AE
+    // stores into an 8/16-bit world and keeps lround's argument finite (a raw
+    // 1e30 or +inf * 32768 overflows long). NaN compares false against both
+    // ends, so std::clamp would pass it straight through to lround; map it to 0
+    // explicitly for a deterministic channel. The float destination keeps the
+    // value as given - a float world holds HDR.
+    const double bounded =
+        normalized == normalized ? std::clamp(normalized, 0.0, 1.0) : 0.0;
+    if (to_bytes == 4)
+      static_cast<uint8_t*>(out)[channel] =
+          static_cast<uint8_t>(std::lround(bounded * 255.0));
+    else if (to_bytes == 8)
+      static_cast<uint16_t*>(out)[channel] =
+          static_cast<uint16_t>(std::lround(bounded * 32768.0));
+    else
+      static_cast<float*>(out)[channel] = static_cast<float>(normalized);
+  }
+}
+}  // namespace
 
 int32_t fill_world_typed(int32_t pixel_bytes, const void* color,
                          const LegacyRect* requested, void* world) {
   unsigned char* pixels{};
   int32_t rowbytes{}, width{}, height{};
   if (!resolve_world(world, pixel_bytes, pixels, rowbytes, width, height))
-    return kPfErrBadCallbackParam;
+    return fill_matte_denied("fill", "unresolved_world");
   const std::array<unsigned char, 16> transparent_black{};
   if (!color) color = transparent_black.data();
   LegacyRect bounds{};
   if (!normalize_legacy_rect(requested, width, height, bounds))
-    return kPfErrBadCallbackParam;
+    return fill_matte_denied("fill", "invalid_area");
   for (int32_t y = bounds.top; y < bounds.bottom; ++y)
     for (int32_t x = bounds.left; x < bounds.right; ++x)
       std::memcpy(pixels + static_cast<std::size_t>(y) * rowbytes +
@@ -182,33 +261,30 @@ int32_t fill_world_typed(int32_t pixel_bytes, const void* color,
   return 0;
 }
 
+// The three fill variants differ only in the colour argument's precision; each
+// fills the world at the world's own depth, converting the colour into it.
+int32_t fill_matte_fill(int32_t color_bytes, const void* color,
+                        const LegacyRect* area, void* world) {
+  const int32_t world_bytes = world_pixel_bytes(world);
+  if (!color) return fill_world_typed(world_bytes, nullptr, area, world);
+  std::array<unsigned char, 16> converted{};
+  convert_argb_color(color_bytes, world_bytes, color, converted.data());
+  return fill_world_typed(world_bytes, converted.data(), area, world);
+}
 int32_t __cdecl fill_world8(void*, const void* color, const LegacyRect* area, void* world) {
-  if (std::strcmp(pixel_format(), "argb16") == 0) {
-    std::array<uint16_t, 4> deep{};
-    if (color) for (int channel = 0; channel < 4; ++channel)
-      deep[channel] = static_cast<uint16_t>(
-          (static_cast<uint32_t>(static_cast<const uint8_t*>(color)[channel]) * 32768u + 127u) /
-          255u);
-    return fill_world_typed(8, color ? deep.data() : nullptr, area, world);
-  }
-  if (std::strcmp(pixel_format(), "argb32f") == 0) {
-    std::array<float, 4> floating{};
-    if (color) for (int channel = 0; channel < 4; ++channel)
-      floating[channel] = static_cast<const uint8_t*>(color)[channel] / 255.0f;
-    return fill_world_typed(16, color ? floating.data() : nullptr, area, world);
-  }
-  return fill_world_typed(4, color, area, world);
+  return fill_matte_fill(4, color, area, world);
 }
 int32_t __cdecl fill_world16(void*, const void* color, const LegacyRect* area, void* world) {
-  return fill_world_typed(8, color, area, world);
+  return fill_matte_fill(8, color, area, world);
 }
 int32_t __cdecl fill_world_float(void*, const void* color, const LegacyRect* area, void* world) {
-  return fill_world_typed(16, color, area, world);
+  return fill_matte_fill(16, color, area, world);
 }
 
 int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const void* matte,
                                 int32_t forward, void* destination_world) {
-  if (!source_world || !destination_world || !matte) return kPfErrBadCallbackParam;
+  if (!source_world || !destination_world || !matte)
+    return fill_matte_denied("premultiply_color", "null_argument");
   unsigned char *source{}, *destination{};
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
@@ -217,10 +293,10 @@ int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const v
       !resolve_world(destination_world, pixel_bytes, destination, destination_rowbytes,
                            destination_width, destination_height) ||
       source_width != destination_width || source_height != destination_height)
-    return kPfErrBadCallbackParam;
+    return fill_matte_denied("premultiply_color", "unresolved_or_size_mismatch");
   const std::size_t packed_row = static_cast<std::size_t>(source_width) * pixel_bytes;
   if (packed_row > SIZE_MAX / static_cast<std::size_t>(source_height))
-    return kPfErrBadCallbackParam;
+    return fill_matte_denied("premultiply_color", "row_overflow");
   std::vector<unsigned char> snapshot;
   try {
     snapshot.resize(packed_row * static_cast<std::size_t>(source_height));
@@ -272,28 +348,33 @@ int32_t premultiply_color_typed(int32_t pixel_bytes, void* source_world, const v
 }
 
 int32_t __cdecl premultiply_world8(void*, int32_t forward, void* world) {
-  if (std::strcmp(pixel_format(), "argb16") == 0) {
-    const std::array<uint16_t, 4> black{};
-    return premultiply_color_typed(8, world, black.data(), forward, world);
-  }
-  if (std::strcmp(pixel_format(), "argb32f") == 0) {
-    const std::array<float, 4> black{};
-    return premultiply_color_typed(16, world, black.data(), forward, world);
-  }
-  const std::array<uint8_t, 4> black{};
-  return premultiply_color_typed(4, world, black.data(), forward, world);
+  // The matte is black; a 16-byte zero buffer reads as zero in every depth, so
+  // premultiply_color_typed at the world's own depth needs no per-format array.
+  const std::array<unsigned char, 16> black{};
+  return premultiply_color_typed(world_pixel_bytes(world), world, black.data(), forward, world);
+}
+// premultiply_color / _color16 / _color_float name the matte colour's precision;
+// the source and destination worlds carry their own depth (issue #1086).
+int32_t premultiply_color_dispatch(int32_t matte_bytes, void* source, const void* matte,
+                                   int32_t forward, void* destination) {
+  if (!source || !destination || !matte)
+    return fill_matte_denied("premultiply_color", "null_argument");
+  const int32_t world_bytes = world_pixel_bytes(destination);
+  std::array<unsigned char, 16> converted{};
+  convert_argb_color(matte_bytes, world_bytes, matte, converted.data());
+  return premultiply_color_typed(world_bytes, source, converted.data(), forward, destination);
 }
 int32_t __cdecl premultiply_color8(void*, void* source, const void* color,
                                    int32_t forward, void* destination) {
-  return premultiply_color_typed(4, source, color, forward, destination);
+  return premultiply_color_dispatch(4, source, color, forward, destination);
 }
 int32_t __cdecl premultiply_color16(void*, void* source, const void* color,
                                     int32_t forward, void* destination) {
-  return premultiply_color_typed(8, source, color, forward, destination);
+  return premultiply_color_dispatch(8, source, color, forward, destination);
 }
 int32_t __cdecl premultiply_color_float(void*, void* source, const void* color,
                                         int32_t forward, void* destination) {
-  return premultiply_color_typed(16, source, color, forward, destination);
+  return premultiply_color_dispatch(16, source, color, forward, destination);
 }
 
 static_assert(kUtilsFill == 9 * sizeof(void*));
