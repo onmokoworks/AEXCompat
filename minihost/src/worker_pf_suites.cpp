@@ -108,6 +108,17 @@ bool normalize_legacy_rect(const LegacyRect* requested, int32_t width, int32_t h
       result.bottom >= result.top && result.right <= width && result.bottom <= height;
 }
 
+bool clip_legacy_rect(const LegacyRect* requested, int32_t width, int32_t height,
+                      LegacyRect& result) {
+  if (width <= 0 || height <= 0) return false;
+  const LegacyRect candidate = requested ? *requested : LegacyRect{0, 0, width, height};
+  result.left = std::clamp(candidate.left, 0, width);
+  result.top = std::clamp(candidate.top, 0, height);
+  result.right = std::clamp(candidate.right, result.left, width);
+  result.bottom = std::clamp(candidate.bottom, result.top, height);
+  return true;
+}
+
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
   T value{};
@@ -561,9 +572,9 @@ int32_t __cdecl iterate_world_float(void* in_data, int32_t progress_base, int32_
       refcon, pixel_function, destination_world);
 }
 
-int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const LegacyRect* area,
-                             const void* origin, void* refcon, IteratePixelRaw pixel_function,
-                             void* destination_world) {
+int32_t iterate_origin_typed(int32_t pixel_bytes, bool clip_source, void* source_world,
+                             const LegacyRect* area, const void* origin, void* refcon,
+                             IteratePixelRaw pixel_function, void* destination_world) {
   unsigned char *source{}, *destination{};
   int32_t source_rowbytes{}, source_width{}, source_height{};
   int32_t destination_rowbytes{}, destination_width{}, destination_height{};
@@ -586,7 +597,11 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
     return finish_callback(Callback::IterateOrigin, kPfErrBadCallbackParam,
                            Reason::MissingWorld);
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(area, destination_width, destination_height, bounds))
+  const int32_t bound_width = clip_source && has_source
+      ? std::min(source_width, destination_width) : destination_width;
+  const int32_t bound_height = clip_source && has_source
+      ? std::min(source_height, destination_height) : destination_height;
+  if (!clip_legacy_rect(area, bound_width, bound_height, bounds))
     return finish_callback(Callback::IterateOrigin, kPfErrBadCallbackParam,
                            Reason::InvalidArea);
   int16_t origin_x{}, origin_y{};
@@ -612,19 +627,19 @@ int32_t iterate_origin_typed(int32_t pixel_bytes, void* source_world, const Lega
 int32_t __cdecl iterate_origin8(void*, int32_t, int32_t, void* source_world,
                                 const LegacyRect* area, const void* origin, void* refcon,
                                 IteratePixelRaw pixel_function, void* destination_world) {
-  return iterate_origin_typed(4, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(4, true, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 int32_t __cdecl iterate_origin16(void*, int32_t, int32_t, void* source_world,
                                  const LegacyRect* area, const void* origin, void* refcon,
                                  IteratePixelRaw pixel_function, void* destination_world) {
-  return iterate_origin_typed(8, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(8, true, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 int32_t __cdecl iterate_origin_float(void*, int32_t, int32_t, void* source_world,
                                      const LegacyRect* area, const void* origin, void* refcon,
                                      IteratePixelRaw pixel_function, void* destination_world) {
-  return iterate_origin_typed(16, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(16, true, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 
@@ -639,8 +654,8 @@ int32_t __cdecl iterate_lut8(void*, int32_t, int32_t, void* source_world,
       !bounded_argb8_world(destination_world, destination, destination_rowbytes,
                            destination_width, destination_height)) return kPfErrBadCallbackParam;
   LegacyRect bounds{};
-  if (!normalize_legacy_rect(area, std::min(source_width, destination_width),
-                             std::min(source_height, destination_height), bounds))
+  if (!clip_legacy_rect(area, std::min(source_width, destination_width),
+                        std::min(source_height, destination_height), bounds))
     return kPfErrBadCallbackParam;
   unsigned char* tables[4]{alpha_lut, red_lut, green_lut, blue_lut};
   for (int32_t y = bounds.top; y < bounds.bottom; ++y) {
@@ -662,7 +677,7 @@ int32_t __cdecl iterate_origin_non_clip8(void* in_data, int32_t progress_base,
                                           const LegacyRect* area, const void* origin,
                                           void* refcon, IteratePixelRaw pixel_function,
                                           void* destination_world) {
-  return iterate_origin_typed(4, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(4, false, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 
@@ -671,7 +686,7 @@ int32_t __cdecl iterate_origin_non_clip16(void* in_data, int32_t progress_base,
                                            const LegacyRect* area, const void* origin,
                                            void* refcon, IteratePixelRaw pixel_function,
                                            void* destination_world) {
-  return iterate_origin_typed(8, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(8, false, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 
@@ -680,7 +695,7 @@ int32_t __cdecl iterate_origin_non_clip_float(void* in_data, int32_t progress_ba
                                                const LegacyRect* area, const void* origin,
                                                void* refcon, IteratePixelRaw pixel_function,
                                                void* destination_world) {
-  return iterate_origin_typed(16, source_world, area, origin, refcon, pixel_function,
+  return iterate_origin_typed(16, false, source_world, area, origin, refcon, pixel_function,
                               destination_world);
 }
 
@@ -765,6 +780,25 @@ bool verify_iterate_suites() {
       destination != std::array<unsigned char, 8>{{10, 235, 30, 40, 50, 195, 70, 80}})
     return false;
 
+  // The ordinary LUT walk clips a caller-supplied area to the common source /
+  // destination box. Empty intersections succeed without touching output.
+  destination.fill(0);
+  const LegacyRect oversized_lut{-3, -2, 9, 7};
+  if (iterate_lut8(nullptr, 0, 1, &source_world, &oversized_lut, nullptr, invert.data(),
+                   nullptr, nullptr, &destination_world) != 0 ||
+      destination != std::array<unsigned char, 8>{{10, 235, 30, 40, 50, 195, 70, 80}})
+    return false;
+  destination.fill(0x5a);
+  const LegacyRect outside_lut{5, 5, 9, 9};
+  const LegacyRect inverted_lut{2, 1, 0, 0};
+  if (iterate_lut8(nullptr, 0, 1, &source_world, &outside_lut, nullptr, invert.data(),
+                   nullptr, nullptr, &destination_world) != 0 ||
+      iterate_lut8(nullptr, 0, 1, &source_world, &inverted_lut, nullptr, invert.data(),
+                   nullptr, nullptr, &destination_world) != 0 ||
+      destination != std::array<unsigned char, 8>{{0x5a, 0x5a, 0x5a, 0x5a,
+                                                    0x5a, 0x5a, 0x5a, 0x5a}})
+    return false;
+
   // An area past the walkable box is clipped, not refused (issue #1034):
   // the walk covers exactly the intersection, and a wholly-outside or
   // inverted rect walks nothing and succeeds, like PF_COPY (issue #962).
@@ -824,6 +858,39 @@ bool verify_iterate_suites() {
     return 0;
   };
   const std::array<int16_t, 2> origin{{0, 0}};
+  struct OriginState { int32_t calls{}, first_x{}, last_x{}, y{}; } origin_state{};
+  const auto origin_callback = [](void* opaque, int32_t x, int32_t y, void* input,
+                                  void* output) -> int32_t {
+    auto& value = *static_cast<OriginState*>(opaque);
+    if (value.calls == 0) {
+      value.first_x = x;
+      value.y = y;
+    }
+    value.last_x = x;
+    ++value.calls;
+    std::memcpy(output, input, 4);
+    return 0;
+  };
+  const std::array<int16_t, 2> shifted_origin{{7, -3}};
+  const LegacyRect oversized_origin{-3, -2, 9, 7};
+  if (iterate_origin8(nullptr, 0, 1, &source_world, &oversized_origin,
+                      shifted_origin.data(), &origin_state, origin_callback,
+                      &destination_world) != 0 ||
+      origin_state.calls != 2 || origin_state.first_x != 7 ||
+      origin_state.last_x != 8 || origin_state.y != -3) return false;
+  origin_state = {};
+  const LegacyRect outside_origin{5, 5, 9, 9};
+  const LegacyRect inverted_origin{2, 1, 0, 0};
+  if (iterate_origin8(nullptr, 0, 1, &source_world, &outside_origin,
+                      shifted_origin.data(), &origin_state, origin_callback,
+                      &destination_world) != 0 ||
+      iterate_origin8(nullptr, 0, 1, &source_world, &inverted_origin,
+                      shifted_origin.data(), &origin_state, origin_callback,
+                      &destination_world) != 0 ||
+      origin_state.calls != 0) return false;
+
+  // The separate non-clip-source slot still walks the whole destination and
+  // supplies a zero pixel beyond the source extent.
   if (iterate_origin_non_clip8(nullptr, 0, 1, &source_world, nullptr, origin.data(),
                                &pixel_state, pixel_callback, &destination_world) != 0 ||
       pixel_state.calls != 3 || !pixel_state.saw_zero) return false;
