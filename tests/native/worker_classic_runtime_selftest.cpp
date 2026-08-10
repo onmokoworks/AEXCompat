@@ -253,7 +253,7 @@ int main() {
           null_arbitrary_definitions) &&
       parameter_execution::roundtrip_arbitrary_values(
           &copy_synthetic_arbitrary, arbitrary_input, arbitrary_output,
-      null_arbitrary_definitions) &&
+          null_arbitrary_definitions) &&
       parameter_state.arbitrary.interpolation_failures ==
           interpolation_failures_before &&
       parameter_state.arbitrary.roundtrip_failures == roundtrip_failures_before;
