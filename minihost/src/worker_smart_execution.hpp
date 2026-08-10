@@ -45,6 +45,10 @@ struct Result {
   bool rects_valid{};
   bool guards_intact{};
   bool output_pixels_valid{};
+  // The guarded output still held its initialization sentinel after a
+  // successful selector. Kept separate from non-finite/otherwise-invalid
+  // output so only this exact no-output case can authorize route fallback.
+  bool output_untouched{};
   bool gpu_render_possible{};
   bool gpu_render_dispatched{};
   int32_t checkout_time{};
