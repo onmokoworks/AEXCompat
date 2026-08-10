@@ -2894,6 +2894,85 @@
     }
 
     #[test]
+    fn get_module_file_name_w_bounds_utf16_and_reports_win32_errors() {
+        const GET_MODULE_FILE_NAME: u64 = STUB_BASE + 0x420;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            dispatch_win64_import("kernel32.dll", "GetModuleFileNameW"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetModuleFileNameW)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "GetModuleFileNameW"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_MODULE_FILE_NAME,
+            "kernel32.dll",
+            "GetModuleFileNameW",
+        )
+        .unwrap();
+        let output = DATA_BASE + 0xb00;
+
+        for module in [0, TEST_CODE] {
+            engine.write(output, &[0xa5; 128]).unwrap();
+            engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+            let returned = engine
+                .call_win64(GET_MODULE_FILE_NAME, [module, output, 64, 0, 0, 0])
+                .unwrap();
+            let expected = r"C:\AEXCompat\guest-plugin.aex";
+            assert_eq!(returned, expected.encode_utf16().count() as u64);
+            let bytes = engine
+                .unicorn
+                .mem_read_as_vec(output, (returned as usize + 1) * 2)
+                .unwrap();
+            let units = bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect::<Vec<_>>();
+            assert_eq!(String::from_utf16(&units[..units.len() - 1]).unwrap(), expected);
+            assert_eq!(units.last(), Some(&0));
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+        }
+
+        engine.write(output, &[0xa5; 16]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    GET_MODULE_FILE_NAME,
+                    [WINDOWS_KERNEL32_MODULE_TOKEN, output, 4, 0, 0, 0],
+                )
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+            [b'C', 0, b':', 0, b'\\', 0, 0, 0]
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INSUFFICIENT_BUFFER
+        );
+
+        for (module, pointer, capacity, error) in [
+            (0xdead_beef, output, 64, ERROR_MOD_NOT_FOUND),
+            (0, 0, 64, ERROR_INVALID_PARAMETER),
+            (0, output, 0, ERROR_INVALID_PARAMETER),
+        ] {
+            assert_eq!(
+                engine
+                    .call_win64(
+                        GET_MODULE_FILE_NAME,
+                        [module, pointer, capacity, 0, 0, 0],
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, error);
+        }
+    }
+
+    #[test]
     fn deterministic_getenv_and_openmp_dynamic_policy_are_bounded() {
         const GETENV: u64 = STUB_BASE + 0x410;
         const OMP_SET_DYNAMIC: u64 = STUB_BASE + 0x420;
