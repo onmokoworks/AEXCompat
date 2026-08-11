@@ -926,6 +926,11 @@ struct FrameRecord {
   int32_t width{};
   int32_t height{};
   abi::PrPixelFormat format{abi::kPrPixelFormat_GPU_BGRA_4444_32f};
+  // True for a frame the plug-in allocated through CreateGPUPPix. A Premiere GPU
+  // filter renders into a frame it creates itself and hands back through
+  // outFrame; it does not touch a host-provided destination. That returned frame
+  // is what the host must read (issue #1058).
+  bool plugin_created{};
 };
 
 struct HostContext {
@@ -982,6 +987,7 @@ abi::prSuiteError GPUDev_CreateGPUPPix(abi::csSDK_uint32, abi::PrPixelFormat fmt
   record->format = fmt;
   if (!g_ctx->frames->pr_make_gpu_ppix(record->world, record->live, w, h))
     return -1;
+  record->plugin_created = true;
   *out = reinterpret_cast<abi::PPixHand>(g_ctx->frames->pr_ppix(record->world));
   g_ctx->gpu_frames.push_back(std::move(record));
   return abi::kSuiteError_NoError;
@@ -1005,9 +1011,13 @@ abi::prSuiteError GPUDev_GetGPUPPixSize(abi::PPixHand ppix, size_t* out) {
 }
 
 // ---- PPix Suite / PPix2 Suite ---------------------------------------------
-abi::prSuiteError PPix_Dispose(abi::PPixHand ppix) {
-  FrameRecord* record = find_frame(ppix);
-  if (record) g_ctx->frames->pr_dispose(record->world, record->live);
+abi::prSuiteError PPix_Dispose(abi::PPixHand /*ppix*/) {
+  // Defer: a Premiere GPU filter calls Dispose on the frame it returns through
+  // outFrame as a reference release, expecting the host to still hold its own
+  // reference. This host does not reference-count frames, so freeing here would
+  // destroy the rendered output before it is read back. Every frame is freed
+  // once, in the HostContext destructor, after the output has been downloaded
+  // (issue #1058).
   return abi::kSuiteError_NoError;
 }
 abi::prSuiteError PPix_GetBounds(abi::PPixHand ppix, abi::prRect* out) {
@@ -1472,9 +1482,10 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   render_params.inRenderPARDen = 1;
   render_params.inRenderField = 2;  // both fields
 
-  // Pre-create the output frame and hand it in via outFrame: a separable blur
-  // renders input -> its own scratch (CreateGPUPPix) -> this output, so the host
-  // supplies the destination rather than the plug-in returning a fresh handle.
+  // Hand the plug-in a valid outFrame destination (some effects check it before
+  // rendering), but recover the rendered pixels from the CreateGPUPPix frame the
+  // plug-in actually renders into - the VR filters ignore this destination and
+  // return their own frame.
   auto output_record = std::make_unique<FrameRecord>();
   output_record->width = width;
   output_record->height = height;
@@ -1506,13 +1517,26 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
     return false;
   }
 
-  const bool render_ok = abi::suite_ok(render_error) && out_frame;
-  FrameRecord* out_record = render_ok ? find_frame(out_frame) : nullptr;
+  // Locate the rendered frame: the one the plug-in named through outFrame if it
+  // set it, otherwise the most recent frame it created via CreateGPUPPix (the
+  // VR filters render into that and never touch outFrame). Deferred disposal
+  // keeps every frame live until after this readback.
+  FrameRecord* out_record = nullptr;
+  if (abi::suite_ok(render_error)) {
+    if (out_frame) out_record = find_frame(out_frame);
+    if (!out_record || !out_record->plugin_created)
+      for (auto it = context.gpu_frames.rbegin(); it != context.gpu_frames.rend();
+           ++it)
+        if ((*it)->plugin_created) {
+          out_record = it->get();
+          break;
+        }
+  }
 
   if (filter.DisposeInstance) filter.DisposeInstance(&instance);
   shutdown();
 
-  if (!render_ok || !out_record) return false;
+  if (!out_record) return false;
 
   const int32_t rowbytes = width * 16;
   if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * height))
