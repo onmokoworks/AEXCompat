@@ -1576,6 +1576,20 @@ fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
     }
 }
 
+fn combine_fixture_inspection_and_close<T>(
+    inspected: Result<T, String>,
+    close: Result<(), String>,
+) -> Result<T, String> {
+    match (inspected, close) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(render_error), Ok(())) => Err(render_error),
+        (Ok(_), Err(close_error)) => Err(close_error),
+        (Err(render_error), Err(close_error)) => {
+            Err(format!("{render_error}; worker cleanup: {close_error}"))
+        }
+    }
+}
+
 struct FixtureParameterPayload {
     transport: String,
     identity: Value,
@@ -1888,8 +1902,8 @@ pub fn render_fixture_headless(
         Ok((output, input_world, layer_worlds))
     })();
     let close = close_probe_worker(started);
-    let (output_argb, primary_argb, layer_worlds) = inspected?;
-    close?;
+    let (output_argb, primary_argb, layer_worlds) =
+        combine_fixture_inspection_and_close(inspected, close)?;
 
     let staging = fixture_staging_path(output_directory)?;
     let result = (|| -> Result<Value, String> {
@@ -2775,6 +2789,34 @@ mod tests {
     #[test]
     fn repository_root_is_found_from_worktree() {
         assert!(repository_root().is_some());
+    }
+
+    #[test]
+    fn fixture_failure_preserves_render_error_when_worker_cleanup_also_fails() {
+        let error = combine_fixture_inspection_and_close::<()>(
+            Err("SMART_RENDER failed: invalid world destination".into()),
+            Err("worker exited unsuccessfully".into()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            "SMART_RENDER failed: invalid world destination; worker cleanup: worker exited unsuccessfully"
+        );
+    }
+
+    #[test]
+    fn fixture_failure_reports_the_only_failed_phase() {
+        assert_eq!(
+            combine_fixture_inspection_and_close::<()>(Err("render failed".into()), Ok(()))
+                .unwrap_err(),
+            "render failed"
+        );
+        assert_eq!(
+            combine_fixture_inspection_and_close(Ok(()), Err("cleanup failed".into())).unwrap_err(),
+            "cleanup failed"
+        );
+        assert!(combine_fixture_inspection_and_close(Ok(7), Ok(())).is_ok());
     }
 
     #[test]
