@@ -678,6 +678,8 @@ impl GuestEngine<'static> {
 
     pub fn configure_trace_watches(&mut self, _: Vec<TraceWatchSpec>) {}
 
+    pub fn configure_trace_checkpoint_only(&mut self, _: bool) {}
+
     pub fn add_trace_watch(&mut self, _: TraceWatchSpec) {}
 
     pub fn configure_parameter_definitions(
