@@ -190,7 +190,7 @@ fn validate_fixture(fixture: &DeclarativeRenderFixture) -> io::Result<()> {
     }
     if fixture.timing.time_scale == 0
         || fixture.timing.time_step <= 0
-        || fixture.timing.total_time <= 0
+        || fixture.timing.total_time < 0
         || fixture.timing.current_time < 0
         || fixture.timing.current_time > fixture.timing.total_time
     {
@@ -284,6 +284,18 @@ mod tests {
         boundary["timing"]["current_time"] = json!(1);
         let fixture: DeclarativeRenderFixture = serde_json::from_value(boundary).unwrap();
         validate_fixture(&fixture).unwrap();
+        let mut zero_duration = value.clone();
+        zero_duration["timing"]["total_time"] = json!(0);
+        let fixture: DeclarativeRenderFixture =
+            serde_json::from_value(zero_duration.clone()).unwrap();
+        validate_fixture(&fixture).unwrap();
+        zero_duration["timing"]["current_time"] = json!(1);
+        let fixture: DeclarativeRenderFixture = serde_json::from_value(zero_duration).unwrap();
+        assert!(validate_fixture(&fixture).is_err());
+        let mut negative_duration = value.clone();
+        negative_duration["timing"]["total_time"] = json!(-1);
+        let fixture: DeclarativeRenderFixture = serde_json::from_value(negative_duration).unwrap();
+        assert!(validate_fixture(&fixture).is_err());
         value["unknown"] = json!(true);
         assert!(serde_json::from_value::<DeclarativeRenderFixture>(value).is_err());
         let mut unknown_parameter = parameter();

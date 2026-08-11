@@ -608,7 +608,7 @@ impl ClassicHost {
                 return Err(error);
             }
         };
-        if let Err(error) = self.write_frame_context(width, height, 0, 1, time_scale) {
+        if let Err(error) = self.write_frame_context(width, height, 0, 1, 0, time_scale) {
             let _ = self.end_global();
             return Err(error);
         }
@@ -683,6 +683,7 @@ impl ClassicHost {
             height,
             current_time,
             1,
+            0,
             time_scale,
             format,
             input_pixels,
@@ -700,6 +701,7 @@ impl ClassicHost {
         height: u32,
         current_time: i32,
         time_step: i32,
+        total_time: i32,
         time_scale: u32,
         format: FramePixelFormat,
         input_pixels: &[u8],
@@ -712,6 +714,7 @@ impl ClassicHost {
             height,
             current_time,
             time_step,
+            total_time,
             time_scale,
             format,
             input_pixels,
@@ -738,6 +741,7 @@ impl ClassicHost {
             height,
             0,
             1,
+            0,
             time_scale,
             format,
             input_pixels,
@@ -778,6 +782,7 @@ impl ClassicHost {
             height,
             0,
             1,
+            0,
             time_scale,
             format,
             input_pixels,
@@ -795,6 +800,7 @@ impl ClassicHost {
         height: u32,
         current_time: i32,
         time_step: i32,
+        total_time: i32,
         time_scale: u32,
         format: FramePixelFormat,
         input_pixels: &[u8],
@@ -808,7 +814,14 @@ impl ClassicHost {
                 "resident session has not been opened".into(),
             ));
         }
-        self.write_frame_context(width, height, current_time, time_step, time_scale)?;
+        self.write_frame_context(
+            width,
+            height,
+            current_time,
+            time_step,
+            total_time,
+            time_scale,
+        )?;
         let report = self
             .render_pixels_with_request_mode(
                 width,
@@ -1896,6 +1909,7 @@ impl ClassicHost {
         height: u32,
         current_time: i32,
         time_step: i32,
+        total_time: i32,
         time_scale: u32,
     ) -> Result<(), ClassicError> {
         let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
@@ -1906,6 +1920,7 @@ impl ClassicHost {
             height,
             current_time,
             time_step,
+            total_time,
             time_scale,
         );
         self.engine.write(self.input, &input)?;
@@ -3037,12 +3052,14 @@ fn populate_frame_context(
     height: u32,
     current_time: i32,
     time_step: i32,
+    total_time: i32,
     time_scale: u32,
 ) {
     write_i32(input, abi::IN_WIDTH_OFFSET, width as i32);
     write_i32(input, abi::IN_HEIGHT_OFFSET, height as i32);
     write_i32(input, abi::IN_CURRENT_TIME_OFFSET, current_time);
     write_i32(input, abi::IN_TIME_STEP_OFFSET, time_step);
+    write_i32(input, abi::IN_TOTAL_TIME_OFFSET, total_time);
     write_i32(input, abi::IN_LOCAL_TIME_STEP_OFFSET, time_step);
     write_u32(input, abi::IN_TIME_SCALE_OFFSET, time_scale);
     write_rect(input, abi::IN_EXTENT_HINT_OFFSET, width, height);
@@ -3464,9 +3481,10 @@ mod tests {
     #[test]
     fn fixture_frame_context_preserves_non_unit_time_step() {
         let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
-        populate_frame_context(&mut input, 640, 360, 42, 7, 30);
+        populate_frame_context(&mut input, 640, 360, 42, 7, 210, 30);
         assert_eq!(read_i32(&input, abi::IN_CURRENT_TIME_OFFSET), 42);
         assert_eq!(read_i32(&input, abi::IN_TIME_STEP_OFFSET), 7);
+        assert_eq!(read_i32(&input, abi::IN_TOTAL_TIME_OFFSET), 210);
         assert_eq!(read_i32(&input, abi::IN_LOCAL_TIME_STEP_OFFSET), 7);
         assert_eq!(read_u32(&input, abi::IN_TIME_SCALE_OFFSET), 30);
     }

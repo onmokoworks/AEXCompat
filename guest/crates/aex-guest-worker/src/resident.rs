@@ -394,7 +394,7 @@ fn parse_render_frame(
         .ok_or_else(|| SessionError::Protocol("render_frame has no integer v".into()))?;
     let allowed = if version == 1 {
         &["current_time", "frame_index", "type", "v"][..]
-    } else if matches!(version, 2 | 3) {
+    } else if matches!(version, 2 | 3 | 4) {
         &["current_time", "frame_index", "parameters", "type", "v"][..]
     } else {
         return Err(SessionError::Protocol(format!(
@@ -410,7 +410,9 @@ fn parse_render_frame(
         .get("current_time")
         .and_then(Value::as_object)
         .ok_or_else(|| SessionError::Protocol("render_frame has no current_time object".into()))?;
-    let time_keys = if version == 3 {
+    let time_keys = if version == 4 {
+        &["scale", "step", "total", "value"][..]
+    } else if version == 3 {
         &["scale", "step", "value"][..]
     } else {
         &["scale", "value"][..]
@@ -426,7 +428,7 @@ fn parse_render_frame(
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| SessionError::Protocol("current_time.scale is outside u32".into()))?;
-    let current_step = if version == 3 {
+    let current_step = if matches!(version, 3 | 4) {
         current_time
             .get("step")
             .and_then(Value::as_i64)
@@ -438,6 +440,11 @@ fn parse_render_frame(
     } else {
         1
     };
+    let total_time = if version == 4 {
+        parse_fixture_total_time(current_time, current_value)?
+    } else {
+        0
+    };
     if current_scale != time_scale {
         return Err(SessionError::Protocol(format!(
             "current_time.scale {current_scale} does not match session scale {time_scale}"
@@ -445,13 +452,13 @@ fn parse_render_frame(
     }
     let parameters = match version {
         1 => Vec::new(),
-        2 | 3 => {
+        2 | 3 | 4 => {
             let payload = object
                 .get("parameters")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     SessionError::Protocol(
-                        "render_frame v2/v3 requires a string parameters field".into(),
+                        "render_frame v2/v3/v4 requires a string parameters field".into(),
                     )
                 })?;
             parse_parameter_payload(payload, setup)?
@@ -484,6 +491,7 @@ fn parse_render_frame(
             height,
             current_value,
             current_step,
+            total_time,
             current_scale,
             pixel_format,
             &input,
@@ -555,6 +563,22 @@ fn parse_render_frame(
             Err(SessionError::Classic(error))
         }
     }
+}
+
+fn parse_fixture_total_time(
+    current_time: &serde_json::Map<String, Value>,
+    current_value: i32,
+) -> Result<i32, SessionError> {
+    current_time
+        .get("total")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| *value >= 0 && current_value >= 0 && current_value <= *value)
+        .ok_or_else(|| {
+            SessionError::Protocol(
+                "current_time.total must be a non-negative i32 at or after value".into(),
+            )
+        })
 }
 
 fn write_fixture_world_dumps(input_slot: &Path, report: &RenderReport) -> Result<(), SessionError> {
@@ -910,6 +934,25 @@ mod tests {
     use crate::classic::{
         MAX_FAILURE_CRASH_SNAPSHOT_BYTES, MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES,
     };
+
+    #[test]
+    fn fixture_total_time_is_strict_and_allows_zero_duration_at_t_zero() {
+        let valid = serde_json::json!({"total":210})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(parse_fixture_total_time(&valid, 42).unwrap(), 210);
+        let zero = serde_json::json!({"total":0}).as_object().unwrap().clone();
+        assert_eq!(parse_fixture_total_time(&zero, 0).unwrap(), 0);
+        assert!(parse_fixture_total_time(&zero, 1).is_err());
+        let negative = serde_json::json!({"total":-1}).as_object().unwrap().clone();
+        assert!(parse_fixture_total_time(&negative, 0).is_err());
+        let oversized = serde_json::json!({"total":i64::from(i32::MAX) + 1})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(parse_fixture_total_time(&oversized, 0).is_err());
+    }
 
     #[test]
     fn probe_failure_response_carries_bounded_structured_diagnostics() {
