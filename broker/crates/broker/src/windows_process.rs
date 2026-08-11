@@ -1070,7 +1070,23 @@ fn launch_isolated_impl(
         return Err(io::Error::last_os_error());
     }
 
-    let program_text = program.as_os_str().to_string_lossy();
+    // Strip `\\?\` so GPUFoundation resolves its PTX/CUDA dir (#1072). This
+    // resubjects the launch path to MAX_PATH; it is safe because the trusted
+    // worker stage roots under the temp dir are short. Only the launch
+    // application-name/command-line uses the stripped form; provenance, logging,
+    // and hashing keep the original `program`.
+    let program_launch: std::borrow::Cow<Path> =
+        match program.to_str().and_then(|text| text.strip_prefix(r"\\?\")) {
+            Some(rest)
+                if rest.as_bytes().len() >= 2
+                    && rest.as_bytes()[0].is_ascii_alphabetic()
+                    && rest.as_bytes()[1] == b':' =>
+            {
+                std::borrow::Cow::Owned(std::path::PathBuf::from(rest))
+            }
+            _ => std::borrow::Cow::Borrowed(program),
+        };
+    let program_text = program_launch.as_os_str().to_string_lossy();
     let mut command = quote(&program_text);
     for arg in args {
         command.push(' ');
@@ -1080,7 +1096,11 @@ fn launch_isolated_impl(
         .encode_wide()
         .chain(Some(0))
         .collect();
-    let application_wide: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
+    let application_wide: Vec<u16> = program_launch
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
     let mut environment = child_environment(
         trace_file.as_ref().map(|file| file.raw()),
         minidump_file.as_ref().map(|file| file.raw()),

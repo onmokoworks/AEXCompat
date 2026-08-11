@@ -11,6 +11,7 @@
 #include "worker_request_parser.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_smart_execution.hpp"
+#include "worker_smart_setup.hpp"
 #include "worker_ui_event_execution.hpp"
 
 #include <array>
@@ -1352,15 +1353,54 @@ SmartRenderSessionOutcome run_smart_render_session(
         apply_session_ui_action(frame_ui);
         SessionFrameOutput frame;
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
-        const worker_runtime::smart_execution::Result frame_result = smart_render_once(
+        worker_runtime::smart_execution::Result frame_result = smart_render_once(
             entry, input, output, case_id, frame_override ? frame_override : requested,
             &frame_rgba,
             max_width, max_height, frame_layers, current_time, time_step, total_time,
             time_scale, pixel_bytes, &session_frame);
+        // GPU-required fallback (#1072): an effect advertising GPU F32 render
+        // (out_flags2 bit25) that answers PF_Err 14 at the start of CPU
+        // SMART_RENDER only implements the GPU path (the color family). out_flags2
+        // does not separate those from CPU-capable effects, so the runtime 14 is
+        // the only signal. The 14 arrives before the plug-in touches suites,
+        // worlds, or checkouts, so re-run the frame once through the GPU transport.
+        if (frame_result.render_error == 14 &&
+            (read<uint32_t>(output, 400) & (1u << 25)) != 0 &&
+            !worker_runtime::smart_setup::force_gpu_retry_requested()) {
+          const worker_runtime::smart_setup::ForceGpuRetryScope force_gpu;
+          captured.clear();
+          worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
+          frame_result = smart_render_once(
+              entry, input, output, case_id, frame_override ? frame_override : requested,
+              &frame_rgba,
+              max_width, max_height, frame_layers, current_time, time_step, total_time,
+              time_scale, pixel_bytes, &retry_frame);
+        }
         outcome.last = frame_result;
+        // The GPU transport captures float32 ARGB; when the session output is
+        // 8-bit (pixel_bytes == 4) narrow it to 8-bit ARGB the way an 8-bit comp
+        // in AE would receive it (#1072).
+        bool downconverted_8bit = false;
+        if (pixel_bytes == 4 && frame_result.output_width > 0 &&
+            frame_result.output_height > 0) {
+          const std::size_t px = static_cast<std::size_t>(frame_result.output_width) *
+                                 static_cast<std::size_t>(frame_result.output_height);
+          if (captured.size() == px * 16) {
+            std::vector<unsigned char> narrowed(px * 4);
+            const float* src = reinterpret_cast<const float*>(captured.data());
+            for (std::size_t i = 0; i < px * 4; ++i) {
+              float v = src[i];
+              v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+              narrowed[i] = static_cast<unsigned char>(v * 255.0f + 0.5f);
+            }
+            captured.swap(narrowed);
+            downconverted_8bit = true;
+          }
+        }
         frame.width = frame_result.output_width;
         frame.height = frame_result.output_height;
-        frame.rowbytes = frame_result.output_rowbytes;
+        frame.rowbytes = downconverted_8bit ? frame_result.output_width * 4
+                                            : frame_result.output_rowbytes;
         // result_rect's top-left is where these pixels sit relative to the
         // layer origin; a grown output starts at a negative coordinate. Only
         // once the rects passed validation: `result_rect` is copied out of the

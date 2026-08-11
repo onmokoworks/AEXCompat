@@ -54,6 +54,28 @@ struct Plan {
 
 Plan prepare(const Context&, const Request&);
 
+// GPU-required fallback (issue #1072): the color family advertises CPU smart
+// render (out_flags2 bit10) but returns PF_Err 14 at the start of SMART_RENDER
+// because it only implements the GPU path. out_flags2 does not distinguish those
+// effects from ones that render on CPU, so the only signal is the runtime 14.
+// When the frame loop sees it (with GPU F32 advertised) it sets this flag and
+// re-runs the frame, which routes the retry through the GPU transport. Thread-
+// local: the render thread that sets it is the one prepare() reads it on.
+void set_force_gpu_retry(bool);
+bool force_gpu_retry_requested();
+
+// RAII holder for the flag above: sets it for the duration of a scope so that an
+// early return or a throw out of the retry dispatch cannot leave it stuck true
+// (which would force every later frame's first attempt onto the GPU and disable
+// the retry block via the force_gpu_retry_requested() guard).
+class ForceGpuRetryScope {
+ public:
+  ForceGpuRetryScope() { set_force_gpu_retry(true); }
+  ~ForceGpuRetryScope() { set_force_gpu_retry(false); }
+  ForceGpuRetryScope(const ForceGpuRetryScope&) = delete;
+  ForceGpuRetryScope& operator=(const ForceGpuRetryScope&) = delete;
+};
+
 struct WorldBuffers {
   render_safety::InputPixelBuffer* source{};
   render_safety::OutputPixelBuffer* output{};
