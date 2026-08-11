@@ -3241,6 +3241,60 @@ pub fn validate_abandoned_smart_untouched_close(close: &Value) -> Result<(), &'s
         .map_err(CloseReportInvariant::as_str)
 }
 
+/// Authorizes one fresh Classic attempt after the Smart worker was terminated
+/// by Windows heap-corruption detection while it was executing Smart Render.
+/// No pixels or report from the crashed process are accepted.  This is kept
+/// deliberately narrower than a generic crash fallback: transport failures,
+/// host invariant exits, other exception codes, and crashes in any other
+/// lifecycle stage remain terminal.
+pub fn validate_abandoned_smart_heap_corruption_close(close: &Value) -> Result<(), &'static str> {
+    const STATUS_HEAP_CORRUPTION: u64 = 0xC000_0374;
+
+    if close.get("render_path").and_then(Value::as_str) != Some("smart") {
+        return Err("not_smart_render");
+    }
+    if close.get("invalidated") != Some(&Value::Bool(true))
+        || close
+            .pointer("/invalidated_reason/reason")
+            .and_then(Value::as_str)
+            != Some("worker_exited")
+    {
+        return Err("not_worker_exit");
+    }
+    if close
+        .pointer("/worker/classification")
+        .and_then(Value::as_str)
+        != Some("crashed")
+        || close.pointer("/worker/exit_code").and_then(Value::as_u64)
+            != Some(STATUS_HEAP_CORRUPTION)
+    {
+        return Err("not_heap_corruption");
+    }
+    let diagnostics = close
+        .pointer("/worker/diagnostics")
+        .and_then(Value::as_object)
+        .ok_or("worker_diagnostics_missing")?;
+    let smart_stage = |key: &str| {
+        matches!(
+            diagnostics.get(key).and_then(Value::as_str),
+            Some("smart_render" | "smart_render_cpu")
+        )
+    };
+    if !smart_stage("failure_stage") && !smart_stage("active_stage") {
+        return Err("not_smart_render_stage");
+    }
+    if close.get("final_report") != Some(&Value::Null) {
+        return Err("unexpected_final_report");
+    }
+    if close.get("session_clean") != Some(&Value::Bool(false))
+        || close.get("frames_ok").and_then(Value::as_u64).is_none()
+        || close.get("frames_errored").and_then(Value::as_u64) != Some(0)
+    {
+        return Err("unexpected_crash_history");
+    }
+    Ok(())
+}
+
 /// Public close gate for a completed session whose pixels may be published.
 /// It reuses the canonical report validator rather than trusting the summary
 /// `session_clean` convenience bit.

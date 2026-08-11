@@ -996,18 +996,31 @@ struct ClassicFallbackRun {
     smart_authorized: bool,
 }
 
+#[derive(Clone, Copy)]
+enum SmartFallbackEvidence {
+    UntouchedOutput,
+    HeapCorruption,
+}
+
 fn orchestrate_classic_fallback<F>(
     smart_close: &serde_json::Value,
+    evidence: SmartFallbackEvidence,
     launch_classic_once: F,
 ) -> ClassicFallbackRun
 where
     F: FnOnce() -> Result<(Option<RenderedFrame>, serde_json::Value), String>,
 {
-    if validate_abandoned_smart_untouched_close(smart_close).is_err() {
+    let authorized = match evidence {
+        SmartFallbackEvidence::UntouchedOutput => {
+            validate_abandoned_smart_untouched_close(smart_close)
+        }
+        SmartFallbackEvidence::HeapCorruption => {
+            validate_abandoned_smart_heap_corruption_close(smart_close)
+        }
+    };
+    if authorized.is_err() {
         return ClassicFallbackRun {
-            reply: FrameReply::SessionLost(
-                "Smart untouched-output attempt failed close validation".into(),
-            ),
+            reply: FrameReply::SessionLost("Smart attempt failed fallback validation".into()),
             smart_authorized: false,
         };
     }
@@ -1022,6 +1035,96 @@ where
         reply,
         smart_authorized: true,
     }
+}
+
+fn run_classic_fallback_once(
+    config: &MfSessionConfig,
+    plugin_index: u32,
+    retained: &RetainedFrameRequest,
+    roots: &[PathBuf],
+) -> Result<(Option<RenderedFrame>, serde_json::Value), String> {
+    // Preserve the exact request already sent to Smart: this helper never calls
+    // the host and publishes nothing until the fresh Classic close validates.
+    let mut fallback_layers = config.layers.clone();
+    if let Some((slot, pixels)) = &retained.layer
+        && let Some(layer) = fallback_layers.iter_mut().find(|layer| layer.slot == *slot)
+    {
+        layer.rgba.clone_from(pixels);
+    }
+    let mut classic_config = config.clone();
+    let (plugin, sha) = classic_fallback_identity(
+        &config.plugin,
+        &config.sha,
+        config.cluster.as_ref(),
+        plugin_index,
+    )
+    .map_err(str::to_owned)?;
+    classic_config.plugin = plugin;
+    classic_config.sha = sha;
+    classic_config.smart = false;
+    classic_config.cluster = None;
+    classic_config.layers = fallback_layers;
+    let classic_request = SessionOpenRequest {
+        repository: &classic_config.repository,
+        plugin_path: &classic_config.plugin,
+        plugin_sha256: &classic_config.sha,
+        parameters: None,
+        parameter_animation: None,
+        aux_manifest: None,
+        world_dump_dir: None,
+        output_checksum_detail: false,
+        mask_trailer: None,
+        spatial_trailer: None,
+        render_environment_trailer: None,
+        audio_trailer: None,
+        alpha_as_coverage_params: &[],
+        conformance_render_settings: None,
+        layers: &classic_config.layers,
+        dependencies: Vec::new(),
+        dependency_search_dirs: roots.to_vec(),
+        width: classic_config.identity.width,
+        height: classic_config.identity.height,
+        pixel_format: RenderPixelFormat::Argb8,
+        time_step: classic_config.identity.time_step,
+        total_time: classic_config.identity.total_time,
+        time_scale: classic_config.identity.time_scale,
+        frame_deadline: Duration::from_millis(FRAME_DEADLINE_MS),
+        smart: false,
+        gpu_backend: RenderGpuBackend::Auto,
+        gpu_runtime_policy: None,
+        payload_override: None,
+        launch_environment: Default::default(),
+    };
+    let mut classic = RenderSession::open(classic_request)
+        .map_err(|error| format!("Classic fallback open failed: {error}"))?;
+    let classic_outcome = classic.render_frame_with_parameters(
+        0,
+        retained.current_time,
+        &retained.rgba,
+        retained.parameters.as_deref(),
+    );
+    let rendered = match classic_outcome {
+        Ok(outcome) => match outcome.status {
+            FrameStatus::Rendered {
+                pixels,
+                width,
+                height,
+                origin_x,
+                origin_y,
+            } => Some(RenderedFrame {
+                pixels,
+                width,
+                height,
+                origin_x,
+                origin_y,
+            }),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    let classic_close = classic.close();
+    record_session_close(&classic_config, &classic_close);
+    Ok((rendered, classic_close))
 }
 
 /// Opens a session on its own thread, which owns the `!Send` `RenderSession` and
@@ -1273,93 +1376,18 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         ),
                         FrameStatus::SmartOutputUntouched => {
                             let smart_close = session.close();
-                            let fallback = orchestrate_classic_fallback(&smart_close, || {
-                                // Preserve the exact request already sent to
-                                // Smart: this closure never calls the host.
-                                let mut fallback_layers = config.layers.clone();
-                                if let Some((slot, pixels)) = &retained.layer
-                                    && let Some(layer) =
-                                        fallback_layers.iter_mut().find(|layer| layer.slot == *slot)
-                                {
-                                    layer.rgba.clone_from(pixels);
-                                }
-                                let mut classic_config = config.clone();
-                                let (plugin, sha) = classic_fallback_identity(
-                                    &config.plugin,
-                                    &config.sha,
-                                    config.cluster.as_ref(),
-                                    req.plugin_index,
-                                )
-                                .map_err(str::to_owned)?;
-                                classic_config.plugin = plugin;
-                                classic_config.sha = sha;
-                                classic_config.smart = false;
-                                classic_config.cluster = None;
-                                classic_config.layers = fallback_layers;
-                                let classic_request = SessionOpenRequest {
-                                    repository: &classic_config.repository,
-                                    plugin_path: &classic_config.plugin,
-                                    plugin_sha256: &classic_config.sha,
-                                    parameters: baseline,
-                                    parameter_animation: None,
-                                    aux_manifest: None,
-                                    world_dump_dir: None,
-                                    output_checksum_detail: false,
-                                    mask_trailer: None,
-                                    spatial_trailer: None,
-                                    render_environment_trailer: None,
-                                    audio_trailer: None,
-                                    alpha_as_coverage_params: &[],
-                                    conformance_render_settings: None,
-                                    layers: &classic_config.layers,
-                                    dependencies: Vec::new(),
-                                    dependency_search_dirs: roots.clone(),
-                                    width: classic_config.identity.width,
-                                    height: classic_config.identity.height,
-                                    pixel_format: RenderPixelFormat::Argb8,
-                                    time_step: classic_config.identity.time_step,
-                                    total_time: classic_config.identity.total_time,
-                                    time_scale: classic_config.identity.time_scale,
-                                    frame_deadline: Duration::from_millis(FRAME_DEADLINE_MS),
-                                    smart: false,
-                                    gpu_backend: RenderGpuBackend::Auto,
-                                    gpu_runtime_policy: None,
-                                    payload_override: None,
-                                    launch_environment: Default::default(),
-                                };
-                                let mut classic =
-                                    RenderSession::open(classic_request).map_err(|error| {
-                                        format!("Classic fallback open failed: {error}")
-                                    })?;
-                                let classic_outcome = classic.render_frame_with_parameters(
-                                    0,
-                                    retained.current_time,
-                                    &retained.rgba,
-                                    retained.parameters.as_deref(),
-                                );
-                                let rendered = match classic_outcome {
-                                    Ok(outcome) => match outcome.status {
-                                        FrameStatus::Rendered {
-                                            pixels,
-                                            width,
-                                            height,
-                                            origin_x,
-                                            origin_y,
-                                        } => Some(RenderedFrame {
-                                            pixels,
-                                            width,
-                                            height,
-                                            origin_x,
-                                            origin_y,
-                                        }),
-                                        _ => None,
-                                    },
-                                    Err(_) => None,
-                                };
-                                let classic_close = classic.close();
-                                record_session_close(&classic_config, &classic_close);
-                                Ok((rendered, classic_close))
-                            });
+                            let fallback = orchestrate_classic_fallback(
+                                &smart_close,
+                                SmartFallbackEvidence::UntouchedOutput,
+                                || {
+                                    run_classic_fallback_once(
+                                        &config,
+                                        req.plugin_index,
+                                        &retained,
+                                        &roots,
+                                    )
+                                },
+                            );
                             if !fallback.smart_authorized {
                                 record_session_close(&config, &smart_close);
                             }
@@ -1367,7 +1395,33 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                             return;
                         }
                     },
-                    Err(error) => FrameReply::SessionLost(format!("render_frame failed: {error}")),
+                    Err(error) => {
+                        if config.smart {
+                            let smart_close = session.close();
+                            let fallback = orchestrate_classic_fallback(
+                                &smart_close,
+                                SmartFallbackEvidence::HeapCorruption,
+                                || {
+                                    run_classic_fallback_once(
+                                        &config,
+                                        req.plugin_index,
+                                        &retained,
+                                        &roots,
+                                    )
+                                },
+                            );
+                            if fallback.smart_authorized {
+                                let _ = req.reply.send(fallback.reply);
+                                return;
+                            }
+                            record_session_close(&config, &smart_close);
+                            let _ = req.reply.send(FrameReply::SessionLost(format!(
+                                "render_frame failed: {error}"
+                            )));
+                            return;
+                        }
+                        FrameReply::SessionLost(format!("render_frame failed: {error}"))
+                    }
                 };
                 // A host-protection invariant failure invalidates the whole
                 // session; report it lost so the next frame reopens.
