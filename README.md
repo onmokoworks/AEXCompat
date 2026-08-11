@@ -29,15 +29,15 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 1. AEXを選択します。
 2. `PF_PARAMS_SETUP`が自動実行され、左側の**Effect Controls**へパラメーターが表示されます。
 3. 入力画像を選択し、必要なパラメーターを変更します。
-4. **Quick render**または**Render and save PNG**を実行します。
+4. **Render current frame**または**Render and save PNG**を実行します。
 5. FHD viewerで入力とAEX出力を比較します。
 
 パラメーター取得は隔離workerで非同期実行されるため、手動のInspect操作は不要です。
 
 ### 主な機能
 
-- 登録済み・未登録AEXの読み込みとSHA-256による実行直前の同一性確認
-- 通常・delay-load PE importから到達する隣接DLLの再帰的な自動検出とhash固定
+- 登録済み・未登録AEXの読み込みと、実際に読み込んだplug-in bytes・module・環境のprovenance記録
+- 通常・delay-load PE importから到達する隣接DLLの再帰的な自動検出とstaging
 - AE風の常設Effect Controlsと型付きパラメーター編集
 - PNG、JPEG、BMP、TIFF、WebPの画像入力とPNG出力
 - Classic RenderおよびSmartFX
@@ -47,7 +47,7 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 - 8/16/32 bpcの6-case互換matrix
 - After Effects参照画像とのpixel比較
 - custom UI、PF Suite、selector lifecycleの診断probe
-- restricted worker、timeout、Job Object、ACL、sealed load tree、pixel guard
+- worker process、kill-on-close Job Object、process memory limit、private desktop、pixel/output guard
 - crash、hang、selector error、host validation errorの分類表示
 
 ### 対応環境
@@ -97,7 +97,7 @@ carrierを追加します。
 
 - Windows 10または11 x64
 - Rust toolchainとCargo
-- Visual Studio（MSVC C++ toolchain。必要なedition・toolsetはコンポーネントごとに異なる）
+- Visual StudioまたはBuild Tools（MSVC C++ toolchainとWindows SDK。必要なtoolsetはコンポーネントごとに異なる）
 - CMake
 - ローカルのAfter Effects SDK（probeやSDK fixtureをbuildする場合。minihost workerのbuildには不要）
 
@@ -119,6 +119,10 @@ cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
 
+GUIの起動だけなら上記で足ります。WindowsでAEXのinspect/renderまで行うには、
+別途`minihost/`のworkerを`target\minihost-build\`へビルドしてください。SDKは不要です。
+正確なコマンドと配置は[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
+
 #### release build
 
 ```powershell
@@ -138,15 +142,15 @@ uv sync --locked
 # Rust broker / harness / isolation tests
 cargo test --manifest-path broker\Cargo.toml --workspace
 
-# Contract, ABI, oracle, and source-level regression tests
+# Contract, ABI, oracle, and behavioral regression tests
 uv run python -m pytest -q
 ```
 
-`pytest` がPythonテストの正規ランナーです。`unittest discover` ではbare function形式のテストを収集できないため、完全な検証には使用しません。一部のnative fixture、GPU、After Effects oracleテストには、ローカルSDK、対応GPU runtime、またはAE本体が必要です。ビルド生成物やローカル承認receiptを必要とするテストは、それらを生成する明示的なgateまたはbuild手順と組み合わせて実行します。
+`pytest` がPythonテストの正規ランナーです。`unittest discover` ではbare function形式のテストを収集できないため、完全な検証には使用しません。一部のnative fixture、GPU、After Effects oracleテストには、ローカルSDK、対応GPU runtime、またはAE本体が必要です。ビルド生成物やmachine-bound evidenceを必要とするテストは、それらを生成する明示的なgateまたはbuild手順と組み合わせて実行します。
 
 ローカル成果物を要するテストは2つに分かれます。この checkout からビルドした worker / probe を自己計算の期待値で検証するテストは `--run-built-artifact-tests` (CIでも実行)、記録済み evidence をローカル現物と照合する machine-bound テストは `--run-local-artifact-tests` (ローカル専用) を付けて実行します。通常のclean cloneではどちらも理由付きでskipします。
 
-SDKや実AEXのないclean cloneでも、標準の`pytest`は依存テストを理由付きでskipし、0 failで完了します。SDK、checkoutからbuildしたartifact、machine-bound evidenceを使う検証は、それぞれ`--run-sdk-tests`、`--run-built-artifact-tests`、`--run-local-artifact-tests`で明示的にopt-inします。必要条件とCI matrixは[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
+SDK、checkoutからbuildしたartifact、machine-bound evidenceを使う検証は、それぞれ`--run-sdk-tests`、`--run-built-artifact-tests`、`--run-local-artifact-tests`で明示的にopt-inします。SDKなしのsource-only実行でも、一部のprobe/fixture buildテストはSDK解決でfailするのが現在の既知状態です。期待結果とCI matrixは[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
 
 ### アーキテクチャ
 
@@ -155,10 +159,10 @@ Desktop Harness / CLI
         |
         v
 Rust Broker
-request validation / identity / sealed transport
+request validation / staging / provenance recording
         |
         v
-Restricted Worker Process
+Isolated Worker Process
         |
         v
 Clean-room C++ Effect Host
@@ -184,7 +188,7 @@ Selected AEX -> image / audio / diagnostic report
 - 「workerが完走した」「画像が生成された」「AEとpixel一致した」は別の到達段階です。
 - custom UI、GPU backend、深度、複数入力、sequence semanticsはAEXごとに対応状況が異なります。
 - AEGPはEffectデバッグに必要な補助経路のみを優先しています。
-- 隔離は偶発的なcrashや多くの不正動作の影響を減らしますが、信頼できないバイナリの安全を保証しません。
+- 隔離はworker crashを封じ、process memoryを制限しますが、workerはユーザーtokenのまま動きます。機密性や安全性を保証するsecurity sandboxではありません。
 
 詳細は[互換性ステータス](docs/COMPATIBILITY_STATUS_2026-07-16.md)と[Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md)を参照してください。
 
@@ -251,13 +255,13 @@ This project is experimental and pre-alpha. The optional Apple Silicon x86_64 na
 1. Select an AEX.
 2. A background worker runs `PF_PARAMS_SETUP` and fills the left-side **Effect Controls** automatically.
 3. Select an input image and edit parameters.
-4. Run **Quick render** or **Render and save PNG**.
+4. Run **Render current frame** or **Render and save PNG**.
 5. Compare input and AEX output in the FHD viewer.
 
 ### Features
 
-- Registered and previously unknown AEX execution with pre-launch SHA-256 revalidation
-- Recursive discovery and hash pinning of adjacent DLLs referenced by normal and delay-load PE imports
+- Registered and previously unknown AEX execution with provenance for the plug-in bytes, loaded modules, and environment that actually ran
+- Recursive discovery and staging of adjacent DLLs referenced by normal and delay-load PE imports
 - Persistent AE-inspired Effect Controls with typed parameter editing
 - PNG, JPEG, BMP, TIFF, and WebP input; PNG output
 - Classic Render and SmartFX
@@ -267,7 +271,7 @@ This project is experimental and pre-alpha. The optional Apple Silicon x86_64 na
 - Six-case 8/16/32 bpc compatibility matrix
 - Pixel comparison against After Effects reference output
 - Custom UI, PF Suite, and selector-lifecycle probes
-- Restricted workers, timeouts, Job Objects, ACLs, sealed load trees, and pixel guards
+- Worker processes, kill-on-close Job Objects, process-memory limits, private desktops, and pixel/output guards
 - Separate reporting for crashes, hangs, selector errors, and host validation errors
 
 ### Supported Environment
@@ -313,7 +317,7 @@ Developer ID and notarization are optional publication steps, not local-package
 gates. The trusted-only x86_64/Rosetta carrier is included only when
 `AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1` is explicitly set.
 
-Windows desktop harness requirements: Windows x64, Rust/Cargo, Visual Studio with the MSVC C++ toolchain (the required edition and toolset vary by component), CMake, and a local After Effects SDK when building probes or SDK fixtures (not needed for minihost worker builds). See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for per-component details, SDK generation, and toolset requirements.
+Windows desktop harness requirements: Windows x64, Rust/Cargo, Visual Studio or Build Tools with the MSVC C++ toolchain and Windows SDK, CMake, and a local After Effects SDK only when building probes or SDK fixtures. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for per-component details, SDK generation, and toolset requirements.
 
 Before SDK-backed tests or builds, set the SDK root as a user environment variable and reopen PowerShell:
 
@@ -326,6 +330,10 @@ git clone https://github.com/onmokoworks/AEXCompat.git
 cd AEXCompat\broker
 cargo run -p aexcompat-harness
 ```
+
+That command is sufficient to launch the GUI. Inspecting or rendering an AEX on
+Windows also requires the `minihost/` workers to be built into
+`target\minihost-build\`; those workers do not require the After Effects SDK.
 
 Release build:
 
@@ -343,11 +351,11 @@ cargo test --manifest-path broker\Cargo.toml --workspace
 uv run python -m pytest -q
 ```
 
-`pytest` is the canonical Python test runner. `unittest discover` does not collect the repository's bare-function tests and must not be used as the complete verification command. Some native-fixture, GPU, and AE-oracle tests require a local SDK, a matching GPU runtime, or After Effects. Tests that require generated binaries or local approval receipts must be paired with their explicit build or gate step.
+`pytest` is the canonical Python test runner. `unittest discover` does not collect the repository's bare-function tests and must not be used as the complete verification command. Some native-fixture, GPU, and AE-oracle tests require a local SDK, a matching GPU runtime, or After Effects. Tests that require generated binaries or machine-bound evidence must be paired with their explicit build or gate step.
 
 Tests that need local artifacts are split in two: `--run-built-artifact-tests` runs tests that execute workers / probes built from this checkout against self-computed expectations (CI runs these too), while `--run-local-artifact-tests` runs machine-bound tests that authenticate recorded evidence against local files (local-only). A normal clean clone skips both with an explicit reason.
 
-A clean clone without an SDK or real AEX completes the standard `pytest` run with zero failures; dependency-backed tests skip with explicit reasons. Opt in to SDK, checkout-built artifact, or machine-bound evidence tests with `--run-sdk-tests`, `--run-built-artifact-tests`, or `--run-local-artifact-tests`, respectively. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for prerequisites and the CI matrix.
+Opt in to SDK, checkout-built artifact, or machine-bound evidence tests with `--run-sdk-tests`, `--run-built-artifact-tests`, or `--run-local-artifact-tests`, respectively. In the current source-only run, some probe/fixture build tests still fail while resolving an absent SDK rather than skipping. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for the expected result, prerequisites, and CI matrix.
 
 ### DirectX SDK fixture
 
@@ -364,7 +372,7 @@ The recorded device selection, shader build, worker identity, and render result 
 ```text
 Desktop Harness / CLI
         -> Rust Broker
-        -> Restricted Worker Process
+        -> Isolated Worker Process
         -> Clean-room C++ Effect Host
         -> Selected AEX
         -> Validated image / audio / diagnostics
@@ -377,7 +385,7 @@ Desktop Harness / CLI
 - “Worker completed,” “image produced,” and “pixel-equivalent to AE” are separate maturity levels.
 - Custom UI, GPU backends, pixel depths, multiple inputs, and sequence semantics vary by plug-in.
 - AEGP work is limited to helper routes useful for Effect debugging.
-- Isolation reduces the impact of accidental crashes and many forms of misbehavior; it is not a complete security sandbox.
+- Isolation contains worker crashes and bounds process memory, but the worker keeps the user's token and is not a confidentiality or security sandbox.
 
 See [Compatibility Status](docs/COMPATIBILITY_STATUS_2026-07-16.md), [Project Direction](docs/PROJECT_DIRECTION.md), and the [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md).
 
