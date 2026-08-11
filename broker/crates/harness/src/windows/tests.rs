@@ -97,6 +97,88 @@ mod tests {
     }
 
     #[test]
+    fn parameter_inspection_state_distinguishes_zero_filtering_and_failure_inputs() {
+        let parameter = |visible: bool| {
+            serde_json::from_value::<aexcompat_broker::image_render::InteractiveParameter>(
+                serde_json::json!({
+                    "slot": 1, "name": "Amount", "kind": "float",
+                    "minimum": 0.0, "maximum": 100.0, "value": 25.0,
+                    "choices": [], "color": [0, 0, 0, 0],
+                    "components": [0.0, 0.0, 0.0], "component_count": 0,
+                    "layer_path": null, "enabled": true, "visible": visible,
+                    "supervised": false,
+                }),
+            )
+            .unwrap()
+        };
+        let report = |raw_count: usize| {
+            serde_json::json!({
+                "worker_diagnostics": {
+                    "parameter_metadata": (0..raw_count)
+                        .map(|index| serde_json::json!({"index": index + 1}))
+                        .collect::<Vec<_>>()
+                }
+            })
+        };
+
+        assert_eq!(
+            parameter_inspection_state(&report(0), &[]).unwrap(),
+            ParameterInspectionState::ZeroParameters
+        );
+        assert_eq!(
+            parameter_inspection_state(&report(1), &[]).unwrap(),
+            ParameterInspectionState::UnsupportedParameters
+        );
+        assert_eq!(
+            parameter_inspection_state(&report(1), &[parameter(false)]).unwrap(),
+            ParameterInspectionState::HiddenParameters
+        );
+        assert_eq!(
+            parameter_inspection_state(&report(1), &[parameter(true)]).unwrap(),
+            ParameterInspectionState::Ready
+        );
+        assert!(parameter_inspection_state(&serde_json::json!({}), &[]).is_err());
+        assert!(parameter_inspection_state(&report(0), &[parameter(true)]).is_err());
+
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::ZeroParameters),
+            Some("This effect intentionally declared no parameters.")
+        );
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::UnsupportedParameters),
+            Some("This effect declared parameters, but none use supported control types.")
+        );
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::HiddenParameters),
+            Some("This effect declared controls, but all are hidden by the plug-in.")
+        );
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::Failed),
+            Some("Effect Controls inspection failed. See the diagnostic report below.")
+        );
+        assert_eq!(
+            parameter_inspection_message(ParameterInspectionState::Ready),
+            None
+        );
+        assert_eq!(
+            parameter_inspection_status(
+                ParameterInspectionState::HiddenParameters,
+                &[parameter(false)],
+                false
+            ),
+            "Effect Controls inspected: all declared controls are hidden. Render path: Classic."
+        );
+        assert_eq!(
+            parameter_inspection_status(
+                ParameterInspectionState::Ready,
+                &[parameter(false), parameter(true)],
+                true
+            ),
+            "Effect Controls ready: 1 visible parameter(s). Render path: SmartFX."
+        );
+    }
+
+    #[test]
     fn selection_failure_keeps_the_open_time_snapshot() {
         let selection = selected_interactive_session_selection(
             InspectedRenderCapability {
@@ -1127,6 +1209,33 @@ mod tests {
         assert!(app.inspect_after_refresh);
         assert!(app.parameters.is_empty());
         assert!(app.preview.is_none());
+
+        let retained_hash = refreshed.sha256.clone();
+        let parameter = serde_json::from_value::<
+            aexcompat_broker::image_render::InteractiveParameter,
+        >(serde_json::json!({
+            "slot": 1, "name": "Amount", "kind": "float",
+            "minimum": 0.0, "maximum": 100.0, "value": 25.0,
+            "choices": [], "color": [0, 0, 0, 0],
+            "components": [0.0, 0.0, 0.0], "component_count": 0,
+            "layer_path": null, "enabled": true, "visible": true,
+            "supervised": false,
+        }))
+        .unwrap();
+        app.parameters = vec![parameter.clone()];
+        app.parameter_defaults = vec![parameter];
+        app.parameter_inspection_state = ParameterInspectionState::Ready;
+        app.inspect_after_refresh = false;
+        app.refresh_aex();
+        assert_eq!(app.selection.as_ref().unwrap().sha256, retained_hash);
+        assert!(app.session_approved);
+        assert!(app.inspect_after_refresh);
+        assert_eq!(
+            app.parameter_inspection_state,
+            ParameterInspectionState::Loading
+        );
+        assert!(app.parameters.is_empty());
+        assert!(app.parameter_defaults.is_empty());
 
         app.trust_rebuilds = false;
         first_build.extend_from_slice(b"third build");
