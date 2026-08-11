@@ -4929,7 +4929,7 @@ mod tests {
             "render_path": "smart",
             "session_clean": false,
             "invalidated": true,
-            "invalidated_reason": { "reason": "worker_exited" },
+            "invalidated_reason": { "reason": "worker_exited_during_close" },
             "frames_ok": 2,
             "frames_errored": 0,
             "final_report": null,

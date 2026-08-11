@@ -2829,6 +2829,28 @@ impl RenderSession {
                 None,
             ),
         };
+        // A worker can accept the close write and then crash before producing
+        // its terminal report.  The pre-send liveness checks cannot classify
+        // that ordering, but leaving it as `invalidated=false` makes the close
+        // summary contradict the collected OS outcome.  Preserve a distinct
+        // reason so callers can separate this from a pre-handshake exit and
+        // continue to gate any recovery on the exact crash/report evidence.
+        if self.invalidation.is_none()
+            && final_report.is_none()
+            && matches!(
+                &collected,
+                Some(CollectedExit {
+                    result: Some(result),
+                    ..
+                }) if result.classification == crate::ExitClassification::Crashed
+            )
+        {
+            self.invalidation = Some(SessionInvalidation {
+                reason: "worker_exited_during_close",
+                detail: "the worker crashed after the close request but before its final report"
+                    .into(),
+            });
+        }
         // Cluster sessions check the final report's module audit against the
         // launch manifest's declared set (design §5), replacing the one-shot
         // fixed-cap validator the cluster dispatch disabled at launch. Since
@@ -3243,10 +3265,11 @@ pub fn validate_abandoned_smart_untouched_close(close: &Value) -> Result<(), &'s
 
 /// Authorizes one fresh Classic attempt after the Smart worker was terminated
 /// by Windows heap-corruption detection during Smart Render, or after its valid
-/// frame reply but before it read the close request. No pixels or report from
-/// the crashed process are accepted. This is kept deliberately narrower than a
-/// generic crash fallback: transport failures, host invariant exits, other
-/// exception codes, and crashes after close begins remain terminal.
+/// frame reply but before it read the close request. The same exact crash after
+/// close delivery is eligible only when no final report was produced. No pixels
+/// or report from the crashed process are accepted. This is kept deliberately
+/// narrower than a generic crash fallback: transport failures, host invariant
+/// exits, other exception codes, and other close-time crashes remain terminal.
 pub fn validate_abandoned_smart_heap_corruption_close(close: &Value) -> Result<(), &'static str> {
     const STATUS_HEAP_CORRUPTION: u64 = 0xC000_0374;
 
@@ -3257,7 +3280,10 @@ pub fn validate_abandoned_smart_heap_corruption_close(close: &Value) -> Result<(
         .pointer("/invalidated_reason/reason")
         .and_then(Value::as_str);
     if close.get("invalidated") != Some(&Value::Bool(true))
-        || !matches!(invalidated_reason, Some("worker_exited" | "premature_exit"))
+        || !matches!(
+            invalidated_reason,
+            Some("worker_exited" | "premature_exit" | "worker_exited_during_close")
+        )
     {
         return Err("not_worker_exit");
     }

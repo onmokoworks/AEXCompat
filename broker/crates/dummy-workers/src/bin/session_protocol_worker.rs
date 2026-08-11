@@ -11,6 +11,8 @@
 //! - `crash_frame`: dies with an access-violation exit code mid-frame.
 //! - `heap_corruption_after_frame_0`: returns one valid Smart frame, then dies
 //!   with Windows heap-corruption status before reading the close request.
+//! - `heap_corruption_on_close_after_frame_0`: returns one valid Smart frame,
+//!   accepts the close request, then dies with Windows heap-corruption status.
 //! - `exit_leaving_descendant`: spawns a sleeping child that inherits the
 //!   session handles, then exits; pipe EOF never fires, only the process
 //!   watcher can see the death (protocol §7 three-way wait).
@@ -756,7 +758,12 @@ mod worker {
                 return EXIT_PROTOCOL_VIOLATION;
             };
             match message["type"].as_str() {
-                Some("close") => break,
+                Some("close") => {
+                    if behavior == "heap_corruption_on_close_after_frame_0" && frames == 1 {
+                        std::process::exit(0xC000_0374_u32 as i32);
+                    }
+                    break;
+                }
                 Some("render_frame") => {}
                 Some("swap_plugin") => {
                     // Exact-key strictness (design §4.1): only v, type, and
@@ -1021,7 +1028,11 @@ mod worker {
             if view.read_u32(INPUT_GENERATION_OFFSET) != expected_generation {
                 return EXIT_INVARIANT_FAILURE;
             }
-            if behavior == "heap_corruption_after_frame_0" && frame_index == 0 {
+            if matches!(
+                behavior.as_str(),
+                "heap_corruption_after_frame_0" | "heap_corruption_on_close_after_frame_0"
+            ) && frame_index == 0
+            {
                 eprintln!("stage:smart_render_begin");
                 let mut stderr = std::io::stderr();
                 let _ = std::io::Write::flush(&mut stderr);

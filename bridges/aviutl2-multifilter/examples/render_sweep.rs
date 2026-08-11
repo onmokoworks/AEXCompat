@@ -1161,6 +1161,15 @@ mod tests {
             Some("smart_worker_heap_corruption"),
             "a heap death after the frame reply but before close still discards Smart pixels"
         );
+        let mut during_close_exit = prior_frames.clone();
+        *during_close_exit
+            .pointer_mut("/invalidated_reason/reason")
+            .unwrap() = json!("worker_exited_during_close");
+        assert_eq!(
+            smart_fallback_reason(true, false, &during_close_exit),
+            Some("smart_worker_heap_corruption"),
+            "a heap death after close delivery still discards Smart pixels"
+        );
 
         let mut wrong_exit = close;
         *wrong_exit.pointer_mut("/worker/exit_code").unwrap() = json!(0xC000_0005u64);

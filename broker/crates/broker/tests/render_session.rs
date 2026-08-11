@@ -2258,6 +2258,11 @@ mod windows_e2e {
         });
         validate_abandoned_smart_heap_corruption_close(&valid)
             .expect("exact Smart heap-corruption evidence authorizes one retry");
+        let mut crashed_during_close = valid.clone();
+        crashed_during_close["invalidated_reason"]["reason"] =
+            serde_json::json!("worker_exited_during_close");
+        validate_abandoned_smart_heap_corruption_close(&crashed_during_close)
+            .expect("the same exact crash after close delivery authorizes one retry");
 
         for (pointer, replacement) in [
             ("/render_path", serde_json::json!("classic")),
@@ -2710,6 +2715,35 @@ mod windows_e2e {
         );
         validate_abandoned_smart_heap_corruption_close(&close)
             .expect("the exact post-frame Smart crash authorizes one discarded retry");
+    }
+
+    #[test]
+    fn heap_corruption_after_close_delivery_invalidates_the_session() {
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_smart_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            behavior("heap_corruption_on_close_after_frame_0"),
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(13))
+            .expect("the Smart frame itself completes");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+        assert_eq!(
+            close["invalidated_reason"]["reason"],
+            "worker_exited_during_close"
+        );
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["frames_errored"], 0);
+        assert_eq!(close["final_report"], serde_json::Value::Null);
+        assert_eq!(close["worker"]["classification"], "crashed");
+        assert_eq!(close["worker"]["exit_code"], 0xC000_0374u64);
+        validate_abandoned_smart_heap_corruption_close(&close)
+            .expect("the exact close-delivered Smart crash authorizes one discarded retry");
     }
 
     #[test]
