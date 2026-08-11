@@ -142,19 +142,31 @@ mod tests {
 
         assert_eq!(
             parameter_inspection_message(ParameterInspectionState::ZeroParameters),
-            Some("This effect intentionally declared no parameters.")
+            Some((
+                "This effect intentionally declared no parameters.",
+                "このエフェクトはパラメーターを定義していません。"
+            ))
         );
         assert_eq!(
             parameter_inspection_message(ParameterInspectionState::UnsupportedParameters),
-            Some("This effect declared parameters, but none use supported control types.")
+            Some((
+                "This effect declared parameters, but none use supported control types.",
+                "パラメーターはありますが、対応しているコントロール形式がありません。"
+            ))
         );
         assert_eq!(
             parameter_inspection_message(ParameterInspectionState::HiddenParameters),
-            Some("This effect declared controls, but all are hidden by the plug-in.")
+            Some((
+                "This effect declared controls, but all are hidden by the plug-in.",
+                "コントロールはありますが、プラグインによってすべて非表示です。"
+            ))
         );
         assert_eq!(
             parameter_inspection_message(ParameterInspectionState::Failed),
-            Some("Effect Controls inspection failed. See the diagnostic report below.")
+            Some((
+                "Effect Controls inspection failed. See the diagnostic report below.",
+                "エフェクトコントロールの検査に失敗しました。下の診断レポートを確認してください。"
+            ))
         );
         assert_eq!(
             parameter_inspection_message(ParameterInspectionState::Ready),

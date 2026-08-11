@@ -44,20 +44,26 @@ fn parameter_inspection_state(
     Ok(ParameterInspectionState::Ready)
 }
 
-fn parameter_inspection_message(state: ParameterInspectionState) -> Option<&'static str> {
+fn parameter_inspection_message(
+    state: ParameterInspectionState,
+) -> Option<(&'static str, &'static str)> {
     match state {
-        ParameterInspectionState::ZeroParameters => {
-            Some("This effect intentionally declared no parameters.")
-        }
-        ParameterInspectionState::UnsupportedParameters => {
-            Some("This effect declared parameters, but none use supported control types.")
-        }
-        ParameterInspectionState::HiddenParameters => {
-            Some("This effect declared controls, but all are hidden by the plug-in.")
-        }
-        ParameterInspectionState::Failed => {
-            Some("Effect Controls inspection failed. See the diagnostic report below.")
-        }
+        ParameterInspectionState::ZeroParameters => Some((
+            "This effect intentionally declared no parameters.",
+            "このエフェクトはパラメーターを定義していません。",
+        )),
+        ParameterInspectionState::UnsupportedParameters => Some((
+            "This effect declared parameters, but none use supported control types.",
+            "パラメーターはありますが、対応しているコントロール形式がありません。",
+        )),
+        ParameterInspectionState::HiddenParameters => Some((
+            "This effect declared controls, but all are hidden by the plug-in.",
+            "コントロールはありますが、プラグインによってすべて非表示です。",
+        )),
+        ParameterInspectionState::Failed => Some((
+            "Effect Controls inspection failed. See the diagnostic report below.",
+            "エフェクトコントロールの検査に失敗しました。下の診断レポートを確認してください。",
+        )),
         ParameterInspectionState::NotSelected
         | ParameterInspectionState::Loading
         | ParameterInspectionState::Ready => None,
