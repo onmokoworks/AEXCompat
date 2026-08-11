@@ -493,7 +493,7 @@ fn discover_cluster_in_place(
         // load in place and retired members stay mapped (deferred release),
         // so the capacity is the manifest maximum rather than a declared set.
         module_bound: MAX_CLUSTER_MODULE_BOUND as u32,
-        inspect_deadline: CLUSTER_INSPECT_DEADLINE,
+        inspect_deadline: Some(CLUSTER_INSPECT_DEADLINE),
         launch_environment: Default::default(),
     }) {
         Ok(session) => session,

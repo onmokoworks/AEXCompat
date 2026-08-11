@@ -2844,6 +2844,133 @@ mod tests {
     }
 
     #[test]
+    fn discovery_inspection_requires_search_dirs_before_worker_launch() {
+        let error = inspect_experimental_via_discovery_in_place(
+            std::path::Path::new("missing-repository"),
+            ApprovedImageArtifact {
+                path: std::path::PathBuf::from("missing-plugin.aex"),
+                expected_sha256: [0; 32],
+                expected_size: 1,
+            },
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires dependency search directories")
+        );
+    }
+
+    #[test]
+    fn discovery_report_is_converted_to_interactive_parameters() {
+        let report = json!({
+            "status": "parameters_inspected",
+            "global_setup_error": 0,
+            "params_setup_error": 0,
+            "global_setdown_error": 0,
+            "out_flags": 0,
+            "out_flags2": 1 << 10,
+            "parameters": [{
+                "index": 4,
+                "name": "Amount",
+                "type": 10,
+                "default": 25.0,
+                "valid_min": 0.0,
+                "valid_max": 100.0,
+                "slider_min": 5.0,
+                "slider_max": 75.0,
+                "ui_flags": 0,
+                "flags": 0
+            }]
+        });
+        let (parameters, diagnostics) = inspection_result_from_report(
+            report,
+            json!({"inspection_transport": "discovery_session"}),
+            false,
+        )
+        .expect("authenticated discovery report converts");
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(parameters[0].slot, 4);
+        assert_eq!(parameters[0].kind, "float");
+        assert_eq!(parameters[0].value, 25.0);
+        assert_eq!(diagnostics["advertised_out_flags2"], 1 << 10);
+        assert_eq!(diagnostics["smart_render_advertised"], true);
+        assert_eq!(diagnostics["parameter_metadata"][0]["type"], "float_slider");
+        assert_eq!(
+            diagnostics["parameter_metadata"][0]["user_range"],
+            json!({"minimum": 5.0, "maximum": 75.0})
+        );
+    }
+
+    #[test]
+    fn discovery_orchestration_retries_only_an_authenticated_cleanup_checkpoint() {
+        let report = json!({
+            "status": "parameters_inspected",
+            "global_setup_error": 0,
+            "params_setup_error": 0,
+            "global_setdown_error": 0,
+            "out_flags": 0,
+            "out_flags2": 0,
+            "parameters": []
+        });
+        let clean_close = json!({"session_clean": true});
+        let retries = std::cell::Cell::new(0);
+        let inspected = finish_discovery_inspection(
+            crate::render_session::InspectOutcome::Inspected {
+                report: report.clone(),
+            },
+            Path::new("repository"),
+            clean_close.clone(),
+            |_, _| {
+                retries.set(retries.get() + 1);
+                unreachable!("a clean terminal report must not retry")
+            },
+        )
+        .expect("clean terminal report succeeds");
+        assert!(inspected.0.is_empty());
+        assert_eq!(retries.get(), 0);
+
+        let error = finish_discovery_inspection(
+            crate::render_session::InspectOutcome::InspectError {
+                error_kind: "selector_error".to_owned(),
+                report: Some(report),
+            },
+            Path::new("repository"),
+            clean_close,
+            |_, _| {
+                retries.set(retries.get() + 1);
+                unreachable!("an inspect error must not retry")
+            },
+        )
+        .expect_err("inspect error stays failed");
+        assert!(error.to_string().contains("selector_error"));
+        assert_eq!(retries.get(), 0);
+
+        let recovered = finish_discovery_inspection(
+            crate::render_session::InspectOutcome::CleanupCrashCheckpoint {
+                authorization: crate::render_session::CleanupCrashAuthorization::fixture(),
+            },
+            Path::new("repository"),
+            json!({"invalidated": true}),
+            |_, _| {
+                retries.set(retries.get() + 1);
+                Ok((
+                    Vec::new(),
+                    json!({"inspection_status": "parameters_inspected_cleanup_contained"}),
+                ))
+            },
+        )
+        .expect("authenticated checkpoint performs one contained retry");
+        assert!(recovered.0.is_empty());
+        assert_eq!(retries.get(), 1);
+        assert_eq!(
+            recovered.1["inspection_transport"],
+            "discovery_cleanup_contained"
+        );
+    }
+
+    #[test]
     fn in_place_aegp_initialization_requires_search_dirs_before_file_access() {
         let error = initialize_experimental_aegp_in_place(
             std::path::Path::new("missing-repository"),

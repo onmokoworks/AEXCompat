@@ -3158,7 +3158,7 @@ mod windows_e2e {
                 .collect(),
             dependency_search_dirs: vec![cluster.dependency.parent().unwrap().to_path_buf()],
             module_bound: 64,
-            inspect_deadline: Duration::from_secs(30),
+            inspect_deadline: None,
             launch_environment,
         })
         .expect("open discovery session")
@@ -3414,7 +3414,7 @@ mod windows_e2e {
                 .collect(),
             dependency_search_dirs: vec![cluster.repository.0.clone()],
             module_bound: 64,
-            inspect_deadline: Duration::from_secs(30),
+            inspect_deadline: Some(Duration::from_secs(30)),
             launch_environment: LaunchEnvironment::default(),
         })
         .expect("open in-place discovery session");
@@ -3452,7 +3452,7 @@ mod windows_e2e {
                 .collect(),
             dependency_search_dirs: vec![cluster.repository.0.clone()],
             module_bound: 64,
-            inspect_deadline: Duration::from_secs(30),
+            inspect_deadline: Some(Duration::from_secs(30)),
             launch_environment: behavior("inspect_identity_changed_plugin_1"),
         })
         .expect("open in-place discovery session");

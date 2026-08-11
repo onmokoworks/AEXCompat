@@ -979,14 +979,30 @@ impl HarnessApp {
         let repository = self.repository.clone();
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
+        let plugin_size = selection.size;
+        let mut dependency_search_dirs = self
+            .approved_dependencies
+            .iter()
+            .filter_map(|artifact| artifact.path.parent().map(Path::to_path_buf))
+            .collect::<Vec<_>>();
+        if let Some(parent) = plugin_path.parent() {
+            dependency_search_dirs.push(parent.to_path_buf());
+        }
+        dependency_search_dirs.sort();
+        dependency_search_dirs.dedup();
         self.status = "Loading Effect Controls...".into();
         self.parameter_inspection_state = ParameterInspectionState::Loading;
         self.spawn_native("inspect_parameters", move || {
+            let expected_sha256 = decode_sha256(&hash)?;
             let (parameters, diagnostics) =
-                aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+                aexcompat_broker::image_render::inspect_experimental_via_discovery_in_place(
                     &repository,
-                    &plugin_path,
-                    &hash,
+                    aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
+                        path: plugin_path,
+                        expected_sha256,
+                        expected_size: plugin_size,
+                    },
+                    dependency_search_dirs,
                 )
                 .map_err(|error| error.to_string())?;
             let report = serde_json::json!({
