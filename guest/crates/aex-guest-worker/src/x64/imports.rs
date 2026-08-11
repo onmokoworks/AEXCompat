@@ -52,6 +52,7 @@ enum LegacyWin64Import {
     CeilF,
     ExpF,
     FloorF,
+    LRound,
     PowF,
     Pow,
     Sin,
@@ -357,6 +358,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CeilF
         }
         (_, "ceilf") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lround") => {
+            LegacyWin64Import::LRound
+        }
+        (_, "lround") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "sin") => LegacyWin64Import::Sin,
         (_, "sin") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm") => LegacyWin64Import::CrtInitterm,
@@ -769,6 +774,9 @@ fn install_win64_import(
             }
             LegacyWin64Import::FloorF => {
                 install_float_import(unicorn, stub, "floorf", f32::floor)?;
+            }
+            LegacyWin64Import::LRound => {
+                install_lround_import(unicorn, stub)?;
             }
             LegacyWin64Import::PowF => {
                 install_float_binary_import(unicorn, stub, "powf", f32::powf)?;
