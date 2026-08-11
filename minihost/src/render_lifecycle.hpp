@@ -21,11 +21,13 @@ struct Layout {
   int32_t frame_setup{};
   int32_t frame_setdown{};
   // Where the output extent an expanding effect may revise lives in out_data,
-  // where the origin it may state alongside it lives, and where the extent the
-  // host is offering lives in the output world it hands to the same selector
-  // (issue #984).
+  // and where the extent the host is offering lives in the output world it
+  // hands to the same selector (issue #984).
   std::size_t out_width{};
   std::size_t out_height{};
+  // Origin is frame-local independently of extent negotiation. SmartFX keeps
+  // these offsets so a resident session cannot carry an earlier PRE_RENDER
+  // answer into the next frame (issue #996).
   std::size_t out_origin{};
   // Where in_data carries the same origin back to the plug-in. Cleared beside
   // out_data's so an effect that reads it during FRAME_SETUP sees this frame's
@@ -49,8 +51,6 @@ constexpr Layout without_extent_negotiation(const Layout& layout) {
   Layout reduced = layout;
   reduced.out_width = 0;
   reduced.out_height = 0;
-  reduced.out_origin = 0;
-  reduced.in_origin = 0;
   reduced.world_width = 0;
   reduced.world_height = 0;
   return reduced;

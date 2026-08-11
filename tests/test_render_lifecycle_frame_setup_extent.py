@@ -9,6 +9,11 @@ output-bounds check refused the resize, and the frame died as an
 output-validation failure with RENDER never dispatched. Given the extent it is
 being offered, Basic_3D answers that extent and the frame renders. Issue #984.
 
+SmartFX does not negotiate this extent, but it does reuse the same in_data and
+out_data across frames. Its origin slots therefore still need a per-frame clear
+before FRAME_SETUP so an empty PRE_RENDER cannot inherit an earlier answer.
+Issue #996.
+
 The native self-test drives `begin_frame` with a recording fake, so it needs no
 plug-in and no AEX - only the build.
 """
