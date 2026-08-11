@@ -18,7 +18,11 @@ T read(const parameter_execution::BufferOut& bytes, std::size_t offset) {
   std::memcpy(&value, bytes.data() + offset, sizeof(value));
   return value;
 }
+thread_local bool g_force_gpu_retry = false;
 }  // namespace
+
+void set_force_gpu_retry(bool value) { g_force_gpu_retry = value; }
+bool force_gpu_retry_requested() { return g_force_gpu_retry; }
 
 Plan prepare(const Context& context, const Request& request) {
   Plan plan;
@@ -65,6 +69,11 @@ Plan prepare(const Context& context, const Request& request) {
       plan.explicit_gpu_device ||
       (request.has_external_rgba && request.external_pixel_bytes == 16 &&
        advertised_gpu_support && !plan.force_cpu_image);
+  // GPU-required fallback (issue #1072): the frame loop sets force_gpu_retry
+  // after a CPU smart render returned PF_Err 14 from an effect advertising GPU
+  // F32 support. Route the retry through the GPU transport.
+  if (advertised_gpu_support && !plan.force_cpu_image && force_gpu_retry_requested())
+    plan.gpu_negotiation = true;
   plan.missing_input = case_id == "error_missing_input";
   plan.crash_null_output = case_id == "crash_null_output_world";
   plan.temporal_context = case_id == "temporal_context";
