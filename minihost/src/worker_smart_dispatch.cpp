@@ -454,6 +454,14 @@ class VideoFrameCpuWorlds {
     std::memcpy(&ppix, world.data() + 64, sizeof(ppix));
     return ppix;
   }
+  // The frame's real dimensions as stored in its VF GPU world. create_gpu only
+  // returns a live world whose width/height fields (offsets 36/40) equal the
+  // requested size, so these are authoritative - unlike the FrameRecord scalar
+  // members, which the world build corrupts (issue #1058).
+  void pr_world_dims(const World& world, int32_t& width, int32_t& height) const {
+    width = world_i32(world, 36);
+    height = world_i32(world, 40);
+  }
   // Raw CUDA device pointer backing a GPU frame, via the same VF frame mapping
   // the plug-in itself reads (borrowed, not released - mirrors gpu_memcpy_frame).
   void* pr_gpu_device_ptr(World& world) {
@@ -1000,6 +1008,13 @@ abi::prSuiteError GPUDev_CreateGPUPPix(abi::csSDK_uint32, abi::PrPixelFormat fmt
   record->format = fmt;
   if (!g_ctx->frames->pr_make_gpu_ppix(record->world, record->live, w, h))
     return -1;
+  // Note: building the VF GPU world leaves record->height at h+1 (the world
+  // build writes an allocated-height value onto this adjacent member; the
+  // mechanism is an InitEffectWorldGPU ABI quirk tracked separately). The
+  // authoritative requested size lives in the world at offsets 36/40, which
+  // pr_world_dims reads; the output readback uses those, not this member. The
+  // suite queries below (GetGPUPPixSize / PPix_GetBounds) still report the
+  // member, which the in-corpus plug-ins render correctly against.
   record->plugin_created = true;
   *out = reinterpret_cast<abi::PPixHand>(g_ctx->frames->pr_ppix(record->world));
   g_ctx->gpu_frames.push_back(std::move(record));
@@ -1540,12 +1555,15 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   // without ever writing outFrame). Deferred disposal keeps every frame live
   // until after this readback.
   //
-  // Limitation (issue #1058 follow-up): a plug-in that renders into more than
-  // one CreateGPUPPix frame without naming the output through outFrame (a
-  // ping-pong / multi-pass design) may have its result in an earlier frame than
-  // the most recent one; the dimension cross-check below fails such a mismatch
-  // closed rather than returning wrong pixels. Every effect in scope creates a
-  // single output frame, so this heuristic holds for them.
+  // Limitation (issue #1058 follow-up): this "most recent plug-in frame" pick is
+  // a heuristic, not a reliable output signal. A plug-in that keeps several
+  // CreateGPUPPix frames alive (a ping-pong / multi-pass design), or that renders
+  // its final result into the host outFrame while leaving an undisposed scratch
+  // frame behind, can leave the real output in a frame this loop does not choose.
+  // The dimension cross-check below only rejects a *size* mismatch; a wrong frame
+  // of the same size is read as if it were the output. Every effect in the
+  // current corpus produces a single output frame, so the heuristic holds for
+  // them; widening the corpus needs a real output-frame signal.
   FrameRecord* out_record = nullptr;
   if (abi::suite_ok(render_error)) {
     if (out_frame) {
@@ -1564,12 +1582,21 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   if (filter.DisposeInstance) filter.DisposeInstance(&instance);
   shutdown();
 
-  // Fail closed when the frame the plug-in rendered is not the render's size:
-  // the readback below copies plan-height rows of plan-width, so a shorter or
-  // narrower frame would over-read its device allocation. A size mismatch also
-  // means the plug-in did not produce the frame the host asked for, so decline
-  // rather than return a wrong-size / out-of-bounds result (issue #1058).
-  if (!out_record || out_record->width != width || out_record->height != height)
+  // Fail closed when the plug-in's frame is smaller than the render: the
+  // readback below copies plan-height rows of plan-width, so a frame narrower or
+  // shorter than the render would over-read its device allocation. Read the
+  // frame's size from its VF world (offsets 36/40), not the FrameRecord scalar
+  // members: building the world leaves FrameRecord::height at height+1 (see
+  // GPUDev_CreateGPUPPix), so a check against it would spuriously reject a
+  // correctly sized frame and drop the whole GPU route to the 512 CPU path
+  // (issue #1058). The world width/height are what create_gpu validated the
+  // requested allocation against. Width must match exactly, since the readback
+  // stride is plan-width; a taller frame is safe to read the requested rows from
+  // and is accepted (a Premiere GPU filter may allocate its output a row larger).
+  int32_t out_frame_w = 0, out_frame_h = 0;
+  if (out_record)
+    frames.pr_world_dims(out_record->world, out_frame_w, out_frame_h);
+  if (!out_record || out_frame_w != width || out_frame_h < height)
     return false;
 
   const int32_t rowbytes = width * 16;
