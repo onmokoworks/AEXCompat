@@ -1963,7 +1963,7 @@ pub fn render_fixture_headless(
             let checkpoint_conditions = fixture_conditions(
                 &plugin_sha256,
                 &input_sha256,
-                argb,
+                &rgba,
                 format.pixel_format(),
                 artifact_render_path,
                 &parameters.identity,
