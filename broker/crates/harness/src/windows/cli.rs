@@ -279,6 +279,22 @@ fn cli_contract() -> serde_json::Value {
                 "note": "The final slot/value pair is required only for --render-experimental-session-param."
             },
             {
+                "name": "--render-raw",
+                "argv": ["--render-raw", "<aex>", "<input-image>", "<output-directory>", "argb8|argb16|argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
+                "result": "native-argb-raw-artifact-report-json"
+            },
+            {
+                "name": "--render-exr",
+                "argv": ["--render-exr", "<aex>", "<input-image>", "<output-directory>", "argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
+                "result": "uncompressed-scanline-float32-exr-artifact-report-json"
+            },
+            {
+                "name": "--render-fixture",
+                "argv": ["--render-fixture", "<aex>", "<fixture.json>", "<output-directory>"],
+                "result": "declarative-render-fixture-report-json",
+                "note": "Fixture asset paths are relative to fixture.json; plug-in path and hash are never embedded."
+            },
+            {
                 "name": "--render-experimental",
                 "argv": ["--render-experimental|--render-experimental-auto|--render-experimental-16|--render-experimental-16-deep|--render-experimental-32|--render-experimental-smart|--render-experimental-smart-16|--render-experimental-smart-16-deep|--render-experimental-smart-32|--render-experimental-smart-32-cpu", "<aex>", "<input-image>", "<output-image>"],
                 "result": "render-report-json"
@@ -327,6 +343,40 @@ fn cli_contract() -> serde_json::Value {
             "use_conformance_bundle_for_hashed_reproducible_artifacts": true
         }
     })
+}
+
+#[cfg(test)]
+mod artifact_cli_contract_tests {
+    use super::cli_contract;
+
+    #[test]
+    fn raw_and_exr_commands_publish_exact_argument_and_result_contracts() {
+        let contract = cli_contract();
+        let commands = contract["commands"].as_array().unwrap();
+        let command = |name: &str| {
+            commands
+                .iter()
+                .find(|entry| entry["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name} command"))
+        };
+        assert_eq!(command("--render-raw")["argv"].as_array().unwrap().len(), 9);
+        assert_eq!(
+            command("--render-raw")["result"],
+            "native-argb-raw-artifact-report-json"
+        );
+        assert_eq!(command("--render-exr")["argv"][4], "argb32f");
+        assert_eq!(
+            command("--render-exr")["result"],
+            "uncompressed-scanline-float32-exr-artifact-report-json"
+        );
+        assert_eq!(
+            command("--render-fixture")["argv"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
+    }
 }
 
 fn read_plugin_hash(plugin: &Path) -> Result<String, std::io::Error> {
@@ -408,6 +458,24 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let repository = repository_root(&args);
+    if args.len() == 5 && args[1] == "--render-fixture" {
+        let plugin = Path::new(&args[2]);
+        let hash = required_plugin_hash(plugin);
+        match aexcompat_broker::image_render::render_declarative_fixture(
+            &repository,
+            plugin,
+            &hash,
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+        ) {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 4 && args[1] == "--compare-images" {
         match compare_images(Path::new(&args[2]), Path::new(&args[3])) {
             Ok(comparison) => {

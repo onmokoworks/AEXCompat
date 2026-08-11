@@ -800,7 +800,73 @@ fn render_classic_via_length_one_session(
         }
     }
     let mut deep_overrange_samples = None;
-    let png_written = if empty_smart_result {
+    let artifact_metadata = if empty_smart_result || request.artifact_kind.is_none() {
+        None
+    } else {
+        let premultiplication = final_report
+            .get("premultiplication")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "straight" | "premultiplied" | "opaque"))
+            .or_else(|| {
+                request
+                    .conformance_render_settings
+                    .and_then(|settings| settings.split('|').nth(1))
+            })
+            .ok_or_else(|| invalid("worker report lacks a valid premultiplication state"));
+        let premultiplication = match premultiplication {
+            Ok(value) => value,
+            Err(error) => return SessionWrapperOutcome::Failure(error),
+        };
+        let conditions = RenderArtifactConditions {
+            premultiplication: premultiplication.into(),
+            working_space: "None".into(),
+            render_mode: "software".into(),
+            comparison_identity: json!({
+                "plugin_sha256": request.plugin_sha256.to_ascii_lowercase(),
+                "input_sha256": final_report.get("input_sha256"),
+                "world_sha256": final_report.get("output_sha256"),
+                "render_path": if request.smart { "smartfx" } else { "classic" },
+                "pixel_format": request.pixel_format.report_name(),
+                "timing": {
+                    "current_time": request.timing.current_time,
+                    "time_step": request.timing.time_step,
+                    "total_time": request.timing.total_time,
+                    "time_scale": request.timing.time_scale,
+                },
+                "requested_parameters": final_report.get("requested_parameters"),
+                "origin": {"x": origin_x, "y": origin_y},
+            }),
+        };
+        match request.artifact_kind {
+            Some(RenderArtifactKind::Raw) => match write_raw_world_artifact(
+                request.output_path,
+                &pixels,
+                rendered_width,
+                rendered_height,
+                request.pixel_format,
+                origin_x,
+                origin_y,
+                conditions,
+            ) {
+                Ok(metadata) => Some(metadata),
+                Err(error) => return SessionWrapperOutcome::Failure(error),
+            },
+            Some(RenderArtifactKind::Float32Exr) => match write_float32_exr_artifact(
+                request.output_path,
+                &pixels,
+                rendered_width,
+                rendered_height,
+                origin_x,
+                origin_y,
+                conditions,
+            ) {
+                Ok(metadata) => Some(metadata),
+                Err(error) => return SessionWrapperOutcome::Failure(error),
+            },
+            None => unreachable!("artifact kind was checked above"),
+        }
+    };
+    let png_written = if empty_smart_result || request.artifact_kind.is_some() {
         Ok(())
     } else if request.deep_png_output {
         rgba16_transport_to_png16(&pixels).and_then(|(samples, overrange)| {
