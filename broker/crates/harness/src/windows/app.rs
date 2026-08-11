@@ -1,4 +1,5 @@
 struct HarnessApp {
+    ui_kit: AexUiKit,
     repository: PathBuf,
     selection: Option<Selection>,
     session_approved: bool,
@@ -73,6 +74,7 @@ impl HarnessApp {
     fn new(repository: PathBuf) -> Self {
         let missing_suite_aggregate = aggregate_missing_suites(&repository);
         Self {
+            ui_kit: AexUiKit::default(),
             repository,
             selection: None,
             session_approved: false,
@@ -118,7 +120,8 @@ impl HarnessApp {
             custom_ui_key_modifiers: 0,
             busy: false,
             rendering: false,
-            status: "Select an AEX file. Selection does not execute native code.".into(),
+            status: "Select an AEX file. Effect Controls inspection runs in an isolated worker."
+                .into(),
             report: String::new(),
             render_diagnostics: None,
             failure_diagnostics: None,
@@ -296,13 +299,56 @@ impl HarnessApp {
             egui::vec2(ui.available_width(), viewer_height),
             egui::Layout::top_down(egui::Align::Center),
             |ui| match self.viewer_mode {
-                0 => show_viewer_texture(
+                0 if self.input_preview.is_some() => show_viewer_texture(
                     ui,
                     "Input",
                     self.input_preview.as_ref(),
                     &mut self.viewer_zoom,
                     &mut self.viewer_pan,
                 ),
+                0 => {
+                    let ui_kit = self.ui_kit.clone();
+                    ui.centered_and_justified(|ui| {
+                        ui_kit.onboarding_card(ui, |ui| {
+                                ui.set_max_width(560.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        RichText::new("Start a render workspace")
+                                            .size(24.0)
+                                            .strong(),
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        RichText::new(
+                                            "Choose an After Effects plug-in and an input image. AEXCompat will load the effect controls before any native render runs.",
+                                        )
+                                        .color(Color32::from_rgb(170, 178, 190)),
+                                    );
+                                    ui.add_space(20.0);
+                                    ui.horizontal(|ui| {
+                                        if ui_kit
+                                            .primary_button(ui, "1  Choose AEX...", !self.busy)
+                                            .clicked()
+                                        {
+                                            self.reset_and_choose_aex();
+                                        }
+                                        if ui_kit
+                                            .secondary_button(
+                                                ui,
+                                                "2  Choose image...",
+                                                !self.busy,
+                                            )
+                                            .clicked()
+                                        {
+                                            self.choose_input(ui.ctx());
+                                        }
+                                    });
+                                    ui.add_space(12.0);
+                                    ui.weak("Selecting an AEX scans its identity and dependencies, then inspects Effect Controls in an isolated worker. Rendering stays disabled until both inputs are ready.");
+                                });
+                            });
+                    });
+                }
                 1 if self.preview.is_some() => show_viewer_texture(
                     ui,
                     "AEX output",
@@ -2155,7 +2201,7 @@ impl HarnessApp {
 
 impl eframe::App for HarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_visuals(egui::Visuals::dark());
+        self.ui_kit.install(ctx);
         self.poll(ctx);
         self.dispatch_pending_parameter_change(ctx);
         self.check_selected_identity();
@@ -2164,31 +2210,81 @@ impl eframe::App for HarnessApp {
             self.inspect_parameters_async();
         }
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(6.0);
+            ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("AEXCompat").size(22.0));
-                ui.weak("EFFECT LAB");
-                ui.separator();
-                ui.label(RichText::new("SOURCE").small().strong());
+                ui.heading(RichText::new("AEXCompat").size(24.0).strong());
+                ui.label(
+                    RichText::new("EFFECT LAB")
+                        .small()
+                        .strong()
+                        .color(Color32::from_rgb(92, 181, 220)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(&self.status).small());
+                    if self.busy {
+                        ui.spinner();
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                let aex_ready = self.selection.is_some();
+                let image_ready = self.input_image.is_some();
+                let output_ready = self.preview.is_some();
+                ui.label(
+                    RichText::new(if aex_ready {
+                        "1  AEX  SELECTED"
+                    } else {
+                        "1  AEX"
+                    })
+                        .small()
+                        .strong()
+                        .color(if aex_ready {
+                            Color32::from_rgb(100, 205, 150)
+                        } else {
+                            Color32::from_rgb(170, 178, 190)
+                        }),
+                );
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("AEX..."))
+                    .add_enabled(!self.busy, egui::Button::new("Choose AEX..."))
                     .clicked()
                 {
                     self.reset_and_choose_aex();
                 }
+                ui.separator();
+                ui.label(
+                    RichText::new(if image_ready { "2  INPUT  READY" } else { "2  INPUT" })
+                        .small()
+                        .strong()
+                        .color(if image_ready {
+                            Color32::from_rgb(100, 205, 150)
+                        } else {
+                            Color32::from_rgb(170, 178, 190)
+                        }),
+                );
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Image..."))
+                    .add_enabled(!self.busy, egui::Button::new("Choose image..."))
                     .clicked()
                 {
                     self.choose_input(ctx);
                     self.viewer_mode = 0;
                 }
                 ui.separator();
-                ui.label(RichText::new("PREVIEW").small().strong());
+                ui.label(
+                    RichText::new(if output_ready { "3  OUTPUT  READY" } else { "3  RENDER" })
+                        .small()
+                        .strong()
+                        .color(if output_ready {
+                            Color32::from_rgb(100, 205, 150)
+                        } else {
+                            Color32::from_rgb(170, 178, 190)
+                        }),
+                );
                 let can_render =
                     !self.busy && self.selection.is_some() && self.input_image.is_some();
                 if ui
-                    .add_enabled(can_render, egui::Button::new("Render"))
+                    .scope(|ui| self.ui_kit.primary_button(ui, "Render preview", can_render))
+                    .inner
                     .clicked()
                 {
                     self.quick_render();
@@ -2202,14 +2298,8 @@ impl eframe::App for HarnessApp {
                         self.live_render_due = None;
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.busy {
-                        ui.spinner();
-                    }
-                    ui.label(RichText::new(&self.status).small());
-                });
             });
-            ui.add_space(6.0);
+            ui.add_space(8.0);
         });
         egui::SidePanel::left("effect_controls")
             .default_width(340.0)
