@@ -132,6 +132,20 @@ and bounded image input/output are now the main implementation path.
 - The After Effects installation is an exclusive machine resource. Before any
   capture or aerender run, verify no AfterFX/aerender/aerendercore process is
   running; if one is, another session owns it — wait instead of killing it.
+- Do not hold back on implementation, reverse engineering, or AE-oracle
+  verification work, and do not ask the user for permission before starting it.
+  These are the ordinary work of this project: proceed confidence-first and
+  careful, and let owner review happen on the PR. The only thing that needs
+  owner sign-off before you act is a change that actually weakens a fail-closed
+  host-protection invariant or overrides an explicit CLAUDE.md policy (e.g. the
+  #1182 fault→warning reclassification), not the size or risk of an engineering
+  unit. For the AE oracle specifically, the only coordination question is
+  whether AE is *already* in use — ask/wait only when an
+  AfterFX/aerender/aerendercore process is already running (the
+  exclusive-resource rule above); otherwise just run the capture. "Remaining
+  turns" / "this can't finish in one session" is not a real constraint and is
+  never a reason to stop or defer: keep working until the task is done or you
+  are genuinely blocked.
 - Review happens locally, before the PR exists. Spawn a separate background
   agent of your own to run an adversarial review pass over the working diff,
   fix what it finds, and re-run it on the amended diff. The loop ends when a

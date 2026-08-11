@@ -2,13 +2,18 @@
 
 #include "generated/aex_abi_contract.hpp"
 #include "gpu_memory_world_transport.hpp"
+#include "premiere_gpu_filter_abi.hpp"
 #include "render_subsystem.h"
+#include "worker_active_plugin_context.hpp"
+#include "worker_parameter_runtime.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_world_registry.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <windows.h>
@@ -403,6 +408,65 @@ class VideoFrameCpuWorlds {
 
   void* cuda_context() const { return gf_cuda_context_; }
 
+  // --- Premiere GPU-filter host primitives (issue #1058) ---------------------
+  // A standalone GPU PPix factory the Premiere GPU-filter host drives on demand
+  // (the fixed input()/output() slots above are for the PF SmartFX GPU path).
+  // The PPix handle lives at world+64: a VF-backed PPix that
+  // VF::GetPPixHandFrameMapping maps, which is exactly what the plug-in reads.
+  bool pr_gpu_ready() {
+    if (!(available() && initialize_gpu_foundation_at_module_root() &&
+          (owns_video_frame_ || (owns_video_frame_ = initialize_video_frame_()))))
+      return false;
+    // A Premiere GPU filter fetches its device itself via GF::Detail::GetDevice
+    // (unlike the PF SmartFX GPU route, which is handed a device through the PF
+    // GPU suite). GetDevice indexes GF's enumerated device registry, which is
+    // only populated once the device list is walked - GetPrimaryDevice alone
+    // does not fill it. Warm the registry so the plug-in's own GetDevice call
+    // returns a live device instead of an empty shared_ptr (issue #1058).
+    const uint32_t device_count = get_device_count_();
+    for (uint32_t index = 0; index < device_count; ++index) {
+      std::shared_ptr<void> device;
+      get_device_(&device, index);
+    }
+    return device_count > 0;
+  }
+  bool pr_make_gpu_ppix(World& world, bool& live, int32_t width, int32_t height) {
+    return create_gpu(world, live, width, height, /*framework=*/3);
+  }
+  bool pr_upload(World& world, const void* cpu, int32_t cpu_rowbytes,
+                 int32_t width, int32_t height) {
+    return gpu_memcpy_frame(world, const_cast<void*>(cpu), cpu_rowbytes, width,
+                            height, /*to_gpu=*/true);
+  }
+  bool pr_download(World& world, void* cpu, int32_t cpu_rowbytes, int32_t width,
+                   int32_t height) {
+    return gpu_memcpy_frame(world, cpu, cpu_rowbytes, width, height,
+                            /*to_gpu=*/false);
+  }
+  void pr_dispose(World& world, bool& live) {
+    if (live) {
+      dispose_gpu_(world.data());
+      live = false;
+    }
+  }
+  void* pr_ppix(const World& world) const {
+    void* ppix{};
+    std::memcpy(&ppix, world.data() + 64, sizeof(ppix));
+    return ppix;
+  }
+  // Raw CUDA device pointer backing a GPU frame, via the same VF frame mapping
+  // the plug-in itself reads (borrowed, not released - mirrors gpu_memcpy_frame).
+  void* pr_gpu_device_ptr(World& world) {
+    std::array<std::byte, 24> ivf{};
+    get_gpu_frame_(ivf.data(), world.data());
+    void* mapping{};
+    std::memcpy(&mapping, ivf.data() + 8, sizeof(mapping));
+    void* dev_ptr{};
+    int32_t gpu_rowbytes{};
+    return gpu_frame_device_memory(mapping, &dev_ptr, &gpu_rowbytes) ? dev_ptr
+                                                                      : nullptr;
+  }
+
   bool copy_output_to(World& destination) {
     if (!output_live_) return false;
     if (!output_gpu_) return copy_pixels(output_, destination);
@@ -741,6 +805,12 @@ class VideoFrameCpuWorlds {
     // against whatever context happens to be current if the push failed, rather
     // than reading/writing the wrong device memory.
     if (!gf_cuda_context_ || push(gf_cuda_context_) != 0) return false;
+    // Wait for any pending device work before touching the frame's memory. A
+    // Premiere GPU filter launches its CUDA kernel on its own stream, and a
+    // plain cuMemcpyDtoH only orders against the default stream, so a download
+    // issued right after the plug-in's Render returned would otherwise read the
+    // frame before the kernel finished and copy back zeros (issue #1058).
+    if (sync) sync();
     bool ok = true;
     for (int32_t y = 0; y < height && ok; ++y) {
       const unsigned long long dev = reinterpret_cast<unsigned long long>(dev_ptr) +
@@ -832,6 +902,668 @@ void write_render_request(std::byte* destination,
               sizeof(channel_mask));
 }
 
+// ===========================================================================
+// Premiere GPU-filter host (issue #1058)
+//
+// The VR / Immersive effect family (VRGaussianBlur, ...) are GPU-only Premiere
+// GPU filters. Their AE SmartFX CPU path only draws a "requires GPU" warning
+// and returns 512, so the only way to render them is to drive their private
+// `xGPUFilterEntry` export exactly as Premiere / AE's bridge does: hand the
+// plug-in a `piSuites` host plus the Premiere GPU suites, then call
+// CreateInstance / Render / DisposeInstance. Input/output frames are the GPU
+// VideoFrame PPix handles VideoFrameCpuWorlds already builds for #1158; the
+// plug-in reads their device memory through VF::GetPPixHandFrameMapping, the
+// same path the PF SmartFX GPU route uses.
+// ===========================================================================
+namespace pr_host {
+namespace abi = ::aexcompat::worker_runtime::pr_gpu;
+namespace params_rt = ::aexcompat::worker_runtime::parameters;
+using World = VideoFrameCpuWorlds::World;
+
+struct FrameRecord {
+  World world{};
+  bool live{};
+  int32_t width{};
+  int32_t height{};
+  abi::PrPixelFormat format{abi::kPrPixelFormat_GPU_BGRA_4444_32f};
+};
+
+struct HostContext {
+  VideoFrameCpuWorlds* frames{};
+  std::vector<std::unique_ptr<FrameRecord>> gpu_frames;
+  const params_rt::State* param_state{};
+  int32_t node_id{};
+  int32_t width{};
+  int32_t height{};
+  void* cuda_context{};
+  std::vector<char*> scratch;
+
+  ~HostContext() {
+    for (auto& record : gpu_frames)
+      if (record && record->live) frames->pr_dispose(record->world, record->live);
+    for (char* pointer : scratch) std::free(pointer);
+  }
+};
+
+// Suite methods are stateless and reach the active render through this pointer,
+// set for the duration of one run_pr_gpu_filter() call on the render thread.
+thread_local HostContext* g_ctx{};
+
+FrameRecord* find_frame(abi::PPixHand ppix) {
+  if (!g_ctx || !ppix) return nullptr;
+  for (auto& record : g_ctx->gpu_frames)
+    if (record->live &&
+        g_ctx->frames->pr_ppix(record->world) == static_cast<void*>(ppix))
+      return record.get();
+  return nullptr;
+}
+
+// ---- GPU Device Suite -----------------------------------------------------
+abi::prSuiteError GPUDev_GetDeviceCount(abi::csSDK_uint32* out) {
+  if (out) *out = 1;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError GPUDev_GetDeviceInfo(abi::csSDK_uint32, abi::csSDK_uint32,
+                                       abi::PrGPUDeviceInfo* out) {
+  if (!out) return -1;
+  std::memset(out, 0, sizeof(*out));
+  out->outDeviceFramework = 0;  // CUDA
+  out->outMeetsMinReq = 1;
+  out->outContextHandle = g_ctx ? g_ctx->cuda_context : nullptr;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError GPUDev_CreateGPUPPix(abi::csSDK_uint32, abi::PrPixelFormat fmt,
+                                       int32_t w, int32_t h, int32_t, int32_t,
+                                       abi::prFieldType, abi::PPixHand* out) {
+  if (!out || !g_ctx || w <= 0 || h <= 0) return -1;
+  auto record = std::make_unique<FrameRecord>();
+  record->width = w;
+  record->height = h;
+  record->format = fmt;
+  if (!g_ctx->frames->pr_make_gpu_ppix(record->world, record->live, w, h))
+    return -1;
+  *out = reinterpret_cast<abi::PPixHand>(g_ctx->frames->pr_ppix(record->world));
+  g_ctx->gpu_frames.push_back(std::move(record));
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError GPUDev_GetGPUPPixData(abi::PPixHand ppix, void** out) {
+  FrameRecord* record = find_frame(ppix);
+  if (!record || !out) return -1;
+  *out = g_ctx->frames->pr_gpu_device_ptr(record->world);
+  return *out ? abi::kSuiteError_NoError : -1;
+}
+abi::prSuiteError GPUDev_GetGPUPPixDeviceIndex(abi::PPixHand,
+                                               abi::csSDK_uint32* out) {
+  if (out) *out = 0;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError GPUDev_GetGPUPPixSize(abi::PPixHand ppix, size_t* out) {
+  FrameRecord* record = find_frame(ppix);
+  if (!record || !out) return -1;
+  *out = static_cast<size_t>(record->width) * record->height * 16;
+  return abi::kSuiteError_NoError;
+}
+
+// ---- PPix Suite / PPix2 Suite ---------------------------------------------
+abi::prSuiteError PPix_Dispose(abi::PPixHand ppix) {
+  FrameRecord* record = find_frame(ppix);
+  if (record) g_ctx->frames->pr_dispose(record->world, record->live);
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError PPix_GetBounds(abi::PPixHand ppix, abi::prRect* out) {
+  FrameRecord* record = find_frame(ppix);
+  if (!record || !out) return -1;
+  *out = {0, 0, record->width, record->height};
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError PPix_GetRowBytes(abi::PPixHand ppix, abi::csSDK_int32* out) {
+  FrameRecord* record = find_frame(ppix);
+  if (!record || !out) return -1;
+  *out = record->width * 16;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError PPix_GetPixelAspectRatio(abi::PPixHand, abi::csSDK_uint32* num,
+                                           abi::csSDK_uint32* den) {
+  if (num) *num = 1;
+  if (den) *den = 1;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError PPix_GetPixelFormat(abi::PPixHand ppix,
+                                      abi::PrPixelFormat* out) {
+  FrameRecord* record = find_frame(ppix);
+  if (!record || !out) return -1;
+  *out = record->format;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError PPix2_GetSize(abi::PPixHand ppix, size_t* out) {
+  return GPUDev_GetGPUPPixSize(ppix, out);
+}
+abi::prSuiteError PPix2_GetOrigin(abi::PPixHand, abi::csSDK_int32* x,
+                                  abi::csSDK_int32* y) {
+  if (x) *x = 0;
+  if (y) *y = 0;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError PPix2_GetFieldOrder(abi::PPixHand, abi::prFieldType* out) {
+  if (out) *out = 0;  // progressive
+  return abi::kSuiteError_NoError;
+}
+
+// ---- Video Segment Suite: GetParam bridges to the worker's param records ---
+abi::prSuiteError VS_GetNodeProperty(abi::csSDK_int32, const char*,
+                                     abi::PrMemoryPtr* out) {
+  // Failing this is intentional: the plug-in falls back to reading its blur
+  // amount through GetParam (observed in VRGaussianBlur::Render) when the
+  // "EffectNode::RuntimeInstanceID" property lookup fails, which is the value
+  // path this host actually serves.
+  if (out) *out = nullptr;
+  return -1;
+}
+abi::prSuiteError VS_GetParamCount(abi::csSDK_int32, abi::csSDK_int32* out) {
+  if (!out || !g_ctx || !g_ctx->param_state) return -1;
+  *out = static_cast<abi::csSDK_int32>(g_ctx->param_state->records.size());
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError VS_GetParam(abi::csSDK_int32, abi::csSDK_int32 index,
+                              abi::PrTime, abi::PrParam* out) {
+  if (!out || !g_ctx || !g_ctx->param_state) return -1;
+  std::memset(out, 0, sizeof(*out));
+  const auto& records = g_ctx->param_state->records;
+  // Suite param index i addresses the effect's i-th real parameter (the input
+  // layer is not a node param), i.e. worker records[i].
+  if (index < 0 || static_cast<std::size_t>(index) >= records.size()) return -1;
+  const auto& record = records[static_cast<std::size_t>(index)];
+  const double value = record.has_current ? record.current_value
+                                          : record.default_value;
+  switch (record.type) {
+    case 4:  // PF_Param_CHECKBOX
+      out->mType = abi::kPrParamType_Bool;
+      out->mBool = value != 0.0 ? 1 : 0;
+      return abi::kSuiteError_NoError;
+    case 7:  // PF_Param_POPUP
+      out->mType = abi::kPrParamType_Int32;
+      out->mInt32 = static_cast<int32_t>(value);
+      return abi::kSuiteError_NoError;
+    case 6:   // PF_Param_POINT
+    case 18: {  // PF_Param_POINT_3D
+      out->mType = abi::kPrParamType_Point;
+      const auto& components =
+          record.has_current ? record.current_components : record.default_components;
+      out->mPoint.x = record.component_count > 0 ? components[0] : 0.0;
+      out->mPoint.y = record.component_count > 1 ? components[1] : 0.0;
+      return abi::kSuiteError_NoError;
+    }
+    case 1:   // PF_Param_SLIDER
+    case 2:   // PF_Param_FIX_SLIDER
+    case 3:   // PF_Param_ANGLE (worker stores the decoded value)
+    case 10:  // PF_Param_FLOAT_SLIDER
+    default:
+      out->mType = abi::kPrParamType_Float64;
+      out->mFloat64 = value;
+      return abi::kSuiteError_NoError;
+  }
+}
+
+// Video Segment node-graph walk (PrGPUFilterBase_VR::GetMediaDimensions). This
+// host has no Premiere node graph, so the owner-node query returns "no node":
+// the plug-in's walk then terminates on its first iteration and falls back to
+// SequenceInfoSuite::GetFrameRect for the frame dimensions (observed in
+// VRGaussianBlur::Initialize).
+abi::prSuiteError VS_AcquireOperatorOwnerNodeID(abi::csSDK_int32,
+                                                abi::csSDK_int32* out) {
+  if (out) *out = 0;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError VS_AcquireInputNodeID(abi::csSDK_int32, abi::csSDK_int32,
+                                        abi::PrTime*, abi::csSDK_int32* out) {
+  if (out) *out = 0;
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError VS_ReleaseVideoNodeID(abi::csSDK_int32) {
+  return abi::kSuiteError_NoError;
+}
+abi::prSuiteError VS_GetNodeInfo(abi::csSDK_int32, char* outType,
+                                 void* /*outHash*/, abi::csSDK_int32* outFlags) {
+  if (outType) outType[0] = '\0';
+  if (outFlags) *outFlags = 0;
+  return abi::kSuiteError_NoError;
+}
+
+// ---- Memory Manager Suite (only the pointer helpers are ever driven) -------
+abi::PrMemoryPtr MM_NewPtrClear(abi::csSDK_uint32 bytes) {
+  void* pointer = std::calloc(bytes ? bytes : 1, 1);
+  if (pointer && g_ctx) g_ctx->scratch.push_back(static_cast<char*>(pointer));
+  return static_cast<abi::PrMemoryPtr>(pointer);
+}
+abi::PrMemoryPtr MM_NewPtr(abi::csSDK_uint32 bytes) {
+  return MM_NewPtrClear(bytes);
+}
+void MM_PrDisposePtr(abi::PrMemoryPtr pointer) {
+  if (!pointer || !g_ctx) return;
+  auto& scratch = g_ctx->scratch;
+  for (auto it = scratch.begin(); it != scratch.end(); ++it)
+    if (*it == pointer) {
+      std::free(pointer);
+      scratch.erase(it);
+      return;
+    }
+}
+
+// ---- Sequence Info Suite ---------------------------------------------------
+abi::prSuiteError SI_GetFrameRect(abi::PrTimelineID, abi::prRect* out) {
+  if (!out || !g_ctx) return -1;
+  *out = {0, 0, g_ctx->width, g_ctx->height};
+  return abi::kSuiteError_NoError;
+}
+// Report a flat (non-VR) projection so a VR effect renders as an ordinary 2D
+// layer rather than warping to an equirectangular sphere.
+abi::prSuiteError SI_GetImmersiveVideoVRConfiguration(abi::PrTimelineID,
+    int32_t* proj, int32_t* layout, abi::csSDK_uint32* h, abi::csSDK_uint32* v) {
+  if (proj) *proj = 0;
+  if (layout) *layout = 0;
+  if (h) *h = 360;
+  if (v) *v = 180;
+  return abi::kSuiteError_NoError;
+}
+
+// Static suite tables. Any slot a plug-in reaches that this host does not
+// serve stays null: that surfaces as a diagnosable crash, never a silent wrong
+// pixel (the fail-closed stance in CLAUDE.md).
+abi::PrSDKGPUDeviceSuite g_gpu_device_suite{};
+abi::PrSDKPPixSuite g_ppix_suite{};
+abi::PrSDKPPix2Suite g_ppix2_suite{};
+abi::PrSDKVideoSegmentSuite g_video_segment_suite{};
+abi::PrSDKMemoryManagerSuite g_memory_suite{};
+abi::PrSDKSequenceInfoSuite g_sequence_info_suite{};
+// Acquired-but-unused-by-the-effects-in-scope tables (null slots).
+struct EmptySuite { void* slots[32]{}; };
+EmptySuite g_gpu_image_processing_suite{};
+EmptySuite g_transition_suite{};
+EmptySuite g_opaque_effect_data_suite{};
+
+bool g_suite_tables_ready{};
+void ensure_suite_tables() {
+  if (g_suite_tables_ready) return;
+  g_gpu_device_suite.GetDeviceCount = &GPUDev_GetDeviceCount;
+  g_gpu_device_suite.GetDeviceInfo = &GPUDev_GetDeviceInfo;
+  g_gpu_device_suite.CreateGPUPPix = &GPUDev_CreateGPUPPix;
+  g_gpu_device_suite.GetGPUPPixData = &GPUDev_GetGPUPPixData;
+  g_gpu_device_suite.GetGPUPPixDeviceIndex = &GPUDev_GetGPUPPixDeviceIndex;
+  g_gpu_device_suite.GetGPUPPixSize = &GPUDev_GetGPUPPixSize;
+
+  g_ppix_suite.Dispose = &PPix_Dispose;
+  g_ppix_suite.GetBounds = &PPix_GetBounds;
+  g_ppix_suite.GetRowBytes = &PPix_GetRowBytes;
+  g_ppix_suite.GetPixelAspectRatio = &PPix_GetPixelAspectRatio;
+  g_ppix_suite.GetPixelFormat = &PPix_GetPixelFormat;
+
+  g_ppix2_suite.GetSize = &PPix2_GetSize;
+  g_ppix2_suite.GetOrigin = &PPix2_GetOrigin;
+  g_ppix2_suite.GetFieldOrder = &PPix2_GetFieldOrder;
+
+  g_video_segment_suite.slot8_ReleaseVideoNodeID =
+      reinterpret_cast<void*>(&VS_ReleaseVideoNodeID);
+  g_video_segment_suite.slot9_GetNodeInfo =
+      reinterpret_cast<void*>(&VS_GetNodeInfo);
+  g_video_segment_suite.slot11_AcquireInputNodeID =
+      reinterpret_cast<void*>(&VS_AcquireInputNodeID);
+  g_video_segment_suite.GetNodeProperty = &VS_GetNodeProperty;
+  g_video_segment_suite.GetParamCount = &VS_GetParamCount;
+  g_video_segment_suite.GetParam = &VS_GetParam;
+  // idx 26 (+0xd0) AcquireOperatorOwnerNodeID: tail[8] past GetParam (idx 17).
+  g_video_segment_suite.tail[8] =
+      reinterpret_cast<void*>(&VS_AcquireOperatorOwnerNodeID);
+
+  g_sequence_info_suite.slot0_GetFrameRect =
+      reinterpret_cast<void*>(&SI_GetFrameRect);
+
+  g_memory_suite.NewPtrClear = &MM_NewPtrClear;
+  g_memory_suite.NewPtr = &MM_NewPtr;
+  g_memory_suite.PrDisposePtr = &MM_PrDisposePtr;
+
+  g_sequence_info_suite.GetImmersiveVideoVRConfiguration =
+      &SI_GetImmersiveVideoVRConfiguration;
+  g_suite_tables_ready = true;
+}
+
+bool name_is(const char* a, const char* b) {
+  return a && b && std::strcmp(a, b) == 0;
+}
+abi::prSuiteError SP_AcquireSuite(const char* name, int32_t, const void** out) {
+  if (!out) return -1;
+  *out = nullptr;
+  if (name_is(name, abi::kGPUDeviceSuite)) *out = &g_gpu_device_suite;
+  else if (name_is(name, abi::kPPixSuite)) *out = &g_ppix_suite;
+  else if (name_is(name, abi::kPPix2Suite)) *out = &g_ppix2_suite;
+  else if (name_is(name, abi::kVideoSegmentSuite)) *out = &g_video_segment_suite;
+  else if (name_is(name, abi::kMemoryManagerSuite)) *out = &g_memory_suite;
+  else if (name_is(name, abi::kSequenceInfoSuite)) *out = &g_sequence_info_suite;
+  else if (name_is(name, abi::kGPUImageProcessingSuite))
+    *out = &g_gpu_image_processing_suite;
+  else if (name_is(name, abi::kTransitionSuite)) *out = &g_transition_suite;
+  else if (name_is(name, abi::kOpaqueEffectDataSuite))
+    *out = &g_opaque_effect_data_suite;
+  return *out ? abi::kSuiteError_NoError : -1;
+}
+abi::prSuiteError SP_ReleaseSuite(const char*, int32_t) {
+  return abi::kSuiteError_NoError;
+}
+abi::SPBasicSuite g_sp_basic{&SP_AcquireSuite, &SP_ReleaseSuite, nullptr,
+                             nullptr, nullptr, nullptr, nullptr};
+abi::SPBasicSuite* get_sp_basic() { return &g_sp_basic; }
+abi::PlugUtilFuncs g_util_funcs{nullptr, nullptr, nullptr,       nullptr,
+                                nullptr, nullptr, nullptr,       &get_sp_basic,
+                                nullptr};
+
+// The plug-in's own GPU compute (CUDA kernel launch, GF device work) runs
+// outside the PF selector dispatch's SEH guard, so wrap the filter lifecycle
+// calls here: a crash inside the plug-in is contained (the render declines and
+// falls through) instead of taking the worker down, and its faulting address is
+// recorded for diagnosis. Kept in its own POD-only function because __try/__except
+// cannot share a frame with C++ objects that need unwinding.
+struct PrRenderCrash {
+  uint32_t code{};
+  void* address{};
+  void* access{};
+  bool crashed{};
+};
+LONG pr_seh_filter(uint32_t code, _EXCEPTION_POINTERS* info, PrRenderCrash* crash) {
+  crash->code = code;
+  crash->address = info ? info->ExceptionRecord->ExceptionAddress : nullptr;
+  crash->access =
+      (info && info->ExceptionRecord->NumberParameters >= 2)
+          ? reinterpret_cast<void*>(info->ExceptionRecord->ExceptionInformation[1])
+          : nullptr;
+  crash->crashed = true;
+  return EXCEPTION_EXECUTE_HANDLER;
+}
+abi::prSuiteError guarded_create_instance(abi::PrGPUFilter* filter,
+                                          abi::PrGPUFilterInstance* instance,
+                                          PrRenderCrash* crash) {
+  __try {
+    return filter->CreateInstance(instance);
+  } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
+                            crash)) {
+    return -1;
+  }
+}
+abi::prSuiteError guarded_render(abi::PrGPUFilter* filter,
+                                 abi::PrGPUFilterInstance* instance,
+                                 const abi::PrGPUFilterRenderParams* render_params,
+                                 const abi::PPixHand* in_frames,
+                                 abi::PPixHand* out_frame, PrRenderCrash* crash) {
+  __try {
+    return filter->Render(instance, render_params, in_frames, 1, out_frame);
+  } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
+                            crash)) {
+    return -1;
+  }
+}
+
+// A Premiere GPU filter gates its whole GPU render on MF::IsGPUAccelerationAvailable():
+// when it returns false the plug-in takes a path that uses a null device and
+// crashes (observed in VRGaussianBlur::Render, faulting on null+0x40 in the GPU
+// scratch allocation). In a full Premiere/AE host that flag is set by the
+// application's Mercury-GPU enable; this worker stands up the same GPU stack
+// (GPUFoundation + CUDA, and GF::Detail::GetDevice returns a live device here)
+// but never runs that app-level enable, so the flag reads false. Since the host
+// genuinely provides GPU acceleration, redirect the plug-in's own import of that
+// query to a stub that reports true, so it takes its normal device path.
+bool pr_gpu_available_stub() { return true; }
+
+void force_gpu_acceleration_available(HMODULE module) {
+  auto* base = reinterpret_cast<std::byte*>(module);
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+  const auto* nt =
+      reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+  if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+  const auto& import_dir =
+      nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+  if (!import_dir.VirtualAddress) return;
+  auto* descriptor = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(
+      base + import_dir.VirtualAddress);
+  for (; descriptor->Name; ++descriptor) {
+    if (!descriptor->OriginalFirstThunk || !descriptor->FirstThunk) continue;
+    const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA*>(
+        base + descriptor->OriginalFirstThunk);
+    auto* iat = reinterpret_cast<IMAGE_THUNK_DATA*>(base + descriptor->FirstThunk);
+    for (; names->u1.AddressOfData; ++names, ++iat) {
+      if (names->u1.Ordinal & IMAGE_ORDINAL_FLAG64) continue;
+      const auto* by_name = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
+          base + names->u1.AddressOfData);
+      if (std::strcmp(by_name->Name, "?IsGPUAccelerationAvailable@MF@@YA_NXZ") !=
+          0)
+        continue;
+      DWORD old_protect{};
+      if (VirtualProtect(&iat->u1.Function, sizeof(void*), PAGE_READWRITE,
+                         &old_protect)) {
+        iat->u1.Function =
+            reinterpret_cast<ULONGLONG>(&pr_gpu_available_stub);
+        VirtualProtect(&iat->u1.Function, sizeof(void*), old_protect,
+                       &old_protect);
+      }
+      return;
+    }
+  }
+}
+
+// Drive one Premiere GPU-filter render. Returns true only when it produced a
+// valid output frame into the guarded buffer; any failure returns false so the
+// caller falls through to the ordinary PF SmartFX path (which, for a genuine
+// GPU-only VR effect, surfaces its own 512 diagnostic - never worse than before
+// this route existed).
+bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
+                       smart_execution::Result& result) {
+  const auto& plan = *request.plan;
+  const int32_t width = plan.width;
+  const int32_t height = plan.height;
+  if (width <= 0 || height <= 0) return false;
+  const HMODULE module = active_plugin::effect_module;
+  if (!module) return false;
+  const auto entry = reinterpret_cast<abi::PrGPUFilterEntryFn>(
+      GetProcAddress(module, abi::kGPUFilterEntryExport));
+  if (!entry) {
+    return false;
+  }
+  if (!frames.pr_gpu_ready()) {
+    return false;
+  }
+  ensure_suite_tables();
+
+  // CreateGPUVideoFrame and the plug-in's own device work need the GPU backend
+  // context current on this thread. The PF SmartFX GPU path establishes it via
+  // begin_backend_context before its create_gpu; this route reaches create_gpu
+  // outside that flow (VR effects do not GPU-negotiate), so establish it here.
+  namespace transport = gpu_runtime::memory_world_transport;
+  if (!transport::begin_backend_context(/*framework=*/3, /*device_index=*/0,
+                                        frames.cuda_context())) {
+    return false;
+  }
+
+  force_gpu_acceleration_available(module);
+
+  HostContext context;
+  context.frames = &frames;
+  context.param_state = &params_rt::state();
+  context.node_id = 1;
+  context.width = width;
+  context.height = height;
+  context.cuda_context = frames.cuda_context();
+  g_ctx = &context;
+  struct ContextGuard {
+    ~ContextGuard() {
+      g_ctx = nullptr;
+      gpu_runtime::memory_world_transport::end_backend_context(/*framework=*/3);
+    }
+  } context_guard;
+
+  abi::piSuites suites{};
+  suites.piInterfaceVer = 9;
+  suites.utilFuncs = &g_util_funcs;
+
+  abi::PrGPUFilter filter{};
+  abi::PrGPUFilterInfo info{};
+  int32_t startup_index = 0;
+  const abi::prSuiteError startup_error = entry(
+      abi::kPrSDKGPUFilterInterfaceVersion, &startup_index, /*inStartup=*/1,
+      &suites, &filter, &info);
+  if (!abi::suite_ok(startup_error) || !filter.CreateInstance || !filter.Render) {
+    return false;
+  }
+  const auto shutdown = [&] {
+    int32_t shutdown_index = 0;
+    entry(abi::kPrSDKGPUFilterInterfaceVersion, &shutdown_index, /*inStartup=*/0,
+          &suites, &filter, &info);
+  };
+
+  // Build the input GPU PPix and upload the host's float32 input pixels into it.
+  auto input_record = std::make_unique<FrameRecord>();
+  input_record->width = width;
+  input_record->height = height;
+  if (!frames.pr_make_gpu_ppix(input_record->world, input_record->live, width,
+                               height)) {
+    shutdown();
+    return false;
+  }
+  void* input_pixels{};
+  std::memcpy(&input_pixels, request.input_world->data() + 24,
+              sizeof(input_pixels));
+  const int32_t input_rowbytes = read<int32_t>(*request.input_world, 32);
+  if (input_pixels &&
+      !frames.pr_upload(input_record->world, input_pixels, input_rowbytes, width,
+                        height)) {
+    shutdown();
+    return false;
+  }
+  const abi::PPixHand input_ppix =
+      reinterpret_cast<abi::PPixHand>(frames.pr_ppix(input_record->world));
+  context.gpu_frames.push_back(std::move(input_record));
+
+  abi::PrGPUFilterInstance instance{};
+  instance.piSuitesP = &suites;
+  instance.inDeviceIndex = 0;
+  instance.inTimelineID = 1;
+  instance.inNodeID = context.node_id;
+  instance.ioPrivatePluginData = nullptr;
+  PrRenderCrash crash;
+  const abi::prSuiteError create_error =
+      guarded_create_instance(&filter, &instance, &crash);
+  if (crash.crashed) {
+    std::cerr << "stage:pr_gpu_crash phase=create_instance code=" << std::hex
+              << crash.code << " addr=" << crash.address << std::dec
+              << " base=" << static_cast<void*>(module) << "\n"
+              << std::flush;
+    shutdown();
+    return false;
+  }
+  if (!abi::suite_ok(create_error)) {
+    shutdown();
+    return false;
+  }
+
+  abi::PrGPUFilterRenderParams render_params{};
+  render_params.inQuality = 4;  // Max
+  render_params.inDownsampleFactorX = 1.0f;
+  render_params.inDownsampleFactorY = 1.0f;
+  render_params.inRenderWidth = static_cast<abi::csSDK_uint32>(width);
+  render_params.inRenderHeight = static_cast<abi::csSDK_uint32>(height);
+  render_params.inRenderPARNum = 1;
+  render_params.inRenderPARDen = 1;
+  render_params.inRenderField = 2;  // both fields
+
+  // Pre-create the output frame and hand it in via outFrame: a separable blur
+  // renders input -> its own scratch (CreateGPUPPix) -> this output, so the host
+  // supplies the destination rather than the plug-in returning a fresh handle.
+  auto output_record = std::make_unique<FrameRecord>();
+  output_record->width = width;
+  output_record->height = height;
+  if (!frames.pr_make_gpu_ppix(output_record->world, output_record->live, width,
+                               height)) {
+    if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+    shutdown();
+    return false;
+  }
+  abi::PPixHand host_output_ppix =
+      reinterpret_cast<abi::PPixHand>(frames.pr_ppix(output_record->world));
+  context.gpu_frames.push_back(std::move(output_record));
+
+  abi::PPixHand in_frames[1] = {input_ppix};
+  abi::PPixHand out_frame = host_output_ppix;
+  std::cerr << "stage:pr_gpu_render_begin\n" << std::flush;
+  const abi::prSuiteError render_error = guarded_render(
+      &filter, &instance, &render_params, in_frames, &out_frame, &crash);
+  std::cerr << "stage:pr_gpu_render_end error=" << render_error << "\n"
+            << std::flush;
+  if (crash.crashed) {
+    std::cerr << "stage:pr_gpu_crash phase=render code=" << std::hex
+              << crash.code << " addr=" << crash.address
+              << " access=" << crash.access << std::dec
+              << " base=" << static_cast<void*>(module) << "\n"
+              << std::flush;
+    if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+    shutdown();
+    return false;
+  }
+
+  const bool render_ok = abi::suite_ok(render_error) && out_frame;
+  FrameRecord* out_record = render_ok ? find_frame(out_frame) : nullptr;
+
+  if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+  shutdown();
+
+  if (!render_ok || !out_record) return false;
+
+  const int32_t rowbytes = width * 16;
+  if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * height))
+    return false;
+  *request.destination = request.guarded->data();
+  if (!frames.pr_download(out_record->world, request.guarded->data(), rowbytes,
+                          width, height))
+    return false;
+
+  // TEMP (#1058 correctness): dump the input and rendered output as raw float32
+  // ARGB so an AE-oracle comparison can settle the channel order. Env-gated.
+  if (const char* dump_path = std::getenv("AEXCOMPAT_PR_GPU_DUMP")) {
+    const auto write_raw = [&](const std::string& path, const void* pixels,
+                               int32_t src_rowbytes) {
+      std::ofstream file(path, std::ios::binary);
+      const int32_t header[2] = {width, height};
+      file.write(reinterpret_cast<const char*>(header), sizeof(header));
+      for (int32_t y = 0; y < height; ++y)
+        file.write(static_cast<const char*>(pixels) +
+                       static_cast<std::size_t>(y) * src_rowbytes,
+                   static_cast<std::size_t>(width) * 16);
+    };
+    write_raw(std::string(dump_path) + ".in", input_pixels, input_rowbytes);
+    write_raw(std::string(dump_path) + ".out", request.guarded->data(), rowbytes);
+  }
+
+  if (!render::prepare_world_layout(
+          *request.output_world,
+          {1, plan.pixel_bytes, width, height, rowbytes},
+          *request.destination) ||
+      !request.formats->register_world(request.output_world->data(),
+                                       request.dispatch_pixel_format))
+    return false;
+
+  result.gpu_setup_error = 0;
+  result.pre_error = 0;
+  result.selector_error = 0;
+  result.render_error = 0;
+  result.rects_valid = true;
+  result.empty_result_rect = false;
+  result.result_rect = {0, 0, width, height};
+  result.max_result_rect = {0, 0, width, height};
+  result.result_within_request = true;
+  result.output_width = width;
+  result.output_height = height;
+  result.output_rowbytes = rowbytes;
+  return true;
+}
+
+}  // namespace pr_host
+
 }  // namespace
 
 SelectorInputs build_selector_inputs(const std::array<int32_t, 4>& request_rect,
@@ -905,6 +1637,22 @@ bool dispatch(const Request& request, const Hooks& hooks,
   auto& runtime = smart::state();
   auto& params = request.parameters->params;
   namespace transport = gpu_runtime::memory_world_transport;
+
+  // Premiere GPU-filter route (issue #1058): the VR / Immersive effect family
+  // exports xGPUFilterEntry and is GPU-only - its PF SmartFX CPU path only draws
+  // a "requires GPU acceleration" warning and returns 512. Drive the Premiere
+  // GPU filter directly instead. Only float32 renders qualify (these effects are
+  // 32f GPU); any failure falls through to the ordinary PF path below, so a
+  // genuine GPU-only effect is never made worse than its pre-existing 512.
+  const bool pr_gpu_filter_export =
+      active_plugin::effect_module &&
+      GetProcAddress(active_plugin::effect_module,
+                     pr_gpu::kGPUFilterEntryExport) != nullptr;
+  if (plan.float32 && pr_gpu_filter_export) {
+    VideoFrameCpuWorlds pr_filter_frames;
+    if (pr_host::run_pr_gpu_filter(request, pr_filter_frames, result))
+      return true;
+  }
 
   std::array<std::byte, 8> gpu_setup_input{}, gpu_setup_output{};
   std::array<std::byte, 16> gpu_setup_extra{};

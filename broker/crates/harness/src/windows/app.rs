@@ -1,4 +1,26 @@
+const COLUMN_HEADER_HEIGHT: f32 = 84.0;
+
+fn fixed_column_header(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let (header_rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), COLUMN_HEADER_HEIGHT),
+        egui::Sense::hover(),
+    );
+    let mut header_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(header_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    add_contents(&mut header_ui);
+}
+
+fn fit_size_to_aspect(available: egui::Vec2, aspect: f32) -> egui::Vec2 {
+    let available = available.max(egui::vec2(1.0, 1.0));
+    let width = available.x.min(available.y * aspect);
+    egui::vec2(width, width / aspect)
+}
+
 struct HarnessApp {
+    ui_kit: AexUiKit,
     repository: PathBuf,
     selection: Option<Selection>,
     session_approved: bool,
@@ -20,9 +42,12 @@ struct HarnessApp {
     viewer_mode: u8,
     viewer_zoom: f32,
     viewer_pan: egui::Vec2,
+    show_analysis_panel: bool,
+    analysis_panel_width: f32,
     pixel_comparison: Option<Result<PixelComparison, String>>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    parameter_inspection_state: ParameterInspectionState,
     host_context: Option<aexcompat_broker::render_request::HostContext>,
     smart_render: bool,
     smart_render_advertised: Option<bool>,
@@ -73,6 +98,7 @@ impl HarnessApp {
     fn new(repository: PathBuf) -> Self {
         let missing_suite_aggregate = aggregate_missing_suites(&repository);
         Self {
+            ui_kit: AexUiKit::default(),
             repository,
             selection: None,
             session_approved: false,
@@ -94,9 +120,12 @@ impl HarnessApp {
             viewer_mode: 0,
             viewer_zoom: 1.0,
             viewer_pan: egui::Vec2::ZERO,
+            show_analysis_panel: true,
+            analysis_panel_width: 380.0,
             pixel_comparison: None,
             parameters: Vec::new(),
             parameter_defaults: Vec::new(),
+            parameter_inspection_state: ParameterInspectionState::NotSelected,
             host_context: None,
             smart_render: false,
             smart_render_advertised: None,
@@ -118,7 +147,8 @@ impl HarnessApp {
             custom_ui_key_modifiers: 0,
             busy: false,
             rendering: false,
-            status: "Select an AEX file. Selection does not execute native code.".into(),
+            status: "Select an AEX file. Effect Controls inspection runs in an isolated worker."
+                .into(),
             report: String::new(),
             render_diagnostics: None,
             failure_diagnostics: None,
@@ -185,14 +215,32 @@ impl HarnessApp {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.viewer_mode, 0, "Input");
-                    ui.selectable_value(&mut self.viewer_mode, 1, "AEX output");
-                    ui.selectable_value(&mut self.viewer_mode, 2, "Compare");
+                    if self
+                        .ui_kit
+                        .tab_button(ui, "Input", self.viewer_mode == 0)
+                        .clicked()
+                    {
+                        self.viewer_mode = 0;
+                    }
+                    if self
+                        .ui_kit
+                        .tab_button(ui, "AEX output", self.viewer_mode == 1)
+                        .clicked()
+                    {
+                        self.viewer_mode = 1;
+                    }
+                    if self
+                        .ui_kit
+                        .tab_button(ui, "Compare", self.viewer_mode == 2)
+                        .clicked()
+                    {
+                        self.viewer_mode = 2;
+                    }
                     ui.separator();
                     ui.label("FHD canvas / aspect-fit");
                     ui.separator();
                     ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
-                    if ui.small_button("Fit").clicked() {
+                    if self.ui_kit.compact_button(ui, "Fit", true).clicked() {
                         self.viewer_zoom = 1.0;
                         self.viewer_pan = egui::Vec2::ZERO;
                     }
@@ -248,6 +296,7 @@ impl HarnessApp {
         self.preflight_warnings.clear();
         self.parameters.clear();
         self.parameter_defaults.clear();
+        self.parameter_inspection_state = ParameterInspectionState::NotSelected;
         self.audio_input = None;
         self.audio_effect_only = false;
         self.smart_render = false;
@@ -259,50 +308,131 @@ impl HarnessApp {
     }
 
     fn show_workspace_viewer(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.viewer_mode, 0, "INPUT");
-            ui.selectable_value(&mut self.viewer_mode, 1, "AEX OUTPUT");
-            ui.selectable_value(&mut self.viewer_mode, 2, "COMPARE");
-            ui.separator();
-            let label = match self.viewer_mode {
-                0 => self.input_preview.as_ref().map(|texture| texture.size()),
-                1 => self.preview.as_ref().map(|texture| texture.size()),
-                _ => None,
-            };
-            if let Some([width, height]) = label {
-                ui.monospace(format!("{width} x {height}"));
-            } else {
-                ui.weak("FHD workspace / aspect fit");
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Pop out").clicked() {
-                    self.viewer_open = true;
+        fixed_column_header(ui, |ui| {
+            ui.horizontal(|ui| {
+                if self
+                    .ui_kit
+                    .tab_button(
+                        ui,
+                        self.ui_kit.text("VIEW", "ビュー"),
+                        self.viewer_mode != 2,
+                    )
+                    .clicked()
+                {
+                    self.viewer_mode = if self.preview.is_some() { 1 } else { 0 };
                 }
-                if ui.small_button("Fit").clicked() {
-                    self.viewer_zoom = 1.0;
-                    self.viewer_pan = egui::Vec2::ZERO;
+                if self
+                    .ui_kit
+                    .tab_button(
+                        ui,
+                        self.ui_kit.text("COMPARE", "比較"),
+                        self.viewer_mode == 2,
+                    )
+                    .clicked()
+                {
+                    self.viewer_mode = 2;
                 }
-                ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
+            });
+            ui.horizontal(|ui| {
+                let label = match self.viewer_mode {
+                    0 => self.input_preview.as_ref().map(|texture| texture.size()),
+                    1 => self.preview.as_ref().map(|texture| texture.size()),
+                    _ => None,
+                };
+                if let Some([width, height]) = label {
+                    ui.monospace(format!("{width} x {height}"));
+                } else {
+                    ui.weak(
+                        self.ui_kit
+                            .text("FHD workspace / aspect fit", "FHD表示 / 比率を維持"),
+                    );
+                }
                 if self.rendering {
-                    ui.weak("Rendering...");
                     ui.spinner();
+                    ui.weak(self.ui_kit.text("Rendering...", "レンダー中..."));
                 }
             });
         });
         ui.separator();
 
-        let viewer_height = (ui.available_height() * 0.62).clamp(280.0, 860.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), viewer_height),
-            egui::Layout::top_down(egui::Align::Center),
-            |ui| match self.viewer_mode {
-                0 => show_viewer_texture(
+        let toolbar_height = 42.0;
+        let viewer_available = egui::vec2(
+            ui.available_width(),
+            (ui.available_height() - toolbar_height).max(1.0),
+        );
+        let viewer_size = fit_size_to_aspect(viewer_available, 16.0 / 9.0);
+        ui.horizontal(|ui| {
+            ui.add_space(((ui.available_width() - viewer_size.x) * 0.5).max(0.0));
+            ui.allocate_ui_with_layout(
+                viewer_size,
+                egui::Layout::top_down(egui::Align::Center),
+                |ui| match self.viewer_mode {
+                0 if self.input_preview.is_some() => show_viewer_texture(
                     ui,
                     "Input",
                     self.input_preview.as_ref(),
                     &mut self.viewer_zoom,
                     &mut self.viewer_pan,
                 ),
+                0 => {
+                    let ui_kit = self.ui_kit.clone();
+                    ui.centered_and_justified(|ui| {
+                        ui_kit.onboarding_card(ui, |ui| {
+                                ui.set_max_width(560.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        RichText::new(ui_kit.text(
+                                            "Start a render workspace",
+                                            "レンダーワークスペースを開始",
+                                        ))
+                                            .size(24.0)
+                                            .strong(),
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        RichText::new(
+                                            ui_kit.text(
+                                                "Choose an After Effects plug-in and an input image. AEXCompat will load the effect controls before any native render runs.",
+                                                "After Effectsプラグインと入力画像を選択してください。ネイティブレンダーの前にエフェクトコントロールを読み込みます。",
+                                            ),
+                                        )
+                                        .color(ui_kit.muted_foreground()),
+                                    );
+                                    ui.add_space(20.0);
+                                    ui.horizontal(|ui| {
+                                        if ui_kit
+                                            .primary_button(
+                                                ui,
+                                                ui_kit.text("1  Choose AEX...", "1  AEXを選択..."),
+                                                !self.busy,
+                                            )
+                                            .clicked()
+                                        {
+                                            self.reset_and_choose_aex();
+                                        }
+                                        if ui_kit
+                                            .secondary_button(
+                                                ui,
+                                                ui_kit.text(
+                                                    "2  Choose image...",
+                                                    "2  画像を選択...",
+                                                ),
+                                                !self.busy,
+                                            )
+                                            .clicked()
+                                        {
+                                            self.choose_input(ui.ctx());
+                                        }
+                                    });
+                                    ui.add_space(12.0);
+                                    ui.weak(ui_kit.text(
+                                        "Selecting an AEX scans its identity and dependencies, then inspects Effect Controls in an isolated worker. Rendering stays disabled until both inputs are ready.",
+                                        "AEX選択後、識別情報と依存関係を確認し、隔離ワーカーでエフェクトコントロールを検査します。両方の入力が揃うまでレンダーは無効です。",
+                                    ));
+                                });
+                            });
+                    });
+                }
                 1 if self.preview.is_some() => show_viewer_texture(
                     ui,
                     "AEX output",
@@ -345,8 +475,69 @@ impl HarnessApp {
                         &mut self.viewer_pan,
                     );
                 }),
-            },
-        );
+                },
+            );
+        });
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
+            if self.viewer_mode != 2 {
+                let showing_before = self.viewer_mode == 0;
+                let eye = self
+                    .ui_kit
+                    .eye_button(
+                        ui,
+                        !showing_before,
+                        self.preview.is_some(),
+                        self.ui_kit.text(
+                            if showing_before {
+                                "Show effect result"
+                            } else {
+                                "Show before effect"
+                            },
+                            if showing_before {
+                                "エフェクト適用後を表示"
+                            } else {
+                                "エフェクト適用前を表示"
+                            },
+                        ),
+                    )
+                    .on_hover_text(self.ui_kit.text(
+                        if showing_before {
+                            "Show effect result"
+                        } else {
+                            "Show before effect"
+                        },
+                        if showing_before {
+                            "エフェクト適用後を表示"
+                        } else {
+                            "エフェクト適用前を表示"
+                        },
+                    ));
+                if eye.clicked() {
+                    self.viewer_mode = if showing_before && self.preview.is_some() {
+                        1
+                    } else {
+                        0
+                    };
+                }
+            }
+            if self
+                .ui_kit
+                .compact_button(ui, self.ui_kit.text("Fit", "全体表示"), true)
+                .clicked()
+            {
+                self.viewer_zoom = 1.0;
+                self.viewer_pan = egui::Vec2::ZERO;
+            }
+            if self
+                .ui_kit
+                .compact_button(ui, self.ui_kit.text("Pop out", "別ウィンドウ"), true)
+                .clicked()
+            {
+                self.viewer_open = true;
+            }
+        });
     }
 
     fn spawn<F>(&mut self, work: F)
@@ -544,10 +735,15 @@ impl HarnessApp {
 
     fn start_live_render_if_ready(&mut self) {
         if self.live_render
-            && !self.busy
             && !self.audio_effect_only
-            && self.selection.is_some()
-            && self.input_image.is_some()
+            && render_action_enabled(
+                self.busy,
+                self.selection.is_some(),
+                self.input_image.is_some(),
+                self.session_approved,
+                self.selection_stale,
+                self.smart_render_capability.is_some(),
+            )
         {
             self.quick_render();
             self.viewer_mode = 1;
@@ -684,6 +880,7 @@ impl HarnessApp {
                 });
                 self.selection_stale = false;
                 self.parameters.clear();
+                self.parameter_defaults.clear();
                 self.audio_input = None;
                 self.audio_effect_only = false;
                 self.smart_render = false;
@@ -720,7 +917,9 @@ impl HarnessApp {
                         }
                     }
                 } else {
-                    self.status = "AEX identity is unchanged.".into();
+                    self.inspect_after_refresh = true;
+                    self.parameter_inspection_state = ParameterInspectionState::Loading;
+                    self.status = "AEX identity is unchanged; reloading Effect Controls.".into();
                 }
             }
             Err(error) => {
@@ -781,6 +980,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Loading Effect Controls...".into();
+        self.parameter_inspection_state = ParameterInspectionState::Loading;
         self.spawn_native("inspect_parameters", move || {
             let (parameters, diagnostics) =
                 aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
@@ -1269,6 +1469,14 @@ impl HarnessApp {
     }
 
     fn render_to(&mut self, output: PathBuf) {
+        if !self.session_approved || self.selection_stale {
+            self.status =
+                "Render blocked: the selected AEX session is not approved or is stale.".into();
+            self.report =
+                "reload Effect Controls and approve the current AEX identity before rendering"
+                    .into();
+            return;
+        }
         let Some(selection) = &self.selection else {
             return;
         };
@@ -1722,45 +1930,69 @@ impl HarnessApp {
     }
 
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("Effect Controls").size(20.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(
-                        !self.busy && !self.parameter_defaults.is_empty(),
-                        egui::Button::new("Reset All"),
+        fixed_column_header(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(
+                    RichText::new(
+                        self.ui_kit
+                            .text("Effect Controls", "エフェクトコントロール"),
                     )
-                    .clicked()
-                {
-                    self.parameters = self.parameter_defaults.clone();
-                    self.pending_parameter_slot = None;
-                    self.pending_live_render = self.live_render;
-                    self.live_render_due = self
-                        .live_render
-                        .then(|| Instant::now() + std::time::Duration::from_millis(500));
+                    .size(20.0),
+                );
+                if self.busy && self.task_kind == TaskKind::InspectParameters {
+                    ui.spinner();
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self
+                        .ui_kit
+                        .compact_button(
+                            ui,
+                            self.ui_kit.text("Reset", "リセット"),
+                            !self.busy && !self.parameter_defaults.is_empty(),
+                        )
+                        .clicked()
+                    {
+                        self.parameters = self.parameter_defaults.clone();
+                        self.pending_parameter_slot = None;
+                        self.pending_live_render = self.live_render;
+                        self.live_render_due = self
+                            .live_render
+                            .then(|| Instant::now() + std::time::Duration::from_millis(500));
+                    }
+                });
             });
+            if let Some(selection) = &self.selection {
+                ui.label(
+                    selection
+                        .path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Selected AEX"),
+                );
+            } else {
+                ui.label(self.ui_kit.text(
+                    "Select an AEX to load its parameters.",
+                    "AEXを選択するとパラメーターを読み込みます。",
+                ));
+            }
         });
-        if let Some(selection) = &self.selection {
-            ui.label(
-                selection
-                    .path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Selected AEX"),
-            );
-        } else {
-            ui.label("Select an AEX to load its parameters.");
-        }
         ui.separator();
         if self.busy && self.task_kind == TaskKind::InspectParameters {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Loading parameters...");
+                ui.label(
+                    self.ui_kit
+                        .text("Loading parameters...", "パラメーターを読み込んでいます..."),
+                );
             });
-        } else if self.selection.is_some() && self.parameters.is_empty() {
-            ui.label("This effect exposed no editable parameters.");
-            if ui.small_button("Reload controls").clicked() {
+        } else if let Some((english, japanese)) =
+            parameter_inspection_message(self.parameter_inspection_state)
+        {
+            ui.label(self.ui_kit.text(english, japanese));
+            if ui
+                .small_button(self.ui_kit.text("Reload controls", "再読込"))
+                .clicked()
+            {
                 self.inspect_parameters_async();
             }
         }
@@ -1835,7 +2067,10 @@ impl HarnessApp {
                         });
                         if parameter.kind == "layer" {
                             ui.horizontal(|ui| {
-                                if ui.small_button("Choose image").clicked() {
+                                if ui
+                                    .small_button(self.ui_kit.text("Choose image", "画像を選択"))
+                                    .clicked()
+                                {
                                     parameter.layer_path = rfd::FileDialog::new()
                                         .add_filter(
                                             "Image",
@@ -1849,7 +2084,7 @@ impl HarnessApp {
                                         .as_ref()
                                         .and_then(|path| path.file_name())
                                         .and_then(|name| name.to_str())
-                                        .unwrap_or("Not connected"),
+                                        .unwrap_or(self.ui_kit.text("Not connected", "未接続")),
                                 );
                             });
                         } else if parameter.kind == "arbitrary_data" {
@@ -2086,40 +2321,46 @@ impl HarnessApp {
                     let report = serde_json::from_str::<serde_json::Value>(&result.body)
                         .map_err(|error| format!("inspection report is invalid JSON: {error}"))?;
                     let capability = inspected_render_capability(&report)?;
-                    let parameters = serde_json::from_value(report["parameters"].clone())
-                        .map_err(|error| format!("inspection parameters are invalid: {error}"))?;
+                    let parameters = serde_json::from_value::<
+                        Vec<aexcompat_broker::image_render::InteractiveParameter>,
+                    >(report["parameters"].clone())
+                    .map_err(|error| format!("inspection parameters are invalid: {error}"))?;
                     let audio_effect_only = report["worker_diagnostics"]["audio_effect_only"]
                         .as_bool()
                         .unwrap_or(false);
-                    Ok((capability, parameters, audio_effect_only))
+                    let inspection_state = parameter_inspection_state(&report, &parameters)?;
+                    Ok((capability, parameters, audio_effect_only, inspection_state))
                 })();
                 match accepted {
-                    Ok((capability, parameters, audio_effect_only)) => {
+                    Ok((capability, parameters, audio_effect_only, inspection_state)) => {
                         self.parameters = parameters;
                         self.parameter_defaults = self.parameters.clone();
+                        self.parameter_inspection_state = inspection_state;
                         self.audio_effect_only = audio_effect_only;
                         self.smart_render = capability.smart_render_advertised;
                         self.smart_render_advertised = Some(capability.smart_render_advertised);
                         self.smart_render_capability = Some(capability);
                         effect_controls_ready = true;
-                        self.status = format!(
-                            "Effect Controls ready: {} editable parameter(s). Render path: {}.",
-                            self.parameters.len(),
-                            if self.smart_render {
-                                "SmartFX"
-                            } else {
-                                "Classic"
-                            }
+                        self.status = parameter_inspection_status(
+                            inspection_state,
+                            &self.parameters,
+                            self.smart_render,
                         );
                     }
                     Err(error) => {
                         self.parameters.clear();
                         self.parameter_defaults.clear();
+                        self.parameter_inspection_state = ParameterInspectionState::Failed;
                         self.audio_effect_only = false;
                         self.status = "Effect Controls capability inspection failed safely; rendering is blocked.".into();
                         inspection_blocker = Some(error);
                     }
                 }
+            } else {
+                self.parameters.clear();
+                self.parameter_defaults.clear();
+                self.parameter_inspection_state = ParameterInspectionState::Failed;
+                self.audio_effect_only = false;
             }
         }
         if let Some(output) = result.output {
@@ -2155,7 +2396,7 @@ impl HarnessApp {
 
 impl eframe::App for HarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        ctx.set_visuals(egui::Visuals::dark());
+        self.ui_kit.install(ctx);
         self.poll(ctx);
         self.dispatch_pending_parameter_change(ctx);
         self.check_selected_identity();
@@ -2164,70 +2405,196 @@ impl eframe::App for HarnessApp {
             self.inspect_parameters_async();
         }
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("AEXCompat").size(22.0));
-                ui.weak("EFFECT LAB");
-                ui.separator();
-                ui.label(RichText::new("SOURCE").small().strong());
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("AEX..."))
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self
+                        .ui_kit
+                        .segmented_toggle(
+                            ui,
+                            "language-toggle",
+                            self.ui_kit.language_is(UiLanguage::Japanese),
+                            "EN",
+                            "JA",
+                        )
+                        .clicked()
+                    {
+                        let language = if self.ui_kit.language_is(UiLanguage::Japanese) {
+                            UiLanguage::English
+                        } else {
+                            UiLanguage::Japanese
+                        };
+                        self.ui_kit.set_language(language);
+                    }
+                    if self
+                        .ui_kit
+                        .segmented_toggle(
+                            ui,
+                            "color-mode-toggle",
+                            !self.ui_kit.dark_mode,
+                            "Dark",
+                            "Light",
+                        )
+                        .clicked()
+                    {
+                        self.ui_kit.toggle_color_mode();
+                    }
+                    if self.busy {
+                        ui.spinner();
+                    }
+                });
+            });
+            ui.separator();
+            ui.add_space(2.0);
+            ui.horizontal_wrapped(|ui| {
+                let aex_ready = self.selection.is_some();
+                let image_ready = self.input_image.is_some();
+                let output_ready = self.preview.is_some();
+                let aex_label = if aex_ready {
+                    self.ui_kit.text("1  AEX  SELECTED", "1  AEX  選択済み")
+                } else {
+                    "1  AEX"
+                };
+                self.ui_kit.workflow_label(
+                    ui,
+                    aex_label,
+                    if aex_ready {
+                        self.ui_kit.success_foreground()
+                    } else {
+                        self.ui_kit.muted_foreground()
+                    },
+                );
+                if self
+                    .ui_kit
+                    .compact_button(
+                        ui,
+                        self.ui_kit.text("Choose AEX...", "AEXを選択..."),
+                        !self.busy,
+                    )
                     .clicked()
                 {
                     self.reset_and_choose_aex();
                 }
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Image..."))
+                ui.separator();
+                let image_label = if image_ready {
+                    self.ui_kit.text("2  INPUT  READY", "2  入力  準備完了")
+                } else {
+                    self.ui_kit.text("2  INPUT", "2  入力")
+                };
+                self.ui_kit.workflow_label(
+                    ui,
+                    image_label,
+                    if image_ready {
+                        self.ui_kit.success_foreground()
+                    } else {
+                        self.ui_kit.muted_foreground()
+                    },
+                );
+                if self
+                    .ui_kit
+                    .compact_button(
+                        ui,
+                        self.ui_kit.text("Choose image...", "画像を選択..."),
+                        !self.busy,
+                    )
                     .clicked()
                 {
                     self.choose_input(ctx);
                     self.viewer_mode = 0;
                 }
                 ui.separator();
-                ui.label(RichText::new("PREVIEW").small().strong());
-                let can_render =
-                    !self.busy && self.selection.is_some() && self.input_image.is_some();
+                let output_label = if output_ready {
+                    self.ui_kit.text("3  OUTPUT  READY", "3  出力  準備完了")
+                } else {
+                    self.ui_kit.text("3  RENDER", "3  レンダー")
+                };
+                self.ui_kit.workflow_label(
+                    ui,
+                    output_label,
+                    if output_ready {
+                        self.ui_kit.success_foreground()
+                    } else {
+                        self.ui_kit.muted_foreground()
+                    },
+                );
+                let can_render = render_action_enabled(
+                    self.busy,
+                    self.selection.is_some(),
+                    self.input_image.is_some(),
+                    self.session_approved,
+                    self.selection_stale,
+                    self.smart_render_capability.is_some(),
+                );
                 if ui
-                    .add_enabled(can_render, egui::Button::new("Render"))
+                    .scope(|ui| {
+                        self.ui_kit.compact_primary_button(
+                            ui,
+                            self.ui_kit.text("Render preview", "プレビューをレンダー"),
+                            can_render,
+                        )
+                    })
+                    .inner
                     .clicked()
                 {
                     self.quick_render();
                 }
                 ui.separator();
-                let live_render_changed =
-                    ui.checkbox(&mut self.live_render, "Auto Update").changed();
+                let live_render_changed = self
+                    .ui_kit
+                    .checkbox(
+                        ui,
+                        &mut self.live_render,
+                        self.ui_kit.text("Auto Update", "自動更新"),
+                        true,
+                    )
+                    .changed();
                 if live_render_changed && !self.live_render {
                     self.pending_live_render = false;
                     if self.pending_parameter_slot.is_none() {
                         self.live_render_due = None;
                     }
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.busy {
-                        ui.spinner();
-                    }
-                    ui.label(RichText::new(&self.status).small());
-                });
             });
-            ui.add_space(6.0);
+            ui.add_space(8.0);
         });
-        egui::SidePanel::left("effect_controls")
-            .default_width(340.0)
-            .min_width(260.0)
-            .max_width(460.0)
-            .resizable(true)
-            .show(ctx, |ui| self.show_effect_controls(ui));
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.show_workspace_viewer(ui);
-            ui.separator();
-            egui::CollapsingHeader::new("Analysis, render settings and diagnostics")
-                .default_open(false)
-                .show(ui, |ui| {
-            egui::ScrollArea::vertical()
+        let analysis_openness = ctx.animate_bool(
+            egui::Id::new("analysis_and_logs_animation"),
+            self.show_analysis_panel,
+        );
+        let analysis_width = egui::lerp(18.0..=self.analysis_panel_width, analysis_openness);
+        let analysis_response = egui::SidePanel::left("analysis_and_logs")
+            .exact_width(analysis_width)
+            .resizable(false)
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                if analysis_openness > 0.12 {
+                    fixed_column_header(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(14.0);
+                        ui.heading(self.ui_kit.text("Analysis & Logs", "解析・ログ"));
+                    });
+                    ui.label(self.ui_kit.text(
+                        "Diagnostics, render settings and command output",
+                        "診断、レンダー設定、コマンド出力",
+                    ));
+                        },
+                    );
+                    ui.separator();
+            egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+            ui.label(
+                RichText::new(self.ui_kit.text(
+                    "PROJECT / SESSION SETTINGS",
+                    "プロジェクト／セッション設定",
+                ))
+                .small()
+                .strong()
+                .color(self.ui_kit.muted_foreground()),
+            );
+            ui.separator();
             if ui
-                .add_enabled(!self.busy, egui::Button::new("Change AEX source..."))
+                .add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Change AEX source...", "AEXを変更...")))
                 .clicked()
             {
                 self.reset_and_choose_aex();
@@ -2238,20 +2605,20 @@ impl eframe::App for HarnessApp {
                 let selected_hash = selected.sha256.clone();
                 ui.group(|ui| {
                     ui.label(RichText::new(selected_path).strong());
-                    ui.collapsing("Binary details and dependency DLLs", |ui| {
+                    ui.collapsing(self.ui_kit.text("Binary details and dependency DLLs", "バイナリ詳細と依存DLL"), |ui| {
                     ui.label(format!("{} bytes", selected_size));
                     ui.monospace(&selected_hash);
                     if self.selection_stale {
                         ui.colored_label(Color32::from_rgb(210, 75, 55), "Build changed: native execution is paused until reload");
                     }
                     ui.separator();
-                    ui.label(RichText::new("Local diagnostics").strong());
+                    ui.label(RichText::new(self.ui_kit.text("Local diagnostics", "ローカル診断")).strong());
                     ui.label(format!("Events for selected SHA: {}", self.diagnostic_history.count));
                     ui.label(format!("Latest: {}", self.diagnostic_history.latest.as_deref().unwrap_or("none")));
                     if let Some(warning) = &self.diagnostic_warning {
                         ui.colored_label(Color32::from_rgb(210, 145, 40), warning);
                     }
-                    if ui.button("Reload diagnostics").clicked() {
+                    if ui.button(self.ui_kit.text("Reload diagnostics", "診断を再読込")).clicked() {
                         self.diagnostic_history = load_diagnostic_history(&self.repository, &selected_hash);
                         self.missing_suite_aggregate = aggregate_missing_suites(&self.repository);
                     }
@@ -2275,9 +2642,9 @@ impl eframe::App for HarnessApp {
                         ));
                     }
                     ui.separator();
-                    ui.label(RichText::new("Session dependency DLLs").strong());
+                    ui.label(RichText::new(self.ui_kit.text("Session dependency DLLs", "セッション依存DLL")).strong());
                     if self.dependencies.is_empty() {
-                        ui.label("No additional DLLs selected.");
+                        ui.label(self.ui_kit.text("No additional DLLs selected.", "追加DLLは選択されていません。"));
                     }
                     for warning in &self.preflight_warnings {
                         ui.colored_label(
@@ -2295,16 +2662,16 @@ impl eframe::App for HarnessApp {
                             let basename = dependency.path.file_name().and_then(|name| name.to_str()).unwrap_or("<invalid>");
                             let short_hash = dependency.sha256.get(..12).unwrap_or(&dependency.sha256);
                             ui.monospace(format!("{basename}  {short_hash}...  {} bytes", dependency.size));
-                            if ui.add_enabled(!self.busy, egui::Button::new("Remove")).clicked() {
+                            if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Remove", "削除"))).clicked() {
                                 remove = Some(index);
                             }
                         });
                     }
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(!self.busy, egui::Button::new("Add DLL")).clicked() {
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Add DLL", "DLLを追加"))).clicked() {
                             self.add_dependency();
                         }
-                        if ui.add_enabled(!self.busy && !self.dependencies.is_empty(), egui::Button::new("Clear all")).clicked() {
+                        if ui.add_enabled(!self.busy && !self.dependencies.is_empty(), egui::Button::new(self.ui_kit.text("Clear all", "すべて消去"))).clicked() {
                             self.dependencies.clear();
                             self.preflight_warnings.clear();
                             self.approved_dependencies.clear();
@@ -2325,91 +2692,97 @@ impl eframe::App for HarnessApp {
                         }
                     }
                     ui.label("The selected binary is hashed automatically and runs in a crash-contained worker. This is not a security sandbox.");
-                    if ui.add_enabled(!self.busy, egui::Button::new("Reload rebuilt AEX")).clicked() {
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Reload rebuilt AEX", "再ビルドしたAEXを再読込"))).clicked() {
                         self.refresh_aex();
                     }
                     });
                 });
                 if self.session_approved && !self.selection_stale {
                     ui.add_space(10.0);
-                    if ui.add_enabled(!self.busy, egui::Button::new("Reload Effect Controls")).clicked() { self.inspect_parameters_async(); }
-                    ui.collapsing("Developer probes and diagnostics", |ui| {
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Reload Effect Controls", "エフェクトコントロールを再読込"))).clicked() { self.inspect_parameters_async(); }
+                    ui.label(
+                        RichText::new(self.ui_kit.text("ADVANCED", "高度な機能"))
+                            .small()
+                            .strong()
+                            .color(self.ui_kit.muted_foreground()),
+                    );
+                    ui.collapsing(self.ui_kit.text("Developer probes and diagnostics", "開発者向けプローブと診断"), |ui| {
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(!self.busy, egui::Button::new("Inspect all dependencies")).clicked() { self.inspect_external_dependencies(false); }
-                        if ui.add_enabled(!self.busy, egui::Button::new("Inspect missing dependencies")).clicked() { self.inspect_external_dependencies(true); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Inspect all dependencies", "全依存関係を検査"))).clicked() { self.inspect_external_dependencies(false); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Inspect missing dependencies", "不足依存関係を検査"))).clicked() { self.inspect_external_dependencies(true); }
                     });
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe 2-frame persistent sequence")).clicked() { self.probe_persistent_sequence(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe sequence save/reload")).clicked() { self.probe_flattened_sequence(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe non-destructive sequence save")).clicked() { self.probe_copied_flattened_sequence(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe options dialog")).clicked() { self.probe_options_dialog(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe automatic options dialog")).clicked() { self.probe_automatic_options_dialog(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe NOP_RENDER passthrough")).clicked() { self.probe_nop_render(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe SmartFX NOP_RENDER passthrough")).clicked() { self.probe_smart_nop_render(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe input-buffer write access")).clicked() { self.probe_input_buffer_write(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe SmartFX input-buffer write access")).clicked() { self.probe_smart_input_buffer_write(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe FRAME_SETUP expansion")).clicked() { self.probe_frame_resize(true); }
-                    if ui.add_enabled(!self.busy, egui::Button::new("Probe FRAME_SETUP shrink")).clicked() { self.probe_frame_resize(false); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe 2-frame persistent sequence", "2フレーム永続シーケンスを検査"))).clicked() { self.probe_persistent_sequence(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe sequence save/reload", "シーケンス保存／再読込を検査"))).clicked() { self.probe_flattened_sequence(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe non-destructive sequence save", "非破壊シーケンス保存を検査"))).clicked() { self.probe_copied_flattened_sequence(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe options dialog", "オプションダイアログを検査"))).clicked() { self.probe_options_dialog(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe automatic options dialog", "自動オプションダイアログを検査"))).clicked() { self.probe_automatic_options_dialog(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe NOP_RENDER passthrough", "NOP_RENDERパススルーを検査"))).clicked() { self.probe_nop_render(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe SmartFX NOP_RENDER passthrough", "SmartFX NOP_RENDERパススルーを検査"))).clicked() { self.probe_smart_nop_render(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe input-buffer write access", "入力バッファー書込を検査"))).clicked() { self.probe_input_buffer_write(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe SmartFX input-buffer write access", "SmartFX入力バッファー書込を検査"))).clicked() { self.probe_smart_input_buffer_write(); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe FRAME_SETUP expansion", "FRAME_SETUP拡張を検査"))).clicked() { self.probe_frame_resize(true); }
+                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe FRAME_SETUP shrink", "FRAME_SETUP縮小を検査"))).clicked() { self.probe_frame_resize(false); }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events & 4 != 0)
-                        && ui.add_enabled(!self.busy, egui::Button::new("Probe custom UI cursor")).clicked()
+                        && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe custom UI cursor", "カスタムUIカーソルを検査"))).clicked()
                     {
                         self.probe_custom_ui_cursor();
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events != 0)
-                        && ui.add_enabled(!self.busy, egui::Button::new("Record custom UI draw")).clicked()
+                        && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Record custom UI draw", "カスタムUI描画を記録"))).clicked()
                     {
                         self.probe_custom_ui_draw();
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events != 0) {
                         let changed = ui.checkbox(
                             &mut self.apply_custom_ui_draw_to_render,
-                            "Draw custom UI before each render",
+                            self.ui_kit.text("Draw custom UI before each render", "各レンダー前にカスタムUIを描画"),
                         ).changed();
                         if changed && self.apply_custom_ui_draw_to_render {
                             self.apply_custom_ui_click_to_render = false;
                         }
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events != 0)
-                        && ui.add_enabled(!self.busy, egui::Button::new("Test custom UI lifecycle")).clicked()
+                        && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Test custom UI lifecycle", "カスタムUIライフサイクルを検査"))).clicked()
                     {
                         self.probe_custom_ui_lifecycle();
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events != 0)
-                        && ui.add_enabled(!self.busy, egui::Button::new("Dispatch custom UI idle")).clicked()
+                        && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch custom UI idle", "カスタムUIアイドルを送信"))).clicked()
                     {
                         self.probe_custom_ui_idle();
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events != 0) {
                         ui.group(|ui| {
-                            ui.label(RichText::new("Custom UI key event").strong());
+                            ui.label(RichText::new(self.ui_kit.text("Custom UI key event", "カスタムUIキーイベント")).strong());
                             ui.horizontal(|ui| {
-                                ui.label("Keycode");
+                                ui.label(self.ui_kit.text("Keycode", "キーコード"));
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_keycode).range(0u32..=0xC000_FFFFu32));
                                 ui.label(format!("0x{:08X}", self.custom_ui_keycode));
-                                ui.label("Modifiers");
+                                ui.label(self.ui_kit.text("Modifiers", "修飾キー"));
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_key_modifiers));
-                                if ui.add_enabled(!self.busy, egui::Button::new("Dispatch key")).clicked() {
+                                if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch key", "キーを送信"))).clicked() {
                                     self.probe_custom_ui_keydown();
                                 }
                             });
-                            ui.label("Default is printable A. The custom UI click X/Y values are used as the screen point.");
+                            ui.label(self.ui_kit.text("Default is printable A. The custom UI click X/Y values are used as the screen point.", "初期値は入力可能なAです。カスタムUIクリックのX/Yを画面座標として使います。"));
                         });
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events & 4 != 0) {
                         ui.group(|ui| {
-                            ui.label(RichText::new("Custom UI click").strong());
+                            ui.label(RichText::new(self.ui_kit.text("Custom UI click", "カスタムUIクリック")).strong());
                             ui.horizontal(|ui| {
                                 ui.label("X");
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_click_point[0]).range(0..=8192));
                                 ui.label("Y");
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_click_point[1]).range(0..=8192));
                                 ui.color_edit_button_rgba_unmultiplied(&mut self.custom_ui_click_color);
-                                if ui.add_enabled(!self.busy, egui::Button::new("Dispatch click")).clicked() {
+                                if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch click", "クリックを送信"))).clicked() {
                                     self.probe_custom_ui_click();
                                 }
                             });
                             let changed = ui.checkbox(
                                 &mut self.apply_custom_ui_click_to_render,
-                                "Apply this click before each render",
+                                self.ui_kit.text("Apply this click before each render", "各レンダー前にこのクリックを適用"),
                             ).changed();
                             if changed && self.apply_custom_ui_click_to_render {
                                 self.apply_custom_ui_draw_to_render = false;
@@ -2418,31 +2791,31 @@ impl eframe::App for HarnessApp {
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events & 3 != 0) {
                         ui.group(|ui| {
-                            ui.label(RichText::new("Comp / Layer custom UI drag").strong());
+                            ui.label(RichText::new(self.ui_kit.text("Comp / Layer custom UI drag", "コンポ／レイヤーのカスタムUIドラッグ")).strong());
                             ui.horizontal(|ui| {
-                                ui.label("End X");
+                                ui.label(self.ui_kit.text("End X", "終了X"));
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_drag_end[0]).range(0..=8192));
-                                ui.label("End Y");
+                                ui.label(self.ui_kit.text("End Y", "終了Y"));
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_drag_end[1]).range(0..=8192));
-                                ui.label("Steps");
+                                ui.label(self.ui_kit.text("Steps", "ステップ数"));
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_drag_steps).range(1..=32));
-                                if ui.add_enabled(!self.busy, egui::Button::new("Dispatch drag")).clicked() {
+                                if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch drag", "ドラッグを送信"))).clicked() {
                                     self.probe_custom_ui_drag();
                                 }
                             });
-                            ui.label("The custom UI click X/Y values above are used as the drag start.");
-                            if ui.add_enabled(!self.busy, egui::Button::new("Dispatch mouse exited")).clicked() {
+                            ui.label(self.ui_kit.text("The custom UI click X/Y values above are used as the drag start.", "上のクリックX/Yをドラッグ開始位置として使います。"));
+                            if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch mouse exited", "マウス退出を送信"))).clicked() {
                                 self.probe_custom_ui_mouse_exited();
                             }
                         });
                     }
-                    ui.collapsing("AEGP diagnostics (advanced)", |ui| {
-                        if ui.add_enabled(!self.busy, egui::Button::new("Initialize as AEGP")).clicked() { self.initialize_aegp(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new("Dispatch AEGP update-menu")).clicked() { self.update_aegp_menu(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new("Dispatch one AEGP idle tick")).clicked() { self.dispatch_aegp_idle(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new("Run AEGP command ON/OFF roundtrip")).clicked() { self.dispatch_aegp_command_roundtrip(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new("Run AEGP active-idle roundtrip")).clicked() { self.dispatch_aegp_active_idle_roundtrip(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new("Run AEGP comp-idle roundtrip")).clicked() { self.dispatch_aegp_comp_idle_roundtrip(); }
+                    ui.collapsing(self.ui_kit.text("AEGP diagnostics (advanced)", "AEGP診断（高度）"), |ui| {
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Initialize as AEGP", "AEGPとして初期化"))).clicked() { self.initialize_aegp(); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch AEGP update-menu", "AEGPメニュー更新を送信"))).clicked() { self.update_aegp_menu(); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch one AEGP idle tick", "AEGPアイドルを1回送信"))).clicked() { self.dispatch_aegp_idle(); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Run AEGP command ON/OFF roundtrip", "AEGPコマンドON/OFFを実行"))).clicked() { self.dispatch_aegp_command_roundtrip(); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Run AEGP active-idle roundtrip", "AEGPアクティブアイドルを実行"))).clicked() { self.dispatch_aegp_active_idle_roundtrip(); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Run AEGP comp-idle roundtrip", "AEGPコンポアイドルを実行"))).clicked() { self.dispatch_aegp_comp_idle_roundtrip(); }
                     });
                     });
                     // Effect parameters live in the persistent left-side Effect Controls panel.
@@ -2565,8 +2938,15 @@ impl eframe::App for HarnessApp {
                         self.trigger_button(slot);
                     }
                     }
+                    ui.separator();
+                    ui.label(
+                        RichText::new(self.ui_kit.text("RENDER SETTINGS", "レンダー設定"))
+                            .small()
+                            .strong()
+                            .color(self.ui_kit.muted_foreground()),
+                    );
                     ui.horizontal(|ui| {
-                        ui.label("Render path:");
+                        ui.label(self.ui_kit.text("Render path:", "レンダー方式:"));
                         let classic_changed = ui
                             .selectable_value(&mut self.smart_render, false, "Classic")
                             .changed();
@@ -2591,14 +2971,14 @@ impl eframe::App for HarnessApp {
                     });
                     ui.horizontal(|ui| {
                         use aexcompat_broker::image_render::RenderPixelFormat;
-                        ui.label("Pixel depth:");
+                        ui.label(self.ui_kit.text("Pixel depth:", "色深度:"));
                         ui.selectable_value(&mut self.pixel_format, RenderPixelFormat::Argb8, "8 bpc");
                         ui.selectable_value(&mut self.pixel_format, RenderPixelFormat::Argb16, "16 bpc");
                         ui.selectable_value(&mut self.pixel_format, RenderPixelFormat::Argb32f, "32 bpc float");
                     });
                     ui.horizontal(|ui| {
                         use aexcompat_broker::image_render::RenderGpuBackend;
-                        ui.label("GPU backend:");
+                        ui.label(self.ui_kit.text("GPU backend:", "GPUバックエンド:"));
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::Auto, "Auto");
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::Cuda, "CUDA");
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::OpenCl, "OpenCL");
@@ -2606,22 +2986,22 @@ impl eframe::App for HarnessApp {
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::Cpu, "CPU");
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Frame:");
+                        ui.label(self.ui_kit.text("Frame:", "フレーム:"));
                         if ui.add(egui::DragValue::new(&mut self.frame).range(0..=10_000_000)).changed() {
                             self.duration_frames = self.duration_frames.max(self.frame.saturating_add(1));
                         }
-                        ui.label("Duration frames:");
+                        ui.label(self.ui_kit.text("Duration frames:", "デュレーション:"));
                         ui.add(egui::DragValue::new(&mut self.duration_frames).range(self.frame.saturating_add(1)..=10_000_001));
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Time scale:");
+                        ui.label(self.ui_kit.text("Time scale:", "タイムスケール:"));
                         ui.add(egui::DragValue::new(&mut self.frames_per_second).range(1..=1_000_000));
-                        ui.label("Frame step:");
+                        ui.label(self.ui_kit.text("Frame step:", "フレーム間隔:"));
                         ui.add(egui::DragValue::new(&mut self.frame_time_step).range(1..=100_000));
                         ui.label(format!("{:.5} fps", self.frames_per_second as f64 / self.frame_time_step as f64));
                     });
                     ui.horizontal(|ui| {
-                        ui.label("Rate presets:");
+                        ui.label(self.ui_kit.text("Rate presets:", "フレームレート:"));
                         for (label, scale, step) in [("23.976", 24_000, 1_001), ("29.97", 30_000, 1_001), ("59.94", 60_000, 1_001)] {
                             if ui.button(label).clicked() {
                                 self.frames_per_second = scale;
@@ -2632,7 +3012,7 @@ impl eframe::App for HarnessApp {
                     ui.horizontal(|ui| {
                         let enabled = self.host_context.as_ref().and_then(|context| context.spatial).is_some();
                         let mut requested = enabled;
-                        if ui.checkbox(&mut requested, "Spatial context").changed() {
+                        if ui.checkbox(&mut requested, self.ui_kit.text("Spatial context", "空間設定")).changed() {
                             if requested {
                                 let context = self.host_context.get_or_insert_with(|| aexcompat_broker::render_request::HostContext {
                                     mask_scene: aexcompat_broker::render_request::MaskScene { masks: Vec::new() },
@@ -2679,9 +3059,9 @@ impl eframe::App for HarnessApp {
                     if let Some(spatial) = self.host_context.as_mut().and_then(|context| context.spatial.as_mut()) {
                         ui.horizontal(|ui| {
                             for (label, ratio) in [
-                                ("Downsample X", &mut spatial.downsample_x),
-                                ("Downsample Y", &mut spatial.downsample_y),
-                                ("Pixel aspect", &mut spatial.pixel_aspect_ratio),
+                                (self.ui_kit.text("Downsample X", "ダウンサンプルX"), &mut spatial.downsample_x),
+                                (self.ui_kit.text("Downsample Y", "ダウンサンプルY"), &mut spatial.downsample_y),
+                                (self.ui_kit.text("Pixel aspect", "ピクセル縦横比"), &mut spatial.pixel_aspect_ratio),
                             ] {
                                 ui.label(label);
                                 ui.add(egui::DragValue::new(&mut ratio.numerator).range(1..=1_000_000));
@@ -2691,7 +3071,7 @@ impl eframe::App for HarnessApp {
                         });
                         ui.horizontal(|ui| {
                             let mut explicit = spatial.full_resolution_width.is_some() && spatial.full_resolution_height.is_some();
-                            if ui.checkbox(&mut explicit, "Explicit full-resolution size").changed() {
+                        if ui.checkbox(&mut explicit, self.ui_kit.text("Explicit full-resolution size", "フル解像度を指定")).changed() {
                                 if explicit {
                                     let dimensions = self.input_image.as_ref().and_then(|path| image::image_dimensions(path).ok()).unwrap_or((1, 1));
                                     spatial.full_resolution_width = Some(dimensions.0);
@@ -2710,7 +3090,7 @@ impl eframe::App for HarnessApp {
                         ui.horizontal(|ui| {
                             let mut explicit = spatial.pre_effect_source_origin_x.is_some()
                                 && spatial.pre_effect_source_origin_y.is_some();
-                            if ui.checkbox(&mut explicit, "Pre-effect source origin").changed() {
+                        if ui.checkbox(&mut explicit, self.ui_kit.text("Pre-effect source origin", "エフェクト前の原点を指定")).changed() {
                                 if explicit {
                                     spatial.pre_effect_source_origin_x = Some(0);
                                     spatial.pre_effect_source_origin_y = Some(0);
@@ -2733,7 +3113,7 @@ impl eframe::App for HarnessApp {
                     ui.horizontal(|ui| {
                         let enabled = self.host_context.as_ref().and_then(|context| context.render_environment).is_some();
                         let mut requested = enabled;
-                        if ui.checkbox(&mut requested, "Render environment").changed() {
+                        if ui.checkbox(&mut requested, self.ui_kit.text("Render environment", "レンダー環境")).changed() {
                             if requested {
                                 let context = self.host_context.get_or_insert_with(|| aexcompat_broker::render_request::HostContext {
                                     mask_scene: aexcompat_broker::render_request::MaskScene { masks: Vec::new() },
@@ -2757,29 +3137,29 @@ impl eframe::App for HarnessApp {
                     if let Some(environment) = self.host_context.as_mut().and_then(|context| context.render_environment.as_mut()) {
                         ui.horizontal(|ui| {
                             use aexcompat_broker::render_request::{RenderField, RenderQuality};
-                            ui.label("Quality:");
-                            ui.selectable_value(&mut environment.quality, RenderQuality::Low, "Low");
-                            ui.selectable_value(&mut environment.quality, RenderQuality::High, "High");
-                            ui.label("Field:");
-                            ui.selectable_value(&mut environment.field, RenderField::Frame, "Frame");
-                            ui.selectable_value(&mut environment.field, RenderField::Upper, "Upper");
-                            ui.selectable_value(&mut environment.field, RenderField::Lower, "Lower");
+                            ui.label(self.ui_kit.text("Quality:", "品質:"));
+                            ui.selectable_value(&mut environment.quality, RenderQuality::Low, self.ui_kit.text("Low", "低"));
+                            ui.selectable_value(&mut environment.quality, RenderQuality::High, self.ui_kit.text("High", "高"));
+                            ui.label(self.ui_kit.text("Field:", "フィールド:"));
+                            ui.selectable_value(&mut environment.field, RenderField::Frame, self.ui_kit.text("Frame", "フレーム"));
+                            ui.selectable_value(&mut environment.field, RenderField::Upper, self.ui_kit.text("Upper", "上"));
+                            ui.selectable_value(&mut environment.field, RenderField::Lower, self.ui_kit.text("Lower", "下"));
                         });
                         ui.horizontal(|ui| {
-                            ui.label("Shutter angle:");
+                            ui.label(self.ui_kit.text("Shutter angle:", "シャッター角度:"));
                             ui.add(egui::DragValue::new(&mut environment.shutter_angle).speed(0.01).range(0.0..=1.0));
-                            ui.label("Shutter phase:");
+                            ui.label(self.ui_kit.text("Shutter phase:", "シャッターフェーズ:"));
                             ui.add(egui::DragValue::new(&mut environment.shutter_phase).speed(0.01).range(-1.0..=1.0));
                         });
                     }
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(!self.busy && !self.parameters.is_empty(), egui::Button::new("Load debug request...")).clicked() { self.load_debug_request(); }
-                        if ui.add_enabled(!self.busy && !self.parameters.is_empty(), egui::Button::new("Save debug request...")).clicked() { self.save_debug_request(); }
+                        if ui.add_enabled(!self.busy && !self.parameters.is_empty(), egui::Button::new(self.ui_kit.text("Load debug request...", "デバッグ要求を読込..."))).clicked() { self.load_debug_request(); }
+                        if ui.add_enabled(!self.busy && !self.parameters.is_empty(), egui::Button::new(self.ui_kit.text("Save debug request...", "デバッグ要求を保存..."))).clicked() { self.save_debug_request(); }
                     });
                     if let Some(mask_count) = self.host_context.as_ref().map(|context| context.mask_scene.masks.len()) {
                         ui.horizontal(|ui| {
                             ui.label(format!("Host mask context: {mask_count} mask(s)"));
-                            if ui.add_enabled(!self.busy, egui::Button::new("Clear masks")).clicked() {
+                            if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Clear masks", "マスクを消去"))).clicked() {
                                 if let Some(context) = &mut self.host_context {
                                     context.mask_scene.masks.clear();
                                     if context.spatial.is_none() && context.render_environment.is_none() { self.host_context = None; }
@@ -2788,37 +3168,43 @@ impl eframe::App for HarnessApp {
                         });
                     }
                     if self.audio_effect_only {
-                        ui.colored_label(Color32::from_rgb(30, 120, 170), RichText::new("Audio-only Effect").strong());
-                        ui.label("Transport: 44.1 kHz, mono, float32 little-endian raw samples");
-                        if ui.add_enabled(!self.busy, egui::Button::new("Change audio source (.f32)...")).clicked() { self.choose_audio_input(); }
+                        ui.colored_label(Color32::from_rgb(30, 120, 170), RichText::new(self.ui_kit.text("Audio-only Effect", "音声専用エフェクト")).strong());
+                        ui.label(self.ui_kit.text("Transport: 44.1 kHz, mono, float32 little-endian raw samples", "転送形式: 44.1 kHz、モノラル、float32リトルエンディアンRAW"));
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Change audio source (.f32)...", "音声ソースを変更（.f32）..."))).clicked() { self.choose_audio_input(); }
                         if let Some(path) = &self.audio_input { ui.monospace(path.display().to_string()); }
-                        if ui.add_enabled(!self.busy && self.audio_input.is_some(), egui::Button::new("4. Render and save audio (.f32)...")).clicked() { self.render_audio_and_save(); }
+                        if ui.add_enabled(!self.busy && self.audio_input.is_some(), egui::Button::new(self.ui_kit.text("4. Render and save audio (.f32)...", "4 音声をレンダーして保存（.f32）..."))).clicked() { self.render_audio_and_save(); }
                     } else {
-                        if ui.add_enabled(!self.busy, egui::Button::new("Change image source...")).clicked() { self.choose_input(ctx); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Change image source...", "画像ソースを変更..."))).clicked() { self.choose_input(ctx); }
                         if let Some(path) = &self.input_image { ui.monospace(path.display().to_string()); }
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(!self.busy, egui::Button::new("Select visual audio sidecar (.f32, optional)")).clicked() { self.choose_audio_input(); }
-                            if self.audio_input.is_some() && ui.add_enabled(!self.busy, egui::Button::new("Clear sidecar")).clicked() { self.audio_input = None; }
+                            if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Select visual audio sidecar (.f32, optional)", "音声サイドカーを選択（.f32、任意）"))).clicked() { self.choose_audio_input(); }
+                            if self.audio_input.is_some() && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Clear sidecar", "サイドカーを解除"))).clicked() { self.audio_input = None; }
                         });
                         if let Some(path) = &self.audio_input { ui.monospace(format!("Audio sidecar: {}", path.display())); }
                         if self.audio_input.is_some() {
                             ui.label("Sidecar mode: classic ARGB8, mono float32 LE, 44.1 kHz");
                         }
-                        if ui.add_enabled(!self.busy, egui::Button::new("Select AE reference output (optional)")).clicked() { self.choose_reference(ctx); }
+                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Select AE reference output (optional)", "AE参照出力を選択（任意）"))).clicked() { self.choose_reference(ctx); }
                         if let Some(path) = &self.reference_image { ui.monospace(format!("Reference: {}", path.display())); }
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new("Render current frame")).clicked() { self.quick_render(); }
-                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new("Render and save PNG...")).clicked() { self.render_and_save(); }
-                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new("Run 6-case compatibility matrix")).clicked() { self.run_compatibility_matrix(); }
+                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new(self.ui_kit.text("Render current frame", "現在のフレームをレンダー"))).clicked() { self.quick_render(); }
+                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new(self.ui_kit.text("Render and save PNG...", "レンダーしてPNG保存..."))).clicked() { self.render_and_save(); }
+                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new(self.ui_kit.text("Run 6-case compatibility matrix", "6条件の互換性マトリクスを実行"))).clicked() { self.run_compatibility_matrix(); }
                         });
                     }
                 }
             }
             ui.separator();
-            ui.label(RichText::new(&self.status).strong());
+            ui.label(
+                RichText::new(self.ui_kit.text("ANALYSIS / LOG OUTPUT", "解析／ログ出力"))
+                    .small()
+                    .strong()
+                    .color(self.ui_kit.muted_foreground()),
+            );
+            ui.label(RichText::new(self.ui_kit.status_text(&self.status)).strong());
             if let Some(path) = &self.output_image { ui.monospace(format!("Output: {}", path.display())); }
             if self.input_preview.is_some() || self.preview.is_some() || self.reference_preview.is_some() {
-                if ui.button("Open FHD image viewer").clicked() {
+                if ui.button(self.ui_kit.text("Open FHD image viewer", "FHD画像ビューアーを開く")).clicked() {
                     self.viewer_open = true;
                     self.viewer_mode = if self.preview.is_some() { 2 } else { 0 };
                 }
@@ -3014,7 +3400,74 @@ impl eframe::App for HarnessApp {
                 ui.add(egui::TextEdit::multiline(&mut self.report).font(egui::TextStyle::Monospace).desired_width(f32::INFINITY));
             });
                 });
+                }
+            });
+        let analysis_rect = analysis_response.response.rect;
+        let rail_x = analysis_rect.right();
+        egui::Area::new(egui::Id::new("analysis_and_logs_rail"))
+            .fixed_pos(egui::pos2(rail_x - 6.0, analysis_rect.top()))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rail_rect, rail) = ui.allocate_exact_size(
+                    egui::vec2(12.0, analysis_rect.height()),
+                    egui::Sense::click_and_drag(),
+                );
+                rail.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Checkbox,
+                        true,
+                        self.show_analysis_panel,
+                        self.ui_kit
+                            .text("Show Analysis and Logs panel", "解析・ログパネルを表示"),
+                    )
                 });
+                let line_x = rail_rect.center().x;
+                ui.painter().vline(
+                    line_x,
+                    rail_rect.y_range(),
+                    egui::Stroke::new(1.0, self.ui_kit.separator_color()),
+                );
+                if self.show_analysis_panel && rail.dragged() {
+                    let delta_x = ui.input(|input| input.pointer.delta().x);
+                    self.analysis_panel_width =
+                        (analysis_rect.width() + delta_x).clamp(260.0, 560.0);
+                    ctx.request_repaint();
+                }
+                if rail.clicked() {
+                    self.show_analysis_panel = !self.show_analysis_panel;
+                }
+                let center = egui::pos2(line_x, rail_rect.top() + 16.0);
+                let points = if self.show_analysis_panel {
+                    vec![
+                        egui::pos2(center.x + 2.5, center.y - 4.0),
+                        egui::pos2(center.x - 2.5, center.y),
+                        egui::pos2(center.x + 2.5, center.y + 4.0),
+                    ]
+                } else {
+                    vec![
+                        egui::pos2(center.x - 2.5, center.y - 4.0),
+                        egui::pos2(center.x + 2.5, center.y),
+                        egui::pos2(center.x - 2.5, center.y + 4.0),
+                    ]
+                };
+                ui.painter().add(egui::Shape::convex_polygon(
+                    points,
+                    if rail.hovered() {
+                        ui.visuals().text_color()
+                    } else {
+                        self.ui_kit.muted_foreground()
+                    },
+                    egui::Stroke::NONE,
+                ));
+            });
+        egui::SidePanel::left("effect_controls")
+            .default_width(340.0)
+            .min_width(260.0)
+            .max_width(460.0)
+            .resizable(true)
+            .show(ctx, |ui| self.show_effect_controls(ui));
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.show_workspace_viewer(ui);
         });
         self.show_image_viewer(ctx);
     }

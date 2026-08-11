@@ -672,7 +672,15 @@ ClassicSubsystemDiagnostics capture_classic_subsystems() {
           l2_detail::suite_timeline_report_json() +
           worker_runtime::suite_call_slot_probe::report_json(),
       l2_detail::live_suite_lease_summary(),
-      worker_runtime::suite_registry().rejected_release_count() != 0,
+      // #1182 (owner-directed): a rejected suite release - the plug-in releasing
+      // a suite it never acquired (Basic_Text/Path_Text/Numbers release "PF Param
+      // Utils Suite" v3 without acquiring it) - is contained by the registry as a
+      // no-op that returns rejection and touches no host state, so it cannot
+      // corrupt anything. It is recorded in the suite_timeline (result != 0) as a
+      // reproducible diagnostic and counted below, but it is a benign warning, not
+      // a session-failing fault. Handle and world double-dispose faults are
+      // separate fields and stay fail-closed.
+      false,
       worker_runtime::handles::handle_lifetimes_balanced(),
       aexcompat::pf_path_runtime::lifetimes_balanced(),
       {i64(path.checkout_calls), i64(path.checkin_calls), i64(path.mask_calls),

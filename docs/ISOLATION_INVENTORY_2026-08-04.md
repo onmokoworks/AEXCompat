@@ -53,11 +53,20 @@ evidence." どのモードもこの昇格基準を満たしていない。
 - `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` で継承ハンドルを明示列挙。渡るのは
   stdout/stderr パイプの書き込み端、trace/minidump/session の各ハンドルのみ。
   sentinel テスト (`run_sentinel_check`) が非継承を検証している。
-- 既定では専用 desktop (`CreateDesktopW` + 保護 DACL) 上で起動し、モーダル
-  ダイアログは `worker_dialog.rs` が WM_CLOSE で掃除する (issue #351 の UI
-  封じ込め)。例外として `_on_current_desktop` 系 (GUI ハーネス用の
-  `WorkerDesktopPolicy::Current`) は呼び出し元 desktop で起動し、その場合
-  dialog sweep は付かない。
+- 既定では broker 専用 desktop (`CreateDesktopW` + 保護 DACL) 上で起動し、
+  モーダルダイアログは `worker_dialog.rs` が WM_CLOSE で掃除する (issue #351 の
+  UI 封じ込め)。この desktop は broker プロセス寿命の 1 枚を全 worker で共有する
+  (2026-08-11, issue #1194: per-worker 生成は desktop create/destroy のたびに
+  OS 側で DWM composition state がリークし、長時間 sweep で対話セッション全体が
+  劣化するため)。window の帰属・掃除は desktop ではなく Job Object membership で
+  判定するので、共有しても broker の報告は worker ごとに分かれる。ただし共有の
+  帰結として、並行 worker は互いの window を列挙・メッセージ送信でき、desktop
+  スコープの hook も張れる (従来も同一トークンで sibling desktop を開けたので
+  新しい権限ではないが、既定で到達可能になった)。悪意あるプラグインが並行実行
+  中の別 worker の UI 系診断や挙動を乱すことはできる。worker は元々 confidentiality
+  boundary ではない (§TL;DR)。例外として
+  `_on_current_desktop` 系 (GUI ハーネス用の `WorkerDesktopPolicy::Current`) は
+  呼び出し元 desktop で起動し、その場合 dialog sweep は付かない。
 - stdout 24 MiB / stderr 64 KiB の取得上限とパス redaction。
 - 正常終了後も job を terminate し、継承パイプを握った子孫プロセスが収集を止め
   られないようにしている。
