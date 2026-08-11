@@ -96,6 +96,22 @@ fn parameter_inspection_status(
     }
 }
 
+fn render_action_enabled(
+    busy: bool,
+    has_selection: bool,
+    has_input: bool,
+    session_approved: bool,
+    selection_stale: bool,
+    has_capability: bool,
+) -> bool {
+    !busy
+        && has_selection
+        && has_input
+        && session_approved
+        && !selection_stale
+        && has_capability
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct RenderDiagnostics {
     render_path: String,

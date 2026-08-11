@@ -2133,6 +2133,7 @@ impl HarnessApp {
                 self.parameters.clear();
                 self.parameter_defaults.clear();
                 self.parameter_inspection_state = ParameterInspectionState::Failed;
+                self.audio_effect_only = false;
             }
         }
         if let Some(output) = result.output {
@@ -2198,8 +2199,14 @@ impl eframe::App for HarnessApp {
                 }
                 ui.separator();
                 ui.label(RichText::new("PREVIEW").small().strong());
-                let can_render =
-                    !self.busy && self.selection.is_some() && self.input_image.is_some();
+                let can_render = render_action_enabled(
+                    self.busy,
+                    self.selection.is_some(),
+                    self.input_image.is_some(),
+                    self.session_approved,
+                    self.selection_stale,
+                    self.smart_render_capability.is_some(),
+                );
                 if ui
                     .add_enabled(can_render, egui::Button::new("Render"))
                     .clicked()
