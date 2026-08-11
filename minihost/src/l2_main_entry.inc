@@ -1601,6 +1601,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          invocation.external_total_time, invocation.external_time_scale},
         make_bootstrap_runtime_hooks());
   };
+  aexcompat::worker_runtime::handles::HandleReclamationScope
+      handle_reclamation_scope;
   const auto bootstrap = [&] {
     std::array<wchar_t, 32768> original_directory{};
     std::array<wchar_t, 32768> gpu_module_path{};
@@ -2001,6 +2003,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   const int32_t setdown_error = effective_global_error == 0 && entry
       ? invoke_global_setdown(entry, input.data(), output.data()) : -1;
   dispose_all_live_handles();
+  handle_reclamation_scope.reclaim();
   // Smart-worker fault-injection probes as a handler table (issue #171):
   // each requested mode runs its verifier in the same order as before.
   const struct SmartFaultProbe {
