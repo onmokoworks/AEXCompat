@@ -2066,17 +2066,17 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
   g_conditional_ui_selectors_dispatched = false;
   g_update_params_ui_error = -1;
   g_query_dynamic_flags_error = -1;
-  if (g_update_params_ui_advertised) {
-    g_active_ui_params = params;
-    g_active_ui_param_count = g_params.size() + 1;
-    g_update_params_ui_active = true;
-    g_update_params_ui_error = entry(kUpdateParamsUi, input.data(), output.data(), params,
-                                     nullptr, nullptr);
-    g_update_params_ui_active = false;
-    g_active_ui_params = nullptr;
-    g_active_ui_param_count = 0;
-    g_conditional_ui_selectors_dispatched = true;
-  }
+  // UPDATE_PARAMS_UI is not dispatched here (issue #1156). A headless render has
+  // no Effect Controls panel, and an AE oracle capture confirmed AE's own
+  // aerender never issues UPDATE_PARAMS_UI even to an effect that advertises
+  // SEND_UPDATE_PARAMS_UI (selector-timeline probe, AE 26.3: GLOBAL_SETUP ..
+  // SEQUENCE_SETUP .. FRAME_SETUP .. RENDER .. with zero UPDATE_PARAMS_UI).
+  // Issuing it here drove UI-only suite lifecycles the render never pairs -
+  // Cycore effects released PF Path Data Suite they only acquire while a real
+  // UI is up, which the fail-closed suite-lease check then rejected at close
+  // (session_close_failed), and DeepGlow2 answered it with error 4 and lost the
+  // frame (#883) though it renders in AE. Matching AE (not issuing it) is the
+  // fix. `g_update_params_ui_error` stays -1 (not dispatched) for the report.
   if (g_query_dynamic_flags_advertised) {
     g_query_dynamic_flags_error = entry(kQueryDynamicFlags, input.data(), output.data(), params,
                                         nullptr, nullptr);
@@ -2113,10 +2113,10 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
 // may replace the host's own. A selector that reported an error stopped
 // somewhere it chose not to say, so what it wrote is partial by definition;
 // letting the frame proceed without it is the #883 fix, adopting its writes
-// anyway is not part of that.
+// anyway is not part of that. UPDATE_PARAMS_UI is no longer dispatched (#1156),
+// so it rewrites nothing and does not gate this; only QUERY_DYNAMIC_FLAGS does.
 bool conditional_ui_definitions_usable() {
-  return (!g_update_params_ui_advertised || g_update_params_ui_error == 0) &&
-      (!g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0);
+  return !g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0;
 }
 
 

@@ -218,6 +218,23 @@ After Effects SDK, approved AEX fixtures, a matching GPU driver, or AE itself.
 Run the named build/gate script rather than relying on untracked `target/`
 artifacts from a previous checkout.
 
+There is more than one worker exe and they must all be rebuilt after any change
+to shared worker code. `aex_worker_runtime_core` (which holds `l2_main*.inc`,
+`worker_*.cpp`, the dispatch/suite/lifecycle logic) is linked into THREE
+separate exes under `target/minihost-build/`: `aex_smart_worker.exe` (SmartFX
+render path), `aex_render_worker.exe` (Classic render path), and
+`aex_l2_worker.exe` (discovery). A render sweep routes each plug-in to the exe
+its route needs — SmartFX effects to smart, Classic effects (e.g. every
+CycoreFXHD effect) to render, parameter discovery to l2. So
+`cmake --build target\minihost-build --target aex_smart_worker` alone recompiles
+the shared object but only RELINKS smart; the other two exes stay stale and a
+sweep silently measures old code for Classic/discovery routes (the recurring
+trap: a fix looks like it does nothing, or a Classic effect "won't recover",
+because only the smart exe was relinked). Always rebuild all three
+(`--target aex_smart_worker aex_render_worker aex_l2_worker`, or build the
+default target) and confirm all three exe mtimes are newer than the edit before
+trusting a sweep.
+
 `rust-toolchain.toml` pins the toolchain, so `cargo fmt --check` means the same
 thing on every machine (issue #656). Raising the pin is a deliberate change:
 run `cargo fmt --all` across every workspace in that same commit and add the
