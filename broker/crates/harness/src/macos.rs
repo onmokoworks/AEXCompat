@@ -22,7 +22,8 @@ use aexcompat_broker::render_artifacts::{
     write_raw_world_checkpoint_artifact,
 };
 use aexcompat_broker::render_fixture::{
-    FixtureFinalArtifact, FixturePixelFormat, InteractiveParameter, load_render_fixture,
+    FixtureFinalArtifact, FixturePixelFormat, FixtureTiming, InteractiveParameter,
+    load_render_fixture,
 };
 use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
@@ -1575,11 +1576,19 @@ fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
     }
 }
 
-fn fixture_parameter_payload(parameters: &[InteractiveParameter]) -> Result<String, String> {
+struct FixtureParameterPayload {
+    transport: String,
+    identity: Value,
+}
+
+fn fixture_parameter_payload(
+    parameters: &[InteractiveParameter],
+) -> Result<FixtureParameterPayload, String> {
     let mut assignments = Vec::new();
+    let mut identity = Vec::new();
     let mut component_payload = false;
     for parameter in parameters {
-        let encoded = match parameter.kind.as_str() {
+        let (encoded, kind, value) = match parameter.kind.as_str() {
             "layer" | "group_start" | "group_end" | "button" | "custom" | "no_data" => {
                 continue;
             }
@@ -1590,7 +1599,11 @@ fn fixture_parameter_payload(parameters: &[InteractiveParameter]) -> Result<Stri
                         parameter.slot
                     ));
                 }
-                format!("i32={}", parameter.value as i64)
+                (
+                    format!("i32={}", parameter.value as i64),
+                    "integer",
+                    json!(parameter.value as i64),
+                )
             }
             "float" => {
                 if !parameter.value.is_finite() {
@@ -1599,11 +1612,24 @@ fn fixture_parameter_payload(parameters: &[InteractiveParameter]) -> Result<Stri
                         parameter.slot
                     ));
                 }
-                format!("f64={}", parameter.value)
+                (
+                    format!("f64={}", parameter.value),
+                    "float",
+                    json!(parameter.value),
+                )
             }
-            "color" => format!(
-                "argb8={},{},{},{}",
-                parameter.color[0], parameter.color[1], parameter.color[2], parameter.color[3]
+            "color" => (
+                format!(
+                    "argb8={},{},{},{}",
+                    parameter.color[0], parameter.color[1], parameter.color[2], parameter.color[3]
+                ),
+                "color",
+                json!({
+                    "alpha": parameter.color[0],
+                    "red": parameter.color[1],
+                    "green": parameter.color[2],
+                    "blue": parameter.color[3]
+                }),
             ),
             "angle" | "point" | "point3d" => {
                 let expected = match parameter.kind.as_str() {
@@ -1622,14 +1648,19 @@ fn fixture_parameter_payload(parameters: &[InteractiveParameter]) -> Result<Stri
                     ));
                 }
                 component_payload = true;
-                format!(
-                    "{}={}",
-                    parameter.kind,
-                    parameter.components[..expected]
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(",")
+                let components = parameter.components[..expected].to_vec();
+                (
+                    format!(
+                        "{}={}",
+                        parameter.kind,
+                        components
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    parameter.kind.as_str(),
+                    json!(components),
                 )
             }
             other => {
@@ -1651,12 +1682,21 @@ fn fixture_parameter_payload(parameters: &[InteractiveParameter]) -> Result<Stri
             "param_{}@{}:{encoded}",
             parameter.slot, parameter.slot
         ));
+        identity.push(json!({
+            "id": format!("param_{}", parameter.slot),
+            "slot": parameter.slot,
+            "kind": kind,
+            "value": value
+        }));
     }
-    Ok(format!(
-        "{}|{}",
-        if component_payload { "v4" } else { "v2" },
-        assignments.join(";")
-    ))
+    Ok(FixtureParameterPayload {
+        transport: format!(
+            "{}|{}",
+            if component_payload { "v4" } else { "v2" },
+            assignments.join(";")
+        ),
+        identity: Value::Array(identity),
+    })
 }
 
 fn fixture_staging_path(output: &Path) -> Result<PathBuf, String> {
@@ -1689,7 +1729,7 @@ fn fixture_conditions(
     world: &[u8],
     pixel_format: &str,
     render_path: &str,
-    parameters: &str,
+    requested_parameters: &Value,
     premultiplication: &str,
     current_time: i32,
     time_step: i32,
@@ -1712,10 +1752,25 @@ fn fixture_conditions(
                 "total_time": total_time,
                 "time_scale": time_scale
             },
-            "requested_parameters": [parameters],
+            "requested_parameters": requested_parameters,
             "origin": {"x": 0, "y": 0}
         }),
     }
+}
+
+fn fixture_render_request(timing: &FixtureTiming, parameters: &str) -> Value {
+    json!({
+        "v": 4,
+        "type": "render_frame",
+        "frame_index": 0,
+        "current_time": {
+            "value": timing.current_time,
+            "step": timing.time_step,
+            "total": timing.total_time,
+            "scale": timing.time_scale
+        },
+        "parameters": parameters
+    })
 }
 
 pub fn render_fixture_headless(
@@ -1760,17 +1815,7 @@ pub fn render_fixture_headless(
         start_resident_worker(&workers, aex, &loaded.primary_layer, format, Some(&launch))?;
     let primary_width = started.width;
     let primary_height = started.height;
-    let request = json!({
-        "v": 3,
-        "type": "render_frame",
-        "frame_index": 0,
-        "current_time": {
-            "value": fixture.timing.current_time,
-            "step": fixture.timing.time_step,
-            "scale": fixture.timing.time_scale
-        },
-        "parameters": parameters
-    });
+    let request = fixture_render_request(&fixture.timing, &parameters.transport);
     if let Err(error) = write_control_message(&mut started.stdin, &request) {
         let _ = close_probe_worker(started);
         return Err(error);
@@ -1861,7 +1906,7 @@ pub fn render_fixture_headless(
             &output_argb,
             format.pixel_format(),
             artifact_render_path,
-            &parameters,
+            &parameters.identity,
             &fixture.premultiplication,
             fixture.timing.current_time,
             fixture.timing.time_step,
@@ -1921,7 +1966,7 @@ pub fn render_fixture_headless(
                 argb,
                 format.pixel_format(),
                 artifact_render_path,
-                &parameters,
+                &parameters.identity,
                 &fixture.premultiplication,
                 fixture.timing.current_time,
                 fixture.timing.time_step,
@@ -2799,10 +2844,23 @@ mod tests {
             fixture_parameter(1, "layer", 0.0),
             fixture_parameter(2, "integer", 12.0),
             fixture_parameter(3, "float", 2.5),
+            fixture_parameter(4, "color", 0.0),
         ])
         .unwrap();
-        assert_eq!(payload, "v2|param_2@2:i32=12;param_3@3:f64=2.5");
-        assert!(!payload.contains("param_1"));
+        assert_eq!(
+            payload.transport,
+            "v2|param_2@2:i32=12;param_3@3:f64=2.5;param_4@4:argb8=255,1,2,3"
+        );
+        assert_eq!(
+            payload.identity,
+            json!([
+                {"id":"param_2","slot":2,"kind":"integer","value":12},
+                {"id":"param_3","slot":3,"kind":"float","value":2.5},
+                {"id":"param_4","slot":4,"kind":"color","value":{
+                    "alpha":255,"red":1,"green":2,"blue":3
+                }}
+            ])
+        );
     }
 
     #[test]
@@ -2814,9 +2872,36 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(
-            payload,
+            payload.transport,
             "v4|param_1@1:angle=1.5;param_2@2:point=1.5,2.5;param_3@3:point3d=1.5,2.5,3.5"
         );
+        assert_eq!(
+            payload.identity,
+            json!([
+                {"id":"param_1","slot":1,"kind":"angle","value":[1.5]},
+                {"id":"param_2","slot":2,"kind":"point","value":[1.5,2.5]},
+                {"id":"param_3","slot":3,"kind":"point3d","value":[1.5,2.5,3.5]}
+            ])
+        );
+    }
+
+    #[test]
+    fn fixture_render_request_carries_complete_timing() {
+        let request = fixture_render_request(
+            &FixtureTiming {
+                current_time: 42,
+                time_step: 7,
+                total_time: 210,
+                time_scale: 30,
+            },
+            "v2|",
+        );
+        assert_eq!(request["v"], 4);
+        assert_eq!(
+            request["current_time"],
+            json!({"value":42,"step":7,"total":210,"scale":30})
+        );
+        assert_eq!(request["parameters"], "v2|");
     }
 
     #[test]
