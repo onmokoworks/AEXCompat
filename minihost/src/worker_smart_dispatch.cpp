@@ -1549,27 +1549,36 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
     return false;
   }
 
-  // Locate the rendered frame. If the plug-in pointed outFrame at a frame it
-  // created, that is the output it is handing back; otherwise fall back to the
-  // most recent frame it created via CreateGPUPPix (the VR filters render there
-  // without ever writing outFrame). Deferred disposal keeps every frame live
-  // until after this readback.
+  // Locate the rendered frame, in order of how reliably it names the output:
+  // (1) a plug-in frame named through outFrame, (2) the most recent plug-in
+  // CreateGPUPPix frame (VR filters render there without writing outFrame),
+  // (3) the host-provided output frame (plug-ins that render into *outFrame and
+  // create nothing, e.g. VRColorGradient). Deferred disposal keeps every frame
+  // live until after this readback.
   //
-  // Limitation (issue #1058 follow-up): this "most recent plug-in frame" pick is
-  // a heuristic, not a reliable output signal. A plug-in that keeps several
-  // CreateGPUPPix frames alive (a ping-pong / multi-pass design), or that renders
-  // its final result into the host outFrame while leaving an undisposed scratch
-  // frame behind, can leave the real output in a frame this loop does not choose.
-  // The dimension cross-check below only rejects a *size* mismatch; a wrong frame
-  // of the same size is read as if it were the output. Every effect in the
-  // current corpus produces a single output frame, so the heuristic holds for
-  // them; widening the corpus needs a real output-frame signal.
+  // Limitation (issue #1058 follow-up): step 2 is a heuristic. A plug-in that
+  // keeps several CreateGPUPPix frames alive (a ping-pong / multi-pass design),
+  // or that renders its final result into the host outFrame while leaving an
+  // undisposed scratch frame behind, can leave the real output in a frame this
+  // loop does not choose - step 2 would pick the scratch frame before step 3
+  // could reach the host frame. And step 3 trusts that a success-returning
+  // plug-in fully wrote the host frame: one that reports success, allocates no
+  // frame, and writes only a sub-rect (assuming the host pre-cleared or
+  // pre-copied the input) would have its unwritten region read back as the
+  // frame's recycled device memory, not zero. The dimension cross-check below
+  // only rejects a *size* mismatch; a wrong or partially-written frame of the
+  // right size is read as if it were the output. Every effect in the current
+  // corpus produces a single fully-written output frame, so this holds for them;
+  // widening the corpus needs a real output-frame signal.
   FrameRecord* out_record = nullptr;
   if (abi::suite_ok(render_error)) {
+    // 1. The plug-in created its own frame and handed it back through outFrame.
     if (out_frame) {
       FrameRecord* named = find_frame(out_frame);
       if (named && named->plugin_created) out_record = named;
     }
+    // 2. It created its own frame but did not repoint outFrame (the VR filters
+    //    render into their CreateGPUPPix frame and leave outFrame alone).
     if (!out_record)
       for (auto it = context.gpu_frames.rbegin(); it != context.gpu_frames.rend();
            ++it)
@@ -1577,6 +1586,13 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
           out_record = it->get();
           break;
         }
+    // 3. It created no frame of its own and rendered into the host-provided
+    //    output frame (the plain PF/Premiere contract: render into *outFrame).
+    //    Only reachable when no plug-in frame exists, so this never shadows the
+    //    #828 case (plug-in renders into its own frame, leaving the host frame
+    //    zeroed) - that case always has a plugin_created frame above.
+    if (!out_record && out_frame == host_output_ppix)
+      out_record = find_frame(host_output_ppix);
   }
 
   if (filter.DisposeInstance) filter.DisposeInstance(&instance);
