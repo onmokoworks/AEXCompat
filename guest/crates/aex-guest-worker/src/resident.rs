@@ -480,7 +480,7 @@ fn parse_parameter_payload(
             .iter()
             .find(|parameter| parameter.slot == slot)
             .ok_or_else(|| SessionError::Protocol(format!("unknown parameter slot {slot}")))?;
-        let (value, color, point) = match kind {
+        let (value, color, point, angle_fixed) = match kind {
             "argb8" => {
                 if parameter.param_type != PARAM_COLOR {
                     return Err(SessionError::Protocol(format!(
@@ -501,7 +501,7 @@ fn parse_parameter_payload(
                         )
                     })?;
                 }
-                (None, Some(color), None)
+                (None, Some(color), None, None)
             }
             "point" => {
                 if parameter.param_type != PARAM_POINT {
@@ -526,10 +526,40 @@ fn parse_parameter_payload(
                         ));
                     }
                 }
-                (None, None, Some(point))
+                (None, None, Some(point), None)
+            }
+            "angle-deg" => {
+                if parameter.param_type != 3 {
+                    return Err(SessionError::Protocol(format!(
+                        "parameter slot {slot} is not an angle parameter"
+                    )));
+                }
+                let degrees = encoded.parse::<f64>().map_err(|_| {
+                    SessionError::Protocol("angle degrees must be a finite number".into())
+                })?;
+                if !degrees.is_finite() {
+                    return Err(SessionError::Protocol(
+                        "angle degrees must be a finite number".into(),
+                    ));
+                }
+                (Some(degrees), None, None, None)
+            }
+            "angle-fixed" => {
+                if parameter.param_type != 3 {
+                    return Err(SessionError::Protocol(format!(
+                        "parameter slot {slot} is not an angle parameter"
+                    )));
+                }
+                let fixed = encoded.parse::<i32>().map_err(|_| {
+                    SessionError::Protocol("raw fixed angle must be a signed 32-bit integer".into())
+                })?;
+                (None, None, None, Some(fixed))
             }
             "i32" | "f64" => {
-                if parameter.param_type == PARAM_COLOR || parameter.param_type == PARAM_POINT {
+                if parameter.param_type == PARAM_COLOR
+                    || parameter.param_type == PARAM_POINT
+                    || parameter.param_type == 3
+                {
                     return Err(SessionError::Protocol(format!(
                         "typed parameter slot {slot} requires its matching payload kind"
                     )));
@@ -542,7 +572,7 @@ fn parse_parameter_payload(
                         "parameter value shape is invalid".into(),
                     ));
                 }
-                (Some(value), None, None)
+                (Some(value), None, None, None)
             }
             _ => {
                 return Err(SessionError::Protocol(format!(
@@ -556,6 +586,7 @@ fn parse_parameter_payload(
             value,
             color,
             point,
+            angle_fixed,
         });
     }
     Ok(values)
@@ -877,6 +908,45 @@ mod tests {
         assert_eq!(parsed[0].color, None);
         assert!(parse_parameter_payload("v2|param_2@2:f64=1", &setup).is_err());
         assert!(parse_parameter_payload("v2|param_2@2:point=1", &setup).is_err());
+    }
+
+    #[test]
+    fn angle_parameter_payload_has_explicit_degree_and_fixed_kinds() {
+        let setup = SetupReport {
+            schema_version: 1,
+            execution_backend: "fixture",
+            global_setup_error: 0,
+            params_setup_error: 0,
+            advertised_num_params: 1,
+            out_flags: 0,
+            out_flags2: 0,
+            parameters: vec![crate::classic::ParameterReport {
+                slot: 1,
+                index: 1,
+                param_type: 3,
+                name: "Rotation".into(),
+                default_value: Some(0.0),
+                valid_min: None,
+                valid_max: None,
+                slider_min: None,
+                slider_max: None,
+                precision: None,
+                current_color: None,
+                default_color: None,
+            }],
+            suite_requests: Vec::new(),
+            unsupported_suite_calls: Vec::new(),
+            dropped_unsupported_suite_calls: 0,
+        };
+        let degrees = parse_parameter_payload("v2|param_1@1:angle-deg=-22.5", &setup).unwrap();
+        assert_eq!(degrees[0].value, Some(-22.5));
+        assert_eq!(degrees[0].angle_fixed, None);
+        let fixed = parse_parameter_payload("v2|param_1@1:angle-fixed=-1474560", &setup).unwrap();
+        assert_eq!(fixed[0].value, None);
+        assert_eq!(fixed[0].angle_fixed, Some(-1474560));
+        assert!(parse_parameter_payload("v2|param_1@1:f64=22.5", &setup).is_err());
+        assert!(parse_parameter_payload("v2|param_1@1:angle-deg=NaN", &setup).is_err());
+        assert!(parse_parameter_payload("v2|param_1@1:angle-fixed=2147483648", &setup).is_err());
     }
 
     #[test]

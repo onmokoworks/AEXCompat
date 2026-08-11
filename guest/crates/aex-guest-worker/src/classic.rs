@@ -96,6 +96,7 @@ pub struct ParameterValue {
     pub value: Option<f64>,
     pub color: Option<[u8; 4]>,
     pub point: Option<[f64; 2]>,
+    pub angle_fixed: Option<i32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,6 +109,8 @@ pub struct AppliedParameter {
     pub color: Option<[u8; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<[f64; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub angle_fixed: Option<i32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1356,6 +1359,7 @@ impl ClassicHost {
                     value: requested.value,
                     color: requested.color,
                     point: requested.point,
+                    angle_fixed: requested.angle_fixed,
                 });
             }
             let parameter = resources.parameter_definitions[index];
@@ -2541,6 +2545,20 @@ fn apply_parameter_value(
     param_type: i32,
     requested: &ParameterValue,
 ) -> Result<(), ClassicError> {
+    if let Some(angle_fixed) = requested.angle_fixed {
+        if param_type != PARAM_ANGLE
+            || requested.value.is_some()
+            || requested.color.is_some()
+            || requested.point.is_some()
+        {
+            return Err(ClassicError::Input(
+                "raw fixed angle requires an angle parameter and no other payload".into(),
+            ));
+        }
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4]
+            .copy_from_slice(&angle_fixed.to_le_bytes());
+        return Ok(());
+    }
     if param_type == PARAM_COLOR {
         let color = requested.color.ok_or_else(|| {
             ClassicError::Input("color parameter requires four ARGB8 components".into())
@@ -2604,11 +2622,11 @@ fn apply_parameter_value(
         PARAM_SLIDER | PARAM_POPUP => {
             definition[union..union + 4].copy_from_slice(&(value.round() as i32).to_le_bytes());
         }
-        PARAM_FIXED_SLIDER => {
+        PARAM_FIXED_SLIDER | PARAM_ANGLE => {
             let fixed = value * 65536.0;
             if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
                 return Err(ClassicError::Input(format!(
-                    "fixed-slider value is outside 16.16 range: {value}"
+                    "fixed parameter value is outside 16.16 range: {value}"
                 )));
             }
             definition[union..union + 4].copy_from_slice(&(fixed.round() as i32).to_le_bytes());
@@ -2655,6 +2673,14 @@ fn numeric_descriptor(
 ) {
     let union = abi::PARAM_U_OFFSET;
     match param_type {
+        PARAM_ANGLE => (
+            Some(read_i32(definition, union + ANGLE_DEFAULT_OFFSET) as f64 / 65536.0),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
         PARAM_SLIDER => (
             Some(read_i32(definition, union + abi::SLIDER_DEFAULT_OFFSET) as f64),
             Some(read_i32(definition, union + abi::SLIDER_VALID_MIN_OFFSET) as f64),
@@ -3011,9 +3037,31 @@ mod tests {
             value: Some(value),
             color: None,
             point: None,
+            angle_fixed: None,
         };
         apply_parameter_value(&mut fixed, PARAM_FIXED_SLIDER, &scalar(12.5)).unwrap();
         assert_eq!(read_i32(&fixed, union), 12 * 65536 + 32768);
+
+        let mut angle = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value(&mut angle, PARAM_ANGLE, &scalar(-22.5)).unwrap();
+        assert_eq!(read_i32(&angle, union), -22 * 65536 - 32768);
+        assert!(apply_parameter_value(&mut angle, PARAM_ANGLE, &scalar(32768.0)).is_err());
+        for raw in [i32::MIN, i32::MAX] {
+            apply_parameter_value(
+                &mut angle,
+                PARAM_ANGLE,
+                &ParameterValue {
+                    slot: None,
+                    name: "angle".into(),
+                    value: None,
+                    color: None,
+                    point: None,
+                    angle_fixed: Some(raw),
+                },
+            )
+            .unwrap();
+            assert_eq!(read_i32(&angle, union), raw);
+        }
 
         let mut checkbox = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         apply_parameter_value(&mut checkbox, PARAM_CHECKBOX, &scalar(1.0)).unwrap();
@@ -3044,6 +3092,7 @@ mod tests {
                 value: None,
                 color: None,
                 point: Some([42.5, -7.25]),
+                angle_fixed: None,
             },
         )
         .unwrap();
@@ -3076,6 +3125,7 @@ mod tests {
                 value: None,
                 color: Some([255, 64, 128, 192]),
                 point: None,
+                angle_fixed: None,
             },
         )
         .unwrap();
@@ -3089,6 +3139,7 @@ mod tests {
             value: None,
             color: Some([255, 64, 128, 192]),
             point: None,
+            angle_fixed: None,
         })
         .unwrap();
         assert_eq!(applied["slot"], 2);
@@ -3108,6 +3159,7 @@ mod tests {
                 value: None,
                 color: Some([255, 1, 2, 3]),
                 point: None,
+                angle_fixed: None,
             },
         )
         .unwrap_err();

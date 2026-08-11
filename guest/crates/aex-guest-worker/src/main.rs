@@ -297,7 +297,7 @@ fn usage() {
         "       aex-guest-worker trace-selector <x64.aex> <GLOBAL_SETUP|PARAMS_SETUP> [--effect <#index|match-name>]"
     );
     eprintln!(
-        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--render-backend <cpu|opencl|wgpu-metal>] [--gpu-device-index <n>] [name=value | name@slot=a,r,g,b ...]"
+        "       aex-guest-worker render-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--render-backend <cpu|opencl|wgpu-metal>] [--gpu-device-index <n>] [name=value | name@slot=a,r,g,b | angle=deg:n | angle=fixed:i32 ...]"
     );
     eprintln!(
         "       aex-guest-worker render-trace-png <x64.aex> <input.png> <output.png> [--effect <#index|match-name>] [--pixel-format <argb8|argb16|argb32f>] [--watch <spec>] [--watch-output-pixel x,y] [name=value ...]"
@@ -778,39 +778,59 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             return Err(format!("duplicate parameter assignment: {identity:?}"));
         }
         let components = encoded.split(',').collect::<Vec<_>>();
-        let (numeric, point, color) = match components.as_slice() {
-            [number] => (
-                Some(
-                    number
-                        .parse()
-                        .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
-                ),
-                None,
-                None,
-            ),
-            [x, y] => (
-                None,
-                Some([
-                    x.parse()
-                        .map_err(|error| format!("invalid point x for {name:?}: {error}"))?,
-                    y.parse()
-                        .map_err(|error| format!("invalid point y for {name:?}: {error}"))?,
-                ]),
-                None,
-            ),
-            [alpha, red, green, blue] => {
-                let mut color = [0u8; 4];
-                for (destination, component) in color.iter_mut().zip([alpha, red, green, blue]) {
-                    *destination = component.parse::<u8>().map_err(|_| {
-                        format!("ARGB8 component for {name:?} must be an integer from 0 to 255")
-                    })?;
-                }
-                (None, None, Some(color))
+        let (numeric, point, color, angle_fixed) = if let Some(degrees) =
+            encoded.strip_prefix("deg:")
+        {
+            let degrees = degrees
+                .parse::<f64>()
+                .map_err(|error| format!("invalid angle degrees for {name:?}: {error}"))?;
+            if !degrees.is_finite() {
+                return Err(format!("angle degrees for {name:?} must be finite"));
             }
-            _ => {
-                return Err(format!(
-                    "parameter assignment must contain one scalar, two point components, or four ARGB8 components: {encoded:?}"
-                ));
+            (Some(degrees), None, None, None)
+        } else if let Some(fixed) = encoded.strip_prefix("fixed:") {
+            let fixed = fixed
+                .parse::<i32>()
+                .map_err(|error| format!("invalid raw fixed angle for {name:?}: {error}"))?;
+            (None, None, None, Some(fixed))
+        } else {
+            match components.as_slice() {
+                [number] => (
+                    Some(
+                        number
+                            .parse()
+                            .map_err(|error| format!("invalid value for {name:?}: {error}"))?,
+                    ),
+                    None,
+                    None,
+                    None,
+                ),
+                [x, y] => (
+                    None,
+                    Some([
+                        x.parse()
+                            .map_err(|error| format!("invalid point x for {name:?}: {error}"))?,
+                        y.parse()
+                            .map_err(|error| format!("invalid point y for {name:?}: {error}"))?,
+                    ]),
+                    None,
+                    None,
+                ),
+                [alpha, red, green, blue] => {
+                    let mut color = [0u8; 4];
+                    for (destination, component) in color.iter_mut().zip([alpha, red, green, blue])
+                    {
+                        *destination = component.parse::<u8>().map_err(|_| {
+                            format!("ARGB8 component for {name:?} must be an integer from 0 to 255")
+                        })?;
+                    }
+                    (None, None, Some(color), None)
+                }
+                _ => {
+                    return Err(format!(
+                        "parameter assignment must contain one scalar, two point components, or four ARGB8 components: {encoded:?}"
+                    ));
+                }
             }
         };
         parsed.push(ParameterValue {
@@ -819,6 +839,7 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             value: numeric,
             color,
             point,
+            angle_fixed,
         });
     }
     Ok(parsed)
@@ -995,6 +1016,21 @@ mod tests {
         assert_eq!(values[1].color, None);
         assert_eq!(values[2].slot, Some(4));
         assert_eq!(values[2].value, Some(100.0));
+    }
+
+    #[test]
+    fn parameter_parser_accepts_angle_degrees_and_raw_fixed() {
+        let values = parse_parameter_values(&[
+            OsString::from("Rotation=deg:-22.5"),
+            OsString::from("Other Rotation=fixed:2147483647"),
+        ])
+        .unwrap();
+        assert_eq!(values[0].value, Some(-22.5));
+        assert_eq!(values[0].angle_fixed, None);
+        assert_eq!(values[1].value, None);
+        assert_eq!(values[1].angle_fixed, Some(i32::MAX));
+        assert!(parse_parameter_values(&[OsString::from("Rotation=deg:NaN")]).is_err());
+        assert!(parse_parameter_values(&[OsString::from("Rotation=fixed:2147483648")]).is_err());
     }
 
     #[test]
