@@ -853,6 +853,11 @@ fn render_classic_via_length_one_session(
             .get("premultiplication")
             .and_then(Value::as_str)
             .filter(|value| matches!(*value, "straight" | "premultiplied" | "opaque"))
+            .or_else(|| {
+                request
+                    .conformance_render_settings
+                    .and_then(|settings| settings.split('|').nth(1))
+            })
             .ok_or_else(|| invalid("worker report lacks a valid premultiplication state"));
         let premultiplication = match premultiplication {
             Ok(value) => value,

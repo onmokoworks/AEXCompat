@@ -23,7 +23,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-fn validate_conditions(conditions: &RenderArtifactConditions) -> io::Result<()> {
+fn validate_conditions(
+    conditions: &RenderArtifactConditions,
+    checkpoint_expected: bool,
+) -> io::Result<()> {
     if !matches!(
         conditions.premultiplication.as_str(),
         "straight" | "premultiplied" | "opaque"
@@ -50,7 +53,9 @@ fn validate_conditions(conditions: &RenderArtifactConditions) -> io::Result<()> 
             return Err(invalid(format!("comparison identity lacks {key}")));
         }
     }
-    if identity.len() != 8 {
+    if identity.len() != if checkpoint_expected { 9 } else { 8 }
+        || (checkpoint_expected && !identity.contains_key("checkpoint"))
+    {
         return Err(invalid("comparison identity has unknown keys"));
     }
     for key in ["plugin_sha256", "input_sha256", "world_sha256"] {
@@ -94,6 +99,25 @@ fn validate_conditions(conditions: &RenderArtifactConditions) -> io::Result<()> 
         })
         .ok_or_else(|| invalid("comparison identity origin is not canonical"))?;
     let _ = (timing, origin);
+    if let Some(checkpoint) = identity.get("checkpoint") {
+        let checkpoint = checkpoint
+            .as_object()
+            .filter(|value| {
+                value.len() == 3
+                    && ["id", "stage", "fixture_sha256"]
+                        .into_iter()
+                        .all(|key| value.get(key).and_then(serde_json::Value::as_str).is_some())
+            })
+            .ok_or_else(|| invalid("comparison identity checkpoint is not canonical"))?;
+        let hash = checkpoint["fixture_sha256"].as_str().unwrap();
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid("comparison identity checkpoint hash is invalid"));
+        }
+    }
     Ok(())
 }
 
@@ -202,7 +226,78 @@ pub fn write_raw_world_artifact(
     origin_y: i32,
     conditions: RenderArtifactConditions,
 ) -> io::Result<serde_json::Value> {
-    validate_conditions(&conditions)?;
+    write_raw_world_artifact_with_checkpoint(
+        directory,
+        packed_rgba,
+        width,
+        height,
+        format,
+        origin_x,
+        origin_y,
+        conditions,
+        None,
+    )
+}
+
+pub fn write_raw_world_checkpoint_artifact(
+    directory: &Path,
+    packed_rgba: &[u8],
+    width: u32,
+    height: u32,
+    format: RenderPixelFormat,
+    origin_x: i32,
+    origin_y: i32,
+    conditions: RenderArtifactConditions,
+    checkpoint_id: &str,
+    checkpoint_stage: &str,
+    fixture_sha256: &str,
+) -> io::Result<serde_json::Value> {
+    let canonical = |value: &str, limit: usize| {
+        !value.is_empty()
+            && value.len() <= limit
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+    };
+    if !canonical(checkpoint_id, 64)
+        || !canonical(checkpoint_stage, 96)
+        || fixture_sha256.len() != 64
+        || !fixture_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid("checkpoint identity is not canonical"));
+    }
+    let checkpoint_identity = serde_json::json!({
+        "id":checkpoint_id, "stage":checkpoint_stage, "fixture_sha256":fixture_sha256
+    });
+    let mut conditions = conditions;
+    conditions.comparison_identity["checkpoint"] = checkpoint_identity.clone();
+    write_raw_world_artifact_with_checkpoint(
+        directory,
+        packed_rgba,
+        width,
+        height,
+        format,
+        origin_x,
+        origin_y,
+        conditions,
+        Some(checkpoint_identity),
+    )
+}
+
+fn write_raw_world_artifact_with_checkpoint(
+    directory: &Path,
+    packed_rgba: &[u8],
+    width: u32,
+    height: u32,
+    format: RenderPixelFormat,
+    origin_x: i32,
+    origin_y: i32,
+    conditions: RenderArtifactConditions,
+    checkpoint_identity: Option<serde_json::Value>,
+) -> io::Result<serde_json::Value> {
+    validate_conditions(&conditions, checkpoint_identity.is_some())?;
     validate_identity_origin(&conditions, origin_x, origin_y)?;
     let component = component_bytes(format);
     validate(packed_rgba, width, height, component)?;
@@ -212,8 +307,8 @@ pub fn write_raw_world_artifact(
         RenderPixelFormat::Argb16 => "unsigned_integer_0_32768_ae_internal",
         RenderPixelFormat::Argb32f => "ieee754_binary32_raw_words",
     };
-    let metadata = serde_json::json!({
-        "schema":"aexcompat.render_raw", "schema_version":1, "width":width, "height":height,
+    let mut metadata = serde_json::json!({
+        "schema":"aexcompat.render_raw", "schema_version":if checkpoint_identity.is_some() {2} else {1}, "width":width, "height":height,
         "rowbytes":u64::from(width)*4*component as u64, "row_padding":"excluded", "channel_order":"ARGB",
         "source_world_rowbytes":serde_json::Value::Null,"source_world_row_padding":"not_transported",
         "pixel_format":format.report_name(), "component_bytes":component, "component_representation":representation,
@@ -221,9 +316,12 @@ pub fn write_raw_world_artifact(
         "premultiplication":conditions.premultiplication, "working_space":conditions.working_space,
         "render_mode":conditions.render_mode, "comparison_identity":conditions.comparison_identity,
         "origin":{"x":origin_x,"y":origin_y},
-        "data_file":"output.bin", "data_size_bytes":raw.len(), "data_sha256":format!("{:x}", Sha256::digest(&raw))
-        ,"comparison_boundaries":{"aex_arithmetic":"internal_world_raw","host_export":"not_applicable"}
+        "data_file":"output.bin", "data_size_bytes":raw.len(), "data_sha256":format!("{:x}", Sha256::digest(&raw)),
+        "comparison_boundaries":{"aex_arithmetic":"internal_world_raw","host_export":"not_applicable"}
     });
+    if let Some(checkpoint_identity) = checkpoint_identity {
+        metadata["checkpoint_identity"] = checkpoint_identity;
+    }
     let json = serde_json::to_vec_pretty(&metadata)?;
     commit_directory(directory, &[("output.bin", &raw), ("output.json", &json)])?;
     Ok(metadata)
@@ -297,7 +395,7 @@ pub fn write_float32_exr_artifact(
     origin_y: i32,
     conditions: RenderArtifactConditions,
 ) -> io::Result<serde_json::Value> {
-    validate_conditions(&conditions)?;
+    validate_conditions(&conditions, false)?;
     validate_identity_origin(&conditions, origin_x, origin_y)?;
     let exr = encode_exr(packed_rgba32f, width, height)?;
     let metadata = serde_json::json!({"schema":"aexcompat.render_exr","schema_version":1,"width":width,"height":height,
@@ -548,6 +646,61 @@ mod tests {
             );
             assert!(!target.exists());
         }
+    }
+    #[test]
+    fn checkpoint_raw_binds_identity_and_preserves_special_float_words() {
+        let ordinary = temp("ordinary-v1-no-checkpoint");
+        let _ = fs::remove_dir_all(&ordinary);
+        let ordinary_metadata = write_raw_world_artifact(
+            &ordinary,
+            &[0; 4],
+            1,
+            1,
+            RenderPixelFormat::Argb8,
+            0,
+            0,
+            conditions(),
+        )
+        .unwrap();
+        assert_eq!(ordinary_metadata["schema_version"], 1);
+        assert!(ordinary_metadata.get("checkpoint_identity").is_none());
+        fs::remove_dir_all(ordinary).unwrap();
+
+        let directory = temp("checkpoint-special-words");
+        let _ = fs::remove_dir_all(&directory);
+        let words = [0x7fc1_2345u32, 0x8000_0000, 0x0000_0001, 0x3f80_0000];
+        let rgba = words
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let metadata = write_raw_world_checkpoint_artifact(
+            &directory,
+            &rgba,
+            1,
+            1,
+            RenderPixelFormat::Argb32f,
+            0,
+            0,
+            conditions(),
+            "input_world",
+            "smart-input",
+            &"ab".repeat(32),
+        )
+        .unwrap();
+        let raw_words = fs::read(directory.join("output.bin"))
+            .unwrap()
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(raw_words, [words[3], words[0], words[1], words[2]]);
+        assert_eq!(metadata["schema_version"], 2);
+        assert_eq!(metadata["checkpoint_identity"]["id"], "input_world");
+        assert_eq!(metadata["checkpoint_identity"]["stage"], "smart-input");
+        assert_eq!(
+            metadata["comparison_identity"]["checkpoint"],
+            metadata["checkpoint_identity"]
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn commit_is_no_overwrite_atomic_set() {
