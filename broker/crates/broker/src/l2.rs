@@ -28,8 +28,12 @@ fn worker_passed(worker_report: &Value) -> bool {
             .and_then(Value::as_bool)
             .unwrap_or(false)
     };
-    let conditional_ui_expected =
-        advertised("update_params_ui_advertised") || advertised("query_dynamic_flags_advertised");
+    // UPDATE_PARAMS_UI is no longer dispatched (#1156: a headless render/discovery
+    // has no Effect Controls panel, and AE's aerender never issues it). The worker
+    // now sets conditional_ui_selectors_dispatched only for QUERY_DYNAMIC_FLAGS, so
+    // the L2 contract keys off that alone; advertising SEND_UPDATE_PARAMS_UI no
+    // longer implies a dispatch.
+    let conditional_ui_expected = advertised("query_dynamic_flags_advertised");
     worker_report.get("status") == Some(&Value::String("selectors_completed".into()))
         && worker_report
             .get("about_message")
@@ -171,9 +175,14 @@ mod tests {
         value["about_message"] = json!("Some Other Effect v3");
         assert!(worker_passed(&value));
 
-        // The host must dispatch the conditional UI selectors exactly when the
-        // plug-in advertised them.
+        // UPDATE_PARAMS_UI is no longer dispatched (#1156), so advertising it does
+        // not require a dispatch: the host matches AE's headless aerender, which
+        // never issues it.
         value["update_params_ui_advertised"] = json!(true);
+        assert!(worker_passed(&value));
+
+        // QUERY_DYNAMIC_FLAGS still must be dispatched exactly when advertised.
+        value["query_dynamic_flags_advertised"] = json!(true);
         assert!(!worker_passed(&value));
         value["conditional_ui_selectors_dispatched"] = json!(true);
         assert!(worker_passed(&value));
