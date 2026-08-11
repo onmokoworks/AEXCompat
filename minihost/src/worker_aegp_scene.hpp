@@ -269,6 +269,8 @@ int32_t __cdecl aegp_get_layer_flags(void* layer, uint32_t* flags);
 int32_t __cdecl aegp_set_layer_flag(void* layer, uint32_t flag, uint8_t value);
 int32_t __cdecl aegp_get_layer_transfer_mode(void*, AegpLayerTransferMode*);
 int32_t __cdecl aegp_get_layer_object_type(void* layer, int32_t* type);
+int32_t __cdecl aegp_get_layer_current_time(
+    void* layer, int16_t time_mode, AegpTime* time);
 int32_t __cdecl aegp_get_layer_in_point(void*, int32_t, AegpTime*);
 int32_t __cdecl aegp_get_layer_duration(void*, int32_t, AegpTime*);
 int32_t __cdecl aegp_set_layer_in_point_and_duration(
