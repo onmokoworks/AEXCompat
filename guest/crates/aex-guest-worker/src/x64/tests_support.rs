@@ -5594,6 +5594,46 @@
     }
 
     #[test]
+    fn smart_checkout_resolves_layer_disk_id_without_aliasing_positional_point_storage() {
+        let parameter = |disk_id: i32, param_type: i32, name: &str| {
+            let mut bytes = vec![0; abi::PF_PARAM_DEF_SIZE];
+            bytes[..4].copy_from_slice(&disk_id.to_le_bytes());
+            GuestParam {
+                index: -1,
+                param_type,
+                name: name.into(),
+                bytes,
+            }
+        };
+        let parameters = vec![
+            parameter(2, 6, "Center"),
+            parameter(30, 10, "Amount"),
+            parameter(1, 0, "Noise Layer"),
+        ];
+
+        assert_eq!(resolve_layer_parameter_offset(&parameters, 1).unwrap(), 2);
+        assert_eq!(parameters[0].param_type, 6, "the positional point stays distinct");
+
+        let mut duplicate = parameters.clone();
+        duplicate.push(parameter(1, 0, "Duplicate Layer"));
+        assert!(
+            resolve_layer_parameter_offset(&duplicate, 1)
+                .unwrap_err()
+                .contains("duplicated")
+        );
+        assert!(
+            resolve_layer_parameter_offset(&parameters, 2)
+                .unwrap_err()
+                .contains("not a PF_Param_LAYER")
+        );
+        assert!(
+            resolve_layer_parameter_offset(&parameters, 99)
+                .unwrap_err()
+                .contains("does not resolve")
+        );
+    }
+
+    #[test]
     fn smart_checkout_rejects_non_layer_secondary_parameter() {
         let mut engine = test_engine(&[0xc3]);
         let input_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
