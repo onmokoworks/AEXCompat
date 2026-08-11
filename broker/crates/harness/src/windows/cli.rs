@@ -369,7 +369,13 @@ mod artifact_cli_contract_tests {
             command("--render-exr")["result"],
             "uncompressed-scanline-float32-exr-artifact-report-json"
         );
-        assert_eq!(command("--render-fixture")["argv"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            command("--render-fixture")["argv"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
     }
 }
 
