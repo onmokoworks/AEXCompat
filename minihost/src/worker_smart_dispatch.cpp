@@ -931,6 +931,12 @@ struct FrameRecord {
   // outFrame; it does not touch a host-provided destination. That returned frame
   // is what the host must read (issue #1058).
   bool plugin_created{};
+  // Set when the plug-in released the frame through PPixSuite::Dispose. The
+  // actual free is deferred to the HostContext destructor (the released frame
+  // may still be the render output the host has not read yet), but recording the
+  // release keeps handle ownership fail-closed: a second Dispose of the same
+  // handle, or a Dispose of a handle this host never issued, is rejected.
+  bool dispose_requested{};
 };
 
 struct HostContext {
@@ -944,6 +950,13 @@ struct HostContext {
   std::vector<char*> scratch;
 
   ~HostContext() {
+    // Every GPU frame the render allocated - host input/output and each frame
+    // the plug-in created through CreateGPUPPix - is freed exactly once here,
+    // since PPixSuite::Dispose only defers. A plug-in that allocates frames in a
+    // loop therefore holds them all until the render ends rather than freeing a
+    // disposed frame immediately; peak device memory is bounded by the worker's
+    // kill-on-close Job Object memory limit, which contains a runaway allocator
+    // (issue #1058 follow-up if a legitimate effect ever needs a per-render cap).
     for (auto& record : gpu_frames)
       if (record && record->live) frames->pr_dispose(record->world, record->live);
     for (char* pointer : scratch) std::free(pointer);
@@ -1011,13 +1024,17 @@ abi::prSuiteError GPUDev_GetGPUPPixSize(abi::PPixHand ppix, size_t* out) {
 }
 
 // ---- PPix Suite / PPix2 Suite ---------------------------------------------
-abi::prSuiteError PPix_Dispose(abi::PPixHand /*ppix*/) {
-  // Defer: a Premiere GPU filter calls Dispose on the frame it returns through
-  // outFrame as a reference release, expecting the host to still hold its own
-  // reference. This host does not reference-count frames, so freeing here would
-  // destroy the rendered output before it is read back. Every frame is freed
-  // once, in the HostContext destructor, after the output has been downloaded
-  // (issue #1058).
+abi::prSuiteError PPix_Dispose(abi::PPixHand ppix) {
+  // A Premiere GPU filter calls Dispose on the frame it returns through outFrame
+  // as a reference release, expecting the host to still hold its own reference.
+  // This host does not reference-count frames, so freeing here would destroy the
+  // rendered output before it is read back; the free is deferred to the
+  // HostContext destructor (issue #1058). Ownership stays fail-closed though: a
+  // Dispose of a handle this host never issued, or a second Dispose of the same
+  // handle, is rejected rather than silently accepted.
+  FrameRecord* record = find_frame(ppix);
+  if (!record || record->dispose_requested) return -1;
+  record->dispose_requested = true;
   return abi::kSuiteError_NoError;
 }
 abi::prSuiteError PPix_GetBounds(abi::PPixHand ppix, abi::prRect* out) {
@@ -1517,14 +1534,25 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
     return false;
   }
 
-  // Locate the rendered frame: the one the plug-in named through outFrame if it
-  // set it, otherwise the most recent frame it created via CreateGPUPPix (the
-  // VR filters render into that and never touch outFrame). Deferred disposal
-  // keeps every frame live until after this readback.
+  // Locate the rendered frame. If the plug-in pointed outFrame at a frame it
+  // created, that is the output it is handing back; otherwise fall back to the
+  // most recent frame it created via CreateGPUPPix (the VR filters render there
+  // without ever writing outFrame). Deferred disposal keeps every frame live
+  // until after this readback.
+  //
+  // Limitation (issue #1058 follow-up): a plug-in that renders into more than
+  // one CreateGPUPPix frame without naming the output through outFrame (a
+  // ping-pong / multi-pass design) may have its result in an earlier frame than
+  // the most recent one; the dimension cross-check below fails such a mismatch
+  // closed rather than returning wrong pixels. Every effect in scope creates a
+  // single output frame, so this heuristic holds for them.
   FrameRecord* out_record = nullptr;
   if (abi::suite_ok(render_error)) {
-    if (out_frame) out_record = find_frame(out_frame);
-    if (!out_record || !out_record->plugin_created)
+    if (out_frame) {
+      FrameRecord* named = find_frame(out_frame);
+      if (named && named->plugin_created) out_record = named;
+    }
+    if (!out_record)
       for (auto it = context.gpu_frames.rbegin(); it != context.gpu_frames.rend();
            ++it)
         if ((*it)->plugin_created) {
@@ -1536,7 +1564,13 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   if (filter.DisposeInstance) filter.DisposeInstance(&instance);
   shutdown();
 
-  if (!out_record) return false;
+  // Fail closed when the frame the plug-in rendered is not the render's size:
+  // the readback below copies plan-height rows of plan-width, so a shorter or
+  // narrower frame would over-read its device allocation. A size mismatch also
+  // means the plug-in did not produce the frame the host asked for, so decline
+  // rather than return a wrong-size / out-of-bounds result (issue #1058).
+  if (!out_record || out_record->width != width || out_record->height != height)
+    return false;
 
   const int32_t rowbytes = width * 16;
   if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * height))
