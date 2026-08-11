@@ -97,6 +97,22 @@ mod tests {
     }
 
     #[test]
+    fn parameter_inspection_and_render_gate_preserve_successful_empty_states() {
+        let report = serde_json::json!({
+            "worker_diagnostics": { "parameter_metadata": [] }
+        });
+        assert_eq!(
+            parameter_inspection_state(&report, &[]).unwrap(),
+            ParameterInspectionState::ZeroParameters
+        );
+        assert!(render_action_enabled(false, true, true, true, false, true));
+        assert!(!render_action_enabled(
+            false, true, true, true, false, false
+        ));
+        assert!(!render_action_enabled(false, true, true, true, true, true));
+    }
+
+    #[test]
     fn selection_failure_keeps_the_open_time_snapshot() {
         let selection = selected_interactive_session_selection(
             InspectedRenderCapability {
