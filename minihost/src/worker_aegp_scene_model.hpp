@@ -36,6 +36,7 @@ enum class StreamValueKind : uint8_t {
   layer = 3,
   mask = 4,
   arbitrary = 5,
+  no_data = 6,
 };
 
 struct TemporalEase {
