@@ -2,6 +2,7 @@
 #include "worker_suite_registry.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -41,21 +42,35 @@ std::size_t occurrences(const std::string& value, const std::string& needle) {
 }  // namespace
 
 int main() {
+  // #1182: a suite release with no matching acquire is contained by the registry
+  // as a no-op (it returns rejection and touches no host state), so it is a
+  // benign warning, not a session-failing fault. This pins that contract: the
+  // rejected release is COUNTED as a diagnostic but never sets
+  // suite_fault_observed, before or after.
+  const uint32_t rejected_before =
+      aexcompat::worker_runtime::suite_registry().rejected_release_count();
   auto clean_state =
       aexcompat::worker_render_report::capture_classic_subsystems();
   const int32_t rejected_release =
       aexcompat::worker_runtime::suite_registry().release(
           "AEGP Layer Mask Suite", 999, nullptr);
-  auto fault_state =
+  const uint32_t rejected_after =
+      aexcompat::worker_runtime::suite_registry().rejected_release_count();
+  auto after_state =
       aexcompat::worker_render_report::capture_classic_subsystems();
   const std::string clean_warning = serialize_suite_state(clean_state);
-  const std::string actual_fault = serialize_suite_state(fault_state);
+  const std::string after_reject = serialize_suite_state(after_state);
   const std::string key = "\"suite_fault_observed\":";
   const bool passed =
-      rejected_release != 0 && !clean_state.suite_fault && fault_state.suite_fault &&
+      // The registry rejected the unacquired release (the protection: a no-op).
+      rejected_release != 0 &&
+      // The rejection is still counted as a reproducible diagnostic.
+      rejected_after == rejected_before + 1 &&
+      // It is benign: suite_fault_observed stays false, before and after.
+      !clean_state.suite_fault && !after_state.suite_fault &&
       clean_warning.find(key + "false") != std::string::npos &&
-      actual_fault.find(key + "true") != std::string::npos &&
-      occurrences(clean_warning, key) == 1 && occurrences(actual_fault, key) == 1 &&
+      after_reject.find(key + "false") != std::string::npos &&
+      occurrences(clean_warning, key) == 1 && occurrences(after_reject, key) == 1 &&
       clean_warning.find("\"suite_acquires\":8") != std::string::npos &&
       clean_warning.find("\"suite_releases\":7") != std::string::npos &&
       clean_warning.find("\"live_suite_lease_count\":1") != std::string::npos &&
@@ -65,12 +80,15 @@ int main() {
 
   if (!passed) {
     std::cerr << "clean_warning=" << clean_warning << '\n'
-              << "actual_fault=" << actual_fault << '\n';
+              << "after_reject=" << after_reject << '\n'
+              << "rejected_release=" << rejected_release
+              << " rejected_before=" << rejected_before
+              << " rejected_after=" << rejected_after << '\n';
   }
 
   std::cout << "{\"classic_suite_fault_report\":\""
             << (passed ? "passed" : "failed")
-            << "\",\"false_and_true_mutations\":"
+            << "\",\"rejected_release_is_benign_warning\":"
             << (passed ? "true" : "false") << "}\n";
   return passed ? 0 : 1;
 }
