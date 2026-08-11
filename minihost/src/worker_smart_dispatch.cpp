@@ -1122,17 +1122,51 @@ abi::prSuiteError VS_GetParam(abi::csSDK_int32, abi::csSDK_int32 index,
       out->mType = abi::kPrParamType_Bool;
       out->mBool = value != 0.0 ? 1 : 0;
       return abi::kSuiteError_NoError;
-    case 7:  // PF_Param_POPUP
+    case 7: {  // PF_Param_POPUP
+      // PF stores popup selections 1-based; the Premiere VideoSegment convention
+      // these VR effects read against is 0-based. Delivering the raw PF value
+      // shifts every menu by one - for VRColorGradient that lands the default
+      // "Blending Mode" (PF 2 = "Normal") on the plug-in's 0-based index 2,
+      // which is the "(-" separator entry in its BlendingModeList, disabling the
+      // blend and reading back as an exact input passthrough (issue #1206).
+      // Convert to 0-based; a valid PF popup value is >= 1.
       out->mType = abi::kPrParamType_Int32;
-      out->mInt32 = static_cast<int32_t>(value);
+      const int32_t pf_value = static_cast<int32_t>(value);
+      out->mInt32 = pf_value > 0 ? pf_value - 1 : 0;
       return abi::kSuiteError_NoError;
+    }
+    case 5: {  // PF_Param_COLOR
+      // The VR effects read the color out of the PrParam value union as three
+      // 16-bit little-endian channels R,G,B (bytes +1/+3/+5 from the union
+      // start), each divided by 255 - i.e. they take the high byte of each
+      // 16-bit channel as the 8-bit value (observed in VRColorGradient::Render
+      // FUN_180007f10: R=uStack_330>>8&0xff, G=uStack_330>>0x18, B=uStack_32c>>8
+      // &0xff). Deliver the discovered 8-bit color in each channel's high byte.
+      out->mType = abi::kPrParamType_Int64;
+      const auto& color =
+          record.has_current ? record.current_color : record.default_color;
+      std::array<uint8_t, 8> packed{};
+      packed[1] = color[1];  // R high byte (record color is ARGB: [1]=R)
+      packed[3] = color[2];  // G high byte
+      packed[5] = color[3];  // B high byte
+      std::memcpy(&out->mInt64, packed.data(), packed.size());
+      return abi::kSuiteError_NoError;
+    }
     case 6:   // PF_Param_POINT
     case 18: {  // PF_Param_POINT_3D
+      // Discovery stores a POINT default as a percentage of the layer (SDK
+      // PF_PointDef x_dephault, 0..100). The Premiere VideoSegment convention
+      // these VR effects read against is a 0..1 fraction of the frame with the
+      // frame center at 0.5 (VRColorGradient's point->direction math uses a
+      // hard-coded center of {0.5, 0.5}: FUN_1800103e0). Delivering the raw
+      // percentage placed every point ~100x outside the frame, collapsing the
+      // per-point view directions and corrupting the gradient. Convert to the
+      // 0..1 fraction.
       out->mType = abi::kPrParamType_Point;
       const auto& components =
           record.has_current ? record.current_components : record.default_components;
-      out->mPoint.x = record.component_count > 0 ? components[0] : 0.0;
-      out->mPoint.y = record.component_count > 1 ? components[1] : 0.0;
+      out->mPoint.x = record.component_count > 0 ? components[0] / 100.0 : 0.0;
+      out->mPoint.y = record.component_count > 1 ? components[1] / 100.0 : 0.0;
       return abi::kSuiteError_NoError;
     }
     case 1:   // PF_Param_SLIDER
@@ -1598,51 +1632,54 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   if (filter.DisposeInstance) filter.DisposeInstance(&instance);
   shutdown();
 
-  // Fail closed when the plug-in's frame is smaller than the render: the
-  // readback below copies plan-height rows of plan-width, so a frame narrower or
-  // shorter than the render would over-read its device allocation. Read the
-  // frame's size from its VF world (offsets 36/40), not the FrameRecord scalar
-  // members: building the world leaves FrameRecord::height at height+1 (see
-  // GPUDev_CreateGPUPPix), so a check against it would spuriously reject a
-  // correctly sized frame and drop the whole GPU route to the 512 CPU path
-  // (issue #1058). The world width/height are what create_gpu validated the
-  // requested allocation against. Width must match exactly, since the readback
-  // stride is plan-width; a taller frame is safe to read the requested rows from
-  // and is accepted (a Premiere GPU filter may allocate its output a row larger).
+  // Read back the plug-in's own output extent, not the requested plan size. A
+  // Premiere GPU filter may legitimately produce a frame of a different size
+  // than requested - VRConverter, driven by its "Output Frame Ratio" popup,
+  // reprojects a 256x256 equirect input to a 256x128 2:1 frame (Project
+  // Direction 3: verify variable output size). Read the frame's size from its VF
+  // world (offsets 36/40), not the FrameRecord scalar members: building the
+  // world leaves FrameRecord::height at height+1 (see GPUDev_CreateGPUPPix), so
+  // those members are unreliable (issue #1058). The world width/height are what
+  // create_gpu validated the allocation against, so reading exactly that many
+  // rows of that stride never over-reads the device allocation - the fail-closed
+  // property the earlier plan-size cross-check provided. Reject only a
+  // degenerate (non-positive) extent.
   int32_t out_frame_w = 0, out_frame_h = 0;
   if (out_record)
     frames.pr_world_dims(out_record->world, out_frame_w, out_frame_h);
-  if (!out_record || out_frame_w != width || out_frame_h < height)
+  if (!out_record || out_frame_w <= 0 || out_frame_h <= 0)
     return false;
 
-  const int32_t rowbytes = width * 16;
-  if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * height))
+  const int32_t rowbytes = out_frame_w * 16;
+  if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * out_frame_h))
     return false;
   *request.destination = request.guarded->data();
   if (!frames.pr_download(out_record->world, request.guarded->data(), rowbytes,
-                          width, height))
+                          out_frame_w, out_frame_h))
     return false;
 
   // TEMP (#1058 correctness): dump the input and rendered output as raw float32
   // ARGB so an AE-oracle comparison can settle the channel order. Env-gated.
   if (const char* dump_path = std::getenv("AEXCOMPAT_PR_GPU_DUMP")) {
     const auto write_raw = [&](const std::string& path, const void* pixels,
-                               int32_t src_rowbytes) {
+                               int32_t w, int32_t h, int32_t src_rowbytes) {
       std::ofstream file(path, std::ios::binary);
-      const int32_t header[2] = {width, height};
+      const int32_t header[2] = {w, h};
       file.write(reinterpret_cast<const char*>(header), sizeof(header));
-      for (int32_t y = 0; y < height; ++y)
+      for (int32_t y = 0; y < h; ++y)
         file.write(static_cast<const char*>(pixels) +
                        static_cast<std::size_t>(y) * src_rowbytes,
-                   static_cast<std::size_t>(width) * 16);
+                   static_cast<std::size_t>(w) * 16);
     };
-    write_raw(std::string(dump_path) + ".in", input_pixels, input_rowbytes);
-    write_raw(std::string(dump_path) + ".out", request.guarded->data(), rowbytes);
+    write_raw(std::string(dump_path) + ".in", input_pixels, width, height,
+              input_rowbytes);
+    write_raw(std::string(dump_path) + ".out", request.guarded->data(),
+              out_frame_w, out_frame_h, rowbytes);
   }
 
   if (!render::prepare_world_layout(
           *request.output_world,
-          {1, plan.pixel_bytes, width, height, rowbytes},
+          {1, plan.pixel_bytes, out_frame_w, out_frame_h, rowbytes},
           *request.destination) ||
       !request.formats->register_world(request.output_world->data(),
                                        request.dispatch_pixel_format))
@@ -1654,11 +1691,11 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   result.render_error = 0;
   result.rects_valid = true;
   result.empty_result_rect = false;
-  result.result_rect = {0, 0, width, height};
-  result.max_result_rect = {0, 0, width, height};
+  result.result_rect = {0, 0, out_frame_w, out_frame_h};
+  result.max_result_rect = {0, 0, out_frame_w, out_frame_h};
   result.result_within_request = true;
-  result.output_width = width;
-  result.output_height = height;
+  result.output_width = out_frame_w;
+  result.output_height = out_frame_h;
   result.output_rowbytes = rowbytes;
   return true;
 }
