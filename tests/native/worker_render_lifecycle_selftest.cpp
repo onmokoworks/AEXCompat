@@ -102,6 +102,10 @@ struct Buffers {
 struct Observation {
   int32_t width_on_entry{};
   int32_t height_on_entry{};
+  int32_t out_origin_x_on_entry{};
+  int32_t out_origin_y_on_entry{};
+  int32_t in_origin_x_on_entry{};
+  int32_t in_origin_y_on_entry{};
   int32_t selector{};
   int calls{};
   // What FRAME_SETUP writes back, so a fake can stand in for an expanding
@@ -117,7 +121,8 @@ struct Observation {
 
 Observation g_observed;
 
-int32_t recording_frame(void*, int32_t selector, void*, void* output, void**, void*) {
+int32_t recording_frame(void*, int32_t selector, void* input, void* output,
+                        void**, void*) {
   if (selector != kLayout.frame_setup) return 0;
   ++g_observed.calls;
   g_observed.selector = selector;
@@ -125,6 +130,16 @@ int32_t recording_frame(void*, int32_t selector, void*, void* output, void**, vo
               static_cast<unsigned char*>(output) + kOutWidth, sizeof(int32_t));
   std::memcpy(&g_observed.height_on_entry,
               static_cast<unsigned char*>(output) + kOutHeight, sizeof(int32_t));
+  std::memcpy(&g_observed.out_origin_x_on_entry,
+              static_cast<unsigned char*>(output) + kOutOrigin, sizeof(int32_t));
+  std::memcpy(&g_observed.out_origin_y_on_entry,
+              static_cast<unsigned char*>(output) + kOutOrigin + 4,
+              sizeof(int32_t));
+  std::memcpy(&g_observed.in_origin_x_on_entry,
+              static_cast<unsigned char*>(input) + kInOrigin, sizeof(int32_t));
+  std::memcpy(&g_observed.in_origin_y_on_entry,
+              static_cast<unsigned char*>(input) + kInOrigin + 4,
+              sizeof(int32_t));
   if (g_observed.revise) {
     std::memcpy(static_cast<unsigned char*>(output) + kOutWidth,
                 &g_observed.revised_width, sizeof(int32_t));
@@ -211,11 +226,11 @@ void a_layout_without_extent_offsets_leaves_out_data_untouched() {
   check(g_observed.width_on_entry == 0 && g_observed.height_on_entry == 0,
         "a Layout with no extent offsets offers nothing");
 
-  // Every single offset the offer depends on, knocked out one at a time: each
-  // one missing is the same refusal, from either side of the transfer.
-  for (const Layout partial :
+  // Every single extent offset the offer depends on, knocked out one at a
+  // time: each one missing is the same refusal, from either side of the
+  // transfer.
+  for (const Layout& partial :
        {layout_without(&Layout::out_width), layout_without(&Layout::out_height),
-        layout_without(&Layout::out_origin), layout_without(&Layout::in_origin),
         layout_without(&Layout::world_width),
         layout_without(&Layout::world_height)}) {
     Buffers half;
@@ -227,6 +242,28 @@ void a_layout_without_extent_offsets_leaves_out_data_untouched() {
           "a Layout naming only one side of the offer offers nothing");
     check(out_extent(half, 0) == 0,
           "an incomplete Layout does not write an extent to offset zero");
+  }
+
+  // Origin is a separate, paired contract. Missing either origin offset must
+  // not suppress the extent offer, nor clear only one side of the answer.
+  for (const Layout& partial : {layout_without(&Layout::out_origin),
+                                layout_without(&Layout::in_origin)}) {
+    Buffers half;
+    write_world_extent(half, 256, 144);
+    const int32_t stale_origin[2]{22, 28};
+    std::memcpy(half.output + kOutOrigin, stale_origin, sizeof(stale_origin));
+    std::memcpy(half.input + kInOrigin, stale_origin, sizeof(stale_origin));
+    g_observed = {};
+    begin_frame(recording_hooks(), partial, half.input, half.output, nullptr,
+                half.world);
+    check(g_observed.width_on_entry == 256 &&
+              g_observed.height_on_entry == 144,
+          "origin offsets do not participate in the extent offer");
+    check(out_extent(half, kOutOrigin) == 22,
+          "a partial origin layout leaves out_data untouched");
+    int32_t in_x{};
+    std::memcpy(&in_x, half.input + kInOrigin, sizeof(in_x));
+    check(in_x == 22, "and leaves in_data untouched too");
   }
 }
 
@@ -440,11 +477,10 @@ void the_frame_report_origin_is_the_negation_of_the_stated_one() {
   }
 }
 
-// SmartFX runs the same lifecycle without the extent negotiation, and its
-// layout is derived from the classic one rather than copied. Derivation has to
-// keep every selector offset and drop every extent offset; keeping one extent
-// offset would invite FRAME_SETUP to revise an extent nothing reads back.
-void the_smart_layout_keeps_the_selectors_and_drops_the_extents() {
+// SmartFX runs the same lifecycle without extent negotiation, but origin is
+// still frame-local. A resident session reuses these buffers, so the second
+// frame must start undecided even if PRE_RENDER never supplies a replacement.
+void the_smart_layout_drops_extents_but_clears_stale_origins() {
   constexpr Layout smart =
       aexcompat::render_lifecycle::without_extent_negotiation(kLayout);
   check(smart.in_sequence_data == kLayout.in_sequence_data &&
@@ -456,18 +492,36 @@ void the_smart_layout_keeps_the_selectors_and_drops_the_extents() {
             smart.frame_setup == kLayout.frame_setup &&
             smart.frame_setdown == kLayout.frame_setdown,
         "the derived layout drives the same selectors and data slots");
-  check(smart.out_width == 0 && smart.out_height == 0 && smart.out_origin == 0 &&
-            smart.in_origin == 0 && smart.world_width == 0 &&
-            smart.world_height == 0,
+  check(smart.out_width == 0 && smart.out_height == 0 &&
+            smart.world_width == 0 && smart.world_height == 0,
         "and names no extent offsets at all");
+  check(smart.out_origin == kLayout.out_origin &&
+            smart.in_origin == kLayout.in_origin,
+        "while preserving the frame-local origin slots");
 
   Buffers buffers;
   write_world_extent(buffers, 256, 144);
+  const int32_t stale_origin[2]{22, 28};
+  std::memcpy(buffers.output + kOutOrigin, stale_origin, sizeof(stale_origin));
+  std::memcpy(buffers.input + kInOrigin, stale_origin, sizeof(stale_origin));
   g_observed = {};
   begin_frame(recording_hooks(), smart, buffers.input, buffers.output, nullptr,
               buffers.world);
   check(g_observed.width_on_entry == 0 && g_observed.height_on_entry == 0,
         "so FRAME_SETUP on the derived layout is offered nothing");
+  check(g_observed.out_origin_x_on_entry == 0 &&
+            g_observed.out_origin_y_on_entry == 0 &&
+            g_observed.in_origin_x_on_entry == 0 &&
+            g_observed.in_origin_y_on_entry == 0,
+        "and FRAME_SETUP itself sees no origin from the previous frame");
+  check(out_extent(buffers, kOutOrigin) == 0 &&
+            out_extent(buffers, kOutOrigin + 4) == 0,
+        "but a SmartFX frame does not inherit out_data origin");
+  int32_t in_x{}, in_y{};
+  std::memcpy(&in_x, buffers.input + kInOrigin, sizeof(in_x));
+  std::memcpy(&in_y, buffers.input + kInOrigin + 4, sizeof(in_y));
+  check(in_x == 0 && in_y == 0,
+        "and it does not inherit in_data output_origin");
 }
 
 }  // namespace
@@ -482,7 +536,7 @@ int main() {
   a_stated_origin_has_to_reach_the_output();
   the_extent_hint_comes_back_inside_the_new_buffer();
   the_frame_report_origin_is_the_negation_of_the_stated_one();
-  the_smart_layout_keeps_the_selectors_and_drops_the_extents();
+  the_smart_layout_drops_extents_but_clears_stale_origins();
   a_null_world_offers_nothing();
   a_refused_frame_setup_does_not_start_the_frame();
   if (failures == 0)
