@@ -3242,22 +3242,22 @@ pub fn validate_abandoned_smart_untouched_close(close: &Value) -> Result<(), &'s
 }
 
 /// Authorizes one fresh Classic attempt after the Smart worker was terminated
-/// by Windows heap-corruption detection while it was executing Smart Render.
-/// No pixels or report from the crashed process are accepted.  This is kept
-/// deliberately narrower than a generic crash fallback: transport failures,
-/// host invariant exits, other exception codes, and crashes in any other
-/// lifecycle stage remain terminal.
+/// by Windows heap-corruption detection during Smart Render, or after its valid
+/// frame reply but before it read the close request. No pixels or report from
+/// the crashed process are accepted. This is kept deliberately narrower than a
+/// generic crash fallback: transport failures, host invariant exits, other
+/// exception codes, and crashes after close begins remain terminal.
 pub fn validate_abandoned_smart_heap_corruption_close(close: &Value) -> Result<(), &'static str> {
     const STATUS_HEAP_CORRUPTION: u64 = 0xC000_0374;
 
     if close.get("render_path").and_then(Value::as_str) != Some("smart") {
         return Err("not_smart_render");
     }
+    let invalidated_reason = close
+        .pointer("/invalidated_reason/reason")
+        .and_then(Value::as_str);
     if close.get("invalidated") != Some(&Value::Bool(true))
-        || close
-            .pointer("/invalidated_reason/reason")
-            .and_then(Value::as_str)
-            != Some("worker_exited")
+        || !matches!(invalidated_reason, Some("worker_exited" | "premature_exit"))
     {
         return Err("not_worker_exit");
     }

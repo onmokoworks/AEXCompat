@@ -1152,6 +1152,15 @@ mod tests {
             Some("smart_worker_heap_corruption"),
             "a close-time exit after prior rendered frames still retries the whole slice"
         );
+        let mut post_frame_exit = prior_frames.clone();
+        *post_frame_exit
+            .pointer_mut("/invalidated_reason/reason")
+            .unwrap() = json!("premature_exit");
+        assert_eq!(
+            smart_fallback_reason(true, false, &post_frame_exit),
+            Some("smart_worker_heap_corruption"),
+            "a heap death after the frame reply but before close still discards Smart pixels"
+        );
 
         let mut wrong_exit = close;
         *wrong_exit.pointer_mut("/worker/exit_code").unwrap() = json!(0xC000_0005u64);
