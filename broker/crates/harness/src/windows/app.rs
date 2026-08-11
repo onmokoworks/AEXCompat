@@ -23,6 +23,7 @@ struct HarnessApp {
     pixel_comparison: Option<Result<PixelComparison, String>>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
+    parameter_inspection_state: ParameterInspectionState,
     host_context: Option<aexcompat_broker::render_request::HostContext>,
     smart_render: bool,
     smart_render_advertised: Option<bool>,
@@ -97,6 +98,7 @@ impl HarnessApp {
             pixel_comparison: None,
             parameters: Vec::new(),
             parameter_defaults: Vec::new(),
+            parameter_inspection_state: ParameterInspectionState::NotSelected,
             host_context: None,
             smart_render: false,
             smart_render_advertised: None,
@@ -248,6 +250,7 @@ impl HarnessApp {
         self.preflight_warnings.clear();
         self.parameters.clear();
         self.parameter_defaults.clear();
+        self.parameter_inspection_state = ParameterInspectionState::NotSelected;
         self.audio_input = None;
         self.audio_effect_only = false;
         self.smart_render = false;
@@ -684,6 +687,7 @@ impl HarnessApp {
                 });
                 self.selection_stale = false;
                 self.parameters.clear();
+                self.parameter_defaults.clear();
                 self.audio_input = None;
                 self.audio_effect_only = false;
                 self.smart_render = false;
@@ -720,7 +724,9 @@ impl HarnessApp {
                         }
                     }
                 } else {
-                    self.status = "AEX identity is unchanged.".into();
+                    self.inspect_after_refresh = true;
+                    self.parameter_inspection_state = ParameterInspectionState::Loading;
+                    self.status = "AEX identity is unchanged; reloading Effect Controls.".into();
                 }
             }
             Err(error) => {
@@ -781,6 +787,7 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         self.status = "Loading Effect Controls...".into();
+        self.parameter_inspection_state = ParameterInspectionState::Loading;
         self.spawn_native("inspect_parameters", move || {
             let (parameters, diagnostics) =
                 aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
@@ -1758,8 +1765,9 @@ impl HarnessApp {
                 ui.spinner();
                 ui.label("Loading parameters...");
             });
-        } else if self.selection.is_some() && self.parameters.is_empty() {
-            ui.label("This effect exposed no editable parameters.");
+        } else if let Some(message) = parameter_inspection_message(self.parameter_inspection_state)
+        {
+            ui.label(message);
             if ui.small_button("Reload controls").clicked() {
                 self.inspect_parameters_async();
             }
@@ -2086,40 +2094,46 @@ impl HarnessApp {
                     let report = serde_json::from_str::<serde_json::Value>(&result.body)
                         .map_err(|error| format!("inspection report is invalid JSON: {error}"))?;
                     let capability = inspected_render_capability(&report)?;
-                    let parameters = serde_json::from_value(report["parameters"].clone())
-                        .map_err(|error| format!("inspection parameters are invalid: {error}"))?;
+                    let parameters = serde_json::from_value::<
+                        Vec<aexcompat_broker::image_render::InteractiveParameter>,
+                    >(report["parameters"].clone())
+                    .map_err(|error| format!("inspection parameters are invalid: {error}"))?;
                     let audio_effect_only = report["worker_diagnostics"]["audio_effect_only"]
                         .as_bool()
                         .unwrap_or(false);
-                    Ok((capability, parameters, audio_effect_only))
+                    let inspection_state = parameter_inspection_state(&report, &parameters)?;
+                    Ok((capability, parameters, audio_effect_only, inspection_state))
                 })();
                 match accepted {
-                    Ok((capability, parameters, audio_effect_only)) => {
+                    Ok((capability, parameters, audio_effect_only, inspection_state)) => {
                         self.parameters = parameters;
                         self.parameter_defaults = self.parameters.clone();
+                        self.parameter_inspection_state = inspection_state;
                         self.audio_effect_only = audio_effect_only;
                         self.smart_render = capability.smart_render_advertised;
                         self.smart_render_advertised = Some(capability.smart_render_advertised);
                         self.smart_render_capability = Some(capability);
                         effect_controls_ready = true;
-                        self.status = format!(
-                            "Effect Controls ready: {} editable parameter(s). Render path: {}.",
-                            self.parameters.len(),
-                            if self.smart_render {
-                                "SmartFX"
-                            } else {
-                                "Classic"
-                            }
+                        self.status = parameter_inspection_status(
+                            inspection_state,
+                            &self.parameters,
+                            self.smart_render,
                         );
                     }
                     Err(error) => {
                         self.parameters.clear();
                         self.parameter_defaults.clear();
+                        self.parameter_inspection_state = ParameterInspectionState::Failed;
                         self.audio_effect_only = false;
                         self.status = "Effect Controls capability inspection failed safely; rendering is blocked.".into();
                         inspection_blocker = Some(error);
                     }
                 }
+            } else {
+                self.parameters.clear();
+                self.parameter_defaults.clear();
+                self.parameter_inspection_state = ParameterInspectionState::Failed;
+                self.audio_effect_only = false;
             }
         }
         if let Some(output) = result.output {
@@ -2185,8 +2199,14 @@ impl eframe::App for HarnessApp {
                 }
                 ui.separator();
                 ui.label(RichText::new("PREVIEW").small().strong());
-                let can_render =
-                    !self.busy && self.selection.is_some() && self.input_image.is_some();
+                let can_render = render_action_enabled(
+                    self.busy,
+                    self.selection.is_some(),
+                    self.input_image.is_some(),
+                    self.session_approved,
+                    self.selection_stale,
+                    self.smart_render_capability.is_some(),
+                );
                 if ui
                     .add_enabled(can_render, egui::Button::new("Render"))
                     .clicked()

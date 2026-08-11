@@ -6,6 +6,107 @@ enum TaskKind {
     InspectParameters,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ParameterInspectionState {
+    #[default]
+    NotSelected,
+    Loading,
+    Ready,
+    ZeroParameters,
+    UnsupportedParameters,
+    HiddenParameters,
+    Failed,
+}
+
+fn parameter_inspection_state(
+    report: &serde_json::Value,
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+) -> Result<ParameterInspectionState, String> {
+    let raw_count = report
+        .get("worker_diagnostics")
+        .and_then(|diagnostics| diagnostics.get("parameter_metadata"))
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .ok_or("inspection has no raw parameter metadata")?;
+    if raw_count == 0 {
+        return if parameters.is_empty() {
+            Ok(ParameterInspectionState::ZeroParameters)
+        } else {
+            Err("inspection mapped parameters from an empty worker result".into())
+        };
+    }
+    if parameters.is_empty() {
+        return Ok(ParameterInspectionState::UnsupportedParameters);
+    }
+    if parameters.iter().all(|parameter| !parameter.visible) {
+        return Ok(ParameterInspectionState::HiddenParameters);
+    }
+    Ok(ParameterInspectionState::Ready)
+}
+
+fn parameter_inspection_message(state: ParameterInspectionState) -> Option<&'static str> {
+    match state {
+        ParameterInspectionState::ZeroParameters => {
+            Some("This effect intentionally declared no parameters.")
+        }
+        ParameterInspectionState::UnsupportedParameters => {
+            Some("This effect declared parameters, but none use supported control types.")
+        }
+        ParameterInspectionState::HiddenParameters => {
+            Some("This effect declared controls, but all are hidden by the plug-in.")
+        }
+        ParameterInspectionState::Failed => {
+            Some("Effect Controls inspection failed. See the diagnostic report below.")
+        }
+        ParameterInspectionState::NotSelected
+        | ParameterInspectionState::Loading
+        | ParameterInspectionState::Ready => None,
+    }
+}
+
+fn parameter_inspection_status(
+    state: ParameterInspectionState,
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+    smart_render: bool,
+) -> String {
+    let render_path = if smart_render { "SmartFX" } else { "Classic" };
+    match state {
+        ParameterInspectionState::Ready => format!(
+            "Effect Controls ready: {} visible parameter(s). Render path: {render_path}.",
+            parameters
+                .iter()
+                .filter(|parameter| parameter.visible)
+                .count()
+        ),
+        ParameterInspectionState::ZeroParameters => format!(
+            "Effect Controls ready: the effect declared no parameters. Render path: {render_path}."
+        ),
+        ParameterInspectionState::UnsupportedParameters => format!(
+            "Effect Controls inspected: declared parameters use unsupported control types. Render path: {render_path}."
+        ),
+        ParameterInspectionState::HiddenParameters => format!(
+            "Effect Controls inspected: all declared controls are hidden. Render path: {render_path}."
+        ),
+        ParameterInspectionState::Failed => {
+            "Effect Controls capability inspection failed safely; rendering is blocked.".into()
+        }
+        ParameterInspectionState::NotSelected | ParameterInspectionState::Loading => {
+            "Loading Effect Controls...".into()
+        }
+    }
+}
+
+fn render_action_enabled(
+    busy: bool,
+    has_selection: bool,
+    has_input: bool,
+    session_approved: bool,
+    selection_stale: bool,
+    has_capability: bool,
+) -> bool {
+    !busy && has_selection && has_input && session_approved && !selection_stale && has_capability
+}
+
 #[derive(Debug, Default, PartialEq)]
 struct RenderDiagnostics {
     render_path: String,
