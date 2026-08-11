@@ -1885,12 +1885,10 @@ const AegpInstalledEffectRecord* find_installed_effect(int32_t key) {
 // ThreeD_SPATIAL 1, ThreeD 2, TwoD_SPATIAL 3, TwoD 4, OneD 5, COLOR 6, ARB 7,
 // MARKER 8, LAYER_ID 9, MASK_ID 10, MASK 11, TEXT_DOCUMENT 12.
 //
-// A PF type this host models no stream for answers NO_DATA, which
-// `stream_value_kind` already answers as none. That covers more than the group
-// markers: PF_Param_PATH has no MASK-stream support here, and a group start,
-// group end, or button has no stream at all in this model, so an index landing
-// on one refuses to open. AE returns a stream reference for the group markers,
-// so a plug-in enumerating every parameter stops early here (issue #919).
+// PF types without a value map to AEGP NO_DATA. Loaded plug-ins still receive
+// real stream references for CUSTOM/NO_DATA/group/button definitions, while
+// value checkout remains unavailable. PF_Param_PATH is different: it requires
+// MASK-stream support and remains unopened until that model exists (#919).
 constexpr int32_t aegp_stream_type_for_param_type(int32_t param_type) noexcept {
   constexpr int32_t kAegpStreamNoData = 0;
   constexpr int32_t kAegpStreamThreeD = 2;
@@ -2078,8 +2076,8 @@ int32_t __cdecl aegp_get_effect_num_param_streams_v2(void* effect, int32_t* coun
   // The count is `records.size() + 1` because AE counts the input layer, which
   // has no record of its own and sits at index 0. `loaded_effect_parameter`
   // answers that index too, so a walk over `0..count-1` matches what opens -
-  // except at a group marker or a path parameter, which have no stream in this
-  // host at all (#919).
+  // including valueless definitions. PATH remains the one declared parameter
+  // kind in this range that cannot open until MASK streams are implemented.
   *count = static_cast<int32_t>(records.size()) + 1;
   return 0;
 }
@@ -2104,6 +2102,22 @@ aexcompat::scene_model::StreamValueKind stream_value_kind(
     case 7: return StreamValueKind::arbitrary;
     case 9: return StreamValueKind::layer;
     default: return StreamValueKind::none;
+  }
+}
+
+bool loaded_parameter_has_no_data_stream(int32_t index) noexcept {
+  if (index < 1) return false;
+  const auto& records = aexcompat::worker_runtime::parameters::state().records;
+  if (static_cast<std::size_t>(index) > records.size()) return false;
+  switch (records[static_cast<std::size_t>(index - 1)].type) {
+    case 8:   // PF_Param_CUSTOM (obsolete)
+    case 9:   // PF_Param_NO_DATA
+    case 13:  // PF_Param_GROUP_START
+    case 14:  // PF_Param_GROUP_END
+    case 15:  // PF_Param_BUTTON
+      return true;
+    default:
+      return false;
   }
 }
 
@@ -3224,6 +3238,9 @@ int32_t __cdecl aegp_get_new_effect_stream_by_index_v2(
   // (#931).
   aexcompat::scene_model::StreamState stream_state{};
   stream_state.value_kind = stream_value_kind(parameter->type);
+  if (stream_state.value_kind == aexcompat::scene_model::StreamValueKind::none &&
+      instance->loaded_plugin && loaded_parameter_has_no_data_stream(index))
+    stream_state.value_kind = aexcompat::scene_model::StreamValueKind::no_data;
   stream_state.dimensions = parameter->type == 6 ? 4 :
       (parameter->type == 2 ? 3 : (parameter->type == 4 ? 2 : 1));
   stream_state.temporal_dimensions = 1;
@@ -3408,6 +3425,11 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
   const auto& instance = g_aegp_effect_instances[value->effect_instance_index];
   const auto* parameter = find_effect_parameter(instance, value->param_index);
   if (!parameter) return 4;
+  ObjectSnapshot stream_snapshot{};
+  if (!scene_registry().snapshot(value->identity, stream_snapshot) ||
+      stream_snapshot.stream.value_kind ==
+          aexcompat::scene_model::StreamValueKind::no_data)
+    return 4;
   output->stream = stream;
   output->value.fill(std::byte{});
   const std::size_t fixture_slot =
