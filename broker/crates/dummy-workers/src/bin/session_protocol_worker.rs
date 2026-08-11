@@ -9,6 +9,8 @@
 //!
 //! - `hang_frame`: never answers the first `render_frame` (watchdog target).
 //! - `crash_frame`: dies with an access-violation exit code mid-frame.
+//! - `heap_corruption_after_frame_0`: returns one valid Smart frame, then dies
+//!   with Windows heap-corruption status before reading the close request.
 //! - `exit_leaving_descendant`: spawns a sleeping child that inherits the
 //!   session handles, then exits; pipe EOF never fires, only the process
 //!   watcher can see the death (protocol §7 three-way wait).
@@ -1019,6 +1021,11 @@ mod worker {
             if view.read_u32(INPUT_GENERATION_OFFSET) != expected_generation {
                 return EXIT_INVARIANT_FAILURE;
             }
+            if behavior == "heap_corruption_after_frame_0" && frame_index == 0 {
+                eprintln!("stage:smart_render_begin");
+                let mut stderr = std::io::stderr();
+                let _ = std::io::Write::flush(&mut stderr);
+            }
             let mut output = vec![0u8; slot_bytes];
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -1086,6 +1093,9 @@ mod worker {
             );
             if !write_message(response, &reply) {
                 return EXIT_PROTOCOL_VIOLATION;
+            }
+            if behavior == "heap_corruption_after_frame_0" && frame_index == 0 {
+                std::process::exit(0xC000_0374_u32 as i32);
             }
             if behavior == "exit_after_frame_0" && frame_index == 0 {
                 // A unilateral exit with a clean-looking report and exit code

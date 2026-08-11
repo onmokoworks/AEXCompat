@@ -2682,6 +2682,37 @@ mod windows_e2e {
     }
 
     #[test]
+    fn post_frame_heap_corruption_authorizes_one_discarded_smart_attempt() {
+        let (repository, plugin, sha) = temp_repository();
+        let mut session = open_smart_session(
+            &repository.0,
+            &plugin,
+            &sha,
+            behavior("heap_corruption_after_frame_0"),
+        );
+        let outcome = session
+            .render_frame(0, 0, &input_pattern(12))
+            .expect("the Smart frame itself completes");
+        assert!(matches!(outcome.status, FrameStatus::Rendered { .. }));
+        std::thread::sleep(Duration::from_millis(500));
+
+        let close = session.close();
+        assert_eq!(close["invalidated"], true, "close: {close}");
+        assert_eq!(close["invalidated_reason"]["reason"], "premature_exit");
+        assert_eq!(close["frames_ok"], 1);
+        assert_eq!(close["frames_errored"], 0);
+        assert_eq!(close["final_report"], serde_json::Value::Null);
+        assert_eq!(close["worker"]["classification"], "crashed");
+        assert_eq!(close["worker"]["exit_code"], 0xC000_0374u64);
+        assert_eq!(
+            close["worker"]["diagnostics"]["active_stage"],
+            "smart_render"
+        );
+        validate_abandoned_smart_heap_corruption_close(&close)
+            .expect("the exact post-frame Smart crash authorizes one discarded retry");
+    }
+
+    #[test]
     fn process_death_is_seen_even_when_a_descendant_holds_the_pipe() {
         let (repository, plugin, sha) = temp_repository();
         let mut session = open_session(
