@@ -15,6 +15,7 @@ def test_windows_formatting_uses_repository_rust_toolchain() -> None:
 
     assert toolchain["channel"]
     assert "rustfmt" in toolchain["components"]
-    assert "run: rustup toolchain install" in workflow
-    assert "dtolnay/rust-toolchain@stable" not in workflow
+    assert "Select-String -Path rust-toolchain.toml" in workflow
+    assert "toolchain: ${{ steps.repository-rust.outputs.channel }}" in workflow
+    assert "components: rustfmt" in workflow
     assert "rustfmt --edition 2024 --check" in workflow
