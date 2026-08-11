@@ -23,8 +23,8 @@ use windows_sys::Win32::System::JobObjects::{
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::StationsAndDesktops::{
-    CloseDesktop, CreateDesktopW, GetProcessWindowStation, GetThreadDesktop,
-    GetUserObjectInformationW, HDESK, UOI_NAME,
+    CreateDesktopW, GetProcessWindowStation, GetThreadDesktop, GetUserObjectInformationW, HDESK,
+    UOI_NAME,
 };
 use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::Win32::System::Threading::{
@@ -55,8 +55,22 @@ const DESKTOP_WORKER_ACCESS: u32 = 0x0000_01ff;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerDesktopPolicy {
-    /// Non-interactive discovery/render workers get a private desktop so a
-    /// modal UI cannot appear on the user's input desktop.
+    /// Non-interactive discovery/render workers run on a private desktop so a
+    /// modal UI cannot appear on the user's input desktop. All such workers
+    /// share one desktop for the life of the broker process (issue #1194):
+    /// Windows leaks DWM composition state on every desktop create/destroy
+    /// cycle, so per-worker desktops progressively degraded the interactive
+    /// session over a long sweep. The isolation property is "not the user's
+    /// desktop", which sharing preserves; window attribution stays per-worker
+    /// because the dialog sweep tests Job Object membership, not the desktop.
+    ///
+    /// What sharing does concede: concurrent workers see each other's windows
+    /// and can post to them or set desktop-scoped hooks. That was already
+    /// reachable before — the same-token worker could open a sibling's
+    /// desktop by name, and the DACL's owner ACE granted it access — so this
+    /// is a default, not a new privilege, and the worker was never a
+    /// confidentiality boundary. It does mean a hostile plug-in running
+    /// concurrently can perturb another worker's UI-related diagnostics.
     Dedicated,
     /// Explicit GUI harnesses retain the caller's current desktop.
     Current,
@@ -148,20 +162,35 @@ fn current_desktop_startup_path() -> io::Result<Vec<u16>> {
         .collect())
 }
 
-/// A desktop created exclusively for a non-interactive worker. The startup
-/// path and the HDESK stay alive until the process/job and pipe readers have
-/// finished; closing the handle immediately after CreateProcess would make
-/// later UI calls fail nondeterministically.
-struct WorkerDesktop {
-    // `None` represents the caller's existing desktop. It is not owned by the
-    // broker and must never be closed here.
-    handle: Option<HDESK>,
+/// The one private desktop every [`WorkerDesktopPolicy::Dedicated`] worker
+/// shares, created on first use and owned by the broker process for its whole
+/// lifetime (issue #1194). Creating a desktop per worker asked Windows for a
+/// create/destroy cycle per launch, and DWM leaks composition state on every
+/// such cycle on the OS side, so a long sweep degraded the interactive
+/// session until `dwm.exe` was restarted. One desktop per broker keeps the
+/// number of cycles independent of worker count.
+///
+/// Teardown is process exit: the kernel closes the HDESK when the broker
+/// terminates, normally or not, and the kill-on-close Job Objects guarantee
+/// no worker outlives the broker to keep the desktop object alive. Nothing
+/// else ever closes this handle, so the sweep threads and `lpDesktop` may
+/// read it at any point in the process's life.
+struct SharedWorkerDesktop {
+    handle: HDESK,
     startup_path: Vec<u16>,
 }
 
-impl WorkerDesktop {
+// The HDESK is a process-wide kernel handle, only ever read after creation,
+// and never closed before process exit; the path is immutable after creation.
+unsafe impl Send for SharedWorkerDesktop {}
+unsafe impl Sync for SharedWorkerDesktop {}
+
+impl SharedWorkerDesktop {
     fn create() -> io::Result<Self> {
         let station = current_window_station_name()?;
+        // Random so concurrent broker processes on one window station cannot
+        // collide (a name collision would silently share across brokers with
+        // whatever DACL the first one applied).
         let desktop_name = format!("AEXCompatWorkerDesktop-{:032x}", rand::random::<u128>());
         let desktop_text: Vec<u16> = desktop_name.encode_utf16().chain([0]).collect();
         let startup_path: Vec<u16> = format!("{station}\\{desktop_name}")
@@ -188,8 +217,52 @@ impl WorkerDesktop {
             return Err(io::Error::last_os_error());
         }
         Ok(Self {
-            handle: Some(handle),
+            handle,
             startup_path,
+        })
+    }
+}
+
+/// The shared worker desktop, created on the first dedicated launch. A failed
+/// creation is returned to that launch and not cached, so a transient failure
+/// does not condemn every later launch; the lock keeps a racing first launch
+/// from creating a second desktop whose handle would then leak unclosed.
+fn shared_worker_desktop() -> io::Result<&'static SharedWorkerDesktop> {
+    static DESKTOP: std::sync::OnceLock<SharedWorkerDesktop> = std::sync::OnceLock::new();
+    static INIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    if let Some(desktop) = DESKTOP.get() {
+        return Ok(desktop);
+    }
+    let _guard = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(desktop) = DESKTOP.get() {
+        return Ok(desktop);
+    }
+    let created = SharedWorkerDesktop::create()?;
+    // `set`, not `get_or_init`: initialization is serialized by `INIT` and
+    // re-checked above, so a second initializer cannot exist, and `set` makes
+    // a violation a panic instead of a silently leaked desktop handle.
+    if DESKTOP.set(created).is_err() {
+        unreachable!("the shared worker desktop was initialized twice");
+    }
+    Ok(DESKTOP.get().expect("set above"))
+}
+
+/// One launch's view of the desktop its worker starts on. Owns nothing: the
+/// dedicated desktop belongs to the process ([`SharedWorkerDesktop`]) and the
+/// caller's desktop was never the broker's to close. The startup path is a
+/// per-launch copy because `lpDesktop` wants a mutable pointer.
+struct WorkerDesktop {
+    // `None` represents the caller's existing desktop, which is never swept.
+    handle: Option<HDESK>,
+    startup_path: Vec<u16>,
+}
+
+impl WorkerDesktop {
+    fn shared() -> io::Result<Self> {
+        let shared = shared_worker_desktop()?;
+        Ok(Self {
+            handle: Some(shared.handle),
+            startup_path: shared.startup_path.clone(),
         })
     }
 
@@ -202,16 +275,6 @@ impl WorkerDesktop {
 
     fn startup_path(&mut self) -> *mut u16 {
         self.startup_path.as_mut_ptr()
-    }
-}
-
-impl Drop for WorkerDesktop {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            unsafe {
-                CloseDesktop(handle);
-            }
-        }
     }
 }
 
@@ -243,10 +306,10 @@ pub struct ProcessResult {
     /// True when the worker's own peak commit reached the cap, meaning
     /// allocations beyond it were failing inside the worker.
     pub memory_limit_reached: bool,
-    /// Windows the worker put on its private desktop, which the broker closed
-    /// on its behalf (issue #351). Normally empty. An entry with `closed:
-    /// false` is the one that matters: the window ignored `WM_CLOSE`, so the
-    /// worker is still waiting on something nobody can answer.
+    /// Windows the worker put on the shared private desktop, which the broker
+    /// closed on its behalf (issue #351). Normally empty. An entry with
+    /// `closed: false` is the one that matters: the window ignored `WM_CLOSE`,
+    /// so the worker is still waiting on something nobody can answer.
     pub dismissed_windows: Vec<crate::worker_dialog::DismissedWindow>,
 }
 
@@ -667,18 +730,19 @@ fn run_isolated_impl(
 /// this without collecting terminates the worker through the job's
 /// kill-on-close limit.
 pub struct LaunchedIsolatedProcess {
-    /// Present only for a private desktop: the interactive desktop is never
-    /// swept, so a GUI harness worker's windows are left exactly as they are.
+    /// Present only for the shared private desktop: the interactive desktop
+    /// is never swept, so a GUI harness worker's windows are left exactly as
+    /// they are.
     ///
     /// Declared first so it is also dropped first. The sweep thread reads the
-    /// desktop and job handles below, and a launch dropped instead of
-    /// collected — how a session kills its worker — would otherwise close both
-    /// while the thread was still between polls. Windows hands handle values
-    /// out again, so that is not merely a failed call.
+    /// job and process handles below (the desktop handle it also reads lives
+    /// for the whole process), and a launch dropped instead of collected —
+    /// how a session kills its worker — would otherwise close both while the
+    /// thread was still between polls. Windows hands handle values out again,
+    /// so that is not merely a failed call.
     dialog_sweep: Option<crate::worker_dialog::DialogSweep>,
     process: OwnedHandle,
     job: OwnedHandle,
-    desktop: Option<WorkerDesktop>,
     stdout_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     stderr_reader: thread::JoinHandle<io::Result<(String, bool)>>,
     // Opt-in crash minidump (issue #18). The broker keeps the pipe read side
@@ -751,7 +815,6 @@ impl LaunchedIsolatedProcess {
         let LaunchedIsolatedProcess {
             process: process_handle,
             job,
-            desktop,
             stdout_reader,
             stderr_reader,
             minidump_file,
@@ -795,8 +858,9 @@ impl LaunchedIsolatedProcess {
         let (peak_process_memory_bytes, peak_job_memory_bytes) = query_job_memory_peaks(job.raw());
         let worker_peak_commit_bytes = query_worker_peak_commit(process_handle.raw());
         // Ended after the worker is gone so the last sweep sees whether the
-        // windows it closed actually went away, and before the desktop handle
-        // is released so it is never enumerated after being closed.
+        // windows it closed actually went away. (The desktop handle it reads
+        // is the process-lifetime shared one, so there is no release to order
+        // against.)
         let dismissed_windows = dialog_sweep.map(|sweep| sweep.finish()).unwrap_or_default();
         // A worker that finished got past whatever was on its desktop, so only
         // one that did not is worth warning about.
@@ -812,10 +876,6 @@ impl LaunchedIsolatedProcess {
                 "a worker window may have held the worker up"
             );
         }
-        // Release the desktop only after the worker, job, readers, and
-        // diagnostics have all been collected. The object is intentionally
-        // not part of the inherited handle list; lpDesktop names it.
-        drop(desktop);
         let classification = classify_exit(exit_code, timed_out);
         // The hard commit cap rejects the allocation that would cross it, so the
         // recorded peak stops short of the limit by up to one failed request.
@@ -994,8 +1054,8 @@ fn launch_isolated_impl(
     let minidump_active = minidump_file.is_some();
     let session_active = session.is_some();
     let mut desktop = match desktop_policy {
-        WorkerDesktopPolicy::Dedicated => Some(WorkerDesktop::create()?),
-        WorkerDesktopPolicy::Current => Some(WorkerDesktop::current()?),
+        WorkerDesktopPolicy::Dedicated => WorkerDesktop::shared()?,
+        WorkerDesktopPolicy::Current => WorkerDesktop::current()?,
     };
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
@@ -1114,9 +1174,7 @@ fn launch_isolated_impl(
     startup.StartupInfo.hStdOutput = stdout_write.raw();
     startup.StartupInfo.hStdError = stderr_write.raw();
     startup.StartupInfo.hStdInput = null_mut();
-    if let Some(desktop) = desktop.as_mut() {
-        startup.StartupInfo.lpDesktop = desktop.startup_path();
-    }
+    startup.StartupInfo.lpDesktop = desktop.startup_path();
     startup.lpAttributeList = attribute_list;
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
     let creation_flags = EXTENDED_STARTUPINFO_PRESENT
@@ -1196,20 +1254,18 @@ fn launch_isolated_impl(
     }
     let stdout_reader = reader(stdout_read.take() as usize, STDOUT_CAPTURE_LIMIT);
     let stderr_reader = reader(stderr_read.take() as usize, STDERR_CAPTURE_LIMIT);
-    // Only a desktop the broker created is swept. `None` here means the
+    // Only the desktop the broker created is swept. `None` here means the
     // caller asked for its own desktop (the GUI harness path), where closing a
-    // window would be closing the user's.
-    let dialog_sweep = desktop
-        .as_ref()
-        .and_then(|desktop| desktop.handle)
-        .map(|handle| {
-            crate::worker_dialog::DialogSweep::start(handle, job.raw(), process_handle.raw())
-        });
+    // window would be closing the user's. The desktop is shared, but the sweep
+    // attributes and closes windows by this launch's Job Object membership, so
+    // concurrent workers' windows stay out of each other's reports.
+    let dialog_sweep = desktop.handle.map(|handle| {
+        crate::worker_dialog::DialogSweep::start(handle, job.raw(), process_handle.raw())
+    });
     Ok(LaunchedIsolatedProcess {
         dialog_sweep,
         process: process_handle,
         job,
-        desktop,
         stdout_reader,
         stderr_reader,
         minidump_file,
@@ -1258,6 +1314,25 @@ impl Drop for SuspendedProcessCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Racing first launches must converge on one desktop (issue #1194): the
+    /// desktop count must not scale with worker count, and a losing racer's
+    /// desktop would also be a handle nothing ever closes.
+    #[test]
+    fn concurrent_dedicated_launches_share_one_desktop() {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    shared_worker_desktop().map(|desktop| desktop.handle as usize)
+                })
+            })
+            .collect();
+        let desktops: std::collections::HashSet<usize> = handles
+            .into_iter()
+            .map(|thread| thread.join().unwrap().expect("create the shared desktop"))
+            .collect();
+        assert_eq!(desktops.len(), 1, "every launch must reuse one desktop");
+    }
 
     #[test]
     fn timeout_cleanup_reports_job_termination_failure_without_waiting() {

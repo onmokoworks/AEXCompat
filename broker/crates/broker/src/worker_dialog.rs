@@ -1,11 +1,13 @@
 //! Closing the windows a worker opens on its private desktop (issue #351).
 //!
-//! Non-interactive workers run on a desktop of their own, so a plug-in that
-//! puts up a modal dialog no longer puts it in front of whoever is using the
-//! machine. That fixes where the dialog appears, not what it does to the
-//! worker: nobody can answer a window on that desktop either, so the worker
-//! waits on it. Parameter inspection has no deadline (issue #354), which turns
-//! that wait into a permanent one — the same hang as before, now invisible.
+//! Non-interactive workers run on a private desktop — one shared by every
+//! such worker for the life of the broker process (issue #1194) — so a
+//! plug-in that puts up a modal dialog no longer puts it in front of whoever
+//! is using the machine. That fixes where the dialog appears, not what it
+//! does to the worker: nobody can answer a window on that desktop either, so
+//! the worker waits on it. Parameter inspection has no deadline (issue #354),
+//! which turns that wait into a permanent one — the same hang as before, now
+//! invisible.
 //!
 //! So the broker watches the desktop it created and closes what it finds there.
 //! The Intel IPP dispatcher shipped with After Effects is the case that
@@ -39,7 +41,8 @@
 //! is already unusable; the sweep records everything it closes so that case is
 //! attributable rather than mysterious.
 
-/// A window the broker found on a worker's private desktop.
+/// A window a worker put up, found by the broker on the shared private
+/// desktop and attributed to the worker by its Job Object.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DismissedWindow {
     pub title: String,
@@ -107,7 +110,9 @@ mod windows_impl {
         IsWindowVisible, PostMessageW, WM_CLOSE, WS_EX_NOACTIVATE,
     };
 
-    /// The broker's watch over one worker's private desktop.
+    /// The broker's watch over one worker's windows on the shared private
+    /// desktop. Concurrent workers each get their own sweep over the same
+    /// desktop; job membership keeps the reports apart.
     ///
     /// Started with the worker and ended when its exit is collected. Held by
     /// the launch so that dropping the launch — which is how a session kills a
@@ -253,11 +258,32 @@ mod windows_impl {
 
     unsafe extern "system" fn visit(window: HWND, param: LPARAM) -> BOOL {
         let state = unsafe { &mut *(param as *mut SweepState) };
-        // Recorded before any filter: a window that merely turned invisible for
-        // a moment, or whose job membership could not be tested this time, is
-        // still there. Treating it as gone would drop its entry and restart its
-        // grace, so a window that flapped could never age into being closed.
         let key = window as isize;
+        // Membership is asked once per pass and only where it is needed: for a
+        // tracked key it decides reuse right here, and the answer is carried
+        // down to the close filter; for an untracked key it is deferred past
+        // the visibility filters, which short-circuit the common hidden
+        // message windows without a kernel query.
+        let tracked_membership = state
+            .tracked
+            .contains_key(&key)
+            .then(|| belongs_to_job(window, state.job));
+        // A tracked handle whose window now definitively belongs to a process
+        // outside the job is not the tracked window: the desktop is shared
+        // (issue #1194), so Windows can hand a destroyed dialog's HWND to
+        // another worker's window within a poll or two, and counting the
+        // newcomer as presence would keep the dead entry alive — a dialog that
+        // was answered would never be reported `closed`. Not inserting lets
+        // the entry age out via `missed`. Only a definitive "no" is reuse; an
+        // unanswerable query keeps the presumption of continuity below.
+        if tracked_membership == Some(Some(false)) {
+            return 1;
+        }
+        // Recorded before the remaining filters: a window that merely turned
+        // invisible for a moment, or whose job membership could not be tested
+        // this time, is still there. Treating it as gone would drop its entry
+        // and restart its grace, so a window that flapped could never age into
+        // being closed.
         state.still_present.insert(key);
         if unsafe { IsWindowVisible(window) } == 0 {
             return 1;
@@ -266,7 +292,8 @@ mod windows_impl {
         if unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) } as u32 & WS_EX_NOACTIVATE != 0 {
             return 1;
         }
-        if !belongs_to_job(window, state.job) {
+        let membership = tracked_membership.unwrap_or_else(|| belongs_to_job(window, state.job));
+        if membership != Some(true) {
             return 1;
         }
         let (first_seen, is_dialog) = match state.tracked.get(&key) {
@@ -333,15 +360,20 @@ mod windows_impl {
     /// Whether `window` belongs to a process inside `job` — the worker itself
     /// or anything it spawned. A process id alone would miss a helper process
     /// and could match a recycled id belonging to something unrelated.
-    fn belongs_to_job(window: HWND, job: HANDLE) -> bool {
+    ///
+    /// `None` when the question could not be answered at all. Callers must
+    /// not collapse that into either verdict: an unanswerable window is still
+    /// counted present (so a tracked entry keeps its grace), while only a
+    /// definitive "no" marks a tracked handle as reused by another worker.
+    fn belongs_to_job(window: HWND, job: HANDLE) -> Option<bool> {
         let mut owner = 0u32;
         unsafe { GetWindowThreadProcessId(window, &mut owner) };
         if owner == 0 {
-            return false;
+            return None;
         }
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, owner) };
         if process.is_null() {
-            return false;
+            return None;
         }
         let mut member: BOOL = 0;
         let queried = unsafe { IsProcessInJob(process, job, &mut member) };
@@ -351,8 +383,9 @@ mod windows_impl {
             // worker's dialog the worker stays blocked with nothing recorded.
             // At least say why.
             tracing::debug!("could not test a worker desktop window for job membership");
+            return None;
         }
-        queried != 0 && member != 0
+        Some(member != 0)
     }
 
     fn window_text(
