@@ -1,6 +1,6 @@
 use egui_shadcn::{
-    Button as ShadcnButton, ButtonSize, ButtonStyle, ButtonVariant, CardProps, CardSize, CardVariant,
-    ColorPalette, ControlSize, ControlVariant, ShadcnBaseColor, Theme, card, checkbox,
+    Button as ShadcnButton, ButtonSize, ButtonStyle, ButtonVariant, CardProps, CardSize,
+    CardVariant, ColorPalette, ControlSize, ControlVariant, ShadcnBaseColor, Theme, card, checkbox,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,10 +60,7 @@ impl AexUiKit {
             r"C:\Windows\Fonts\YuGothM.ttc",
             r"C:\Windows\Fonts\msgothic.ttc",
         ];
-        let Some(font_bytes) = candidates
-            .iter()
-            .find_map(|path| std::fs::read(path).ok())
-        else {
+        let Some(font_bytes) = candidates.iter().find_map(|path| std::fs::read(path).ok()) else {
             return;
         };
         let font_data = egui::FontData::from_owned(font_bytes).tweak(egui::FontTweak {
@@ -122,16 +119,22 @@ impl AexUiKit {
             }
             "Computing AEX identity..." => "AEXの識別情報を確認しています...",
             "Loading Effect Controls..." => "エフェクトコントロールを読み込んでいます...",
-            "Input image loaded. Ready to render." => "入力画像を読み込みました。レンダーできます。",
+            "Input image loaded. Ready to render." => {
+                "入力画像を読み込みました。レンダーできます。"
+            }
             "Input image could not be decoded." => "入力画像をデコードできませんでした。",
-            "Audio input selected. Ready to render." => "音声入力を選択しました。レンダーできます。",
+            "Audio input selected. Ready to render." => {
+                "音声入力を選択しました。レンダーできます。"
+            }
             "AE reference image loaded." => "AE参照画像を読み込みました。",
             "AE reference image could not be decoded." => "AE参照画像をデコードできませんでした。",
             "AEX identity is unchanged." => "AEXの識別情報に変更はありません。",
             "Could not reload the selected AEX." => "選択したAEXを再読み込みできませんでした。",
             "Rendering through the resident session..." => "常駐セッションでレンダーしています...",
             "Rendering in an isolated worker..." => "隔離ワーカーでレンダーしています...",
-            "Rendering audio in an isolated worker..." => "隔離ワーカーで音声をレンダーしています...",
+            "Rendering audio in an isolated worker..." => {
+                "隔離ワーカーで音声をレンダーしています..."
+            }
             "Completed" => "完了しました",
             "Failed safely" => "安全に停止しました",
             "Dependency list cleared." => "依存DLL一覧を消去しました。",
@@ -170,10 +173,8 @@ impl AexUiKit {
             .painter()
             .layout_no_wrap(text.to_owned(), font.clone(), color);
         let height = ButtonSize::Sm.height();
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(galley.size().x, height),
-            egui::Sense::hover(),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(galley.size().x, height), egui::Sense::hover());
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -199,7 +200,13 @@ impl AexUiKit {
         label: impl Into<egui::WidgetText>,
         enabled: bool,
     ) -> egui::Response {
-        self.button_with_variant(ui, label, enabled, ControlVariant::Secondary, ControlSize::Sm)
+        self.button_with_variant(
+            ui,
+            label,
+            enabled,
+            ControlVariant::Secondary,
+            ControlSize::Sm,
+        )
     }
 
     fn compact_primary_button(
@@ -315,7 +322,8 @@ impl AexUiKit {
             egui::pos2(left, response.rect.top() + inset),
             egui::vec2(segment_width, response.rect.height() - inset * 2.0),
         );
-        ui.painter().rect_filled(thumb, 6.0, self.theme.palette.background);
+        ui.painter()
+            .rect_filled(thumb, 6.0, self.theme.palette.background);
 
         let font = egui::FontId::proportional(12.0);
         let active = self.theme.palette.foreground;
@@ -432,7 +440,8 @@ impl AexUiKit {
     }
 
     fn disabled_button_style(&self, variant: ControlVariant) -> ButtonStyle {
-        let mut style = ButtonStyle::from_variant(&self.theme.palette, ButtonVariant::from(variant));
+        let mut style =
+            ButtonStyle::from_variant(&self.theme.palette, ButtonVariant::from(variant));
         let (background, foreground, border) = if self.dark_mode {
             (
                 egui::Color32::from_rgb(50, 50, 55),

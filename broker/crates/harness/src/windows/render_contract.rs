@@ -44,7 +44,9 @@ fn parameter_inspection_state(
     Ok(ParameterInspectionState::Ready)
 }
 
-fn parameter_inspection_message(state: ParameterInspectionState) -> Option<(&'static str, &'static str)> {
+fn parameter_inspection_message(
+    state: ParameterInspectionState,
+) -> Option<(&'static str, &'static str)> {
     match state {
         ParameterInspectionState::ZeroParameters => Some((
             "This effect intentionally declared no parameters.",
@@ -77,7 +79,10 @@ fn parameter_inspection_status(
     match state {
         ParameterInspectionState::Ready => format!(
             "Effect Controls ready: {} visible parameter(s). Render path: {render_path}.",
-            parameters.iter().filter(|parameter| parameter.visible).count()
+            parameters
+                .iter()
+                .filter(|parameter| parameter.visible)
+                .count()
         ),
         ParameterInspectionState::ZeroParameters => format!(
             "Effect Controls ready: the effect declared no parameters. Render path: {render_path}."
@@ -88,10 +93,12 @@ fn parameter_inspection_status(
         ParameterInspectionState::HiddenParameters => format!(
             "Effect Controls inspected: all declared controls are hidden. Render path: {render_path}."
         ),
-        ParameterInspectionState::Failed =>
-            "Effect Controls capability inspection failed safely; rendering is blocked.".into(),
-        ParameterInspectionState::NotSelected | ParameterInspectionState::Loading =>
-            "Loading Effect Controls...".into(),
+        ParameterInspectionState::Failed => {
+            "Effect Controls capability inspection failed safely; rendering is blocked.".into()
+        }
+        ParameterInspectionState::NotSelected | ParameterInspectionState::Loading => {
+            "Loading Effect Controls...".into()
+        }
     }
 }
 

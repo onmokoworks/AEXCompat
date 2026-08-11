@@ -215,9 +215,27 @@ impl HarnessApp {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if self.ui_kit.tab_button(ui, "Input", self.viewer_mode == 0).clicked() { self.viewer_mode = 0; }
-                    if self.ui_kit.tab_button(ui, "AEX output", self.viewer_mode == 1).clicked() { self.viewer_mode = 1; }
-                    if self.ui_kit.tab_button(ui, "Compare", self.viewer_mode == 2).clicked() { self.viewer_mode = 2; }
+                    if self
+                        .ui_kit
+                        .tab_button(ui, "Input", self.viewer_mode == 0)
+                        .clicked()
+                    {
+                        self.viewer_mode = 0;
+                    }
+                    if self
+                        .ui_kit
+                        .tab_button(ui, "AEX output", self.viewer_mode == 1)
+                        .clicked()
+                    {
+                        self.viewer_mode = 1;
+                    }
+                    if self
+                        .ui_kit
+                        .tab_button(ui, "Compare", self.viewer_mode == 2)
+                        .clicked()
+                    {
+                        self.viewer_mode = 2;
+                    }
                     ui.separator();
                     ui.label("FHD canvas / aspect-fit");
                     ui.separator();
@@ -291,33 +309,50 @@ impl HarnessApp {
 
     fn show_workspace_viewer(&mut self, ui: &mut egui::Ui) {
         fixed_column_header(ui, |ui| {
-        ui.horizontal(|ui| {
-            if self.ui_kit.tab_button(ui, self.ui_kit.text("VIEW", "ビュー"), self.viewer_mode != 2).clicked() {
-                self.viewer_mode = if self.preview.is_some() { 1 } else { 0 };
-            }
-            if self.ui_kit.tab_button(ui, self.ui_kit.text("COMPARE", "比較"), self.viewer_mode == 2).clicked() { self.viewer_mode = 2; }
+            ui.horizontal(|ui| {
+                if self
+                    .ui_kit
+                    .tab_button(
+                        ui,
+                        self.ui_kit.text("VIEW", "ビュー"),
+                        self.viewer_mode != 2,
+                    )
+                    .clicked()
+                {
+                    self.viewer_mode = if self.preview.is_some() { 1 } else { 0 };
+                }
+                if self
+                    .ui_kit
+                    .tab_button(
+                        ui,
+                        self.ui_kit.text("COMPARE", "比較"),
+                        self.viewer_mode == 2,
+                    )
+                    .clicked()
+                {
+                    self.viewer_mode = 2;
+                }
+            });
+            ui.horizontal(|ui| {
+                let label = match self.viewer_mode {
+                    0 => self.input_preview.as_ref().map(|texture| texture.size()),
+                    1 => self.preview.as_ref().map(|texture| texture.size()),
+                    _ => None,
+                };
+                if let Some([width, height]) = label {
+                    ui.monospace(format!("{width} x {height}"));
+                } else {
+                    ui.weak(
+                        self.ui_kit
+                            .text("FHD workspace / aspect fit", "FHD表示 / 比率を維持"),
+                    );
+                }
+                if self.rendering {
+                    ui.spinner();
+                    ui.weak(self.ui_kit.text("Rendering...", "レンダー中..."));
+                }
+            });
         });
-        ui.horizontal(|ui| {
-            let label = match self.viewer_mode {
-                0 => self.input_preview.as_ref().map(|texture| texture.size()),
-                1 => self.preview.as_ref().map(|texture| texture.size()),
-                _ => None,
-            };
-            if let Some([width, height]) = label {
-                ui.monospace(format!("{width} x {height}"));
-            } else {
-                ui.weak(
-                    self.ui_kit
-                        .text("FHD workspace / aspect fit", "FHD表示 / 比率を維持"),
-                );
-            }
-            if self.rendering {
-                ui.spinner();
-                ui.weak(self.ui_kit.text("Rendering...", "レンダー中..."));
-            }
-        });
-            },
-        );
         ui.separator();
 
         let toolbar_height = 42.0;
@@ -884,8 +919,7 @@ impl HarnessApp {
                 } else {
                     self.inspect_after_refresh = true;
                     self.parameter_inspection_state = ParameterInspectionState::Loading;
-                    self.status =
-                        "AEX identity is unchanged; reloading Effect Controls.".into();
+                    self.status = "AEX identity is unchanged; reloading Effect Controls.".into();
                 }
             }
             Err(error) => {
@@ -1897,59 +1931,59 @@ impl HarnessApp {
 
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
         fixed_column_header(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading(
-                RichText::new(
-                    self.ui_kit
-                        .text("Effect Controls", "エフェクトコントロール"),
-                )
-                .size(20.0),
-            );
-            if self.busy && self.task_kind == TaskKind::InspectParameters {
-                ui.spinner();
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.ui_kit
-                    .compact_button(
-                        ui,
-                        self.ui_kit.text("Reset", "リセット"),
-                        !self.busy && !self.parameter_defaults.is_empty(),
+            ui.horizontal(|ui| {
+                ui.heading(
+                    RichText::new(
+                        self.ui_kit
+                            .text("Effect Controls", "エフェクトコントロール"),
                     )
-                    .clicked()
-                {
-                    self.parameters = self.parameter_defaults.clone();
-                    self.pending_parameter_slot = None;
-                    self.pending_live_render = self.live_render;
-                    self.live_render_due = self
-                        .live_render
-                        .then(|| Instant::now() + std::time::Duration::from_millis(500));
+                    .size(20.0),
+                );
+                if self.busy && self.task_kind == TaskKind::InspectParameters {
+                    ui.spinner();
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self
+                        .ui_kit
+                        .compact_button(
+                            ui,
+                            self.ui_kit.text("Reset", "リセット"),
+                            !self.busy && !self.parameter_defaults.is_empty(),
+                        )
+                        .clicked()
+                    {
+                        self.parameters = self.parameter_defaults.clone();
+                        self.pending_parameter_slot = None;
+                        self.pending_live_render = self.live_render;
+                        self.live_render_due = self
+                            .live_render
+                            .then(|| Instant::now() + std::time::Duration::from_millis(500));
+                    }
+                });
             });
+            if let Some(selection) = &self.selection {
+                ui.label(
+                    selection
+                        .path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("Selected AEX"),
+                );
+            } else {
+                ui.label(self.ui_kit.text(
+                    "Select an AEX to load its parameters.",
+                    "AEXを選択するとパラメーターを読み込みます。",
+                ));
+            }
         });
-        if let Some(selection) = &self.selection {
-            ui.label(
-                selection
-                    .path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Selected AEX"),
-            );
-        } else {
-            ui.label(self.ui_kit.text(
-                "Select an AEX to load its parameters.",
-                "AEXを選択するとパラメーターを読み込みます。",
-            ));
-        }
-            },
-        );
         ui.separator();
         if self.busy && self.task_kind == TaskKind::InspectParameters {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(self.ui_kit.text(
-                    "Loading parameters...",
-                    "パラメーターを読み込んでいます...",
-                ));
+                ui.label(
+                    self.ui_kit
+                        .text("Loading parameters...", "パラメーターを読み込んでいます..."),
+                );
             });
         } else if let Some((english, japanese)) =
             parameter_inspection_message(self.parameter_inspection_state)
@@ -2417,20 +2451,21 @@ impl eframe::App for HarnessApp {
                 let image_ready = self.input_image.is_some();
                 let output_ready = self.preview.is_some();
                 let aex_label = if aex_ready {
-                        self.ui_kit.text("1  AEX  SELECTED", "1  AEX  選択済み")
-                    } else {
-                        "1  AEX"
-                    };
+                    self.ui_kit.text("1  AEX  SELECTED", "1  AEX  選択済み")
+                } else {
+                    "1  AEX"
+                };
                 self.ui_kit.workflow_label(
                     ui,
                     aex_label,
                     if aex_ready {
-                            self.ui_kit.success_foreground()
-                        } else {
-                            self.ui_kit.muted_foreground()
-                        },
+                        self.ui_kit.success_foreground()
+                    } else {
+                        self.ui_kit.muted_foreground()
+                    },
                 );
-                if self.ui_kit
+                if self
+                    .ui_kit
                     .compact_button(
                         ui,
                         self.ui_kit.text("Choose AEX...", "AEXを選択..."),
@@ -2442,20 +2477,21 @@ impl eframe::App for HarnessApp {
                 }
                 ui.separator();
                 let image_label = if image_ready {
-                        self.ui_kit.text("2  INPUT  READY", "2  入力  準備完了")
-                    } else {
-                        self.ui_kit.text("2  INPUT", "2  入力")
-                    };
+                    self.ui_kit.text("2  INPUT  READY", "2  入力  準備完了")
+                } else {
+                    self.ui_kit.text("2  INPUT", "2  入力")
+                };
                 self.ui_kit.workflow_label(
                     ui,
                     image_label,
                     if image_ready {
-                            self.ui_kit.success_foreground()
-                        } else {
-                            self.ui_kit.muted_foreground()
-                        },
+                        self.ui_kit.success_foreground()
+                    } else {
+                        self.ui_kit.muted_foreground()
+                    },
                 );
-                if self.ui_kit
+                if self
+                    .ui_kit
                     .compact_button(
                         ui,
                         self.ui_kit.text("Choose image...", "画像を選択..."),
@@ -2468,18 +2504,18 @@ impl eframe::App for HarnessApp {
                 }
                 ui.separator();
                 let output_label = if output_ready {
-                        self.ui_kit.text("3  OUTPUT  READY", "3  出力  準備完了")
-                    } else {
-                        self.ui_kit.text("3  RENDER", "3  レンダー")
-                    };
+                    self.ui_kit.text("3  OUTPUT  READY", "3  出力  準備完了")
+                } else {
+                    self.ui_kit.text("3  RENDER", "3  レンダー")
+                };
                 self.ui_kit.workflow_label(
                     ui,
                     output_label,
                     if output_ready {
-                            self.ui_kit.success_foreground()
-                        } else {
-                            self.ui_kit.muted_foreground()
-                        },
+                        self.ui_kit.success_foreground()
+                    } else {
+                        self.ui_kit.muted_foreground()
+                    },
                 );
                 let can_render = render_action_enabled(
                     self.busy,
@@ -2493,8 +2529,7 @@ impl eframe::App for HarnessApp {
                     .scope(|ui| {
                         self.ui_kit.compact_primary_button(
                             ui,
-                            self.ui_kit
-                                .text("Render preview", "プレビューをレンダー"),
+                            self.ui_kit.text("Render preview", "プレビューをレンダー"),
                             can_render,
                         )
                     })
@@ -2504,8 +2539,9 @@ impl eframe::App for HarnessApp {
                     self.quick_render();
                 }
                 ui.separator();
-                let live_render_changed =
-                    self.ui_kit.checkbox(
+                let live_render_changed = self
+                    .ui_kit
+                    .checkbox(
                         ui,
                         &mut self.live_render,
                         self.ui_kit.text("Auto Update", "自動更新"),
@@ -3381,10 +3417,8 @@ impl eframe::App for HarnessApp {
                         egui::WidgetType::Checkbox,
                         true,
                         self.show_analysis_panel,
-                        self.ui_kit.text(
-                            "Show Analysis and Logs panel",
-                            "解析・ログパネルを表示",
-                        ),
+                        self.ui_kit
+                            .text("Show Analysis and Logs panel", "解析・ログパネルを表示"),
                     )
                 });
                 let line_x = rail_rect.center().x;
