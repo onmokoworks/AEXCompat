@@ -24,6 +24,20 @@ static_assert(sizeof(AEGP_LayerRenderOptionsSuite1) == 14 * sizeof(void*));
 static_assert(sizeof(AEGP_LayerRenderOptionsSuite2) == 15 * sizeof(void*));
 static_assert(sizeof(AEGP_RenderOptionsSuite1) == 17 * sizeof(void*));
 static_assert(sizeof(AEGP_RenderOptionsSuite4) == 23 * sizeof(void*));
+static_assert(offsetof(AEGP_CompSuite10, AEGP_GetItemFromComp) ==
+              1 * sizeof(void*));
+static_assert(offsetof(AEGP_LayerSuite8, AEGP_GetLayerCurrentTime) ==
+              14 * sizeof(void*));
+using GetItemFromCompSignature =
+    A_Err(SPAPI*)(AEGP_CompH, AEGP_ItemH*);
+using GetLayerCurrentTimeSignature =
+    A_Err(SPAPI*)(AEGP_LayerH, AEGP_LTimeMode, A_Time*);
+static_assert(std::is_same_v<
+              decltype(AEGP_CompSuite10::AEGP_GetItemFromComp),
+              GetItemFromCompSignature>);
+static_assert(std::is_same_v<
+              decltype(AEGP_LayerSuite8::AEGP_GetLayerCurrentTime),
+              GetLayerCurrentTimeSignature>);
 #define ASSERT_SDK_SLOT(Suite, Member, Slot) \
   static_assert(offsetof(Suite, Member) == (Slot) * sizeof(void*))
 ASSERT_SDK_SLOT(AEGP_LayerRenderOptionsSuite1, AEGP_NewFromLayer, 0);

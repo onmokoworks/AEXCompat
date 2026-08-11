@@ -1452,6 +1452,17 @@ int32_t __cdecl aegp_get_layer_object_type(void* layer, int32_t* type) {
   ++g_aegp_layer_attribute_calls;
   return 0;
 }
+int32_t __cdecl aegp_get_layer_current_time(
+    void* layer, int16_t time_mode, AegpTime* time) {
+  const int32_t index = aegp_layer_attribute_index(layer);
+  if (index < 0 || (time_mode != 0 && time_mode != 1) || !time) return 4;
+  const AegpTime comp_time{g_aegp_scene_frame, 30};
+  if (time_mode == 0)
+    return aegp_convert_comp_to_layer_time(layer, &comp_time, time);
+  *time = comp_time;
+  ++g_aegp_layer_attribute_calls;
+  return 0;
+}
 int32_t __cdecl aegp_get_layer_in_point(void* layer, int32_t time_mode, AegpTime* time) {
   const int32_t index = aegp_layer_attribute_index(layer);
   if (index < 0 || (time_mode != 0 && time_mode != 1) || !time) return 4;
@@ -2702,6 +2713,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
   if (named("AEGP Comp Suite") && version == 21) {
     g_aegp_comp_suite10 =
         unsupported_suite_slots<UnsupportedSuiteId::aegp_comp_21, 41>();
+    g_aegp_comp_suite10[1] =
+        reinterpret_cast<void*>(&aegp_get_item_from_comp);
     g_aegp_comp_suite10[4] = factory.comp_bg_color;
     *suite = g_aegp_comp_suite10.data();
     return SceneSuiteAcquireResult::acquired;
@@ -2930,6 +2943,8 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_layer_suite8[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
     g_aegp_layer_suite8[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
     g_aegp_layer_suite8[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+    g_aegp_layer_suite8[14] =
+        reinterpret_cast<void*>(&aegp_get_layer_current_time);
     g_aegp_layer_suite8[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
     g_aegp_layer_suite8[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
     g_aegp_layer_suite8[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
