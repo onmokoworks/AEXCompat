@@ -6,6 +6,141 @@ enum TaskKind {
     InspectParameters,
 }
 
+fn prepare_render_preview(
+    success: bool,
+    operation: Option<&str>,
+    output: Option<&Path>,
+) -> Result<Option<(PathBuf, egui::ColorImage)>, String> {
+    if operation != Some("render_image") || !success {
+        return Ok(None);
+    }
+    let output = output.ok_or("native render reported success without an output image")?;
+    let image = decode_preview_image(output)
+        .map_err(|error| format!("native render output is not displayable: {error}"))?;
+    Ok(Some((output.to_path_buf(), image)))
+}
+
+fn report_ui_output_failure(body: &str, error: &str) -> String {
+    let mut report = serde_json::from_str::<serde_json::Value>(body)
+        .unwrap_or_else(|_| serde_json::json!({ "native_report": body }));
+    if !report.is_object() {
+        report = serde_json::json!({ "native_report": report });
+    }
+    report["native_passed"] = report
+        .get("passed")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    report["passed"] = serde_json::json!(false);
+    report["ui_output"] = serde_json::json!({
+        "displayable": false,
+        "error": error,
+    });
+    serde_json::to_string_pretty(&report).unwrap_or_else(|_| error.to_owned())
+}
+
+fn native_failure_status(operation: Option<&str>, body: &str) -> &'static str {
+    if operation == Some("render_image")
+        && serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|report| report.get("error")?.as_str().map(str::to_owned))
+            .is_some_and(|error| error.contains("local worker binary is missing or unreadable"))
+    {
+        "Required render worker is missing or unreadable."
+    } else {
+        "Failed safely"
+    }
+}
+
+fn visible_report_summary(body: &str) -> Option<String> {
+    if let Ok(report) = serde_json::from_str::<serde_json::Value>(body) {
+        for pointer in ["/ui_output/error", "/error", "/message"] {
+            if let Some(message) = report.pointer(pointer).and_then(serde_json::Value::as_str) {
+                return Some(visible_text_summary(message));
+            }
+        }
+        return None;
+    }
+    body.lines()
+        .find(|line| !line.trim().is_empty())
+        .map(visible_text_summary)
+}
+
+fn visible_text_summary(value: &str) -> String {
+    let mut output = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(1024)
+        .collect::<String>();
+    if value.chars().count() > 1024 {
+        output.push_str("...");
+    }
+    output
+}
+
+fn required_render_worker_path(repository: &Path, smart: bool) -> PathBuf {
+    repository.join(if smart {
+        "target/minihost-build/aex_smart_worker.exe"
+    } else {
+        "target/minihost-build/aex_render_worker.exe"
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_input_fingerprint(
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+    smart_render: bool,
+    pixel_format: aexcompat_broker::image_render::RenderPixelFormat,
+    gpu_backend: aexcompat_broker::image_render::RenderGpuBackend,
+    frame: i32,
+    duration_frames: i32,
+    frames_per_second: u32,
+    frame_time_step: i32,
+    host_context: Option<&aexcompat_broker::render_request::HostContext>,
+    audio_input: Option<&Path>,
+    custom_ui_click: bool,
+    custom_ui_draw: bool,
+    custom_ui_click_point: [u16; 2],
+    custom_ui_click_color: [f32; 4],
+) -> String {
+    serde_json::json!({
+        "parameters": parameters,
+        "smart_render": smart_render,
+        "pixel_format": format!("{pixel_format:?}"),
+        "gpu_backend": format!("{gpu_backend:?}"),
+        "frame": frame,
+        "duration_frames": duration_frames,
+        "frames_per_second": frames_per_second,
+        "frame_time_step": frame_time_step,
+        "host_context": host_context,
+        "audio_input": audio_input,
+        "custom_ui_click": custom_ui_click,
+        "custom_ui_draw": custom_ui_draw,
+        "custom_ui_click_point": custom_ui_click_point,
+        "custom_ui_click_color": custom_ui_click_color,
+    })
+    .to_string()
+}
+
+fn receive_task_result(receiver: &Receiver<TaskResult>) -> Option<TaskResult> {
+    match receiver.try_recv() {
+        Ok(result) => Some(result),
+        Err(mpsc::TryRecvError::Empty) => None,
+        Err(mpsc::TryRecvError::Disconnected) => Some(TaskResult {
+            success: false,
+            body: serde_json::json!({
+                "passed": false,
+                "error": "background task ended without returning a result",
+                "stage": "ui_background_task",
+            })
+            .to_string(),
+            output: None,
+            identity: None,
+            operation: None,
+            diagnostic_eligible: false,
+        }),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ParameterInspectionState {
     #[default]

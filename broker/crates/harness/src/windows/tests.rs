@@ -3,6 +3,234 @@ mod tests {
     use super::*;
 
     #[test]
+    fn render_success_requires_a_displayable_output_image() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-output-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let valid = root.join("valid.png");
+        image::RgbaImage::from_pixel(2, 3, image::Rgba([1, 2, 3, 255]))
+            .save(&valid)
+            .unwrap();
+        let prepared = prepare_render_preview(true, Some("render_image"), Some(&valid))
+            .expect("valid PNG must complete the UI render boundary")
+            .expect("image render must publish a preview");
+        assert_eq!(prepared.0, valid);
+        assert_eq!(prepared.1.size, [2, 3]);
+
+        let missing = root.join("missing.png");
+        assert!(
+            prepare_render_preview(true, Some("render_image"), Some(&missing))
+                .unwrap_err()
+                .contains("not displayable")
+        );
+        assert!(
+            prepare_render_preview(true, Some("render_image"), None)
+                .unwrap_err()
+                .contains("without an output image")
+        );
+        assert!(
+            prepare_render_preview(false, Some("render_image"), Some(&missing))
+                .unwrap()
+                .is_none(),
+            "a native failure must retain its original report"
+        );
+        assert!(
+            prepare_render_preview(true, Some("render_audio"), Some(&missing))
+                .unwrap()
+                .is_none(),
+            "non-image outputs must not be decoded as previews"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ui_output_failure_preserves_native_result_and_surfaces_details() {
+        let report = report_ui_output_failure(
+            r#"{"passed":true,"worker_diagnostics":{"stage":"render"}}"#,
+            "native render output is not displayable",
+        );
+        let value: serde_json::Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(value["native_passed"], true);
+        assert_eq!(value["passed"], false);
+        assert_eq!(value["worker_diagnostics"]["stage"], "render");
+        assert_eq!(value["ui_output"]["displayable"], false);
+        assert_eq!(
+            visible_report_summary(&report).as_deref(),
+            Some("native render output is not displayable")
+        );
+
+        let missing_worker = serde_json::json!({
+            "passed": false,
+            "error": "session open failed: local worker binary is missing or unreadable"
+        });
+        let missing_worker = missing_worker.to_string();
+        assert_eq!(
+            native_failure_status(Some("render_image"), &missing_worker),
+            "Required render worker is missing or unreadable."
+        );
+        assert!(
+            visible_report_summary(&missing_worker)
+                .unwrap()
+                .contains("local worker binary is missing")
+        );
+    }
+
+    #[test]
+    fn render_worker_preflight_and_disconnected_tasks_are_explicit() {
+        let repository = Path::new("C:/aexcompat");
+        assert_eq!(
+            required_render_worker_path(repository, false),
+            repository.join("target/minihost-build/aex_render_worker.exe")
+        );
+        assert_eq!(
+            required_render_worker_path(repository, true),
+            repository.join("target/minihost-build/aex_smart_worker.exe")
+        );
+
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let result = receive_task_result(&receiver).expect("disconnect must become a UI result");
+        assert!(!result.success);
+        assert!(
+            visible_report_summary(&result.body)
+                .unwrap()
+                .contains("ended without returning a result")
+        );
+    }
+
+    #[test]
+    fn poll_connects_native_image_result_to_ui_preview_and_failure_state() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-poll-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let output = root.join("output.png");
+        image::RgbaImage::from_pixel(4, 5, image::Rgba([9, 8, 7, 255]))
+            .save(&output)
+            .unwrap();
+        let mut app = HarnessApp::new(root.clone());
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TaskResult {
+                success: true,
+                body: serde_json::json!({ "passed": true }).to_string(),
+                output: Some(output.clone()),
+                identity: None,
+                operation: Some("render_image".into()),
+                diagnostic_eligible: false,
+            })
+            .unwrap();
+        app.receiver = Some(receiver);
+        app.busy = true;
+        app.rendering = true;
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        app.poll(&ctx);
+        let _ = ctx.end_pass();
+        assert_eq!(app.output_image.as_deref(), Some(output.as_path()));
+        assert_eq!(app.preview.as_ref().unwrap().size(), [4, 5]);
+        assert_eq!(app.viewer_mode, 1);
+        assert_eq!(app.status, "AEX output ready.");
+        assert!(!app.busy);
+        assert!(!app.rendering);
+
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TaskResult {
+                success: false,
+                body: serde_json::json!({
+                    "passed": false,
+                    "error": "session open failed: local worker binary is missing or unreadable"
+                })
+                .to_string(),
+                output: None,
+                identity: None,
+                operation: Some("render_image".into()),
+                diagnostic_eligible: false,
+            })
+            .unwrap();
+        app.receiver = Some(receiver);
+        app.busy = true;
+        app.rendering = true;
+        ctx.begin_pass(Default::default());
+        app.poll(&ctx);
+        let _ = ctx.end_pass();
+        assert!(app.output_image.is_none());
+        assert!(app.preview.is_none());
+        assert_eq!(
+            app.status,
+            "Required render worker is missing or unreadable."
+        );
+        assert!(
+            visible_report_summary(&app.report)
+                .unwrap()
+                .contains("local worker binary is missing")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn render_input_changes_invalidate_the_previous_ui_output() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-invalidate-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut app = HarnessApp::new(root.clone());
+        let ctx = egui::Context::default();
+        app.output_image = Some(root.join("old.png"));
+        app.pixel_comparison = Some(Err("old comparison".into()));
+        app.viewer_mode = 2;
+        app.preview = Some(ctx.load_texture(
+            "old-output",
+            egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
+            egui::TextureOptions::LINEAR,
+        ));
+        app.invalidate_render_output();
+        assert!(app.output_image.is_none());
+        assert!(app.preview.is_none());
+        assert!(app.pixel_comparison.is_none());
+        assert_eq!(app.viewer_mode, 0);
+
+        let before = app.current_render_input_fingerprint();
+        app.frame += 1;
+        assert_ne!(app.current_render_input_fingerprint(), before);
+        app.apply_custom_ui_click_to_render = true;
+        let before_click_edit = app.current_render_input_fingerprint();
+        app.custom_ui_click_point[0] += 1;
+        assert_ne!(app.current_render_input_fingerprint(), before_click_edit);
+        let before_color_edit = app.current_render_input_fingerprint();
+        app.custom_ui_click_color[2] = 0.5;
+        assert_ne!(app.current_render_input_fingerprint(), before_color_edit);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cli_inspection_paths_are_absolute_and_deverbatim() {
+        let relative = Path::new("Cargo.toml");
+        let canonical = canonical_deverbatim(relative).unwrap();
+        assert!(canonical.is_absolute());
+        assert!(!canonical.as_os_str().to_string_lossy().starts_with(r"\\?\"));
+        let roots = inspect_dependency_roots(relative, &[]).unwrap();
+        assert_eq!(roots, vec![canonical.parent().unwrap().to_path_buf()]);
+    }
+
+    #[test]
     fn inspected_defaults_are_normalized_before_ui_or_cli_rendering() {
         let parameter = aexcompat_broker::image_render::InteractiveParameter {
             slot: 5,

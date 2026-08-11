@@ -212,6 +212,32 @@ impl HarnessApp {
         }
     }
 
+    fn invalidate_render_output(&mut self) {
+        self.output_image = None;
+        self.preview = None;
+        self.pixel_comparison = None;
+        self.viewer_mode = 0;
+    }
+
+    fn current_render_input_fingerprint(&self) -> String {
+        render_input_fingerprint(
+            &self.parameters,
+            self.smart_render,
+            self.pixel_format,
+            self.gpu_backend,
+            self.frame,
+            self.duration_frames,
+            self.frames_per_second,
+            self.frame_time_step,
+            self.host_context.as_ref(),
+            self.audio_input.as_deref(),
+            self.apply_custom_ui_click_to_render,
+            self.apply_custom_ui_draw_to_render,
+            self.custom_ui_click_point,
+            self.custom_ui_click_color,
+        )
+    }
+
     /// Tells the session thread to close the resident worker. Required
     /// whenever the AEX selection or its approval changes: the worker must
     /// not outlive the selection it was opened for.
@@ -257,32 +283,49 @@ impl HarnessApp {
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if self
-                        .ui_kit
-                        .tab_button(ui, "Input", self.viewer_mode == 0)
-                        .clicked()
-                    {
+                    let input_clicked = ui
+                        .add_enabled_ui(self.input_preview.is_some(), |ui| {
+                            self.ui_kit.tab_button(ui, "Input", self.viewer_mode == 0)
+                        })
+                        .inner
+                        .clicked();
+                    if input_clicked {
                         self.viewer_mode = 0;
                     }
-                    if self
-                        .ui_kit
-                        .tab_button(ui, "AEX output", self.viewer_mode == 1)
-                        .clicked()
-                    {
+                    let output_clicked = ui
+                        .add_enabled_ui(self.preview.is_some(), |ui| {
+                            self.ui_kit
+                                .tab_button(ui, "AEX output", self.viewer_mode == 1)
+                        })
+                        .inner
+                        .clicked();
+                    if output_clicked {
                         self.viewer_mode = 1;
                     }
-                    if self
-                        .ui_kit
-                        .tab_button(ui, "Compare", self.viewer_mode == 2)
-                        .clicked()
-                    {
+                    let compare_clicked = ui
+                        .add_enabled_ui(
+                            self.input_preview.is_some() && self.preview.is_some(),
+                            |ui| self.ui_kit.tab_button(ui, "Compare", self.viewer_mode == 2),
+                        )
+                        .inner
+                        .clicked();
+                    if compare_clicked {
                         self.viewer_mode = 2;
                     }
                     ui.separator();
                     ui.label("FHD canvas / aspect-fit");
                     ui.separator();
                     ui.monospace(format!("{:.0}%", self.viewer_zoom * 100.0));
-                    if self.ui_kit.compact_button(ui, "Fit", true).clicked() {
+                    let active_view_available = match self.viewer_mode {
+                        0 => self.input_preview.is_some(),
+                        1 => self.preview.is_some(),
+                        _ => self.input_preview.is_some() && self.preview.is_some(),
+                    };
+                    if self
+                        .ui_kit
+                        .compact_button(ui, "Fit", active_view_available)
+                        .clicked()
+                    {
                         self.viewer_zoom = 1.0;
                         self.viewer_pan = egui::Vec2::ZERO;
                     }
@@ -363,15 +406,20 @@ impl HarnessApp {
                 {
                     self.viewer_mode = if self.preview.is_some() { 1 } else { 0 };
                 }
-                if self
-                    .ui_kit
-                    .tab_button(
-                        ui,
-                        self.ui_kit.text("COMPARE", "比較"),
-                        self.viewer_mode == 2,
+                let compare_clicked = ui
+                    .add_enabled_ui(
+                        self.input_preview.is_some() && self.preview.is_some(),
+                        |ui| {
+                            self.ui_kit.tab_button(
+                                ui,
+                                self.ui_kit.text("COMPARE", "比較"),
+                                self.viewer_mode == 2,
+                            )
+                        },
                     )
-                    .clicked()
-                {
+                    .inner
+                    .clicked();
+                if compare_clicked {
                     self.viewer_mode = 2;
                 }
             });
@@ -485,17 +533,26 @@ impl HarnessApp {
                 1 => {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
-                            if self.busy {
+                            if self.rendering {
                                 ui.spinner();
-                                ui.label("Rendering AEX output...");
+                                ui.label(
+                                    self.ui_kit.text(
+                                        "Rendering AEX output...",
+                                        "AEX出力をレンダーしています...",
+                                    ),
+                                );
                             } else {
                                 ui.colored_label(
                                     Color32::from_rgb(225, 155, 65),
-                                    RichText::new("AEX output is not available").strong(),
+                                    RichText::new(self.ui_kit.text(
+                                        "AEX output is not available",
+                                        "AEX出力はまだありません",
+                                    ))
+                                    .strong(),
                                 );
-                                ui.label(&self.status);
-                                if let Some(first_line) = self.report.lines().next() {
-                                    ui.monospace(first_line);
+                                ui.label(self.ui_kit.status_text(&self.status));
+                                if let Some(summary) = visible_report_summary(&self.report) {
+                                    ui.monospace(summary);
                                 }
                             }
                         });
@@ -564,9 +621,18 @@ impl HarnessApp {
                     };
                 }
             }
+            let active_view_available = match self.viewer_mode {
+                0 => self.input_preview.is_some(),
+                1 => self.preview.is_some(),
+                _ => self.input_preview.is_some() && self.preview.is_some(),
+            };
             if self
                 .ui_kit
-                .compact_button(ui, self.ui_kit.text("Fit", "全体表示"), true)
+                .compact_button(
+                    ui,
+                    self.ui_kit.text("Fit", "全体表示"),
+                    active_view_available,
+                )
                 .clicked()
             {
                 self.viewer_zoom = 1.0;
@@ -574,7 +640,11 @@ impl HarnessApp {
             }
             if self
                 .ui_kit
-                .compact_button(ui, self.ui_kit.text("Pop out", "別ウィンドウ"), true)
+                .compact_button(
+                    ui,
+                    self.ui_kit.text("Pop out", "別ウィンドウ"),
+                    self.input_preview.is_some() || self.preview.is_some(),
+                )
                 .clicked()
             {
                 self.viewer_open = true;
@@ -762,9 +832,7 @@ impl HarnessApp {
             Ok(preview) => {
                 self.input_image = Some(path);
                 self.input_preview = Some(preview);
-                self.output_image = None;
-                self.preview = None;
-                self.pixel_comparison = None;
+                self.invalidate_render_output();
                 self.status = "Input image loaded. Ready to render.".into();
                 self.start_live_render_if_ready();
             }
@@ -1543,7 +1611,13 @@ impl HarnessApp {
                     .into();
             return;
         }
-        let Some(selection) = &self.selection else {
+        let Some((plugin_path, hash, selection_size)) = self.selection.as_ref().map(|selection| {
+            (
+                selection.path.clone(),
+                selection.sha256.clone(),
+                selection.size,
+            )
+        }) else {
             return;
         };
         let Some(input) = self.input_image.clone() else {
@@ -1556,6 +1630,10 @@ impl HarnessApp {
             self.report = "render capability is missing, malformed, or stale; reload Effect Controls before rendering".into();
             return;
         };
+        // A render attempt owns the output state. Once inputs or controls
+        // request a new frame, the previous frame is no longer authoritative.
+        self.invalidate_render_output();
+        self.viewer_mode = 1;
         let interactive_selection = match selected_interactive_session_selection(
             capability,
             self.smart_render,
@@ -1569,9 +1647,21 @@ impl HarnessApp {
                 return;
             }
         };
+        let worker =
+            required_render_worker_path(&self.repository, interactive_selection.path.is_smart());
+        if !worker.is_file() {
+            self.status = "Required render worker is missing or unreadable.".into();
+            self.report = serde_json::json!({
+                "passed": false,
+                "error": "required render worker is missing or unreadable",
+                "expected_worker": worker,
+                "render_path": if interactive_selection.path.is_smart() { "smartfx" } else { "classic" },
+                "stage": "ui_render_preflight",
+            })
+            .to_string();
+            return;
+        }
         let repository = self.repository.clone();
-        let plugin_path = selection.path.clone();
-        let hash = selection.sha256.clone();
         let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         let host_context = self.host_context.clone();
         let smart = interactive_selection.path.is_smart();
@@ -1634,11 +1724,7 @@ impl HarnessApp {
             if live_eligible {
                 let identity = DispatchIdentity {
                     sha256: hash.clone(),
-                    size: self
-                        .selection
-                        .as_ref()
-                        .map(|item| item.size)
-                        .unwrap_or_default(),
+                    size: selection_size,
                 };
                 let diagnostic_eligible = self.selection.is_some();
                 let (respond, receiver) = mpsc::channel();
@@ -2019,6 +2105,7 @@ impl HarnessApp {
                         .clicked()
                     {
                         self.parameters = self.parameter_defaults.clone();
+                        self.invalidate_render_output();
                         self.pending_parameter_slot = None;
                         self.pending_live_render = self.live_render;
                         self.live_render_due = self
@@ -2064,6 +2151,7 @@ impl HarnessApp {
         }
 
         let mut clicked_button = None;
+        let mut controls_changed = false;
         let parameter_defaults = self.parameter_defaults.clone();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -2229,6 +2317,7 @@ impl HarnessApp {
                         || parameter.layer_path != previous_layer
                         || parameter.debug_summary != previous_summary;
                     if changed {
+                        controls_changed = true;
                         if parameter.supervised {
                             self.pending_parameter_slot = Some(parameter.slot);
                             self.live_render_due =
@@ -2243,9 +2332,13 @@ impl HarnessApp {
                 }
             });
         if let Some(slot) = clicked_button {
+            controls_changed = true;
             self.pending_parameter_slot = Some(slot);
             self.pending_live_render = self.live_render;
             self.live_render_due = Some(Instant::now() + std::time::Duration::from_millis(500));
+        }
+        if controls_changed {
+            self.invalidate_render_output();
         }
     }
 
@@ -2268,15 +2361,25 @@ impl HarnessApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        let result = self
-            .receiver
-            .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok());
-        let Some(result) = result else {
+        let result = self.receiver.as_ref().and_then(receive_task_result);
+        let Some(mut result) = result else {
             if self.busy {
                 ctx.request_repaint_after(std::time::Duration::from_millis(100));
             }
             return;
+        };
+        let prepared_preview = match prepare_render_preview(
+            result.success,
+            result.operation.as_deref(),
+            result.output.as_deref(),
+        ) {
+            Ok(preview) => preview,
+            Err(error) => {
+                result.success = false;
+                result.output = None;
+                result.body = report_ui_output_failure(&result.body, &error);
+                None
+            }
         };
         let task_kind = self.task_kind;
         self.busy = false;
@@ -2324,7 +2427,7 @@ impl HarnessApp {
         self.status = if result.success {
             "Completed"
         } else {
-            "Failed safely"
+            native_failure_status(result.operation.as_deref(), &result.body)
         }
         .into();
         let mut inspect_selected_aex = false;
@@ -2429,17 +2532,20 @@ impl HarnessApp {
                 self.audio_effect_only = false;
             }
         }
-        if let Some(output) = result.output {
+        if let Some((output, image)) = prepared_preview {
             self.render_diagnostics = serde_json::from_str(&result.body)
                 .ok()
                 .as_ref()
                 .and_then(render_diagnostics);
             self.output_image = Some(output.clone());
-            if let Ok(preview) = load_preview(ctx, "output", &output) {
-                self.preview = Some(preview);
-                self.viewer_mode = 1;
-            }
+            self.preview = Some(ctx.load_texture("output", image, egui::TextureOptions::LINEAR));
+            self.viewer_mode = 1;
+            self.status = "AEX output ready.".into();
             self.refresh_pixel_comparison();
+        } else if result.operation.as_deref() == Some("render_image") {
+            self.output_image = None;
+            self.preview = None;
+            self.pixel_comparison = None;
         }
         if let Ok(report) = serde_json::from_str(&result.body) {
             apply_dynamic_ui_report(&mut self.parameters, &report);
@@ -2623,6 +2729,7 @@ impl eframe::App for HarnessApp {
             });
             ui.add_space(8.0);
         });
+        let render_input_before = self.current_render_input_fingerprint();
         let analysis_openness = ctx.animate_bool(
             egui::Id::new("analysis_and_logs_animation"),
             self.show_analysis_panel,
@@ -3252,10 +3359,18 @@ impl eframe::App for HarnessApp {
                         }
                         if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Select AE reference output (optional)", "AE参照出力を選択（任意）"))).clicked() { self.choose_reference(ctx); }
                         if let Some(path) = &self.reference_image { ui.monospace(format!("Reference: {}", path.display())); }
+                        let native_actions_ready = render_action_enabled(
+                            self.busy,
+                            self.selection.is_some(),
+                            self.input_image.is_some(),
+                            self.session_approved,
+                            self.selection_stale,
+                            self.smart_render_capability.is_some(),
+                        );
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new(self.ui_kit.text("Render current frame", "現在のフレームをレンダー"))).clicked() { self.quick_render(); }
-                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new(self.ui_kit.text("Render and save PNG...", "レンダーしてPNG保存..."))).clicked() { self.render_and_save(); }
-                            if ui.add_enabled(!self.busy && self.input_image.is_some(), egui::Button::new(self.ui_kit.text("Run 6-case compatibility matrix", "6条件の互換性マトリクスを実行"))).clicked() { self.run_compatibility_matrix(); }
+                            if ui.add_enabled(native_actions_ready, egui::Button::new(self.ui_kit.text("Render current frame", "現在のフレームをレンダー"))).clicked() { self.quick_render(); }
+                            if ui.add_enabled(native_actions_ready, egui::Button::new(self.ui_kit.text("Render and save PNG...", "レンダーしてPNG保存..."))).clicked() { self.render_and_save(); }
+                            if ui.add_enabled(native_actions_ready, egui::Button::new(self.ui_kit.text("Run 6-case compatibility matrix", "6条件の互換性マトリクスを実行"))).clicked() { self.run_compatibility_matrix(); }
                         });
                     }
                 }
@@ -3468,6 +3583,9 @@ impl eframe::App for HarnessApp {
                 });
                 }
             });
+        if self.current_render_input_fingerprint() != render_input_before {
+            self.invalidate_render_output();
+        }
         let analysis_rect = analysis_response.response.rect;
         let rail_x = analysis_rect.right();
         egui::Area::new(egui::Id::new("analysis_and_logs_rail"))
