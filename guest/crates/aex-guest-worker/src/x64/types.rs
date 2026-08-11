@@ -531,6 +531,8 @@ pub struct TraceWatchSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub absolute_address: Option<u64>,
     pub register: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dereference_offset: Option<u64>,
     pub size: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<u64>,

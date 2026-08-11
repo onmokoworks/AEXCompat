@@ -1689,6 +1689,7 @@ impl ClassicHost {
                     output_pixels + row_offset + u64::from(x) * format.bytes_per_pixel() as u64,
                 ),
                 register: "absolute",
+                dereference_offset: None,
                 size: format.bytes_per_pixel(),
                 occurrence: None,
                 image_coordinate: Some([x, y]),
