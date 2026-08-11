@@ -178,6 +178,16 @@ impl WorkerSession {
         self.audit_tree_with_limits(MAX_SESSION_FILES, MAX_SESSION_BYTES)
     }
 
+    pub(crate) fn audit_tree_with_additional_files(
+        &self,
+        additional_files: usize,
+    ) -> Result<(), String> {
+        let files = MAX_SESSION_FILES
+            .checked_add(additional_files)
+            .ok_or_else(|| "macos_worker_artifact_limit: file count overflow".to_string())?;
+        self.audit_tree_with_limits(files, MAX_SESSION_BYTES)
+    }
+
     fn audit_tree_with_limits(&self, max_files: usize, max_bytes: u64) -> Result<(), String> {
         let mut count = 0usize;
         let mut bytes = 0u64;

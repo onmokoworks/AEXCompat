@@ -447,6 +447,31 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let fixture_layers = match extract_single_path_option(&mut arguments, "--fixture-layers-v1") {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let fixture_smart = match extract_single_string_option(&mut arguments, "--fixture-render-path")
+    {
+        Ok(None) => None,
+        Ok(Some(value)) if value == "classic" => Some(false),
+        Ok(Some(value)) if value == "smart" => Some(true),
+        Ok(Some(_)) => {
+            eprintln!("aex_guest_error: --fixture-render-path requires classic or smart");
+            return ExitCode::from(2);
+        }
+        Err(error) => {
+            eprintln!("aex_guest_error: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if fixture_layers.is_some() && fixture_smart.is_none() {
+        eprintln!("aex_guest_error: --fixture-layers-v1 requires --fixture-render-path");
+        return ExitCode::from(2);
+    }
     if arguments.len() != 6 {
         usage();
         return ExitCode::from(2);
@@ -487,6 +512,8 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
                 time_scale,
                 pixel_format,
                 effect_selector.as_deref(),
+                fixture_layers.as_deref(),
+                fixture_smart,
                 stdin.lock(),
                 stdout.lock(),
             )
@@ -499,6 +526,39 @@ fn run_session_command(mut arguments: Vec<std::ffi::OsString>) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn extract_single_string_option(
+    arguments: &mut Vec<std::ffi::OsString>,
+    option: &str,
+) -> Result<Option<String>, String> {
+    let mut found = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        if arguments[index] != option {
+            index += 1;
+            continue;
+        }
+        if found.is_some() || index + 1 >= arguments.len() {
+            return Err(format!("{option} must be specified once with a value"));
+        }
+        let value = arguments[index + 1]
+            .to_str()
+            .ok_or_else(|| format!("{option} value must be UTF-8"))?;
+        if value.is_empty() {
+            return Err(format!("{option} value must not be empty"));
+        }
+        found = Some(value.to_owned());
+        arguments.drain(index..=index + 1);
+    }
+    Ok(found)
+}
+
+fn extract_single_path_option(
+    arguments: &mut Vec<std::ffi::OsString>,
+    option: &str,
+) -> Result<Option<PathBuf>, String> {
+    extract_single_string_option(arguments, option).map(|value| value.map(PathBuf::from))
 }
 
 fn render_png(

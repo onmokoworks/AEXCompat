@@ -5,6 +5,7 @@ pub use crate::render_artifacts::{
     RenderArtifactConditions, RenderArtifactKind, write_float32_exr_artifact,
     write_raw_world_artifact, write_raw_world_checkpoint_artifact,
 };
+pub use crate::render_fixture::InteractiveParameter;
 pub use crate::render_pixel_format::RenderPixelFormat;
 include!("image_render/diagnostics.rs");
 include!("image_render/types_and_transport.rs");

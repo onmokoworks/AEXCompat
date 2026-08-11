@@ -1,19 +1,42 @@
 use crate::classic::{
-    ClassicError, ClassicHost, PARAM_COLOR, PARAM_POINT, ParameterValue, ResidentFailureDiagnostic,
-    SetupReport,
+    ClassicError, ClassicHost, PARAM_COLOR, PARAM_LAYER, PARAM_POINT, ParameterValue,
+    ResidentFailureDiagnostic, ResidentLayer, SetupReport,
 };
 use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_PARAMETER_PAYLOAD_BYTES: usize = 16 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResidentLayerManifest {
+    v: u32,
+    layers: Vec<ResidentLayerEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResidentLayerEntry {
+    slot: usize,
+    width: u32,
+    height: u32,
+    path: PathBuf,
+}
+
+struct OwnedResidentLayer {
+    slot: usize,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
 
 #[derive(Debug)]
 pub enum SessionError {
@@ -105,14 +128,40 @@ pub fn run_resident_session(
     time_scale: u32,
     pixel_format: FramePixelFormat,
     effect_selector: Option<&str>,
+    fixture_layers: Option<&Path>,
+    fixture_smart: Option<bool>,
     mut request: impl Read,
     mut response: impl Write,
 ) -> Result<(), SessionError> {
     let pixel_bytes = pixel_format
         .byte_count(width, height)
         .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    let layers = load_resident_layers(input_slot, fixture_layers, pixel_format)?;
     let mut host = ClassicHost::new_with_effect(image, effect_selector)?;
     let setup = host.begin_resident_session(width, height, time_scale)?;
+    if fixture_smart == Some(true) && setup.out_flags2 & (1 << 10) == 0 {
+        return Err(SessionError::Protocol(
+            "fixture requested Smart Render but the AEX did not advertise it".into(),
+        ));
+    }
+    for layer in &layers {
+        let Some(parameter) = setup
+            .parameters
+            .iter()
+            .find(|parameter| parameter.slot == layer.slot)
+        else {
+            return Err(SessionError::Protocol(format!(
+                "fixture layer slot {} was not declared by the AEX",
+                layer.slot
+            )));
+        };
+        if parameter.param_type != PARAM_LAYER {
+            return Err(SessionError::Protocol(format!(
+                "fixture layer slot {} is not a layer parameter",
+                layer.slot
+            )));
+        }
+    }
     write_message(
         &mut response,
         &SessionReady {
@@ -151,13 +200,34 @@ pub fn run_resident_session(
                             input.len()
                         )));
                     }
-                    match host.probe_resident_pixels(
-                        width,
-                        height,
-                        time_scale,
-                        pixel_format,
-                        &input,
-                    ) {
+                    let borrowed_layers = layers
+                        .iter()
+                        .map(|layer| ResidentLayer {
+                            slot: layer.slot,
+                            width: layer.width,
+                            height: layer.height,
+                            pixels: &layer.pixels,
+                        })
+                        .collect::<Vec<_>>();
+                    let probe = match fixture_smart {
+                        Some(smart) => host.probe_resident_fixture_pixels(
+                            width,
+                            height,
+                            time_scale,
+                            pixel_format,
+                            &input,
+                            &borrowed_layers,
+                            smart,
+                        ),
+                        None => host.probe_resident_pixels(
+                            width,
+                            height,
+                            time_scale,
+                            pixel_format,
+                            &input,
+                        ),
+                    };
+                    match probe {
                         Ok(report) => write_message(
                             &mut response,
                             &SessionProbed {
@@ -213,6 +283,8 @@ pub fn run_resident_session(
                         height,
                         pixel_bytes,
                         pixel_format,
+                        &layers,
+                        fixture_smart,
                         &mut host,
                         &mut generation,
                         &mut response,
@@ -310,6 +382,8 @@ fn parse_render_frame(
     height: u32,
     pixel_bytes: usize,
     pixel_format: FramePixelFormat,
+    fixture_layers: &[OwnedResidentLayer],
+    fixture_smart: Option<bool>,
     host: &mut ClassicHost,
     generation: &mut u64,
     response: &mut impl Write,
@@ -378,15 +452,38 @@ fn parse_render_frame(
     let rowbytes = pixel_format
         .rowbytes(width)
         .map_err(|error| SessionError::Protocol(error.to_string()))?;
-    match host.render_resident_pixels(
-        width,
-        height,
-        current_value,
-        current_scale,
-        pixel_format,
-        &input,
-        &parameters,
-    ) {
+    let borrowed_layers = fixture_layers
+        .iter()
+        .map(|layer| ResidentLayer {
+            slot: layer.slot,
+            width: layer.width,
+            height: layer.height,
+            pixels: &layer.pixels,
+        })
+        .collect::<Vec<_>>();
+    let rendered = match fixture_smart {
+        Some(smart) => host.render_resident_fixture_pixels(
+            width,
+            height,
+            current_value,
+            current_scale,
+            pixel_format,
+            &input,
+            &parameters,
+            &borrowed_layers,
+            smart,
+        ),
+        None => host.render_resident_pixels(
+            width,
+            height,
+            current_value,
+            current_scale,
+            pixel_format,
+            &input,
+            &parameters,
+        ),
+    };
+    match rendered {
         Ok(report) => {
             fs::write(output_slot, &report.raw_pixels).map_err(|error| {
                 SessionError::Io(format!("write resident output slot: {error}"))
@@ -437,6 +534,87 @@ fn parse_render_frame(
             Err(SessionError::Classic(error))
         }
     }
+}
+
+fn load_resident_layers(
+    input_slot: &Path,
+    manifest_path: Option<&Path>,
+    format: FramePixelFormat,
+) -> Result<Vec<OwnedResidentLayer>, SessionError> {
+    let Some(manifest_path) = manifest_path else {
+        return Ok(Vec::new());
+    };
+    let session_root = input_slot
+        .parent()
+        .ok_or_else(|| SessionError::Protocol("resident input slot has no parent".into()))?
+        .canonicalize()
+        .map_err(|error| SessionError::Io(format!("canonicalize resident session: {error}")))?;
+    let canonical_manifest = manifest_path
+        .canonicalize()
+        .map_err(|error| SessionError::Io(format!("canonicalize layer manifest: {error}")))?;
+    if canonical_manifest.parent() != Some(session_root.as_path()) {
+        return Err(SessionError::Protocol(
+            "resident layer manifest must be staged beside the input slot".into(),
+        ));
+    }
+    let manifest_size = fs::metadata(&canonical_manifest)
+        .map_err(|error| SessionError::Io(format!("stat layer manifest: {error}")))?
+        .len();
+    if manifest_size == 0 || manifest_size > MAX_CONTROL_MESSAGE_BYTES as u64 {
+        return Err(SessionError::Protocol(
+            "resident layer manifest exceeds the bounded size".into(),
+        ));
+    }
+    let bytes = fs::read(&canonical_manifest)
+        .map_err(|error| SessionError::Io(format!("read layer manifest: {error}")))?;
+    let manifest: ResidentLayerManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| SessionError::Protocol(format!("parse layer manifest: {error}")))?;
+    if manifest.v != 1 || manifest.layers.len() > 8 {
+        return Err(SessionError::Protocol(
+            "resident layer manifest version or count is invalid".into(),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut layers = Vec::with_capacity(manifest.layers.len());
+    for layer in manifest.layers {
+        if layer.slot == 0 || !seen.insert(layer.slot) || !layer.path.is_absolute() {
+            return Err(SessionError::Protocol(
+                "resident layer identity is invalid".into(),
+            ));
+        }
+        let path = layer
+            .path
+            .canonicalize()
+            .map_err(|error| SessionError::Io(format!("canonicalize resident layer: {error}")))?;
+        if path.parent() != Some(session_root.as_path()) {
+            return Err(SessionError::Protocol(
+                "resident layer must be staged beside the input slot".into(),
+            ));
+        }
+        let expected = format
+            .byte_count(layer.width, layer.height)
+            .map_err(|error| SessionError::Protocol(error.to_string()))?;
+        let observed = fs::metadata(&path)
+            .map_err(|error| SessionError::Io(format!("stat resident layer: {error}")))?
+            .len();
+        if observed != expected as u64 {
+            return Err(SessionError::Protocol(format!(
+                "resident layer byte count {observed} does not match {expected}"
+            )));
+        }
+        let pixels = fs::read(&path)
+            .map_err(|error| SessionError::Io(format!("read resident layer: {error}")))?;
+        format
+            .validate_bytes(layer.width, layer.height, &pixels)
+            .map_err(|error| SessionError::Protocol(error.to_string()))?;
+        layers.push(OwnedResidentLayer {
+            slot: layer.slot,
+            width: layer.width,
+            height: layer.height,
+            pixels,
+        });
+    }
+    Ok(layers)
 }
 
 fn parse_parameter_payload(
@@ -891,5 +1069,51 @@ mod tests {
         assert!(
             read_message(&mut &((MAX_CONTROL_MESSAGE_BYTES + 1) as u32).to_le_bytes()[..]).is_err()
         );
+    }
+
+    #[test]
+    fn resident_layer_manifest_is_bounded_unique_and_session_local() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-resident-layer-manifest-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let input = root.join("input.argb8");
+        fs::write(&input, [0u8; 4]).unwrap();
+        let layer = root.join("layer.argb8");
+        fs::write(&layer, [255u8, 1, 2, 3]).unwrap();
+        let manifest = root.join("layers.json");
+        let entry = serde_json::json!({
+            "slot": 1, "width": 1, "height": 1, "path": layer
+        });
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({"v":1,"layers":[entry.clone()]})).unwrap(),
+        )
+        .unwrap();
+        let loaded =
+            load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].pixels, [255, 1, 2, 3]);
+
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({"v":1,"layers":[entry.clone(),entry]})).unwrap(),
+        )
+        .unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+
+        fs::write(&layer, [0u8; 8]).unwrap();
+        let entry = serde_json::json!({
+            "slot": 1, "width": 1, "height": 1, "path": layer
+        });
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({"v":1,"layers":[entry]})).unwrap(),
+        )
+        .unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

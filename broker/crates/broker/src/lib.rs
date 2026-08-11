@@ -19,6 +19,7 @@ pub mod pnp_opencl_runtime_collector;
 pub mod render;
 #[path = "image_render/artifacts.rs"]
 pub mod render_artifacts;
+pub mod render_fixture;
 pub mod render_pixel_format;
 #[cfg(windows)]
 pub mod render_request;

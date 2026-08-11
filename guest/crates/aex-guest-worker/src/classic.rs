@@ -29,7 +29,7 @@ const CMD_SMART_RENDER_GPU: u64 = abi::PF_CMD_SMART_RENDER_GPU as u64;
 const CMD_GPU_DEVICE_SETUP: u64 = abi::PF_CMD_GPU_DEVICE_SETUP as u64;
 const CMD_GPU_DEVICE_SETDOWN: u64 = abi::PF_CMD_GPU_DEVICE_SETDOWN as u64;
 const CMD_ARBITRARY_CALLBACK: u64 = abi::PF_CMD_ARBITRARY_CALLBACK as u64;
-const PARAM_LAYER: i32 = 0;
+pub const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
 const PARAM_ANGLE: i32 = 3;
@@ -96,6 +96,14 @@ pub struct ParameterValue {
     pub value: Option<f64>,
     pub color: Option<[u8; 4]>,
     pub point: Option<[f64; 2]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ResidentLayer<'a> {
+    pub slot: usize,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: &'a [u8],
 }
 
 #[derive(Debug, Serialize)]
@@ -226,6 +234,15 @@ struct FrameResources {
     output_guard_base: u64,
     output_pixels: u64,
     parameter_definitions: Vec<u64>,
+    secondary_layers: Vec<ResidentLayerResources>,
+}
+
+#[derive(Clone)]
+struct ResidentLayerResources {
+    slot: usize,
+    width: u32,
+    height: u32,
+    pixels: u64,
 }
 
 impl ClassicHost {
@@ -651,6 +668,60 @@ impl ClassicHost {
             input_pixels,
             parameter_values,
             true,
+            &[],
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_resident_fixture_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_scale: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+        secondary_layers: &[ResidentLayer<'_>],
+        smart: bool,
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_pixels_mode(
+            width,
+            height,
+            current_time,
+            time_scale,
+            format,
+            input_pixels,
+            parameter_values,
+            true,
+            secondary_layers,
+            Some(smart),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn probe_resident_fixture_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        time_scale: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        secondary_layers: &[ResidentLayer<'_>],
+        smart: bool,
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_pixels_mode(
+            width,
+            height,
+            0,
+            time_scale,
+            format,
+            input_pixels,
+            &[],
+            false,
+            secondary_layers,
+            Some(smart),
         )
     }
 
@@ -688,6 +759,8 @@ impl ClassicHost {
             input_pixels,
             &[],
             false,
+            &[],
+            None,
         )
     }
 
@@ -702,6 +775,8 @@ impl ClassicHost {
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         count_frame: bool,
+        secondary_layers: &[ResidentLayer<'_>],
+        smart_override: Option<bool>,
     ) -> Result<RenderReport, ClassicError> {
         if !self.sequence_active {
             return Err(ClassicError::Input(
@@ -721,6 +796,8 @@ impl ClassicHost {
                 false,
                 true,
                 RenderBackendRequest::Cpu,
+                secondary_layers,
+                smart_override,
             )?
             .0;
         if count_frame {
@@ -1168,6 +1245,8 @@ impl ClassicHost {
             trace_enabled,
             false,
             backend,
+            &[],
+            None,
         )
     }
 
@@ -1184,6 +1263,8 @@ impl ClassicHost {
         trace_enabled: bool,
         persistent_sequence: bool,
         backend: RenderBackendRequest,
+        secondary_layers: &[ResidentLayer<'_>],
+        smart_override: Option<bool>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         self.last_gpu_diagnostic = GpuRenderDiagnostic::pending(backend);
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
@@ -1218,7 +1299,13 @@ impl ClassicHost {
                 format.name()
             )));
         }
-        let smart_render = setup.out_flags2 & (1 << 10) != 0;
+        let smart_capable = setup.out_flags2 & (1 << 10) != 0;
+        let smart_render = smart_override.unwrap_or(smart_capable);
+        if smart_render && !smart_capable {
+            return Err(ClassicError::Input(
+                "fixture requested Smart Render but the AEX did not advertise it".into(),
+            ));
+        }
         if backend.is_gpu() && !smart_render {
             return Err(ClassicError::Input(
                 "OpenCL GPU rendering requires Smart Render support".into(),
@@ -1263,8 +1350,14 @@ impl ClassicHost {
         }
         let mut applied_values = Vec::with_capacity(parameter_values.len());
         let mut applied_requests = BTreeSet::new();
-        let resources =
-            self.ensure_frame_resources(width, height, format, pixel_bytes, captured_params.len())?;
+        let resources = self.ensure_frame_resources(
+            width,
+            height,
+            format,
+            pixel_bytes,
+            captured_params.len(),
+            secondary_layers,
+        )?;
         let input_param = resources.input_param;
         let params = resources.params;
         let output_world = resources.output_world;
@@ -1321,6 +1414,9 @@ impl ClassicHost {
             .copy_from_slice(&input_world);
         self.engine.write(input_param, &input_definition)?;
         self.engine.write(guest_input_pixels, input_pixels)?;
+        for (layer, allocated) in secondary_layers.iter().zip(&resources.secondary_layers) {
+            self.engine.write(allocated.pixels, layer.pixels)?;
+        }
         let output_guard = vec![OUTPUT_GUARD_PATTERN; OUTPUT_GUARD_BYTES];
         self.engine
             .write(resources.output_guard_base, &output_guard)?;
@@ -1334,7 +1430,53 @@ impl ClassicHost {
             let mut definition = captured.bytes;
             materialize_default(&mut definition, captured.param_type, width, height)
                 .map_err(ClassicError::Input)?;
-            if smart_render {
+            if let Some(layer) = resources
+                .secondary_layers
+                .iter()
+                .find(|layer| layer.slot == index + 1)
+            {
+                let layer_rowbytes = format
+                    .rowbytes(layer.width)
+                    .map_err(|error| ClassicError::Input(error.to_string()))?;
+                let mut layer_world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_WORLD_FLAGS_OFFSET,
+                    format.world_flags(),
+                );
+                write_u64(&mut layer_world, abi::LAYER_DATA_OFFSET, layer.pixels);
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_ROWBYTES_OFFSET,
+                    layer_rowbytes as i32,
+                );
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_WIDTH_OFFSET,
+                    layer.width as i32,
+                );
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_HEIGHT_OFFSET,
+                    layer.height as i32,
+                );
+                write_rect(
+                    &mut layer_world,
+                    abi::LAYER_EXTENT_HINT_OFFSET,
+                    layer.width,
+                    layer.height,
+                );
+                write_i32(&mut layer_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
+                write_u32(&mut layer_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
+                if captured.param_type != PARAM_LAYER {
+                    return Err(ClassicError::Input(format!(
+                        "secondary layer slot {} is not a layer parameter",
+                        index + 1
+                    )));
+                }
+                definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
+                    .copy_from_slice(&layer_world);
+            } else if smart_render {
                 materialize_layer_world(&mut definition, captured.param_type, &input_world);
             }
             if let Some((request_index, requested)) =
@@ -1611,6 +1753,7 @@ impl ClassicHost {
         format: FramePixelFormat,
         pixel_bytes: usize,
         parameter_count: usize,
+        secondary_layers: &[ResidentLayer<'_>],
     ) -> Result<FrameResources, ClassicError> {
         if let Some(resources) = &self.frame_resources {
             if resources.width != width
@@ -1618,6 +1761,14 @@ impl ClassicHost {
                 || resources.format != format
                 || resources.pixel_bytes != pixel_bytes
                 || resources.parameter_definitions.len() != parameter_count
+                || resources.secondary_layers.len() != secondary_layers.len()
+                || resources.secondary_layers.iter().zip(secondary_layers).any(
+                    |(allocated, requested)| {
+                        allocated.slot != requested.slot
+                            || allocated.width != requested.width
+                            || allocated.height != requested.height
+                    },
+                )
             {
                 return Err(ClassicError::Input(
                     "resident frame structure changed; reopen the session".into(),
@@ -1638,6 +1789,32 @@ impl ClassicHost {
         for _ in 0..parameter_count {
             parameter_definitions.push(self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?);
         }
+        let mut allocated_layers = Vec::with_capacity(secondary_layers.len());
+        let mut seen_slots = BTreeSet::new();
+        for layer in secondary_layers {
+            if layer.slot == 0
+                || layer.slot > parameter_count
+                || !seen_slots.insert(layer.slot)
+                || layer.width == 0
+                || layer.height == 0
+            {
+                return Err(ClassicError::Input(
+                    "secondary layer identity or dimensions are invalid".into(),
+                ));
+            }
+            format
+                .validate_bytes(layer.width, layer.height, layer.pixels)
+                .map_err(|error| ClassicError::Input(error.to_string()))?;
+            let bytes = format
+                .byte_count(layer.width, layer.height)
+                .map_err(|error| ClassicError::Input(error.to_string()))?;
+            allocated_layers.push(ResidentLayerResources {
+                slot: layer.slot,
+                width: layer.width,
+                height: layer.height,
+                pixels: self.engine.allocate(bytes, 64)?,
+            });
+        }
         let resources = FrameResources {
             width,
             height,
@@ -1650,6 +1827,7 @@ impl ClassicHost {
             output_guard_base,
             output_pixels,
             parameter_definitions,
+            secondary_layers: allocated_layers,
         };
         self.frame_resources = Some(resources.clone());
         Ok(resources)

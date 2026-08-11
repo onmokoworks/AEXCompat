@@ -1,5 +1,8 @@
 use sha2::Sha256 as FixtureSha256;
 use std::cell::RefCell;
+use crate::render_fixture::{
+    FixtureFinalArtifact, FixturePixelFormat, load_render_fixture,
+};
 
 thread_local! {
     static FIXTURE_WORLD_DUMP_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -38,14 +41,6 @@ impl Drop for FixtureOverridesGuard {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum FixturePixelFormat {
-    Argb8,
-    Argb16,
-    Argb32f,
-}
-
 impl From<FixturePixelFormat> for RenderPixelFormat {
     fn from(value: FixturePixelFormat) -> Self {
         match value {
@@ -54,165 +49,6 @@ impl From<FixturePixelFormat> for RenderPixelFormat {
             FixturePixelFormat::Argb32f => Self::Argb32f,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum FixtureFinalArtifact {
-    Raw,
-    Exr,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FixtureCheckpoint {
-    id: String,
-    stage: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeclarativeRenderFixture {
-    schema: String,
-    schema_version: u32,
-    primary_layer: PathBuf,
-    parameters: Vec<InteractiveParameter>,
-    pixel_format: FixturePixelFormat,
-    render_path: String,
-    premultiplication: String,
-    timing: FixtureTiming,
-    final_artifact: FixtureFinalArtifact,
-    checkpoints: Vec<FixtureCheckpoint>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FixtureTiming {
-    current_time: i32,
-    time_step: i32,
-    total_time: i32,
-    time_scale: u32,
-}
-
-fn fixture_relative(base: &Path, path: &Path) -> io::Result<PathBuf> {
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path.components().any(|part| {
-            matches!(
-                part,
-                std::path::Component::CurDir
-                    | std::path::Component::ParentDir
-                    | std::path::Component::RootDir
-                    | std::path::Component::Prefix(_)
-            )
-        })
-    {
-        return Err(invalid(
-            "fixture asset paths must be traversal-free relative paths",
-        ));
-    }
-    Ok(base.join(path))
-}
-
-fn validate_fixture(fixture: &DeclarativeRenderFixture) -> io::Result<()> {
-    if fixture.schema != "aexcompat.render_fixture" || fixture.schema_version != 1 {
-        return Err(invalid(
-            "render fixture schema must be aexcompat.render_fixture v1",
-        ));
-    }
-    if !matches!(fixture.render_path.as_str(), "classic" | "smart") {
-        return Err(invalid("fixture render_path must be classic or smart"));
-    }
-    if !matches!(
-        fixture.premultiplication.as_str(),
-        "straight" | "premultiplied" | "opaque"
-    ) {
-        return Err(invalid("fixture premultiplication is not canonical"));
-    }
-    let timing = RenderTiming {
-        current_time: fixture.timing.current_time,
-        time_step: fixture.timing.time_step,
-        total_time: fixture.timing.total_time,
-        time_scale: fixture.timing.time_scale,
-    };
-    if !timing.is_valid() {
-        return Err(invalid("fixture timing is invalid"));
-    }
-    if matches!(fixture.final_artifact, FixtureFinalArtifact::Exr)
-        && !matches!(fixture.pixel_format, FixturePixelFormat::Argb32f)
-    {
-        return Err(invalid("fixture EXR output requires argb32f"));
-    }
-    if fixture.checkpoints.is_empty() || fixture.checkpoints.len() > 16 {
-        return Err(invalid("fixture must request 1..16 checkpoints"));
-    }
-    let prefix = if fixture.render_path == "smart" {
-        "smart"
-    } else {
-        "classic"
-    };
-    for (index, checkpoint) in fixture.checkpoints.iter().enumerate() {
-        let valid_id = !checkpoint.id.is_empty()
-            && checkpoint.id.len() <= 64
-            && checkpoint
-                .id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
-        let valid_stage = checkpoint.stage == format!("{prefix}-input")
-            || checkpoint.stage == format!("{prefix}-output")
-            || checkpoint
-                .stage
-                .strip_prefix(&format!("{prefix}-layer-slot"))
-                .and_then(|slot| slot.parse::<u32>().ok())
-                .is_some_and(|slot| slot > 0);
-        if !valid_id
-            || !valid_stage
-            || fixture.checkpoints[..index]
-                .iter()
-                .any(|prior| prior.id == checkpoint.id || prior.stage == checkpoint.stage)
-        {
-            return Err(invalid("fixture checkpoint identity or stage is invalid"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_fixture_parameter_schema(document: &Value) -> io::Result<()> {
-    let parameters = document
-        .get("parameters")
-        .and_then(Value::as_array)
-        .ok_or_else(|| invalid("fixture parameters must be an array"))?;
-    const REQUIRED: [&str; 15] = [
-        "slot",
-        "name",
-        "kind",
-        "minimum",
-        "maximum",
-        "value",
-        "choices",
-        "color",
-        "components",
-        "component_count",
-        "layer_path",
-        "enabled",
-        "visible",
-        "supervised",
-        "control_size",
-    ];
-    const OPTIONAL: [&str; 2] = ["debug_summary", "custom_ui_events"];
-    for parameter in parameters {
-        let object = parameter
-            .as_object()
-            .ok_or_else(|| invalid("fixture parameter must be an object"))?;
-        if REQUIRED.iter().any(|key| !object.contains_key(*key))
-            || object
-                .keys()
-                .any(|key| !REQUIRED.contains(&key.as_str()) && !OPTIONAL.contains(&key.as_str()))
-        {
-            return Err(invalid("fixture parameter schema is not canonical"));
-        }
-    }
-    Ok(())
 }
 
 fn fixture_staging_path(output: &Path) -> io::Result<PathBuf> {
@@ -289,22 +125,11 @@ pub fn render_declarative_fixture(
             "fixture output exists",
         ));
     }
-    let fixture_bytes = fs::read(fixture_path)?;
-    let fixture_sha256 = format!("{:x}", FixtureSha256::digest(&fixture_bytes));
-    let fixture_document: Value = serde_json::from_slice(&fixture_bytes)?;
-    validate_fixture_parameter_schema(&fixture_document)?;
-    let fixture: DeclarativeRenderFixture = serde_json::from_value(fixture_document)?;
-    validate_fixture(&fixture)?;
-    let fixture_base = fixture_path
-        .parent()
-        .ok_or_else(|| invalid("fixture has no parent"))?;
-    let primary = fixture_relative(fixture_base, &fixture.primary_layer)?;
-    let mut parameters = fixture.parameters.clone();
-    for parameter in &mut parameters {
-        if let Some(path) = parameter.layer_path.as_deref() {
-            parameter.layer_path = Some(fixture_relative(fixture_base, path)?);
-        }
-    }
+    let loaded = load_render_fixture(fixture_path)?;
+    let fixture_sha256 = loaded.sha256;
+    let fixture = loaded.document;
+    let primary = loaded.primary_layer;
+    let parameters = loaded.parameters;
     let format = RenderPixelFormat::from(fixture.pixel_format);
     let smart = fixture.render_path == "smart";
     let timing = RenderTiming {
@@ -413,35 +238,28 @@ mod declarative_fixture_tests {
 
     #[test]
     fn fixture_schema_rejects_unknown_fields_and_non_pf32_exr() {
+        let directory = std::env::temp_dir().join(format!(
+            "aexcompat-fixture-schema-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("fixture.json");
         let unknown = br#"{"schema":"aexcompat.render_fixture","schema_version":1,"primary_layer":"input.png","parameters":[],"pixel_format":"argb8","render_path":"classic","premultiplication":"straight","timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},"final_artifact":"raw","checkpoints":[{"id":"input","stage":"classic-input"}],"extra":true}"#;
-        assert!(serde_json::from_slice::<DeclarativeRenderFixture>(unknown).is_err());
+        fs::write(&path, unknown).unwrap();
+        assert!(load_render_fixture(&path).is_err());
         let invalid_exr = br#"{"schema":"aexcompat.render_fixture","schema_version":1,"primary_layer":"input.png","parameters":[],"pixel_format":"argb16","render_path":"classic","premultiplication":"straight","timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},"final_artifact":"exr","checkpoints":[{"id":"input","stage":"classic-input"}]}"#;
-        let fixture: DeclarativeRenderFixture = serde_json::from_slice(invalid_exr).unwrap();
-        assert!(validate_fixture(&fixture).is_err());
-        assert!(fixture_relative(Path::new("fixture"), Path::new(r"\outside.png")).is_err());
-        assert!(fixture_relative(Path::new("fixture"), Path::new(r"C:outside.png")).is_err());
-        let mut parameter = serde_json::to_value(InteractiveParameter {
-            slot: 1,
-            name: "amount".into(),
-            kind: "float".into(),
-            minimum: 0.0,
-            maximum: 1.0,
-            value: 0.5,
-            choices: Vec::new(),
-            color: [0; 4],
-            components: [0.0; 3],
-            component_count: 0,
-            layer_path: None,
-            enabled: true,
-            visible: true,
-            supervised: false,
-            debug_summary: None,
-            custom_ui_events: 0,
-            control_size: [0; 2],
-        })
-        .unwrap();
-        parameter["unknown"] = Value::Bool(true);
-        assert!(validate_fixture_parameter_schema(&json!({"parameters":[parameter]})).is_err());
+        fs::write(&path, invalid_exr).unwrap();
+        assert!(load_render_fixture(&path).is_err());
+        assert!(
+            crate::render_fixture::fixture_relative(Path::new("fixture"), Path::new(r"\outside.png"))
+                .is_err()
+        );
+        assert!(
+            crate::render_fixture::fixture_relative(Path::new("fixture"), Path::new(r"C:outside.png"))
+                .is_err()
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
