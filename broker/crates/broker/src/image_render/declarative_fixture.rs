@@ -1,8 +1,6 @@
+use crate::render_fixture::{FixtureFinalArtifact, FixturePixelFormat, load_render_fixture};
 use sha2::Sha256 as FixtureSha256;
 use std::cell::RefCell;
-use crate::render_fixture::{
-    FixtureFinalArtifact, FixturePixelFormat, load_render_fixture,
-};
 
 thread_local! {
     static FIXTURE_WORLD_DUMP_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -249,14 +247,19 @@ mod declarative_fixture_tests {
         let invalid_exr = br#"{"schema":"aexcompat.render_fixture","schema_version":1,"primary_layer":"input.png","parameters":[],"pixel_format":"argb16","render_path":"classic","premultiplication":"straight","timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},"final_artifact":"exr","checkpoints":[{"id":"input","stage":"classic-input"}]}"#;
         fs::write(&path, invalid_exr).unwrap();
         assert!(load_render_fixture(&path).is_err());
-        assert!(crate::render_fixture::fixture_relative(
-            Path::new("fixture"),
-            Path::new(r"\outside.png")
-        )
-        .is_err());
         assert!(
-            crate::render_fixture::fixture_relative(Path::new("fixture"), Path::new(r"C:outside.png"))
-                .is_err()
+            crate::render_fixture::fixture_relative(
+                Path::new("fixture"),
+                Path::new(r"\outside.png")
+            )
+            .is_err()
+        );
+        assert!(
+            crate::render_fixture::fixture_relative(
+                Path::new("fixture"),
+                Path::new(r"C:outside.png")
+            )
+            .is_err()
         );
         fs::remove_dir_all(directory).unwrap();
     }
