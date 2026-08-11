@@ -263,9 +263,21 @@ impl HarnessApp {
 
     fn show_workspace_viewer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.viewer_mode, 0, "INPUT");
-            ui.selectable_value(&mut self.viewer_mode, 1, "AEX OUTPUT");
-            ui.selectable_value(&mut self.viewer_mode, 2, "COMPARE");
+            ui.selectable_value(
+                &mut self.viewer_mode,
+                0,
+                self.ui_kit.text("INPUT", "入力"),
+            );
+            ui.selectable_value(
+                &mut self.viewer_mode,
+                1,
+                self.ui_kit.text("AEX OUTPUT", "AEX 出力"),
+            );
+            ui.selectable_value(
+                &mut self.viewer_mode,
+                2,
+                self.ui_kit.text("COMPARE", "比較"),
+            );
             ui.separator();
             let label = match self.viewer_mode {
                 0 => self.input_preview.as_ref().map(|texture| texture.size()),
@@ -275,13 +287,22 @@ impl HarnessApp {
             if let Some([width, height]) = label {
                 ui.monospace(format!("{width} x {height}"));
             } else {
-                ui.weak("FHD workspace / aspect fit");
+                ui.weak(
+                    self.ui_kit
+                        .text("FHD workspace / aspect fit", "FHD表示 / 比率を維持"),
+                );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Pop out").clicked() {
+                if ui
+                    .small_button(self.ui_kit.text("Pop out", "別ウィンドウ"))
+                    .clicked()
+                {
                     self.viewer_open = true;
                 }
-                if ui.small_button("Fit").clicked() {
+                if ui
+                    .small_button(self.ui_kit.text("Fit", "全体表示"))
+                    .clicked()
+                {
                     self.viewer_zoom = 1.0;
                     self.viewer_pan = egui::Vec2::ZERO;
                 }
@@ -313,21 +334,31 @@ impl HarnessApp {
                                 ui.set_max_width(560.0);
                                 ui.vertical_centered(|ui| {
                                     ui.label(
-                                        RichText::new("Start a render workspace")
+                                        RichText::new(ui_kit.text(
+                                            "Start a render workspace",
+                                            "レンダーワークスペースを開始",
+                                        ))
                                             .size(24.0)
                                             .strong(),
                                     );
                                     ui.add_space(8.0);
                                     ui.label(
                                         RichText::new(
-                                            "Choose an After Effects plug-in and an input image. AEXCompat will load the effect controls before any native render runs.",
+                                            ui_kit.text(
+                                                "Choose an After Effects plug-in and an input image. AEXCompat will load the effect controls before any native render runs.",
+                                                "After Effectsプラグインと入力画像を選択してください。ネイティブレンダーの前にエフェクトコントロールを読み込みます。",
+                                            ),
                                         )
-                                        .color(Color32::from_rgb(170, 178, 190)),
+                                        .color(ui_kit.muted_foreground()),
                                     );
                                     ui.add_space(20.0);
                                     ui.horizontal(|ui| {
                                         if ui_kit
-                                            .primary_button(ui, "1  Choose AEX...", !self.busy)
+                                            .primary_button(
+                                                ui,
+                                                ui_kit.text("1  Choose AEX...", "1  AEXを選択..."),
+                                                !self.busy,
+                                            )
                                             .clicked()
                                         {
                                             self.reset_and_choose_aex();
@@ -335,7 +366,10 @@ impl HarnessApp {
                                         if ui_kit
                                             .secondary_button(
                                                 ui,
-                                                "2  Choose image...",
+                                                ui_kit.text(
+                                                    "2  Choose image...",
+                                                    "2  画像を選択...",
+                                                ),
                                                 !self.busy,
                                             )
                                             .clicked()
@@ -344,7 +378,10 @@ impl HarnessApp {
                                         }
                                     });
                                     ui.add_space(12.0);
-                                    ui.weak("Selecting an AEX scans its identity and dependencies, then inspects Effect Controls in an isolated worker. Rendering stays disabled until both inputs are ready.");
+                                    ui.weak(ui_kit.text(
+                                        "Selecting an AEX scans its identity and dependencies, then inspects Effect Controls in an isolated worker. Rendering stays disabled until both inputs are ready.",
+                                        "AEX選択後、識別情報と依存関係を確認し、隔離ワーカーでエフェクトコントロールを検査します。両方の入力が揃うまでレンダーは無効です。",
+                                    ));
                                 });
                             });
                     });
@@ -1769,12 +1806,18 @@ impl HarnessApp {
 
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading(RichText::new("Effect Controls").size(20.0));
+            ui.heading(
+                RichText::new(
+                    self.ui_kit
+                        .text("Effect Controls", "エフェクトコントロール"),
+                )
+                .size(20.0),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .add_enabled(
                         !self.busy && !self.parameter_defaults.is_empty(),
-                        egui::Button::new("Reset All"),
+                        egui::Button::new(self.ui_kit.text("Reset All", "すべてリセット")),
                     )
                     .clicked()
                 {
@@ -1796,7 +1839,10 @@ impl HarnessApp {
                     .unwrap_or("Selected AEX"),
             );
         } else {
-            ui.label("Select an AEX to load its parameters.");
+            ui.label(self.ui_kit.text(
+                "Select an AEX to load its parameters.",
+                "AEXを選択するとパラメーターを読み込みます。",
+            ));
         }
         ui.separator();
         if self.busy && self.task_kind == TaskKind::InspectParameters {
@@ -2212,15 +2258,20 @@ impl eframe::App for HarnessApp {
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("AEXCompat").size(24.0).strong());
-                ui.label(
-                    RichText::new("EFFECT LAB")
-                        .small()
-                        .strong()
-                        .color(Color32::from_rgb(92, 181, 220)),
-                );
+                ui.label(RichText::new("AEXCompat").size(18.0).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(&self.status).small());
+                    if ui
+                        .small_button(self.ui_kit.language_action_label())
+                        .clicked()
+                    {
+                        self.ui_kit.toggle_language();
+                    }
+                    if ui
+                        .small_button(self.ui_kit.color_mode_action_label())
+                        .clicked()
+                    {
+                        self.ui_kit.toggle_color_mode();
+                    }
                     if self.busy {
                         ui.spinner();
                     }
@@ -2233,37 +2284,49 @@ impl eframe::App for HarnessApp {
                 let output_ready = self.preview.is_some();
                 ui.label(
                     RichText::new(if aex_ready {
-                        "1  AEX  SELECTED"
+                        self.ui_kit.text("1  AEX  SELECTED", "1  AEX  選択済み")
                     } else {
                         "1  AEX"
                     })
                         .small()
                         .strong()
                         .color(if aex_ready {
-                            Color32::from_rgb(100, 205, 150)
+                            self.ui_kit.success_foreground()
                         } else {
-                            Color32::from_rgb(170, 178, 190)
+                            self.ui_kit.muted_foreground()
                         }),
                 );
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Choose AEX..."))
+                    .add_enabled(
+                        !self.busy,
+                        egui::Button::new(self.ui_kit.text("Choose AEX...", "AEXを選択...")),
+                    )
                     .clicked()
                 {
                     self.reset_and_choose_aex();
                 }
                 ui.separator();
                 ui.label(
-                    RichText::new(if image_ready { "2  INPUT  READY" } else { "2  INPUT" })
+                    RichText::new(if image_ready {
+                        self.ui_kit.text("2  INPUT  READY", "2  入力  準備完了")
+                    } else {
+                        self.ui_kit.text("2  INPUT", "2  入力")
+                    })
                         .small()
                         .strong()
                         .color(if image_ready {
-                            Color32::from_rgb(100, 205, 150)
+                            self.ui_kit.success_foreground()
                         } else {
-                            Color32::from_rgb(170, 178, 190)
+                            self.ui_kit.muted_foreground()
                         }),
                 );
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Choose image..."))
+                    .add_enabled(
+                        !self.busy,
+                        egui::Button::new(
+                            self.ui_kit.text("Choose image...", "画像を選択..."),
+                        ),
+                    )
                     .clicked()
                 {
                     self.choose_input(ctx);
@@ -2271,19 +2334,30 @@ impl eframe::App for HarnessApp {
                 }
                 ui.separator();
                 ui.label(
-                    RichText::new(if output_ready { "3  OUTPUT  READY" } else { "3  RENDER" })
+                    RichText::new(if output_ready {
+                        self.ui_kit.text("3  OUTPUT  READY", "3  出力  準備完了")
+                    } else {
+                        self.ui_kit.text("3  RENDER", "3  レンダー")
+                    })
                         .small()
                         .strong()
                         .color(if output_ready {
-                            Color32::from_rgb(100, 205, 150)
+                            self.ui_kit.success_foreground()
                         } else {
-                            Color32::from_rgb(170, 178, 190)
+                            self.ui_kit.muted_foreground()
                         }),
                 );
                 let can_render =
                     !self.busy && self.selection.is_some() && self.input_image.is_some();
                 if ui
-                    .scope(|ui| self.ui_kit.primary_button(ui, "Render preview", can_render))
+                    .scope(|ui| {
+                        self.ui_kit.primary_button(
+                            ui,
+                            self.ui_kit
+                                .text("Render preview", "プレビューをレンダー"),
+                            can_render,
+                        )
+                    })
                     .inner
                     .clicked()
                 {
@@ -2291,7 +2365,11 @@ impl eframe::App for HarnessApp {
                 }
                 ui.separator();
                 let live_render_changed =
-                    ui.checkbox(&mut self.live_render, "Auto Update").changed();
+                    ui.checkbox(
+                        &mut self.live_render,
+                        self.ui_kit.text("Auto Update", "自動更新"),
+                    )
+                    .changed();
                 if live_render_changed && !self.live_render {
                     self.pending_live_render = false;
                     if self.pending_parameter_slot.is_none() {
@@ -2310,7 +2388,10 @@ impl eframe::App for HarnessApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.show_workspace_viewer(ui);
             ui.separator();
-            egui::CollapsingHeader::new("Analysis, render settings and diagnostics")
+            egui::CollapsingHeader::new(self.ui_kit.text(
+                "Analysis, render settings and diagnostics",
+                "解析・レンダー設定・診断",
+            ))
                 .default_open(false)
                 .show(ui, |ui| {
             egui::ScrollArea::vertical()
