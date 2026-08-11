@@ -49,9 +49,9 @@ fn parameter_inspection_message(state: ParameterInspectionState) -> Option<&'sta
         ParameterInspectionState::ZeroParameters => {
             Some("This effect intentionally declared no parameters.")
         }
-        ParameterInspectionState::UnsupportedParameters => Some(
-            "This effect declared parameters, but none use supported control types.",
-        ),
+        ParameterInspectionState::UnsupportedParameters => {
+            Some("This effect declared parameters, but none use supported control types.")
+        }
         ParameterInspectionState::HiddenParameters => {
             Some("This effect declared controls, but all are hidden by the plug-in.")
         }
@@ -73,7 +73,10 @@ fn parameter_inspection_status(
     match state {
         ParameterInspectionState::Ready => format!(
             "Effect Controls ready: {} visible parameter(s). Render path: {render_path}.",
-            parameters.iter().filter(|parameter| parameter.visible).count()
+            parameters
+                .iter()
+                .filter(|parameter| parameter.visible)
+                .count()
         ),
         ParameterInspectionState::ZeroParameters => format!(
             "Effect Controls ready: the effect declared no parameters. Render path: {render_path}."

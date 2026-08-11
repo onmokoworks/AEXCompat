@@ -1765,8 +1765,7 @@ impl HarnessApp {
                 ui.spinner();
                 ui.label("Loading parameters...");
             });
-        } else if let Some(message) =
-            parameter_inspection_message(self.parameter_inspection_state)
+        } else if let Some(message) = parameter_inspection_message(self.parameter_inspection_state)
         {
             ui.label(message);
             if ui.small_button("Reload controls").clicked() {
