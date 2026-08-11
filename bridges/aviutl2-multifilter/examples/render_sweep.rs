@@ -79,7 +79,7 @@ use aexcompat_aviutl2_multifilter::{
 use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::render_session::{
     FrameOutcome, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
-    validate_abandoned_smart_untouched_close,
+    validate_abandoned_smart_heap_corruption_close, validate_abandoned_smart_untouched_close,
 };
 use serde_json::{Map, Value, json};
 
@@ -629,8 +629,12 @@ fn sweep_one(
     {
         outcome.bucket = format!("render_frame_failed:{reason}");
     }
-    let fallback_validation =
-        smart_output_untouched.then(|| validate_abandoned_smart_untouched_close(&close));
+    let fallback_reason = smart_fallback_reason(smart, smart_output_untouched, &close);
+    let fallback_validation = fallback_reason.map(|reason| match reason {
+        "smart_output_untouched" => validate_abandoned_smart_untouched_close(&close),
+        "smart_worker_heap_corruption" => validate_abandoned_smart_heap_corruption_close(&close),
+        _ => unreachable!("fallback reason is locally constructed"),
+    });
     let fallback_authorized = fallback_validation.as_ref().is_some_and(Result::is_ok);
     let smart_attempt_evidence = fallback_validation.as_ref().map(|validation| {
         json!({
@@ -644,32 +648,70 @@ fn sweep_one(
         })
     });
     attach_close(&mut outcome, close, options.close_report);
-    if smart_output_untouched && !fallback_authorized {
+    if fallback_reason.is_some() && !fallback_authorized {
         outcome.detail.insert(
             "fallback_rejected".to_owned(),
-            json!("smart_attempt_close_invariant"),
+            json!("smart_attempt_validation"),
         );
     }
-    if fallback_authorized {
-        let mut classic_options = options.clone();
-        classic_options.force_classic = true;
-        let mut fallback = sweep_one(repository, record, &classic_options, input, layer_pixels);
-        fallback.detail.insert(
-            "fallback_reason".to_owned(),
-            json!("smart_output_untouched"),
-        );
-        if let Some(evidence) = smart_attempt_evidence {
-            fallback.detail.insert("smart_attempt".to_owned(), evidence);
-        }
-        fallback
-            .detail
-            .insert("render_path".to_owned(), json!("classic_fallback"));
+    if let Some(fallback) = orchestrate_sweep_classic_fallback(
+        options,
+        fallback_reason,
+        fallback_authorized,
+        smart_attempt_evidence,
+        |classic_options| sweep_one(repository, record, classic_options, input, layer_pixels),
+    ) {
         return fallback;
     }
     if outcome.bucket == "rendered" && !close_clean {
         outcome.bucket = "session_close_failed".to_owned();
     }
     outcome
+}
+
+fn orchestrate_sweep_classic_fallback<F>(
+    options: &Options,
+    fallback_reason: Option<&'static str>,
+    fallback_authorized: bool,
+    smart_attempt_evidence: Option<Value>,
+    launch_classic_once: F,
+) -> Option<Outcome>
+where
+    F: FnOnce(&Options) -> Outcome,
+{
+    if !fallback_authorized {
+        return None;
+    }
+    let reason = fallback_reason.expect("authorized fallback has a reason");
+    let mut classic_options = options.clone();
+    classic_options.force_classic = true;
+    // Re-run the complete requested frame slice in one fresh Classic session.
+    // This covers both a frame that never replied and a worker that exited
+    // after earlier frame pixels were observed: no pixels from the unvalidated
+    // Smart session become the sweep verdict.
+    let mut fallback = launch_classic_once(&classic_options);
+    fallback
+        .detail
+        .insert("fallback_reason".to_owned(), json!(reason));
+    if let Some(evidence) = smart_attempt_evidence {
+        fallback.detail.insert("smart_attempt".to_owned(), evidence);
+    }
+    fallback
+        .detail
+        .insert("render_path".to_owned(), json!("classic_fallback"));
+    Some(fallback)
+}
+
+fn smart_fallback_reason(
+    smart: bool,
+    smart_output_untouched: bool,
+    close: &Value,
+) -> Option<&'static str> {
+    if smart_output_untouched {
+        return Some("smart_output_untouched");
+    }
+    (smart && validate_abandoned_smart_heap_corruption_close(close).is_ok())
+        .then_some("smart_worker_heap_corruption")
 }
 
 fn discovery_failure_bucket(diagnostics: Option<&Value>, classification: Option<&str>) -> String {
@@ -1076,6 +1118,102 @@ mod tests {
             discovery_failure_bucket(Some(&diagnostics), Some("nonzero_exit")),
             "exit_11_load_library"
         );
+    }
+
+    #[test]
+    fn sweep_retries_only_the_exact_smart_heap_corruption_boundary() {
+        let close = json!({
+            "render_path": "smart",
+            "session_clean": false,
+            "invalidated": true,
+            "invalidated_reason": { "reason": "worker_exited" },
+            "frames_ok": 0,
+            "frames_errored": 0,
+            "final_report": null,
+            "worker": {
+                "classification": "crashed",
+                "exit_code": 0xC000_0374u64,
+                "diagnostics": { "active_stage": "smart_render_cpu" }
+            }
+        });
+        assert_eq!(
+            smart_fallback_reason(true, false, &close),
+            Some("smart_worker_heap_corruption")
+        );
+        assert_eq!(
+            smart_fallback_reason(false, false, &close),
+            None,
+            "Classic failures never recursively retry"
+        );
+        let mut prior_frames = close.clone();
+        *prior_frames.pointer_mut("/frames_ok").unwrap() = json!(3);
+        assert_eq!(
+            smart_fallback_reason(true, false, &prior_frames),
+            Some("smart_worker_heap_corruption"),
+            "a close-time exit after prior rendered frames still retries the whole slice"
+        );
+
+        let mut wrong_exit = close;
+        *wrong_exit.pointer_mut("/worker/exit_code").unwrap() = json!(0xC000_0005u64);
+        assert_eq!(smart_fallback_reason(true, false, &wrong_exit), None);
+    }
+
+    #[test]
+    fn sweep_replays_the_complete_slice_once_and_returns_only_classic_pixels() {
+        let mut options = discovery_options(PathBuf::from("unused.json"));
+        options.discovery_only = false;
+        options.frames = 3;
+        options.current_time = 7;
+        options.force_classic = false;
+        let launches = std::cell::Cell::new(0);
+        let smart_evidence = json!({
+            "close_validated": true,
+            "frames_ok": 2,
+            "frames_errored": 0
+        });
+
+        let outcome = orchestrate_sweep_classic_fallback(
+            &options,
+            Some("smart_worker_heap_corruption"),
+            true,
+            Some(smart_evidence.clone()),
+            |classic_options| {
+                launches.set(launches.get() + 1);
+                assert!(classic_options.force_classic);
+                assert_eq!(classic_options.frames, 3);
+                assert_eq!(classic_options.current_time, 7);
+                let mut outcome = Outcome::bare("rendered");
+                outcome.detail.insert("pixel_bytes".into(), json!(16));
+                outcome
+            },
+        )
+        .expect("authorized Smart close launches Classic");
+
+        assert_eq!(launches.get(), 1, "the complete slice launches once");
+        assert_eq!(outcome.bucket, "rendered");
+        assert_eq!(outcome.detail["pixel_bytes"], 16);
+        assert_eq!(outcome.detail["render_path"], "classic_fallback");
+        assert_eq!(
+            outcome.detail["fallback_reason"],
+            "smart_worker_heap_corruption"
+        );
+        assert_eq!(outcome.detail["smart_attempt"], smart_evidence);
+
+        let rejected_launches = std::cell::Cell::new(0);
+        assert!(
+            orchestrate_sweep_classic_fallback(
+                &options,
+                Some("smart_worker_heap_corruption"),
+                false,
+                None,
+                |_| {
+                    rejected_launches.set(rejected_launches.get() + 1);
+                    Outcome::bare("rendered")
+                },
+            )
+            .is_none()
+        );
+        assert_eq!(rejected_launches.get(), 0);
     }
 
     #[test]

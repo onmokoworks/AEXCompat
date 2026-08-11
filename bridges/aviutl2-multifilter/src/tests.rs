@@ -4870,10 +4870,14 @@ mod tests {
             }
         });
         let launches = std::cell::Cell::new(0);
-        let rejected = orchestrate_classic_fallback(&serde_json::json!({}), || {
-            launches.set(launches.get() + 1);
-            Ok((None, classic_close.clone()))
-        });
+        let rejected = orchestrate_classic_fallback(
+            &serde_json::json!({}),
+            SmartFallbackEvidence::UntouchedOutput,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((None, classic_close.clone()))
+            },
+        );
         assert!(!rejected.smart_authorized);
         assert_eq!(launches.get(), 0, "invalid Smart close launches no Classic");
 
@@ -4884,10 +4888,14 @@ mod tests {
             origin_x: 0,
             origin_y: 0,
         };
-        let accepted = orchestrate_classic_fallback(&smart_close, || {
-            launches.set(launches.get() + 1);
-            Ok((Some(frame()), classic_close.clone()))
-        });
+        let accepted = orchestrate_classic_fallback(
+            &smart_close,
+            SmartFallbackEvidence::UntouchedOutput,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((Some(frame()), classic_close.clone()))
+            },
+        );
         assert!(accepted.smart_authorized);
         assert_eq!(launches.get(), 1, "authorized Smart close launches once");
         assert!(matches!(
@@ -4899,15 +4907,88 @@ mod tests {
         *unclean_classic
             .pointer_mut("/final_report/global_setdown_error")
             .unwrap() = serde_json::json!(4);
-        let rejected_classic = orchestrate_classic_fallback(&smart_close, || {
-            launches.set(launches.get() + 1);
-            Ok((Some(frame()), unclean_classic))
-        });
+        let rejected_classic = orchestrate_classic_fallback(
+            &smart_close,
+            SmartFallbackEvidence::UntouchedOutput,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((Some(frame()), unclean_classic))
+            },
+        );
         assert_eq!(
             launches.get(),
             2,
             "each authorization permits exactly one launch"
         );
         assert!(matches!(rejected_classic.reply, FrameReply::SessionLost(_)));
+    }
+
+    #[test]
+    fn heap_corruption_fallback_requires_exact_smart_close_and_clean_classic() {
+        let smart_close = serde_json::json!({
+            "render_path": "smart",
+            "session_clean": false,
+            "invalidated": true,
+            "invalidated_reason": { "reason": "worker_exited" },
+            "frames_ok": 2,
+            "frames_errored": 0,
+            "final_report": null,
+            "worker": {
+                "classification": "crashed",
+                "exit_code": 0xC000_0374u64,
+                "diagnostics": { "failure_stage": "smart_render" }
+            }
+        });
+        let classic_close = serde_json::json!({
+            "invalidated": false,
+            "worker": { "classification": "ok" },
+            "final_report": {
+                "status": "render_completed", "global_setdown_error": 0,
+                "guard_bytes_intact": true, "suite_leases_balanced": true,
+                "handle_lifetimes_balanced": true, "world_lifetimes_balanced": true,
+                "param_checkouts_balanced": true, "render_error": 0,
+                "persistent_sequence_setup_error": 0,
+                "persistent_sequence_setdown_error": 0
+            }
+        });
+        let launches = std::cell::Cell::new(0);
+        let frame = || RenderedFrame {
+            pixels: vec![1, 2, 3, 4],
+            width: 1,
+            height: 1,
+            origin_x: 0,
+            origin_y: 0,
+        };
+
+        let accepted = orchestrate_classic_fallback(
+            &smart_close,
+            SmartFallbackEvidence::HeapCorruption,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((Some(frame()), classic_close.clone()))
+            },
+        );
+        assert!(accepted.smart_authorized);
+        assert_eq!(launches.get(), 1);
+        assert!(matches!(
+            accepted.reply,
+            FrameReply::RenderedClassicFallback(_)
+        ));
+
+        let mut wrong_stage = smart_close;
+        *wrong_stage
+            .pointer_mut("/worker/diagnostics/failure_stage")
+            .unwrap() = serde_json::json!("frame_setdown");
+        let rejected = orchestrate_classic_fallback(
+            &wrong_stage,
+            SmartFallbackEvidence::HeapCorruption,
+            || {
+                launches.set(launches.get() + 1);
+                Ok((Some(frame()), classic_close))
+            },
+        );
+        assert!(!rejected.smart_authorized);
+        assert_eq!(launches.get(), 1, "rejected evidence launches no Classic");
+        assert!(matches!(rejected.reply, FrameReply::SessionLost(_)));
     }
 }

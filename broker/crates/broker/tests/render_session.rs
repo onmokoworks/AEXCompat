@@ -16,6 +16,7 @@ mod windows_e2e {
         AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, ClusterRenderPlugins,
         DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest, InspectOutcome,
         RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
+        validate_abandoned_smart_heap_corruption_close,
         validate_abandoned_smart_untouched_close,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
@@ -2232,6 +2233,79 @@ mod windows_e2e {
             assert!(
                 validate_abandoned_smart_untouched_close(&mutated).is_err(),
                 "mutation {pointer} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn abandoned_smart_heap_corruption_close_is_narrow_and_fail_closed() {
+        let valid = serde_json::json!({
+            "stage": "render_session_close",
+            "render_path": "smart",
+            "session_clean": false,
+            "invalidated": true,
+            "invalidated_reason": { "reason": "worker_exited" },
+            "frames_ok": 3,
+            "frames_errored": 0,
+            "final_report": null,
+            "worker": {
+                "classification": "crashed",
+                "exit_code": 0xC000_0374u64,
+                "diagnostics": {
+                    "failure_stage": "smart_render",
+                    "active_stage": "smart_render_cpu"
+                }
+            }
+        });
+        validate_abandoned_smart_heap_corruption_close(&valid)
+            .expect("exact Smart heap-corruption evidence authorizes one retry");
+
+        for (pointer, replacement) in [
+            ("/render_path", serde_json::json!("classic")),
+            ("/invalidated", serde_json::json!(false)),
+            (
+                "/invalidated_reason/reason",
+                serde_json::json!("worker_invariant_failure"),
+            ),
+            ("/worker/classification", serde_json::json!("nonzero_exit")),
+            ("/worker/exit_code", serde_json::json!(0xC000_0005u64)),
+            (
+                "/worker/diagnostics/failure_stage",
+                serde_json::json!("frame_setdown"),
+            ),
+            (
+                "/worker/diagnostics/active_stage",
+                serde_json::json!("frame_setdown"),
+            ),
+            ("/final_report", serde_json::json!({ "status": "partial" })),
+            ("/frames_ok", serde_json::json!("3")),
+            ("/session_clean", serde_json::json!(true)),
+            ("/frames_errored", serde_json::json!(1)),
+        ] {
+            let mut mutated = valid.clone();
+            *mutated.pointer_mut(pointer).expect("test pointer exists") = replacement;
+            if pointer.ends_with("failure_stage") || pointer.ends_with("active_stage") {
+                *mutated
+                    .pointer_mut("/worker/diagnostics/failure_stage")
+                    .expect("failure stage exists") = serde_json::json!("frame_setdown");
+                *mutated
+                    .pointer_mut("/worker/diagnostics/active_stage")
+                    .expect("active stage exists") = serde_json::json!("frame_setdown");
+            }
+            assert!(
+                validate_abandoned_smart_heap_corruption_close(&mutated).is_err(),
+                "mutation {pointer} must fail closed"
+            );
+        }
+        for missing in ["final_report", "frames_ok"] {
+            let mut mutated = valid.clone();
+            mutated
+                .as_object_mut()
+                .expect("close is an object")
+                .remove(missing);
+            assert!(
+                validate_abandoned_smart_heap_corruption_close(&mutated).is_err(),
+                "missing {missing} must fail closed"
             );
         }
     }

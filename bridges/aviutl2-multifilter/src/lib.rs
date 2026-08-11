@@ -36,7 +36,8 @@ use aexcompat_broker::plugin_dependency_closure::{
 use aexcompat_broker::render_session::{
     ClusterRenderPlugins, DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest,
     InspectOutcome, RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome,
-    validate_abandoned_smart_untouched_close, validate_completed_session_close,
+    validate_abandoned_smart_heap_corruption_close, validate_abandoned_smart_untouched_close,
+    validate_completed_session_close,
 };
 use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
 use aviutl2_sys::filter2::{
