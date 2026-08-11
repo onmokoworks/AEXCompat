@@ -2369,7 +2369,10 @@ bool verify_aegp_installed_effect_catalog_suite4() {
   using GetInstalledEffectText = int32_t (__cdecl*)(int32_t, char*);
 
   const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
-  g_aegp_comp_idle_roundtrip_mode = true;
+  // A normally loaded PF effect acquires suites outside the AEGP idle
+  // roundtrip harness. Effect Suite v4 is a public render-time table, so its
+  // availability must not depend on that diagnostic mode.
+  g_aegp_comp_idle_roundtrip_mode = false;
   const void* acquired2 = nullptr;
   const void* acquired3 = nullptr;
   const void* acquired4 = nullptr;
@@ -2386,6 +2389,11 @@ bool verify_aegp_installed_effect_catalog_suite4() {
     ok = ok && slots2 && slots3 && slots4 &&
          slots2[slot] == slots3[slot] && slots3[slot] == slots4[slot];
   }
+  const auto& suite4_stubs =
+      aexcompat::worker_runtime::unsupported_suite_slots<
+          aexcompat::worker_runtime::UnsupportedSuiteId::aegp_effect_4, 22>();
+  for (const std::size_t slot : {7u, 17u, 18u, 19u, 20u, 21u})
+    ok = ok && slots4 && slots4[slot] == suite4_stubs[slot];
   const auto get_num = slots3
       ? reinterpret_cast<GetNumInstalledEffects>(slots3[11]) : nullptr;
   const auto get_next = slots3

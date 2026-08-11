@@ -2955,7 +2955,7 @@ SceneSuiteAcquireResult scene_acquire_suite(
     return SceneSuiteAcquireResult::acquired;
   }
 
-  if (named("AEGP Effect Suite") && version == 4 && state().comp_idle_roundtrip_mode) {
+  if (named("AEGP Effect Suite") && version == 4) {
     g_aegp_effect_suite4 =
         unsupported_suite_slots<UnsupportedSuiteId::aegp_effect_4, 22>();
     g_aegp_effect_suite4[0] = reinterpret_cast<void*>(&aegp_get_layer_num_effects);
