@@ -56,6 +56,10 @@ aex-guest-worker render-trace-png \
 - `arg`と`register`は同義です。`rcx`、`rdx`、`r8`、`r9`、`rax`、
   `stack5`～`stack8`（または`5`～`8`）を指定できます。
 - `size`は1～4096 byteです。
+- `deref=<offset>`を指定すると、register/stack引数そのものではなく、
+  `引数 + offset`に格納された64-bit little-endian pointerの参照先を監視します。
+  offsetは0～4096 byteです。OpenCV `Mat`のdata fieldなど、headerと実データが
+  分離した構造を同じentry/return境界で追う用途を想定しています。
 - `when`は省略可能です。指定する場合は`entry+return`または`both`です。
 - `occurrence`は省略可能な1始まりの呼び出し番号です。例えば
   `occurrence=2113`は、同じwatchに一致する2113回目だけを記録します。
@@ -66,7 +70,9 @@ aex-guest-worker render-trace-png \
 - `--watch-output-pixel x,y`は出力pixelの前後値と画像内位置を記録します。
 
 `rva=`はメモリアドレスではなくinstructionのRVAです。監視するメモリのアドレスは、
-その時点の指定registerまたはstack引数からworkerが取得します。
+その時点の指定registerまたはstack引数からworkerが取得します。`deref`指定時は、
+そこからpointer fieldを1段だけ安全に読み取ります。fieldまたは参照先が未mapなら
+snapshotはunreadableとして記録され、workerをクラッシュさせません。
 
 ## JSONの読み方
 

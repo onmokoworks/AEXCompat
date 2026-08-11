@@ -1503,6 +1503,7 @@
             instruction_rva: None,
             absolute_address: None,
             register: "rcx",
+            dereference_offset: None,
             size: 1,
             occurrence: None,
             image_coordinate: None,
@@ -1547,6 +1548,36 @@
     }
 
     #[test]
+    fn execution_trace_watch_can_dereference_pointer_field() {
+        const CODE: u64 = 0x1000_0000;
+        // mov rax,[rcx]; inc byte ptr [rax]; ret
+        let mut engine = test_engine(&[0x48, 0x8b, 0x01, 0xfe, 0x00, 0xc3]);
+        let target = engine.allocate(1, 1).unwrap();
+        engine.write(target, &[41]).unwrap();
+        let holder = engine.allocate(8, 8).unwrap();
+        engine.write(holder, &target.to_le_bytes()).unwrap();
+        engine.configure_trace_watches(vec![TraceWatchSpec {
+            id: "dereferenced-target".into(),
+            function_rva: Some(0),
+            instruction_rva: None,
+            absolute_address: None,
+            register: "rcx",
+            dereference_offset: Some(0),
+            size: 1,
+            occurrence: None,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        }]);
+        engine.begin_execution_trace("RENDER", CODE).unwrap();
+        engine.call_win64(CODE, [holder, 0, 0, 0, 0, 0]).unwrap();
+        let trace = engine.finish_execution_trace(0).unwrap();
+        let witness = trace.memory_witnesses.first().unwrap();
+        assert_eq!(witness.before.u8_values, [41]);
+        assert_eq!(witness.after.u8_values, [42]);
+    }
+
+    #[test]
     fn execution_trace_treats_explicitly_watched_first_jump_as_tail_call() {
         const CODE: u64 = 0x1000_0000;
         // jmp target; padding; target: mov rax,[rsp+0x28]; inc byte ptr [rax]; ret
@@ -1561,6 +1592,7 @@
             instruction_rva: None,
             absolute_address: None,
             register: "stack5",
+            dereference_offset: None,
             size: 1,
             occurrence: None,
             image_coordinate: None,
@@ -1600,6 +1632,7 @@
             instruction_rva: None,
             absolute_address: None,
             register: "rcx",
+            dereference_offset: None,
             size: 1,
             occurrence: Some(2),
             image_coordinate: None,
@@ -1637,6 +1670,7 @@
             instruction_rva: None,
             absolute_address: None,
             register: "rcx",
+            dereference_offset: None,
             size: 1,
             occurrence: None,
             image_coordinate: None,
@@ -1779,6 +1813,7 @@
             instruction_rva: None,
             absolute_address: None,
             register: "rcx",
+            dereference_offset: None,
             size: 4,
             occurrence: None,
             image_coordinate: None,
@@ -1825,6 +1860,7 @@
             instruction_rva: None,
             absolute_address: None,
             register: "rcx",
+            dereference_offset: None,
             size: 1,
             occurrence: Some(2),
             image_coordinate: None,
@@ -1864,6 +1900,7 @@
             instruction_rva: None,
             absolute_address: None,
             register: "rcx",
+            dereference_offset: None,
             size: 4,
             occurrence: None,
             image_coordinate: None,

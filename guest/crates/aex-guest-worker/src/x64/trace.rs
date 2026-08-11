@@ -180,6 +180,26 @@ fn selected_watch_occurrence(capture: &mut TraceCapture, spec: &TraceWatchSpec) 
         .is_none_or(|occurrence| occurrence == *count)
 }
 
+fn trace_watch_address(
+    unicorn: &Unicorn<'_, GuestState>,
+    register: &'static str,
+    stack_offset: u64,
+    dereference_offset: Option<u64>,
+) -> u64 {
+    let base = trace_register_value(unicorn, register, stack_offset).unwrap_or(0);
+    let Some(offset) = dereference_offset else {
+        return base;
+    };
+    let Some(pointer_address) = base.checked_add(offset) else {
+        return 0;
+    };
+    let mut bytes = [0u8; 8];
+    if unicorn.mem_read(pointer_address, &mut bytes).is_err() {
+        return 0;
+    }
+    u64::from_le_bytes(bytes)
+}
+
 fn select_function_watches(capture: &mut TraceCapture, function_rva: u64) -> Vec<TraceWatchSpec> {
     let matches = capture
         .watch_specs
@@ -242,7 +262,12 @@ fn trace_instruction(
         let pending = entry_watches
             .into_iter()
             .map(|spec| {
-                let watch_address = trace_register_value(unicorn, spec.register, 0x28).unwrap_or(0);
+                let watch_address = trace_watch_address(
+                    unicorn,
+                    spec.register,
+                    0x28,
+                    spec.dereference_offset,
+                );
                 PendingTraceWatch {
                     spec_id: spec.id,
                     register: spec.register,
@@ -487,7 +512,12 @@ fn trace_instruction(
         let pending = matching_watches
             .into_iter()
             .map(|spec| {
-                let address = trace_register_value(unicorn, spec.register, 0x20).unwrap_or(0);
+                let address = trace_watch_address(
+                    unicorn,
+                    spec.register,
+                    0x20,
+                    spec.dereference_offset,
+                );
                 PendingTraceWatch {
                     spec_id: spec.id,
                     register: spec.register,
@@ -586,7 +616,12 @@ fn trace_instruction(
             let pending = matching_watches
                 .into_iter()
                 .map(|spec| {
-                    let address = trace_register_value(unicorn, spec.register, 0x28).unwrap_or(0);
+                    let address = trace_watch_address(
+                        unicorn,
+                        spec.register,
+                        0x28,
+                        spec.dereference_offset,
+                    );
                     PendingTraceWatch {
                         spec_id: spec.id,
                         register: spec.register,
