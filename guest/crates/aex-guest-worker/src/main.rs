@@ -865,6 +865,8 @@ fn parse_parameter_values(values: &[std::ffi::OsString]) -> Result<Vec<Parameter
             value: numeric,
             color,
             point,
+            angle: None,
+            point3d: None,
         });
     }
     Ok(parsed)

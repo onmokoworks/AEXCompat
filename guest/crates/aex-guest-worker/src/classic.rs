@@ -31,10 +31,11 @@ const CMD_GPU_DEVICE_SETDOWN: u64 = abi::PF_CMD_GPU_DEVICE_SETDOWN as u64;
 pub const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
-const PARAM_ANGLE: i32 = 3;
+pub(crate) const PARAM_ANGLE: i32 = 3;
 const PARAM_CHECKBOX: i32 = 4;
 pub(crate) const PARAM_COLOR: i32 = 5;
 pub(crate) const PARAM_POINT: i32 = 6;
+pub(crate) const PARAM_POINT3D: i32 = 18;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
 const LAYER_DEFAULT_OFFSET: usize = 116;
@@ -92,6 +93,8 @@ pub struct ParameterValue {
     pub value: Option<f64>,
     pub color: Option<[u8; 4]>,
     pub point: Option<[f64; 2]>,
+    pub angle: Option<f64>,
+    pub point3d: Option<[f64; 3]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -100,6 +103,14 @@ pub struct ResidentLayer<'a> {
     pub width: u32,
     pub height: u32,
     pub pixels: &'a [u8],
+}
+
+#[derive(Debug)]
+pub struct ResidentWorldDump {
+    pub slot: usize,
+    pub width: u32,
+    pub height: u32,
+    pub raw_pixels: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +123,10 @@ pub struct AppliedParameter {
     pub color: Option<[u8; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<[f64; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub angle: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub point3d: Option<[f64; 3]>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -200,6 +215,10 @@ pub struct RenderReport {
     pub argb8: Vec<u8>,
     #[serde(skip)]
     pub raw_pixels: Vec<u8>,
+    #[serde(skip)]
+    pub raw_input_pixels: Vec<u8>,
+    #[serde(skip)]
+    pub raw_secondary_layers: Vec<ResidentWorldDump>,
 }
 
 fn write_ansi_numeric_callbacks(engine: &GuestEngine<'static>, utility_bytes: &mut [u8]) {
@@ -603,7 +622,7 @@ impl ClassicHost {
                 return Err(error);
             }
         };
-        if let Err(error) = self.write_frame_context(width, height, 0, time_scale) {
+        if let Err(error) = self.write_frame_context(width, height, 0, 1, time_scale) {
             let _ = self.end_global();
             return Err(error);
         }
@@ -677,6 +696,7 @@ impl ClassicHost {
             width,
             height,
             current_time,
+            1,
             time_scale,
             format,
             input_pixels,
@@ -693,6 +713,7 @@ impl ClassicHost {
         width: u32,
         height: u32,
         current_time: i32,
+        time_step: i32,
         time_scale: u32,
         format: FramePixelFormat,
         input_pixels: &[u8],
@@ -704,6 +725,7 @@ impl ClassicHost {
             width,
             height,
             current_time,
+            time_step,
             time_scale,
             format,
             input_pixels,
@@ -729,6 +751,7 @@ impl ClassicHost {
             width,
             height,
             0,
+            1,
             time_scale,
             format,
             input_pixels,
@@ -768,6 +791,7 @@ impl ClassicHost {
             width,
             height,
             0,
+            1,
             time_scale,
             format,
             input_pixels,
@@ -784,6 +808,7 @@ impl ClassicHost {
         width: u32,
         height: u32,
         current_time: i32,
+        time_step: i32,
         time_scale: u32,
         format: FramePixelFormat,
         input_pixels: &[u8],
@@ -797,7 +822,7 @@ impl ClassicHost {
                 "resident session has not been opened".into(),
             ));
         }
-        self.write_frame_context(width, height, current_time, time_scale)?;
+        self.write_frame_context(width, height, current_time, time_step, time_scale)?;
         let report = self
             .render_pixels_with_request_mode(
                 width,
@@ -1500,7 +1525,13 @@ impl ClassicHost {
                                 .map_or(requested.name == captured.name, |slot| slot == index + 1)
                     })
             {
-                apply_parameter_value(&mut definition, captured.param_type, requested)?;
+                apply_parameter_value_for_layer(
+                    &mut definition,
+                    captured.param_type,
+                    requested,
+                    width,
+                    height,
+                )?;
                 applied_requests.insert(request_index);
                 applied_values.push(AppliedParameter {
                     slot: index + 1,
@@ -1508,6 +1539,8 @@ impl ClassicHost {
                     value: requested.value,
                     color: requested.color,
                     point: requested.point,
+                    angle: requested.angle,
+                    point3d: requested.point3d,
                 });
             }
             let parameter = resources.parameter_definitions[index];
@@ -1713,6 +1746,23 @@ impl ClassicHost {
         }
         let mut raw_pixels = vec![0u8; pixel_bytes];
         self.engine.read(output_pixels, &mut raw_pixels)?;
+        let mut raw_input_pixels = vec![0u8; pixel_bytes];
+        self.engine
+            .read(guest_input_pixels, &mut raw_input_pixels)?;
+        let mut raw_secondary_layers = Vec::with_capacity(resources.secondary_layers.len());
+        for layer in &resources.secondary_layers {
+            let layer_bytes = format
+                .byte_count(layer.width, layer.height)
+                .map_err(|error| ClassicError::Input(error.to_string()))?;
+            let mut pixels = vec![0u8; layer_bytes];
+            self.engine.read(layer.pixels, &mut pixels)?;
+            raw_secondary_layers.push(ResidentWorldDump {
+                slot: layer.slot,
+                width: layer.width,
+                height: layer.height,
+                raw_pixels: pixels,
+            });
+        }
         let argb8 = format
             .to_argb8_preview(&raw_pixels)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
@@ -1751,6 +1801,8 @@ impl ClassicHost {
                 census,
                 argb8,
                 raw_pixels,
+                raw_input_pixels,
+                raw_secondary_layers,
             },
             traces,
         ))
@@ -1853,17 +1905,19 @@ impl ClassicHost {
         width: u32,
         height: u32,
         current_time: i32,
+        time_step: i32,
         time_scale: u32,
     ) -> Result<(), ClassicError> {
         let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
         self.engine.read(self.input, &mut input)?;
-        write_i32(&mut input, abi::IN_WIDTH_OFFSET, width as i32);
-        write_i32(&mut input, abi::IN_HEIGHT_OFFSET, height as i32);
-        write_i32(&mut input, abi::IN_CURRENT_TIME_OFFSET, current_time);
-        write_i32(&mut input, abi::IN_TIME_STEP_OFFSET, 1);
-        write_i32(&mut input, abi::IN_LOCAL_TIME_STEP_OFFSET, 1);
-        write_u32(&mut input, abi::IN_TIME_SCALE_OFFSET, time_scale);
-        write_rect(&mut input, abi::IN_EXTENT_HINT_OFFSET, width, height);
+        populate_frame_context(
+            &mut input,
+            width,
+            height,
+            current_time,
+            time_step,
+            time_scale,
+        );
         self.engine.write(self.input, &input)?;
         Ok(())
     }
@@ -2641,6 +2695,23 @@ fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, heigh
             definition[union..union + 4].copy_from_slice(&x.to_le_bytes());
             definition[union + 4..union + 8].copy_from_slice(&y.to_le_bytes());
         }
+        PARAM_POINT3D => {
+            for (component, extent) in [width, height, height].into_iter().enumerate() {
+                let offset = union + 24 + component * 8;
+                let percent = f64::from_le_bytes(
+                    definition[offset..offset + 8]
+                        .try_into()
+                        .expect("point3d default is eight bytes"),
+                );
+                let pixels = if width > 0 && height > 0 {
+                    percent / 100.0 * f64::from(extent)
+                } else {
+                    percent
+                };
+                definition[union + component * 8..union + component * 8 + 8]
+                    .copy_from_slice(&pixels.to_le_bytes());
+            }
+        }
         _ => {}
     }
 }
@@ -2656,16 +2727,31 @@ fn materialize_layer_world(definition: &mut [u8], param_type: i32, input_world: 
     }
 }
 
+#[cfg(test)]
 fn apply_parameter_value(
     definition: &mut [u8],
     param_type: i32,
     requested: &ParameterValue,
 ) -> Result<(), ClassicError> {
+    apply_parameter_value_for_layer(definition, param_type, requested, 0, 0)
+}
+
+fn apply_parameter_value_for_layer(
+    definition: &mut [u8],
+    param_type: i32,
+    requested: &ParameterValue,
+    width: u32,
+    height: u32,
+) -> Result<(), ClassicError> {
     if param_type == PARAM_COLOR {
         let color = requested.color.ok_or_else(|| {
             ClassicError::Input("color parameter requires four ARGB8 components".into())
         })?;
-        if requested.value.is_some() {
+        if requested.value.is_some()
+            || requested.point.is_some()
+            || requested.angle.is_some()
+            || requested.point3d.is_some()
+        {
             return Err(ClassicError::Input(
                 "color parameter accepts only ARGB8 components".into(),
             ));
@@ -2687,15 +2773,65 @@ fn apply_parameter_value(
                 "point parameter components must be finite and typed".into(),
             ));
         }
-        for (offset, value) in [(0, x), (4, y)] {
-            let fixed = value * 65536.0;
-            if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
-                return Err(ClassicError::Input(format!(
-                    "point component is outside 16.16 range: {value}"
-                )));
-            }
+        for (offset, value, extent) in [(0, x, width), (4, y, height)] {
+            let pixels = if width > 0 && height > 0 {
+                value / 100.0 * f64::from(extent)
+            } else {
+                value
+            };
+            let fixed = pixels.clamp(-32768.0, 32767.0) * 65536.0;
             definition[abi::PARAM_U_OFFSET + offset..abi::PARAM_U_OFFSET + offset + 4]
                 .copy_from_slice(&(fixed.round() as i32).to_le_bytes());
+        }
+        return Ok(());
+    }
+    if param_type == PARAM_ANGLE {
+        let angle = requested.angle.ok_or_else(|| {
+            ClassicError::Input("angle parameter requires one typed component".into())
+        })?;
+        if requested.value.is_some()
+            || requested.color.is_some()
+            || requested.point.is_some()
+            || requested.point3d.is_some()
+            || !angle.is_finite()
+        {
+            return Err(ClassicError::Input(
+                "angle parameter component must be finite and typed".into(),
+            ));
+        }
+        let fixed = angle * 65536.0;
+        if fixed < i32::MIN as f64 || fixed > i32::MAX as f64 {
+            return Err(ClassicError::Input(format!(
+                "angle component is outside 16.16 range: {angle}"
+            )));
+        }
+        definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4]
+            .copy_from_slice(&(fixed.round() as i32).to_le_bytes());
+        return Ok(());
+    }
+    if param_type == PARAM_POINT3D {
+        let values = requested.point3d.ok_or_else(|| {
+            ClassicError::Input("point3d parameter requires three typed components".into())
+        })?;
+        if requested.value.is_some()
+            || requested.color.is_some()
+            || requested.point.is_some()
+            || requested.angle.is_some()
+            || values.iter().any(|value| !value.is_finite())
+        {
+            return Err(ClassicError::Input(
+                "point3d parameter components must be finite and typed".into(),
+            ));
+        }
+        for (index, (value, extent)) in values.into_iter().zip([width, height, height]).enumerate()
+        {
+            let pixels = if width > 0 && height > 0 {
+                value / 100.0 * f64::from(extent)
+            } else {
+                value
+            };
+            definition[abi::PARAM_U_OFFSET + index * 8..abi::PARAM_U_OFFSET + index * 8 + 8]
+                .copy_from_slice(&pixels.to_le_bytes());
         }
         return Ok(());
     }
@@ -2707,6 +2843,11 @@ fn apply_parameter_value(
     if requested.point.is_some() {
         return Err(ClassicError::Input(format!(
             "parameter type {param_type} does not accept a point value"
+        )));
+    }
+    if requested.angle.is_some() || requested.point3d.is_some() {
+        return Err(ClassicError::Input(format!(
+            "parameter type {param_type} does not accept component values"
         )));
     }
     let value = requested.value.ok_or_else(|| {
@@ -2830,6 +2971,23 @@ fn numeric_descriptor(
         ),
         _ => (None, None, None, None, None, None),
     }
+}
+
+fn populate_frame_context(
+    input: &mut [u8],
+    width: u32,
+    height: u32,
+    current_time: i32,
+    time_step: i32,
+    time_scale: u32,
+) {
+    write_i32(input, abi::IN_WIDTH_OFFSET, width as i32);
+    write_i32(input, abi::IN_HEIGHT_OFFSET, height as i32);
+    write_i32(input, abi::IN_CURRENT_TIME_OFFSET, current_time);
+    write_i32(input, abi::IN_TIME_STEP_OFFSET, time_step);
+    write_i32(input, abi::IN_LOCAL_TIME_STEP_OFFSET, time_step);
+    write_u32(input, abi::IN_TIME_SCALE_OFFSET, time_scale);
+    write_rect(input, abi::IN_EXTENT_HINT_OFFSET, width, height);
 }
 
 fn cleanup_error_code(result: Result<i32, ClassicError>) -> i32 {
@@ -3089,6 +3247,23 @@ mod tests {
             5 * 65536,
             "point y percentage default must become a source coordinate"
         );
+
+        let mut point3d = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        for (index, value) in [50.0f64, 25.0, 75.0].into_iter().enumerate() {
+            point3d[abi::PARAM_U_OFFSET + 24 + index * 8..abi::PARAM_U_OFFSET + 32 + index * 8]
+                .copy_from_slice(&value.to_le_bytes());
+        }
+        materialize_default(&mut point3d, PARAM_POINT3D, 32, 20);
+        for (index, expected) in [16.0f64, 5.0, 15.0].into_iter().enumerate() {
+            assert_eq!(
+                f64::from_le_bytes(
+                    point3d[abi::PARAM_U_OFFSET + index * 8..abi::PARAM_U_OFFSET + index * 8 + 8]
+                        .try_into()
+                        .unwrap()
+                ),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -3102,6 +3277,8 @@ mod tests {
             value: Some(value),
             color: None,
             point: None,
+            angle: None,
+            point3d: None,
         };
         apply_parameter_value(&mut fixed, PARAM_FIXED_SLIDER, &scalar(12.5)).unwrap();
         assert_eq!(read_i32(&fixed, union), 12 * 65536 + 32768);
@@ -3135,6 +3312,8 @@ mod tests {
                 value: None,
                 color: None,
                 point: Some([42.5, -7.25]),
+                angle: None,
+                point3d: None,
             },
         )
         .unwrap();
@@ -3146,6 +3325,63 @@ mod tests {
             read_i32(&point, abi::PARAM_U_OFFSET + 4),
             (-7.25 * 65536.0) as i32
         );
+
+        let mut angle = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value_for_layer(
+            &mut angle,
+            PARAM_ANGLE,
+            &ParameterValue {
+                name: "angle".into(),
+                slot: None,
+                value: None,
+                color: None,
+                point: None,
+                angle: Some(12.5),
+                point3d: None,
+            },
+            32,
+            20,
+        )
+        .unwrap();
+        assert_eq!(read_i32(&angle, union), (12.5 * 65536.0) as i32);
+
+        let mut point3d = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        apply_parameter_value_for_layer(
+            &mut point3d,
+            PARAM_POINT3D,
+            &ParameterValue {
+                name: "point3d".into(),
+                slot: None,
+                value: None,
+                color: None,
+                point: None,
+                angle: None,
+                point3d: Some([50.0, 25.0, 75.0]),
+            },
+            32,
+            20,
+        )
+        .unwrap();
+        for (index, expected) in [16.0f64, 5.0, 15.0].into_iter().enumerate() {
+            assert_eq!(
+                f64::from_le_bytes(
+                    point3d[union + index * 8..union + index * 8 + 8]
+                        .try_into()
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_frame_context_preserves_non_unit_time_step() {
+        let mut input = vec![0u8; abi::PF_IN_DATA_SIZE];
+        populate_frame_context(&mut input, 640, 360, 42, 7, 30);
+        assert_eq!(read_i32(&input, abi::IN_CURRENT_TIME_OFFSET), 42);
+        assert_eq!(read_i32(&input, abi::IN_TIME_STEP_OFFSET), 7);
+        assert_eq!(read_i32(&input, abi::IN_LOCAL_TIME_STEP_OFFSET), 7);
+        assert_eq!(read_u32(&input, abi::IN_TIME_SCALE_OFFSET), 30);
     }
 
     #[test]
@@ -3167,6 +3403,8 @@ mod tests {
                 value: None,
                 color: Some([255, 64, 128, 192]),
                 point: None,
+                angle: None,
+                point3d: None,
             },
         )
         .unwrap();
@@ -3180,6 +3418,8 @@ mod tests {
             value: None,
             color: Some([255, 64, 128, 192]),
             point: None,
+            angle: None,
+            point3d: None,
         })
         .unwrap();
         assert_eq!(applied["slot"], 2);
@@ -3199,6 +3439,8 @@ mod tests {
                 value: None,
                 color: Some([255, 1, 2, 3]),
                 point: None,
+                angle: None,
+                point3d: None,
             },
         )
         .unwrap_err();
