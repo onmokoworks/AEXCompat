@@ -384,6 +384,37 @@ jobs:
             throw 'SDK or built-artifact tests were skipped even though their prerequisites are provisioned'
           }
 
+      - name: Record public PF layer parameter probe identity
+        if: success() && steps.sdk.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $artifact = Join-Path $env:GITHUB_WORKSPACE 'target\pf-layer-param-probe-build\Release\pf_layer_param_probe.aex'
+          if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
+            throw "verified PF layer parameter probe is missing: $artifact"
+          }
+          $file = Get-Item -LiteralPath $artifact
+          $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksum = Join-Path $file.DirectoryName 'pf_layer_param_probe.aex.sha256'
+          Set-Content -LiteralPath $checksum -Value "$hash  $($file.Name)" -Encoding ascii -NoNewline
+          Write-Host "published_probe_source_commit=$env:GITHUB_SHA"
+          Write-Host "published_probe_configuration=Release"
+          Write-Host "published_probe_architecture=x86_64"
+          Write-Host "published_probe_size=$($file.Length)"
+          Write-Host "published_probe_sha256=$hash"
+
+      - name: Publish verified public PF layer parameter probe
+        if: success() && steps.sdk.outcome == 'success'
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: pf-layer-param-probe-windows-x86_64-${{ github.sha }}
+          path: |
+            target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex
+            target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex.sha256
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats

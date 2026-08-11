@@ -185,8 +185,11 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
           suite_timeline_report_json() +
           aexcompat::worker_runtime::suite_call_slot_probe::report_json(),
       live_suite_lease_summary(),
-      in.suite_fault_observed ||
-          worker_runtime::suite_registry().rejected_release_count() != 0,
+      // #1182 (owner-directed): a rejected suite release is contained as a no-op
+      // (see worker_render_report.cpp) and is a benign warning recorded in the
+      // suite_timeline, not a session-failing fault. Keep only genuine passed-in
+      // suite faults; handle/world double-dispose faults stay fail-closed.
+      in.suite_fault_observed,
       worker_runtime::handles::handle_lifetimes_balanced(),
       {handle_stats.created, handle_stats.disposed},
       {arbitrary.copy_calls, arbitrary.dispose_calls, arbitrary.print_calls,

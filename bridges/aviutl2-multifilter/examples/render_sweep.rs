@@ -458,10 +458,11 @@ impl Outcome {
     }
 }
 
-/// The secondary layer handed to a plug-in that declares one: every layer slot
-/// carries the same structured map unless the run is the no-layer control.
-/// Supplying only the first slot makes a multi-layer effect observe a mixture
-/// of a real layer and an empty checkout, which is not a useful render probe.
+/// The secondary layer handed to a plug-in that declares one.  The shipping
+/// multifilter maps AviUtl2's single virtual buffer to the first declared layer
+/// slot; later layer parameters retain their PARAMS_SETUP defaults.  Mirroring
+/// that route matters: populating every optional layer changes the effect's
+/// meaning and can make a valid default render fail before its render selector.
 fn probe_layers(
     record: &DiagnosticDiscovery,
     options: &Options,
@@ -472,6 +473,7 @@ fn probe_layers(
     }
     layer_slots_of(&record.parameters)
         .into_iter()
+        .take(1)
         .map(|slot| SessionLayer {
             slot,
             width: options.width,
@@ -1026,6 +1028,7 @@ fn write_report(path: &Path, report: &Value) -> bool {
 mod tests {
     use super::*;
     use aexcompat_aviutl2_multifilter::DiscoveredPluginKind;
+    use aexcompat_broker::image_render::InteractiveParameter;
 
     fn discovery_options(json: PathBuf) -> Options {
         Options {
@@ -1067,6 +1070,53 @@ mod tests {
             })),
             cluster_fallback: Some("worker_exited/invalidated".to_owned()),
         }
+    }
+
+    fn parameter(slot: u32, kind: &str) -> InteractiveParameter {
+        InteractiveParameter {
+            slot,
+            name: format!("parameter {slot}"),
+            kind: kind.to_owned(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 0.0,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        }
+    }
+
+    #[test]
+    fn sweep_maps_the_single_shipping_virtual_buffer_to_only_the_first_layer_slot() {
+        let mut record = failed_discovery(PathBuf::from("multiple-layers.aex"));
+        record.ok = true;
+        record.parameters = vec![
+            parameter(1, "float"),
+            parameter(3, "layer"),
+            parameter(8, "layer"),
+            parameter(13, "layer"),
+        ];
+        let mut options = discovery_options(PathBuf::from("unused.json"));
+        options.discovery_only = false;
+        let pixels = vec![0x7f; 4];
+
+        let layers = probe_layers(&record, &options, &pixels);
+
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].slot, 3);
+        assert_eq!(layers[0].rgba, pixels);
+        assert!(layers[0].dynamic);
+
+        options.no_layer = true;
+        assert!(probe_layers(&record, &options, &[0; 4]).is_empty());
     }
 
     #[test]
