@@ -37,8 +37,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Read repository Rust toolchain
+        id: repository-rust
+        shell: pwsh
+        run: |
+          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
+          if (-not $match -or $match.Matches.Count -ne 1) {
+            throw 'rust-toolchain.toml must declare exactly one channel'
+          }
+          "channel=$($match.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ steps.repository-rust.outputs.channel }}
           components: rustfmt
       - uses: mozilla/sccache-action@v0.0.11
         with:
