@@ -420,7 +420,7 @@ fn cli_inspection_failure_document(message: &str) -> serde_json::Value {
     })
 }
 
-fn required_plugin_parameters(
+fn required_inspected_plugin_parameters(
     repository: &Path,
     plugin: &Path,
     hash: &str,
@@ -428,11 +428,7 @@ fn required_plugin_parameters(
     let inspected = (|| {
         let expected_size = fs::metadata(plugin)?.len();
         let expected_sha256 = decode_sha256(hash).map_err(std::io::Error::other)?;
-        let dependency_search_dirs = plugin
-            .parent()
-            .map(Path::to_path_buf)
-            .into_iter()
-            .collect();
+        let dependency_search_dirs = plugin.parent().map(Path::to_path_buf).into_iter().collect();
         aexcompat_broker::image_render::inspect_experimental_via_discovery_in_place(
             repository,
             aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
@@ -450,6 +446,16 @@ fn required_plugin_parameters(
             std::process::exit(1);
         }
     }
+}
+
+fn required_plugin_parameters(
+    repository: &Path,
+    plugin: &Path,
+    hash: &str,
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    aexcompat_broker::image_render::normalize_default_interactive_parameters(
+        &required_inspected_plugin_parameters(repository, plugin, hash),
+    )
 }
 
 fn print_cli_help() {
@@ -1575,7 +1581,7 @@ fn main() -> eframe::Result {
     if args.len() == 3 && args[1] == "--inspect-experimental" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let parameters = required_plugin_parameters(&repository, plugin, &hash);
+        let parameters = required_inspected_plugin_parameters(&repository, plugin, &hash);
         println!("{}", serde_json::to_string_pretty(&parameters).unwrap());
         return Ok(());
     }

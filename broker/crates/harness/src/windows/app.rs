@@ -19,6 +19,48 @@ fn fit_size_to_aspect(available: egui::Vec2, aspect: f32) -> egui::Vec2 {
     egui::vec2(width, width / aspect)
 }
 
+fn normalize_inspected_ui_parameters(
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    parameters
+        .iter()
+        .cloned()
+        .map(|mut parameter| {
+            if matches!(parameter.kind.as_str(), "integer" | "float" | "path")
+                && parameter.value.is_finite()
+                && parameter.minimum.is_finite()
+                && parameter.maximum.is_finite()
+                && parameter.minimum <= parameter.maximum
+            {
+                parameter.value = parameter.value.clamp(parameter.minimum, parameter.maximum);
+            }
+            parameter
+        })
+        .collect()
+}
+
+fn parameters_for_native_action(
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+    defaults: &[aexcompat_broker::image_render::InteractiveParameter],
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    parameters
+        .iter()
+        .filter(|parameter| {
+            if parameter.kind != "arbitrary_data" {
+                return true;
+            }
+            let default_was_unsendable = defaults.iter().any(|default| {
+                default.slot == parameter.slot
+                    && default.kind == "arbitrary_data"
+                    && default.debug_summary.is_none()
+            });
+            !(default_was_unsendable
+                && parameter.debug_summary.as_deref().is_none_or(str::is_empty))
+        })
+        .cloned()
+        .collect()
+}
+
 struct HarnessApp {
     ui_kit: AexUiKit,
     repository: PathBuf,
@@ -1301,11 +1343,12 @@ impl HarnessApp {
             return;
         };
         self.status = "Dispatching an isolated custom UI cursor event...".into();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         match aexcompat_broker::image_render::probe_experimental_custom_ui_cursor(
             &self.repository,
             &selection.path,
             &selection.sha256,
-            &self.parameters,
+            &parameters,
         ) {
             Ok(report) => {
                 self.status = "Custom UI requested the eyedropper cursor.".into();
@@ -1323,11 +1366,12 @@ impl HarnessApp {
             return;
         };
         self.status = "Recording an isolated custom UI draw event...".into();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         match aexcompat_broker::image_render::probe_experimental_custom_ui_draw(
             &self.repository,
             &selection.path,
             &selection.sha256,
-            &self.parameters,
+            &parameters,
         ) {
             Ok(report) => {
                 self.status = "Custom UI draw commands were recorded safely.".into();
@@ -1347,11 +1391,12 @@ impl HarnessApp {
             return;
         };
         self.status = "Dispatching an isolated custom UI lifecycle...".into();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         match aexcompat_broker::image_render::probe_experimental_custom_ui_lifecycle(
             &self.repository,
             &selection.path,
             &selection.sha256,
-            &self.parameters,
+            &parameters,
         ) {
             Ok(report) => {
                 self.status = "Custom UI lifecycle completed safely.".into();
@@ -1369,11 +1414,12 @@ impl HarnessApp {
             return;
         };
         self.status = "Dispatching one custom UI idle event...".into();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         match aexcompat_broker::image_render::probe_experimental_custom_ui_idle(
             &self.repository,
             &selection.path,
             &selection.sha256,
-            &self.parameters,
+            &parameters,
         ) {
             Ok(report) => {
                 self.status = "Custom UI idle lifecycle completed safely.".into();
@@ -1391,6 +1437,7 @@ impl HarnessApp {
             return;
         };
         self.status = "Dispatching one custom UI key event...".into();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         match aexcompat_broker::image_render::probe_experimental_custom_ui_keydown(
             &self.repository,
             &selection.path,
@@ -1398,7 +1445,7 @@ impl HarnessApp {
             self.custom_ui_click_point,
             self.custom_ui_keycode,
             self.custom_ui_key_modifiers,
-            &self.parameters,
+            &parameters,
         ) {
             Ok(report) => {
                 self.status = "Custom UI key lifecycle completed safely.".into();
@@ -1416,11 +1463,12 @@ impl HarnessApp {
             return;
         };
         self.status = "Dispatching a Layer/Comp custom UI mouse-exited event...".into();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         match aexcompat_broker::image_render::probe_experimental_custom_ui_mouse_exited(
             &self.repository,
             &selection.path,
             &selection.sha256,
-            &self.parameters,
+            &parameters,
         ) {
             Ok(report) => {
                 self.status = "Custom UI mouse-exited lifecycle completed safely.".into();
@@ -1438,13 +1486,14 @@ impl HarnessApp {
             return;
         };
         self.status = "Dispatching an isolated custom UI click event...".into();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         match aexcompat_broker::image_render::probe_experimental_custom_ui_click(
             &self.repository,
             &selection.path,
             &selection.sha256,
             self.custom_ui_click_point,
             self.custom_ui_click_color,
-            &self.parameters,
+            &parameters,
         ) {
             Ok(report) => {
                 self.status = "Custom UI click changed the effect value safely.".into();
@@ -1464,6 +1513,7 @@ impl HarnessApp {
             return;
         };
         self.status = "Dispatching a bounded custom UI drag sequence...".into();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         match aexcompat_broker::image_render::probe_experimental_custom_ui_drag(
             &self.repository,
             &selection.path,
@@ -1471,7 +1521,7 @@ impl HarnessApp {
             self.custom_ui_click_point,
             self.custom_ui_drag_end,
             self.custom_ui_drag_steps,
-            &self.parameters,
+            &parameters,
         ) {
             Ok(report) => {
                 self.status = "Custom UI drag sequence completed safely.".into();
@@ -1522,7 +1572,7 @@ impl HarnessApp {
         let repository = self.repository.clone();
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
-        let parameters = self.parameters.clone();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         let host_context = self.host_context.clone();
         let smart = interactive_selection.path.is_smart();
         let pixel_format = self.pixel_format;
@@ -1703,7 +1753,7 @@ impl HarnessApp {
         let repository = self.repository.clone();
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
-        let parameters = self.parameters.clone();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         self.status = "Rendering audio in an isolated worker...".into();
         self.spawn_native("render_audio", move || {
             let report = aexcompat_broker::image_render::render_experimental_audio(
@@ -1744,7 +1794,7 @@ impl HarnessApp {
         let repository = self.repository.clone();
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
-        let parameters = self.parameters.clone();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         let host_context = self.host_context.clone();
         let timing = match render_timing(
             self.frame,
@@ -1792,7 +1842,7 @@ impl HarnessApp {
         let repository = self.repository.clone();
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
-        let parameters = self.parameters.clone();
+        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
         self.status = format!("Dispatching PF_Cmd_USER_CHANGED_PARAM for slot {slot}...");
         self.spawn_native("user_changed_parameter", move || {
             let report = aexcompat_broker::image_render::trigger_experimental_button(
@@ -2349,7 +2399,7 @@ impl HarnessApp {
                 })();
                 match accepted {
                     Ok((capability, parameters, audio_effect_only, inspection_state)) => {
-                        self.parameters = parameters;
+                        self.parameters = normalize_inspected_ui_parameters(&parameters);
                         self.parameter_defaults = self.parameters.clone();
                         self.parameter_inspection_state = inspection_state;
                         self.audio_effect_only = audio_effect_only;

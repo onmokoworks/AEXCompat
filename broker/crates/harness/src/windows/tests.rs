@@ -3,6 +3,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inspected_defaults_are_normalized_before_ui_or_cli_rendering() {
+        let parameter = aexcompat_broker::image_render::InteractiveParameter {
+            slot: 5,
+            name: "Brightness Gain".to_owned(),
+            kind: "float".to_owned(),
+            minimum: 1.0,
+            maximum: 100.0,
+            value: 0.1,
+            choices: Vec::new(),
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0; 2],
+        };
+        let arbitrary = aexcompat_broker::image_render::InteractiveParameter {
+            slot: 14,
+            name: "Ramp".to_owned(),
+            kind: "arbitrary_data".to_owned(),
+            debug_summary: None,
+            ..parameter.clone()
+        };
+        let normalized = normalize_inspected_ui_parameters(&[parameter.clone(), arbitrary]);
+        assert_eq!(normalized[0].value, 1.0);
+        assert_eq!(normalized.len(), 2, "UI keeps every discovered descriptor");
+        assert_eq!(normalized[1].kind, "arbitrary_data");
+        let defaults = normalized.clone();
+        let sendable = parameters_for_native_action(&normalized, &defaults);
+        assert_eq!(
+            sendable.len(),
+            1,
+            "render omits only the unsendable default"
+        );
+        assert!(
+            aexcompat_broker::image_render::encode_interactive_payload(&sendable).is_ok(),
+            "normalized discovery defaults must be renderable"
+        );
+        assert!(
+            aexcompat_broker::image_render::encode_interactive_payload(&[parameter]).is_err(),
+            "an explicit out-of-range edit remains fail-closed"
+        );
+        let mut displayed = normalized.clone();
+        displayed[1].debug_summary = Some(String::new());
+        assert_eq!(
+            parameters_for_native_action(&displayed, &defaults).len(),
+            1,
+            "opening an empty arbitrary editor does not make it sendable"
+        );
+        displayed[1].debug_summary = Some("edited ramp".to_owned());
+        assert_eq!(
+            parameters_for_native_action(&displayed, &defaults).len(),
+            2,
+            "an explicit printable arbitrary edit is retained"
+        );
+    }
+
+    #[test]
     fn parameter_signature_ignores_values_but_pins_structure() {
         let parameter = |slot: u32, kind: &str, value: f64| {
             serde_json::from_value::<aexcompat_broker::image_render::InteractiveParameter>(

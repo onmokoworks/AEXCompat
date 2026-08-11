@@ -1526,11 +1526,9 @@ where
                 false,
             )
         }
-        InspectOutcome::InspectError { error_kind, report } => {
-            Err(invalid(format!(
-                "discovery inspection failed ({error_kind}): report={report:?}, close={close}"
-            )))
-        }
+        InspectOutcome::InspectError { error_kind, report } => Err(invalid(format!(
+            "discovery inspection failed ({error_kind}): report={report:?}, close={close}"
+        ))),
         InspectOutcome::CleanupCrashCheckpoint { authorization } => {
             let (parameters, mut diagnostics) = cleanup_retry(authorization, repository)?;
             diagnostics["inspection_transport"] = json!("discovery_cleanup_contained");
