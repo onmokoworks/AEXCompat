@@ -98,6 +98,7 @@ struct GuestState {
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
     trace_watches: Vec<TraceWatchSpec>,
+    trace_checkpoint_only: bool,
     pending_iterate: Option<PendingIterate>,
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     vcomp_requested_threads: Option<u32>,
@@ -330,6 +331,7 @@ struct TraceCapture {
     watch_occurrence_counts: HashMap<String, u64>,
     watch_stack: Vec<Vec<PendingTraceWatch>>,
     selector_watches: Vec<PendingTraceWatch>,
+    checkpoint_returns: HashMap<u64, Vec<PendingTraceWatch>>,
     witnesses: Vec<TraceMemoryWitness>,
     dropped_witnesses: u64,
     basic_blocks: HashMap<(u64, u32), u64>,
@@ -342,6 +344,7 @@ struct TraceCapture {
     known_function_entries: HashSet<u64>,
     truncated: bool,
     dropped_events: u64,
+    checkpoint_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -392,6 +395,7 @@ pub struct TraceModule {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceConfiguration {
+    pub capture_mode: &'static str,
     pub max_events: usize,
     pub max_basic_blocks: usize,
     pub max_branch_edges: usize,

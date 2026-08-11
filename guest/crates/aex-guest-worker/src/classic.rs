@@ -1133,6 +1133,8 @@ impl ClassicHost {
         watches: Vec<TraceWatchSpec>,
         output_pixel: Option<[u32; 2]>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        self.engine
+            .configure_trace_checkpoint_only(!watches.is_empty());
         self.engine.configure_trace_watches(watches);
         self.trace_output_pixel = output_pixel;
         self.render_pixels_trace(width, height, format, input_pixels, parameter_values)

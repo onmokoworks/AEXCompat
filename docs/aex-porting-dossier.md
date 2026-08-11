@@ -30,6 +30,13 @@ aex-guest-worker render-trace-png \
 `SEQUENCE_SETDOWN`ごとの記録が`execution_traces`へ入ります。生成画像は
 `output.png`、通常のrender reportとtraceは標準出力のJSONへ入ります。
 
+`--watch`を1件以上指定したrenderは、全basic-block/branch censusを行わない
+低オーバーヘッドの`checkpoint` captureになります。指定したdirect call-siteと
+そのcall-return直後だけをhookし、通常のSmart Render経路を維持したまま
+entry/return snapshotを取得します。JSONの
+`trace_configuration.capture_mode`は`checkpoint`になり、`basic_blocks`と
+`branch_edges`は空です。watchなしの従来traceは`full_trace`です。
+
 ## 特定の値を追う
 
 関数の入口とreturnで、引数ポインター先の変化を保存できます。
@@ -53,6 +60,10 @@ aex-guest-worker render-trace-png \
 - `function`は監視対象関数の入口RVAです。trace対象selector自身も指定できます。
 - `rva`はcallまたはtail-callを行うinstructionのRVAです。
 - `function`と`rva`はどちらか一方だけを指定します。
+- `occurrence=<n>`はn回目だけを取得するため、実質的なhit上限として使えます。
+- `size`は1..4096 bytesに制限されます。`deref=<offset>`を指定すると、register
+  またはstack引数の`+offset`に格納されたpointer先を取得します。
+- checkpointも通常のguest selector timeout内でfail-closeします。
 - `arg`と`register`は同義です。`rcx`、`rdx`、`r8`、`r9`、`rax`、
   `stack5`～`stack8`（または`5`～`8`）を指定できます。
 - `size`は1～4096 byteです。

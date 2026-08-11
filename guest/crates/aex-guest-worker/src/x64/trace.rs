@@ -233,6 +233,85 @@ fn select_call_watches(
         .collect()
 }
 
+fn checkpoint_instruction(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+    image_base: u64,
+    image_end: u64,
+) {
+    let pc_rva = address.saturating_sub(image_base);
+    let pending = unicorn
+        .get_data_mut()
+        .trace
+        .as_mut()
+        .and_then(|capture| capture.checkpoint_returns.remove(&pc_rva))
+        .unwrap_or_default();
+    if !pending.is_empty() {
+        let completed = complete_trace_watches(unicorn, pending, image_base, image_end);
+        if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+            append_trace_witnesses(capture, completed);
+        }
+    }
+
+    let mut bytes = [0u8; 15];
+    if unicorn.mem_read(address, &mut bytes).is_err() {
+        return;
+    }
+    let instruction = Decoder::with_ip(64, &bytes, address, DecoderOptions::NONE).decode();
+    if instruction.mnemonic() != Mnemonic::Call {
+        return;
+    }
+    let target = instruction.near_branch_target();
+    if !(image_base..image_end).contains(&target) {
+        return;
+    }
+    let target_rva = target - image_base;
+    let watches = unicorn
+        .get_data_mut()
+        .trace
+        .as_mut()
+        .map(|capture| select_call_watches(capture, Some(target_rva), Some(pc_rva)))
+        .unwrap_or_default();
+    if watches.is_empty() {
+        return;
+    }
+    let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
+    let pending = watches
+        .into_iter()
+        .map(|spec| {
+            let watch_address = trace_watch_address(
+                unicorn,
+                spec.register,
+                0x20,
+                spec.dereference_offset,
+            );
+            PendingTraceWatch {
+                spec_id: spec.id,
+                register: spec.register,
+                call_id: None,
+                function_rva: Some(target_rva),
+                pc_rva: Some(pc_rva),
+                address: watch_address,
+                before: trace_memory_snapshot(
+                    unicorn,
+                    watch_address,
+                    spec.size,
+                    image_base,
+                    image_end,
+                ),
+                image_coordinate: spec.image_coordinate,
+                image_row_offset: spec.image_row_offset,
+                image_format: spec.image_format,
+            }
+        })
+        .collect::<Vec<_>>();
+    let return_rva = instruction.next_ip().saturating_sub(image_base);
+    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+        capture.checkpoint_returns.entry(return_rva).or_default().extend(pending);
+    }
+    let _ = rsp;
+}
+
 fn trace_instruction(
     unicorn: &mut Unicorn<'_, GuestState>,
     address: u64,
