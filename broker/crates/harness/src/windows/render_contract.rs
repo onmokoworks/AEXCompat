@@ -39,16 +39,24 @@ fn report_ui_output_failure(body: &str, error: &str) -> String {
 }
 
 fn native_failure_status(operation: Option<&str>, body: &str) -> &'static str {
-    if operation == Some("render_image")
-        && serde_json::from_str::<serde_json::Value>(body)
-            .ok()
-            .and_then(|report| report.get("error")?.as_str().map(str::to_owned))
+    if operation == Some("render_image") {
+        let report = serde_json::from_str::<serde_json::Value>(body).ok();
+        if report
+            .as_ref()
+            .is_some_and(|report| report.pointer("/ui_output/error").is_some())
+        {
+            return "AEX output could not be loaded.";
+        }
+        if report
+            .as_ref()
+            .and_then(|report| report.get("error"))
+            .and_then(serde_json::Value::as_str)
             .is_some_and(|error| error.contains("local worker binary is missing or unreadable"))
-    {
-        "Required render worker is missing or unreadable."
-    } else {
-        "Failed safely"
+        {
+            return "Required render worker is missing or unreadable.";
+        }
     }
+    "Failed safely"
 }
 
 fn visible_report_summary(body: &str) -> Option<String> {

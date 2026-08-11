@@ -61,6 +61,10 @@ mod tests {
         assert_eq!(value["worker_diagnostics"]["stage"], "render");
         assert_eq!(value["ui_output"]["displayable"], false);
         assert_eq!(
+            native_failure_status(Some("render_image"), &report),
+            "AEX output could not be loaded."
+        );
+        assert_eq!(
             visible_report_summary(&report).as_deref(),
             Some("native render output is not displayable")
         );

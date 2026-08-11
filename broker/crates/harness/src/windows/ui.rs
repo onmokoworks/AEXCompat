@@ -138,6 +138,7 @@ impl AexUiKit {
             "Completed" => "完了しました",
             "Failed safely" => "安全に停止しました",
             "AEX output ready." => "AEX出力を表示しました。",
+            "AEX output could not be loaded." => "AEX出力を読み込めませんでした。",
             "Required render worker is missing or unreadable." => {
                 "必要なレンダーワーカーが見つからないか、読み込めません。"
             }
