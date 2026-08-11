@@ -181,12 +181,20 @@ mod tests {
     #[test]
     fn render_action_requires_current_successful_inspection() {
         assert!(render_action_enabled(false, true, true, true, false, true));
-        assert!(!render_action_enabled(false, true, true, true, false, false));
-        assert!(!render_action_enabled(false, true, true, false, false, true));
+        assert!(!render_action_enabled(
+            false, true, true, true, false, false
+        ));
+        assert!(!render_action_enabled(
+            false, true, true, false, false, true
+        ));
         assert!(!render_action_enabled(false, true, true, true, true, true));
         assert!(!render_action_enabled(true, true, true, true, false, true));
-        assert!(!render_action_enabled(false, false, true, true, false, true));
-        assert!(!render_action_enabled(false, true, false, true, false, true));
+        assert!(!render_action_enabled(
+            false, false, true, true, false, true
+        ));
+        assert!(!render_action_enabled(
+            false, true, false, true, false, true
+        ));
     }
 
     #[test]

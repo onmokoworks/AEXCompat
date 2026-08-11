@@ -104,12 +104,7 @@ fn render_action_enabled(
     selection_stale: bool,
     has_capability: bool,
 ) -> bool {
-    !busy
-        && has_selection
-        && has_input
-        && session_approved
-        && !selection_stale
-        && has_capability
+    !busy && has_selection && has_input && session_approved && !selection_stale && has_capability
 }
 
 #[derive(Debug, Default, PartialEq)]
