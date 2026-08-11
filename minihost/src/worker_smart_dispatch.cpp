@@ -454,6 +454,14 @@ class VideoFrameCpuWorlds {
     std::memcpy(&ppix, world.data() + 64, sizeof(ppix));
     return ppix;
   }
+  // The frame's real dimensions as stored in its VF GPU world. create_gpu only
+  // returns a live world whose width/height fields (offsets 36/40) equal the
+  // requested size, so these are authoritative - unlike the FrameRecord scalar
+  // members, which the world build corrupts (issue #1058).
+  void pr_world_dims(const World& world, int32_t& width, int32_t& height) const {
+    width = world_i32(world, 36);
+    height = world_i32(world, 40);
+  }
   // Raw CUDA device pointer backing a GPU frame, via the same VF frame mapping
   // the plug-in itself reads (borrowed, not released - mirrors gpu_memcpy_frame).
   void* pr_gpu_device_ptr(World& world) {
@@ -926,6 +934,17 @@ struct FrameRecord {
   int32_t width{};
   int32_t height{};
   abi::PrPixelFormat format{abi::kPrPixelFormat_GPU_BGRA_4444_32f};
+  // True for a frame the plug-in allocated through CreateGPUPPix. A Premiere GPU
+  // filter renders into a frame it creates itself and hands back through
+  // outFrame; it does not touch a host-provided destination. That returned frame
+  // is what the host must read (issue #1058).
+  bool plugin_created{};
+  // Set when the plug-in released the frame through PPixSuite::Dispose. The
+  // actual free is deferred to the HostContext destructor (the released frame
+  // may still be the render output the host has not read yet), but recording the
+  // release keeps handle ownership fail-closed: a second Dispose of the same
+  // handle, or a Dispose of a handle this host never issued, is rejected.
+  bool dispose_requested{};
 };
 
 struct HostContext {
@@ -939,6 +958,13 @@ struct HostContext {
   std::vector<char*> scratch;
 
   ~HostContext() {
+    // Every GPU frame the render allocated - host input/output and each frame
+    // the plug-in created through CreateGPUPPix - is freed exactly once here,
+    // since PPixSuite::Dispose only defers. A plug-in that allocates frames in a
+    // loop therefore holds them all until the render ends rather than freeing a
+    // disposed frame immediately; peak device memory is bounded by the worker's
+    // kill-on-close Job Object memory limit, which contains a runaway allocator
+    // (issue #1058 follow-up if a legitimate effect ever needs a per-render cap).
     for (auto& record : gpu_frames)
       if (record && record->live) frames->pr_dispose(record->world, record->live);
     for (char* pointer : scratch) std::free(pointer);
@@ -982,6 +1008,14 @@ abi::prSuiteError GPUDev_CreateGPUPPix(abi::csSDK_uint32, abi::PrPixelFormat fmt
   record->format = fmt;
   if (!g_ctx->frames->pr_make_gpu_ppix(record->world, record->live, w, h))
     return -1;
+  // Note: building the VF GPU world leaves record->height at h+1 (the world
+  // build writes an allocated-height value onto this adjacent member; the
+  // mechanism is an InitEffectWorldGPU ABI quirk tracked separately). The
+  // authoritative requested size lives in the world at offsets 36/40, which
+  // pr_world_dims reads; the output readback uses those, not this member. The
+  // suite queries below (GetGPUPPixSize / PPix_GetBounds) still report the
+  // member, which the in-corpus plug-ins render correctly against.
+  record->plugin_created = true;
   *out = reinterpret_cast<abi::PPixHand>(g_ctx->frames->pr_ppix(record->world));
   g_ctx->gpu_frames.push_back(std::move(record));
   return abi::kSuiteError_NoError;
@@ -1006,8 +1040,16 @@ abi::prSuiteError GPUDev_GetGPUPPixSize(abi::PPixHand ppix, size_t* out) {
 
 // ---- PPix Suite / PPix2 Suite ---------------------------------------------
 abi::prSuiteError PPix_Dispose(abi::PPixHand ppix) {
+  // A Premiere GPU filter calls Dispose on the frame it returns through outFrame
+  // as a reference release, expecting the host to still hold its own reference.
+  // This host does not reference-count frames, so freeing here would destroy the
+  // rendered output before it is read back; the free is deferred to the
+  // HostContext destructor (issue #1058). Ownership stays fail-closed though: a
+  // Dispose of a handle this host never issued, or a second Dispose of the same
+  // handle, is rejected rather than silently accepted.
   FrameRecord* record = find_frame(ppix);
-  if (record) g_ctx->frames->pr_dispose(record->world, record->live);
+  if (!record || record->dispose_requested) return -1;
+  record->dispose_requested = true;
   return abi::kSuiteError_NoError;
 }
 abi::prSuiteError PPix_GetBounds(abi::PPixHand ppix, abi::prRect* out) {
@@ -1472,9 +1514,10 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   render_params.inRenderPARDen = 1;
   render_params.inRenderField = 2;  // both fields
 
-  // Pre-create the output frame and hand it in via outFrame: a separable blur
-  // renders input -> its own scratch (CreateGPUPPix) -> this output, so the host
-  // supplies the destination rather than the plug-in returning a fresh handle.
+  // Hand the plug-in a valid outFrame destination (some effects check it before
+  // rendering), but recover the rendered pixels from the CreateGPUPPix frame the
+  // plug-in actually renders into - the VR filters ignore this destination and
+  // return their own frame.
   auto output_record = std::make_unique<FrameRecord>();
   output_record->width = width;
   output_record->height = height;
@@ -1506,13 +1549,55 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
     return false;
   }
 
-  const bool render_ok = abi::suite_ok(render_error) && out_frame;
-  FrameRecord* out_record = render_ok ? find_frame(out_frame) : nullptr;
+  // Locate the rendered frame. If the plug-in pointed outFrame at a frame it
+  // created, that is the output it is handing back; otherwise fall back to the
+  // most recent frame it created via CreateGPUPPix (the VR filters render there
+  // without ever writing outFrame). Deferred disposal keeps every frame live
+  // until after this readback.
+  //
+  // Limitation (issue #1058 follow-up): this "most recent plug-in frame" pick is
+  // a heuristic, not a reliable output signal. A plug-in that keeps several
+  // CreateGPUPPix frames alive (a ping-pong / multi-pass design), or that renders
+  // its final result into the host outFrame while leaving an undisposed scratch
+  // frame behind, can leave the real output in a frame this loop does not choose.
+  // The dimension cross-check below only rejects a *size* mismatch; a wrong frame
+  // of the same size is read as if it were the output. Every effect in the
+  // current corpus produces a single output frame, so the heuristic holds for
+  // them; widening the corpus needs a real output-frame signal.
+  FrameRecord* out_record = nullptr;
+  if (abi::suite_ok(render_error)) {
+    if (out_frame) {
+      FrameRecord* named = find_frame(out_frame);
+      if (named && named->plugin_created) out_record = named;
+    }
+    if (!out_record)
+      for (auto it = context.gpu_frames.rbegin(); it != context.gpu_frames.rend();
+           ++it)
+        if ((*it)->plugin_created) {
+          out_record = it->get();
+          break;
+        }
+  }
 
   if (filter.DisposeInstance) filter.DisposeInstance(&instance);
   shutdown();
 
-  if (!render_ok || !out_record) return false;
+  // Fail closed when the plug-in's frame is smaller than the render: the
+  // readback below copies plan-height rows of plan-width, so a frame narrower or
+  // shorter than the render would over-read its device allocation. Read the
+  // frame's size from its VF world (offsets 36/40), not the FrameRecord scalar
+  // members: building the world leaves FrameRecord::height at height+1 (see
+  // GPUDev_CreateGPUPPix), so a check against it would spuriously reject a
+  // correctly sized frame and drop the whole GPU route to the 512 CPU path
+  // (issue #1058). The world width/height are what create_gpu validated the
+  // requested allocation against. Width must match exactly, since the readback
+  // stride is plan-width; a taller frame is safe to read the requested rows from
+  // and is accepted (a Premiere GPU filter may allocate its output a row larger).
+  int32_t out_frame_w = 0, out_frame_h = 0;
+  if (out_record)
+    frames.pr_world_dims(out_record->world, out_frame_w, out_frame_h);
+  if (!out_record || out_frame_w != width || out_frame_h < height)
+    return false;
 
   const int32_t rowbytes = width * 16;
   if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * height))
