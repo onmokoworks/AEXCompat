@@ -4,6 +4,8 @@
 runs one classic or SmartFX render and atomically publishes the final raw/EXR artifact plus
 the requested native-world checkpoints. The AEX path and its observed hash stay outside the
 fixture. All image paths in the fixture are traversal-free paths relative to `fixture.json`.
+The same command and document contract are supported by the Windows harness and by the
+Apple Silicon macOS harness; macOS executes the x86-64 AEX through the resident guest worker.
 
 The v1 document is strict: unknown top-level, timing, or checkpoint fields are rejected.
 `parameters` uses the complete parameter records returned by `--inspect-experimental`; a
