@@ -960,6 +960,204 @@ int32_t transfer_rect_denied(const char* reason, int64_t value) {
   return kPfErrBadCallbackParam;
 }
 
+// PF transfer-mode blend, factored out of transfer_rect_registered so
+// transform_world composites through the exact same math (issue #1178). These
+// were transfer_rect's local lambdas; lifting them changes nothing there (the
+// all-mode golden in verify_world_transform_composite_rect pins byte identity).
+std::array<double, 3> blend_clip_color(std::array<double, 3> color) {
+  const double luminance = 0.30 * color[0] + 0.59 * color[1] + 0.11 * color[2];
+  const double minimum = (std::min)({color[0], color[1], color[2]});
+  const double maximum_value = (std::max)({color[0], color[1], color[2]});
+  if (minimum < 0.0) for (double& component : color)
+    component = luminance + (component - luminance) * luminance / (luminance - minimum);
+  if (maximum_value > 1.0) for (double& component : color)
+    component = luminance + (component - luminance) * (1.0 - luminance) /
+        (maximum_value - luminance);
+  return color;
+}
+std::array<double, 3> blend_set_luminance(std::array<double, 3> color, double luminance) {
+  const double delta = luminance - (0.30 * color[0] + 0.59 * color[1] + 0.11 * color[2]);
+  for (double& component : color) component += delta;
+  return blend_clip_color(color);
+}
+double blend_saturation(const std::array<double, 3>& color) {
+  return (std::max)({color[0], color[1], color[2]}) -
+      (std::min)({color[0], color[1], color[2]});
+}
+std::array<double, 3> blend_set_saturation(std::array<double, 3> color, double target) {
+  int minimum_index = 0, maximum_index = 0;
+  for (int index = 1; index < 3; ++index) {
+    if (color[index] < color[minimum_index]) minimum_index = index;
+    if (color[index] > color[maximum_index]) maximum_index = index;
+  }
+  const int middle_index = 3 - minimum_index - maximum_index;
+  if (color[maximum_index] > color[minimum_index]) {
+    color[middle_index] = (color[middle_index] - color[minimum_index]) * target /
+        (color[maximum_index] - color[minimum_index]);
+    color[maximum_index] = target;
+  } else {
+    color[middle_index] = color[maximum_index] = 0.0;
+  }
+  color[minimum_index] = 0.0;
+  return color;
+}
+double blend_component_value(int32_t mode, double source, double destination) {
+  switch (mode) {
+    case 4: case 29: return source + destination;
+    case 5: return source * destination;
+    case 6: return source + destination - source * destination;
+    case 7: return destination <= 0.5 ? 2.0 * source * destination :
+        1.0 - 2.0 * (1.0 - source) * (1.0 - destination);
+    case 8: return source <= 0.5 ? destination - (1.0 - 2.0 * source) * destination *
+        (1.0 - destination) : destination + (2.0 * source - 1.0) *
+        ((destination <= 0.25 ? ((16.0 * destination - 12.0) * destination + 4.0) *
+        destination : std::sqrt((std::max)(destination, 0.0))) - destination);
+    case 9: return source <= 0.5 ? 2.0 * source * destination :
+        1.0 - 2.0 * (1.0 - source) * (1.0 - destination);
+    case 10: return (std::min)(source, destination);
+    case 11: return (std::max)(source, destination);
+    case 12: case 26: return std::abs(destination - source);
+    case 23: case 27: return source >= 1.0 ? 1.0 :
+        (std::min)(1.0, destination / (1.0 - source));
+    case 24: case 28: return source <= 0.0 ? 0.0 :
+        1.0 - (std::min)(1.0, (1.0 - destination) / source);
+    case 25: return source + destination - 2.0 * source * destination;
+    case 30: return source + destination - 1.0;
+    case 31: return source <= 0.5 ? destination + 2.0 * source - 1.0 :
+        destination + 2.0 * (source - 0.5);
+    case 32: return source <= 0.5 ? (source <= 0.0 ? 0.0 :
+        1.0 - (std::min)(1.0, (1.0 - destination) / (2.0 * source))) :
+        (source >= 1.0 ? 1.0 : (std::min)(1.0, destination / (2.0 * (1.0 - source))));
+    case 33: return source <= 0.5 ? (std::min)(destination, 2.0 * source) :
+        (std::max)(destination, 2.0 * source - 1.0);
+    case 34: {
+      const double vivid = source <= 0.5 ? (source <= 0.0 ? 0.0 :
+          1.0 - (std::min)(1.0, (1.0 - destination) / (2.0 * source))) :
+          (source >= 1.0 ? 1.0 :
+          (std::min)(1.0, destination / (2.0 * (1.0 - source))));
+      return vivid < 0.5 ? 0.0 : 1.0;
+    }
+    case 37: return destination - source;
+    case 38: return source <= 0.0 ? 1.0 : destination / source;
+    default: return source;
+  }
+}
+// Composites straight-colour `src` onto `dst` (raw channel values in
+// [0, maximum], index 0 = alpha) for one pixel under `transfer_mode`. Mutates
+// `dst`; channels a mode leaves untouched keep their value, so the caller may
+// store all four back unconditionally. Returns false only when a dissolve pixel
+// is dropped (dst then unchanged). `px`/`py` seed the dissolve hash.
+bool apply_transfer_blend(int32_t transfer_mode, uint32_t mode_flags, bool rgb_only,
+                          int32_t random_seed, int64_t px, int64_t py,
+                          double effective_opacity, double maximum,
+                          const std::array<double, 4>& src,
+                          std::array<double, 4>& dst) {
+  if (transfer_mode == 0) {
+    for (int channel = rgb_only ? 1 : 0; channel < 4; ++channel)
+      dst[channel] = src[channel] * effective_opacity +
+          dst[channel] * (1.0 - effective_opacity);
+    return true;
+  }
+  const double raw_source_alpha = src[0] / maximum;
+  if (transfer_mode >= 17 && transfer_mode <= 20) {
+    const double source_luminance = (0.30 * src[1] + 0.59 * src[2] + 0.11 * src[3]) / maximum;
+    const double factor = transfer_mode == 17 ? raw_source_alpha :
+        (transfer_mode == 18 ? source_luminance :
+         (transfer_mode == 19 ? 1.0 - raw_source_alpha : 1.0 - source_luminance));
+    dst[0] = dst[0] * (1.0 - effective_opacity + effective_opacity * factor);
+    return true;
+  }
+  if (transfer_mode == 22) {
+    if (!rgb_only) dst[0] = dst[0] + src[0] * effective_opacity;
+    return true;
+  }
+  if (transfer_mode == 3) {
+    uint32_t hash = static_cast<uint32_t>(random_seed) ^
+        (static_cast<uint32_t>(px) * 0x9e3779b9u) ^
+        (static_cast<uint32_t>(py) * 0x85ebca6bu);
+    hash ^= hash >> 16; hash *= 0x7feb352du; hash ^= hash >> 15;
+    if ((hash & 0x00ffffffu) >= static_cast<uint32_t>(
+            std::clamp(effective_opacity, 0.0, 1.0) * 16777216.0)) return false;
+  }
+  const double source_alpha = raw_source_alpha *
+      (transfer_mode == 3 ? 1.0 : effective_opacity);
+  const double destination_alpha = dst[0] / maximum;
+  const bool behind = transfer_mode == 1;
+  if (transfer_mode >= 4 && transfer_mode != 21) {
+    std::array<double, 3> source_color{}, destination_color{}, blended{};
+    for (int index = 0; index < 3; ++index) {
+      source_color[index] = src[index + 1] / maximum;
+      destination_color[index] = dst[index + 1] / maximum;
+    }
+    if (transfer_mode >= 13 && transfer_mode <= 16) {
+      if (transfer_mode == 13)
+        blended = blend_set_luminance(blend_set_saturation(source_color,
+            blend_saturation(destination_color)), 0.30 * destination_color[0] +
+            0.59 * destination_color[1] + 0.11 * destination_color[2]);
+      else if (transfer_mode == 14)
+        blended = blend_set_luminance(blend_set_saturation(destination_color,
+            blend_saturation(source_color)), 0.30 * destination_color[0] +
+            0.59 * destination_color[1] + 0.11 * destination_color[2]);
+      else if (transfer_mode == 15)
+        blended = blend_set_luminance(source_color, 0.30 * destination_color[0] +
+            0.59 * destination_color[1] + 0.11 * destination_color[2]);
+      else
+        blended = blend_set_luminance(destination_color, 0.30 * source_color[0] +
+            0.59 * source_color[1] + 0.11 * source_color[2]);
+    } else if (transfer_mode == 35 || transfer_mode == 36) {
+      const double source_luminance = 0.30 * source_color[0] +
+          0.59 * source_color[1] + 0.11 * source_color[2];
+      const double destination_luminance = 0.30 * destination_color[0] +
+          0.59 * destination_color[1] + 0.11 * destination_color[2];
+      blended = (transfer_mode == 35 ? source_luminance > destination_luminance :
+          source_luminance < destination_luminance) ? source_color : destination_color;
+    } else {
+      for (int index = 0; index < 3; ++index)
+        blended[index] = blend_component_value(transfer_mode, source_color[index],
+                                               destination_color[index]);
+    }
+    if (rgb_only) {
+      for (int index = 0; index < 3; ++index)
+        dst[index + 1] = (destination_color[index] *
+            (1.0 - effective_opacity) + blended[index] * effective_opacity) * maximum;
+      return true;
+    }
+    for (int index = 0; index < 3; ++index) {
+      const double result = (1.0 - source_alpha) * destination_color[index] +
+          source_alpha * ((1.0 - destination_alpha) * source_color[index] +
+                          destination_alpha * blended[index]);
+      dst[index + 1] = result * maximum;
+    }
+    dst[0] = (source_alpha + destination_alpha * (1.0 - source_alpha)) * maximum;
+    return true;
+  }
+  const double output_alpha = behind
+      ? destination_alpha + source_alpha * (1.0 - destination_alpha)
+      : source_alpha + destination_alpha * (1.0 - source_alpha);
+  for (int channel = 1; channel < 4; ++channel) {
+    double value = 0.0;
+    if (transfer_mode == 21) {
+      value = dst[channel] + src[channel] * effective_opacity;
+    } else if (mode_flags == 1) {
+      if (output_alpha > 0.0) {
+        value = behind
+            ? (dst[channel] * destination_alpha + src[channel] * source_alpha *
+                (1.0 - destination_alpha)) / output_alpha
+            : (src[channel] * source_alpha + dst[channel] * destination_alpha *
+                (1.0 - source_alpha)) / output_alpha;
+      }
+    } else {
+      value = behind
+          ? dst[channel] + src[channel] * effective_opacity *
+              (1.0 - destination_alpha)
+          : src[channel] * effective_opacity + dst[channel] * (1.0 - source_alpha);
+    }
+    dst[channel] = value;
+  }
+  if (!rgb_only) dst[0] = output_alpha * maximum;
+  return true;
+}
+
 }  // namespace
 
 int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode_flags,
@@ -977,13 +1175,21 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
   if (mode_flags > 1) return transform_world_denied("mode_flags_range", mode_flags);
   if (field < 0 || field > 2) return transform_world_denied("field_range", field);
   int32_t transfer_mode{};
+  int32_t random_seed{};
   uint8_t opacity{}, rgb_only{};
   uint16_t opacity16{};
   std::memcpy(&transfer_mode, composite_mode, sizeof(transfer_mode));
+  std::memcpy(&random_seed, static_cast<const std::byte*>(composite_mode) + 4,
+              sizeof(random_seed));
   std::memcpy(&opacity, static_cast<const std::byte*>(composite_mode) + 8, sizeof(opacity));
   std::memcpy(&rgb_only, static_cast<const std::byte*>(composite_mode) + 9, sizeof(rgb_only));
   std::memcpy(&opacity16, static_cast<const std::byte*>(composite_mode) + 10, sizeof(opacity16));
-  if (transfer_mode != 0) return transform_world_denied("transfer_mode", transfer_mode);
+  // The warped source is composited through the full PF transfer-mode set, the
+  // same blend transfer_rect serves (issue #1178). Numbers passes mode 2 and
+  // Tile passes mode 22; refusing every non-zero mode failed the whole frame
+  // with 516.
+  if (transfer_mode < 0 || transfer_mode > 38)
+    return transform_world_denied("transfer_mode_range", transfer_mode);
   if (rgb_only > 1) return transform_world_denied("rgb_only_range");
   std::array<double, 9> matrix{};
   std::memcpy(matrix.data(), matrices, sizeof(matrix));
@@ -1173,13 +1379,27 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
       }
       auto* output = destination + static_cast<std::size_t>(y) * destination_info.rowbytes +
           static_cast<std::size_t>(x) * pixel_bytes;
-      for (int channel = rgb_only ? 1 : 0; channel < 4; ++channel) {
-        const double old = pixel_bytes == 4 ? output[channel] :
+      const auto read_output = [&](int channel) -> double {
+        return pixel_bytes == 4 ? output[channel] :
             (pixel_bytes == 8 ? reinterpret_cast<uint16_t*>(output)[channel] :
                                 reinterpret_cast<float*>(output)[channel]);
-        const double effective_opacity = opacity_fraction * coverage;
-        write(output, channel, sampled[channel] * effective_opacity +
-                               old * (1.0 - effective_opacity));
+      };
+      std::array<double, 4> src_channels{sampled[0], sampled[1], sampled[2], sampled[3]};
+      std::array<double, 4> dst_channels{read_output(0), read_output(1),
+                                         read_output(2), read_output(3)};
+      const double effective_opacity = opacity_fraction * coverage;
+      // Same blend as transfer_rect, fed the sample in the world's native
+      // premultiply state exactly as transfer_rect feeds its `input`, so the
+      // composite handles mode_flags identically. The mode_flags==1 bilinear
+      // premultiply above is a sampling-quality step that is divided back out,
+      // so it does not double-apply; it does not make the sample straight for
+      // mode_flags==0. Unchanged channels keep their dst value, so storing all
+      // four back matches the mode's selective writes.
+      if (apply_transfer_blend(transfer_mode, mode_flags, rgb_only != 0, random_seed,
+                               static_cast<int64_t>(x), static_cast<int64_t>(y),
+                               effective_opacity, maximum, src_channels, dst_channels)) {
+        for (int channel = 0; channel < 4; ++channel)
+          write(output, channel, dst_channels[channel]);
       }
     }
   }
@@ -1453,84 +1673,6 @@ int32_t transfer_rect_registered(int32_t quality, uint32_t mode_flags, int32_t f
     else return static_cast<Channel>(std::clamp(std::lround(value), 0l,
         std::is_same_v<Channel, uint8_t> ? 255l : 32768l));
   };
-  const auto clip_color = [](std::array<double, 3> color) {
-    const double luminance = 0.30 * color[0] + 0.59 * color[1] + 0.11 * color[2];
-    const double minimum = (std::min)({color[0], color[1], color[2]});
-    const double maximum_value = (std::max)({color[0], color[1], color[2]});
-    if (minimum < 0.0) for (double& component : color)
-      component = luminance + (component - luminance) * luminance / (luminance - minimum);
-    if (maximum_value > 1.0) for (double& component : color)
-      component = luminance + (component - luminance) * (1.0 - luminance) /
-          (maximum_value - luminance);
-    return color;
-  };
-  const auto set_luminance = [&](std::array<double, 3> color, double luminance) {
-    const double delta = luminance - (0.30 * color[0] + 0.59 * color[1] + 0.11 * color[2]);
-    for (double& component : color) component += delta;
-    return clip_color(color);
-  };
-  const auto saturation = [](const std::array<double, 3>& color) {
-    return (std::max)({color[0], color[1], color[2]}) -
-        (std::min)({color[0], color[1], color[2]});
-  };
-  const auto set_saturation = [](std::array<double, 3> color, double target) {
-    int minimum_index = 0, maximum_index = 0;
-    for (int index = 1; index < 3; ++index) {
-      if (color[index] < color[minimum_index]) minimum_index = index;
-      if (color[index] > color[maximum_index]) maximum_index = index;
-    }
-    const int middle_index = 3 - minimum_index - maximum_index;
-    if (color[maximum_index] > color[minimum_index]) {
-      color[middle_index] = (color[middle_index] - color[minimum_index]) * target /
-          (color[maximum_index] - color[minimum_index]);
-      color[maximum_index] = target;
-    } else {
-      color[middle_index] = color[maximum_index] = 0.0;
-    }
-    color[minimum_index] = 0.0;
-    return color;
-  };
-  const auto blend_component = [](int32_t mode, double source, double destination) {
-    switch (mode) {
-      case 4: case 29: return source + destination;
-      case 5: return source * destination;
-      case 6: return source + destination - source * destination;
-      case 7: return destination <= 0.5 ? 2.0 * source * destination :
-          1.0 - 2.0 * (1.0 - source) * (1.0 - destination);
-      case 8: return source <= 0.5 ? destination - (1.0 - 2.0 * source) * destination *
-          (1.0 - destination) : destination + (2.0 * source - 1.0) *
-          ((destination <= 0.25 ? ((16.0 * destination - 12.0) * destination + 4.0) *
-          destination : std::sqrt((std::max)(destination, 0.0))) - destination);
-      case 9: return source <= 0.5 ? 2.0 * source * destination :
-          1.0 - 2.0 * (1.0 - source) * (1.0 - destination);
-      case 10: return (std::min)(source, destination);
-      case 11: return (std::max)(source, destination);
-      case 12: case 26: return std::abs(destination - source);
-      case 23: case 27: return source >= 1.0 ? 1.0 :
-          (std::min)(1.0, destination / (1.0 - source));
-      case 24: case 28: return source <= 0.0 ? 0.0 :
-          1.0 - (std::min)(1.0, (1.0 - destination) / source);
-      case 25: return source + destination - 2.0 * source * destination;
-      case 30: return source + destination - 1.0;
-      case 31: return source <= 0.5 ? destination + 2.0 * source - 1.0 :
-          destination + 2.0 * (source - 0.5);
-      case 32: return source <= 0.5 ? (source <= 0.0 ? 0.0 :
-          1.0 - (std::min)(1.0, (1.0 - destination) / (2.0 * source))) :
-          (source >= 1.0 ? 1.0 : (std::min)(1.0, destination / (2.0 * (1.0 - source))));
-      case 33: return source <= 0.5 ? (std::min)(destination, 2.0 * source) :
-          (std::max)(destination, 2.0 * source - 1.0);
-      case 34: {
-        const double vivid = source <= 0.5 ? (source <= 0.0 ? 0.0 :
-            1.0 - (std::min)(1.0, (1.0 - destination) / (2.0 * source))) :
-            (source >= 1.0 ? 1.0 :
-            (std::min)(1.0, destination / (2.0 * (1.0 - source))));
-        return vivid < 0.5 ? 0.0 : 1.0;
-      }
-      case 37: return destination - source;
-      case 38: return source <= 0.0 ? 1.0 : destination / source;
-      default: return source;
-    }
-  };
   for (std::size_t row = 0; row < height; ++row) {
     const int64_t source_y = clipped_top + static_cast<int64_t>(row);
     const int64_t output_y = destination_y + source_y - bounds.top;
@@ -1544,114 +1686,21 @@ int32_t transfer_rect_registered(int32_t quality, uint32_t mode_flags, int32_t f
           static_cast<std::size_t>(output_x) * sizeof(Pixel));
       const double effective_opacity = opacity *
           (mask_world ? mask_coverage[row * width + column] : 1.0);
-      if (transfer_mode == 0) {
-        for (int channel = rgb_only ? 1 : 0; channel < 4; ++channel) {
-          (*output)[channel] = store(input[channel] * effective_opacity +
-                                     (*output)[channel] * (1.0 - effective_opacity));
-        }
-        continue;
+      std::array<double, 4> src_channels{
+          static_cast<double>(input[0]), static_cast<double>(input[1]),
+          static_cast<double>(input[2]), static_cast<double>(input[3])};
+      std::array<double, 4> dst_channels{
+          static_cast<double>((*output)[0]), static_cast<double>((*output)[1]),
+          static_cast<double>((*output)[2]), static_cast<double>((*output)[3])};
+      // The dissolve hash keys off the source pixel coordinate, so pass
+      // source_x/source_y as it did inline; unchanged channels keep their dst
+      // value, so storing all four back matches the mode's selective writes.
+      if (apply_transfer_blend(transfer_mode, mode_flags, rgb_only != 0, random_seed,
+                               source_x, source_y, effective_opacity, maximum,
+                               src_channels, dst_channels)) {
+        for (int channel = 0; channel < 4; ++channel)
+          (*output)[channel] = store(dst_channels[channel]);
       }
-      const double raw_source_alpha = input[0] / maximum;
-      if (transfer_mode >= 17 && transfer_mode <= 20) {
-        const double source_luminance = (0.30 * input[1] + 0.59 * input[2] +
-                                         0.11 * input[3]) / maximum;
-        const double factor = transfer_mode == 17 ? raw_source_alpha :
-            (transfer_mode == 18 ? source_luminance :
-             (transfer_mode == 19 ? 1.0 - raw_source_alpha : 1.0 - source_luminance));
-        (*output)[0] = store((*output)[0] *
-            (1.0 - effective_opacity + effective_opacity * factor));
-        continue;
-      }
-      if (transfer_mode == 22) {
-        if (!rgb_only) (*output)[0] = store((*output)[0] + input[0] * effective_opacity);
-        continue;
-      }
-      if (transfer_mode == 3) {
-        uint32_t hash = static_cast<uint32_t>(random_seed) ^
-            (static_cast<uint32_t>(source_x) * 0x9e3779b9u) ^
-            (static_cast<uint32_t>(source_y) * 0x85ebca6bu);
-        hash ^= hash >> 16; hash *= 0x7feb352du; hash ^= hash >> 15;
-        if ((hash & 0x00ffffffu) >= static_cast<uint32_t>(
-                std::clamp(effective_opacity, 0.0, 1.0) * 16777216.0)) continue;
-      }
-      const double source_alpha = raw_source_alpha *
-          (transfer_mode == 3 ? 1.0 : effective_opacity);
-      const double destination_alpha = (*output)[0] / maximum;
-      const bool behind = transfer_mode == 1;
-      if (transfer_mode >= 4 && transfer_mode != 21) {
-        std::array<double, 3> source_color{}, destination_color{}, blended{};
-        for (int index = 0; index < 3; ++index) {
-          source_color[index] = input[index + 1] / maximum;
-          destination_color[index] = (*output)[index + 1] / maximum;
-        }
-        if (transfer_mode >= 13 && transfer_mode <= 16) {
-          if (transfer_mode == 13)
-            blended = set_luminance(set_saturation(source_color,
-                saturation(destination_color)), 0.30 * destination_color[0] +
-                0.59 * destination_color[1] + 0.11 * destination_color[2]);
-          else if (transfer_mode == 14)
-            blended = set_luminance(set_saturation(destination_color,
-                saturation(source_color)), 0.30 * destination_color[0] +
-                0.59 * destination_color[1] + 0.11 * destination_color[2]);
-          else if (transfer_mode == 15)
-            blended = set_luminance(source_color, 0.30 * destination_color[0] +
-                0.59 * destination_color[1] + 0.11 * destination_color[2]);
-          else
-            blended = set_luminance(destination_color, 0.30 * source_color[0] +
-                0.59 * source_color[1] + 0.11 * source_color[2]);
-        } else if (transfer_mode == 35 || transfer_mode == 36) {
-          const double source_luminance = 0.30 * source_color[0] +
-              0.59 * source_color[1] + 0.11 * source_color[2];
-          const double destination_luminance = 0.30 * destination_color[0] +
-              0.59 * destination_color[1] + 0.11 * destination_color[2];
-          blended = (transfer_mode == 35 ? source_luminance > destination_luminance :
-              source_luminance < destination_luminance) ? source_color : destination_color;
-        } else {
-          for (int index = 0; index < 3; ++index)
-            blended[index] = blend_component(transfer_mode, source_color[index],
-                                             destination_color[index]);
-        }
-        if (rgb_only) {
-          for (int index = 0; index < 3; ++index)
-            (*output)[index + 1] = store((destination_color[index] *
-                (1.0 - effective_opacity) + blended[index] * effective_opacity) * maximum);
-          continue;
-        }
-        for (int index = 0; index < 3; ++index) {
-          const double result = (1.0 - source_alpha) * destination_color[index] +
-              source_alpha * ((1.0 - destination_alpha) * source_color[index] +
-                              destination_alpha * blended[index]);
-          (*output)[index + 1] = store(result * maximum);
-        }
-        if (!rgb_only) (*output)[0] = store((source_alpha + destination_alpha *
-                                             (1.0 - source_alpha)) * maximum);
-        continue;
-      }
-      const double output_alpha = behind
-          ? destination_alpha + source_alpha * (1.0 - destination_alpha)
-          : source_alpha + destination_alpha * (1.0 - source_alpha);
-      for (int channel = 1; channel < 4; ++channel) {
-        double value = 0.0;
-        if (transfer_mode == 21) {
-          value = (*output)[channel] + input[channel] * effective_opacity;
-        } else if (mode_flags == 1) {
-          if (output_alpha > 0.0) {
-            value = behind
-                ? ((*output)[channel] * destination_alpha + input[channel] * source_alpha *
-                    (1.0 - destination_alpha)) / output_alpha
-                : (input[channel] * source_alpha + (*output)[channel] * destination_alpha *
-                    (1.0 - source_alpha)) / output_alpha;
-          }
-        } else {
-          value = behind
-              ? (*output)[channel] + input[channel] * effective_opacity *
-                  (1.0 - destination_alpha)
-              : input[channel] * effective_opacity +
-                  (*output)[channel] * (1.0 - source_alpha);
-        }
-        (*output)[channel] = store(value);
-      }
-      if (!rgb_only) (*output)[0] = store(output_alpha * maximum);
     }
   }
   return 0;
@@ -2177,6 +2226,98 @@ bool verify_world_transform_composite_rect() {
       !run_pixel_case(2, {112, 47, 24, 12})) {
     std::cerr << "composite diagnostic: pixel matrix\n";
     return false;
+  }
+  // Golden byte-identity anchor for every transfer mode transfer_rect serves
+  // (issue #1178): the per-pixel blend was extracted into apply_transfer_blend
+  // so transform_world can reuse it, and these 39 cases pin transfer_rect's
+  // output for one representative pixel/opacity so the extraction cannot drift
+  // that widely-used path. Values captured from the pre-extraction build.
+  {
+    int dummy_effect = 0;
+    auto run_transfer_case = [&](int32_t mode, uint32_t mode_flags, uint8_t rgb_only,
+                                 const std::array<uint8_t, 4>& expected) {
+      std::array<unsigned char, 4> src{128, 64, 32, 16};
+      std::array<unsigned char, 4> dst{64, 20, 10, 5};
+      std::array<std::byte, 64> sw{}, dw{};
+      make_world(sw, src.data(), 4, 1, 1);
+      make_world(dw, dst.data(), 4, 1, 1);
+      std::array<std::byte, 12> cm{};
+      const uint8_t op8 = 128;
+      const uint16_t op16 = 32768;
+      std::memcpy(cm.data(), &mode, sizeof(mode));
+      std::memcpy(cm.data() + 8, &op8, sizeof(op8));
+      std::memcpy(cm.data() + 9, &rgb_only, sizeof(rgb_only));
+      std::memcpy(cm.data() + 10, &op16, sizeof(op16));
+      LegacyRect r{0, 0, 1, 1};
+      return transfer_rect(&dummy_effect, 0, mode_flags, 0, &r, &sw, cm.data(),
+                           nullptr, 0, 0, &dw) == 0 &&
+             dst == std::array<unsigned char, 4>{expected[0], expected[1],
+                                                 expected[2], expected[3]};
+    };
+    // Three variants pin the extraction across the sub-paths a single flag set
+    // would miss (the review of #1178 flagged the coverage gap): normal, the
+    // premultiplied-composite branch (mode_flags==1), and the colour-only
+    // branch (rgb_only==1). Values captured from the pre-extraction build.
+    static constexpr std::array<std::array<uint8_t, 4>, 39> kTransferGoldens{{
+        {96, 42, 21, 11},  {112, 44, 22, 11}, {112, 47, 24, 12}, {160, 42, 21, 11},
+        {112, 32, 16, 8},  {112, 27, 14, 7},  {112, 32, 16, 8},  {112, 28, 14, 7},
+        {112, 28, 14, 7},  {112, 28, 14, 7},  {112, 28, 14, 7},  {112, 31, 16, 8},
+        {112, 30, 15, 7},  {112, 28, 14, 7},  {112, 29, 14, 7},  {112, 29, 14, 7},
+        {112, 30, 16, 9},  {48, 20, 10, 5},   {37, 20, 10, 5},   {48, 20, 10, 5},
+        {59, 20, 10, 5},   {112, 52, 26, 13}, {128, 20, 10, 5},  {112, 29, 14, 7},
+        {112, 27, 14, 7},  {112, 32, 16, 8},  {112, 30, 15, 7},  {112, 29, 14, 7},
+        {112, 27, 14, 7},  {112, 32, 16, 8},  {112, 16, 0, 0},   {112, 20, 2, 0},
+        {112, 27, 14, 7},  {112, 28, 14, 7},  {112, 27, 14, 7},  {112, 31, 16, 8},
+        {112, 28, 14, 7},  {112, 24, 12, 6},  {112, 32, 19, 12},
+    }};
+    // mode_flags==1: the premultiplied-composite branch.
+    static constexpr std::array<std::array<uint8_t, 4>, 39> kTransferGoldensPremul{{
+        {96, 42, 21, 11},  {112, 39, 19, 10}, {112, 45, 23, 11}, {160, 55, 28, 14},
+        {112, 32, 16, 8},  {112, 27, 14, 7},  {112, 32, 16, 8},  {112, 28, 14, 7},
+        {112, 28, 14, 7},  {112, 28, 14, 7},  {112, 28, 14, 7},  {112, 31, 16, 8},
+        {112, 30, 15, 7},  {112, 28, 14, 7},  {112, 29, 14, 7},  {112, 29, 14, 7},
+        {112, 30, 16, 9},  {48, 20, 10, 5},   {37, 20, 10, 5},   {48, 20, 10, 5},
+        {59, 20, 10, 5},   {112, 52, 26, 13}, {128, 20, 10, 5},  {112, 29, 14, 7},
+        {112, 27, 14, 7},  {112, 32, 16, 8},  {112, 30, 15, 7},  {112, 29, 14, 7},
+        {112, 27, 14, 7},  {112, 32, 16, 8},  {112, 16, 0, 0},   {112, 20, 2, 0},
+        {112, 27, 14, 7},  {112, 28, 14, 7},  {112, 27, 14, 7},  {112, 31, 16, 8},
+        {112, 28, 14, 7},  {112, 24, 12, 6},  {112, 32, 19, 12},
+    }};
+    // rgb_only==1: the colour-only branch (alpha kept, except the alpha-only
+    // matte modes 17-20 which write alpha regardless of rgb_only).
+    static constexpr std::array<std::array<uint8_t, 4>, 39> kTransferGoldensRgbOnly{{
+        {64, 42, 21, 11},  {64, 44, 22, 11},  {64, 47, 24, 12},  {64, 42, 21, 11},
+        {64, 52, 26, 13},  {64, 12, 6, 3},    {64, 50, 25, 13},  {64, 15, 6, 3},
+        {64, 15, 6, 3},    {64, 15, 6, 3},    {64, 20, 10, 5},   {64, 42, 21, 11},
+        {64, 32, 16, 8},   {64, 20, 10, 5},   {64, 23, 9, 2},    {64, 23, 9, 2},
+        {64, 34, 24, 19},  {48, 20, 10, 5},   {37, 20, 10, 5},   {48, 20, 10, 5},
+        {59, 20, 10, 5},   {64, 52, 26, 13},  {64, 20, 10, 5},   {64, 23, 11, 5},
+        {64, 10, 5, 2},    {64, 47, 25, 13},  {64, 32, 16, 8},   {64, 23, 11, 5},
+        {64, 10, 5, 2},    {64, 52, 26, 13},  {64, 0, 0, 0},     {64, 0, 0, 0},
+        {64, 10, 5, 2},    {64, 20, 10, 5},   {64, 10, 5, 2},    {64, 42, 21, 11},
+        {64, 20, 10, 5},   {64, 0, 0, 0},     {64, 50, 45, 42},
+    }};
+    struct GoldenVariant {
+      uint32_t mode_flags;
+      uint8_t rgb_only;
+      const std::array<std::array<uint8_t, 4>, 39>* goldens;
+    };
+    const std::array<GoldenVariant, 3> variants{{
+        {0, 0, &kTransferGoldens},
+        {1, 0, &kTransferGoldensPremul},
+        {0, 1, &kTransferGoldensRgbOnly},
+    }};
+    for (const auto& variant : variants) {
+      for (int32_t mode = 0; mode <= 38; ++mode) {
+        if (!run_transfer_case(mode, variant.mode_flags, variant.rgb_only,
+                               (*variant.goldens)[mode])) {
+          std::cerr << "composite diagnostic: transfer_rect golden mode_flags="
+                    << variant.mode_flags << " rgb_only=" << (int)variant.rgb_only
+                    << " mode=" << mode << "\n";
+          return false;
+        }
+      }
+    }
   }
 
   constexpr int32_t rowbytes = 16;
