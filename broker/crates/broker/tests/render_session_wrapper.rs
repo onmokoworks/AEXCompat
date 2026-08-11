@@ -20,8 +20,8 @@ mod windows_e2e {
         AnimationInterpolation, AnimationTime, AnimationValue, InteractiveParameter,
         ParameterAnimation, ParameterAnimationKey, RENDER_SESSION_WRAPPER_RENDERS,
         RenderArtifactKind, RenderGpuBackend, RenderPixelFormat, RenderTiming, RenderUiAction,
-        TimedLayerImage, render_experimental_artifact_at_time, render_experimental_audio,
-        render_experimental_image, render_experimental_image_at_time,
+        TimedLayerImage, render_declarative_fixture, render_experimental_artifact_at_time,
+        render_experimental_audio, render_experimental_image, render_experimental_image_at_time,
         render_experimental_image_at_time_with_format_and_context,
         render_experimental_image_at_time_with_format_context_and_ui_action,
         render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend,
@@ -583,6 +583,198 @@ mod windows_e2e {
         assert_eq!(
             comparison["comparison_boundary"]["claim_level"],
             "raw_u32_exact"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn declarative_fixture_commits_exr_and_selected_native_checkpoints_together() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let aex =
+            root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping declarative fixture: build smart worker and geometry probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-declarative-fixture-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_fn(8, 6, |x, y| {
+            image::Rgba([(x * 17) as u8, (y * 29) as u8, (x + y) as u8, 255])
+        })
+        .save(scratch.join("primary.png"))
+        .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture", "schema_version":1,
+            "primary_layer":"primary.png", "parameters":[], "pixel_format":"argb32f",
+            "render_path":"smart",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"exr",
+            "checkpoints":[
+                {"id":"input_world","stage":"smart-input"},
+                {"id":"output_world","stage":"smart-output"}
+            ]
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+        let output = scratch.join("result");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("declarative fixture render");
+        assert_eq!(report["pixel_format"], "argb32f");
+        assert_eq!(report["final_artifact"]["compression"], "none");
+        assert!(output.join("final/output.exr").is_file());
+        for (id, stage) in [
+            ("input_world", "smart-input"),
+            ("output_world", "smart-output"),
+        ] {
+            let metadata: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.join("checkpoints").join(id).join("output.json")).unwrap(),
+            )
+            .unwrap();
+            let raw =
+                std::fs::read(output.join("checkpoints").join(id).join("output.bin")).unwrap();
+            assert_eq!(metadata["schema_version"], 2);
+            assert_eq!(metadata["checkpoint_identity"]["id"], id);
+            assert_eq!(metadata["checkpoint_identity"]["stage"], stage);
+            assert_eq!(
+                metadata["comparison_identity"]["checkpoint"],
+                metadata["checkpoint_identity"]
+            );
+            assert_eq!(metadata["pixel_format"], "argb32f");
+            assert_eq!(metadata["channel_order"], "ARGB");
+            assert_eq!(
+                metadata["component_representation"],
+                "ieee754_binary32_raw_words"
+            );
+            assert_eq!(metadata["data_size_bytes"], raw.len());
+            assert_eq!(
+                metadata["rowbytes"].as_u64().unwrap() * metadata["height"].as_u64().unwrap(),
+                raw.len() as u64
+            );
+        }
+        for (format, representation, component_bytes) in [
+            ("argb8", "unsigned_integer_0_255", 1u64),
+            ("argb16", "unsigned_integer_0_32768_ae_internal", 2u64),
+        ] {
+            let mut depth_fixture = fixture.clone();
+            depth_fixture["pixel_format"] = serde_json::json!(format);
+            depth_fixture["final_artifact"] = serde_json::json!("raw");
+            depth_fixture["checkpoints"] =
+                serde_json::json!([{"id":"input_world","stage":"smart-input"}]);
+            let path = scratch.join(format!("fixture-{format}.json"));
+            std::fs::write(&path, serde_json::to_vec_pretty(&depth_fixture).unwrap()).unwrap();
+            let depth_output = scratch.join(format!("result-{format}"));
+            render_declarative_fixture(&root, &aex, &sha, &path, &depth_output)
+                .unwrap_or_else(|error| panic!("{format} fixture render failed: {error}"));
+            let metadata: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(depth_output.join("checkpoints/input_world/output.json")).unwrap(),
+            )
+            .unwrap();
+            let raw =
+                std::fs::read(depth_output.join("checkpoints/input_world/output.bin")).unwrap();
+            assert_eq!(metadata["pixel_format"], format);
+            assert_eq!(metadata["component_bytes"], component_bytes);
+            assert_eq!(metadata["component_representation"], representation);
+            if format == "argb16" {
+                assert!(
+                    raw.chunks_exact(2)
+                        .all(|word| { u16::from_le_bytes([word[0], word[1]]) <= 32768 })
+                );
+            }
+        }
+        let mut missing_fixture = fixture.clone();
+        missing_fixture["pixel_format"] = serde_json::json!("argb8");
+        missing_fixture["final_artifact"] = serde_json::json!("raw");
+        missing_fixture["checkpoints"] =
+            serde_json::json!([{"id":"missing_layer","stage":"smart-layer-slot99"}]);
+        let missing_path = scratch.join("fixture-missing.json");
+        std::fs::write(
+            &missing_path,
+            serde_json::to_vec_pretty(&missing_fixture).unwrap(),
+        )
+        .unwrap();
+        let missing_output = scratch.join("missing-result");
+        assert!(
+            render_declarative_fixture(&root, &aex, &sha, &missing_path, &missing_output).is_err()
+        );
+        assert!(
+            !missing_output.exists(),
+            "a missing checkpoint published a partial fixture set"
+        );
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn declarative_classic_fixture_carries_secondary_layer_and_scalar_parameter() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping declarative layer fixture: build classic worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-declarative-layer-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        let secondary_pixels = image::RgbaImage::from_fn(4, 3, |x, y| {
+            image::Rgba([(x * 31) as u8, (y * 47) as u8, 93, 255])
+        });
+        secondary_pixels
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let render = |value: f64, name: &str| {
+            let parameters = vec![
+                layer_parameter(1, Path::new("secondary.png")),
+                float_parameter(2, value),
+            ];
+            let fixture = serde_json::json!({
+                "schema":"aexcompat.render_fixture", "schema_version":1,
+                "primary_layer":"primary.png", "parameters":parameters,
+                "pixel_format":"argb8", "render_path":"classic",
+                "premultiplication":"straight",
+                "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+                "final_artifact":"raw",
+                "checkpoints":[{"id":"secondary_world","stage":"classic-layer-slot1"}]
+            });
+            let fixture_path = scratch.join(format!("{name}.json"));
+            std::fs::write(&fixture_path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+            let output = scratch.join(name);
+            render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+                .unwrap_or_else(|error| panic!("classic layer fixture failed: {error}"));
+            output
+        };
+        let low = render(20.0, "low");
+        let high = render(200.0, "high");
+        let checkpoint = std::fs::read(low.join("checkpoints/secondary_world/output.bin")).unwrap();
+        let expected = secondary_pixels
+            .into_raw()
+            .chunks_exact(4)
+            .flat_map(|rgba| [rgba[3], rgba[0], rgba[1], rgba[2]])
+            .collect::<Vec<_>>();
+        assert_eq!(checkpoint, expected, "secondary checkpoint words changed");
+        assert_ne!(
+            std::fs::read(low.join("final/output.bin")).unwrap(),
+            std::fs::read(high.join("final/output.bin")).unwrap(),
+            "changing the fixture scalar parameter did not change the render"
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }

@@ -120,6 +120,9 @@ fn requested_minidump_directory(repository: &Path) -> io::Result<Option<String>>
 }
 
 fn requested_world_dump_dir(repository: &Path) -> io::Result<Option<WorldDumpDir>> {
+    if let Some(path) = fixture_world_dump_override() {
+        return resolve_world_dump_dir(repository, &path).map(Some);
+    }
     match std::env::var_os(WORLD_DUMP_DIR_ENV) {
         Some(value) => resolve_world_dump_dir(repository, Path::new(&value)).map(Some),
         None => Ok(None),

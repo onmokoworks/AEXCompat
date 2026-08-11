@@ -41,7 +41,11 @@ const STALE_IMAGE_TRANSPORT_AGE: Duration = Duration::from_secs(15 * 60);
 const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
 
 fn conformance_render_settings_transport() -> io::Result<Option<String>> {
-    let Ok(encoded) = std::env::var(CONFORMANCE_RENDER_SETTINGS_ENV) else {
+    let encoded = if let Some(value) = fixture_render_settings_override() {
+        value
+    } else if let Ok(value) = std::env::var(CONFORMANCE_RENDER_SETTINGS_ENV) {
+        value
+    } else {
         return Ok(None);
     };
     let fields = encoded.split('|').collect::<Vec<_>>();

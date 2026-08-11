@@ -289,6 +289,12 @@ fn cli_contract() -> serde_json::Value {
                 "result": "uncompressed-scanline-float32-exr-artifact-report-json"
             },
             {
+                "name": "--render-fixture",
+                "argv": ["--render-fixture", "<aex>", "<fixture.json>", "<output-directory>"],
+                "result": "declarative-render-fixture-report-json",
+                "note": "Fixture asset paths are relative to fixture.json; plug-in path and hash are never embedded."
+            },
+            {
                 "name": "--render-experimental",
                 "argv": ["--render-experimental|--render-experimental-auto|--render-experimental-16|--render-experimental-16-deep|--render-experimental-32|--render-experimental-smart|--render-experimental-smart-16|--render-experimental-smart-16-deep|--render-experimental-smart-32|--render-experimental-smart-32-cpu", "<aex>", "<input-image>", "<output-image>"],
                 "result": "render-report-json"
@@ -362,6 +368,13 @@ mod artifact_cli_contract_tests {
         assert_eq!(
             command("--render-exr")["result"],
             "uncompressed-scanline-float32-exr-artifact-report-json"
+        );
+        assert_eq!(
+            command("--render-fixture")["argv"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
         );
     }
 }
@@ -445,6 +458,24 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let repository = repository_root(&args);
+    if args.len() == 5 && args[1] == "--render-fixture" {
+        let plugin = Path::new(&args[2]);
+        let hash = required_plugin_hash(plugin);
+        match aexcompat_broker::image_render::render_declarative_fixture(
+            &repository,
+            plugin,
+            &hash,
+            Path::new(&args[3]),
+            Path::new(&args[4]),
+        ) {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 4 && args[1] == "--compare-images" {
         match compare_images(Path::new(&args[2]), Path::new(&args[3])) {
             Ok(comparison) => {
