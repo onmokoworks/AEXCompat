@@ -3623,7 +3623,7 @@ mod tests {
             point3d[abi::PARAM_U_OFFSET + 24 + index * 8..abi::PARAM_U_OFFSET + 32 + index * 8]
                 .copy_from_slice(&value.to_le_bytes());
         }
-        materialize_default(&mut point3d, PARAM_POINT3D, 32, 20);
+        materialize_default(&mut point3d, PARAM_POINT3D, 32, 20).unwrap();
         for (index, expected) in [16.0f64, 5.0, 15.0].into_iter().enumerate() {
             assert_eq!(
                 f64::from_le_bytes(
