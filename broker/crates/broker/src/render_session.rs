@@ -3247,21 +3247,24 @@ pub fn validate_abandoned_smart_untouched_close(close: &Value) -> Result<(), &'s
 /// deliberately narrower than a generic crash fallback: transport failures,
 /// host invariant exits, other exception codes, and crashes in any other
 /// lifecycle stage remain terminal.
-pub fn validate_abandoned_smart_heap_corruption_close(
-    close: &Value,
-) -> Result<(), &'static str> {
+pub fn validate_abandoned_smart_heap_corruption_close(close: &Value) -> Result<(), &'static str> {
     const STATUS_HEAP_CORRUPTION: u64 = 0xC000_0374;
 
     if close.get("render_path").and_then(Value::as_str) != Some("smart") {
         return Err("not_smart_render");
     }
     if close.get("invalidated") != Some(&Value::Bool(true))
-        || close.pointer("/invalidated_reason/reason").and_then(Value::as_str)
+        || close
+            .pointer("/invalidated_reason/reason")
+            .and_then(Value::as_str)
             != Some("worker_exited")
     {
         return Err("not_worker_exit");
     }
-    if close.pointer("/worker/classification").and_then(Value::as_str) != Some("crashed")
+    if close
+        .pointer("/worker/classification")
+        .and_then(Value::as_str)
+        != Some("crashed")
         || close.pointer("/worker/exit_code").and_then(Value::as_u64)
             != Some(STATUS_HEAP_CORRUPTION)
     {

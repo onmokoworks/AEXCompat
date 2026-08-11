@@ -16,8 +16,7 @@ mod windows_e2e {
         AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, ClusterRenderPlugins,
         DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest, InspectOutcome,
         RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
-        validate_abandoned_smart_heap_corruption_close,
-        validate_abandoned_smart_untouched_close,
+        validate_abandoned_smart_heap_corruption_close, validate_abandoned_smart_untouched_close,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use aexcompat_broker::secure_launch::LaunchEnvironment;

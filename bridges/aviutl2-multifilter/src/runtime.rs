@@ -1020,9 +1020,7 @@ where
     };
     if authorized.is_err() {
         return ClassicFallbackRun {
-            reply: FrameReply::SessionLost(
-                "Smart attempt failed fallback validation".into(),
-            ),
+            reply: FrameReply::SessionLost("Smart attempt failed fallback validation".into()),
             smart_authorized: false,
         };
     }
