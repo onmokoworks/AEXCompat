@@ -21,6 +21,8 @@ struct Statistics {
   std::uint32_t automatic_pre_render_disposals{};
   std::size_t live_count{};
   std::uint64_t live_bytes{};
+  std::size_t quarantined_count{};
+  std::uint64_t quarantined_bytes{};
 };
 
 void** __cdecl new_handle(std::uint64_t size);
@@ -28,6 +30,8 @@ void* __cdecl lock_handle(void** handle);
 void __cdecl unlock_handle(void** handle);
 void __cdecl dispose_handle(void** handle);
 void dispose_all_live_handles();
+void begin_handle_reclamation_quarantine();
+void reclaim_quarantined_handles();
 std::uint64_t __cdecl handle_size(void** handle);
 std::int32_t __cdecl resize_handle(std::uint64_t size, void*** handle);
 
@@ -35,6 +39,19 @@ bool handle_lifetimes_balanced();
 bool host_handle_is_live(const void* handle);
 Statistics statistics();
 void record_automatic_pre_render_disposal();
+
+class HandleReclamationScope {
+ public:
+  HandleReclamationScope();
+  ~HandleReclamationScope();
+  HandleReclamationScope(const HandleReclamationScope&) = delete;
+  HandleReclamationScope& operator=(const HandleReclamationScope&) = delete;
+
+  void reclaim();
+
+ private:
+  bool active_{true};
+};
 
 struct HandleSuite {
   decltype(&new_handle) create;

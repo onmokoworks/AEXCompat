@@ -39,6 +39,9 @@ struct HandleRecord {
 };
 
 std::unordered_set<HandleRecord*> g_handles;
+std::vector<HandleRecord*> g_quarantined_handles;
+std::uint64_t g_quarantined_bytes{};
+bool g_reclamation_quarantine_active{};
 std::mutex g_mutex;
 Statistics g_statistics;
 
@@ -53,14 +56,26 @@ AegpMemoryStatistics g_aegp_statistics;
 
 void invalid_operation() { ++g_statistics.invalid_operations; }
 
+bool physical_budget_exceeded(std::uint64_t requested,
+                              std::uint64_t replaced_live_bytes = 0) {
+  if (requested > kMaxHandleBytes ||
+      g_statistics.live_bytes < replaced_live_bytes)
+    return true;
+  const std::uint64_t remaining_live =
+      g_statistics.live_bytes - replaced_live_bytes;
+  return remaining_live > kMaxHandleBytes - requested ||
+         g_quarantined_bytes >
+             kMaxHandleBytes - requested - remaining_live;
+}
+
 }  // namespace
 
 void** __cdecl new_handle(std::uint64_t size) {
   std::cerr << "callback:new_handle size=" << size << "\n" << std::flush;
   trace_callback_invoke();
   std::lock_guard<std::mutex> lock(g_mutex);
-  if (size > kMaxHandleBytes || g_handles.size() >= kMaxHandleCount ||
-      g_statistics.live_bytes > kMaxHandleBytes - size) {
+  if (g_handles.size() + g_quarantined_handles.size() >= kMaxHandleCount ||
+      physical_budget_exceeded(size)) {
     std::cerr << "callback:new_handle_failed reason=budget size=" << size << "\n"
               << std::flush;
     invalid_operation();
@@ -116,6 +131,7 @@ void __cdecl unlock_handle(void** handle) {
 
 void __cdecl dispose_handle(void** handle) {
   auto* record = reinterpret_cast<HandleRecord*>(handle);
+  bool quarantine = false;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!record || !g_handles.count(record)) {
@@ -130,7 +146,13 @@ void __cdecl dispose_handle(void** handle) {
     g_handles.erase(record);
     ++g_statistics.disposed;
     g_statistics.live_bytes -= record->size;
+    quarantine = g_reclamation_quarantine_active;
+    if (quarantine) {
+      g_quarantined_handles.push_back(record);
+      g_quarantined_bytes += record->size;
+    }
   }
+  if (quarantine) return;
   ::operator delete(record->data);
   delete record;
 }
@@ -142,6 +164,29 @@ void dispose_all_live_handles() {
     records.assign(g_handles.begin(), g_handles.end());
   }
   for (auto* record : records) dispose_handle(&record->data);
+}
+
+void begin_handle_reclamation_quarantine() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  // Reserve outside any plug-in callback. The total live+quarantined handle
+  // limit below guarantees that dispose_handle cannot grow this vector while
+  // crossing the foreign ABI boundary.
+  g_quarantined_handles.reserve(kMaxHandleCount);
+  g_reclamation_quarantine_active = true;
+}
+
+void reclaim_quarantined_handles() {
+  std::vector<HandleRecord*> records;
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_reclamation_quarantine_active = false;
+    records.swap(g_quarantined_handles);
+    g_quarantined_bytes = 0;
+  }
+  for (auto* record : records) {
+    ::operator delete(record->data);
+    delete record;
+  }
 }
 
 std::uint64_t __cdecl handle_size(void** handle) {
@@ -162,7 +207,7 @@ std::int32_t __cdecl resize_handle(std::uint64_t size, void*** handle) {
   }
   auto* record = reinterpret_cast<HandleRecord*>(*handle);
   if (!g_handles.count(record) || record->lock_count != 0 ||
-      g_statistics.live_bytes - record->size > kMaxHandleBytes - size) {
+      physical_budget_exceeded(size, record->size)) {
     invalid_operation();
     return 4;
   }
@@ -187,7 +232,8 @@ std::int32_t __cdecl resize_handle(std::uint64_t size, void*** handle) {
 
 bool handle_lifetimes_balanced() {
   std::lock_guard<std::mutex> lock(g_mutex);
-  return g_handles.empty() && g_statistics.created == g_statistics.disposed &&
+  return g_handles.empty() && g_quarantined_handles.empty() &&
+         g_statistics.created == g_statistics.disposed &&
          g_statistics.locks ==
              g_statistics.unlocks + g_statistics.locks_released_on_dispose;
 }
@@ -202,12 +248,28 @@ Statistics statistics() {
   std::lock_guard<std::mutex> lock(g_mutex);
   Statistics result = g_statistics;
   result.live_count = g_handles.size();
+  result.quarantined_count = g_quarantined_handles.size();
+  result.quarantined_bytes = g_quarantined_bytes;
   return result;
 }
 
 void record_automatic_pre_render_disposal() {
   std::lock_guard<std::mutex> lock(g_mutex);
   ++g_statistics.automatic_pre_render_disposals;
+}
+
+HandleReclamationScope::HandleReclamationScope() {
+  begin_handle_reclamation_quarantine();
+}
+
+HandleReclamationScope::~HandleReclamationScope() {
+  if (active_) reclaim_quarantined_handles();
+}
+
+void HandleReclamationScope::reclaim() {
+  if (!active_) return;
+  reclaim_quarantined_handles();
+  active_ = false;
 }
 
 HandleSuite g_handle_suite{&new_handle, &lock_handle, &unlock_handle,
