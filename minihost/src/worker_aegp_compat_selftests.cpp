@@ -2157,6 +2157,16 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   matte.type = 0;  // PF_Param_LAYER
   matte.name = "Matte";
   records.push_back(matte);
+  for (const auto [type, name] : std::array{
+           std::pair{9, "No Data"}, std::pair{13, "Group Start"},
+           std::pair{14, "Group End"}, std::pair{15, "Button"},
+           std::pair{8, "Custom"}, std::pair{12, "Path"}}) {
+    ParamRecord marker{};
+    marker.index = static_cast<int32_t>(records.size() + 1);
+    marker.type = type;
+    marker.name = name;
+    records.push_back(marker);
+  }
   records[0].name = u8"量";
   scene_runtime_state().effect_live = false;
 
@@ -2199,7 +2209,7 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   ok = ok && get_v9_stream_count && get_v9_effect_stream &&
       dispose_v9_stream && get_v9_stream_name && get_v9_stream_type &&
       get_v9_stream_value && dispose_v9_stream_value &&
-      get_v9_stream_count(effect, &count) == 0 && count == 3;
+      get_v9_stream_count(effect, &count) == 0 && count == 9;
 
   void* v9_amount = nullptr;
   ok = ok && get_v9_effect_stream(0, effect, 1, &v9_amount) == 0 && v9_amount;
@@ -2294,9 +2304,35 @@ bool verify_aegp_loaded_plugin_effect_streams() {
       g_hooks.get_stream_name_v2(amount, 1, name) == 0 && std::strcmp(name, "Amount") == 0 &&
       g_hooks.get_stream_type_v2(amount, &type) == 0 && type == 5;
 
+  // AE exposes group markers and other valueless parameter definitions as
+  // real NO_DATA streams. They can be enumerated, named, typed, and disposed,
+  // but a value checkout must fail without modifying the caller's output.
+  for (int32_t index = 3; ok && index <= 7; ++index) {
+    void* no_data = nullptr;
+    scene_runtime::AegpStreamValue sentinel{};
+    sentinel.stream = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
+    sentinel.value.fill(std::byte{0x5a});
+    const auto before = sentinel;
+    ok = g_hooks.get_new_effect_stream_v2(0, effect, index, &no_data) == 0 &&
+        no_data && g_hooks.get_stream_name_v2(no_data, 1, name) == 0 &&
+        std::strcmp(name, records[static_cast<std::size_t>(index - 1)].name.c_str()) == 0 &&
+        g_hooks.get_stream_type_v2(no_data, &type) == 0 && type == 0 &&
+        g_hooks.get_new_stream_value_v2(
+            0, no_data, 1, &v9_time, 1, &sentinel) == 4 &&
+        std::memcmp(&sentinel, &before, sizeof(sentinel)) == 0;
+    ok = g_hooks.dispose_stream_v2(no_data) == 0 && ok;
+  }
+
+  // PATH requires a MASK stream implementation; do not misrepresent it as
+  // NO_DATA merely to make enumeration succeed.
+  void* unsupported_path = reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc));
+  ok = ok && g_hooks.get_new_effect_stream_v2(
+                 0, effect, 8, &unsupported_path) == 4 &&
+      unsupported_path == reinterpret_cast<void*>(static_cast<uintptr_t>(0x9abc));
+
   // Past the declared parameters there is nothing to open.
   void* past = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
-  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 3, &past) != 0 &&
+  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 9, &past) != 0 &&
       past == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
 
   // The value reads as zero: `parameter_values` holds the probe fixture's
