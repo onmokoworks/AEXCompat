@@ -3296,6 +3296,18 @@ fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
     assert_eq!(
+        dispatch_win64_import(crt_math, "lround"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LRound)
+    );
+    assert_eq!(
+        dispatch_win64_import("ucrtbase.dll", "lround"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LRound)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "lround"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
         dispatch_win64_import(crt_math, "cos"),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Cos)
     );
@@ -3318,6 +3330,54 @@ fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
     assert_eq!(
         dispatch_win64_import("OpenCL.DLL", "cosf"),
         Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
+    );
+}
+
+#[test]
+fn win64_crt_lround_uses_xmm0_f64_and_returns_a_windows_long_in_eax() {
+    const LROUND_IMPORT: u64 = STUB_BASE + 0x1a8;
+
+    fn call_lround(engine: &mut GuestEngine<'static>, input: f64) -> i32 {
+        let mut xmm0 = [0xa5; 16];
+        xmm0[..8].copy_from_slice(&input.to_le_bytes());
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm0)
+            .unwrap();
+        engine.call_win64(LROUND_IMPORT, [0; 6]).unwrap();
+        engine.unicorn.reg_read(RegisterX86::RAX).unwrap() as u32 as i32
+    }
+
+    let mut engine = test_engine(&[0xc3]);
+    // Import slots are initially poison/placeholder code. The installer must
+    // replace it with a bare return so the hook's EAX value survives.
+    engine
+        .unicorn
+        .mem_write(LROUND_IMPORT, &[0x31, 0xc0, 0xc3])
+        .unwrap();
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            LROUND_IMPORT,
+            "api-ms-win-crt-math-l1-1-0.dll",
+            "lround",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LRound)
+    );
+
+    assert_eq!(call_lround(&mut engine, 200.4), 200);
+    assert_eq!(call_lround(&mut engine, 1.5), 2);
+    assert_eq!(call_lround(&mut engine, -1.5), -2);
+    assert_eq!(call_lround(&mut engine, f64::NAN), i32::MIN);
+    assert_eq!(call_lround(&mut engine, f64::INFINITY), i32::MIN);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .math_calls
+            .iter()
+            .any(|call| call.starts_with("lround("))
     );
 }
 

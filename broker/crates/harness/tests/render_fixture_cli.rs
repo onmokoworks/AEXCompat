@@ -1,5 +1,3 @@
-#![cfg(windows)]
-
 #[test]
 fn render_fixture_argv_dispatch_rejects_noncanonical_fixture_without_output() {
     let scratch = std::env::temp_dir().join(format!(

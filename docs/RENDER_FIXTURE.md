@@ -4,11 +4,15 @@
 runs one classic or SmartFX render and atomically publishes the final raw/EXR artifact plus
 the requested native-world checkpoints. The AEX path and its observed hash stay outside the
 fixture. All image paths in the fixture are traversal-free paths relative to `fixture.json`.
+The same command and document contract are supported by the Windows harness and by the
+Apple Silicon macOS harness; macOS executes the x86-64 AEX through the resident guest worker.
+On macOS, input and secondary-layer checkpoints are read back from the worlds materialized in
+guest memory after the render rather than reconstructed from the source images on the host.
 
 The v1 document is strict: unknown top-level, timing, or checkpoint fields are rejected.
 `parameters` uses the complete parameter records returned by `--inspect-experimental`; a
 layer parameter's `layer_path` is also relative to the fixture. This permits scalar, choice,
-color, point, primary-layer, and secondary-layer cases without a second sidecar.
+color, angle, 2D/3D point, primary-layer, and secondary-layer cases without a second sidecar.
 
 ```json
 {

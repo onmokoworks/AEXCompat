@@ -50,6 +50,7 @@ enum LegacyWin64Import {
     CeilF,
     ExpF,
     FloorF,
+    LRound,
     PowF,
     Pow,
     Sin,
@@ -270,20 +271,14 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         None => {}
     }
     let legacy = match (normalized_library.as_str(), symbol) {
-        ("kernel32.dll", "GetSystemTimeAsFileTime") => {
-            LegacyWin64Import::GetSystemTimeAsFileTime
-        }
+        ("kernel32.dll", "GetSystemTimeAsFileTime") => LegacyWin64Import::GetSystemTimeAsFileTime,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
         ("kernel32.dll", "GetCurrentProcessId") => LegacyWin64Import::GetCurrentProcessId,
-        ("kernel32.dll", "QueryPerformanceCounter") => {
-            LegacyWin64Import::QueryPerformanceCounter
-        }
+        ("kernel32.dll", "QueryPerformanceCounter") => LegacyWin64Import::QueryPerformanceCounter,
         ("kernel32.dll", "QueryPerformanceFrequency") => {
             LegacyWin64Import::QueryPerformanceFrequency
         }
-        ("kernel32.dll", "GetEnvironmentVariableA") => {
-            LegacyWin64Import::GetEnvironmentVariableA
-        }
+        ("kernel32.dll", "GetEnvironmentVariableA") => LegacyWin64Import::GetEnvironmentVariableA,
         ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
         ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
@@ -318,9 +313,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("api-ms-win-crt-runtime-l1-1-0.dll", symbol)
             if matches!(
                 symbol,
-                "_initialize_narrow_environment"
-                    | "_configure_narrow_argv"
-                    | "_cexit"
+                "_initialize_narrow_environment" | "_configure_narrow_argv" | "_cexit"
             ) =>
         {
             LegacyWin64Import::ExplicitMsvcRuntimeZero
@@ -345,16 +338,14 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
         (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceilf") => {
-            LegacyWin64Import::CeilF
-        }
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceilf") => LegacyWin64Import::CeilF,
         (_, "ceilf") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lround") => LegacyWin64Import::LRound,
+        (_, "lround") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "sin") => LegacyWin64Import::Sin,
         (_, "sin") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm") => LegacyWin64Import::CrtInitterm,
-        ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e") => {
-            LegacyWin64Import::CrtInittermE
-        }
+        ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e") => LegacyWin64Import::CrtInittermE,
         (_, "_initterm" | "_initterm_e") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
@@ -437,9 +428,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, symbol) if symbol.contains("__ExceptionPtr") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        ("vcruntime140.dll", "__std_exception_copy") => {
-            LegacyWin64Import::VcruntimeExceptionCopy
-        }
+        ("vcruntime140.dll", "__std_exception_copy") => LegacyWin64Import::VcruntimeExceptionCopy,
         ("vcruntime140.dll", "__std_exception_destroy") => {
             LegacyWin64Import::VcruntimeExceptionDestroy
         }
@@ -606,7 +595,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::StdioVsnprintfS => {
-                uc("write stdio formatter return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write stdio formatter return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install stdio formatter import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -642,7 +634,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::MsvcpMutexUnlock => {
-                uc("write mutex unlock return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write mutex unlock return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install mutex unlock import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -651,7 +646,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::MsvcpMutexDestroy => {
-                uc("write mutex destroy return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write mutex destroy return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install mutex destroy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -683,7 +681,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::VcruntimeExceptionCopy => {
-                uc("write exception copy return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write exception copy return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install exception copy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -692,7 +693,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::VcruntimeExceptionDestroy => {
-                uc("write exception destroy return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write exception destroy return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install exception destroy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -724,6 +728,9 @@ fn install_win64_import(
             LegacyWin64Import::FloorF => {
                 install_float_import(unicorn, stub, "floorf", f32::floor)?;
             }
+            LegacyWin64Import::LRound => {
+                install_lround_import(unicorn, stub)?;
+            }
             LegacyWin64Import::PowF => {
                 install_float_binary_import(unicorn, stub, "powf", f32::powf)?;
             }
@@ -745,7 +752,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::OmpSetDynamic => {
-                uc("write omp_set_dynamic return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write omp_set_dynamic return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install omp_set_dynamic import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -889,7 +899,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetLastError | LegacyWin64Import::SetLastError => {
-                uc("write last-error import return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write last-error import return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install last-error import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
@@ -926,7 +939,10 @@ fn install_win64_import(
                 // import remains a typed trap.
             }
             LegacyWin64Import::CrtInitterm | LegacyWin64Import::CrtInittermE => {
-                uc("write CRT initializer tail jump", unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]))?;
+                uc(
+                    "write CRT initializer tail jump",
+                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                )?;
                 let stop_on_error = implementation == LegacyWin64Import::CrtInittermE;
                 uc(
                     "install CRT initializer import",
@@ -946,7 +962,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::CrtExecuteOnexitTable => {
-                uc("write CRT onexit tail jump", unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]))?;
+                uc(
+                    "write CRT onexit tail jump",
+                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                )?;
                 uc(
                     "install CRT onexit execution import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
@@ -959,7 +978,10 @@ fn install_win64_import(
                     "write deterministic guest environment value",
                     unicorn.mem_write(HOST_ENVIRONMENT_VALUE, b"1\0"),
                 )?;
-                uc("write deterministic getenv return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write deterministic getenv return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install deterministic getenv import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -968,7 +990,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::CrtSetTerminate => {
-                uc("write CRT set_terminate return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write CRT set_terminate return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install CRT set_terminate import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -981,7 +1006,10 @@ fn install_win64_import(
             | LegacyWin64Import::EnterCriticalSection
             | LegacyWin64Import::LeaveCriticalSection
             | LegacyWin64Import::DeleteCriticalSection => {
-                uc("write critical-section return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write critical-section return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install critical-section import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
@@ -990,7 +1018,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetModuleHandleW => {
-                uc("write GetModuleHandleW return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write GetModuleHandleW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install GetModuleHandleW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -999,7 +1030,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetProcAddress => {
-                uc("write GetProcAddress return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write GetProcAddress return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install GetProcAddress import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -1262,7 +1296,9 @@ fn emulate_crt_onexit(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWi
         match operation {
             LegacyWin64Import::CrtInitializeOnexitTable => {
                 if unicorn.get_data().crt_onexit_tables.contains_key(&table) {
-                    return Err(format!("CRT onexit table {table:#x} is already initialized"));
+                    return Err(format!(
+                        "CRT onexit table {table:#x} is already initialized"
+                    ));
                 }
                 if unicorn.get_data().crt_onexit_tables.len() >= MAX_CRT_ONEXIT_TABLES {
                     return Err(format!(
@@ -1388,11 +1424,7 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
         let name_pointer = read_win64_import_argument(unicorn, 0)?;
         let buffer = read_win64_import_argument(unicorn, 1)?;
         let size = read_win64_import_argument(unicorn, 2)? as u32;
-        let name = read_windows_environment_name(
-            unicorn,
-            name_pointer,
-            "GetEnvironmentVariableA",
-        )?;
+        let name = read_windows_environment_name(unicorn, name_pointer, "GetEnvironmentVariableA")?;
         let Some(value) = deterministic_guest_environment_value(&name) else {
             unicorn.get_data_mut().windows_last_error = ERROR_ENVVAR_NOT_FOUND;
             return Ok(0);
@@ -1427,15 +1459,10 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_windows_last_error(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    operation: LegacyWin64Import,
-) {
+fn emulate_windows_last_error(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
         match operation {
-            LegacyWin64Import::GetLastError => Ok(u64::from(
-                unicorn.get_data().windows_last_error,
-            )),
+            LegacyWin64Import::GetLastError => Ok(u64::from(unicorn.get_data().windows_last_error)),
             LegacyWin64Import::SetLastError => {
                 unicorn.get_data_mut().windows_last_error =
                     read_win64_import_argument(unicorn, 0)? as u32;
@@ -1607,7 +1634,9 @@ fn emulate_windows_critical_section(
                 unicorn
                     .mem_write(address, &[0; WINDOWS_CRITICAL_SECTION_BYTES])
                     .map_err(|error| {
-                        format!("Windows critical-section object {address:#x} is not writable: {error}")
+                        format!(
+                            "Windows critical-section object {address:#x} is not writable: {error}"
+                        )
                     })?;
                 unicorn
                     .get_data_mut()
@@ -1626,9 +1655,9 @@ fn emulate_windows_critical_section(
                     .ok_or_else(|| {
                         format!("Windows critical section {address:#x} is not initialized")
                     })?;
-                *lock_count = lock_count.checked_add(1).ok_or_else(|| {
-                    "Windows critical-section recursion overflow".to_string()
-                })?;
+                *lock_count = lock_count
+                    .checked_add(1)
+                    .ok_or_else(|| "Windows critical-section recursion overflow".to_string())?;
                 if *lock_count > MAX_WINDOWS_CRITICAL_SECTION_RECURSION {
                     *lock_count -= 1;
                     return Err(format!(
@@ -1790,10 +1819,7 @@ fn install_windows_condition_variable_callbacks(
     Ok(())
 }
 
-fn emulate_windows_condition_variable(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    operation: u8,
-) {
+fn emulate_windows_condition_variable(unicorn: &mut Unicorn<'_, GuestState>, operation: u8) {
     let result = (|| -> Result<(), String> {
         let address = read_win64_import_argument(unicorn, 0)?;
         if address == 0 {
@@ -1924,9 +1950,7 @@ fn emulate_query_performance_value(
         }
         unicorn
             .mem_write(output, &value.to_le_bytes())
-            .map_err(|error| {
-                format!("{function} output {output:#x} is not writable: {error}")
-            })
+            .map_err(|error| format!("{function} output {output:#x} is not writable: {error}"))
     });
     match result {
         Ok(()) => {
@@ -1962,9 +1986,7 @@ fn emulate_fls(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Impo
                 }
                 let index = (0..MAX_WINDOWS_FLS_SLOTS)
                     .find(|index| !unicorn.get_data().windows_fls_slots.contains_key(index))
-                    .ok_or_else(|| {
-                        format!("FLS slot count exceeds {MAX_WINDOWS_FLS_SLOTS}")
-                    })?;
+                    .ok_or_else(|| format!("FLS slot count exceeds {MAX_WINDOWS_FLS_SLOTS}"))?;
                 unicorn
                     .get_data_mut()
                     .windows_fls_slots

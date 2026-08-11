@@ -1093,6 +1093,7 @@ fn native_imports_reject_cxx_exception_dispatch_but_preserve_ordinary_callbacks(
         callback_address!(native_crt_malloc)
     );
     assert!(validate_native_import("omp_get_max_threads").is_ok());
+    assert!(validate_native_import("lround").is_ok());
     let omp_callback: unsafe extern "win64" fn(u64, u64, u64, u64, u64, u64) -> u64 =
         unsafe { std::mem::transmute(native_import_callback("omp_get_max_threads")) };
     assert_eq!(unsafe { omp_callback(0, 0, 0, 0, 0, 0) }, 1);

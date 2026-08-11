@@ -1,19 +1,42 @@
 use crate::classic::{
-    ClassicError, ClassicHost, PARAM_COLOR, PARAM_POINT, ParameterValue, ResidentFailureDiagnostic,
-    SetupReport,
+    ClassicError, ClassicHost, PARAM_ANGLE, PARAM_COLOR, PARAM_LAYER, PARAM_POINT, PARAM_POINT3D,
+    ParameterValue, RenderReport, ResidentFailureDiagnostic, ResidentLayer, SetupReport,
 };
 use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_PARAMETER_PAYLOAD_BYTES: usize = 16 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResidentLayerManifest {
+    v: u32,
+    layers: Vec<ResidentLayerEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResidentLayerEntry {
+    slot: usize,
+    width: u32,
+    height: u32,
+    path: PathBuf,
+}
+
+struct OwnedResidentLayer {
+    slot: usize,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
 
 #[derive(Debug)]
 pub enum SessionError {
@@ -105,14 +128,40 @@ pub fn run_resident_session(
     time_scale: u32,
     pixel_format: FramePixelFormat,
     effect_selector: Option<&str>,
+    fixture_layers: Option<&Path>,
+    fixture_smart: Option<bool>,
     mut request: impl Read,
     mut response: impl Write,
 ) -> Result<(), SessionError> {
     let pixel_bytes = pixel_format
         .byte_count(width, height)
         .map_err(|error| SessionError::Protocol(error.to_string()))?;
+    let layers = load_resident_layers(input_slot, fixture_layers, pixel_format)?;
     let mut host = ClassicHost::new_with_effect(image, effect_selector)?;
     let setup = host.begin_resident_session(width, height, time_scale)?;
+    if fixture_smart == Some(true) && setup.out_flags2 & (1 << 10) == 0 {
+        return Err(SessionError::Protocol(
+            "fixture requested Smart Render but the AEX did not advertise it".into(),
+        ));
+    }
+    for layer in &layers {
+        let Some(parameter) = setup
+            .parameters
+            .iter()
+            .find(|parameter| parameter.slot == layer.slot)
+        else {
+            return Err(SessionError::Protocol(format!(
+                "fixture layer slot {} was not declared by the AEX",
+                layer.slot
+            )));
+        };
+        if parameter.param_type != PARAM_LAYER {
+            return Err(SessionError::Protocol(format!(
+                "fixture layer slot {} is not a layer parameter",
+                layer.slot
+            )));
+        }
+    }
     write_message(
         &mut response,
         &SessionReady {
@@ -151,13 +200,34 @@ pub fn run_resident_session(
                             input.len()
                         )));
                     }
-                    match host.probe_resident_pixels(
-                        width,
-                        height,
-                        time_scale,
-                        pixel_format,
-                        &input,
-                    ) {
+                    let borrowed_layers = layers
+                        .iter()
+                        .map(|layer| ResidentLayer {
+                            slot: layer.slot,
+                            width: layer.width,
+                            height: layer.height,
+                            pixels: &layer.pixels,
+                        })
+                        .collect::<Vec<_>>();
+                    let probe = match fixture_smart {
+                        Some(smart) => host.probe_resident_fixture_pixels(
+                            width,
+                            height,
+                            time_scale,
+                            pixel_format,
+                            &input,
+                            &borrowed_layers,
+                            smart,
+                        ),
+                        None => host.probe_resident_pixels(
+                            width,
+                            height,
+                            time_scale,
+                            pixel_format,
+                            &input,
+                        ),
+                    };
+                    match probe {
                         Ok(report) => write_message(
                             &mut response,
                             &SessionProbed {
@@ -213,6 +283,8 @@ pub fn run_resident_session(
                         height,
                         pixel_bytes,
                         pixel_format,
+                        &layers,
+                        fixture_smart,
                         &mut host,
                         &mut generation,
                         &mut response,
@@ -310,6 +382,8 @@ fn parse_render_frame(
     height: u32,
     pixel_bytes: usize,
     pixel_format: FramePixelFormat,
+    fixture_layers: &[OwnedResidentLayer],
+    fixture_smart: Option<bool>,
     host: &mut ClassicHost,
     generation: &mut u64,
     response: &mut impl Write,
@@ -320,7 +394,7 @@ fn parse_render_frame(
         .ok_or_else(|| SessionError::Protocol("render_frame has no integer v".into()))?;
     let allowed = if version == 1 {
         &["current_time", "frame_index", "type", "v"][..]
-    } else if version == 2 {
+    } else if matches!(version, 2 | 3 | 4) {
         &["current_time", "frame_index", "parameters", "type", "v"][..]
     } else {
         return Err(SessionError::Protocol(format!(
@@ -336,7 +410,14 @@ fn parse_render_frame(
         .get("current_time")
         .and_then(Value::as_object)
         .ok_or_else(|| SessionError::Protocol("render_frame has no current_time object".into()))?;
-    require_exact_keys(current_time.keys().map(String::as_str), &["scale", "value"])?;
+    let time_keys = if version == 4 {
+        &["scale", "step", "total", "value"][..]
+    } else if version == 3 {
+        &["scale", "step", "value"][..]
+    } else {
+        &["scale", "value"][..]
+    };
+    require_exact_keys(current_time.keys().map(String::as_str), time_keys)?;
     let current_value = current_time
         .get("value")
         .and_then(Value::as_i64)
@@ -347,6 +428,23 @@ fn parse_render_frame(
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| SessionError::Protocol("current_time.scale is outside u32".into()))?;
+    let current_step = if matches!(version, 3 | 4) {
+        current_time
+            .get("step")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                SessionError::Protocol("current_time.step must be a positive i32".into())
+            })?
+    } else {
+        1
+    };
+    let total_time = if version == 4 {
+        parse_fixture_total_time(current_time, current_value)?
+    } else {
+        0
+    };
     if current_scale != time_scale {
         return Err(SessionError::Protocol(format!(
             "current_time.scale {current_scale} does not match session scale {time_scale}"
@@ -354,13 +452,13 @@ fn parse_render_frame(
     }
     let parameters = match version {
         1 => Vec::new(),
-        2 => {
+        2 | 3 | 4 => {
             let payload = object
                 .get("parameters")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     SessionError::Protocol(
-                        "render_frame v2 requires a string parameters field".into(),
+                        "render_frame v2/v3/v4 requires a string parameters field".into(),
                     )
                 })?;
             parse_parameter_payload(payload, setup)?
@@ -378,19 +476,47 @@ fn parse_render_frame(
     let rowbytes = pixel_format
         .rowbytes(width)
         .map_err(|error| SessionError::Protocol(error.to_string()))?;
-    match host.render_resident_pixels(
-        width,
-        height,
-        current_value,
-        current_scale,
-        pixel_format,
-        &input,
-        &parameters,
-    ) {
+    let borrowed_layers = fixture_layers
+        .iter()
+        .map(|layer| ResidentLayer {
+            slot: layer.slot,
+            width: layer.width,
+            height: layer.height,
+            pixels: &layer.pixels,
+        })
+        .collect::<Vec<_>>();
+    let rendered = match fixture_smart {
+        Some(smart) => host.render_resident_fixture_pixels(
+            width,
+            height,
+            current_value,
+            current_step,
+            total_time,
+            current_scale,
+            pixel_format,
+            &input,
+            &parameters,
+            &borrowed_layers,
+            smart,
+        ),
+        None => host.render_resident_pixels(
+            width,
+            height,
+            current_value,
+            current_scale,
+            pixel_format,
+            &input,
+            &parameters,
+        ),
+    };
+    match rendered {
         Ok(report) => {
             fs::write(output_slot, &report.raw_pixels).map_err(|error| {
                 SessionError::Io(format!("write resident output slot: {error}"))
             })?;
+            if fixture_smart.is_some() {
+                write_fixture_world_dumps(input_slot, &report)?;
+            }
             *generation += 1;
             write_message(
                 response,
@@ -439,6 +565,138 @@ fn parse_render_frame(
     }
 }
 
+fn parse_fixture_total_time(
+    current_time: &serde_json::Map<String, Value>,
+    current_value: i32,
+) -> Result<i32, SessionError> {
+    current_time
+        .get("total")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|value| *value >= 0 && current_value >= 0 && current_value <= *value)
+        .ok_or_else(|| {
+            SessionError::Protocol(
+                "current_time.total must be a non-negative i32 at or after value".into(),
+            )
+        })
+}
+
+fn write_fixture_world_dumps(input_slot: &Path, report: &RenderReport) -> Result<(), SessionError> {
+    let root = input_slot
+        .parent()
+        .ok_or_else(|| SessionError::Protocol("resident input slot has no parent".into()))?;
+    let write_new = |path: &Path, bytes: &[u8]| -> Result<(), SessionError> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| {
+                SessionError::Io(format!(
+                    "create fixture world dump {}: {error}",
+                    path.display()
+                ))
+            })?;
+        file.write_all(bytes).map_err(|error| {
+            SessionError::Io(format!(
+                "write fixture world dump {}: {error}",
+                path.display()
+            ))
+        })
+    };
+    write_new(
+        &root.join("fixture-input-world.bin"),
+        &report.raw_input_pixels,
+    )?;
+    for layer in &report.raw_secondary_layers {
+        write_new(
+            &root.join(format!("fixture-layer-slot{}-world.bin", layer.slot)),
+            &layer.raw_pixels,
+        )?;
+    }
+    Ok(())
+}
+
+fn load_resident_layers(
+    input_slot: &Path,
+    manifest_path: Option<&Path>,
+    format: FramePixelFormat,
+) -> Result<Vec<OwnedResidentLayer>, SessionError> {
+    let Some(manifest_path) = manifest_path else {
+        return Ok(Vec::new());
+    };
+    let session_root = input_slot
+        .parent()
+        .ok_or_else(|| SessionError::Protocol("resident input slot has no parent".into()))?
+        .canonicalize()
+        .map_err(|error| SessionError::Io(format!("canonicalize resident session: {error}")))?;
+    let canonical_manifest = manifest_path
+        .canonicalize()
+        .map_err(|error| SessionError::Io(format!("canonicalize layer manifest: {error}")))?;
+    if canonical_manifest.parent() != Some(session_root.as_path()) {
+        return Err(SessionError::Protocol(
+            "resident layer manifest must be staged beside the input slot".into(),
+        ));
+    }
+    let manifest_size = fs::metadata(&canonical_manifest)
+        .map_err(|error| SessionError::Io(format!("stat layer manifest: {error}")))?
+        .len();
+    if manifest_size == 0 || manifest_size > MAX_CONTROL_MESSAGE_BYTES as u64 {
+        return Err(SessionError::Protocol(
+            "resident layer manifest exceeds the bounded size".into(),
+        ));
+    }
+    let bytes = fs::read(&canonical_manifest)
+        .map_err(|error| SessionError::Io(format!("read layer manifest: {error}")))?;
+    let manifest: ResidentLayerManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| SessionError::Protocol(format!("parse layer manifest: {error}")))?;
+    if manifest.v != 1 || manifest.layers.len() > 8 {
+        return Err(SessionError::Protocol(
+            "resident layer manifest version or count is invalid".into(),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut layers = Vec::with_capacity(manifest.layers.len());
+    for layer in manifest.layers {
+        if layer.slot == 0 || !seen.insert(layer.slot) || !layer.path.is_absolute() {
+            return Err(SessionError::Protocol(
+                "resident layer identity is invalid".into(),
+            ));
+        }
+        let path = layer
+            .path
+            .canonicalize()
+            .map_err(|error| SessionError::Io(format!("canonicalize resident layer: {error}")))?;
+        if path.parent() != Some(session_root.as_path()) {
+            return Err(SessionError::Protocol(
+                "resident layer must be staged beside the input slot".into(),
+            ));
+        }
+        let expected = format
+            .byte_count(layer.width, layer.height)
+            .map_err(|error| SessionError::Protocol(error.to_string()))?;
+        let observed = fs::metadata(&path)
+            .map_err(|error| SessionError::Io(format!("stat resident layer: {error}")))?
+            .len();
+        if observed != expected as u64 {
+            return Err(SessionError::Protocol(format!(
+                "resident layer byte count {observed} does not match {expected}"
+            )));
+        }
+        let pixels = fs::read(&path)
+            .map_err(|error| SessionError::Io(format!("read resident layer: {error}")))?;
+        format
+            .validate_bytes(layer.width, layer.height, &pixels)
+            .map_err(|error| SessionError::Protocol(error.to_string()))?;
+        layers.push(OwnedResidentLayer {
+            slot: layer.slot,
+            width: layer.width,
+            height: layer.height,
+            pixels,
+        });
+    }
+    Ok(layers)
+}
+
 fn parse_parameter_payload(
     payload: &str,
     setup: &SetupReport,
@@ -448,9 +706,13 @@ fn parse_parameter_payload(
             "parameter payload must be bounded ASCII".into(),
         ));
     }
-    let Some(body) = payload.strip_prefix("v2|") else {
+    let (body, component_payload) = if let Some(body) = payload.strip_prefix("v2|") {
+        (body, false)
+    } else if let Some(body) = payload.strip_prefix("v4|") {
+        (body, true)
+    } else {
         return Err(SessionError::Protocol(
-            "macOS resident numeric parameters require a v2 payload".into(),
+            "macOS resident fixture parameters require a v2 or v4 payload".into(),
         ));
     };
     if body.is_empty() {
@@ -486,7 +748,7 @@ fn parse_parameter_payload(
             .iter()
             .find(|parameter| parameter.slot == slot)
             .ok_or_else(|| SessionError::Protocol(format!("unknown parameter slot {slot}")))?;
-        let (value, color, point) = match kind {
+        let (value, color, point, angle, point3d) = match kind {
             "argb8" => {
                 if parameter.param_type != PARAM_COLOR {
                     return Err(SessionError::Protocol(format!(
@@ -507,7 +769,7 @@ fn parse_parameter_payload(
                         )
                     })?;
                 }
-                (None, Some(color), None)
+                (None, Some(color), None, None, None)
             }
             "point" => {
                 if parameter.param_type != PARAM_POINT {
@@ -532,10 +794,54 @@ fn parse_parameter_payload(
                         ));
                     }
                 }
-                (None, None, Some(point))
+                (None, None, Some(point), None, None)
+            }
+            "angle" if component_payload => {
+                if parameter.param_type != PARAM_ANGLE {
+                    return Err(SessionError::Protocol(format!(
+                        "parameter slot {slot} is not an angle parameter"
+                    )));
+                }
+                let angle = encoded.parse::<f64>().map_err(|_| {
+                    SessionError::Protocol("angle component must be a finite number".into())
+                })?;
+                if !angle.is_finite() || !(-32768.0..=32768.0).contains(&angle) {
+                    return Err(SessionError::Protocol(
+                        "angle component is outside the supported range".into(),
+                    ));
+                }
+                (None, None, None, Some(angle), None)
+            }
+            "point3d" if component_payload => {
+                if parameter.param_type != PARAM_POINT3D {
+                    return Err(SessionError::Protocol(format!(
+                        "parameter slot {slot} is not a point3d parameter"
+                    )));
+                }
+                let components = encoded.split(',').collect::<Vec<_>>();
+                if components.len() != 3 {
+                    return Err(SessionError::Protocol(
+                        "point3d parameter requires three components".into(),
+                    ));
+                }
+                let mut point3d = [0.0; 3];
+                for (destination, component) in point3d.iter_mut().zip(components) {
+                    *destination = component.parse::<f64>().map_err(|_| {
+                        SessionError::Protocol("point3d components must be finite numbers".into())
+                    })?;
+                    if !destination.is_finite() || !(-32768.0..=32768.0).contains(destination) {
+                        return Err(SessionError::Protocol(
+                            "point3d component is outside the supported range".into(),
+                        ));
+                    }
+                }
+                (None, None, None, None, Some(point3d))
             }
             "i32" | "f64" => {
-                if parameter.param_type == PARAM_COLOR || parameter.param_type == PARAM_POINT {
+                if matches!(
+                    parameter.param_type,
+                    PARAM_COLOR | PARAM_POINT | PARAM_ANGLE | PARAM_POINT3D
+                ) {
                     return Err(SessionError::Protocol(format!(
                         "typed parameter slot {slot} requires its matching payload kind"
                     )));
@@ -548,7 +854,7 @@ fn parse_parameter_payload(
                         "parameter value shape is invalid".into(),
                     ));
                 }
-                (Some(value), None, None)
+                (Some(value), None, None, None, None)
             }
             _ => {
                 return Err(SessionError::Protocol(format!(
@@ -562,6 +868,8 @@ fn parse_parameter_payload(
             value,
             color,
             point,
+            angle,
+            point3d,
         });
     }
     Ok(values)
@@ -626,6 +934,25 @@ mod tests {
     use crate::classic::{
         MAX_FAILURE_CRASH_SNAPSHOT_BYTES, MAX_FAILURE_SUITE_REQUEST_BYTES, MAX_FAILURE_TEXT_BYTES,
     };
+
+    #[test]
+    fn fixture_total_time_is_strict_and_allows_zero_duration_at_t_zero() {
+        let valid = serde_json::json!({"total":210})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(parse_fixture_total_time(&valid, 42).unwrap(), 210);
+        let zero = serde_json::json!({"total":0}).as_object().unwrap().clone();
+        assert_eq!(parse_fixture_total_time(&zero, 0).unwrap(), 0);
+        assert!(parse_fixture_total_time(&zero, 1).is_err());
+        let negative = serde_json::json!({"total":-1}).as_object().unwrap().clone();
+        assert!(parse_fixture_total_time(&negative, 0).is_err());
+        let oversized = serde_json::json!({"total":i64::from(i32::MAX) + 1})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(parse_fixture_total_time(&oversized, 0).is_err());
+    }
 
     #[test]
     fn probe_failure_response_carries_bounded_structured_diagnostics() {
@@ -886,10 +1213,97 @@ mod tests {
     }
 
     #[test]
+    fn component_parameter_payload_carries_angle_and_point3d() {
+        let parameter = |slot, param_type, name: &str| crate::classic::ParameterReport {
+            slot,
+            index: slot as i32,
+            param_type,
+            name: name.into(),
+            default_value: None,
+            valid_min: None,
+            valid_max: None,
+            slider_min: None,
+            slider_max: None,
+            precision: None,
+            current_color: None,
+            default_color: None,
+        };
+        let setup = SetupReport {
+            schema_version: 1,
+            execution_backend: "fixture",
+            global_setup_error: 0,
+            params_setup_error: 0,
+            advertised_num_params: 3,
+            out_flags: 0,
+            out_flags2: 0,
+            parameters: vec![
+                parameter(1, PARAM_ANGLE, "Angle"),
+                parameter(2, PARAM_POINT3D, "Position"),
+            ],
+            suite_requests: Vec::new(),
+            unsupported_suite_calls: Vec::new(),
+            dropped_unsupported_suite_calls: 0,
+        };
+        let parsed =
+            parse_parameter_payload("v4|param_1@1:angle=12.5;param_2@2:point3d=25,50,75", &setup)
+                .unwrap();
+        assert_eq!(parsed[0].angle, Some(12.5));
+        assert_eq!(parsed[1].point3d, Some([25.0, 50.0, 75.0]));
+        assert!(parse_parameter_payload("v2|param_1@1:angle=12.5", &setup).is_err());
+        assert!(parse_parameter_payload("v4|param_2@2:point3d=1,2", &setup).is_err());
+    }
+
+    #[test]
     fn length_prefix_rejects_zero_and_oversized_messages() {
         assert!(read_message(&mut &0u32.to_le_bytes()[..]).is_err());
         assert!(
             read_message(&mut &((MAX_CONTROL_MESSAGE_BYTES + 1) as u32).to_le_bytes()[..]).is_err()
         );
+    }
+
+    #[test]
+    fn resident_layer_manifest_is_bounded_unique_and_session_local() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-resident-layer-manifest-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root).unwrap();
+        let input = root.join("input.argb8");
+        fs::write(&input, [0u8; 4]).unwrap();
+        let layer = root.join("layer.argb8");
+        fs::write(&layer, [255u8, 1, 2, 3]).unwrap();
+        let manifest = root.join("layers.json");
+        let entry = serde_json::json!({
+            "slot": 1, "width": 1, "height": 1, "path": layer
+        });
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({"v":1,"layers":[entry.clone()]})).unwrap(),
+        )
+        .unwrap();
+        let loaded =
+            load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].pixels, [255, 1, 2, 3]);
+
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({"v":1,"layers":[entry.clone(),entry]})).unwrap(),
+        )
+        .unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+
+        fs::write(&layer, [0u8; 8]).unwrap();
+        let entry = serde_json::json!({
+            "slot": 1, "width": 1, "height": 1, "path": layer
+        });
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({"v":1,"layers":[entry]})).unwrap(),
+        )
+        .unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

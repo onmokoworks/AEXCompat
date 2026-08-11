@@ -273,30 +273,6 @@ impl RenderUiAction {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct InteractiveParameter {
-    pub slot: u32,
-    pub name: String,
-    pub kind: String,
-    pub minimum: f64,
-    pub maximum: f64,
-    pub value: f64,
-    pub choices: Vec<String>,
-    pub color: [u8; 4],
-    pub components: [f64; 3],
-    pub component_count: usize,
-    pub layer_path: Option<PathBuf>,
-    pub enabled: bool,
-    pub visible: bool,
-    pub supervised: bool,
-    #[serde(default)]
-    pub debug_summary: Option<String>,
-    #[serde(default)]
-    pub custom_ui_events: u32,
-    #[serde(default)]
-    pub control_size: [u16; 2],
-}
-
 #[derive(Clone, Debug)]
 pub struct TimedLayerImage {
     pub slot: u32,
