@@ -6,6 +6,59 @@ pub struct GuestParam {
     pub bytes: Vec<u8>,
 }
 
+fn parameter_disk_id(parameter: &GuestParam) -> Option<i32> {
+    parameter.bytes.get(..4).and_then(|bytes| {
+        let bytes: [u8; 4] = bytes.try_into().ok()?;
+        Some(i32::from_le_bytes(bytes))
+    })
+}
+
+pub(crate) fn resolve_layer_parameter_offset(
+    parameters: &[GuestParam],
+    checkout_index: i32,
+) -> Result<usize, String> {
+    let positional = usize::try_from(checkout_index)
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|offset| parameters.get(offset).map(|parameter| (offset, parameter)));
+    let mut disk_matches = parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| parameter_disk_id(parameter) == Some(checkout_index));
+    let disk_match = disk_matches.next();
+    if disk_matches.next().is_some() {
+        return Err(format!(
+            "smart checkout disk_id={checkout_index} is duplicated"
+        ));
+    }
+
+    let positional_layer = positional.filter(|(_, parameter)| parameter.param_type == 0);
+    if let (Some((position, _)), Some((disk_position, _))) = (positional_layer, disk_match) {
+        if position != disk_position {
+            return Err(format!(
+                "smart checkout index={checkout_index} ambiguously names positional and disk-id parameters"
+            ));
+        }
+    }
+    if let Some((offset, _)) = positional_layer {
+        return Ok(offset);
+    }
+    if let Some((offset, parameter)) = disk_match {
+        if parameter.param_type == 0 {
+            return Ok(offset);
+        }
+    }
+    if positional.is_some() || disk_match.is_some() {
+        Err(format!(
+            "smart checkout index={checkout_index} is not a PF_Param_LAYER"
+        ))
+    } else {
+        Err(format!(
+            "smart checkout index={checkout_index} does not resolve to a declared parameter"
+        ))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnsupportedSuiteCall {
     pub name: &'static str,

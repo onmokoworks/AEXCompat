@@ -3056,19 +3056,7 @@ fn smart_checkout_world(
     let mut world = if index == 0 {
         state.smart_input_world
     } else {
-        let offset = usize::try_from(index)
-            .ok()
-            .and_then(|value| value.checked_sub(1))
-            .ok_or_else(|| format!("smart checkout index is negative: {index}"))?;
-        let parameter = state
-            .params
-            .get(offset)
-            .ok_or_else(|| format!("smart checkout index is outside parameters: {index}"))?;
-        if parameter.param_type != 0 {
-            return Err(format!(
-                "smart checkout index={index} is not a PF_Param_LAYER"
-            ));
-        }
+        let offset = resolve_layer_parameter_offset(&state.params, index)?;
         state
             .parameter_definitions
             .get(offset)
