@@ -133,6 +133,108 @@ constexpr int32_t kFieldFrame = 0;
 // PreRender and SmartRender must see the same value.
 constexpr int32_t kChannelMaskArgb = 0xF;
 
+// #1072:mirror AE's PTX cubins next to the staged
+// worker exe so GPUFoundation's ExecutableDir()/PTX/CUDA finds Memory.cubin.
+inline void ensure_ptx_at_executable_dir() {
+  std::array<wchar_t, 4096> exe{};
+  if (GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size())) == 0)
+    return;
+  std::wstring exe_dir(exe.data());
+  auto slash = exe_dir.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return;
+  exe_dir.resize(slash);
+  if (exe_dir.rfind(L"\\\\?\\", 0) == 0) exe_dir = exe_dir.substr(4);
+  std::array<wchar_t, 4096> gf{};
+  const DWORD gf_len = GetModuleFileNameW(GetModuleHandleW(L"GPUFoundation.dll"),
+                                          gf.data(), static_cast<DWORD>(gf.size()));
+  if (gf_len == 0) return;
+  std::wstring ae_dir(gf.data(), gf_len);
+  slash = ae_dir.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return;
+  ae_dir.resize(slash);
+  if (ae_dir.rfind(L"\\\\?\\", 0) == 0) ae_dir = ae_dir.substr(4);
+  CreateDirectoryW((exe_dir + L"\\PTX").c_str(), nullptr);
+  for (const wchar_t* fw : {L"CUDA", L"CL", L"HLSL"}) {
+    const std::wstring src = ae_dir + L"\\PTX\\" + fw;
+    if (GetFileAttributesW(src.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+    const std::wstring dst = exe_dir + L"\\PTX\\" + fw;
+    CreateDirectoryW(dst.c_str(), nullptr);
+    WIN32_FIND_DATAW fd{};
+    const HANDLE h = FindFirstFileW((src + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) continue;
+    do {
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+      CopyFileW((src + L"\\" + fd.cFileName).c_str(),
+                (dst + L"\\" + fd.cFileName).c_str(), TRUE);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+}
+
+// #1072:remove the PTX cubins ensure_ptx mirrored
+// into the staged worker's ExecutableDir once GPUFoundation has preloaded every
+// kernel into device memory (kernel_load_action=2). The staged exe dir is a
+// trusted-worker stage slot root; leaving an unexpected PTX/ subtree there makes
+// the broker skip that slot forever (trusted_worker_stage.rs stage_tree_has_
+// unexpected_entry), which exhausts all slots after a handful of GPU renders.
+// Deleting it right after the preload keeps the slot clean for reuse. Only the
+// worker's own mirror is touched (its own ExecutableDir), so there is no foreign
+// path here.
+inline void remove_ptx_at_executable_dir() {
+  std::array<wchar_t, 4096> exe{};
+  if (GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size())) == 0)
+    return;
+  std::wstring exe_dir(exe.data());
+  auto slash = exe_dir.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return;
+  exe_dir.resize(slash);
+  if (exe_dir.rfind(L"\\\\?\\", 0) == 0) exe_dir = exe_dir.substr(4);
+  const std::wstring ptx = exe_dir + L"\\PTX";
+  for (const wchar_t* fw : {L"CUDA", L"CL", L"HLSL"}) {
+    const std::wstring dir = ptx + L"\\" + fw;
+    WIN32_FIND_DATAW fd{};
+    const HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+      do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+      } while (FindNextFileW(h, &fd));
+      FindClose(h);
+    }
+    RemoveDirectoryW(dir.c_str());
+  }
+  RemoveDirectoryW(ptx.c_str());
+}
+
+// #1072:query a GPU VideoFrame's typed memory-access
+// interfaces (Contrast FUN_1800078c0/FUN_180007980). `mapping` is the object at
+// InterfaceRef slot [8] of GetGPUIVFFromPFEffectWorld's 24-byte return, NOT the
+// IVideoFrame at [0]. vtable[1] is the query-by-type-name entry.
+// This dereferences a vtable on `mapping` whose layout was recovered from the
+// RE of the color family; a GPU frame whose mapping object has a different shape
+// than the one observed there could fault. That is crash-contained by the worker
+// process floor (separate process + Job Object + minidump), not turned into a
+// structured diagnostic here — the transport is only reached for effects that
+// already advertise GPU F32 render and returned 14 on the CPU path.
+inline bool gpu_frame_device_memory(void* mapping, void** out_ptr, int32_t* out_rowbytes) {
+  if (!mapping) return false;
+  struct TypedQuery { const char* name; std::uint64_t len; };
+  auto* obj = static_cast<void***>(mapping);
+  using QueryFn = void* (*)(void*, const TypedQuery*);
+  const auto query = [&](const char* name, std::uint64_t len) -> void* {
+    TypedQuery q{name, len};
+    return reinterpret_cast<QueryFn>((*obj)[1])(mapping, &q);
+  };
+  void* gpu_access = query("VF::IGPUVideoFrameMemoryAccess>(void)", 30);
+  void* pixel_access = query("VF::IVideoFrame2DPixelMemoryAccess>(void)", 34);
+  if (!gpu_access || !pixel_access) return false;
+  auto* g = static_cast<void***>(gpu_access);
+  auto* p = static_cast<void***>(pixel_access);
+  *out_ptr = reinterpret_cast<void* (*)(void*)>((*g)[0])(gpu_access);
+  *out_rowbytes = reinterpret_cast<int32_t (*)(void*)>((*p)[1])(pixel_access);
+  return *out_ptr != nullptr && *out_rowbytes > 0;
+}
+
 // Adobe's own effects that depend on VideoFrame.dll expect a CPU SmartFX world
 // to retain the private PPix backing created by that DLL.  The public
 // PF_EffectWorld layout alone cannot manufacture that backing.  Keep this an
@@ -272,22 +374,12 @@ class VideoFrameCpuWorlds {
   bool create_input(int32_t width, int32_t height, const World& source,
     bool gpu, int32_t framework) {
     if (gpu) {
-      if (!create_cpu(input_cpu_staging_, input_cpu_staging_live_, width,
-                      height) ||
-          !copy_pixels(source, input_cpu_staging_))
-        return false;
       input_gpu_ = create_gpu(input_, input_live_, width, height, framework);
       if (!input_gpu_) return false;
-      void** source_ppix{};
-      void** destination_ppix{};
-      std::memcpy(&source_ppix, input_cpu_staging_.data() + 64,
-                  sizeof(source_ppix));
-      std::memcpy(&destination_ppix, input_.data() + 64,
-                  sizeof(destination_ppix));
-      const std::array<int32_t, 4> bounds{0, 0, width, height};
-      const int32_t copy_error = ppix_copy_(
-          source_ppix, destination_ppix, bounds.data(), bounds.data(), 0);
-      return copy_error == 0;
+      // #1072:upload float32 input straight into the
+      // GPU frame's CUDA device memory (ppixCopy does not cross CPU/GPU).
+      return gpu_memcpy_frame(input_, world_pixels(source), world_i32(source, 32),
+                              width, height, /*to_gpu=*/true);
     }
     return create_cpu(input_, input_live_, width, height) &&
         copy_pixels(source, input_);
@@ -302,12 +394,6 @@ class VideoFrameCpuWorlds {
     return create_cpu(output_, output_live_, width, height);
   }
 
-  bool prepare_gpu_output_staging(int32_t width, int32_t height) {
-    return output_cpu_staging_live_ ||
-        create_cpu(output_cpu_staging_, output_cpu_staging_live_, width,
-                   height);
-  }
-
   World& input() { return input_; }
   World& output() { return output_; }
 
@@ -320,21 +406,9 @@ class VideoFrameCpuWorlds {
   bool copy_output_to(World& destination) {
     if (!output_live_) return false;
     if (!output_gpu_) return copy_pixels(output_, destination);
-    if (!output_cpu_staging_live_) return false;
-    using CuCtxPushCurrent = int(__stdcall*)(void*);
-    using CuCtxPopCurrent = int(__stdcall*)(void**);
-    const HMODULE cuda = GetModuleHandleW(L"nvcuda.dll");
-    const auto push_current = cuda ? reinterpret_cast<CuCtxPushCurrent>(
-        GetProcAddress(cuda, "cuCtxPushCurrent_v2")) : nullptr;
-    const auto pop_current = cuda ? reinterpret_cast<CuCtxPopCurrent>(
-        GetProcAddress(cuda, "cuCtxPopCurrent_v2")) : nullptr;
-    const bool pushed = gf_cuda_context_ && push_current && pop_current &&
-        push_current(gf_cuda_context_) == 0;
-    const bool copied = pushed && transfer_gpu_to_cpu(output_, destination);
-    void* popped{};
-    const bool popped_ok = pushed && pop_current(&popped) == 0 &&
-        popped == gf_cuda_context_;
-    return copied && popped_ok;
+    // #1072:transfer_gpu_to_cpu does the CUDA
+    // context push and the device->host copy itself.
+    return transfer_gpu_to_cpu(output_, destination);
   }
 
   ~VideoFrameCpuWorlds() {
@@ -351,14 +425,6 @@ class VideoFrameCpuWorlds {
       else
         dispose_(input_.data());
       input_live_ = false;
-    }
-    if (output_cpu_staging_live_) {
-      dispose_(output_cpu_staging_.data());
-      output_cpu_staging_live_ = false;
-    }
-    if (input_cpu_staging_live_) {
-      dispose_(input_cpu_staging_.data());
-      input_cpu_staging_live_ = false;
     }
   }
 
@@ -506,6 +572,7 @@ class VideoFrameCpuWorlds {
 
   bool initialize_gpu_foundation_at_module_root() {
     if (is_gpu_foundation_initialized_()) return true;
+    ensure_ptx_at_executable_dir();  // #1072
     initialize_asl_foundation_();
     owns_asl_foundation_ = true;
     std::array<wchar_t, 32768> original_directory{};
@@ -527,7 +594,7 @@ class VideoFrameCpuWorlds {
       }
     }
     initialize_gpu_foundation_(true, true, true, true, true,
-                               /*kernel_load_action=*/1);
+                               /*kernel_load_action=*/2);  // #1072
     // GF creates and leaves its private CUDA context current. The transport
     // starts from the primary context immediately after this adapter returns;
     // keep the two owners separate by removing GF's context from this thread's
@@ -548,6 +615,15 @@ class VideoFrameCpuWorlds {
     }
     if (changed_directory)
       SetCurrentDirectoryW(original_directory.data());
+    // Kernels are resident in device memory now (full preload above), so the
+    // mirrored cubins on disk are no longer needed. Remove them so this worker's
+    // stage slot is not left poisoned for the next effect (#1072). The "preload
+    // covers every kernel the render dispatches" assumption is validated
+    // empirically: the color family renders correctly with the mirror already
+    // deleted here (full corpus sweep, #1072). A new gate-matched effect that
+    // lazy-faults a kernel not covered by the preload would fail its GPU render;
+    // re-verify the sweep when widening the gate, or defer removal to worker exit.
+    remove_ptx_at_executable_dir();
     owns_gpu_foundation_ = is_gpu_foundation_initialized_();
     return owns_gpu_foundation_;
   }
@@ -614,27 +690,82 @@ class VideoFrameCpuWorlds {
         world_i32(world, 40) == height;
   }
 
-  bool transfer_gpu_to_cpu(const World& gpu, World& destination) const {
-    void** source_ppix{};
-    void** staging_ppix{};
-    std::memcpy(&source_ppix, gpu.data() + 64, sizeof(source_ppix));
-    std::memcpy(&staging_ppix, output_cpu_staging_.data() + 64,
-                sizeof(staging_ppix));
-    const int32_t width = world_i32(destination, 36);
-    const int32_t height = world_i32(destination, 40);
-    const std::array<int32_t, 4> bounds{0, 0, width, height};
-    const int32_t error = source_ppix && staging_ppix
-        ? ppix_copy_(source_ppix, staging_ppix, bounds.data(), bounds.data(), 0)
-        : -1;
-    return error == 0 && copy_pixels(output_cpu_staging_, destination);
+  // #1072:copy float32 ARGB rows between a GPU
+  // frame's CUDA device memory and a CPU buffer inside gf_cuda_context_.
+  bool gpu_memcpy_frame(const World& gpu_world, void* cpu_buf, int32_t cpu_rowbytes,
+                        int32_t width, int32_t height, bool to_gpu) {
+    if (!cpu_buf || width <= 0 || height <= 0) return false;
+    const size_t row = static_cast<size_t>(width) * 16;  // float32 ARGB
+    // Fail closed rather than over-read/over-write a malformed world (mirrors
+    // copy_pixels' rowbytes check): the per-row payload is `row` bytes on both
+    // sides, so a stride shorter than that is a rejected world, not a clamp. The
+    // negative check matters because cpu_rowbytes is signed and the offset math
+    // below is unsigned: a negative stride cast to size_t would pass a bare
+    // `< row` test and then wrap the pointer.
+    if (cpu_rowbytes < 0 || static_cast<size_t>(cpu_rowbytes) < row) return false;
+    std::array<std::byte, 24> ivf{};
+    get_gpu_frame_(ivf.data(), gpu_world.data());
+    // KNOWN LEAK (follow-up): GetGPUIVFFromPFEffectWorld returns an owned
+    // InterfaceRef<IVideoFrame> (RE of VF::GetGPUIVFFromPFEffectWorld @18001a0c0:
+    // it stores AddRef'd pointers into the 24-byte return and the caller's
+    // InterfaceRef destructor is what releases them), and the typed query in
+    // gpu_frame_device_memory returns AddRef'd sub-interfaces too. This borrows
+    // both without releasing, matching the pre-existing get_mapping_ convention.
+    // Per-frame (2x: input upload + output copy) it does not accumulate for the
+    // one-frame-per-worker render paths validated here, but a resident multi-frame
+    // GPU session would leak. A correct fix releases the frame ref AND the sub-
+    // interfaces (release_interface_ref handles the 24-byte ref; the sub-interface
+    // release ABI needs its own RE) and must be verified with a multi-frame leak
+    // test before landing, since a wrong release double-frees.
+    void* mapping{};
+    std::memcpy(&mapping, ivf.data() + 8, sizeof(mapping));  // slot [8]
+    void* dev_ptr{};
+    int32_t gpu_rowbytes{};
+    if (!gpu_frame_device_memory(mapping, &dev_ptr, &gpu_rowbytes) ||
+        static_cast<size_t>(gpu_rowbytes) < row)
+      return false;
+    const HMODULE cuda = GetModuleHandleW(L"nvcuda.dll");
+    if (!cuda) return false;
+    using CuMemcpyHtoD = int(__stdcall*)(unsigned long long, const void*, size_t);
+    using CuMemcpyDtoH = int(__stdcall*)(void*, unsigned long long, size_t);
+    using CuCtxPushCurrent = int(__stdcall*)(void*);
+    using CuCtxPopCurrent = int(__stdcall*)(void**);
+    using CuCtxSynchronize = int(__stdcall*)();
+    const auto h2d = reinterpret_cast<CuMemcpyHtoD>(GetProcAddress(cuda, "cuMemcpyHtoD_v2"));
+    const auto d2h = reinterpret_cast<CuMemcpyDtoH>(GetProcAddress(cuda, "cuMemcpyDtoH_v2"));
+    const auto push = reinterpret_cast<CuCtxPushCurrent>(GetProcAddress(cuda, "cuCtxPushCurrent_v2"));
+    const auto pop = reinterpret_cast<CuCtxPopCurrent>(GetProcAddress(cuda, "cuCtxPopCurrent_v2"));
+    const auto sync = reinterpret_cast<CuCtxSynchronize>(GetProcAddress(cuda, "cuCtxSynchronize"));
+    if (!h2d || !d2h || !push || !pop) return false;
+    // dev_ptr is only valid inside gf_cuda_context_; refuse to issue the copy
+    // against whatever context happens to be current if the push failed, rather
+    // than reading/writing the wrong device memory.
+    if (!gf_cuda_context_ || push(gf_cuda_context_) != 0) return false;
+    bool ok = true;
+    for (int32_t y = 0; y < height && ok; ++y) {
+      const unsigned long long dev = reinterpret_cast<unsigned long long>(dev_ptr) +
+          static_cast<unsigned long long>(y) * gpu_rowbytes;
+      auto* cpu = static_cast<std::byte*>(cpu_buf) + static_cast<size_t>(y) * cpu_rowbytes;
+      ok = to_gpu ? (h2d(dev, cpu, row) == 0) : (d2h(cpu, dev, row) == 0);
+    }
+    if (ok && sync) sync();
+    // The context we pushed must be the one that comes back off the stack; a
+    // mismatch means the stack was corrupted under us, so fail closed.
+    void* popped{};
+    const bool popped_ok = pop(&popped) == 0 && popped == gf_cuda_context_;
+    return ok && popped_ok;
+  }
+
+  bool transfer_gpu_to_cpu(const World& gpu, World& destination) {
+    return gpu_memcpy_frame(gpu, world_pixels(destination), world_i32(destination, 32),
+                            world_i32(destination, 36), world_i32(destination, 40),
+                            /*to_gpu=*/false);
   }
 
   bool resolved_{};
   bool available_{};
   bool input_live_{};
   bool output_live_{};
-  bool input_cpu_staging_live_{};
-  bool output_cpu_staging_live_{};
   CreateWorld create_{};
   DisposeWorld dispose_{};
   ParConstructor par_ctor_{};
@@ -676,8 +807,6 @@ class VideoFrameCpuWorlds {
   void* gf_cuda_context_{};
   World input_{};
   World output_{};
-  World input_cpu_staging_{};
-  World output_cpu_staging_{};
 };
 
 template <typename T, std::size_t N>
@@ -1026,8 +1155,6 @@ bool dispatch(const Request& request, const Hooks& hooks,
   bool video_frame_gpu_ready = false;
   if (result.gpu_render_dispatched && video_frame_adapter_ready) {
     video_frame_gpu_ready =
-        video_frame_worlds.prepare_gpu_output_staging(
-            smart_bounds.width, smart_bounds.height) &&
         video_frame_worlds.create_input(plan.width, plan.height,
                                         *request.input_world, true,
                                         gpu_framework) &&
