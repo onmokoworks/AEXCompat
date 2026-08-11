@@ -478,10 +478,7 @@ fn install_double_import(
 
 fn windows_lround(value: f64) -> i32 {
     let rounded = value.round();
-    if !rounded.is_finite()
-        || rounded < f64::from(i32::MIN)
-        || rounded > f64::from(i32::MAX)
-    {
+    if !rounded.is_finite() || rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
         // UCRT's 32-bit `long` conversion uses the integer-indefinite value for
         // a domain/range failure. errno/fenv are not otherwise virtualized by
         // this serial backend, but the returned word remains ABI-compatible.
@@ -495,10 +492,7 @@ fn install_lround_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
 ) -> Result<(), GuestError> {
-    uc(
-        "write lround return",
-        unicorn.mem_write(address, &[0xc3]),
-    )?;
+    uc("write lround return", unicorn.mem_write(address, &[0xc3]))?;
     uc(
         "install lround import",
         unicorn.add_code_hook(address, address, |unicorn, _, _| {
