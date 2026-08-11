@@ -66,6 +66,20 @@ impl MacRenderFormat {
         }
     }
 
+    fn validate_bytes(self, width: u32, height: u32, bytes: &[u8]) -> Result<(), String> {
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(self.bytes_per_pixel()))
+            .ok_or_else(|| "fixture world byte count overflow".to_string())?;
+        if bytes.len() != expected {
+            return Err(format!(
+                "fixture world has {} bytes, expected {expected}",
+                bytes.len()
+            ));
+        }
+        Ok(())
+    }
+
     fn artifact_format(self) -> RenderPixelFormat {
         match self {
             Self::PngArgb8 => RenderPixelFormat::Argb8,
@@ -1222,6 +1236,8 @@ struct StartedResidentWorker {
     plugin_sha256: String,
     input_sha256: String,
     additional_session_files: usize,
+    fixture_input_world: Option<PathBuf>,
+    fixture_layer_worlds: Vec<(u32, u32, u32, PathBuf)>,
 }
 
 struct MacFixtureLaunch<'a> {
@@ -1384,6 +1400,7 @@ fn launch_resident_candidate(
         "--pixel-format".to_string(),
         format.pixel_format().to_string(),
     ];
+    let mut fixture_layer_worlds = Vec::new();
     if let Some(fixture) = fixture {
         let mut staged_layers = Vec::with_capacity(fixture.layers.len());
         for (slot, source) in fixture.layers {
@@ -1397,6 +1414,14 @@ fn launch_resident_candidate(
                 height: layer_height,
                 path,
             });
+            fixture_layer_worlds.push((
+                *slot,
+                layer_width,
+                layer_height,
+                session
+                    .root()
+                    .join(format!("fixture-layer-slot{slot}-world.bin")),
+            ));
         }
         let manifest_path = session.root().join("fixture-layers-v1.json");
         let manifest = serde_json::to_vec(&StagedLayerManifest {
@@ -1475,12 +1500,13 @@ fn launch_resident_candidate(
             }
         ));
     }
-    let additional_session_files = fixture.map_or(0, |fixture| fixture.layers.len() + 1);
+    let additional_session_files = fixture.map_or(0, |fixture| fixture.layers.len() * 2 + 2);
     if let Err(error) = session.audit_tree_with_additional_files(additional_session_files) {
         drop(stdin);
         let _ = terminate_process_group(&mut child);
         return Err(error);
     }
+    let fixture_input_world = fixture.map(|_| session.root().join("fixture-input-world.bin"));
     Ok(StartedResidentWorker {
         child,
         stdin,
@@ -1496,6 +1522,8 @@ fn launch_resident_candidate(
         plugin_sha256,
         input_sha256,
         additional_session_files,
+        fixture_input_world,
+        fixture_layer_worlds,
     })
 }
 
@@ -1549,6 +1577,7 @@ fn close_probe_worker(mut worker: StartedResidentWorker) -> Result<(), String> {
 
 fn fixture_parameter_payload(parameters: &[InteractiveParameter]) -> Result<String, String> {
     let mut assignments = Vec::new();
+    let mut component_payload = false;
     for parameter in parameters {
         let encoded = match parameter.kind.as_str() {
             "layer" | "group_start" | "group_end" | "button" | "custom" | "no_data" => {
@@ -1576,10 +1605,33 @@ fn fixture_parameter_payload(parameters: &[InteractiveParameter]) -> Result<Stri
                 "argb8={},{},{},{}",
                 parameter.color[0], parameter.color[1], parameter.color[2], parameter.color[3]
             ),
-            "point" if parameter.component_count == 2 => format!(
-                "point={},{}",
-                parameter.components[0], parameter.components[1]
-            ),
+            "angle" | "point" | "point3d" => {
+                let expected = match parameter.kind.as_str() {
+                    "angle" => 1,
+                    "point" => 2,
+                    _ => 3,
+                };
+                if parameter.component_count != expected
+                    || parameter.components[..expected]
+                        .iter()
+                        .any(|value| !value.is_finite() || !(-32768.0..=32768.0).contains(value))
+                {
+                    return Err(format!(
+                        "fixture component slot {} is invalid",
+                        parameter.slot
+                    ));
+                }
+                component_payload = true;
+                format!(
+                    "{}={}",
+                    parameter.kind,
+                    parameter.components[..expected]
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }
             other => {
                 return Err(format!(
                     "macOS fixture parameter kind {other:?} is not supported"
@@ -1600,7 +1652,11 @@ fn fixture_parameter_payload(parameters: &[InteractiveParameter]) -> Result<Stri
             parameter.slot, parameter.slot
         ));
     }
-    Ok(format!("v2|{}", assignments.join(";")))
+    Ok(format!(
+        "{}|{}",
+        if component_payload { "v4" } else { "v2" },
+        assignments.join(";")
+    ))
 }
 
 fn fixture_staging_path(output: &Path) -> Result<PathBuf, String> {
@@ -1694,13 +1750,6 @@ pub fn render_fixture_headless(
     if layer_paths.len() > 8 {
         return Err("fixture secondary layer count exceeds 8".into());
     }
-    let (primary_width, primary_height, primary_argb) =
-        encode_resident_image(&loaded.primary_layer, format)?;
-    let mut layer_worlds = Vec::with_capacity(layer_paths.len());
-    for (slot, path) in &layer_paths {
-        let (width, height, bytes) = encode_resident_image(path, format)?;
-        layer_worlds.push((*slot, width, height, bytes));
-    }
     let launch = MacFixtureLaunch {
         layers: &layer_paths,
         smart: fixture.render_path == "smart",
@@ -1709,16 +1758,15 @@ pub fn render_fixture_headless(
     let workers = guest_worker_candidates(repository)?;
     let mut started =
         start_resident_worker(&workers, aex, &loaded.primary_layer, format, Some(&launch))?;
-    if started.width != primary_width || started.height != primary_height {
-        let _ = close_probe_worker(started);
-        return Err("resident dimensions differ from the fixture primary layer".into());
-    }
+    let primary_width = started.width;
+    let primary_height = started.height;
     let request = json!({
-        "v": 2,
+        "v": 3,
         "type": "render_frame",
         "frame_index": 0,
         "current_time": {
             "value": fixture.timing.current_time,
+            "step": fixture.timing.time_step,
             "scale": fixture.timing.time_scale
         },
         "parameters": parameters
@@ -1747,7 +1795,7 @@ pub fn render_fixture_headless(
     };
     let plugin_sha256 = started.plugin_sha256.clone();
     let input_sha256 = started.input_sha256.clone();
-    let inspected = (|| -> Result<Vec<u8>, String> {
+    let inspected = (|| -> Result<_, String> {
         let expected_checksum =
             validate_resident_frame(&response, 0, primary_width, primary_height, format)?;
         let actual_path = response["output"]["render_path"]
@@ -1772,10 +1820,30 @@ pub fn render_fixture_headless(
         if format!("{:x}", Sha256::digest(&output)) != expected_checksum {
             return Err("fixture output checksum differs from worker response".into());
         }
-        Ok(output)
+        let input_path = started
+            .fixture_input_world
+            .as_ref()
+            .ok_or_else(|| "fixture input world dump path is unavailable".to_string())?;
+        let input_world = std::fs::read(input_path)
+            .map_err(|error| format!("read fixture input world dump: {error}"))?;
+        format
+            .validate_bytes(primary_width, primary_height, &input_world)
+            .map_err(|error| format!("validate fixture input world dump: {error}"))?;
+        let mut layer_worlds = Vec::with_capacity(started.fixture_layer_worlds.len());
+        for (slot, width, height, path) in &started.fixture_layer_worlds {
+            let bytes = std::fs::read(path)
+                .map_err(|error| format!("read fixture layer slot {slot} world dump: {error}"))?;
+            format
+                .validate_bytes(*width, *height, &bytes)
+                .map_err(|error| {
+                    format!("validate fixture layer slot {slot} world dump: {error}")
+                })?;
+            layer_worlds.push((*slot, *width, *height, bytes));
+        }
+        Ok((output, input_world, layer_worlds))
     })();
     let close = close_probe_worker(started);
-    let output_argb = inspected?;
+    let (output_argb, primary_argb, layer_worlds) = inspected?;
     close?;
 
     let staging = fixture_staging_path(output_directory)?;
@@ -2708,8 +2776,13 @@ mod tests {
             value,
             choices: Vec::new(),
             color: [255, 1, 2, 3],
-            components: [1.5, 2.5, 0.0],
-            component_count: usize::from(kind == "point") * 2,
+            components: [1.5, 2.5, 3.5],
+            component_count: match kind {
+                "angle" => 1,
+                "point" => 2,
+                "point3d" => 3,
+                _ => 0,
+            },
             layer_path: (kind == "layer").then(|| PathBuf::from("secondary.png")),
             enabled: true,
             visible: true,
@@ -2730,6 +2803,20 @@ mod tests {
         .unwrap();
         assert_eq!(payload, "v2|param_2@2:i32=12;param_3@3:f64=2.5");
         assert!(!payload.contains("param_1"));
+    }
+
+    #[test]
+    fn fixture_payload_preserves_angle_point_and_point3d_components() {
+        let payload = fixture_parameter_payload(&[
+            fixture_parameter(1, "angle", 0.0),
+            fixture_parameter(2, "point", 0.0),
+            fixture_parameter(3, "point3d", 0.0),
+        ])
+        .unwrap();
+        assert_eq!(
+            payload,
+            "v4|param_1@1:angle=1.5;param_2@2:point=1.5,2.5;param_3@3:point3d=1.5,2.5,3.5"
+        );
     }
 
     #[test]

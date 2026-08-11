@@ -1,6 +1,6 @@
 use crate::classic::{
-    ClassicError, ClassicHost, PARAM_COLOR, PARAM_LAYER, PARAM_POINT, ParameterValue,
-    ResidentFailureDiagnostic, ResidentLayer, SetupReport,
+    ClassicError, ClassicHost, PARAM_ANGLE, PARAM_COLOR, PARAM_LAYER, PARAM_POINT, PARAM_POINT3D,
+    ParameterValue, RenderReport, ResidentFailureDiagnostic, ResidentLayer, SetupReport,
 };
 use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
@@ -394,7 +394,7 @@ fn parse_render_frame(
         .ok_or_else(|| SessionError::Protocol("render_frame has no integer v".into()))?;
     let allowed = if version == 1 {
         &["current_time", "frame_index", "type", "v"][..]
-    } else if version == 2 {
+    } else if matches!(version, 2 | 3) {
         &["current_time", "frame_index", "parameters", "type", "v"][..]
     } else {
         return Err(SessionError::Protocol(format!(
@@ -410,7 +410,12 @@ fn parse_render_frame(
         .get("current_time")
         .and_then(Value::as_object)
         .ok_or_else(|| SessionError::Protocol("render_frame has no current_time object".into()))?;
-    require_exact_keys(current_time.keys().map(String::as_str), &["scale", "value"])?;
+    let time_keys = if version == 3 {
+        &["scale", "step", "value"][..]
+    } else {
+        &["scale", "value"][..]
+    };
+    require_exact_keys(current_time.keys().map(String::as_str), time_keys)?;
     let current_value = current_time
         .get("value")
         .and_then(Value::as_i64)
@@ -421,6 +426,18 @@ fn parse_render_frame(
         .and_then(Value::as_u64)
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| SessionError::Protocol("current_time.scale is outside u32".into()))?;
+    let current_step = if version == 3 {
+        current_time
+            .get("step")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                SessionError::Protocol("current_time.step must be a positive i32".into())
+            })?
+    } else {
+        1
+    };
     if current_scale != time_scale {
         return Err(SessionError::Protocol(format!(
             "current_time.scale {current_scale} does not match session scale {time_scale}"
@@ -428,13 +445,13 @@ fn parse_render_frame(
     }
     let parameters = match version {
         1 => Vec::new(),
-        2 => {
+        2 | 3 => {
             let payload = object
                 .get("parameters")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     SessionError::Protocol(
-                        "render_frame v2 requires a string parameters field".into(),
+                        "render_frame v2/v3 requires a string parameters field".into(),
                     )
                 })?;
             parse_parameter_payload(payload, setup)?
@@ -466,6 +483,7 @@ fn parse_render_frame(
             width,
             height,
             current_value,
+            current_step,
             current_scale,
             pixel_format,
             &input,
@@ -488,6 +506,9 @@ fn parse_render_frame(
             fs::write(output_slot, &report.raw_pixels).map_err(|error| {
                 SessionError::Io(format!("write resident output slot: {error}"))
             })?;
+            if fixture_smart.is_some() {
+                write_fixture_world_dumps(input_slot, &report)?;
+            }
             *generation += 1;
             write_message(
                 response,
@@ -534,6 +555,41 @@ fn parse_render_frame(
             Err(SessionError::Classic(error))
         }
     }
+}
+
+fn write_fixture_world_dumps(input_slot: &Path, report: &RenderReport) -> Result<(), SessionError> {
+    let root = input_slot
+        .parent()
+        .ok_or_else(|| SessionError::Protocol("resident input slot has no parent".into()))?;
+    let write_new = |path: &Path, bytes: &[u8]| -> Result<(), SessionError> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| {
+                SessionError::Io(format!(
+                    "create fixture world dump {}: {error}",
+                    path.display()
+                ))
+            })?;
+        file.write_all(bytes).map_err(|error| {
+            SessionError::Io(format!(
+                "write fixture world dump {}: {error}",
+                path.display()
+            ))
+        })
+    };
+    write_new(
+        &root.join("fixture-input-world.bin"),
+        &report.raw_input_pixels,
+    )?;
+    for layer in &report.raw_secondary_layers {
+        write_new(
+            &root.join(format!("fixture-layer-slot{}-world.bin", layer.slot)),
+            &layer.raw_pixels,
+        )?;
+    }
+    Ok(())
 }
 
 fn load_resident_layers(
@@ -626,9 +682,13 @@ fn parse_parameter_payload(
             "parameter payload must be bounded ASCII".into(),
         ));
     }
-    let Some(body) = payload.strip_prefix("v2|") else {
+    let (body, component_payload) = if let Some(body) = payload.strip_prefix("v2|") {
+        (body, false)
+    } else if let Some(body) = payload.strip_prefix("v4|") {
+        (body, true)
+    } else {
         return Err(SessionError::Protocol(
-            "macOS resident numeric parameters require a v2 payload".into(),
+            "macOS resident fixture parameters require a v2 or v4 payload".into(),
         ));
     };
     if body.is_empty() {
@@ -664,7 +724,7 @@ fn parse_parameter_payload(
             .iter()
             .find(|parameter| parameter.slot == slot)
             .ok_or_else(|| SessionError::Protocol(format!("unknown parameter slot {slot}")))?;
-        let (value, color, point) = match kind {
+        let (value, color, point, angle, point3d) = match kind {
             "argb8" => {
                 if parameter.param_type != PARAM_COLOR {
                     return Err(SessionError::Protocol(format!(
@@ -685,7 +745,7 @@ fn parse_parameter_payload(
                         )
                     })?;
                 }
-                (None, Some(color), None)
+                (None, Some(color), None, None, None)
             }
             "point" => {
                 if parameter.param_type != PARAM_POINT {
@@ -710,10 +770,54 @@ fn parse_parameter_payload(
                         ));
                     }
                 }
-                (None, None, Some(point))
+                (None, None, Some(point), None, None)
+            }
+            "angle" if component_payload => {
+                if parameter.param_type != PARAM_ANGLE {
+                    return Err(SessionError::Protocol(format!(
+                        "parameter slot {slot} is not an angle parameter"
+                    )));
+                }
+                let angle = encoded.parse::<f64>().map_err(|_| {
+                    SessionError::Protocol("angle component must be a finite number".into())
+                })?;
+                if !angle.is_finite() || !(-32768.0..=32768.0).contains(&angle) {
+                    return Err(SessionError::Protocol(
+                        "angle component is outside the supported range".into(),
+                    ));
+                }
+                (None, None, None, Some(angle), None)
+            }
+            "point3d" if component_payload => {
+                if parameter.param_type != PARAM_POINT3D {
+                    return Err(SessionError::Protocol(format!(
+                        "parameter slot {slot} is not a point3d parameter"
+                    )));
+                }
+                let components = encoded.split(',').collect::<Vec<_>>();
+                if components.len() != 3 {
+                    return Err(SessionError::Protocol(
+                        "point3d parameter requires three components".into(),
+                    ));
+                }
+                let mut point3d = [0.0; 3];
+                for (destination, component) in point3d.iter_mut().zip(components) {
+                    *destination = component.parse::<f64>().map_err(|_| {
+                        SessionError::Protocol("point3d components must be finite numbers".into())
+                    })?;
+                    if !destination.is_finite() || !(-32768.0..=32768.0).contains(destination) {
+                        return Err(SessionError::Protocol(
+                            "point3d component is outside the supported range".into(),
+                        ));
+                    }
+                }
+                (None, None, None, None, Some(point3d))
             }
             "i32" | "f64" => {
-                if parameter.param_type == PARAM_COLOR || parameter.param_type == PARAM_POINT {
+                if matches!(
+                    parameter.param_type,
+                    PARAM_COLOR | PARAM_POINT | PARAM_ANGLE | PARAM_POINT3D
+                ) {
                     return Err(SessionError::Protocol(format!(
                         "typed parameter slot {slot} requires its matching payload kind"
                     )));
@@ -726,7 +830,7 @@ fn parse_parameter_payload(
                         "parameter value shape is invalid".into(),
                     ));
                 }
-                (Some(value), None, None)
+                (Some(value), None, None, None, None)
             }
             _ => {
                 return Err(SessionError::Protocol(format!(
@@ -740,6 +844,8 @@ fn parse_parameter_payload(
             value,
             color,
             point,
+            angle,
+            point3d,
         });
     }
     Ok(values)
@@ -1061,6 +1167,47 @@ mod tests {
         assert_eq!(parsed[0].color, None);
         assert!(parse_parameter_payload("v2|param_2@2:f64=1", &setup).is_err());
         assert!(parse_parameter_payload("v2|param_2@2:point=1", &setup).is_err());
+    }
+
+    #[test]
+    fn component_parameter_payload_carries_angle_and_point3d() {
+        let parameter = |slot, param_type, name: &str| crate::classic::ParameterReport {
+            slot,
+            index: slot as i32,
+            param_type,
+            name: name.into(),
+            default_value: None,
+            valid_min: None,
+            valid_max: None,
+            slider_min: None,
+            slider_max: None,
+            precision: None,
+            current_color: None,
+            default_color: None,
+        };
+        let setup = SetupReport {
+            schema_version: 1,
+            execution_backend: "fixture",
+            global_setup_error: 0,
+            params_setup_error: 0,
+            advertised_num_params: 3,
+            out_flags: 0,
+            out_flags2: 0,
+            parameters: vec![
+                parameter(1, PARAM_ANGLE, "Angle"),
+                parameter(2, PARAM_POINT3D, "Position"),
+            ],
+            suite_requests: Vec::new(),
+            unsupported_suite_calls: Vec::new(),
+            dropped_unsupported_suite_calls: 0,
+        };
+        let parsed =
+            parse_parameter_payload("v4|param_1@1:angle=12.5;param_2@2:point3d=25,50,75", &setup)
+                .unwrap();
+        assert_eq!(parsed[0].angle, Some(12.5));
+        assert_eq!(parsed[1].point3d, Some([25.0, 50.0, 75.0]));
+        assert!(parse_parameter_payload("v2|param_1@1:angle=12.5", &setup).is_err());
+        assert!(parse_parameter_payload("v4|param_2@2:point3d=1,2", &setup).is_err());
     }
 
     #[test]
