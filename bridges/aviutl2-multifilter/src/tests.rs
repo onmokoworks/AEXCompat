@@ -94,12 +94,22 @@ mod tests {
         std::fs::write(unrelated.join("other.dll"), b"unrelated fixture").unwrap();
 
         let roots = vec![plugin_root.canonicalize().unwrap()];
-        let mut resolved_names = Vec::new();
+        let mut resolved_sets = Vec::new();
         let resolved = registered_runtime_retry_roots(&plugin, &roots, |wanted| {
-            resolved_names.push(wanted.to_owned());
-            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
-                &[wanted.to_owned()],
-                [registered_install.clone()],
+            resolved_sets.push(wanted.to_owned());
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                wanted
+                    .iter()
+                    .map(|basename| {
+                        (
+                            basename.to_ascii_lowercase(),
+                            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+                                std::slice::from_ref(basename),
+                                [registered_install.clone()],
+                            ),
+                        )
+                    })
+                    .collect(),
             )
         });
         assert_eq!(
@@ -110,7 +120,18 @@ mod tests {
                 transitive_runtime.canonicalize().unwrap()
             ])
         );
-        assert!(!resolved_names.iter().any(|name| name == "sibling.dll"));
+        assert_eq!(resolved_sets.first().map(Vec::len), Some(2));
+        assert!(
+            resolved_sets
+                .iter()
+                .flatten()
+                .any(|name| name == "sibling.dll")
+        );
+        assert_eq!(
+            resolved_sets.len(),
+            2,
+            "one indexed lookup per fixed-point pass"
+        );
 
         std::fs::write(
             transitive_runtime.join("common.dll"),
@@ -118,9 +139,19 @@ mod tests {
         )
         .unwrap();
         let conflicting = registered_runtime_retry_roots(&plugin, &roots, |wanted| {
-            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
-                &[wanted.to_owned()],
-                [registered_install.clone()],
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                wanted
+                    .iter()
+                    .map(|basename| {
+                        (
+                            basename.to_ascii_lowercase(),
+                            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+                                std::slice::from_ref(basename),
+                                [registered_install.clone()],
+                            ),
+                        )
+                    })
+                    .collect(),
             )
         });
         assert!(matches!(
@@ -164,8 +195,59 @@ mod tests {
             aexcompat_broker::test_pe::pe64_importing(&borrowed),
         )
         .unwrap();
-        let result = registered_runtime_retry_roots(&plugin, &[root.clone()], |_| Vec::new());
+        let result = registered_runtime_retry_roots(&plugin, &[root.clone()], |_| {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                std::collections::BTreeMap::new(),
+            )
+        });
         assert_eq!(result, RuntimeRootResolution::DiagnosticsTruncated);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registered_runtime_retry_checks_every_provider_before_choosing_a_root() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-mf-runtime-provider-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plugin = root.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            aexcompat_broker::test_pe::pe64_importing(&["common.dll"]),
+        )
+        .unwrap();
+        let mut providers = Vec::new();
+        for index in 0..16 {
+            let directory = root.join(format!("provider-{index:02}"));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join("common.dll"),
+                if index == 15 {
+                    b"different".as_slice()
+                } else {
+                    b"same".as_slice()
+                },
+            )
+            .unwrap();
+            providers.push(directory);
+        }
+        let result = registered_runtime_retry_roots(&plugin, &[root.clone()], |_| {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                std::collections::BTreeMap::from([("common.dll".into(), providers.clone())]),
+            )
+        });
+        assert!(matches!(
+            result,
+            RuntimeRootResolution::Ambiguous {
+                ref basename,
+                candidate_count: 16,
+            } if basename == "common.dll"
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 

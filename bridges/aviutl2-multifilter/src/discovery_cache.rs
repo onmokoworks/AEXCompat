@@ -1122,12 +1122,14 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> 
 fn cached_matching_registered_runtime_roots(
     plugin: &Path,
     sha: &str,
-    basename: &str,
-) -> Vec<PathBuf> {
-    static ASSOCIATED: OnceLock<Mutex<HashMap<(String, String), Vec<PathBuf>>>> = OnceLock::new();
+    basenames: &[String],
+) -> aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup {
+    static ASSOCIATED: OnceLock<Mutex<HashMap<(String, String, String), Vec<PathBuf>>>> =
+        OnceLock::new();
     let plugin_key = (
         plugin.to_string_lossy().to_ascii_lowercase(),
         sha.to_owned(),
+        aexcompat_broker::installed_runtime_roots::registered_runtime_snapshot_id(),
     );
     let cache = ASSOCIATED.get_or_init(|| Mutex::new(HashMap::new()));
     let associated = if let Some(found) = cache
@@ -1149,9 +1151,9 @@ fn cached_matching_registered_runtime_roots(
             .or_insert_with(|| found.clone())
             .clone()
     };
-    aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
-        &[basename.to_ascii_lowercase()],
-        associated,
+    aexcompat_broker::installed_runtime_roots::matching_registered_runtime_roots_by_basename(
+        basenames,
+        &associated,
     )
 }
 

@@ -104,8 +104,8 @@ fn finish_one_shot_in_place(
     let mut effective_roots = roots.clone();
     let inspected = match inspect(roots.clone()) {
         Err(original) if inspection_is_load_failure(&original) => {
-            match registered_runtime_retry_roots(plugin, &roots, |basename| {
-                cached_matching_registered_runtime_roots(plugin, &entry.sha, basename)
+            match registered_runtime_retry_roots(plugin, &roots, |basenames| {
+                cached_matching_registered_runtime_roots(plugin, &entry.sha, basenames)
             }) {
                 RuntimeRootResolution::Resolved(retry_roots) => {
                     effective_roots = retry_roots.clone();
@@ -224,7 +224,9 @@ fn runtime_root_resolution_error(resolution: &RuntimeRootResolution) -> std::io:
 fn registered_runtime_retry_roots(
     plugin: &Path,
     initial_roots: &[PathBuf],
-    mut resolve: impl FnMut(&str) -> Vec<PathBuf>,
+    mut resolve: impl FnMut(
+        &[String],
+    ) -> aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup,
 ) -> RuntimeRootResolution {
     const MAX_SEARCH_ROOTS: usize = aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
     let mut roots = initial_roots.to_vec();
@@ -260,19 +262,42 @@ fn registered_runtime_retry_roots(
                 RuntimeRootResolution::Unresolved
             };
         }
-        let mut added = false;
-        let mut actionable = false;
-        let mut deferred_ambiguity = None;
-        for basename in &survey.unresolved {
-            if is_api_set(basename)
-                || std::env::var_os("WINDIR")
-                    .map(PathBuf::from)
-                    .is_some_and(|windows| windows.join("System32").join(basename).is_file())
-            {
-                continue;
+        let actionable_names: Vec<String> = survey
+            .unresolved
+            .iter()
+            .filter(|basename| {
+                !is_api_set(basename)
+                    && !std::env::var_os("WINDIR")
+                        .map(PathBuf::from)
+                        .is_some_and(|windows| windows.join("System32").join(basename).is_file())
+            })
+            .cloned()
+            .collect();
+        if actionable_names.is_empty() {
+            return if roots.len() > initial_len {
+                RuntimeRootResolution::Resolved(roots)
+            } else {
+                RuntimeRootResolution::Unresolved
+            };
+        }
+        // Resolve the whole dependency set in one indexed lookup. The cache key
+        // includes this sorted set, the associated install roots, and the index
+        // snapshot, so distinct plug-ins sharing one runtime closure reuse it.
+        let candidates_by_basename = match resolve(&actionable_names) {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(found) => {
+                found
             }
-            actionable = true;
-            let candidates = resolve(basename);
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::IndexTruncated => {
+                return RuntimeRootResolution::DiagnosticsTruncated;
+            }
+        };
+        let mut added = false;
+        let mut deferred_ambiguity = None;
+        for basename in &actionable_names {
+            let candidates = candidates_by_basename
+                .get(&basename.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default();
             let candidate_count = candidates.len();
             let had_candidates = !candidates.is_empty();
             let Some(candidate) = equivalent_runtime_candidate(basename, candidates) else {
@@ -306,13 +331,6 @@ fn registered_runtime_retry_roots(
             // Recompute the entire closure after each admitted directory: it
             // may satisfy other names from this now-stale unresolved set.
             break;
-        }
-        if !actionable {
-            return if roots.len() > initial_len {
-                RuntimeRootResolution::Resolved(roots)
-            } else {
-                RuntimeRootResolution::Unresolved
-            };
         }
         if !added {
             if let Some(ambiguity) = deferred_ambiguity {
@@ -769,11 +787,11 @@ fn discover_cluster_in_place(
             }
             Ok(InspectOutcome::InspectError { error_kind, report }) => {
                 if error_kind == "load_failed" {
-                    match registered_runtime_retry_roots(&path, &search_dirs, |basename| {
+                    match registered_runtime_retry_roots(&path, &search_dirs, |basenames| {
                         cached_matching_registered_runtime_roots(
                             &path,
                             &prepared.entry.sha,
-                            basename,
+                            basenames,
                         )
                     }) {
                         RuntimeRootResolution::Resolved(retry_roots) => {

@@ -421,14 +421,32 @@ impl HarnessApp {
             .iter()
             .map(|warning| warning.basename.clone())
             .collect::<Vec<_>>();
-        self.runtime_dependency_roots =
-            aexcompat_broker::installed_runtime_roots::matching_registered_runtime_roots(
-                &unresolved,
-            )
-            .into_iter()
-            .filter_map(|path| canonical_runtime_dependency_root(&path).ok())
-            .take(15)
-            .collect();
+        self.runtime_dependency_roots = match
+            aexcompat_broker::installed_runtime_roots::matching_registered_runtime_roots(&unresolved)
+        {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(found) => {
+                let admitted = found
+                    .into_iter()
+                    .map(|(basename, roots)| {
+                        (
+                            basename,
+                            roots
+                                .into_iter()
+                                .filter_map(|path| canonical_runtime_dependency_root(&path).ok())
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                aexcompat_broker::installed_runtime_roots::unique_runtime_roots(admitted, 15)
+            }
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::IndexTruncated => {
+                self.diagnostic_warning = Some(
+                    "Registered runtime index exceeded its safety bound; no partial runtime roots were admitted. Restart after narrowing registered install roots."
+                        .to_owned(),
+                );
+                Vec::new()
+            }
+        };
         let Some(selection) = self.selection.as_ref() else {
             return;
         };
