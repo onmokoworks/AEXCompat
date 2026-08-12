@@ -31,4 +31,3 @@ struct Manifest {
 bool load_manifest(const std::filesystem::path& path, Manifest& result);
 
 }  // namespace aexcompat::worker_runtime::companions
-
