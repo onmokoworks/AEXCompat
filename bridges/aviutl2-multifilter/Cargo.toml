@@ -34,5 +34,8 @@ windows = { version = "0.62", features = [
 toml_edit = "0.25.13"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
 
+[dev-dependencies]
+aexcompat-broker = { path = "../../broker/crates/broker", features = ["test-pe-fixtures"] }
+
 # Diagnostic examples use only the crate's own dependencies plus the broker's
 # public in-place API.

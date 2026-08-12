@@ -1,5 +1,6 @@
 //! Bounded discovery of runtime DLL directories below Windows-registered installs.
 
+use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,72 @@ const MAX_MATCHES: usize = 15;
 
 pub fn matching_registered_runtime_roots(unresolved_basenames: &[String]) -> Vec<PathBuf> {
     matching_runtime_roots(unresolved_basenames, registered_install_locations())
+}
+
+/// Restrict runtime lookup to registered install trees that contain a byte-
+/// identical copy of the selected plug-in. This associates a relocated host
+/// copy with its own installer without guessing from vendor names or paths.
+pub fn matching_registered_runtime_roots_for_plugin(
+    plugin: &Path,
+    unresolved_basenames: &[String],
+) -> Vec<PathBuf> {
+    matching_runtime_roots(
+        unresolved_basenames,
+        associated_registered_install_roots(plugin),
+    )
+}
+
+pub fn associated_registered_install_roots(plugin: &Path) -> Vec<PathBuf> {
+    let Ok(plugin_bytes) = std::fs::read(plugin) else {
+        return Vec::new();
+    };
+    let Some(plugin_name) = plugin.file_name() else {
+        return Vec::new();
+    };
+    let expected = Sha256::digest(&plugin_bytes);
+    let expected_len = plugin_bytes.len() as u64;
+    let mut associated = Vec::new();
+    for root in registered_install_locations()
+        .into_iter()
+        .take(MAX_INSTALL_ROOTS)
+    {
+        let mut queue = VecDeque::from([(root.clone(), 0usize)]);
+        let mut visited = 0usize;
+        let mut matched = false;
+        while let Some((directory, depth)) = queue.pop_front() {
+            if visited == MAX_VISITED_DIRS {
+                break;
+            }
+            visited += 1;
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && path.file_name().is_some_and(|name| {
+                        name.to_string_lossy()
+                            .eq_ignore_ascii_case(&plugin_name.to_string_lossy())
+                    })
+                    && path
+                        .metadata()
+                        .is_ok_and(|metadata| metadata.len() == expected_len)
+                    && std::fs::read(&path).is_ok_and(|bytes| Sha256::digest(bytes) == expected)
+                {
+                    matched = true;
+                    break;
+                }
+                if depth < MAX_DEPTH && path.is_dir() {
+                    queue.push_back((path, depth + 1));
+                }
+            }
+            if matched {
+                associated.push(root);
+                break;
+            }
+        }
+    }
+    associated
 }
 
 pub fn matching_runtime_roots(

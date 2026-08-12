@@ -99,8 +99,35 @@ fn finish_one_shot_in_place(
     if roots.is_empty() {
         return entry;
     }
-    match inspect_experimental_in_place(repository, plugin, &entry.sha, roots.clone()) {
+    let inspect =
+        |roots: Vec<PathBuf>| inspect_experimental_in_place(repository, plugin, &entry.sha, roots);
+    let mut effective_roots = roots.clone();
+    let inspected = match inspect(roots.clone()) {
+        Err(original) if inspection_is_load_failure(&original) => {
+            match registered_runtime_retry_roots(plugin, &roots, |basename| {
+                cached_matching_registered_runtime_roots(plugin, &entry.sha, basename)
+            }) {
+                RuntimeRootResolution::Resolved(retry_roots) => {
+                    effective_roots = retry_roots.clone();
+                    inspect(retry_roots)
+                }
+                failure @ (RuntimeRootResolution::Ambiguous { .. }
+                | RuntimeRootResolution::CapacityExceeded { .. }
+                | RuntimeRootResolution::DiagnosticsTruncated) => {
+                    Err(runtime_root_resolution_error(&failure))
+                }
+                RuntimeRootResolution::Unresolved => Err(original),
+            }
+        }
+        result => result,
+    };
+    match inspected {
         Ok((params, diagnostics)) => {
+            entry.closure.roots = effective_roots
+                .iter()
+                .map(|root| root.to_string_lossy().into_owned())
+                .collect();
+            entry.closure_identity = Some(in_place_identity(&effective_roots));
             entry.out_flags2 = diagnostics
                 .get("advertised_out_flags2")
                 .and_then(|value| value.as_u64())
@@ -122,10 +149,198 @@ fn finish_one_shot_in_place(
             }
             entry.failure_classification = inspection_failure_classification(&error);
             entry.failure_diagnostics = inspection_failure_diagnostics(&error);
-            record_survey_for_failed_in_place(&mut entry, plugin, &roots);
+            record_survey_for_failed_in_place(&mut entry, plugin, &effective_roots);
         }
     }
     entry
+}
+
+fn inspection_is_load_failure(error: &std::io::Error) -> bool {
+    let Some(diagnostics) = inspection_failure_diagnostics(error) else {
+        return false;
+    };
+    diagnostics
+        .get("cluster_error_kind")
+        .and_then(|value| value.as_str())
+        == Some("load_failed")
+        || diagnostics
+            .get("load_failure")
+            .and_then(|value| value.get("stage"))
+            .and_then(|value| value.as_str())
+            == Some("load_library")
+}
+
+#[derive(Debug, PartialEq)]
+enum RuntimeRootResolution {
+    Resolved(Vec<PathBuf>),
+    Ambiguous {
+        basename: String,
+        candidate_count: usize,
+    },
+    CapacityExceeded {
+        basename: String,
+        root_count: usize,
+    },
+    DiagnosticsTruncated,
+    Unresolved,
+}
+
+fn runtime_root_resolution_error(resolution: &RuntimeRootResolution) -> std::io::Error {
+    let diagnostics = match resolution {
+        RuntimeRootResolution::Ambiguous {
+            basename,
+            candidate_count,
+        } => serde_json::json!({
+            "classification": "registered_runtime_ambiguous",
+            "reason": "different_provider_bytes",
+            "basename": basename,
+            "candidate_count": candidate_count,
+        }),
+        RuntimeRootResolution::CapacityExceeded {
+            basename,
+            root_count,
+        } => serde_json::json!({
+            "classification": "registered_runtime_capacity_exceeded",
+            "reason": "search_root_limit",
+            "basename": basename,
+            "root_count": root_count,
+        }),
+        RuntimeRootResolution::DiagnosticsTruncated => serde_json::json!({
+            "classification": "registered_runtime_diagnostics_truncated",
+            "reason": "dependency_diagnostics_limit",
+        }),
+        _ => serde_json::Value::Null,
+    };
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("diagnostics={diagnostics}"),
+    )
+}
+
+/// Resolve a failed LoadLibrary closure only. Each basename must have exactly
+/// one registered provider; ambiguity fails closed because AddDllDirectory does
+/// not define precedence between multiple USER_DIRS providers. Re-survey after
+/// every admitted root so transitive runtime dependencies reach a fixed point.
+fn registered_runtime_retry_roots(
+    plugin: &Path,
+    initial_roots: &[PathBuf],
+    mut resolve: impl FnMut(&str) -> Vec<PathBuf>,
+) -> RuntimeRootResolution {
+    const MAX_SEARCH_ROOTS: usize = aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
+    let mut roots = initial_roots.to_vec();
+    let initial_len = roots.len();
+    loop {
+        let Ok(survey) = survey_dependency_closure(plugin, &roots) else {
+            return RuntimeRootResolution::Unresolved;
+        };
+        if survey.dependency_diagnostics_truncated {
+            return RuntimeRootResolution::DiagnosticsTruncated;
+        }
+        for diagnostic in &survey.dependency_diagnostics {
+            if diagnostic.search_classification != "ambiguous" {
+                continue;
+            }
+            let candidates: Vec<PathBuf> = roots
+                .iter()
+                .filter(|root| root.join(&diagnostic.import_basename).is_file())
+                .cloned()
+                .collect();
+            let candidate_count = candidates.len();
+            if equivalent_runtime_candidate(&diagnostic.import_basename, candidates).is_none() {
+                return RuntimeRootResolution::Ambiguous {
+                    basename: diagnostic.import_basename.clone(),
+                    candidate_count,
+                };
+            }
+        }
+        if survey.unresolved.is_empty() {
+            return if roots.len() > initial_len {
+                RuntimeRootResolution::Resolved(roots)
+            } else {
+                RuntimeRootResolution::Unresolved
+            };
+        }
+        let mut added = false;
+        let mut actionable = false;
+        let mut deferred_ambiguity = None;
+        for basename in &survey.unresolved {
+            if is_api_set(basename)
+                || std::env::var_os("WINDIR")
+                    .map(PathBuf::from)
+                    .is_some_and(|windows| windows.join("System32").join(basename).is_file())
+            {
+                continue;
+            }
+            actionable = true;
+            let candidates = resolve(basename);
+            let candidate_count = candidates.len();
+            let had_candidates = !candidates.is_empty();
+            let Some(candidate) = equivalent_runtime_candidate(basename, candidates) else {
+                if had_candidates {
+                    deferred_ambiguity = Some(RuntimeRootResolution::Ambiguous {
+                        basename: basename.clone(),
+                        candidate_count,
+                    });
+                }
+                continue;
+            };
+            let Ok(candidate) = candidate.canonicalize() else {
+                continue;
+            };
+            if !candidate.is_dir()
+                || roots.iter().any(|root| {
+                    root.to_string_lossy()
+                        .eq_ignore_ascii_case(&candidate.to_string_lossy())
+                })
+            {
+                continue;
+            }
+            if roots.len() == MAX_SEARCH_ROOTS {
+                return RuntimeRootResolution::CapacityExceeded {
+                    basename: basename.clone(),
+                    root_count: roots.len(),
+                };
+            }
+            roots.push(candidate);
+            added = true;
+            // Recompute the entire closure after each admitted directory: it
+            // may satisfy other names from this now-stale unresolved set.
+            break;
+        }
+        if !actionable {
+            return if roots.len() > initial_len {
+                RuntimeRootResolution::Resolved(roots)
+            } else {
+                RuntimeRootResolution::Unresolved
+            };
+        }
+        if !added {
+            if let Some(ambiguity) = deferred_ambiguity {
+                return ambiguity;
+            }
+            return RuntimeRootResolution::Unresolved;
+        }
+    }
+}
+
+/// Multiple registered directories are equivalent only when the requested DLL
+/// itself is byte-identical in every one. The deterministic first directory is
+/// then safe for this import; differing providers remain ambiguous.
+fn equivalent_runtime_candidate(basename: &str, mut candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    let mut expected = None;
+    for directory in &candidates {
+        let bytes = std::fs::read(directory.join(basename)).ok()?;
+        let digest = Sha256::digest(bytes);
+        if expected.as_ref().is_some_and(|value| value != &digest) {
+            return None;
+        }
+        expected = Some(digest);
+    }
+    candidates.into_iter().next()
 }
 
 /// Completes discovery for a PiPL that the PF worker positively identified as
@@ -451,11 +666,13 @@ fn discover_cluster_in_place(
     dependency: &DependencyConfig,
     build: BuildFingerprint,
     members: Vec<(PathBuf, PreparedDiscovery)>,
+    override_search_dirs: Option<Vec<PathBuf>>,
 ) -> Vec<(PathBuf, CacheEntry)> {
     let member_count = members.len();
     // Every member shares one search-root set by construction (the in-place
     // identity), so the first member's roots stand for the cluster.
-    let search_dirs = search_roots_for(&members[0].0, &dependency.dirs);
+    let search_dirs =
+        override_search_dirs.unwrap_or_else(|| search_roots_for(&members[0].0, &dependency.dirs));
     if search_dirs.is_empty() {
         return fallback_members_in_place(
             repository,
@@ -518,10 +735,16 @@ fn discover_cluster_in_place(
                 // repeat the same uncontained setdown). Give each remaining
                 // member a fresh ordinary session so it must independently
                 // earn its own checkpoint before the one-shot fallback.
-                discover_cluster_in_place(repository, dependency, build, vec![(path, prepared)])
-                    .into_iter()
-                    .next()
-                    .expect("one member yields one entry")
+                discover_cluster_in_place(
+                    repository,
+                    dependency,
+                    build,
+                    vec![(path, prepared)],
+                    None,
+                )
+                .into_iter()
+                .next()
+                .expect("one member yields one entry")
             } else {
                 fallback_members_in_place(
                     repository,
@@ -545,6 +768,48 @@ fn discover_cluster_in_place(
                 results.push((path, entry));
             }
             Ok(InspectOutcome::InspectError { error_kind, report }) => {
+                if error_kind == "load_failed" {
+                    match registered_runtime_retry_roots(&path, &search_dirs, |basename| {
+                        cached_matching_registered_runtime_roots(
+                            &path,
+                            &prepared.entry.sha,
+                            basename,
+                        )
+                    }) {
+                        RuntimeRootResolution::Resolved(retry_roots) => {
+                            let mut prepared = prepared;
+                            prepared.entry.closure.roots = retry_roots
+                                .iter()
+                                .map(|root| root.to_string_lossy().into_owned())
+                                .collect();
+                            prepared.entry.closure_identity = Some(in_place_identity(&retry_roots));
+                            let retried = discover_cluster_in_place(
+                                repository,
+                                dependency,
+                                build,
+                                vec![(path, prepared)],
+                                Some(retry_roots),
+                            )
+                            .into_iter()
+                            .next()
+                            .expect("one member yields one entry");
+                            results.push(retried);
+                            continue;
+                        }
+                        failure @ (RuntimeRootResolution::Ambiguous { .. }
+                        | RuntimeRootResolution::CapacityExceeded { .. }
+                        | RuntimeRootResolution::DiagnosticsTruncated) => {
+                            let mut entry = prepared.entry;
+                            let error = runtime_root_resolution_error(&failure);
+                            entry.failure_classification =
+                                inspection_failure_classification(&error);
+                            entry.failure_diagnostics = inspection_failure_diagnostics(&error);
+                            results.push((path, entry));
+                            continue;
+                        }
+                        RuntimeRootResolution::Unresolved => {}
+                    }
+                }
                 let mut entry = prepared.entry;
                 let exit_code = match error_kind.as_str() {
                     "load_failed" => Some(11),
@@ -992,7 +1257,7 @@ fn discover_all_with_progress(
                             let cluster_results =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     discover_cluster_in_place(
-                                        repository, dependency, build, members,
+                                        repository, dependency, build, members, None,
                                     )
                                 }))
                                 .unwrap_or_else(|_| {
@@ -1120,6 +1385,10 @@ fn register_discovered(
     entry: &CacheEntry,
     name: &str,
 ) {
+    let mut resolved_dependency = dependency.clone();
+    if !entry.closure.roots.is_empty() {
+        resolved_dependency.dirs = entry.closure.roots.iter().map(PathBuf::from).collect();
+    }
     // Build config items + readers + normalized defaults from the exposed params.
     let mut items: Vec<*const c_void> = Vec::new();
     let mut readers: Vec<ItemReader> = Vec::new();
@@ -1141,7 +1410,7 @@ fn register_discovered(
     let userdata = Box::leak(Box::new(FilterCtx {
         repository: repository.to_path_buf(),
         plugin: plugin.to_path_buf(),
-        dependency: dependency.clone(),
+        dependency: resolved_dependency,
         sha: entry.sha.clone(),
         smart: smart_render_route_supported(entry.smart, entry.out_flags2),
         closure_identity: entry.closure_identity.clone(),
