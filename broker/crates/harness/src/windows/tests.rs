@@ -3,6 +3,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn analysis_panel_width_uses_the_padded_action_layout_and_stable_collapsed_rail() {
+        assert_eq!(
+            analysis_panel_min_width(),
+            ANALYSIS_PANEL_ACTION_WIDTH + ANALYSIS_PANEL_PADDING * 2.0
+        );
+        assert_eq!(clamp_analysis_panel_width(0.0), analysis_panel_min_width());
+        assert_eq!(
+            clamp_analysis_panel_width(f32::MAX),
+            ANALYSIS_PANEL_MAX_WIDTH
+        );
+        assert_eq!(
+            analysis_panel_display_width(analysis_panel_min_width(), 0.0),
+            ANALYSIS_PANEL_COLLAPSED_WIDTH
+        );
+        assert_eq!(
+            analysis_panel_display_width(analysis_panel_min_width(), 1.0),
+            analysis_panel_min_width()
+        );
+        let stored = 540.0;
+        assert!(analysis_panel_display_width(stored, 0.25) < stored);
+        assert_eq!(
+            resized_analysis_panel_width(stored, 8.0),
+            548.0,
+            "dragging during reopen must use the stored target, not animated visible width"
+        );
+    }
+
+    #[test]
     fn render_success_requires_a_displayable_output_image() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-ui-output-{}-{}",
