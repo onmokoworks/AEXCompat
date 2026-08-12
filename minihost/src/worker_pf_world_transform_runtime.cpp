@@ -751,21 +751,122 @@ bool verify_world_transform_blend() {
       second == expected;
 }
 
+namespace {
+
+// Answers a refused PF_COPY / PF_COPY_HQ naming the condition that refused it,
+// like `transform_world_denied` below: the plug-in usually passes the 516
+// through as its whole frame error and says something unrelated ("insufficient
+// memory for Wave Warp."), so without the marker the refusing check is
+// recoverable only by rebuilding the worker with prints (issue #1037 filed
+// Wave Warp as "refused with no denial trace" for exactly this gap). Always
+// on; the reason is a lower-case identifier, the shape the broker's
+// `callback_denials` parser vouches for.
+int32_t copy_denied(const char* reason) {
+  std::cerr << "stage:callback_denied callback=copy reason=" << reason
+            << "\n" << std::flush;
+  return kPfErrBadCallbackParam;
+}
+
+// Deliberately narrower than `world_registry::bytes_per_pixel`: the GPU
+// format (`kPixelFormatGpuBgra128`) maps to 0 here so a GPU-world anchor can
+// never admit a foreign operand - GPU worlds have no CPU pixel base for the
+// bounds check to cap. Do not "unify" the two helpers.
+int32_t dispatch_pixel_format_bytes(int32_t pixel_format) {
+  return pixel_format == kPixelFormatArgb32 ? 4 :
+      (pixel_format == kPixelFormatArgb64 ? 8 :
+       (pixel_format == kPixelFormatArgb128 ? 16 : 0));
+}
+
+// A copy operand the format registry has never seen, admitted the way the
+// sampling callbacks admit their source worlds (worker_pf_sampling_runtime.cpp,
+// issues #777/#813): by the declared-stride bounds check, not by ownership.
+// AE's PF_COPY takes any PF_EffectWorld the caller can describe, not only
+// worlds the host handed out - Wave Warp builds a scratch row buffer inside a
+// locked handle, wraps it in a stack PF_EffectWorld, and copies out of it, and
+// refusing that world failed its whole frame with 516 (issue #1037). The
+// declared stride and height cap every access the copy below makes, so the
+// host's own walk stays inside what the plug-in declared; a declaration that
+// misdescribes the plug-in's own memory is the plug-in's fault, contained by
+// the worker process exactly as it is for sampling.
+//
+// Three refusals survive, deliberately:
+// - A world the dispatch-format registry already knows - a registered struct
+//   whose fields no longer match registration, or a struct re-declaring a
+//   registered world's pixel base under a different geometry - never takes
+//   this path: reaching a failed resolve with one is the registry's
+//   fail-closed mismatch refusal on a host-handed reference (the frame input
+//   and output worlds above all), and it must stay a refusal instead of
+//   degrading into foreign admission. That refusal is only as wide as the
+//   dispatch scope's thread: the registry is thread_local, so on a thread the
+//   plug-in spawned itself the scope stack is empty and this check cannot see
+//   the dispatch worlds - the guarantee holds for the thread that holds the
+//   scope, which is every thread the host itself dispatches on.
+// - A world whose pixel base the host allocated (`PF_NEW_WORLD`, AEGP
+//   platform/owned backings) never takes this path either:
+//   `world_pixels_owned` keeps each allocation's own fail-closed geometry
+//   check (issue #700) authoritative, so a struct retargeted at a smaller
+//   host allocation stays refused rather than bounds-laundered here. A
+//   pointer *into* one of those allocations is indistinguishable from foreign
+//   memory and is admitted at its declared stride, the sampling latitude.
+// - The unknown side borrows its pixel format from the resolved side (the
+//   copy requires the two formats equal anyway, and the DEEP-flag check inside
+//   `resolve_world` still has to agree). With neither side resolved there is
+//   no format to anchor on and the copy stays refused.
+bool resolve_foreign_copy_world(void* world, const DispatchWorldFormat& known,
+                                DispatchWorldFormat& result) {
+  if (!g_configured || !g_context.hooks.world_pixels_owned ||
+      world_safety::dispatch_world_reference_known(world) ||
+      g_context.hooks.world_pixels_owned(world))
+    return false;
+  const int32_t pixel_bytes = dispatch_pixel_format_bytes(known.pixel_format);
+  unsigned char* pixels{};
+  int32_t rowbytes{}, width{}, height{};
+  if (!pixel_bytes ||
+      !resolve_world(world, pixel_bytes, pixels, rowbytes, width, height))
+    return false;
+  result = {};
+  result.world = world;
+  result.data = pixels;
+  result.width = width;
+  result.height = height;
+  result.rowbytes = rowbytes;
+  result.pixel_format = known.pixel_format;
+  return true;
+}
+
+bool resolve_copy_worlds(void* source_world, void* destination_world,
+                         DispatchWorldFormat& source_info,
+                         DispatchWorldFormat& destination_info) {
+  const bool source_known =
+      resolve_dispatch_world_format(source_world, source_info);
+  const bool destination_known =
+      resolve_dispatch_world_format(destination_world, destination_info);
+  if (source_known && destination_known) return true;
+  if (source_known)
+    return resolve_foreign_copy_world(destination_world, source_info,
+                                      destination_info);
+  if (destination_known)
+    return resolve_foreign_copy_world(source_world, destination_info,
+                                      source_info);
+  return false;
+}
+
+}  // namespace
+
 int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
                             const LegacyRect* source_rect, const LegacyRect* destination_rect) {
   DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info) ||
-      source_info.pixel_format != destination_info.pixel_format)
-    return kPfErrBadCallbackParam;
-  const int32_t pixel_bytes = source_info.pixel_format == kPixelFormatArgb32 ? 4 :
-      (source_info.pixel_format == kPixelFormatArgb64 ? 8 :
-       (source_info.pixel_format == kPixelFormatArgb128 ? 16 : 0));
+  if (!resolve_copy_worlds(source_world, destination_world, source_info,
+                           destination_info))
+    return copy_denied("unresolved_world");
+  if (source_info.pixel_format != destination_info.pixel_format)
+    return copy_denied("pixel_format_mismatch");
+  const int32_t pixel_bytes = dispatch_pixel_format_bytes(source_info.pixel_format);
   if (!pixel_bytes || source_info.width > 4096 || source_info.height > 4096 ||
       destination_info.width > 4096 || destination_info.height > 4096 ||
       source_info.rowbytes < static_cast<int64_t>(source_info.width) * pixel_bytes ||
       destination_info.rowbytes < static_cast<int64_t>(destination_info.width) * pixel_bytes)
-    return kPfErrBadCallbackParam;
+    return copy_denied("world_bounds");
   auto* source = static_cast<unsigned char*>(source_info.data);
   auto* destination = static_cast<unsigned char*>(destination_info.data);
   // Clipped to both worlds at once rather than refused against either. AE's
@@ -784,7 +885,7 @@ int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
   LegacyRect src{}, dst{};
   if (!copy_correspondence(source_rect, source_info, destination_rect,
                            destination_info, src, dst))
-    return kPfErrBadCallbackParam;
+    return copy_denied("no_correspondence");
   const int32_t copy_width = src.right - src.left;
   const int32_t copy_height = src.bottom - src.top;
   // Disjoint after clipping: the caller named a region the two worlds do not
@@ -917,7 +1018,110 @@ bool verify_copy_world_clipping() {
   ok = copy_world_hq(nullptr, &source, &destination, &right_half,
                      &whole_destination) == 0 &&
       red(0) == 30 && red(1) == 40 && ok;
+
+  // A source world the host never handed out: Wave Warp wraps a scratch row
+  // buffer from a locked handle in a stack PF_EffectWorld and copies out of it
+  // (issue #1037). Admitted by the declared-stride bounds check with the
+  // resolved destination's pixel format, at both quality entry points.
+  std::array<uint8_t, kWide * 4> scratch_pixels{};
+  for (int32_t column = 0; column < kWide; ++column) {
+    scratch_pixels[static_cast<std::size_t>(column) * 4] = 255;
+    scratch_pixels[static_cast<std::size_t>(column) * 4 + 1] =
+        static_cast<uint8_t>((column + 1) * 11);
+  }
+  LocalEffectWorld scratch{};
+  scratch.data = scratch_pixels.data();
+  scratch.rowbytes = kWide * 4;
+  scratch.width = kWide;
+  scratch.height = kRows;
+  destination_pixels.fill(0);
+  ok = copy_world8(nullptr, &scratch, &destination, &right_half,
+                   &whole_destination) == 0 &&
+      red(0) == 33 && red(1) == 44 && ok;
+  destination_pixels.fill(0);
+  ok = copy_world_hq(nullptr, &scratch, &destination, &right_half,
+                     &whole_destination) == 0 &&
+      red(0) == 33 && red(1) == 44 && ok;
+
+  // The same latitude on the destination side: a copy into a foreign world
+  // lands where the declared geometry says.
+  scratch_pixels.fill(0);
+  destination_pixels.fill(0);
+  const LegacyRect whole_source{0, 0, kNarrow, kRows};
+  const LegacyRect scratch_right_half{kNarrow, 0, kWide, kRows};
+  ok = copy_world8(nullptr, &source, &destination, &right_half,
+                   &whole_destination) == 0 &&
+      copy_world8(nullptr, &destination, &scratch, &whole_source,
+                  &scratch_right_half) == 0 &&
+      scratch_pixels[kNarrow * 4 + 1] == 30 &&
+      scratch_pixels[(kNarrow + 1) * 4 + 1] == 40 && ok;
+
+  // With neither side resolved there is no pixel format to anchor on: refused,
+  // not guessed.
+  LocalEffectWorld second_scratch = scratch;
+  std::array<uint8_t, kWide * 4> second_scratch_pixels{};
+  second_scratch.data = second_scratch_pixels.data();
+  ok = copy_world8(nullptr, &scratch, &second_scratch, nullptr, nullptr) ==
+      kPfErrBadCallbackParam && ok;
+
+  // A foreign world whose DEEP flag disagrees with the anchoring format is a
+  // misdescribed operand, refused by the same depth check sampling applies.
+  LocalEffectWorld deep_scratch = scratch;
+  deep_scratch.world_flags = 1;
+  ok = copy_world8(nullptr, &deep_scratch, &destination, &right_half,
+                   &whole_destination) == kPfErrBadCallbackParam && ok;
+
+  // A registered world whose fields were mutated after registration is the
+  // dispatch registry's fail-closed mismatch refusal, and the foreign-operand
+  // fallback must not resurrect it: the struct pointer is known, so the
+  // mutation stays refused, not admitted at its new declared geometry. The
+  // mutation grows `height`, which the declared-stride bounds check alone
+  // would accept - this case is what pins the gate, not the bounds.
+  const int32_t source_height_before = source.height;
+  source.height = kRows + 1;
+  ok = copy_world8(nullptr, &source, &destination, nullptr, nullptr) ==
+      kPfErrBadCallbackParam && ok;
+  source.height = source_height_before;
+
+  // Same refusal when the plug-in re-declares a registered world's pixel base
+  // through a fresh struct with a different geometry: the base pointer is
+  // known to the registry, so the re-declaration is a mismatch, not a foreign
+  // world.
+  LocalEffectWorld alias = scratch;
+  alias.data = source_pixels.data();
+  alias.rowbytes = kWide * 4;
+  alias.width = kWide;
+  alias.height = kRows + 1;
+  ok = copy_world8(nullptr, &alias, &destination, nullptr, nullptr) ==
+      kPfErrBadCallbackParam && ok;
   return ok;
+}
+
+// The foreign-operand fallback's gate, run by the harness under a
+// configuration whose `world_pixels_owned` answers true for everything (a
+// stand-in for "this base pointer is a host allocation") and again under a
+// null hook: both must refuse the very world the fallback otherwise admits,
+// because the gate - not the bounds check - is what keeps host-issued
+// allocations under their own registries' fail-closed geometry checks. The
+// admitting side of the same world is covered by `verify_copy_world_clipping`.
+bool verify_copy_foreign_world_gate() {
+  DispatchWorldFormatScope formats;
+  constexpr int32_t kWidth = 2;
+  std::array<uint8_t, kWidth * 4> source_pixels{{255, 10, 0, 0, 255, 20, 0, 0}};
+  std::array<uint8_t, kWidth * 4> destination_pixels{};
+  LocalEffectWorld foreign{}, destination{};
+  foreign.data = source_pixels.data();
+  foreign.rowbytes = kWidth * 4;
+  foreign.width = kWidth;
+  foreign.height = 1;
+  destination.data = destination_pixels.data();
+  destination.rowbytes = kWidth * 4;
+  destination.width = kWidth;
+  destination.height = 1;
+  if (!formats.register_world(&destination, kPixelFormatArgb32)) return false;
+  return copy_world8(nullptr, &foreign, &destination, nullptr, nullptr) ==
+      kPfErrBadCallbackParam &&
+      destination_pixels == std::array<uint8_t, kWidth * 4>{};
 }
 
 namespace {
@@ -1710,9 +1914,13 @@ int32_t __cdecl copy_world_hq(void* effect_ref, void* source_world, void* destin
                               const LegacyRect* source_rect,
                               const LegacyRect* destination_rect) {
   DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_dispatch_world_format(source_world, source_info) ||
-      !resolve_dispatch_world_format(destination_world, destination_info))
-    return kPfErrBadCallbackParam;
+  // The same operand admission `copy_world8` grants, so the two entry points
+  // admit the same worlds (the #962 lesson below, applied to operands): a
+  // plug-in that branches on `in_data->quality` must not find its scratch
+  // world accepted at draft and refused at the quality a final renders at.
+  if (!resolve_copy_worlds(source_world, destination_world, source_info,
+                           destination_info))
+    return copy_denied("unresolved_world");
   // The same clipping PF_COPY does, so the two entry points admit the same
   // rectangles. Refusing here while `copy_world8` clipped would have left a
   // plug-in that branches on `in_data->quality` - the ordinary
@@ -1725,7 +1933,7 @@ int32_t __cdecl copy_world_hq(void* effect_ref, void* source_world, void* destin
   LegacyRect source_bounds{}, destination_bounds{};
   if (!copy_correspondence(source_rect, source_info, destination_rect,
                            destination_info, source_bounds, destination_bounds))
-    return kPfErrBadCallbackParam;
+    return copy_denied("no_correspondence");
   return copy_world8(effect_ref, source_world, destination_world,
                      &source_bounds, &destination_bounds);
 }

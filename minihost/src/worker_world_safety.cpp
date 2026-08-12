@@ -116,6 +116,19 @@ bool resolve_dispatch_world_format(const void* world,
   return true;
 }
 
+bool dispatch_world_reference_known(const void* world) {
+  void* data{};
+  int32_t rowbytes{}, width{}, height{};
+  if (!read_world_layout(world, data, rowbytes, width, height)) return false;
+  for (auto scope = g_dispatch_world_formats.rbegin();
+       scope != g_dispatch_world_formats.rend(); ++scope) {
+    for (const auto& entry : *scope) {
+      if (entry.world == world || (data && entry.data == data)) return true;
+    }
+  }
+  return false;
+}
+
 bool resolve_registered_dispatch_world(const void* world,
                                        DispatchWorldFormat& result) {
   void* data{};
