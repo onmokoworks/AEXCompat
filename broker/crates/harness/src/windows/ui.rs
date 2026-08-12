@@ -432,9 +432,9 @@ impl AexUiKit {
                             egui::accesskit::Action::Increment,
                         ) as f64
                             - input.num_accesskit_action_requests(
-                            response.id,
-                            egui::accesskit::Action::Decrement,
-                        ) as f64
+                                response.id,
+                                egui::accesskit::Action::Decrement,
+                            ) as f64
                     });
                     *value += access_delta * step;
                     ui.input(|input| {
@@ -489,7 +489,8 @@ impl AexUiKit {
                     rect.center(),
                     egui::vec2(rect.width(), if response.hovered() { 3.0 } else { 2.0 }),
                 );
-                ui.painter().rect_filled(track, 2.0, self.theme.palette.muted);
+                ui.painter()
+                    .rect_filled(track, 2.0, self.theme.palette.muted);
                 let fraction = if maximum > minimum {
                     ((*value - minimum) / (maximum - minimum)).clamp(0.0, 1.0) as f32
                 } else {
@@ -505,7 +506,11 @@ impl AexUiKit {
                 );
                 ui.painter().circle_filled(
                     thumb,
-                    if response.hovered() || response.dragged() { 7.0 } else { 6.0 },
+                    if response.hovered() || response.dragged() {
+                        7.0
+                    } else {
+                        6.0
+                    },
                     thumb_fill,
                 );
                 ui.painter().circle_stroke(
@@ -742,12 +747,7 @@ mod ui_kit_tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 changed = ui
                     .add_enabled_ui(false, |ui| {
-                        AexUiKit::default().modern_slider(
-                            ui,
-                            &mut value,
-                            0.0..=100.0,
-                            "Amount",
-                        )
+                        AexUiKit::default().modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
                     })
                     .inner
                     .changed();
@@ -825,9 +825,11 @@ mod ui_kit_tests {
             };
             let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    assert!(AexUiKit::default()
-                        .modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
-                        .changed());
+                    assert!(
+                        AexUiKit::default()
+                            .modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
+                            .changed()
+                    );
                 });
             });
             assert_eq!(value, expected);
@@ -849,9 +851,11 @@ mod ui_kit_tests {
         };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                assert!(AexUiKit::default()
-                    .modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
-                    .changed());
+                assert!(
+                    AexUiKit::default()
+                        .modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
+                        .changed()
+                );
             });
         });
         assert_eq!(value, 75.0);
