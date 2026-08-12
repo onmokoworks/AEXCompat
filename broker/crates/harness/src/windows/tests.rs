@@ -271,7 +271,10 @@ mod tests {
         assert_eq!(app.viewer_mode, 0);
         assert!(!app.pending_live_render);
         assert!(!app.render_after_parameter_change);
-        assert_eq!(app.input_image.as_deref(), Some(root.join("input.png").as_path()));
+        assert_eq!(
+            app.input_image.as_deref(),
+            Some(root.join("input.png").as_path())
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -254,8 +254,8 @@ impl HarnessApp {
         self.failure_diagnostics = None;
         self.matrix_results.clear();
         self.invalidate_render_output();
-        self.status = "Select an AEX file. Effect Controls inspection runs in an isolated worker."
-            .into();
+        self.status =
+            "Select an AEX file. Effect Controls inspection runs in an isolated worker.".into();
         self.report.clear();
     }
 
