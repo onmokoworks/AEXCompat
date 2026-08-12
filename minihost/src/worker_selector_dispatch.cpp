@@ -10,6 +10,7 @@
 #include <cstring>
 #include <exception>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 
 #include "worker_minidump_runtime.hpp"
@@ -448,11 +449,13 @@ void record_selector_invocation(const char* selector,
                                 const EffectRefEntryDiagnostic& effect_ref,
                                 const ApplicationIdEntryDiagnostic& appl_id,
                                 const SpecVersionEntryDiagnostic& version) {
-  if (g_telemetry.invocations.size() >=
-      kMaxSelectorInvocationDiagnostics) {
-    g_telemetry.invocations_truncated = true;
-    return;
-  }
+  // The invocations vector is capped (and never cleared for the worker's life),
+  // but the always-on `stage:selector_seh` line below must fire on every caught
+  // fault regardless of how many selectors ran first - an interactive/batch
+  // session crosses the cap after a few frames, and a 512 with no fault
+  // fingerprint is exactly what this trace exists to prevent. So the diagnostic
+  // is built and the line emitted unconditionally; only the push_back that
+  // grows the (bounded) vector is gated on the cap, at the end.
   SelectorInvocationDiagnostic diagnostic;
   diagnostic.selector = selector ? selector : "UNKNOWN";
   diagnostic.invocation_completed_normally = invocation_completed_normally;
@@ -500,6 +503,71 @@ void record_selector_invocation(const char* selector,
         }
       }
     }
+  }
+  if (seh_caught) {
+    // Always-on, like the stage: lines: a caught SEH becomes a substitute
+    // error code (kAuditFailure -> 512) further up, and without this line the
+    // render routes report "error=512" with no trace of where the fault was
+    // (the selector_invocations JSON reaches only the l2 report). Pointer
+    // *classifications* only - no raw addresses - so the line stays as
+    // shareable as the other stage lines.
+    // A module basename is a plug-in-controlled filename that can hold spaces
+    // or '=' (only newlines/control bytes are already scrubbed to '?'). This is
+    // a space-separated key=value line, so map those two to '_' before writing
+    // a module field - otherwise a DLL named "x.dll rva=0xdead" would forge
+    // extra tokens on this one line.
+    const auto safe = [](const std::string& value) {
+      std::string result = value;
+      for (char& ch : result)
+        if (ch == ' ' || ch == '=') ch = '_';
+      return result;
+    };
+    std::ostringstream trace;
+    trace << "stage:selector_seh selector=" << diagnostic.selector
+          << " code=0x" << std::hex << seh_code << std::dec << " site="
+          << (diagnostic.fault_module_class.empty()
+                  ? "unknown"
+                  : diagnostic.fault_module_class);
+    if (!diagnostic.fault_module.empty())
+      trace << " module=" << safe(diagnostic.fault_module);
+    if (diagnostic.has_plugin_rva)
+      trace << " rva=0x" << std::hex << diagnostic.plugin_rva << std::dec;
+    if (!diagnostic.access_type.empty())
+      trace << " access=" << diagnostic.access_type;
+    if (diagnostic.has_fault_address) {
+      trace << " fault=" << diagnostic.fault_address.classification;
+      if (!diagnostic.fault_address.module.empty()) {
+        trace << ':' << safe(diagnostic.fault_address.module);
+        if (diagnostic.fault_address.has_relative_offset)
+          trace << "+0x" << std::hex
+                << diagnostic.fault_address.relative_offset << std::dec;
+      }
+    }
+    if (diagnostic.has_register_snapshot) {
+      // The classified stack values are the closest thing to a caller for a
+      // fault that lands outside every module (a call through a garbage
+      // slot): a return address on the stack classifies as plugin/module
+      // with an offset. Only those are printed; heap values carry nothing.
+      for (std::size_t index = 0; index < diagnostic.stack_values.size();
+           ++index) {
+        const StackValueClassificationDiagnostic& stack_value =
+            diagnostic.stack_values[index];
+        if (!stack_value.readable) continue;
+        const PointerClassificationDiagnostic& value = stack_value.value;
+        if (value.classification != "plugin" &&
+            value.classification != "module")
+          continue;
+        trace << " stack" << index << '=' << value.classification;
+        if (!value.module.empty()) trace << ':' << safe(value.module);
+        if (value.has_relative_offset)
+          trace << "+0x" << std::hex << value.relative_offset << std::dec;
+      }
+    }
+    std::cerr << trace.str() << "\n" << std::flush;
+  }
+  if (g_telemetry.invocations.size() >= kMaxSelectorInvocationDiagnostics) {
+    g_telemetry.invocations_truncated = true;
+    return;
   }
   g_telemetry.invocations.push_back(std::move(diagnostic));
 }
