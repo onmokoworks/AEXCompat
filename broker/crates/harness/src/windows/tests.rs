@@ -185,6 +185,97 @@ mod tests {
     }
 
     #[test]
+    fn auto_update_render_completion_preserves_compare_view() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-compare-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let output = root.join("output.png");
+        image::RgbaImage::from_pixel(4, 5, image::Rgba([9, 8, 7, 255]))
+            .save(&output)
+            .unwrap();
+        let ctx = egui::Context::default();
+        let mut app = HarnessApp::new(root.clone());
+        app.input_preview = Some(ctx.load_texture(
+            "compare-input",
+            egui::ColorImage::new([4, 5], vec![egui::Color32::BLACK; 20]),
+            egui::TextureOptions::LINEAR,
+        ));
+        app.viewer_mode = 2;
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TaskResult {
+                success: true,
+                body: serde_json::json!({ "passed": true }).to_string(),
+                output: Some(output),
+                identity: None,
+                operation: Some("render_image".into()),
+                diagnostic_eligible: false,
+            })
+            .unwrap();
+        app.receiver = Some(receiver);
+        app.busy = true;
+        app.rendering = true;
+        ctx.begin_pass(Default::default());
+        app.poll(&ctx);
+        let _ = ctx.end_pass();
+        assert!(app.preview.is_some());
+        assert_eq!(app.viewer_mode, 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn closing_aex_clears_plugin_authority_and_output_but_keeps_input() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-ui-close-aex-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = HarnessApp::new(root.clone());
+        app.selection = Some(Selection {
+            path: root.join("effect.aex"),
+            size: 123,
+            sha256: "ABC".into(),
+            modified: None,
+        });
+        app.session_approved = true;
+        app.input_image = Some(root.join("input.png"));
+        app.output_image = Some(root.join("output.png"));
+        app.preview = Some(ctx.load_texture(
+            "close-output",
+            egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
+            egui::TextureOptions::LINEAR,
+        ));
+        app.viewer_mode = 2;
+        app.pending_live_render = true;
+        app.render_after_parameter_change = true;
+
+        app.close_selected_aex();
+
+        assert!(app.selection.is_none());
+        assert!(!app.session_approved);
+        assert!(app.parameters.is_empty());
+        assert!(app.smart_render_capability.is_none());
+        assert!(app.output_image.is_none());
+        assert!(app.preview.is_none());
+        assert_eq!(app.viewer_mode, 0);
+        assert!(!app.pending_live_render);
+        assert!(!app.render_after_parameter_change);
+        assert_eq!(app.input_image.as_deref(), Some(root.join("input.png").as_path()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn render_input_changes_invalidate_the_previous_ui_output() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-ui-invalidate-{}-{}",
@@ -210,6 +301,21 @@ mod tests {
         assert!(app.preview.is_none());
         assert!(app.pixel_comparison.is_none());
         assert_eq!(app.viewer_mode, 0);
+
+        app.output_image = Some(root.join("old-again.png"));
+        app.preview = Some(ctx.load_texture(
+            "old-output-again",
+            egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
+            egui::TextureOptions::LINEAR,
+        ));
+        app.viewer_mode = 2;
+        app.clear_render_output();
+        assert!(app.output_image.is_none());
+        assert!(app.preview.is_none());
+        assert_eq!(
+            app.viewer_mode, 2,
+            "Auto Update invalidation must preserve the selected compare view"
+        );
 
         let before = app.current_render_input_fingerprint();
         app.frame += 1;

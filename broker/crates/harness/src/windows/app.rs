@@ -212,11 +212,51 @@ impl HarnessApp {
         }
     }
 
-    fn invalidate_render_output(&mut self) {
+    fn clear_render_output(&mut self) {
         self.output_image = None;
         self.preview = None;
         self.pixel_comparison = None;
+    }
+
+    fn invalidate_render_output(&mut self) {
+        self.clear_render_output();
         self.viewer_mode = 0;
+    }
+
+    fn close_selected_aex(&mut self) {
+        self.close_live_session();
+        self.selection = None;
+        self.session_approved = false;
+        self.dependencies.clear();
+        self.approved_dependencies.clear();
+        self.approval_check = false;
+        self.trust_rebuilds = false;
+        self.selection_stale = false;
+        self.diagnostic_history = DiagnosticHistory::default();
+        self.diagnostic_warning = None;
+        self.preflight_warnings.clear();
+        self.parameters.clear();
+        self.parameter_defaults.clear();
+        self.parameter_inspection_state = ParameterInspectionState::NotSelected;
+        self.audio_input = None;
+        self.audio_effect_only = false;
+        self.smart_render = false;
+        self.smart_render_advertised = None;
+        self.smart_render_capability = None;
+        self.smart_render_manual_override = false;
+        self.host_context = None;
+        self.inspect_after_refresh = false;
+        self.pending_parameter_slot = None;
+        self.pending_live_render = false;
+        self.live_render_due = None;
+        self.render_after_parameter_change = false;
+        self.render_diagnostics = None;
+        self.failure_diagnostics = None;
+        self.matrix_results.clear();
+        self.invalidate_render_output();
+        self.status = "Select an AEX file. Effect Controls inspection runs in an isolated worker."
+            .into();
+        self.report.clear();
     }
 
     fn current_render_input_fingerprint(&self) -> String {
@@ -370,25 +410,7 @@ impl HarnessApp {
     fn reset_and_choose_aex(&mut self) {
         // The selection is gone the moment the reset starts; the resident
         // worker for it must not outlive a cancelled or failed re-pick.
-        self.close_live_session();
-        self.selection = None;
-        self.session_approved = false;
-        self.approved_dependencies.clear();
-        self.trust_rebuilds = false;
-        self.selection_stale = false;
-        self.diagnostic_history = DiagnosticHistory::default();
-        self.diagnostic_warning = None;
-        self.preflight_warnings.clear();
-        self.parameters.clear();
-        self.parameter_defaults.clear();
-        self.parameter_inspection_state = ParameterInspectionState::NotSelected;
-        self.audio_input = None;
-        self.audio_effect_only = false;
-        self.smart_render = false;
-        self.smart_render_advertised = None;
-        self.smart_render_capability = None;
-        self.smart_render_manual_override = false;
-        self.host_context = None;
+        self.close_selected_aex();
         self.choose_aex();
     }
 
@@ -1632,8 +1654,9 @@ impl HarnessApp {
         };
         // A render attempt owns the output state. Once inputs or controls
         // request a new frame, the previous frame is no longer authoritative.
-        self.invalidate_render_output();
-        self.viewer_mode = 1;
+        let preserve_compare = self.viewer_mode == 2 && self.input_preview.is_some();
+        self.clear_render_output();
+        self.viewer_mode = if preserve_compare { 2 } else { 1 };
         let interactive_selection = match selected_interactive_session_selection(
             capability,
             self.smart_render,
@@ -2105,7 +2128,7 @@ impl HarnessApp {
                         .clicked()
                     {
                         self.parameters = self.parameter_defaults.clone();
-                        self.invalidate_render_output();
+                        self.clear_render_output();
                         self.pending_parameter_slot = None;
                         self.pending_live_render = self.live_render;
                         self.live_render_due = self
@@ -2338,7 +2361,7 @@ impl HarnessApp {
             self.live_render_due = Some(Instant::now() + std::time::Duration::from_millis(500));
         }
         if controls_changed {
-            self.invalidate_render_output();
+            self.clear_render_output();
         }
     }
 
@@ -2539,13 +2562,18 @@ impl HarnessApp {
                 .and_then(render_diagnostics);
             self.output_image = Some(output.clone());
             self.preview = Some(ctx.load_texture("output", image, egui::TextureOptions::LINEAR));
-            self.viewer_mode = 1;
+            self.viewer_mode = if self.viewer_mode == 2 && self.input_preview.is_some() {
+                2
+            } else {
+                1
+            };
             self.status = "AEX output ready.".into();
             self.refresh_pixel_comparison();
         } else if result.operation.as_deref() == Some("render_image") {
             self.output_image = None;
             self.preview = None;
             self.pixel_comparison = None;
+            self.viewer_mode = 1;
         }
         if let Ok(report) = serde_json::from_str(&result.body) {
             apply_dynamic_ui_report(&mut self.parameters, &report);
@@ -2646,6 +2674,17 @@ impl eframe::App for HarnessApp {
                     .clicked()
                 {
                     self.reset_and_choose_aex();
+                }
+                if self
+                    .ui_kit
+                    .compact_button(
+                        ui,
+                        self.ui_kit.text("Close", "閉じる"),
+                        aex_ready && !self.busy,
+                    )
+                    .clicked()
+                {
+                    self.close_selected_aex();
                 }
                 ui.separator();
                 let image_label = if image_ready {
@@ -3584,7 +3623,7 @@ impl eframe::App for HarnessApp {
                 }
             });
         if self.current_render_input_fingerprint() != render_input_before {
-            self.invalidate_render_output();
+            self.clear_render_output();
         }
         let analysis_rect = analysis_response.response.rect;
         let rail_x = analysis_rect.right();
