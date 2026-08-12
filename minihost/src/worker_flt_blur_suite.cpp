@@ -291,7 +291,130 @@ int32_t __cdecl compute_directional_blur_radii(
   return 0;
 }
 
-Suite1 g_suite1{&gaussian_blur, &box_blur, &compute_directional_blur_radii};
+// Slot 3 (FLT_DirectionalBlur). The tap bound mirrors slot 0/1's kMaximumRadius:
+// a smear whose half-length would exceed it is rejected rather than run, so the
+// per-pixel accumulation stays bounded even for an adversarial length.
+constexpr int32_t kMaximumDirectionalTaps = 4096;
+
+// Bilinear sample of the interleaved ARGB float buffer at fractional pixel
+// coordinates. Samples outside the source contribute transparent black (0),
+// matching FLT's padded intermediate world (FUN_18002ebb0 builds a larger
+// PF_World, so the smear fades to transparent at the source edges) and the
+// destination the plug-in pre-cleared to 0.
+float sample_bilinear(const std::vector<float>& pixels, int32_t width,
+                      int32_t height, double fx, double fy,
+                      int32_t channel) noexcept {
+  const double x0f = std::floor(fx);
+  const double y0f = std::floor(fy);
+  const int32_t x0 = static_cast<int32_t>(x0f);
+  const int32_t y0 = static_cast<int32_t>(y0f);
+  const float tx = static_cast<float>(fx - x0f);
+  const float ty = static_cast<float>(fy - y0f);
+  const auto at = [&](int32_t x, int32_t y) -> float {
+    if (x < 0 || x >= width || y < 0 || y >= height) return 0.0f;
+    return pixels[(static_cast<std::size_t>(y) * width + x) * 4 + channel];
+  };
+  const float top = at(x0, y0) + (at(x0 + 1, y0) - at(x0, y0)) * tx;
+  const float bottom = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * tx;
+  return top + (bottom - top) * ty;
+}
+
+int32_t __cdecl directional_blur(
+    void* effect_ref, int32_t quality, double downsample_x, double downsample_y,
+    double length, double direction_degrees, const void* source_world,
+    void* destination_world) {
+  if (!g_hooks.effect_ref || effect_ref != g_hooks.effect_ref ||
+      !g_hooks.resolve_world || (quality != 0 && quality != 1) ||
+      !std::isfinite(length) || length <= 0.0 ||
+      length > static_cast<double>(kMaximumRadius) ||
+      !std::isfinite(direction_degrees) || !std::isfinite(downsample_x) ||
+      !std::isfinite(downsample_y) || downsample_x <= 0.0 ||
+      downsample_y <= 0.0)
+    return kBadCallbackParam;
+  world_safety::DispatchWorldFormat source{}, destination{};
+  if (!g_hooks.resolve_world(source_world, source) ||
+      !g_hooks.resolve_world(destination_world, destination))
+    return kBadCallbackParam;
+  int32_t pixel_bytes{};
+  if (!compatible_worlds(source, destination, pixel_bytes))
+    return kBadCallbackParam;
+
+  const double radians = direction_degrees * kDegreesToRadians;
+  const double sin_theta = std::sin(radians);
+  const double cos_theta = std::cos(radians);
+  // AE's visible smear extents (FLT FUN_180032690 param_6[4]/[5]): the blur
+  // projects onto x by |sin| and onto y by |cos|, each scaled by the matching
+  // downsample. Same sin->x / cos->y convention as slot 2.
+  const double extent_x = length * downsample_x * std::fabs(sin_theta);
+  const double extent_y = length * downsample_y * std::fabs(cos_theta);
+  const double half_length = std::hypot(extent_x, extent_y);
+  // Bound the extent as a double before the cast. downsample_x/y have no upper
+  // bound, so half_length can exceed INT32_MAX, where a double->int32 cast is
+  // undefined; on x64 it yields INT_MIN, which would slip past an int-domain
+  // bound check straight into the zero-extent branch and pass an out-of-range
+  // input off as a successful passthrough. Rejecting in the double domain keeps
+  // the tap count in [0, kMaximumDirectionalTaps] so the cast is well defined,
+  // matching slot 2's bounded_ceil_to_int guard.
+  if (!std::isfinite(half_length) ||
+      half_length > static_cast<double>(kMaximumDirectionalTaps))
+    return kBadCallbackParam;
+  const int32_t taps = static_cast<int32_t>(std::ceil(half_length));
+  // Signed half-vector of the centered smear (both directions blend around the
+  // pixel, so the sign only orients the axis, not the result).
+  const double vector_x = (sin_theta >= 0.0 ? 1.0 : -1.0) * extent_x;
+  const double vector_y = (cos_theta >= 0.0 ? 1.0 : -1.0) * extent_y;
+
+  try {
+    const std::size_t values = static_cast<std::size_t>(source.width) *
+        source.height * 4;
+    std::vector<float> input(values);
+    if (pixel_bytes == 4) load_pixels<uint8_t>(source, input);
+    else if (pixel_bytes == 8) load_pixels<uint16_t>(source, input);
+    else load_pixels<float>(source, input);
+
+    std::vector<float> output(values);
+    const int32_t width = source.width;
+    const int32_t height = source.height;
+    if (taps <= 0) {
+      // Zero-extent case: half_length underflowed to exactly 0 (both axis
+      // extents collapsed, e.g. a subnormal downsample), so the centered box is
+      // the identity. A sub-1px extent is not this case: it rounds up to one
+      // tap and runs the blur below.
+      output = input;
+    } else {
+      const double inverse_taps = 1.0 / static_cast<double>(taps);
+      const float weight = 1.0f / static_cast<float>(2 * taps + 1);
+      for (int32_t y = 0; y < height; ++y) {
+        for (int32_t x = 0; x < width; ++x) {
+          float accumulator[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+          for (int32_t tap = -taps; tap <= taps; ++tap) {
+            const double t = static_cast<double>(tap) * inverse_taps;
+            const double sample_x = static_cast<double>(x) + t * vector_x;
+            const double sample_y = static_cast<double>(y) + t * vector_y;
+            for (int32_t channel = 0; channel < 4; ++channel)
+              accumulator[channel] += sample_bilinear(input, width, height,
+                                                       sample_x, sample_y,
+                                                       channel);
+          }
+          const std::size_t destination_index =
+              (static_cast<std::size_t>(y) * width + x) * 4;
+          for (int32_t channel = 0; channel < 4; ++channel)
+            output[destination_index + channel] =
+                accumulator[channel] * weight;
+        }
+      }
+    }
+    if (pixel_bytes == 4) store_pixels<uint8_t>(output, destination);
+    else if (pixel_bytes == 8) store_pixels<uint16_t>(output, destination);
+    else store_pixels<float>(output, destination);
+    return 0;
+  } catch (const std::bad_alloc&) {
+    return kBadCallbackParam;
+  }
+}
+
+Suite1 g_suite1{&gaussian_blur, &box_blur, &compute_directional_blur_radii,
+                &directional_blur};
 
 }  // namespace
 
@@ -318,7 +441,7 @@ bool selftest() {
     return false;
   const auto* suite = static_cast<const Suite1*>(raw_suite);
   if (!suite->gaussian_blur || !suite->box_blur ||
-      !suite->compute_directional_blur_radii) {
+      !suite->compute_directional_blur_radii || !suite->directional_blur) {
     g_hooks.release_suite(kSuiteName, kSuiteVersion1);
     return false;
   }
@@ -453,6 +576,112 @@ bool selftest() {
                                             &radius_y) == kBadCallbackParam &&
       suite->compute_directional_blur_radii(1.0, 1.0, 0.0, 1.0, &radius_x,
                                             nullptr) == kBadCallbackParam;
+
+  // directional_blur (slot 3): a five-wide row with a single opaque-white
+  // impulse at x=2. Direction 90 degrees is a horizontal smear (|sin 90|=1 on
+  // x, |cos 90|~0 on y); length 1 at downsample 1 gives extent 1px, so each
+  // output pixel averages three integer-aligned taps {x-1, x, x+1}. Only the
+  // taps that land on x=2 carry the impulse, and 255/3 rounds to 85, so the
+  // white spreads to x in {1,2,3} and the edges stay clear. Bilinear sampling
+  // outside the row yields transparent black, so no channel exceeds the
+  // impulse. This checks direction, extent, and edge handling deterministically
+  // without depending on AE's RenderGraph normalization.
+  constexpr int32_t dir_width = 5;
+  constexpr int32_t dir_height = 1;
+  const auto make_dir_world = [=](void* pixels, int32_t rowbytes) {
+    world_safety::LocalEffectWorld world{};
+    world.data = pixels;
+    world.rowbytes = rowbytes;
+    world.width = dir_width;
+    world.height = dir_height;
+    world.extent_hint = {0, 0, dir_width, dir_height};
+    world.pix_aspect_ratio = {1, 1};
+    return world;
+  };
+  std::array<uint8_t, dir_width * dir_height * 4> dir_source{
+      0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0};
+  std::array<uint8_t, dir_width * dir_height * 4> dir_destination{};
+  const auto dir_source_before = dir_source;
+  auto dir_source_world = make_dir_world(dir_source.data(), dir_width * 4);
+  auto dir_destination_world =
+      make_dir_world(dir_destination.data(), dir_width * 4);
+  world_safety::DispatchWorldFormatScope dir_formats;
+  ok = ok &&
+      dir_formats.register_world(&dir_source_world,
+                                 world_registry::kPixelFormatArgb32) &&
+      dir_formats.register_world(&dir_destination_world,
+                                 world_registry::kPixelFormatArgb32);
+  const std::array<uint8_t, dir_width * dir_height * 4> dir_expected{
+      0, 0, 0, 0, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 85, 0, 0, 0, 0};
+  ok = ok && suite->directional_blur(
+      g_hooks.effect_ref, 1, 1.0, 1.0, 1.0, 90.0, &dir_source_world,
+      &dir_destination_world) == 0 &&
+      dir_destination == dir_expected && dir_source == dir_source_before;
+  // Fail-closed rejections, all of which must return kBadCallbackParam without
+  // touching the destination:
+  //   - foreign identity;
+  //   - non-positive length (0), and over-cap length isolated from the extent
+  //     bound (5000 > kMaximumRadius but extent 5000*0.5 = 2500 < tap bound,
+  //     so only the length clause rejects it);
+  //   - non-finite length (inf);
+  //   - the extent/tap bound, both in range (2.0,4096) and via an overflow-range
+  //     downsample (1e9,4096) that would make the int cast undefined without the
+  //     pre-cast double-domain bound;
+  //   - zero, negative, and non-finite downsample on both axes;
+  //   - non-finite direction; out-of-range quality; and null/unresolvable
+  //     worlds.
+  constexpr double dir_inf = std::numeric_limits<double>::infinity();
+  constexpr double dir_nan = std::numeric_limits<double>::quiet_NaN();
+  ok = ok &&
+      suite->directional_blur(reinterpret_cast<void*>(1), 1, 1.0, 1.0, 1.0,
+                              90.0, &dir_source_world,
+                              &dir_destination_world) == kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, 0.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 0.5, 0.5, 5000.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, dir_inf, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 2.0, 1.0, 4096.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1e9, 1.0, 4096.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 0.0, 1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 0.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, -1.0, 1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, -1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, dir_inf, 1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, dir_inf, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, 1.0, dir_nan,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 2, 1.0, 1.0, 1.0, 90.0,
+                              &dir_source_world, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, 1.0, 90.0,
+                              nullptr, &dir_destination_world) ==
+          kBadCallbackParam &&
+      suite->directional_blur(g_hooks.effect_ref, 1, 1.0, 1.0, 1.0, 90.0,
+                              &dir_source_world, nullptr) == kBadCallbackParam;
+  // None of the rejected calls may have written the destination.
+  ok = ok && dir_destination == dir_expected;
 
   return g_hooks.release_suite(kSuiteName, kSuiteVersion1) == 0 && ok;
 }
