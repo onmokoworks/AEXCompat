@@ -3,14 +3,35 @@ fn load_preview(
     texture_name: &str,
     path: &Path,
 ) -> Result<egui::TextureHandle, String> {
-    let image = image::open(path).map_err(|error| error.to_string())?;
+    let image = decode_preview_image(path)?;
+    Ok(ctx.load_texture(texture_name, image, egui::TextureOptions::LINEAR))
+}
+
+fn decode_preview_image(path: &Path) -> Result<egui::ColorImage, String> {
+    let image = image::open(path).map_err(|error| format!("image decode failed: {error}"))?;
     let rgba = image.into_rgba8();
+    if rgba.width() == 0 || rgba.height() == 0 {
+        return Err("decoded image has zero width or height".into());
+    }
     let size = [rgba.width() as usize, rgba.height() as usize];
-    Ok(ctx.load_texture(
-        texture_name,
-        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()),
-        egui::TextureOptions::LINEAR,
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        rgba.as_raw(),
     ))
+}
+
+fn canonical_deverbatim(path: &Path) -> Result<PathBuf, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("path could not be resolved: {error}"))?;
+    let text = canonical.as_os_str().to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        Ok(PathBuf::from(format!(r"\\{rest}")))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        Ok(PathBuf::from(rest))
+    } else {
+        Ok(canonical)
+    }
 }
 
 fn show_preview(ui: &mut egui::Ui, label: &str, texture: Option<&egui::TextureHandle>) {
@@ -83,16 +104,14 @@ fn inspect_dependency_roots(
     requested_roots: &[std::ffi::OsString],
 ) -> Result<Vec<PathBuf>, String> {
     const MAX_ROOTS: usize = aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
-    let plugin = plugin
-        .canonicalize()
+    let plugin = canonical_deverbatim(plugin)
         .map_err(|error| format!("selected AEX could not be resolved: {error}"))?;
     let mut roots = Vec::with_capacity(requested_roots.len() + 1);
     if let Some(parent) = plugin.parent() {
         roots.push(parent.to_path_buf());
     }
     for requested in requested_roots {
-        let root = PathBuf::from(requested)
-            .canonicalize()
+        let root = canonical_deverbatim(&PathBuf::from(requested))
             .map_err(|error| format!("dependency root could not be resolved: {error}"))?;
         if !root.is_dir() {
             return Err(format!(
@@ -420,20 +439,43 @@ fn cli_inspection_failure_document(message: &str) -> serde_json::Value {
     })
 }
 
-fn required_plugin_parameters(
+fn required_inspected_plugin_parameters(
     repository: &Path,
     plugin: &Path,
     hash: &str,
 ) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
-    match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
-        repository, plugin, hash,
-    ) {
+    let inspected = (|| {
+        let plugin = canonical_deverbatim(plugin).map_err(std::io::Error::other)?;
+        let expected_size = fs::metadata(&plugin)?.len();
+        let expected_sha256 = decode_sha256(hash).map_err(std::io::Error::other)?;
+        let dependency_search_dirs = plugin.parent().map(Path::to_path_buf).into_iter().collect();
+        aexcompat_broker::image_render::inspect_experimental_via_discovery_in_place(
+            repository,
+            aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact {
+                path: plugin,
+                expected_sha256,
+                expected_size,
+            },
+            dependency_search_dirs,
+        )
+    })();
+    match inspected {
         Ok((parameters, _)) => parameters,
         Err(error) => {
             eprintln!("{}", cli_inspection_failure_document(&error.to_string()));
             std::process::exit(1);
         }
     }
+}
+
+fn required_plugin_parameters(
+    repository: &Path,
+    plugin: &Path,
+    hash: &str,
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    aexcompat_broker::image_render::normalize_default_interactive_parameters(
+        &required_inspected_plugin_parameters(repository, plugin, hash),
+    )
 }
 
 fn print_cli_help() {
@@ -1559,13 +1601,8 @@ fn main() -> eframe::Result {
     if args.len() == 3 && args[1] == "--inspect-experimental" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        match aexcompat_broker::image_render::inspect_experimental(&repository, plugin, &hash) {
-            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
-            Err(error) => {
-                eprintln!("{error}");
-                std::process::exit(1);
-            }
-        }
+        let parameters = required_inspected_plugin_parameters(&repository, plugin, &hash);
+        println!("{}", serde_json::to_string_pretty(&parameters).unwrap());
         return Ok(());
     }
     if args.len() == 5 && args[1] == "--inspect-experimental-runtime-policy" {

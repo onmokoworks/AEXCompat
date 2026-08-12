@@ -77,8 +77,9 @@ pub struct InPlaceDiscoverySessionOpenRequest<'a> {
     pub dependency_search_dirs: Vec<PathBuf>,
     /// The bounded module-enumeration capacity of the recorded audit.
     pub module_bound: u32,
-    /// Per-inspect watchdog deadline (design §7).
-    pub inspect_deadline: Duration,
+    /// Optional per-inspect watchdog deadline (design §7). `None` preserves
+    /// parameter inspection's no-wall-clock-verdict contract (issue #354).
+    pub inspect_deadline: Option<Duration>,
     /// Per-launch environment inputs (issue #910), forwarded to the worker
     /// launch instead of the broker mutating its own environment.
     pub launch_environment: crate::secure_launch::LaunchEnvironment,
@@ -130,6 +131,16 @@ impl CleanupCrashAuthorization {
             self.dependency_search_dirs,
         )
     }
+
+    #[cfg(test)]
+    pub(crate) fn fixture() -> Self {
+        Self {
+            plugin_sha256: "0".repeat(64),
+            plugin_path: PathBuf::from("fixture.aex"),
+            expected_size: 1,
+            dependency_search_dirs: vec![PathBuf::from("fixture-root")],
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -165,7 +176,7 @@ pub struct DiscoverySession {
     transport: SessionTransport,
     receiver: mpsc::Receiver<SessionEvent>,
     process_exit_observed: bool,
-    inspect_deadline: Duration,
+    inspect_deadline: Option<Duration>,
     invalidation: Option<SessionInvalidation>,
     plugin_count: u32,
     plugin_sha256: Vec<String>,
@@ -194,7 +205,10 @@ impl DiscoverySession {
     }
 
     fn open_impl(request: InPlaceDiscoverySessionOpenRequest<'_>) -> io::Result<DiscoverySession> {
-        if request.inspect_deadline.is_zero() {
+        if request
+            .inspect_deadline
+            .is_some_and(|deadline| deadline.is_zero())
+        {
             return Err(invalid("discovery session inspect deadline is invalid"));
         }
         let (request_read, request_write) = inheritable_pipe(false)?;
@@ -370,6 +384,27 @@ impl DiscoverySession {
         }
     }
 
+    fn await_response_without_deadline(&mut self) -> FrameWait {
+        loop {
+            let event = if self.process_exit_observed {
+                match self.receiver.recv_timeout(PROCESS_EXIT_DRAIN) {
+                    Ok(event) => event,
+                    Err(_) => return FrameWait::WorkerGone,
+                }
+            } else {
+                match self.receiver.recv() {
+                    Ok(event) => event,
+                    Err(_) => return FrameWait::WorkerGone,
+                }
+            };
+            match event {
+                SessionEvent::Message(body) => return FrameWait::Message(body),
+                SessionEvent::ReaderViolation => return FrameWait::FramingViolation,
+                SessionEvent::ProcessExited => self.process_exit_observed = true,
+            }
+        }
+    }
+
     /// Inspects one manifest plugin (design §4.2): sends
     /// `{"v":1,"type":"inspect_plugin","plugin_index":N,"request_index":R}`
     /// and waits for `inspect_done` under the three-way wait. `request_index`
@@ -444,16 +479,24 @@ impl DiscoverySession {
         }
         let mut checkpoint: Option<InspectCheckpoint> = None;
         // An interim checkpoint does not reset the per-inspect watchdog.
-        let response_deadline = Instant::now() + self.inspect_deadline;
+        let response_deadline = self
+            .inspect_deadline
+            .map(|deadline| Instant::now() + deadline);
         let body = loop {
-            let frame = match self.await_response_until(response_deadline) {
+            let frame = match response_deadline {
+                Some(deadline) => self.await_response_until(deadline),
+                None => self.await_response_without_deadline(),
+            };
+            let frame = match frame {
                 FrameWait::Message(body) => body,
                 FrameWait::Deadline => {
                     return Err(self.invalidate(
                         "inspect_deadline",
                         format!(
                             "request {request_index} exceeded the {}ms deadline",
-                            self.inspect_deadline.as_millis()
+                            self.inspect_deadline
+                                .expect("deadline frame requires configured deadline")
+                                .as_millis()
                         ),
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));

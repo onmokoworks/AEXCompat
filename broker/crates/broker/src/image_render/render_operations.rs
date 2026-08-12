@@ -1466,6 +1466,78 @@ pub fn inspect_experimental_with_diagnostics(
     )
 }
 
+/// Inspects one in-place plug-in through the shipping discovery-session
+/// contract. A cleanup crash can succeed only through the authenticated,
+/// single-use retry authorization minted by that session.
+pub fn inspect_experimental_via_discovery_in_place(
+    repository: &Path,
+    plugin: ApprovedImageArtifact,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    use crate::render_session::{DiscoverySession, InPlaceDiscoverySessionOpenRequest};
+
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "in-place discovery inspection requires dependency search directories",
+        ));
+    }
+    let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+        repository,
+        plugins: vec![plugin],
+        dependency_search_dirs,
+        module_bound: crate::cluster_manifest::MAX_CLUSTER_MODULE_BOUND,
+        inspect_deadline: None,
+        launch_environment: Default::default(),
+    })?;
+    let outcome = session.inspect_plugin(0, 0)?;
+    let close = session.close();
+    finish_discovery_inspection(outcome, repository, close, |authorization, repository| {
+        inspect_experimental_cleanup_contained_in_place(authorization, repository)
+    })
+}
+
+fn finish_discovery_inspection<F>(
+    outcome: crate::render_session::InspectOutcome,
+    repository: &Path,
+    close: Value,
+    cleanup_retry: F,
+) -> io::Result<(Vec<InteractiveParameter>, Value)>
+where
+    F: FnOnce(
+        crate::render_session::CleanupCrashAuthorization,
+        &Path,
+    ) -> io::Result<(Vec<InteractiveParameter>, Value)>,
+{
+    use crate::render_session::InspectOutcome;
+
+    match outcome {
+        InspectOutcome::Inspected { report } => {
+            if close.get("session_clean") != Some(&json!(true)) {
+                return Err(invalid(format!(
+                    "discovery inspection session did not close cleanly: {close}"
+                )));
+            }
+            inspection_result_from_report(
+                report,
+                json!({
+                    "classification": "ok",
+                    "inspection_transport": "discovery_session",
+                }),
+                false,
+            )
+        }
+        InspectOutcome::InspectError { error_kind, report } => Err(invalid(format!(
+            "discovery inspection failed ({error_kind}): report={report:?}, close={close}"
+        ))),
+        InspectOutcome::CleanupCrashCheckpoint { authorization } => {
+            let (parameters, mut diagnostics) = cleanup_retry(authorization, repository)?;
+            diagnostics["inspection_transport"] = json!("discovery_cleanup_contained");
+            diagnostics["discovery_close"] = close;
+            Ok((parameters, diagnostics))
+        }
+    }
+}
+
 pub fn inspect_experimental_with_approved_dependencies(
     repository: &Path,
     plugin_path: &Path,

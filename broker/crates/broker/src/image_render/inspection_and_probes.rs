@@ -126,6 +126,14 @@ fn inspect_experimental_impl(
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }
+    inspection_result_from_report(report, diagnostics, runtime_policy.is_some())
+}
+
+fn inspection_result_from_report(
+    report: Value,
+    mut diagnostics: Value,
+    runtime_module_policy_applied: bool,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     let advertised_out_flags = report
         .get("out_flags")
         .and_then(Value::as_u64)
@@ -140,7 +148,7 @@ fn inspect_experimental_impl(
     diagnostics["smart_render_advertised"] = json!(smart_render_advertised(advertised_out_flags2));
     diagnostics["audio_effect_only"] = json!(audio_effect_only);
     diagnostics["image_render_supported"] = json!(!audio_effect_only);
-    diagnostics["runtime_module_policy_applied"] = json!(runtime_policy.is_some());
+    diagnostics["runtime_module_policy_applied"] = json!(runtime_module_policy_applied);
     if report.get("params_setup_error") != Some(&json!(0)) {
         return Err(invalid("AEX rejected PF_PARAMS_SETUP"));
     }

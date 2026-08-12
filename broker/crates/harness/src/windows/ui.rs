@@ -137,6 +137,11 @@ impl AexUiKit {
             }
             "Completed" => "完了しました",
             "Failed safely" => "安全に停止しました",
+            "AEX output ready." => "AEX出力を表示しました。",
+            "AEX output could not be loaded." => "AEX出力を読み込めませんでした。",
+            "Required render worker is missing or unreadable." => {
+                "必要なレンダーワーカーが見つからないか、読み込めません。"
+            }
             "Dependency list cleared." => "依存DLL一覧を消去しました。",
             "Effect Controls capability inspection failed safely; rendering is blocked." => {
                 "エフェクトコントロールの機能検査が安全に停止しました。レンダーは無効です。"
