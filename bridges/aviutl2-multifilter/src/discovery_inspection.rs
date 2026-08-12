@@ -99,25 +99,24 @@ fn finish_one_shot_in_place(
     if roots.is_empty() {
         return entry;
     }
-    let inspect = |roots: Vec<PathBuf>| {
-        inspect_experimental_in_place(repository, plugin, &entry.sha, roots)
-    };
+    let inspect =
+        |roots: Vec<PathBuf>| inspect_experimental_in_place(repository, plugin, &entry.sha, roots);
     let mut effective_roots = roots.clone();
     let inspected = match inspect(roots.clone()) {
         Err(original) if inspection_is_load_failure(&original) => {
             match registered_runtime_retry_roots(plugin, &roots, |basename| {
                 cached_matching_registered_runtime_roots(plugin, &entry.sha, basename)
             }) {
-            RuntimeRootResolution::Resolved(retry_roots) => {
-                effective_roots = retry_roots.clone();
-                inspect(retry_roots)
-            }
-            failure @ (RuntimeRootResolution::Ambiguous { .. }
-            | RuntimeRootResolution::CapacityExceeded { .. }
-            | RuntimeRootResolution::DiagnosticsTruncated) => {
-                Err(runtime_root_resolution_error(&failure))
-            }
-            RuntimeRootResolution::Unresolved => Err(original),
+                RuntimeRootResolution::Resolved(retry_roots) => {
+                    effective_roots = retry_roots.clone();
+                    inspect(retry_roots)
+                }
+                failure @ (RuntimeRootResolution::Ambiguous { .. }
+                | RuntimeRootResolution::CapacityExceeded { .. }
+                | RuntimeRootResolution::DiagnosticsTruncated) => {
+                    Err(runtime_root_resolution_error(&failure))
+                }
+                RuntimeRootResolution::Unresolved => Err(original),
             }
         }
         result => result,
@@ -174,21 +173,33 @@ fn inspection_is_load_failure(error: &std::io::Error) -> bool {
 #[derive(Debug, PartialEq)]
 enum RuntimeRootResolution {
     Resolved(Vec<PathBuf>),
-    Ambiguous { basename: String, candidate_count: usize },
-    CapacityExceeded { basename: String, root_count: usize },
+    Ambiguous {
+        basename: String,
+        candidate_count: usize,
+    },
+    CapacityExceeded {
+        basename: String,
+        root_count: usize,
+    },
     DiagnosticsTruncated,
     Unresolved,
 }
 
 fn runtime_root_resolution_error(resolution: &RuntimeRootResolution) -> std::io::Error {
     let diagnostics = match resolution {
-        RuntimeRootResolution::Ambiguous { basename, candidate_count } => serde_json::json!({
+        RuntimeRootResolution::Ambiguous {
+            basename,
+            candidate_count,
+        } => serde_json::json!({
             "classification": "registered_runtime_ambiguous",
             "reason": "different_provider_bytes",
             "basename": basename,
             "candidate_count": candidate_count,
         }),
-        RuntimeRootResolution::CapacityExceeded { basename, root_count } => serde_json::json!({
+        RuntimeRootResolution::CapacityExceeded {
+            basename,
+            root_count,
+        } => serde_json::json!({
             "classification": "registered_runtime_capacity_exceeded",
             "reason": "search_root_limit",
             "basename": basename,
@@ -200,7 +211,10 @@ fn runtime_root_resolution_error(resolution: &RuntimeRootResolution) -> std::io:
         }),
         _ => serde_json::Value::Null,
     };
-    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("diagnostics={diagnostics}"))
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("diagnostics={diagnostics}"),
+    )
 }
 
 /// Resolve a failed LoadLibrary closure only. Each basename must have exactly
@@ -212,8 +226,7 @@ fn registered_runtime_retry_roots(
     initial_roots: &[PathBuf],
     mut resolve: impl FnMut(&str) -> Vec<PathBuf>,
 ) -> RuntimeRootResolution {
-    const MAX_SEARCH_ROOTS: usize =
-        aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
+    const MAX_SEARCH_ROOTS: usize = aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
     let mut roots = initial_roots.to_vec();
     let initial_len = roots.len();
     loop {
@@ -658,8 +671,8 @@ fn discover_cluster_in_place(
     let member_count = members.len();
     // Every member shares one search-root set by construction (the in-place
     // identity), so the first member's roots stand for the cluster.
-    let search_dirs = override_search_dirs
-        .unwrap_or_else(|| search_roots_for(&members[0].0, &dependency.dirs));
+    let search_dirs =
+        override_search_dirs.unwrap_or_else(|| search_roots_for(&members[0].0, &dependency.dirs));
     if search_dirs.is_empty() {
         return fallback_members_in_place(
             repository,
@@ -722,10 +735,16 @@ fn discover_cluster_in_place(
                 // repeat the same uncontained setdown). Give each remaining
                 // member a fresh ordinary session so it must independently
                 // earn its own checkpoint before the one-shot fallback.
-                discover_cluster_in_place(repository, dependency, build, vec![(path, prepared)], None)
-                    .into_iter()
-                    .next()
-                    .expect("one member yields one entry")
+                discover_cluster_in_place(
+                    repository,
+                    dependency,
+                    build,
+                    vec![(path, prepared)],
+                    None,
+                )
+                .into_iter()
+                .next()
+                .expect("one member yields one entry")
             } else {
                 fallback_members_in_place(
                     repository,
@@ -763,8 +782,7 @@ fn discover_cluster_in_place(
                                 .iter()
                                 .map(|root| root.to_string_lossy().into_owned())
                                 .collect();
-                            prepared.entry.closure_identity =
-                                Some(in_place_identity(&retry_roots));
+                            prepared.entry.closure_identity = Some(in_place_identity(&retry_roots));
                             let retried = discover_cluster_in_place(
                                 repository,
                                 dependency,
@@ -783,7 +801,8 @@ fn discover_cluster_in_place(
                         | RuntimeRootResolution::DiagnosticsTruncated) => {
                             let mut entry = prepared.entry;
                             let error = runtime_root_resolution_error(&failure);
-                            entry.failure_classification = inspection_failure_classification(&error);
+                            entry.failure_classification =
+                                inspection_failure_classification(&error);
                             entry.failure_diagnostics = inspection_failure_diagnostics(&error);
                             results.push((path, entry));
                             continue;
@@ -1238,11 +1257,7 @@ fn discover_all_with_progress(
                             let cluster_results =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     discover_cluster_in_place(
-                                        repository,
-                                        dependency,
-                                        build,
-                                        members,
-                                        None,
+                                        repository, dependency, build, members, None,
                                     )
                                 }))
                                 .unwrap_or_else(|_| {

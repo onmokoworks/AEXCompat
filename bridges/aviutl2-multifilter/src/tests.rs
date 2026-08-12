@@ -154,10 +154,16 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let names: Vec<String> = (0..65).map(|index| format!("missing-{index}.dll")).collect();
+        let names: Vec<String> = (0..65)
+            .map(|index| format!("missing-{index}.dll"))
+            .collect();
         let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
         let plugin = root.join("effect.aex");
-        std::fs::write(&plugin, aexcompat_broker::test_pe::pe64_importing(&borrowed)).unwrap();
+        std::fs::write(
+            &plugin,
+            aexcompat_broker::test_pe::pe64_importing(&borrowed),
+        )
+        .unwrap();
         let result = registered_runtime_retry_roots(&plugin, &[root.clone()], |_| Vec::new());
         assert_eq!(result, RuntimeRootResolution::DiagnosticsTruncated);
         std::fs::remove_dir_all(root).unwrap();

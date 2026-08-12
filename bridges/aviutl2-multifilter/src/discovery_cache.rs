@@ -1119,7 +1119,11 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> 
     roots
 }
 
-fn cached_matching_registered_runtime_roots(plugin: &Path, sha: &str, basename: &str) -> Vec<PathBuf> {
+fn cached_matching_registered_runtime_roots(
+    plugin: &Path,
+    sha: &str,
+    basename: &str,
+) -> Vec<PathBuf> {
     static ASSOCIATED: OnceLock<Mutex<HashMap<(String, String), Vec<PathBuf>>>> = OnceLock::new();
     let plugin_key = (
         plugin.to_string_lossy().to_ascii_lowercase(),
@@ -1136,7 +1140,8 @@ fn cached_matching_registered_runtime_roots(plugin: &Path, sha: &str, basename: 
     } else {
         // Association can visit thousands of directories. Never hold the
         // process cache lock while doing filesystem or registry I/O.
-        let found = aexcompat_broker::installed_runtime_roots::associated_registered_install_roots(plugin);
+        let found =
+            aexcompat_broker::installed_runtime_roots::associated_registered_install_roots(plugin);
         cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
