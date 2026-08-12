@@ -69,6 +69,7 @@ pub fn render_scattermap_fixture(
         None,
         None,
         dependencies,
+        Vec::new(),
         None,
         false,
         None,
@@ -505,7 +506,7 @@ pub fn render_experimental_image_with_approved_dependencies(
     gpu_backend: RenderGpuBackend,
     dependencies: Vec<ApprovedImageArtifact>,
 ) -> io::Result<Value> {
-    render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
+    render_experimental_image_with_approved_dependencies_and_search_dirs(
         repository,
         plugin_path,
         approved_sha256,
@@ -519,6 +520,45 @@ pub fn render_experimental_image_with_approved_dependencies(
         custom_ui_action,
         gpu_backend,
         dependencies,
+        Vec::new(),
+    )
+}
+
+/// Interactive in-place render with the same explicitly approved runtime
+/// roots used for Effect Controls inspection. The secure session boundary
+/// canonicalizes and bounds the roots again; this API does not turn a root
+/// into an approved dependency artifact.
+pub fn render_experimental_image_with_approved_dependencies_and_search_dirs(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    host_context: Option<&crate::render_request::HostContext>,
+    custom_ui_action: Option<RenderUiAction>,
+    gpu_backend: RenderGpuBackend,
+    dependencies: Vec<ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<PathBuf>,
+) -> io::Result<Value> {
+    render_experimental_image_with_approved_dependencies_and_runtime_policy_and_search_dirs(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timing,
+        smart,
+        pixel_format,
+        host_context,
+        custom_ui_action,
+        gpu_backend,
+        dependencies,
+        dependency_search_dirs,
         None,
     )
 }
@@ -537,6 +577,42 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
     custom_ui_action: Option<RenderUiAction>,
     gpu_backend: RenderGpuBackend,
     dependencies: Vec<ApprovedImageArtifact>,
+    gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
+) -> io::Result<Value> {
+    render_experimental_image_with_approved_dependencies_and_runtime_policy_and_search_dirs(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timing,
+        smart,
+        pixel_format,
+        host_context,
+        custom_ui_action,
+        gpu_backend,
+        dependencies,
+        Vec::new(),
+        gpu_runtime_policy,
+    )
+}
+
+fn render_experimental_image_with_approved_dependencies_and_runtime_policy_and_search_dirs(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    host_context: Option<&crate::render_request::HostContext>,
+    custom_ui_action: Option<RenderUiAction>,
+    gpu_backend: RenderGpuBackend,
+    dependencies: Vec<ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<PathBuf>,
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
 ) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
@@ -561,6 +637,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
         None,
         None,
         dependencies,
+        dependency_search_dirs,
         gpu_runtime_policy,
         false,
         None,
@@ -627,6 +704,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_deep16_png(
         None,
         None,
         dependencies,
+        Vec::new(),
         None,
         true,
         None,
@@ -666,6 +744,7 @@ pub fn render_experimental_image_with_timed_layers(
         None,
         None,
         Some(timed_layers),
+        Vec::new(),
         Vec::new(),
         None,
         false,
@@ -720,6 +799,7 @@ pub fn render_experimental_image_with_parameter_animation(
         Some(animations),
         None,
         Vec::new(),
+        Vec::new(),
         None,
         false,
         None,
@@ -757,6 +837,7 @@ pub fn render_experimental_image_with_audio_sidecar(
         Some(audio_path),
         None,
         None,
+        Vec::new(),
         Vec::new(),
         None,
         false,
@@ -801,6 +882,7 @@ pub fn render_experimental_artifact_at_time(
         None,
         None,
         None,
+        Vec::new(),
         Vec::new(),
         None,
         false,

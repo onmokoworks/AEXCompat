@@ -111,6 +111,59 @@ fn parameters_for_native_action(
         .collect()
 }
 
+fn canonical_runtime_dependency_root(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("Runtime dependency folder must be an absolute path.".into());
+    }
+    let canonical = canonical_deverbatim(path)
+        .map_err(|error| format!("Runtime dependency folder is unavailable: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("Runtime dependency folder is not a directory.".into());
+    }
+    let text = canonical
+        .to_str()
+        .ok_or("Runtime dependency folder must be UTF-8.")?;
+    if text.contains(';') {
+        return Err("Runtime dependency folder must not contain ';'.".into());
+    }
+    Ok(canonical)
+}
+
+fn same_windows_path(left: &Path, right: &Path) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+fn approved_dependency_search_dirs(
+    plugin_path: &Path,
+    dependencies: &[aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact],
+    runtime_roots: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let plugin_parent = plugin_path
+        .parent()
+        .ok_or("Selected AEX has no parent folder.")?;
+    let mut roots = vec![plugin_parent.to_path_buf()];
+    for dependency in dependencies {
+        let parent = dependency
+            .path
+            .parent()
+            .ok_or("Approved dependency has no parent folder.")?;
+        if !roots.iter().any(|root| same_windows_path(root, parent)) {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    for root in runtime_roots {
+        if !roots.iter().any(|seen| same_windows_path(seen, root)) {
+            roots.push(root.clone());
+        }
+    }
+    if roots.len() > 16 {
+        return Err("At most 16 dependency search folders may be approved.".into());
+    }
+    Ok(roots)
+}
+
 struct HarnessApp {
     ui_kit: AexUiKit,
     repository: PathBuf,
@@ -118,6 +171,7 @@ struct HarnessApp {
     session_approved: bool,
     dependencies: Vec<SessionDependency>,
     approved_dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
+    runtime_dependency_roots: Vec<PathBuf>,
     approval_check: bool,
     trust_rebuilds: bool,
     selection_stale: bool,
@@ -196,6 +250,7 @@ impl HarnessApp {
             session_approved: false,
             dependencies: Vec::new(),
             approved_dependencies: Vec::new(),
+            runtime_dependency_roots: Vec::new(),
             approval_check: false,
             trust_rebuilds: false,
             selection_stale: false,
@@ -279,6 +334,7 @@ impl HarnessApp {
         self.session_approved = false;
         self.dependencies.clear();
         self.approved_dependencies.clear();
+        self.runtime_dependency_roots.clear();
         self.approval_check = false;
         self.trust_rebuilds = false;
         self.selection_stale = false;
@@ -343,6 +399,19 @@ impl HarnessApp {
     fn accept_adjacent_discovery(&mut self, discovery: AdjacentImportDiscovery) {
         self.dependencies = discovery.dependencies;
         self.preflight_warnings = discovery.warnings;
+        let unresolved = self
+            .preflight_warnings
+            .iter()
+            .map(|warning| warning.basename.clone())
+            .collect::<Vec<_>>();
+        self.runtime_dependency_roots =
+            aexcompat_broker::installed_runtime_roots::matching_registered_runtime_roots(
+                &unresolved,
+            )
+            .into_iter()
+            .filter_map(|path| canonical_runtime_dependency_root(&path).ok())
+            .take(15)
+            .collect();
         let Some(selection) = self.selection.as_ref() else {
             return;
         };
@@ -845,6 +914,27 @@ impl HarnessApp {
         }
     }
 
+    fn invalidate_effect_controls_for_dependency_change(&mut self) {
+        self.close_live_session();
+        self.parameters.clear();
+        self.parameter_defaults.clear();
+        self.parameter_inspection_state = if self.selection.is_some() {
+            ParameterInspectionState::Failed
+        } else {
+            ParameterInspectionState::NotSelected
+        };
+        self.audio_effect_only = false;
+        self.smart_render = false;
+        self.smart_render_advertised = None;
+        self.smart_render_capability = None;
+        self.smart_render_manual_override = false;
+        self.pending_parameter_slot = None;
+        self.pending_live_render = false;
+        self.live_render_due = None;
+        self.render_after_parameter_change = false;
+        self.invalidate_render_output();
+    }
+
     fn invalidate_session_approval(&mut self, status: &str) {
         self.session_approved = false;
         self.approval_check = false;
@@ -1162,16 +1252,19 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         let plugin_size = selection.size;
-        let mut dependency_search_dirs = self
-            .approved_dependencies
-            .iter()
-            .filter_map(|artifact| artifact.path.parent().map(Path::to_path_buf))
-            .collect::<Vec<_>>();
-        if let Some(parent) = plugin_path.parent() {
-            dependency_search_dirs.push(parent.to_path_buf());
-        }
-        dependency_search_dirs.sort();
-        dependency_search_dirs.dedup();
+        let dependency_search_dirs = match approved_dependency_search_dirs(
+            &plugin_path,
+            &self.approved_dependencies,
+            &self.runtime_dependency_roots,
+        ) {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.invalidate_effect_controls_for_dependency_change();
+                self.status = "Effect Controls inspection has invalid dependency folders.".into();
+                self.report = error;
+                return;
+            }
+        };
         self.status = "Loading Effect Controls...".into();
         self.parameter_inspection_state = ParameterInspectionState::Loading;
         self.spawn_native("inspect_parameters", move || {
@@ -1742,6 +1835,18 @@ impl HarnessApp {
         let gpu_backend = self.gpu_backend;
         let audio_sidecar = self.audio_input.clone();
         let dependencies = self.approved_dependencies.clone();
+        let dependency_search_dirs = match approved_dependency_search_dirs(
+            &plugin_path,
+            &dependencies,
+            &self.runtime_dependency_roots,
+        ) {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.status = "Render blocked: dependency folders are invalid.".into();
+                self.report = error;
+                return;
+            }
+        };
         let custom_ui_action = if self.apply_custom_ui_click_to_render {
             Some(aexcompat_broker::image_render::RenderUiAction::Click {
                 point: self.custom_ui_click_point,
@@ -1775,11 +1880,13 @@ impl HarnessApp {
             self.report = "Disable SmartFX, deep color, mask/spatial/render context, and custom UI actions before rendering with audio.".into();
             return;
         }
-        if audio_sidecar.is_some() && !dependencies.is_empty() {
+        if audio_sidecar.is_some()
+            && (!dependencies.is_empty() || !self.runtime_dependency_roots.is_empty())
+        {
             self.status =
-                "Dependency DLLs are not supported by the audio-sidecar render path.".into();
+                "Dependency DLLs or runtime folders are not supported by the audio-sidecar render path.".into();
             self.report =
-                "Remove dependencies or disable the audio sidecar before rendering.".into();
+                "Remove dependencies and runtime folders or disable the audio sidecar before rendering.".into();
             return;
         }
         // The resident-session selector path follows the existing inspection
@@ -1806,6 +1913,7 @@ impl HarnessApp {
                     plugin_path,
                     plugin_sha256: hash,
                     dependencies,
+                    dependency_search_dirs,
                     parameters,
                     selection: interactive_selection,
                     input_path: input,
@@ -1857,7 +1965,7 @@ impl HarnessApp {
                     timing,
                 )
             } else {
-                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
                     &repository,
                     &plugin_path,
                     &hash,
@@ -1871,6 +1979,7 @@ impl HarnessApp {
                     custom_ui_action,
                     gpu_backend,
                     dependencies,
+                    dependency_search_dirs,
                 )
             }
             .map_err(|error| interactive_selection_failure(interactive_selection, error.to_string()))?;

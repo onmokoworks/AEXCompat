@@ -84,6 +84,9 @@ struct LiveSessionKey {
     /// content hash. The sealed tree stages dependencies by basename, so a
     /// renamed DLL with identical bytes still needs a fresh session.
     dependency_identities: Vec<String>,
+    /// Canonical operator-approved runtime roots. A root-set change must
+    /// reopen the worker even when every explicit DLL identity is unchanged.
+    dependency_search_dirs: Vec<PathBuf>,
     /// Parameter structure only (slots, kinds, ranges, choices); values ride
     /// each frame's v:2 message and must not force a reopen.
     parameter_signature: String,
@@ -129,6 +132,7 @@ struct LiveRenderRequest {
     plugin_path: PathBuf,
     plugin_sha256: String,
     dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<PathBuf>,
     parameters: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     selection: aexcompat_broker::image_render::InteractiveSessionSelection,
     input_path: PathBuf,
@@ -267,6 +271,7 @@ fn live_render(
                 format!("{basename}:{}:{hash}", artifact.expected_size)
             })
             .collect(),
+        dependency_search_dirs: request.dependency_search_dirs.clone(),
         parameter_signature: parameter_structure_signature(&request.parameters),
         selection: request.selection,
         width,
@@ -285,7 +290,7 @@ fn live_render(
     }
     let one_shot = |reason: String| -> Result<(String, Option<PathBuf>), String> {
         let mut report =
-            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
                 &request.repository,
                 &request.plugin_path,
                 &request.plugin_sha256,
@@ -299,6 +304,7 @@ fn live_render(
                 None,
                 aexcompat_broker::image_render::RenderGpuBackend::Auto,
                 request.dependencies.clone(),
+                request.dependency_search_dirs.clone(),
             )
             .map_err(|error| {
                 interactive_selection_failure(
@@ -323,6 +329,7 @@ fn live_render(
             parameters: (!request.parameters.is_empty()).then_some(request.parameters.as_slice()),
             selection: request.selection,
             dependencies: request.dependencies.clone(),
+            dependency_search_dirs: request.dependency_search_dirs.clone(),
             width,
             height,
             pixel_format: request.pixel_format,
