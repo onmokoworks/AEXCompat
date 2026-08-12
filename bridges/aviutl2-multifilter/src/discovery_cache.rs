@@ -1119,6 +1119,37 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> 
     roots
 }
 
+fn cached_matching_registered_runtime_roots(plugin: &Path, sha: &str, basename: &str) -> Vec<PathBuf> {
+    static ASSOCIATED: OnceLock<Mutex<HashMap<(String, String), Vec<PathBuf>>>> = OnceLock::new();
+    let plugin_key = (
+        plugin.to_string_lossy().to_ascii_lowercase(),
+        sha.to_owned(),
+    );
+    let cache = ASSOCIATED.get_or_init(|| Mutex::new(HashMap::new()));
+    let associated = if let Some(found) = cache
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&plugin_key)
+        .cloned()
+    {
+        found
+    } else {
+        // Association can visit thousands of directories. Never hold the
+        // process cache lock while doing filesystem or registry I/O.
+        let found = aexcompat_broker::installed_runtime_roots::associated_registered_install_roots(plugin);
+        cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(plugin_key)
+            .or_insert_with(|| found.clone())
+            .clone()
+    };
+    aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+        &[basename.to_ascii_lowercase()],
+        associated,
+    )
+}
+
 /// Whether a name is a Windows API set, which the loader resolves on its own.
 fn is_api_set(name: &str) -> bool {
     let name = name.to_ascii_lowercase();

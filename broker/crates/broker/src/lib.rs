@@ -38,8 +38,8 @@ pub mod session_dependency_manifest;
 #[cfg(windows)]
 pub mod smart;
 pub mod staging_trust;
-#[cfg(test)]
-mod test_pe;
+#[cfg(any(test, feature = "test-pe-fixtures"))]
+pub mod test_pe;
 pub mod trace_policy;
 pub mod trusted_worker_stage;
 pub mod wgpu_dx12_pf_probe;
