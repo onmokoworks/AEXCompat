@@ -399,16 +399,34 @@ mod tests {
             debug_summary: None,
             ..parameter.clone()
         };
-        let normalized = normalize_inspected_ui_parameters(&[parameter.clone(), arbitrary]);
+        let descriptor = |slot, kind: &str| {
+            aexcompat_broker::image_render::InteractiveParameter {
+                slot,
+                name: kind.to_owned(),
+                kind: kind.to_owned(),
+                minimum: 0.0,
+                maximum: 0.0,
+                value: 0.0,
+                ..parameter.clone()
+            }
+        };
+        let radial_blur_parameters = [
+            parameter.clone(),
+            arbitrary,
+            descriptor(3, "group_start"),
+            descriptor(8, "group_end"),
+            descriptor(26, "layer"),
+        ];
+        let normalized = normalize_inspected_ui_parameters(&radial_blur_parameters);
         assert_eq!(normalized[0].value, 1.0);
-        assert_eq!(normalized.len(), 2, "UI keeps every discovered descriptor");
+        assert_eq!(normalized.len(), 5, "UI keeps every discovered descriptor");
         assert_eq!(normalized[1].kind, "arbitrary_data");
         let defaults = normalized.clone();
         let sendable = parameters_for_native_action(&normalized, &defaults);
         assert_eq!(
             sendable.len(),
             1,
-            "render omits only the unsendable default"
+            "render omits unsendable defaults and display-only descriptors"
         );
         assert!(
             aexcompat_broker::image_render::encode_interactive_payload(&sendable).is_ok(),
