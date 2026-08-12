@@ -843,6 +843,8 @@ fn initialize_experimental_aegp_impl(
     if report.get("stage") != Some(&json!("aegp_init"))
         || report.get("init_error") != Some(&json!(0))
         || report.get("suite_leases_balanced") != Some(&json!(true))
+        || report.get("dynamic_suite_live_references") != Some(&json!(0))
+        || !valid_dynamic_suite_report(&report)
     {
         let diagnostics = json!({
             "classification": "aegp_init_contract",
@@ -852,12 +854,50 @@ fn initialize_experimental_aegp_impl(
             "entry_fault": report.get("entry_fault"),
             "entry_exception_code": report.get("entry_exception_code"),
             "suite_leases_balanced": report.get("suite_leases_balanced"),
+            "dynamic_suite_live_references": report.get("dynamic_suite_live_references"),
+            "dynamic_suites_valid": valid_dynamic_suite_report(&report),
         });
         return Err(invalid(format!(
             "AEGP initialization contract failed safely: {diagnostics}"
         )));
     }
     Ok(report)
+}
+
+fn valid_dynamic_suite_report(report: &Value) -> bool {
+    let Some(suites) = report.get("dynamic_suites").and_then(Value::as_array) else {
+        return false;
+    };
+    if suites.len() > 32 {
+        return false;
+    }
+    let mut identities = std::collections::HashSet::with_capacity(suites.len());
+    suites.iter().all(|suite| {
+        let Some(object) = suite.as_object() else {
+            return false;
+        };
+        if object.len() != 3
+            || !object.contains_key("name")
+            || !object.contains_key("api_version")
+            || !object.contains_key("internal_version")
+        {
+            return false;
+        }
+        let Some(name) = object.get("name").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(api_version) = object.get("api_version").and_then(Value::as_i64) else {
+            return false;
+        };
+        let Some(internal_version) = object.get("internal_version").and_then(Value::as_i64) else {
+            return false;
+        };
+        !name.is_empty()
+            && name.len() <= 255
+            && (1..=i64::from(i32::MAX)).contains(&api_version)
+            && (0..=i64::from(i32::MAX)).contains(&internal_version)
+            && identities.insert((name, api_version, internal_version))
+    })
 }
 
 pub fn dispatch_experimental_aegp_update_menu(

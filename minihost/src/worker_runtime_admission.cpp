@@ -95,6 +95,17 @@ int report_load_failure(const char* stage, DWORD error) noexcept {
 int admit_runtime(const RuntimeHostHooks& hooks,
                   const RuntimeAdmissionRequest& request,
                   RuntimeContext& context) {
+  const int prepare_error =
+      prepare_runtime_environment(hooks, request, context);
+  if (prepare_error != 0) return prepare_error;
+  const int load_error = load_runtime_plugin(request, context);
+  if (load_error != 0) release_runtime_context(context);
+  return load_error;
+}
+
+int prepare_runtime_environment(const RuntimeHostHooks& hooks,
+                                const RuntimeAdmissionRequest& request,
+                                RuntimeContext& context) {
   reset_context(context);
   if (!hooks.hash_file || !hooks.redirect_native_stdout ||
       !hooks.restore_native_stdout || request.expected_sha256.empty()) return 10;
@@ -148,16 +159,31 @@ int admit_runtime(const RuntimeHostHooks& hooks,
     }
     search_directory_cookies.push_back(cookie);
   }
+  if (!hooks.redirect_native_stdout()) {
+    remove_cookies();
+    return 13;
+  }
+  context.plugin_path = plugin_path;
+  context.sealed_directory_cookie = sealed_directory_cookie;
+  context.search_directory_cookies = std::move(search_directory_cookies);
+  context.stdout_redirected = true;
+  context.restore_native_stdout = hooks.restore_native_stdout;
+  return 0;
+}
+
+int load_runtime_plugin(const RuntimeAdmissionRequest& request,
+                        RuntimeContext& context) {
+  if (context.plugin_path.empty() || context.module) return 10;
   // In-place loads (issue #751) resolve the plug-in's static imports through
   // the USER_DIRS search set as well, because the dependency closure lives in
   // its real directories instead of beside a staged copy.
   const bool in_place = !request.dependency_search_dirs.empty();
+  const std::filesystem::path& plugin_path = context.plugin_path;
   HMODULE module = LoadLibraryExW(plugin_path.c_str(), nullptr,
       LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32 |
       (in_place ? LOAD_LIBRARY_SEARCH_USER_DIRS : 0));
   if (!module) {
     const DWORD error = GetLastError();
-    remove_cookies();
     return report_load_failure("load_library", error);
   }
   ModuleAuditReport& audit = module_audit_report();
@@ -176,23 +202,12 @@ int admit_runtime(const RuntimeHostHooks& hooks,
                    "\"status\":\"module_audit_failed\",\"module_audit\":"
                 << module_audit_json() << "}\n";
       FreeLibrary(module);
-      remove_cookies();
       return 14;
     }
   } else if (audit.recorded) {
     audit.post_load = capture_module_audit();
   }
-  if (!hooks.redirect_native_stdout()) {
-    FreeLibrary(module);
-    remove_cookies();
-    return 13;
-  }
-  context.plugin_path = plugin_path;
   context.module = module;
-  context.sealed_directory_cookie = sealed_directory_cookie;
-  context.search_directory_cookies = std::move(search_directory_cookies);
-  context.stdout_redirected = true;
-  context.restore_native_stdout = hooks.restore_native_stdout;
   return 0;
 }
 

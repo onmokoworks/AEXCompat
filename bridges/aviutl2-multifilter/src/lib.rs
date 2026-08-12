@@ -25,6 +25,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use aexcompat_broker::companion_manifest::{ApprovedCompanion, CompanionSuiteIdentity};
 use aexcompat_broker::image_render::{
     InteractiveParameter, RenderGpuBackend, RenderPixelFormat,
     initialize_experimental_aegp_in_place, inspect_experimental_cleanup_contained_in_place,
@@ -116,6 +117,7 @@ struct ClusterMember {
     plugin: PathBuf,
     sha: String,
     smart: bool,
+    companions: Vec<ApprovedCompanion>,
 }
 
 /// Registered AEXes grouped by dependency-closure identity (issue #405),

@@ -19,4 +19,10 @@ int admit_worker_entry(const RuntimeHostHooks& hooks,
                        std::unique_ptr<aexcompat::TraceWriter>& trace_writer,
                        RuntimeContext& context);
 
+int prepare_worker_entry(const RuntimeHostHooks& hooks,
+                         const RuntimeAdmissionRequest& request,
+                         const char* trace_worker_label,
+                         std::unique_ptr<aexcompat::TraceWriter>& trace_writer,
+                         RuntimeContext& context);
+
 }  // namespace aexcompat::worker_runtime

@@ -34,7 +34,8 @@ AuxiliaryOptionResult strip_auxiliary_options(
   bool saw_aux = false, saw_animation = false, saw_coverage = false;
   bool saw_dump_worlds = false, saw_checksum_detail = false;
   bool saw_render_settings = false, saw_authorization = false;
-  bool saw_cluster_manifest = false, saw_dependency_dirs = false;
+  bool saw_cluster_manifest = false, saw_companion_manifest = false;
+  bool saw_dependency_dirs = false;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -66,6 +67,10 @@ AuxiliaryOptionResult strip_auxiliary_options(
                hooks.load_cluster_manifest && !saw_cluster_manifest) {
       accepted = hooks.load_cluster_manifest(hooks.context, value);
       saw_cluster_manifest = accepted;
+    } else if (equals(flag, L"--companion-manifest-v1") &&
+               hooks.load_companion_manifest && !saw_companion_manifest) {
+      accepted = hooks.load_companion_manifest(hooks.context, value);
+      saw_companion_manifest = accepted;
     } else if (equals(flag, L"--dependency-dirs-v1") &&
                hooks.set_dependency_search_dirs && !saw_dependency_dirs) {
       accepted = hooks.set_dependency_search_dirs(hooks.context, value);
