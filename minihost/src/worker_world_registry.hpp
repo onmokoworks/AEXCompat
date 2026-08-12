@@ -74,6 +74,10 @@ bool resolve_dispatch_world_format(
     const void* world, world_safety::DispatchWorldFormat& result);
 
 bool owns_world(void* world);
+// Base-pointer membership across every host-issued pixel allocation this
+// registry tracks (PF_NEW_WORLD worlds plus AEGP platform/owned backings);
+// the copy callbacks' foreign-operand fallback gate.
+bool hosts_world_pixels(void* world);
 bool owned_world_matches(void* world, int32_t pixel_format);
 bool snapshot_owned_world(void* world, OwnedWorldSnapshot& snapshot);
 bool lifetimes_balanced();

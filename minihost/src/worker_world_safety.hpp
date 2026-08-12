@@ -67,6 +67,14 @@ bool resolve_dispatch_world_format(const void* world,
                                    DispatchWorldFormat& result);
 bool resolve_registered_dispatch_world(const void* world,
                                        DispatchWorldFormat& result);
+// True when the dispatch-format registry knows this reference at all: the
+// struct pointer was registered (a host-handed world - reaching a failed
+// resolve with one means its fields no longer match what was registered), or
+// its pixel pointer is some registered world's base under a different
+// geometry. Both are the registry's fail-closed mismatch refusal, and the
+// copy callbacks' foreign-operand fallback consults this so that refusal
+// stays a refusal instead of degrading into foreign admission.
+bool dispatch_world_reference_known(const void* world);
 
 bool bounded_typed_world(void* world, int32_t pixel_bytes,
                          unsigned char*& pixels, int32_t& rowbytes,

@@ -276,6 +276,34 @@ bool owns_world(void* world) {
   return world && g_worlds.count(world_pixels(world)) != 0;
 }
 
+// Whether the world's pixel pointer is the base of any host-issued pixel
+// allocation: a `PF_NEW_WORLD` world (`g_worlds`) or an AEGP platform/owned
+// backing. Gate for the copy callbacks' foreign-operand fallback: every one of
+// these allocations has its own fail-closed geometry check (`resolve_owned_world`,
+// `snapshot_aegp_view`), and a plug-in struct that re-declares one of their
+// bases under a different geometry must stay refused rather than be admitted at
+// its declared stride. Borrowed AEGP views are not consulted: their `pf_world`
+// points at a struct owned elsewhere (dispatch-registered or the plug-in's
+// own), which the dispatch-registry check and this check's other branches
+// already cover, and dereferencing it here would read a struct whose lifetime
+// only `snapshot_aegp_view`'s validation vouches for.
+bool hosts_world_pixels(void* world) {
+  void* pixels = world_pixels(world);
+  if (!pixels) return false;
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (g_worlds.count(pixels) != 0) return true;
+  for (const auto& [handle, entry] : g_platform_worlds) {
+    (void)handle;
+    if (entry.backing && entry.backing->world.data == pixels) return true;
+  }
+  for (const auto& [handle, view] : g_aegp_views) {
+    (void)handle;
+    if (view.platform_backing && view.platform_backing->world.data == pixels)
+      return true;
+  }
+  return false;
+}
+
 bool owned_world_matches(void* world, int32_t pixel_format) {
   std::lock_guard<std::mutex> lock(g_mutex);
   const auto found = g_worlds.find(world_pixels(world));
