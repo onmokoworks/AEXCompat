@@ -2039,6 +2039,7 @@ mod windows_e2e {
                 )
                 .expect("valid inspection-bound selection"),
                 dependencies: Vec::new(),
+                dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
                 width: WIDTH,
                 height: HEIGHT,
                 pixel_format: RenderPixelFormat::Argb8,

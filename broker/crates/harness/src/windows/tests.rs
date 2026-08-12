@@ -480,6 +480,7 @@ mod tests {
         let key = |selection| LiveSessionKey {
             plugin_sha256: "a".repeat(64),
             dependency_identities: vec![],
+            dependency_search_dirs: vec![],
             parameter_signature: "[]".into(),
             selection,
             width: 16,
@@ -493,6 +494,12 @@ mod tests {
         // resident key so `render_live_request` closes and reopens instead of
         // reporting a new source from a stale session.
         assert!(key(auto) != key(manual));
+        let mut rooted = key(auto);
+        rooted.dependency_search_dirs = vec![PathBuf::from(r"C:\runtime")];
+        assert!(
+            key(auto) != rooted,
+            "a runtime-root change must reopen the resident worker"
+        );
         assert!(selected_interactive_session_selection(smart, false, true).is_err());
 
         let classic = InspectedRenderCapability {

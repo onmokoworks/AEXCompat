@@ -5,6 +5,7 @@ pub mod gpu_platform_collector;
 pub mod host_core;
 #[cfg(windows)]
 pub mod image_render;
+pub mod installed_runtime_roots;
 #[cfg(windows)]
 pub mod l2;
 pub mod minidump_policy;

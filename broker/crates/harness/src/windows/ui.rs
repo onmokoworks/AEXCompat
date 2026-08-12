@@ -143,6 +143,12 @@ impl AexUiKit {
                 "必要なレンダーワーカーが見つからないか、読み込めません。"
             }
             "Dependency list cleared." => "依存DLL一覧を消去しました。",
+            "Effect Controls inspection has invalid dependency folders." => {
+                "依存フォルダーが無効なため、エフェクトコントロールを検査できません。"
+            }
+            "Render blocked: dependency folders are invalid." => {
+                "依存フォルダーが無効なため、レンダーを停止しました。"
+            }
             "Effect Controls capability inspection failed safely; rendering is blocked." => {
                 "エフェクトコントロールの機能検査が安全に停止しました。レンダーは無効です。"
             }
