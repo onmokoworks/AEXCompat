@@ -399,16 +399,14 @@ mod tests {
             debug_summary: None,
             ..parameter.clone()
         };
-        let descriptor = |slot, kind: &str| {
-            aexcompat_broker::image_render::InteractiveParameter {
-                slot,
-                name: kind.to_owned(),
-                kind: kind.to_owned(),
-                minimum: 0.0,
-                maximum: 0.0,
-                value: 0.0,
-                ..parameter.clone()
-            }
+        let descriptor = |slot, kind: &str| aexcompat_broker::image_render::InteractiveParameter {
+            slot,
+            name: kind.to_owned(),
+            kind: kind.to_owned(),
+            minimum: 0.0,
+            maximum: 0.0,
+            value: 0.0,
+            ..parameter.clone()
         };
         let radial_blur_parameters = [
             parameter.clone(),
