@@ -123,6 +123,12 @@ impl AexUiKit {
                 "入力画像を読み込みました。レンダーできます。"
             }
             "Input image could not be decoded." => "入力画像をデコードできませんでした。",
+            "Image drop ignored while a native task is running." => {
+                "処理中のため画像のドロップを受け付けませんでした。"
+            }
+            "Drop exactly one supported image file." => {
+                "対応している画像ファイルを1枚だけドロップしてください。"
+            }
             "Audio input selected. Ready to render." => {
                 "音声入力を選択しました。レンダーできます。"
             }
@@ -361,6 +367,177 @@ impl AexUiKit {
         response
     }
 
+    fn modern_slider(
+        &self,
+        ui: &mut egui::Ui,
+        value: &mut f64,
+        range: std::ops::RangeInclusive<f64>,
+        accessible_label: &str,
+    ) -> egui::Response {
+        let minimum = *range.start();
+        let maximum = *range.end();
+        let previous = *value;
+        let enabled = ui.is_enabled();
+        let mut displayed_value = value.clamp(minimum, maximum);
+        let (track_response, numeric_response) = ui
+            .horizontal(|ui| {
+                let desired = egui::vec2(ui.available_width().min(180.0).max(96.0), 28.0);
+                let (rect, mut response) =
+                    ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
+                if response.clicked() {
+                    response.request_focus();
+                }
+                if response.dragged() || response.clicked() {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        let fraction = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                        *value = minimum + (maximum - minimum) * f64::from(fraction);
+                    }
+                }
+                if response.enabled() && response.has_focus() && maximum > minimum {
+                    ui.memory_mut(|memory| {
+                        memory.set_focus_lock_filter(
+                            response.id,
+                            egui::EventFilter {
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                                ..Default::default()
+                            },
+                        );
+                    });
+                    let step = (maximum - minimum) / 100.0;
+                    let (delta, home, end) = ui.input(|input| {
+                        let increment = input.key_pressed(egui::Key::ArrowRight)
+                            || input.key_pressed(egui::Key::ArrowUp);
+                        let decrement = input.key_pressed(egui::Key::ArrowLeft)
+                            || input.key_pressed(egui::Key::ArrowDown);
+                        (
+                            f64::from(increment) - f64::from(decrement),
+                            input.key_pressed(egui::Key::Home),
+                            input.key_pressed(egui::Key::End),
+                        )
+                    });
+                    if home {
+                        *value = minimum;
+                    } else if end {
+                        *value = maximum;
+                    } else {
+                        *value += delta * step;
+                    }
+                }
+                if response.enabled() && maximum > minimum {
+                    let step = (maximum - minimum) / 100.0;
+                    let access_delta = ui.input(|input| {
+                        input.num_accesskit_action_requests(
+                            response.id,
+                            egui::accesskit::Action::Increment,
+                        ) as f64
+                            - input.num_accesskit_action_requests(
+                                response.id,
+                                egui::accesskit::Action::Decrement,
+                            ) as f64
+                    });
+                    *value += access_delta * step;
+                    ui.input(|input| {
+                        for request in input.accesskit_action_requests(
+                            response.id,
+                            egui::accesskit::Action::SetValue,
+                        ) {
+                            if let Some(egui::accesskit::ActionData::NumericValue(new_value)) =
+                                request.data
+                            {
+                                *value = new_value.clamp(minimum, maximum);
+                            }
+                        }
+                    });
+                }
+                if response.enabled() {
+                    *value = value.clamp(minimum, maximum);
+                }
+                if *value != previous {
+                    response.mark_changed();
+                }
+                response.widget_info(|| {
+                    egui::WidgetInfo::slider(ui.is_enabled(), *value, accessible_label)
+                });
+                ui.ctx().accesskit_node_builder(response.id, |builder| {
+                    use egui::accesskit::Action;
+                    builder.set_min_numeric_value(minimum);
+                    builder.set_max_numeric_value(maximum);
+                    builder.set_numeric_value_step((maximum - minimum) / 100.0);
+                    if enabled {
+                        builder.add_action(Action::SetValue);
+                    }
+                    if enabled && *value < maximum {
+                        builder.add_action(Action::Increment);
+                    }
+                    if enabled && *value > minimum {
+                        builder.add_action(Action::Decrement);
+                    }
+                });
+                let visuals = ui.style().interact(&response);
+                let primary = if enabled {
+                    self.theme.palette.primary
+                } else {
+                    self.theme.palette.muted.gamma_multiply(0.55)
+                };
+                let thumb_fill = if enabled {
+                    self.theme.palette.background
+                } else {
+                    self.theme.palette.muted.gamma_multiply(0.55)
+                };
+                let track = egui::Rect::from_center_size(
+                    rect.center(),
+                    egui::vec2(rect.width(), if response.hovered() { 3.0 } else { 2.0 }),
+                );
+                ui.painter()
+                    .rect_filled(track, 2.0, self.theme.palette.muted);
+                let fraction = if maximum > minimum {
+                    ((*value - minimum) / (maximum - minimum)).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                };
+                let thumb = egui::pos2(
+                    egui::lerp(rect.left()..=rect.right(), fraction),
+                    rect.center().y,
+                );
+                ui.painter().line_segment(
+                    [track.left_center(), thumb],
+                    egui::Stroke::new(2.0, primary),
+                );
+                ui.painter().circle_filled(
+                    thumb,
+                    if response.hovered() || response.dragged() {
+                        7.0
+                    } else {
+                        6.0
+                    },
+                    thumb_fill,
+                );
+                ui.painter().circle_stroke(
+                    thumb,
+                    if response.has_focus() { 7.0 } else { 6.0 },
+                    egui::Stroke::new(2.0, visuals.fg_stroke.color),
+                );
+                let numeric_value = if enabled {
+                    &mut *value
+                } else {
+                    &mut displayed_value
+                };
+                let numeric = ui.add(
+                    egui::DragValue::new(numeric_value)
+                        .range(range)
+                        .speed(((maximum - minimum).abs() / 200.0).max(0.01)),
+                );
+                (response, numeric)
+            })
+            .inner;
+        let mut response = track_response.union(numeric_response.clone());
+        if numeric_response.changed() {
+            response.mark_changed();
+        }
+        response
+    }
+
     fn tab_button(
         &self,
         ui: &mut egui::Ui,
@@ -519,5 +696,168 @@ mod ui_kit_tests {
             assert!(!secondary.enabled());
             assert!(!secondary.clicked());
         });
+    }
+
+    #[test]
+    fn modern_slider_is_shared_bounded_and_disabled_with_its_ui() {
+        egui::__run_test_ui(|ui| {
+            let kit = AexUiKit::default();
+            let mut value = 25.0;
+            let response = kit.modern_slider(ui, &mut value, 0.0..=100.0, "Amount");
+            assert!(response.enabled());
+            assert_eq!(value, 25.0);
+            assert!(response.rect.height() >= 28.0);
+
+            value = 150.0;
+            let disabled = ui
+                .add_enabled_ui(false, |ui| {
+                    kit.modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
+                })
+                .inner;
+            assert!(!disabled.enabled());
+            assert_eq!(value, 150.0);
+            assert!(!disabled.changed());
+        });
+    }
+
+    #[test]
+    fn focused_modern_slider_ignores_arrow_keys_after_becoming_disabled() {
+        let ctx = egui::Context::default();
+        let mut value = 25.0;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response =
+                    AexUiKit::default().modern_slider(ui, &mut value, 0.0..=100.0, "Amount");
+                response.request_focus();
+            });
+        });
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::ArrowRight,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut changed = true;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                changed = ui
+                    .add_enabled_ui(false, |ui| {
+                        AexUiKit::default().modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
+                    })
+                    .inner
+                    .changed();
+            });
+        });
+
+        assert_eq!(value, 25.0);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn focused_modern_slider_supports_vertical_arrows_and_range_endpoints() {
+        for (key, expected) in [
+            (egui::Key::ArrowUp, 26.0),
+            (egui::Key::ArrowDown, 24.0),
+            (egui::Key::Home, 0.0),
+            (egui::Key::End, 100.0),
+        ] {
+            let ctx = egui::Context::default();
+            let mut value = 25.0;
+            let _ = ctx.run(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    AexUiKit::default()
+                        .modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
+                        .request_focus();
+                });
+            });
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let mut changed = false;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    changed = AexUiKit::default()
+                        .modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
+                        .changed();
+                });
+            });
+            assert_eq!(value, expected);
+            assert!(changed);
+        }
+    }
+
+    #[test]
+    fn modern_slider_accepts_accesskit_set_value_and_keeps_focus_for_repeated_arrows() {
+        let ctx = egui::Context::default();
+        let mut value = 25.0;
+        let mut slider_id = egui::Id::NULL;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let response =
+                    AexUiKit::default().modern_slider(ui, &mut value, 0.0..=100.0, "Amount");
+                slider_id = response.id;
+                response.request_focus();
+            });
+        });
+
+        for expected in [26.0, 27.0] {
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key: egui::Key::ArrowUp,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert!(
+                        AexUiKit::default()
+                            .modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
+                            .changed()
+                    );
+                });
+            });
+            assert_eq!(value, expected);
+            assert!(ctx.memory(|memory| memory.has_focus(slider_id)));
+        }
+
+        ctx.memory_mut(|memory| memory.surrender_focus(slider_id));
+        assert!(!ctx.memory(|memory| memory.has_focus(slider_id)));
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::AccessKitActionRequest(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::SetValue,
+                    target: slider_id.value().into(),
+                    data: Some(egui::accesskit::ActionData::NumericValue(75.0)),
+                },
+            )],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(
+                    AexUiKit::default()
+                        .modern_slider(ui, &mut value, 0.0..=100.0, "Amount")
+                        .changed()
+                );
+            });
+        });
+        assert_eq!(value, 75.0);
     }
 }

@@ -170,6 +170,17 @@ fn approved_dependency_search_dirs(
     Ok(roots)
 }
 
+fn single_supported_dropped_path(dropped: &[egui::DroppedFile]) -> Option<PathBuf> {
+    if dropped.len() != 1 {
+        return None;
+    }
+    dropped[0]
+        .path
+        .as_ref()
+        .filter(|path| is_supported_input_image(path))
+        .cloned()
+}
+
 struct HarnessApp {
     ui_kit: AexUiKit,
     repository: PathBuf,
@@ -996,6 +1007,10 @@ impl HarnessApp {
         let Some(path) = selected else {
             return;
         };
+        self.load_input_path(ctx, path);
+    }
+
+    fn load_input_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         match load_preview(ctx, "input", &path) {
             Ok(preview) => {
                 self.input_image = Some(path);
@@ -1009,6 +1024,22 @@ impl HarnessApp {
                 self.report = error;
             }
         }
+    }
+
+    fn accept_dropped_input(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        if self.busy {
+            self.status = "Image drop ignored while a native task is running.".into();
+            return;
+        }
+        let Some(path) = single_supported_dropped_path(&dropped) else {
+            self.status = "Drop exactly one supported image file.".into();
+            return;
+        };
+        self.load_input_path(ctx, path);
     }
 
     fn start_live_render_if_ready(&mut self) {
@@ -2490,12 +2521,11 @@ impl HarnessApp {
                                 parameter.value = f64::from(checked);
                             }
                         } else {
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut parameter.value,
-                                    parameter.minimum..=parameter.maximum,
-                                )
-                                .show_value(true),
+                            self.ui_kit.modern_slider(
+                                ui,
+                                &mut parameter.value,
+                                parameter.minimum..=parameter.maximum,
+                                &parameter.name,
                             );
                         }
                     });
@@ -2762,6 +2792,7 @@ impl HarnessApp {
 impl eframe::App for HarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui_kit.install(ctx);
+        self.accept_dropped_input(ctx);
         self.poll(ctx);
         self.dispatch_pending_parameter_change(ctx);
         self.check_selected_identity();
@@ -3325,7 +3356,12 @@ impl eframe::App for HarnessApp {
                                 let mut checked = parameter.value != 0.0;
                                 if ui.checkbox(&mut checked, "").changed() { parameter.value = if checked { 1.0 } else { 0.0 }; }
                             } else {
-                                ui.add(egui::Slider::new(&mut parameter.value, parameter.minimum..=parameter.maximum));
+                                self.ui_kit.modern_slider(
+                                    ui,
+                                    &mut parameter.value,
+                                    parameter.minimum..=parameter.maximum,
+                                    &parameter.name,
+                                );
                             }
                         }));
                         if parameter.supervised
@@ -3879,5 +3915,27 @@ impl eframe::App for HarnessApp {
             self.show_workspace_viewer(ui);
         });
         self.show_image_viewer(ctx);
+        if ctx.input(|input| !input.raw.hovered_files.is_empty()) {
+            let rect = ctx.content_rect().shrink(18.0);
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("input-image-drop-target"),
+            ));
+            painter.rect(
+                rect,
+                12.0,
+                self.ui_kit.theme.palette.background.gamma_multiply(0.92),
+                egui::Stroke::new(2.0, self.ui_kit.theme.palette.primary),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                self.ui_kit
+                    .text("Drop one input image", "入力画像を1枚ドロップ"),
+                egui::FontId::proportional(22.0),
+                self.ui_kit.theme.palette.foreground,
+            );
+        }
     }
 }

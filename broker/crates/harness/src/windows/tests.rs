@@ -3,6 +3,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn input_image_path_uses_one_state_transition_for_picker_and_drop() {
+        let root = temporary_directory("ui-dropped-input");
+        let valid = root.join("frame.PNG");
+        let invalid = root.join("notes.txt");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&valid)
+            .unwrap();
+        fs::write(&invalid, b"not an image").unwrap();
+        assert!(is_supported_input_image(&valid));
+        assert!(!is_supported_input_image(&invalid));
+        assert!(!is_supported_input_image(&root.join("missing.png")));
+        let path_drop = egui::DroppedFile {
+            path: Some(valid.clone()),
+            ..Default::default()
+        };
+        let memory_drop = egui::DroppedFile {
+            name: "clipboard.png".into(),
+            bytes: Some(std::sync::Arc::from(&b"payload"[..])),
+            ..Default::default()
+        };
+        assert_eq!(
+            single_supported_dropped_path(std::slice::from_ref(&path_drop)),
+            Some(valid.clone())
+        );
+        assert!(single_supported_dropped_path(std::slice::from_ref(&memory_drop)).is_none());
+        assert!(single_supported_dropped_path(&[path_drop, memory_drop]).is_none());
+
+        let ctx = egui::Context::default();
+        let mut app = HarnessApp::new(root.clone());
+        app.output_image = Some(root.join("stale-output.png"));
+        app.viewer_mode = 2;
+        app.load_input_path(&ctx, valid.clone());
+        assert_eq!(app.input_image.as_deref(), Some(valid.as_path()));
+        assert_eq!(app.input_preview.as_ref().unwrap().size(), [3, 2]);
+        assert!(app.output_image.is_none());
+        assert_eq!(app.viewer_mode, 0);
+        assert_eq!(app.status, "Input image loaded. Ready to render.");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn analysis_panel_width_uses_the_padded_action_layout_and_stable_collapsed_rail() {
         assert_eq!(
             analysis_panel_min_width(),
