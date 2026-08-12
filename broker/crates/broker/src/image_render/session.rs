@@ -1132,11 +1132,13 @@ pub struct InteractiveRenderSession {
 #[cfg(windows)]
 impl InteractiveRenderSession {
     pub fn open(request: InteractiveSessionOpen<'_>) -> io::Result<Self> {
-        let mut dependency_search_dirs = vec![request
-            .plugin_path
-            .parent()
-            .ok_or_else(|| invalid("interactive plugin path has no parent directory"))?
-            .to_path_buf()];
+        let mut dependency_search_dirs = vec![
+            request
+                .plugin_path
+                .parent()
+                .ok_or_else(|| invalid("interactive plugin path has no parent directory"))?
+                .to_path_buf(),
+        ];
         for dependency in &request.dependencies {
             let parent = dependency
                 .path
