@@ -52,17 +52,41 @@ using BoxBlur = int32_t (__cdecl *)(
 // null-pointer guard.
 using ComputeDirectionalBlurRadii = int32_t (__cdecl *)(
     double, double, double, double, int32_t*, int32_t*);
+// Slot 3 (offset 0x18), FLT_DirectionalBlur, reached through the
+// FLT_DirectionalBlurC wrapper (FLT.dll 0x1800325b0 -> 0x180030d00). The one
+// observed caller is Directional Blur (DirectionalBlur.aex FUN_18000e040,
+// issue #1145). ABI recovered from that call site and FLT.dll's own
+// FUN_18002ebb0/FUN_180032690:
+//   (effect_ref, quality, downsample_x, downsample_y, length,
+//    direction_degrees, source_world, destination_world)
+// The plug-in only calls this with length > 0 and after clearing the
+// destination; a centered directional motion blur of `source` is written into
+// `destination`. Bit depth of both worlds matches (FLT asserts it). AE's
+// visible smear extent is length*downsample_x*|sin| on x and
+// length*downsample_y*|cos| on y (FLT FUN_180032690 param_6[4]/[5]), the same
+// sin->x / cos->y convention as slot 2. AE's internal normalization runs
+// through the RenderGraph engine (RG_ExecuteGraph, FLT.dll FUN_180031a50),
+// which is not reproducible outside AE; the host implements the observable
+// contract (a directional box blur with transparent-black edges, matching AE's
+// extent geometry) rather than that engine. Returns 0 on success; invalid
+// identity, quality, length, downsample, world layout, format, or an extent
+// that would exceed the tap bound returns PF_Err_BAD_CALLBACK_PARAM (4), never
+// a partially valid output.
+using DirectionalBlur = int32_t (__cdecl *)(
+    void*, int32_t, double, double, double, double, const void*, void*);
 
 struct Suite1 {
   GaussianBlur gaussian_blur;
   BoxBlur box_blur;
   ComputeDirectionalBlurRadii compute_directional_blur_radii;
+  DirectionalBlur directional_blur;
 };
 
-static_assert(sizeof(Suite1) == 3 * sizeof(void*));
+static_assert(sizeof(Suite1) == 4 * sizeof(void*));
 static_assert(offsetof(Suite1, gaussian_blur) == 0);
 static_assert(offsetof(Suite1, box_blur) == sizeof(void*));
 static_assert(offsetof(Suite1, compute_directional_blur_radii) == 2 * sizeof(void*));
+static_assert(offsetof(Suite1, directional_blur) == 3 * sizeof(void*));
 
 bool configure(const Hooks&) noexcept;
 const Suite1* suite1() noexcept;
