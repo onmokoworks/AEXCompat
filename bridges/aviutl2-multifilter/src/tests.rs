@@ -97,18 +97,20 @@ mod tests {
         let mut resolved_sets = Vec::new();
         let resolved = registered_runtime_retry_roots(&plugin, &roots, |wanted| {
             resolved_sets.push(wanted.to_owned());
-            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(wanted
-                .iter()
-                .map(|basename| {
-                    (
-                        basename.to_ascii_lowercase(),
-                        aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
-                            std::slice::from_ref(basename),
-                            [registered_install.clone()],
-                        ),
-                    )
-                })
-                .collect())
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                wanted
+                    .iter()
+                    .map(|basename| {
+                        (
+                            basename.to_ascii_lowercase(),
+                            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+                                std::slice::from_ref(basename),
+                                [registered_install.clone()],
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
         });
         assert_eq!(
             resolved,
@@ -119,8 +121,17 @@ mod tests {
             ])
         );
         assert_eq!(resolved_sets.first().map(Vec::len), Some(2));
-        assert!(resolved_sets.iter().flatten().any(|name| name == "sibling.dll"));
-        assert_eq!(resolved_sets.len(), 2, "one indexed lookup per fixed-point pass");
+        assert!(
+            resolved_sets
+                .iter()
+                .flatten()
+                .any(|name| name == "sibling.dll")
+        );
+        assert_eq!(
+            resolved_sets.len(),
+            2,
+            "one indexed lookup per fixed-point pass"
+        );
 
         std::fs::write(
             transitive_runtime.join("common.dll"),
@@ -128,18 +139,20 @@ mod tests {
         )
         .unwrap();
         let conflicting = registered_runtime_retry_roots(&plugin, &roots, |wanted| {
-            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(wanted
-                .iter()
-                .map(|basename| {
-                    (
-                        basename.to_ascii_lowercase(),
-                        aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
-                            std::slice::from_ref(basename),
-                            [registered_install.clone()],
-                        ),
-                    )
-                })
-                .collect())
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                wanted
+                    .iter()
+                    .map(|basename| {
+                        (
+                            basename.to_ascii_lowercase(),
+                            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+                                std::slice::from_ref(basename),
+                                [registered_install.clone()],
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
         });
         assert!(matches!(
             conflicting,
