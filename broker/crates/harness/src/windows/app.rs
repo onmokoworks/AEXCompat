@@ -96,6 +96,12 @@ fn parameters_for_native_action(
     parameters
         .iter()
         .filter(|parameter| {
+            if matches!(
+                parameter.kind.as_str(),
+                "layer" | "group_start" | "group_end" | "button" | "custom" | "no_data"
+            ) {
+                return false;
+            }
             if parameter.kind != "arbitrary_data" {
                 return true;
             }
