@@ -180,7 +180,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 33> simple_commands{{
+  const std::array<selftest::SimpleCommand, 34> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -257,6 +257,10 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-aegp-persistent-data-suite4",
        "aegp_persistent_data_suite4",
        hooks.simple.aegp_persistent_data_suite4},
+      {L"--self-test-headless-system-sound-suppression",
+       "headless_system_sound_suppression",
+       hooks.simple.headless_system_sound_suppression, 1,
+       ",\"process_local\":true,\"dialog_containment_unchanged\":true"},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))

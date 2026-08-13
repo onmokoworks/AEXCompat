@@ -54,6 +54,7 @@ struct SimpleHooks {
   bool (*aegp_persistent_data_suite3)(){};
   bool (*native_stdout_routing)(){};
   bool (*aegp_persistent_data_suite4)(){};
+  bool (*headless_system_sound_suppression)(){};
 };
 
 struct Hooks {

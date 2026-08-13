@@ -4,6 +4,9 @@
 //! `argv[1]` is the window title, so a test can look for this exact window.
 //! `argv[2]` selects the shape:
 //!
+//! - `dialog-silenced-warning`: a warning-icon message box with a process-local
+//!   system-alert redirect. It proves the alert is intercepted while the
+//!   private-desktop dialog remains visible to the broker and is still closed.
 //! - `dialog-then-live`: the same message box, but the worker keeps running for
 //!   a while after it is answered. That gives the broker a poll while the
 //!   worker is still alive in which to observe the window gone, which is the
@@ -41,27 +44,167 @@ fn main() {
         return;
     }
 
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_OK, MessageBoxW};
+    let sound_suppression =
+        (shape == "dialog-silenced-warning").then(SystemSoundSuppression::install);
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
     // Announced before the call so a reader can tell "never got there" apart
     // from "got there and is stuck".
     println!("messagebox_open");
     let _ = std::io::stdout().flush();
+    let suppression_monitor = sound_suppression.as_ref().map(|_| {
+        std::thread::spawn(|| {
+            while BEEP_CALLS.load(std::sync::atomic::Ordering::Acquire) == 0
+                && !MESSAGEBOX_DISMISSED.load(std::sync::atomic::Ordering::Acquire)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            if BEEP_CALLS.load(std::sync::atomic::Ordering::Acquire) != 0 {
+                println!("messagebeep_observed_before_dismissal");
+            } else {
+                println!("messagebeep_not_observed_before_dismissal");
+            }
+            let _ = std::io::stdout().flush();
+        })
+    });
+    let flags = if sound_suppression.is_some() {
+        MB_OK | MB_ICONWARNING
+    } else {
+        MB_OK
+    };
     let answer = unsafe {
         MessageBoxW(
             std::ptr::null_mut(),
             wide("blocking until dismissed").as_ptr(),
             wide(&title).as_ptr(),
-            MB_OK,
+            flags,
         )
     };
+    MESSAGEBOX_DISMISSED.store(true, std::sync::atomic::Ordering::Release);
     println!("messagebox_dismissed:{answer}");
-    if shape == "dialog-then-live" {
+    if let Some(monitor) = suppression_monitor {
+        monitor.join().expect("beep probe monitor");
+        println!(
+            "messagebeep_calls:{}",
+            BEEP_CALLS.load(std::sync::atomic::Ordering::Acquire)
+        );
+    }
+    if shape == "dialog-then-live" || shape == "dialog-silenced-warning" {
         let _ = std::io::stdout().flush();
         // Longer than one sweep poll, so the broker sees the window gone before
         // the process is.
         std::thread::sleep(std::time::Duration::from_millis(600));
         println!("worker_still_running");
     }
+}
+
+#[cfg(windows)]
+static BEEP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(windows)]
+static MESSAGEBOX_DISMISSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+unsafe extern "system" fn observed_message_beep(_kind: u32) -> i32 {
+    BEEP_CALLS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    1
+}
+
+#[cfg(windows)]
+struct SystemSoundSuppression {
+    slot: *mut *mut std::ffi::c_void,
+    original: *mut std::ffi::c_void,
+}
+
+#[cfg(windows)]
+impl SystemSoundSuppression {
+    fn install() -> Self {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+        use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
+
+        let user32 = unsafe { GetModuleHandleW(wide("user32.dll").as_ptr()) };
+        assert!(!user32.is_null());
+        let entry = unsafe { GetProcAddress(user32, c"MessageBeep".as_ptr().cast()) }
+            .expect("MessageBeep export") as *const u8;
+        assert_eq!(unsafe { *entry }, 0x48);
+        assert_eq!(unsafe { *entry.add(1) }, 0xff);
+        assert_eq!(unsafe { *entry.add(2) }, 0x25);
+        let displacement = unsafe { std::ptr::read_unaligned(entry.add(3).cast::<i32>()) };
+        let slot = (entry.addr() + 7).wrapping_add_signed(displacement as isize)
+            as *mut *mut std::ffi::c_void;
+        let original = unsafe { *slot };
+        let win32u = unsafe { GetModuleHandleW(wide("win32u.dll").as_ptr()) };
+        assert!(!win32u.is_null());
+        let expected = unsafe { GetProcAddress(win32u, c"NtUserMessageBeep".as_ptr().cast()) }
+            .expect("NtUserMessageBeep export") as *mut std::ffi::c_void;
+        assert_eq!(original, expected);
+        let mut old_protect = 0;
+        assert_ne!(
+            unsafe {
+                VirtualProtect(
+                    slot.cast(),
+                    std::mem::size_of_val(&slot),
+                    PAGE_READWRITE,
+                    &mut old_protect,
+                )
+            },
+            0
+        );
+        unsafe { *slot = observed_message_beep as *mut std::ffi::c_void };
+        let mut ignored = 0;
+        assert_ne!(
+            unsafe {
+                VirtualProtect(
+                    slot.cast(),
+                    std::mem::size_of_val(&slot),
+                    old_protect,
+                    &mut ignored,
+                )
+            },
+            0
+        );
+        Self { slot, original }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SystemSoundSuppression {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
+
+        let mut old_protect = 0;
+        unsafe {
+            assert_ne!(
+                VirtualProtect(
+                    self.slot.cast(),
+                    std::mem::size_of_val(&self.slot),
+                    PAGE_READWRITE,
+                    &mut old_protect,
+                ),
+                0
+            );
+            *self.slot = self.original;
+            let mut ignored = 0;
+            assert_ne!(
+                VirtualProtect(
+                    self.slot.cast(),
+                    std::mem::size_of_val(&self.slot),
+                    old_protect,
+                    &mut ignored,
+                ),
+                0
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn wide(value: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(value)
+        .encode_wide()
+        .chain(Some(0))
+        .collect()
 }
 
 /// Creates a visible window of the worker's own class, pumps messages for long

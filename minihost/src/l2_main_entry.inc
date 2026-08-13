@@ -2295,6 +2295,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 }
 
 int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {
+  std::string sound_diagnostic;
+  if (!worker_runtime::system_sound_suppression::install(sound_diagnostic)) {
+    std::cerr << "stage:system_sound_suppression_failed detail="
+              << sound_diagnostic << '\n' << std::flush;
+    return 11;
+  }
   std::string openmp_diagnostic;
   if (!worker_runtime::openmp::install_deterministic_policy(
           openmp_diagnostic)) {
