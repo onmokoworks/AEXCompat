@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const MAX_INSTALL_ROOTS: usize = 256;
+const MAX_INSTALL_ROOT_OBSERVATIONS: usize = 4 * 2048;
 const MAX_VISITED_DIRS: usize = 4096;
 const MAX_DEPTH: usize = 3;
 const MAX_MATCHES: usize = 15;
@@ -53,6 +54,7 @@ impl RegisteredRuntimeIndex {
     pub fn from_install_roots(install_roots: impl IntoIterator<Item = PathBuf>) -> Self {
         Self::from_install_roots_with_limits(
             install_roots,
+            MAX_INSTALL_ROOT_OBSERVATIONS,
             MAX_INSTALL_ROOTS,
             MAX_VISITED_DIRS,
             MAX_INDEXED_FILES,
@@ -62,6 +64,7 @@ impl RegisteredRuntimeIndex {
 
     fn from_install_roots_with_limits(
         install_roots: impl IntoIterator<Item = PathBuf>,
+        max_install_root_observations: usize,
         max_install_roots: usize,
         max_visited_dirs: usize,
         max_indexed_files: usize,
@@ -71,7 +74,7 @@ impl RegisteredRuntimeIndex {
         let mut seen_roots = HashSet::new();
         let mut truncated = false;
         for (index, root) in install_roots.into_iter().enumerate() {
-            if index == max_install_roots {
+            if index == max_install_root_observations {
                 truncated = true;
                 break;
             }
@@ -82,9 +85,14 @@ impl RegisteredRuntimeIndex {
                 continue;
             }
             let key = path_key(&root);
-            if seen_roots.insert(key.clone()) {
-                roots.push((root, key));
+            if !seen_roots.insert(key.clone()) {
+                continue;
             }
+            if roots.len() == max_install_roots {
+                truncated = true;
+                break;
+            }
+            roots.push((root, key));
         }
         roots.sort_by(|left, right| left.1.cmp(&right.1));
 
@@ -761,6 +769,7 @@ mod tests {
         std::fs::write(root.join("second.dll"), b"second").unwrap();
         let index = RegisteredRuntimeIndex::from_install_roots_with_limits(
             [root.clone()],
+            MAX_INSTALL_ROOT_OBSERVATIONS,
             MAX_INSTALL_ROOTS,
             MAX_VISITED_DIRS,
             1,
@@ -813,6 +822,7 @@ mod tests {
 
         let directory_capped = RegisteredRuntimeIndex::from_install_roots_with_limits(
             [first.clone()],
+            MAX_INSTALL_ROOT_OBSERVATIONS,
             MAX_INSTALL_ROOTS,
             1,
             MAX_INDEXED_FILES,
@@ -824,6 +834,7 @@ mod tests {
         );
         let roots_capped = RegisteredRuntimeIndex::from_install_roots_with_limits(
             [first.clone(), second],
+            MAX_INSTALL_ROOT_OBSERVATIONS,
             1,
             MAX_VISITED_DIRS,
             MAX_INDEXED_FILES,
@@ -834,6 +845,79 @@ mod tests {
             RegisteredRuntimeLookup::IndexTruncated
         );
         std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn duplicate_registered_locations_do_not_consume_the_unique_root_limit() {
+        let parent = std::env::temp_dir().join(format!(
+            "aexcompat-runtime-duplicate-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = parent.join("first");
+        let second = parent.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join("second.dll"), b"second").unwrap();
+        let second_canonical = second.canonicalize().unwrap();
+
+        let index = RegisteredRuntimeIndex::from_install_roots_with_limits(
+            [first.clone(), first, second.clone()],
+            MAX_INSTALL_ROOT_OBSERVATIONS,
+            2,
+            MAX_VISITED_DIRS,
+            MAX_INDEXED_FILES,
+            MAX_INDEX_METADATA_BYTES,
+        );
+        assert_eq!(
+            index.matching_roots_by_basename(&["second.dll".into()], &[second_canonical.clone()],),
+            RegisteredRuntimeLookup::Found(BTreeMap::from([(
+                "second.dll".into(),
+                vec![second_canonical]
+            )]))
+        );
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn raw_registered_location_observations_remain_bounded_and_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-runtime-observation-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("runtime.dll"), b"runtime").unwrap();
+        let observed = std::cell::Cell::new(0usize);
+        let locations = std::iter::from_fn(|| {
+            observed.set(observed.get() + 1);
+            Some(root.clone())
+        });
+
+        let index = RegisteredRuntimeIndex::from_install_roots_with_limits(
+            locations,
+            3,
+            2,
+            MAX_VISITED_DIRS,
+            MAX_INDEXED_FILES,
+            MAX_INDEX_METADATA_BYTES,
+        );
+        assert_eq!(
+            observed.get(),
+            4,
+            "the extra item proves the input exceeded the cap"
+        );
+        assert_eq!(
+            index.matching_roots_by_basename(&["runtime.dll".into()], &[root.clone()]),
+            RegisteredRuntimeLookup::IndexTruncated
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
