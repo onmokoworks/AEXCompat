@@ -2063,6 +2063,7 @@ mod windows_e2e {
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
             dependencies: Vec::new(),
+            companions: Vec::new(),
             dependency_search_dirs: vec![aex.parent().unwrap().to_path_buf()],
             width: 64,
             height: 48,

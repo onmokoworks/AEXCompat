@@ -146,6 +146,7 @@ mod windows_e2e {
         launch_environment: LaunchEnvironment,
     ) -> RenderSession {
         RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository,
             plugin_path: plugin,
             plugin_sha256: sha,
@@ -186,6 +187,7 @@ mod windows_e2e {
         launch_environment: LaunchEnvironment,
     ) -> RenderSession {
         RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository,
             plugin_path: plugin,
             plugin_sha256: sha,
@@ -435,6 +437,7 @@ mod windows_e2e {
     fn smart_session_dispatches_the_smart_worker_and_closes_clean() {
         let (repository, plugin, sha) = temp_repository();
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -495,6 +498,7 @@ mod windows_e2e {
         let (repository, plugin, sha) = temp_repository();
         let search_dir = plugin.parent().expect("plugin parent").to_path_buf();
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -538,6 +542,7 @@ mod windows_e2e {
     fn smart_session_with_an_explicit_gpu_backend_requires_a_policy() {
         let (repository, plugin, sha) = temp_repository();
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -584,6 +589,7 @@ mod windows_e2e {
         // reaching a rendered frame proves no GPU command was attempted.
         // (Argb8 keeps the fixture's depth-8 transport contract.)
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -691,6 +697,7 @@ mod windows_e2e {
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -750,6 +757,7 @@ mod windows_e2e {
             dynamic: true,
         }];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -820,6 +828,7 @@ mod windows_e2e {
             dynamic: true,
         }];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -912,6 +921,7 @@ mod windows_e2e {
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -975,6 +985,7 @@ mod windows_e2e {
             },
         ];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1040,6 +1051,7 @@ mod windows_e2e {
             },
         ];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1103,6 +1115,7 @@ mod windows_e2e {
             },
         ];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1149,6 +1162,7 @@ mod windows_e2e {
         // fixture strips the pair and still resolves the 10-slot contract, so
         // open succeeds and frames render (issue #98 W1-4c).
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1194,6 +1208,7 @@ mod windows_e2e {
         // Same bound the one-shot path enforces (slot <= 1024); open must fail
         // fast rather than launch a worker that rejects the option.
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1245,6 +1260,7 @@ mod windows_e2e {
             dynamic: false,
         }];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1295,6 +1311,7 @@ mod windows_e2e {
             dynamic: false,
         }];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1365,6 +1382,7 @@ mod windows_e2e {
 
         let launch_payload = |override_payload: Option<&str>| -> String {
             let mut session = RenderSession::open(SessionOpenRequest {
+                companions: Vec::new(),
                 repository: &repository.0,
                 plugin_path: &plugin,
                 plugin_sha256: &sha,
@@ -1430,6 +1448,7 @@ mod windows_e2e {
         let parameters = [float_parameter(1)];
         let animations = [scalar_animation(1)];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1500,6 +1519,7 @@ mod windows_e2e {
         }))
         .expect("arbitrary animation fixture")];
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1586,6 +1606,7 @@ mod windows_e2e {
         // auxiliary gates (existing file / existing directory / literal "1"),
         // so a mangled pair would kill the session before the first frame.
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1631,6 +1652,7 @@ mod windows_e2e {
         std::fs::create_dir_all(&reused).unwrap();
         std::fs::write(reused.join("000-stale.bin"), b"stale").unwrap();
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1671,6 +1693,7 @@ mod windows_e2e {
         let (repository, plugin, sha) = temp_repository();
         let missing = repository.0.join("outside-dumps");
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1711,6 +1734,7 @@ mod windows_e2e {
         let (repository, plugin, sha) = temp_repository();
         let animations = [scalar_animation(2)];
         let error = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -1804,6 +1828,7 @@ mod windows_e2e {
         // It is no longer routed to the one-shot path.
         let (repository, plugin, sha) = temp_repository();
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -2355,6 +2380,7 @@ mod windows_e2e {
         // Only a SmartFX session may report an empty result, so open a smart
         // session (the broker rejects an empty result on a classic session).
         let mut session = RenderSession::open(SessionOpenRequest {
+            companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
             plugin_sha256: &sha,
@@ -3101,6 +3127,7 @@ mod windows_e2e {
     ) -> RenderSession {
         RenderSession::open_cluster(
             SessionOpenRequest {
+                companions: Vec::new(),
                 repository: &cluster.repository.0,
                 plugin_path: &cluster.plugins[0].0,
                 plugin_sha256: &cluster.plugins[0].1,
@@ -3211,6 +3238,7 @@ mod windows_e2e {
         let cluster = temp_cluster_repository();
         let mut session = RenderSession::open_cluster(
             SessionOpenRequest {
+                companions: Vec::new(),
                 repository: &cluster.repository.0,
                 plugin_path: &cluster.plugins[0].0,
                 plugin_sha256: &cluster.plugins[0].1,
