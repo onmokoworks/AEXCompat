@@ -163,6 +163,7 @@
 #include "worker_render_report.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
+#include "worker_system_sound_suppression.hpp"
 
 
 // Split as textual implementation fragments to preserve this ABI-sensitive

@@ -148,6 +148,7 @@
 #include "worker_render_report.hpp"
 #include "worker_render_receipts.hpp"
 #include "worker_target.hpp"
+#include "worker_system_sound_suppression.hpp"
 
 
 // Worker-entry wiring moved from worker_main (issue #165): the component
@@ -609,7 +610,8 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
         &aexcompat::worker_runtime::persistent_data::selftest,
         &aexcompat::worker_runtime::selftest_native_stdout_routing,
-        &aexcompat::worker_runtime::persistent_data::selftest4}});
+        &aexcompat::worker_runtime::persistent_data::selftest4,
+        &aexcompat::worker_runtime::system_sound_suppression::selftest}});
   // Compatibility anchors for selftests whose command catalog now lives in
   // worker_fixed_selftest_routing.cpp.
   // --self-test-world-transform-affine
