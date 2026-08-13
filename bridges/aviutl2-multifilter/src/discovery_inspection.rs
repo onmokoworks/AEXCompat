@@ -385,7 +385,9 @@ fn finish_aegp_discovery(
                     let api_version = i32::try_from(suite.get("api_version")?.as_i64()?).ok()?;
                     let internal_version =
                         i32::try_from(suite.get("internal_version")?.as_i64()?).ok()?;
-                    (name.as_bytes().len() <= 255 && !name.is_empty() && api_version > 0
+                    (name.as_bytes().len() <= 255
+                        && !name.is_empty()
+                        && api_version > 0
                         && internal_version >= 0)
                         .then(|| ProvidedSuite {
                             name: name.to_owned(),
@@ -593,9 +595,7 @@ fn demanded_suites_from_report(report: &serde_json::Value) -> Vec<ProvidedSuite>
         .collect()
 }
 
-fn companion_demand_from_probe_report(
-    close: &serde_json::Value,
-) -> Option<Vec<ProvidedSuite>> {
+fn companion_demand_from_probe_report(close: &serde_json::Value) -> Option<Vec<ProvidedSuite>> {
     let bounded_report = close.get("final_report").is_some_and(|report| {
         report.get("missing_suites").is_some()
             && report.get("missing_suites_truncated") == Some(&serde_json::Value::Bool(false))
@@ -1173,7 +1173,8 @@ pub fn discover_records_for_diagnostics_with_progress(
                 .collect(),
         );
     };
-    let discovered = discover_all_with_progress(repository, paths, &dependency, build, &report_completed);
+    let discovered =
+        discover_all_with_progress(repository, paths, &dependency, build, &report_completed);
     // Diagnostic/shipping CLI callers do not have the persistent UI cache
     // orchestrator. Complete the same demand phase once, after their entire
     // selected discovery set is available, so provider/effect chunk ordering
@@ -1400,38 +1401,40 @@ fn complete_companion_demand_probes(
             continue;
         }
         let roots: Vec<PathBuf> = entry.closure.roots.iter().map(PathBuf::from).collect();
-        let run_probe = |companions| RenderSession::open(SessionOpenRequest {
-            repository,
-            plugin_path: Path::new(&path),
-            plugin_sha256: &entry.sha,
-            parameters: None,
-            parameter_animation: None,
-            aux_manifest: None,
-            world_dump_dir: None,
-            output_checksum_detail: false,
-            mask_trailer: None,
-            spatial_trailer: None,
-            render_environment_trailer: None,
-            audio_trailer: None,
-            alpha_as_coverage_params: &[],
-            conformance_render_settings: None,
-            layers: &[],
-            dependencies: Vec::new(),
-            companions,
-            dependency_search_dirs: roots.clone(),
-            width: 1,
-            height: 1,
-            pixel_format: RenderPixelFormat::Argb8,
-            time_step: 1,
-            total_time: 1,
-            time_scale: 1,
-            frame_deadline: Duration::from_secs(5),
-            smart: smart_render_route_supported(entry.smart, entry.out_flags2),
-            gpu_backend: RenderGpuBackend::Auto,
-            gpu_runtime_policy: None,
-            payload_override: None,
-            launch_environment: Default::default(),
-        });
+        let run_probe = |companions| {
+            RenderSession::open(SessionOpenRequest {
+                repository,
+                plugin_path: Path::new(&path),
+                plugin_sha256: &entry.sha,
+                parameters: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                companions,
+                dependency_search_dirs: roots.clone(),
+                width: 1,
+                height: 1,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 1,
+                time_scale: 1,
+                frame_deadline: Duration::from_secs(5),
+                smart: smart_render_route_supported(entry.smart, entry.out_flags2),
+                gpu_backend: RenderGpuBackend::Auto,
+                gpu_runtime_policy: None,
+                payload_override: None,
+                launch_environment: Default::default(),
+            })
+        };
         if let Ok(mut session) = run_probe(Vec::new()) {
             let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
             let close = session.close();

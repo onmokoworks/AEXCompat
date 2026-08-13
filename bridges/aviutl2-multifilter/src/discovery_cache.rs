@@ -1052,8 +1052,7 @@ fn run_discovery_pass(
     // Resident probes are never part of the synchronous first-launch path.
     // Unresolved effects are queued above and completed only by this background
     // pass, becoming registerable on the next launch.
-    if kind == DiscoveryPassKind::Background
-        && complete_companion_demand_probes(repository, cache)
+    if kind == DiscoveryPassKind::Background && complete_companion_demand_probes(repository, cache)
     {
         persisted = save_cache(cache);
     }

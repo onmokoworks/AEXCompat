@@ -139,7 +139,13 @@ mod tests {
         let unrelated_provider = package.join("unrelated-provider.aex");
         let arbitrary = package.join("arbitrary.aex");
         let remote_provider = other.join("provider.aex");
-        for path in [&effect, &provider, &unrelated_provider, &arbitrary, &remote_provider] {
+        for path in [
+            &effect,
+            &provider,
+            &unrelated_provider,
+            &arbitrary,
+            &remote_provider,
+        ] {
             std::fs::write(path, b"fixture").unwrap();
         }
         let mut provider_entry = discovered(1, 7, build(1));
@@ -161,7 +167,10 @@ mod tests {
         arbitrary_entry.plugin_kind = DiscoveredPluginKind::Effect;
         let mut cache = HashMap::new();
         cache.insert(effect.to_string_lossy().into_owned(), effect_entry);
-        cache.insert(provider.to_string_lossy().into_owned(), provider_entry.clone());
+        cache.insert(
+            provider.to_string_lossy().into_owned(),
+            provider_entry.clone(),
+        );
         let mut unrelated_entry = provider_entry.clone();
         unrelated_entry.provided_suites[0].name = "Aftereffect Runtime Service".into();
         cache.insert(
@@ -177,7 +186,10 @@ mod tests {
         let associated = companion_providers_for(&effect, &cache).unwrap();
         assert_eq!(associated.len(), 1);
         assert_eq!(associated[0].artifact.path, provider);
-        assert_eq!(associated[0].suites[0].name, "Opaque Runtime Service 2026.1");
+        assert_eq!(
+            associated[0].suites[0].name,
+            "Opaque Runtime Service 2026.1"
+        );
         assert_eq!(associated[0].suites[0].api_version, 1);
         assert_eq!(associated[0].suites[0].internal_version, 2);
 
