@@ -66,6 +66,7 @@
 //! whole sweep.
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -82,14 +83,168 @@ use aexcompat_broker::render_session::{
     FrameOutcome, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
     validate_abandoned_smart_heap_corruption_close, validate_abandoned_smart_untouched_close,
 };
-use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
+use aexcompat_broker::secure_image_dispatch::{ApprovedImageArtifact, WorkerKind};
+use serde::Serialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 /// Per-frame deadline. The sweep's own bound on a plug-in that never answers;
 /// discovery above it has none, by policy — a wrong verdict there is worse than
 /// a slow one (#354) — but a frame the caller is waiting on is exactly where a
 /// deadline belongs.
 const FRAME_DEADLINE: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ExecutableFingerprint {
+    sha256: Option<String>,
+    size_bytes: Option<u64>,
+    error: Option<&'static str>,
+}
+
+impl ExecutableFingerprint {
+    fn failed(error: &'static str) -> Self {
+        Self {
+            sha256: None,
+            size_bytes: None,
+            error: Some(error),
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.sha256.is_some() && self.size_bytes.is_some() && self.error.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct ReportBuildFingerprint {
+    schema_version: u32,
+    /// Machine-readable evidence limit: this compares the executable paths at
+    /// run boundaries. It is not a per-launch admission receipt and cannot
+    /// detect a replace-and-restore between those observations.
+    scope: &'static str,
+    verification: &'static str,
+    complete: bool,
+    cli: ExecutableFingerprint,
+    l2_worker: ExecutableFingerprint,
+    classic_worker: ExecutableFingerprint,
+    smart_worker: ExecutableFingerprint,
+}
+
+fn fingerprint_executable(path: &Path) -> ExecutableFingerprint {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return ExecutableFingerprint::failed("open_failed");
+    };
+    let Ok(metadata) = file.metadata() else {
+        return ExecutableFingerprint::failed("metadata_failed");
+    };
+    if !metadata.is_file() {
+        return ExecutableFingerprint::failed("not_a_file");
+    }
+
+    let expected_size = metadata.len();
+    let expected_modified = metadata.modified().ok();
+    let mut read_size = 0u64;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => return ExecutableFingerprint::failed("read_failed"),
+        };
+        read_size = match read_size.checked_add(read as u64) {
+            Some(total) => total,
+            None => return ExecutableFingerprint::failed("size_overflow"),
+        };
+        hasher.update(&buffer[..read]);
+    }
+    let Ok(after_metadata) = file.metadata() else {
+        return ExecutableFingerprint::failed("metadata_failed_after_read");
+    };
+    if read_size != expected_size
+        || after_metadata.len() != expected_size
+        || after_metadata.modified().ok() != expected_modified
+    {
+        return ExecutableFingerprint::failed("file_changed_during_read");
+    }
+
+    ExecutableFingerprint {
+        sha256: Some(format!("{:x}", hasher.finalize())),
+        size_bytes: Some(read_size),
+        error: None,
+    }
+}
+
+fn capture_report_build_fingerprint(
+    repository: &Path,
+    cli_path: Result<PathBuf, ()>,
+) -> ReportBuildFingerprint {
+    let cli = cli_path
+        .as_deref()
+        .map(fingerprint_executable)
+        .unwrap_or_else(|_| ExecutableFingerprint::failed("current_exe_unavailable"));
+    let worker = |kind: WorkerKind| {
+        fingerprint_executable(&repository.join(kind.repository_relative_program()))
+    };
+    let l2_worker = worker(WorkerKind::L2);
+    let classic_worker = worker(WorkerKind::Render);
+    let smart_worker = worker(WorkerKind::Smart);
+    ReportBuildFingerprint {
+        schema_version: 1,
+        scope: "executable_path_boundary_snapshot_not_launch_receipt",
+        verification: "pre_run_candidate",
+        // A start-only observation cannot claim which bytes a later launch
+        // admitted. Interrupted JSONL therefore stays explicitly incomplete.
+        complete: false,
+        cli,
+        l2_worker,
+        classic_worker,
+        smart_worker,
+    }
+}
+
+fn verify_executable_fingerprint(
+    before: &ExecutableFingerprint,
+    after: &ExecutableFingerprint,
+) -> ExecutableFingerprint {
+    if before == after && before.is_complete() {
+        before.clone()
+    } else if before == after {
+        before.clone()
+    } else {
+        ExecutableFingerprint::failed("changed_between_boundary_snapshots")
+    }
+}
+
+fn finalize_report_build_fingerprint(
+    before: &ReportBuildFingerprint,
+    repository: &Path,
+    cli_path: Result<PathBuf, ()>,
+) -> ReportBuildFingerprint {
+    let after = capture_report_build_fingerprint(repository, cli_path);
+    let cli = verify_executable_fingerprint(&before.cli, &after.cli);
+    let l2_worker = verify_executable_fingerprint(&before.l2_worker, &after.l2_worker);
+    let classic_worker =
+        verify_executable_fingerprint(&before.classic_worker, &after.classic_worker);
+    let smart_worker = verify_executable_fingerprint(&before.smart_worker, &after.smart_worker);
+    let complete = [&cli, &l2_worker, &classic_worker, &smart_worker]
+        .into_iter()
+        .all(|fingerprint| fingerprint.is_complete());
+    ReportBuildFingerprint {
+        schema_version: 1,
+        scope: "executable_path_boundary_snapshot_not_launch_receipt",
+        verification: if complete {
+            "run_boundary_verified"
+        } else {
+            "run_boundary_incomplete"
+        },
+        complete,
+        cli,
+        l2_worker,
+        classic_worker,
+        smart_worker,
+    }
+}
 
 /// The session's timing: one tick of a 30-per-second scale, over a ten-second
 /// span. `--frames` advances the timeline by one step per frame.
@@ -206,6 +361,8 @@ fn main() {
         std::env::var_os("AEXCOMPAT_MULTIFILTER_REPOSITORY")
             .expect("set AEXCOMPAT_MULTIFILTER_REPOSITORY to the repository root"),
     );
+    let cli_path = std::env::current_exe().map_err(|_| ());
+    let build = capture_report_build_fingerprint(&repository, cli_path.clone());
 
     let scan = scan_for_diagnostics((!options.dirs.is_empty()).then(|| options.dirs.clone()));
     // Not exhaustive means the denominator is short by an unknown amount, which
@@ -260,7 +417,7 @@ fn main() {
         &targets,
         scan.dependency_dirs.clone(),
         |batch| {
-            record_discovery_progress(&batch, &scan, &partial, &completed, targets.len());
+            record_discovery_progress(&batch, &scan, &build, &partial, &completed, targets.len());
         },
     );
     records.sort_by(|left, right| left.path.cmp(&right.path));
@@ -273,9 +430,11 @@ fn main() {
     );
 
     if options.discovery_only {
+        let build = finalize_report_build_fingerprint(&build, &repository, cli_path);
         let report = discovery_only_report(
             &options,
             &scan,
+            &build,
             &records,
             discovery_elapsed,
             started.elapsed(),
@@ -348,7 +507,7 @@ fn main() {
             outcome.bucket,
         );
         *buckets.entry(outcome.bucket.clone()).or_default() += 1;
-        let record = plugin_record(record, &name, outcome, elapsed_ms);
+        let record = plugin_record(record, &name, &build, outcome, elapsed_ms);
         if let Some((path, line)) = &mut sidecar {
             line.clear();
             if serde_json::to_writer(&mut *line, &record).is_ok() {
@@ -359,9 +518,11 @@ fn main() {
         plugins.push(record);
     }
 
+    let build = finalize_report_build_fingerprint(&build, &repository, cli_path);
     let report = report(
         &options,
         &scan,
+        &build,
         discovery_elapsed,
         started.elapsed(),
         buckets,
@@ -373,6 +534,7 @@ fn main() {
 fn record_discovery_progress(
     batch: &[DiagnosticDiscovery],
     scan: &DiagnosticScan,
+    build: &ReportBuildFingerprint,
     partial: &Mutex<Option<PathBuf>>,
     completed: &AtomicUsize,
     total: usize,
@@ -387,7 +549,7 @@ fn record_discovery_progress(
     };
     for record in batch {
         let name = plugin_name(&record.path, &scan.dirs);
-        let value = plugin_record(record, &name, discovery_outcome(record), 0);
+        let value = plugin_record(record, &name, build, discovery_outcome(record), 0);
         if let Ok(mut line) = serde_json::to_vec(&value) {
             line.push(b'\n');
             append_line(path, &line);
@@ -398,6 +560,7 @@ fn record_discovery_progress(
 fn discovery_only_report(
     options: &Options,
     scan: &DiagnosticScan,
+    build: &ReportBuildFingerprint,
     records: &[DiagnosticDiscovery],
     discovery_elapsed: Duration,
     elapsed: Duration,
@@ -409,10 +572,18 @@ fn discovery_only_report(
             let name = plugin_name(&record.path, &scan.dirs);
             let outcome = discovery_outcome(record);
             *buckets.entry(outcome.bucket.clone()).or_default() += 1;
-            plugin_record(record, &name, outcome, 0)
+            plugin_record(record, &name, build, outcome, 0)
         })
         .collect();
-    report(options, scan, discovery_elapsed, elapsed, buckets, plugins)
+    report(
+        options,
+        scan,
+        build,
+        discovery_elapsed,
+        elapsed,
+        buckets,
+        plugins,
+    )
 }
 
 fn finish_report(options: &Options, report: &Value) {
@@ -983,6 +1154,7 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
 fn plugin_record(
     record: &DiagnosticDiscovery,
     name: &PluginName,
+    build: &ReportBuildFingerprint,
     outcome: Outcome,
     elapsed_ms: u128,
 ) -> Value {
@@ -1010,6 +1182,7 @@ fn plugin_record(
         "scan_folder": name.root,
         "plugin_sha256": record.sha256,
         "plugin_size_bytes": record.byte_size,
+        "build": build,
         "category": record.category,
         "discovery": {
             "ok": record.ok,
@@ -1036,11 +1209,18 @@ fn plugin_record(
 fn report(
     options: &Options,
     scan: &DiagnosticScan,
+    build: &ReportBuildFingerprint,
     discovery_elapsed: Duration,
     elapsed: Duration,
     buckets: BTreeMap<String, usize>,
-    plugins: Vec<Value>,
+    mut plugins: Vec<Value>,
 ) -> Value {
+    // Render partial rows are written as each plug-in completes and retain the
+    // explicit pre-run candidate. Only the atomic final report can carry the
+    // end-of-run verification, so replace every in-memory row here.
+    for plugin in &mut plugins {
+        plugin["build"] = json!(build);
+    }
     let render = (!options.discovery_only).then(|| {
         json!({
             "width": options.width,
@@ -1059,6 +1239,7 @@ fn report(
     });
     json!({
         "schema_version": 1,
+        "build": build,
         "scan": {
             "folder_count": scan.dirs.len(),
             "seen": scan.seen,
@@ -1172,6 +1353,9 @@ mod tests {
             out_flags2: 0,
             category: None,
             parameters: Vec::new(),
+            provided_suites: Vec::new(),
+            demanded_suites: Vec::new(),
+            companion_demand_probe_complete: false,
             search_roots: Vec::new(),
             failure_classification: Some("nonzero_exit".to_owned()),
             failure_diagnostics: Some(json!({
@@ -1202,6 +1386,90 @@ mod tests {
             custom_ui_events: 0,
             control_size: [0, 0],
         }
+    }
+
+    fn write_build_layout(root: &Path) -> PathBuf {
+        let cli = root.join("render_sweep.exe");
+        std::fs::write(&cli, b"render-sweep-v1").unwrap();
+        for (kind, bytes) in [
+            (WorkerKind::L2, b"l2-v1".as_slice()),
+            (WorkerKind::Render, b"classic-v1".as_slice()),
+            (WorkerKind::Smart, b"smart-v1".as_slice()),
+        ] {
+            let worker = root.join(kind.repository_relative_program());
+            std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+            std::fs::write(worker, bytes).unwrap();
+        }
+        cli
+    }
+
+    #[test]
+    fn build_fingerprint_tracks_worker_bytes_and_fails_open_identity_explicitly() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-render-sweep-build-{}-{nonce:032x}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let cli = write_build_layout(&root);
+
+        let first = capture_report_build_fingerprint(&root, Ok(cli.clone()));
+        assert!(!first.complete);
+        assert_eq!(
+            first.scope,
+            "executable_path_boundary_snapshot_not_launch_receipt"
+        );
+        assert_eq!(first.verification, "pre_run_candidate");
+        assert!(first.smart_worker.error.is_none());
+        assert_eq!(first.smart_worker.size_bytes, Some(8));
+
+        let stable = finalize_report_build_fingerprint(&first, &root, Ok(cli.clone()));
+        assert!(stable.complete);
+        assert_eq!(stable.verification, "run_boundary_verified");
+
+        let smart = root.join(WorkerKind::Smart.repository_relative_program());
+        std::fs::write(&smart, b"smart-v2-changed").unwrap();
+        let changed = finalize_report_build_fingerprint(&first, &root, Ok(cli.clone()));
+        assert!(!changed.complete);
+        assert_eq!(changed.verification, "run_boundary_incomplete");
+        assert_eq!(changed.smart_worker.sha256, None);
+        assert_eq!(
+            changed.smart_worker.error,
+            Some("changed_between_boundary_snapshots")
+        );
+        assert_eq!(first.cli, changed.cli);
+        assert_eq!(first.l2_worker, changed.l2_worker);
+        assert_eq!(first.classic_worker, changed.classic_worker);
+
+        // Boundary evidence deliberately cannot prove continuous identity or
+        // actual per-launch admission. Restore the candidate bytes and pin that
+        // limitation in the machine-readable scope instead of overclaiming.
+        std::fs::write(&smart, b"smart-v1").unwrap();
+        let restored = finalize_report_build_fingerprint(&first, &root, Ok(cli.clone()));
+        assert!(restored.complete);
+        assert_eq!(restored.verification, "run_boundary_verified");
+        assert_eq!(
+            restored.scope,
+            "executable_path_boundary_snapshot_not_launch_receipt"
+        );
+
+        std::fs::remove_file(&smart).unwrap();
+        let missing_start = capture_report_build_fingerprint(&root, Ok(cli.clone()));
+        let missing = finalize_report_build_fingerprint(&missing_start, &root, Ok(cli));
+        assert!(!missing.complete);
+        assert_eq!(missing.smart_worker.sha256, None);
+        assert_eq!(missing.smart_worker.size_bytes, None);
+        assert_eq!(missing.smart_worker.error, Some("open_failed"));
+        let serialized = serde_json::to_string(&missing).unwrap();
+        assert!(
+            !serialized.contains(&root.to_string_lossy().to_string()),
+            "the shareable fingerprint must not disclose its source paths"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1416,11 +1684,15 @@ mod tests {
         };
         let report_path = root.join("discovery.json");
         let options = discovery_options(report_path.clone());
+        let cli = write_build_layout(&root);
+        let build_start = capture_report_build_fingerprint(&root, Ok(cli.clone()));
+        let build = finalize_report_build_fingerprint(&build_start, &root, Ok(cli));
         let partial = partial_path(&report_path);
         let completed = AtomicUsize::new(0);
         record_discovery_progress(
             &records,
             &scan,
+            &build_start,
             &Mutex::new(Some(partial.clone())),
             &completed,
             1,
@@ -1434,10 +1706,13 @@ mod tests {
         let partial_row: Value = serde_json::from_slice(&partial_bytes).unwrap();
         assert_eq!(partial_row["discovery"]["ok"], false);
         assert_eq!(partial_row["bucket"], "exit_11_load_library");
+        assert_eq!(partial_row["build"]["complete"], false);
+        assert_eq!(partial_row["build"]["verification"], "pre_run_candidate");
 
         let report = discovery_only_report(
             &options,
             &scan,
+            &build,
             &records,
             Duration::from_millis(4),
             Duration::from_millis(5),
@@ -1454,6 +1729,22 @@ mod tests {
         assert!(final_report["render"].is_null());
         assert_eq!(final_report["buckets"]["exit_11_load_library"], 1);
         assert_eq!(final_report["plugins"][0]["discovery"]["ok"], false);
+        assert_eq!(final_report["build"]["complete"], true);
+        assert_eq!(
+            final_report["build"]["verification"],
+            "run_boundary_verified"
+        );
+        assert_eq!(final_report["plugins"][0]["build"], final_report["build"]);
+        for executable in ["cli", "l2_worker", "classic_worker", "smart_worker"] {
+            assert_eq!(
+                final_report["build"][executable]["sha256"],
+                partial_row["build"][executable]["sha256"]
+            );
+            assert_eq!(
+                final_report["build"][executable]["size_bytes"],
+                partial_row["build"][executable]["size_bytes"]
+            );
+        }
 
         let blocked_path = root.join("blocked.json");
         std::fs::create_dir(&blocked_path).unwrap();

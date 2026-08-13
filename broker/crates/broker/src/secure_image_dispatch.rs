@@ -13,7 +13,11 @@ pub enum WorkerKind {
 }
 
 impl WorkerKind {
-    fn repository_relative_program(self) -> &'static str {
+    /// Repository-relative worker image selected by production dispatch.
+    /// Diagnostic callers use the same candidate path for build-set boundary
+    /// snapshots. Such snapshots are not launch-admission receipts and do not
+    /// claim which bytes an individual worker process used.
+    pub const fn repository_relative_program(self) -> &'static str {
         match self {
             Self::L2 => "target/minihost-build/aex_l2_worker.exe",
             Self::Render => "target/minihost-build/aex_render_worker.exe",
