@@ -123,6 +123,7 @@ fn finish_one_shot_in_place(
     };
     match inspected {
         Ok((params, diagnostics)) => {
+            entry.demanded_suites = demanded_suites_from_report(&diagnostics);
             entry.closure.roots = effective_roots
                 .iter()
                 .map(|root| root.to_string_lossy().into_owned())
@@ -373,7 +374,28 @@ fn finish_aegp_discovery(
     roots: &[PathBuf],
 ) -> CacheEntry {
     match initialize_experimental_aegp_in_place(repository, plugin, &entry.sha, roots.to_vec()) {
-        Ok(_) => {
+        Ok(report) => {
+            entry.provided_suites = report
+                .get("dynamic_suites")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|suite| {
+                    let name = suite.get("name")?.as_str()?;
+                    let api_version = i32::try_from(suite.get("api_version")?.as_i64()?).ok()?;
+                    let internal_version =
+                        i32::try_from(suite.get("internal_version")?.as_i64()?).ok()?;
+                    (name.as_bytes().len() <= 255
+                        && !name.is_empty()
+                        && api_version > 0
+                        && internal_version >= 0)
+                        .then(|| ProvidedSuite {
+                            name: name.to_owned(),
+                            api_version,
+                            internal_version,
+                        })
+                })
+                .collect();
             entry.ok = true;
             entry.plugin_kind = DiscoveredPluginKind::Aegp;
             entry.smart = false;
@@ -546,8 +568,45 @@ fn fill_entry_from_inspect_report(entry: &mut CacheEntry, report: &serde_json::V
     // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
     entry.smart = entry.out_flags2 & (1 << 10) != 0;
     entry.params = params;
+    entry.demanded_suites = demanded_suites_from_report(report);
     normalize_parameters_for_cache(&mut entry.params);
     entry.ok = true;
+}
+
+fn demanded_suites_from_report(report: &serde_json::Value) -> Vec<ProvidedSuite> {
+    let report = report
+        .get("final_report")
+        .or_else(|| report.get("worker_report"))
+        .unwrap_or(report);
+    report
+        .get("missing_suites")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|suite| {
+            let name = suite.get("name")?.as_str()?;
+            let api_version = i32::try_from(suite.get("version")?.as_i64()?).ok()?;
+            (api_version > 0 && !name.is_empty()).then(|| ProvidedSuite {
+                name: name.to_owned(),
+                api_version,
+                internal_version: 0,
+            })
+        })
+        .collect()
+}
+
+fn companion_demand_from_probe_report(close: &serde_json::Value) -> Option<Vec<ProvidedSuite>> {
+    let bounded_report = close.get("final_report").is_some_and(|report| {
+        report.get("missing_suites").is_some()
+            && report.get("missing_suites_truncated") == Some(&serde_json::Value::Bool(false))
+    });
+    bounded_report.then(|| {
+        if close.get("session_clean") == Some(&serde_json::Value::Bool(true)) {
+            Vec::new()
+        } else {
+            demanded_suites_from_report(close)
+        }
+    })
 }
 
 /// One unit of discovery work (issue #405): with the same worker budget as
@@ -1051,6 +1110,9 @@ pub struct DiagnosticDiscovery {
     /// The plug-in was inspected and its parameters are the declared ones.
     pub ok: bool,
     pub plugin_kind: DiscoveredPluginKind,
+    pub provided_suites: Vec<ProvidedSuite>,
+    pub demanded_suites: Vec<ProvidedSuite>,
+    pub companion_demand_probe_complete: bool,
     pub sha256: String,
     pub byte_size: u64,
     /// `PF_OutFlag2_SUPPORTS_SMART_RENDER`; which render path a session opens on.
@@ -1111,9 +1173,20 @@ pub fn discover_records_for_diagnostics_with_progress(
                 .collect(),
         );
     };
-    discover_all_with_progress(repository, paths, &dependency, build, &report_completed)
+    let discovered =
+        discover_all_with_progress(repository, paths, &dependency, build, &report_completed);
+    // Diagnostic/shipping CLI callers do not have the persistent UI cache
+    // orchestrator. Complete the same demand phase once, after their entire
+    // selected discovery set is available, so provider/effect chunk ordering
+    // cannot change the result.
+    let mut combined: HashMap<String, CacheEntry> = discovered
         .into_iter()
-        .map(|(path, entry)| diagnostic_discovery(path, entry))
+        .map(|(path, entry)| (path.to_string_lossy().into_owned(), entry))
+        .collect();
+    let _ = complete_companion_demand_probes(repository, &mut combined);
+    combined
+        .into_iter()
+        .map(|(path, entry)| diagnostic_discovery(PathBuf::from(path), entry))
         .collect()
 }
 
@@ -1122,6 +1195,9 @@ fn diagnostic_discovery(path: PathBuf, entry: CacheEntry) -> DiagnosticDiscovery
         path,
         ok: entry.ok,
         plugin_kind: entry.plugin_kind,
+        provided_suites: entry.provided_suites,
+        demanded_suites: entry.demanded_suites,
+        companion_demand_probe_complete: entry.companion_demand_probe_complete,
         sha256: entry.sha,
         byte_size: entry.len,
         smart: entry.smart,
@@ -1301,6 +1377,136 @@ fn discover_all_with_progress(
         .unwrap_or_else(|poison| poison.into_inner())
 }
 
+/// Completes provider-free demand probes against the combined discovery cache.
+/// This deliberately runs after all discovery chunks have been merged: an
+/// effect and its sibling AEGP provider may land on opposite chunk boundaries.
+/// Returns whether any cache entry changed.
+fn complete_companion_demand_probes(
+    repository: &Path,
+    completed: &mut HashMap<String, CacheEntry>,
+) -> bool {
+    let targets = companion_demand_probe_targets(completed);
+    let mut changed = false;
+    for path in targets {
+        if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
+            break;
+        }
+        let Some(entry) = completed.get(&path).cloned() else {
+            continue;
+        };
+        if !entry.ok
+            || entry.plugin_kind != DiscoveredPluginKind::Effect
+            || entry.companion_demand_probe_complete
+        {
+            continue;
+        }
+        let roots: Vec<PathBuf> = entry.closure.roots.iter().map(PathBuf::from).collect();
+        let run_probe = |companions| {
+            RenderSession::open(SessionOpenRequest {
+                repository,
+                plugin_path: Path::new(&path),
+                plugin_sha256: &entry.sha,
+                parameters: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                companions,
+                dependency_search_dirs: roots.clone(),
+                width: 1,
+                height: 1,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 1,
+                time_scale: 1,
+                frame_deadline: Duration::from_secs(5),
+                smart: smart_render_route_supported(entry.smart, entry.out_flags2),
+                gpu_backend: RenderGpuBackend::Auto,
+                gpu_runtime_policy: None,
+                payload_override: None,
+                launch_environment: Default::default(),
+            })
+        };
+        if let Ok(mut session) = run_probe(Vec::new()) {
+            let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
+            let close = session.close();
+            if let Some(candidate_suites) = companion_demand_from_probe_report(&close) {
+                // A clean effect merely queried an optional host capability and
+                // successfully used its fallback. Only a non-clean provider-free
+                // lifecycle is a candidate. Confirm causality by requiring the
+                // exact provider injection to make the same lifecycle clean.
+                let demanded_suites = if candidate_suites.is_empty() {
+                    Some(Vec::new())
+                } else {
+                    let mut candidate_cache = completed.clone();
+                    if let Some(candidate) = candidate_cache.get_mut(&path) {
+                        candidate.demanded_suites = candidate_suites.clone();
+                        candidate.companion_demand_probe_complete = true;
+                    }
+                    companion_providers_for(Path::new(&path), &candidate_cache)
+                        .ok()
+                        .and_then(|companions| {
+                            let mut session = run_probe(companions).ok()?;
+                            let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
+                            let close = session.close();
+                            Some(
+                                if close.get("session_clean")
+                                    == Some(&serde_json::Value::Bool(true))
+                                {
+                                    candidate_suites
+                                } else {
+                                    // The provider did not repair the lifecycle;
+                                    // the observed miss was optional/unrelated.
+                                    Vec::new()
+                                },
+                            )
+                        })
+                };
+                if let Some(demanded_suites) = demanded_suites {
+                    if let Some(entry) = completed.get_mut(&path) {
+                        entry.demanded_suites = demanded_suites;
+                        entry.companion_demand_probe_complete = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn companion_demand_probe_targets(completed: &HashMap<String, CacheEntry>) -> Vec<String> {
+    let provider_parents: std::collections::HashSet<PathBuf> = completed
+        .iter()
+        .filter(|(_, entry)| {
+            entry.ok
+                && entry.plugin_kind == DiscoveredPluginKind::Aegp
+                && !entry.provided_suites.is_empty()
+        })
+        .filter_map(|(path, _)| Path::new(path).parent().map(Path::to_path_buf))
+        .collect();
+    completed
+        .iter()
+        .filter(|(path, entry)| {
+            entry.ok
+                && entry.plugin_kind == DiscoveredPluginKind::Effect
+                && !entry.companion_demand_probe_complete
+                && Path::new(path)
+                    .parent()
+                    .is_some_and(|parent| provider_parents.contains(parent))
+        })
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
 /// A numerically-comparable key for a version token ("25.0" > "7.0", unlike a
 /// lexical compare), falling back to 0 for non-numeric components.
 fn version_key(version: &str) -> Vec<u64> {
@@ -1401,6 +1607,7 @@ fn register_discovered(
     plugin: &Path,
     dependency: &DependencyConfig,
     entry: &CacheEntry,
+    companions: Vec<ApprovedCompanion>,
     name: &str,
 ) {
     let mut resolved_dependency = dependency.clone();
@@ -1431,6 +1638,7 @@ fn register_discovered(
         dependency: resolved_dependency,
         sha: entry.sha.clone(),
         smart: smart_render_route_supported(entry.smart, entry.out_flags2),
+        companions: companions.clone(),
         closure_identity: entry.closure_identity.clone(),
         // From the raw discovery parameters, NOT from `defaults`: `build_item`
         // maps only value-carrying kinds (float/integer/color) into config
@@ -1459,6 +1667,7 @@ fn register_discovered(
                 plugin: plugin.to_path_buf(),
                 sha: entry.sha.clone(),
                 smart: entry.smart,
+                companions,
             });
     }
 

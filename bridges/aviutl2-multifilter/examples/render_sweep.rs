@@ -76,11 +76,13 @@ use aexcompat_aviutl2_multifilter::{
     discover_records_for_diagnostics_with_progress, layer_slots_of, pf_error_name, plugin_name,
     scan_for_diagnostics, smart_render_route_supported,
 };
+use aexcompat_broker::companion_manifest::{ApprovedCompanion, CompanionSuiteIdentity};
 use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::render_session::{
     FrameOutcome, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
     validate_abandoned_smart_heap_corruption_close, validate_abandoned_smart_untouched_close,
 };
+use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
 use serde_json::{Map, Value, json};
 
 /// Per-frame deadline. The sweep's own bound on a plug-in that never answers;
@@ -322,7 +324,14 @@ fn main() {
         // Third-party AEX in-process code paths (the PE read, the parameter
         // translation) can panic; one plug-in must not end the sweep.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sweep_one(&repository, record, &options, &input, &layer_pixels)
+            sweep_one(
+                &repository,
+                record,
+                &records,
+                &options,
+                &input,
+                &layer_pixels,
+            )
         }))
         .unwrap_or_else(|_| Outcome {
             bucket: "sweep_panicked".to_owned(),
@@ -489,9 +498,93 @@ fn probe_layers(
         .collect()
 }
 
+fn decode_sha256(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 {
+        return None;
+    }
+    let mut result = [0u8; 32];
+    for (index, slot) in result.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(result)
+}
+
+fn companion_providers_for(
+    effect: &DiagnosticDiscovery,
+    records: &[DiagnosticDiscovery],
+) -> Result<Vec<ApprovedCompanion>, &'static str> {
+    let Some(parent) = effect.path.parent() else {
+        return Ok(Vec::new());
+    };
+    let has_sibling_provider = records.iter().any(|provider| {
+        provider.ok
+            && provider.plugin_kind == aexcompat_aviutl2_multifilter::DiscoveredPluginKind::Aegp
+            && !provider.provided_suites.is_empty()
+            && provider.path.parent() == Some(parent)
+    });
+    if has_sibling_provider && !effect.companion_demand_probe_complete {
+        return Err("companion_demand_probe_unresolved");
+    }
+    let mut result = Vec::new();
+    let mut claimed = std::collections::BTreeSet::new();
+    for provider in records {
+        if !provider.ok
+            || provider.plugin_kind != aexcompat_aviutl2_multifilter::DiscoveredPluginKind::Aegp
+            || provider.provided_suites.is_empty()
+            || provider.path.parent() != Some(parent)
+        {
+            continue;
+        }
+        let Some(expected_sha256) = decode_sha256(&provider.sha256) else {
+            continue;
+        };
+        let suites: Option<Vec<_>> = provider
+            .provided_suites
+            .iter()
+            .map(|suite| {
+                Some(CompanionSuiteIdentity {
+                    name: suite.name.clone(),
+                    api_version: u32::try_from(suite.api_version).ok().filter(|v| *v != 0)?,
+                    internal_version: u32::try_from(suite.internal_version).ok()?,
+                })
+            })
+            .collect();
+        let Some(suites) = suites else {
+            continue;
+        };
+        let demanded: Vec<_> = suites
+            .iter()
+            .filter(|suite| {
+                effect.demanded_suites.iter().any(|demand| {
+                    demand.name == suite.name
+                        && u32::try_from(demand.api_version).ok() == Some(suite.api_version)
+                })
+            })
+            .cloned()
+            .collect();
+        if demanded.is_empty() {
+            continue;
+        }
+        if demanded.iter().any(|suite| !claimed.insert(suite.clone())) {
+            return Err("ambiguous_companion_suite_provider");
+        }
+        result.push(ApprovedCompanion {
+            artifact: ApprovedImageArtifact {
+                path: provider.path.clone(),
+                expected_sha256,
+                expected_size: provider.byte_size,
+            },
+            suites: demanded,
+        });
+    }
+    result.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
+    Ok(result)
+}
+
 fn sweep_one(
     repository: &Path,
     record: &DiagnosticDiscovery,
+    records: &[DiagnosticDiscovery],
     options: &Options,
     input: &[u8],
     layer_pixels: &[u8],
@@ -525,6 +618,10 @@ fn sweep_one(
     // drives the same changed-only contract as an untouched bridge object;
     // `--plugin-defaults` remains a compatible explicit spelling of it.
     let parameters = None;
+    let companions = match companion_providers_for(record, records) {
+        Ok(companions) => companions,
+        Err(classification) => return Outcome::bare(classification),
+    };
 
     let session = RenderSession::open(SessionOpenRequest {
         repository,
@@ -543,6 +640,7 @@ fn sweep_one(
         conformance_render_settings: None,
         layers: &layers,
         dependencies: Vec::new(),
+        companions,
         dependency_search_dirs: record.search_roots.clone(),
         width: options.width,
         height: options.height,
@@ -661,7 +759,16 @@ fn sweep_one(
         fallback_reason,
         fallback_authorized,
         smart_attempt_evidence,
-        |classic_options| sweep_one(repository, record, classic_options, input, layer_pixels),
+        |classic_options| {
+            sweep_one(
+                repository,
+                record,
+                records,
+                classic_options,
+                input,
+                layer_pixels,
+            )
+        },
     ) {
         return fallback;
     }
@@ -907,6 +1014,9 @@ fn plugin_record(
         "discovery": {
             "ok": record.ok,
             "plugin_kind": record.plugin_kind,
+            "provided_suites": record.provided_suites,
+            "demanded_suites": record.demanded_suites,
+            "companion_demand_probe_complete": record.companion_demand_probe_complete,
             "smart": record.smart,
             "out_flags2": record.out_flags2,
             "smart_route_supported":

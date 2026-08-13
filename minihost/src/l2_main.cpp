@@ -77,6 +77,8 @@
 #include "worker_openmp_policy.hpp"
 #include "worker_entry_admission.hpp"
 #include "worker_session.hpp"
+#include "worker_companion_manifest.hpp"
+#include "worker_companion_runtime.hpp"
 #include "worker_selftest_dispatch.hpp"
 #include "worker_fixed_selftest_routing.hpp"
 #include "worker_custom_selftest_routing.hpp"
@@ -163,7 +165,7 @@
 #include "worker_target.hpp"
 
 
-// Split as textual implementation fragments to preserve this ABI-sensitive worker as
-// one translation unit while keeping each handwritten file reviewable.
+// Split as textual implementation fragments to preserve this ABI-sensitive
+// worker as one translation unit while keeping each handwritten file reviewable.
 #include "l2_main_support.inc"
 #include "l2_main_entry.inc"

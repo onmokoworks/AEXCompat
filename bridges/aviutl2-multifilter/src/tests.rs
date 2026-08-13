@@ -20,6 +20,9 @@ mod tests {
             len,
             ok: true,
             plugin_kind: DiscoveredPluginKind::Effect,
+            provided_suites: Vec::new(),
+            demanded_suites: Vec::new(),
+            companion_demand_probe_complete: false,
             sha: "aa".into(),
             smart: true,
             out_flags2: 1 << 10,
@@ -46,6 +49,162 @@ mod tests {
             smart: false,
             ..discovered(mtime_secs, len, build)
         }
+    }
+
+    #[test]
+    fn clean_provider_free_probe_does_not_require_optional_missing_suite() {
+        let clean = serde_json::json!({
+            "session_clean": true,
+            "final_report": {
+                "missing_suites": [{"name": "Optional Preview Suite", "version": 1}],
+                "missing_suites_truncated": false
+            }
+        });
+        assert_eq!(companion_demand_from_probe_report(&clean), Some(Vec::new()));
+
+        let failed = serde_json::json!({
+            "session_clean": false,
+            "final_report": {
+                "missing_suites": [{"name": "Required Runtime Suite 2026.1", "version": 2}],
+                "missing_suites_truncated": false
+            }
+        });
+        let demanded = companion_demand_from_probe_report(&failed).unwrap();
+        assert_eq!(demanded.len(), 1);
+        assert_eq!(demanded[0].name, "Required Runtime Suite 2026.1");
+        assert_eq!(demanded[0].api_version, 2);
+
+        let truncated = serde_json::json!({
+            "session_clean": false,
+            "final_report": {
+                "missing_suites": [],
+                "missing_suites_truncated": true
+            }
+        });
+        assert_eq!(companion_demand_from_probe_report(&truncated), None);
+    }
+
+    #[test]
+    fn companion_probe_targets_use_the_combined_cache_across_save_chunks() {
+        let root = std::env::temp_dir().join("aexcompat-demand-probe-chunks");
+        let package = root.join("package");
+        let mut cache = HashMap::new();
+        for index in 0..DISCOVERY_SAVE_CHUNK {
+            cache.insert(
+                root.join(format!("filler-{index}.aex"))
+                    .to_string_lossy()
+                    .into_owned(),
+                discovered(1, 7, build(1)),
+            );
+        }
+        let effect = package.join("consumer.aex");
+        cache.insert(
+            effect.to_string_lossy().into_owned(),
+            discovered(1, 7, build(1)),
+        );
+        let mut provider = discovered(1, 7, build(1));
+        provider.plugin_kind = DiscoveredPluginKind::Aegp;
+        provider.provided_suites = vec![ProvidedSuite {
+            name: "Package Runtime Suite".into(),
+            api_version: 1,
+            internal_version: 1,
+        }];
+        cache.insert(
+            package.join("provider.aex").to_string_lossy().into_owned(),
+            provider,
+        );
+
+        assert_eq!(
+            companion_demand_probe_targets(&cache),
+            vec![effect.to_string_lossy().into_owned()]
+        );
+    }
+
+    #[test]
+    fn companion_association_uses_discovered_aegp_suites_in_exact_install_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-mf-companions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let package = root.join("package");
+        let other = root.join("other");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let effect = package.join("effect.aex");
+        let provider = package.join("effect-helper.aex");
+        let unrelated_provider = package.join("unrelated-provider.aex");
+        let arbitrary = package.join("arbitrary.aex");
+        let remote_provider = other.join("provider.aex");
+        for path in [
+            &effect,
+            &provider,
+            &unrelated_provider,
+            &arbitrary,
+            &remote_provider,
+        ] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let mut provider_entry = discovered(1, 7, build(1));
+        provider_entry.plugin_kind = DiscoveredPluginKind::Aegp;
+        provider_entry.sha = "11".repeat(32);
+        provider_entry.provided_suites = vec![ProvidedSuite {
+            name: "Opaque Runtime Service 2026.1".into(),
+            api_version: 1,
+            internal_version: 2,
+        }];
+        let mut effect_entry = discovered(1, 7, build(1));
+        effect_entry.demanded_suites = vec![ProvidedSuite {
+            name: "Opaque Runtime Service 2026.1".into(),
+            api_version: 1,
+            internal_version: 0,
+        }];
+        effect_entry.companion_demand_probe_complete = true;
+        let mut arbitrary_entry = provider_entry.clone();
+        arbitrary_entry.plugin_kind = DiscoveredPluginKind::Effect;
+        let mut cache = HashMap::new();
+        cache.insert(effect.to_string_lossy().into_owned(), effect_entry);
+        cache.insert(
+            provider.to_string_lossy().into_owned(),
+            provider_entry.clone(),
+        );
+        let mut unrelated_entry = provider_entry.clone();
+        unrelated_entry.provided_suites[0].name = "Aftereffect Runtime Service".into();
+        cache.insert(
+            unrelated_provider.to_string_lossy().into_owned(),
+            unrelated_entry,
+        );
+        cache.insert(arbitrary.to_string_lossy().into_owned(), arbitrary_entry);
+        cache.insert(
+            remote_provider.to_string_lossy().into_owned(),
+            provider_entry,
+        );
+
+        let associated = companion_providers_for(&effect, &cache).unwrap();
+        assert_eq!(associated.len(), 1);
+        assert_eq!(associated[0].artifact.path, provider);
+        assert_eq!(
+            associated[0].suites[0].name,
+            "Opaque Runtime Service 2026.1"
+        );
+        assert_eq!(associated[0].suites[0].api_version, 1);
+        assert_eq!(associated[0].suites[0].internal_version, 2);
+
+        let duplicate = package.join("duplicate-provider.aex");
+        std::fs::write(&duplicate, b"fixture").unwrap();
+        let duplicate_entry = cache
+            .get(&provider.to_string_lossy().into_owned())
+            .unwrap()
+            .clone();
+        cache.insert(duplicate.to_string_lossy().into_owned(), duplicate_entry);
+        assert_eq!(
+            companion_providers_for(&effect, &cache),
+            Err("ambiguous_companion_suite_provider")
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3452,6 +3611,7 @@ mod tests {
                     time_scale: 30,
                 },
                 layers: Vec::new(),
+                companions: Vec::new(),
                 cluster: Some(ClusterLaunch {
                     plugins: vec![(one.clone(), sha_of(&one)), (two.clone(), sha_of(&two))],
                     swap_payloads: vec![None, None],

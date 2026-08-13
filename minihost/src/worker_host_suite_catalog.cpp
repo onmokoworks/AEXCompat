@@ -1,4 +1,5 @@
 #include "worker_host_suite_catalog.hpp"
+#include "worker_dynamic_suite_registry.hpp"
 #include "worker_pf_ansi_runtime.hpp"
 #include "worker_suite_registry.hpp"
 
@@ -13,7 +14,7 @@ struct OwnedCatalog {
   std::mutex mutex;
   std::vector<StaticSuite> suites;
   StaticProviderCatalog static_catalog{};
-  Provider providers[2]{};
+  Provider providers[3]{};
   ProviderCatalog provider_catalog{};
   bool configured{};
   AssemblyHooks assembly{};
@@ -152,7 +153,12 @@ bool configure_host_suite_catalog(const CatalogConfiguration& configuration) {
   catalog.static_catalog = {catalog.suites.data(), catalog.suites.size()};
   catalog.providers[0] = configuration.scene_provider;
   catalog.providers[1] = {&resolve_static_provider, &catalog.static_catalog};
-  catalog.provider_catalog = {catalog.providers, 2, nullptr, nullptr};
+  catalog.providers[2] = {&dynamic_suites::resolve, nullptr};
+  // Keep the dynamic companion registry on the production SPBasicSuite
+  // resolution path.  The first two providers cover scene-owned and static
+  // host suites; AEGP companions publish their process-local suites through
+  // the third provider.
+  catalog.provider_catalog = {catalog.providers, 3, nullptr, nullptr};
   catalog.configured = true;
   return true;
 }
@@ -173,13 +179,24 @@ int32_t acquire_catalog_suite(const char* name, int32_t version,
       return 4;
     }
   }
-  return acquire_host_suite(catalog.provider_catalog, name, version, suite,
-                            trace_writer);
+  const int32_t result = acquire_host_suite(
+      catalog.provider_catalog, name, version, suite, trace_writer);
+  if (result != 0) return result;
+  const int32_t retained = dynamic_suites::retain(name, version, *suite);
+  if (retained == 0 || retained == dynamic_suites::kSuiteNotFound) return 0;
+  // The generic tracker accepted the lease but the dynamic owner could not.
+  // Roll the tracker back so neither side reports a reference it does not own.
+  release_host_suite(name, version, trace_writer);
+  if (suite) *suite = nullptr;
+  return retained;
 }
 
 int32_t release_catalog_suite(const char* name, int32_t version,
                               TraceWriter* trace_writer) {
-  return release_host_suite(name, version, trace_writer);
+  const int32_t host_result = release_host_suite(name, version, trace_writer);
+  if (host_result != 0) return host_result;
+  const int32_t dynamic_result = dynamic_suites::release(name, version);
+  return dynamic_result == dynamic_suites::kSuiteNotFound ? 0 : dynamic_result;
 }
 
 }  // namespace aexcompat::worker_runtime::host_suites

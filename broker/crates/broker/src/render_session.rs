@@ -573,6 +573,10 @@ pub struct SessionOpenRequest<'a> {
     /// `session-layers:v2|` launch trailer.
     pub layers: &'a [SessionLayer],
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// Discovery-confirmed AEGP providers initialized in this worker before
+    /// the PF module. Their broker-owned manifest stays alive with the
+    /// resident session and declares the exact suites each provider exposed.
+    pub companions: Vec<crate::companion_manifest::ApprovedCompanion>,
     /// In-place load mode (issue #751): non-empty opens the session on the
     /// plug-in's real path with these directories admitted into the worker's
     /// DLL search set, instead of staging a sealed tree. Mutually exclusive
@@ -824,6 +828,8 @@ pub struct RenderSession {
     /// the whole session; the worker read it at launch, and the drop removes
     /// the document from target/image-transport.
     _in_place_transport: Option<crate::cluster_manifest::ClusterManifestTransport>,
+    /// Keeps `--companion-manifest-v1` alive for the resident worker lifetime.
+    _companion_transport: Option<crate::companion_manifest::CompanionManifestTransport>,
     /// Keeps the AEXRMA1 document alive for the whole GPU session. Staged
     /// launches copy it into the sealed tree; in-place launches read this
     /// broker-owned absolute transport path before loading plug-in code.
@@ -1266,6 +1272,8 @@ impl RenderSession {
             request.total_time.to_string(),
             request.time_scale.to_string(),
         ];
+        let companion_transport =
+            crate::companion_manifest::write_transport(request.repository, &request.companions)?;
         // The secondary-layer trailer sits ahead of the context trailers in
         // the positional tail (issue #98 W1-4). The pixels travel as inherited
         // file HANDLEs (#268), so each entry now carries its layer's read handle
@@ -1382,6 +1390,16 @@ impl RenderSession {
             args_after_plugin.extend([
                 "--parameter-animation-v1".to_owned(),
                 sidecar.0.to_string_lossy().into_owned(),
+            ]);
+        }
+        if let Some(transport) = &companion_transport {
+            // Auxiliary pairs must be at argv's tail. The worker strips them
+            // backwards before interpreting any layer/context positional
+            // trailers, so inserting this beside the fixed session arguments
+            // makes every layered companion launch malformed.
+            args_after_plugin.extend([
+                "--companion-manifest-v1".to_owned(),
+                transport.path().to_string_lossy().into_owned(),
             ]);
         }
         // The session always launches at the render dimensions; an expand grows
@@ -1610,6 +1628,7 @@ impl RenderSession {
             smart: request.smart,
             cluster: cluster_state,
             _in_place_transport: in_place_transport,
+            _companion_transport: companion_transport,
             _runtime_authorization,
             _animation_sidecar: animation_sidecar,
             _layer_sidecars: layer_sidecars,
@@ -3471,6 +3490,7 @@ pub fn run_video_batch(
         conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
+        companions: Vec::new(),
         dependency_search_dirs: vec![plugin_directory],
         width,
         height,

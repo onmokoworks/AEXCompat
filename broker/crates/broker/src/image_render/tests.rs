@@ -2985,6 +2985,41 @@ mod tests {
                 .contains("requires at least one dependency search directory")
         );
     }
+
+    #[test]
+    fn aegp_dynamic_suite_report_is_bounded_unique_and_exact() {
+        let valid = json!({
+            "dynamic_suites": [{
+                "name": "Fixture Companion Suite",
+                "api_version": 1,
+                "internal_version": 2
+            }]
+        });
+        assert!(valid_dynamic_suite_report(&valid));
+
+        let mut duplicate = valid.clone();
+        duplicate["dynamic_suites"] = json!([
+            {"name":"Fixture Companion Suite","api_version":1,"internal_version":2},
+            {"name":"Fixture Companion Suite","api_version":1,"internal_version":2}
+        ]);
+        assert!(!valid_dynamic_suite_report(&duplicate));
+
+        for mutation in [
+            json!({"dynamic_suites":[{"name":"","api_version":1,"internal_version":0}]}),
+            json!({"dynamic_suites":[{"name":"Suite","api_version":0,"internal_version":0}]}),
+            json!({"dynamic_suites":[{"name":"Suite","api_version":1,"internal_version":-1}]}),
+            json!({"dynamic_suites":[{"name":"Suite","api_version":1,"internal_version":0,"extra":true}]}),
+        ] {
+            assert!(!valid_dynamic_suite_report(&mutation));
+        }
+        assert!(!valid_dynamic_suite_report(&json!({
+            "dynamic_suites": (0..33).map(|index| json!({
+                "name": format!("Suite {index}"),
+                "api_version": 1,
+                "internal_version": 0
+            })).collect::<Vec<_>>()
+        })));
+    }
 }
 #[test]
 fn cleanup_contained_report_contract_rejects_mutations() {

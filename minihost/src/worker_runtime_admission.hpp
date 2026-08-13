@@ -57,6 +57,18 @@ int admit_runtime(const RuntimeHostHooks& hooks,
                   const RuntimeAdmissionRequest& request,
                   RuntimeContext& context);
 
+// Splits admission at the provider/consumer boundary. Preparation authenticates
+// the target, establishes the process DLL-search/stdout context, and transfers
+// those resources to RuntimeContext without executing the target module.
+// load_runtime_plugin then performs the sole executable admission of that
+// target. This lets a host initialize approved companion providers after the
+// host context exists but before the consumer PF executes.
+int prepare_runtime_environment(const RuntimeHostHooks& hooks,
+                                const RuntimeAdmissionRequest& request,
+                                RuntimeContext& context);
+int load_runtime_plugin(const RuntimeAdmissionRequest& request,
+                        RuntimeContext& context);
+
 // Builds the bounded request consumed by admission without loading the
 // plug-in. Returns the historical malformed-argument code for non-ASCII
 // identity text so callers cannot accidentally widen the security boundary.

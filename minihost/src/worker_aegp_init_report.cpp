@@ -3,6 +3,7 @@
 #include "runtime_module_audit.hpp"
 #include "worker_aegp_init_runtime.hpp"
 #include "worker_aegp_scene.hpp"
+#include "worker_dynamic_suite_registry.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_render_receipts.hpp"
 
@@ -11,6 +12,33 @@
 #include <string>
 
 namespace aexcompat::l2_detail {
+
+namespace {
+std::string escape_json(const std::string& input) {
+  static constexpr char hex[] = "0123456789abcdef";
+  std::string output;
+  for (const unsigned char ch : input) {
+    switch (ch) {
+      case '"': output += "\\\""; break;
+      case '\\': output += "\\\\"; break;
+      case '\b': output += "\\b"; break;
+      case '\f': output += "\\f"; break;
+      case '\n': output += "\\n"; break;
+      case '\r': output += "\\r"; break;
+      case '\t': output += "\\t"; break;
+      default:
+        if (ch < 0x20) {
+          output += "\\u00";
+          output.push_back(hex[ch >> 4]);
+          output.push_back(hex[ch & 0xf]);
+        } else {
+          output.push_back(static_cast<char>(ch));
+        }
+    }
+  }
+  return output;
+}
+}  // namespace
 
 using aexcompat::worker_runtime::handles::aegp_memory_balanced;
 using aexcompat::worker_runtime::handles::aegp_memory_statistics;
@@ -107,6 +135,10 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
   const auto& trim_probe = in.trim_pipe;
   const auto& switch_probe = in.switch_pipe;
   const bool module_audit_ok = in.module_audit_ok;
+  const auto dynamic_suite_statistics =
+      aexcompat::worker_runtime::dynamic_suites::statistics();
+  const auto registered_dynamic_suites =
+      aexcompat::worker_runtime::dynamic_suites::observed_suites();
   const uint32_t live_suite_references = live_suite_reference_count();
   const std::string live_suite_summary = live_suite_lease_summary();
   const bool isolated_item_cache = g_aegp_active_idle_roundtrip_mode &&
@@ -127,6 +159,7 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
       leases_balanced && effect_lifetimes_balanced && stream_lifetimes_balanced &&
       collection_lifetimes_balanced &&
       aegp_memory_lifetimes_balanced && async_receipt_lifetimes_balanced() &&
+      dynamic_suite_statistics.live_references == 0 &&
       module_audit_ok;
   const bool boundary_regression_passed =
       in.boundary_regression_mode && in.entry_invoked && init_error != 0 &&
@@ -162,6 +195,17 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
             << ",\"death_hooks_registered\":" << g_aegp_death_hooks
             << ",\"death_hooks_invoked\":" << death_hooks_invoked
             << ",\"death_error\":" << death_error
+            << ",\"dynamic_suite_live_references\":"
+            << dynamic_suite_statistics.live_references
+            << ",\"dynamic_suites\":[";
+  for (std::size_t index = 0; index < registered_dynamic_suites.size(); ++index) {
+    if (index) std::cout << ',';
+    const auto& suite = registered_dynamic_suites[index];
+    std::cout << "{\"name\":\"" << escape_json(suite.name)
+              << "\",\"api_version\":" << suite.api_version
+              << ",\"internal_version\":" << suite.internal_version << '}';
+  }
+  std::cout << ']'
             << ",\"event_requested\":\"" << (g_aegp_update_menu_mode ? "update_menu" : (g_aegp_idle_mode ? "idle" : (g_aegp_command_roundtrip_mode ? "command_roundtrip" : (g_aegp_active_idle_roundtrip_mode ? "active_idle_roundtrip" : (g_aegp_keyframe_roundtrip_mode ? "keyframe_roundtrip" : (g_aegp_seek_roundtrip_mode ? "seek_roundtrip" : (g_aegp_trim_roundtrip_mode ? "trim_roundtrip" : (g_aegp_switch_roundtrip_mode ? "switch_roundtrip" : (g_aegp_comp_idle_roundtrip_mode ? "comp_idle_roundtrip" : "none"))))))))) << "\""
             << ",\"event_error\":" << event_error
             << ",\"hooks_invoked\":" << hooks_invoked

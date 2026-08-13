@@ -317,7 +317,27 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         if decision.register
             && let Some(entry) = cached
         {
-            register_discovered(host, &repository, plugin, &dependency, entry, filter_name);
+            let companions = match companion_providers_for(plugin, &cache) {
+                Ok(companions) => companions,
+                Err(classification) => {
+                    log_warn(&format!("companion association rejected: {classification}"));
+                    if classification == "companion_demand_probe_unresolved" {
+                        // This branch continues past the common enqueue below,
+                        // so queue the unresolved effect exactly once here.
+                        pending.push(plugin.clone());
+                    }
+                    continue;
+                }
+            };
+            register_discovered(
+                host,
+                &repository,
+                plugin,
+                &dependency,
+                entry,
+                companions,
+                filter_name,
+            );
             registered += 1;
         }
         if decision.discover {
@@ -355,6 +375,94 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         build,
         scan_complete,
     );
+}
+
+/// Associates only discovery-proven AEGP suite providers in the effect's
+/// exact install directory. This is an explicit cache relation: arbitrary
+/// neighboring AEX files never enter a PF worker, and a provider with no
+/// observed suite identities is not a companion.
+fn companion_providers_for(
+    effect: &Path,
+    cache: &HashMap<String, CacheEntry>,
+) -> Result<Vec<ApprovedCompanion>, &'static str> {
+    let Some(parent) = effect.parent() else {
+        return Ok(Vec::new());
+    };
+    let Some(effect_entry) = cache.get(&effect.to_string_lossy().into_owned()) else {
+        return Ok(Vec::new());
+    };
+    let has_sibling_provider = cache.iter().any(|(path, entry)| {
+        entry.ok
+            && entry.plugin_kind == DiscoveredPluginKind::Aegp
+            && !entry.provided_suites.is_empty()
+            && Path::new(path).parent() == Some(parent)
+    });
+    if has_sibling_provider && !effect_entry.companion_demand_probe_complete {
+        return Err("companion_demand_probe_unresolved");
+    }
+    let mut providers = Vec::new();
+    let mut claimed = std::collections::BTreeSet::new();
+    for (path, entry) in cache {
+        if !entry.ok
+            || entry.plugin_kind != DiscoveredPluginKind::Aegp
+            || entry.provided_suites.is_empty()
+        {
+            continue;
+        }
+        let path = PathBuf::from(path);
+        if path.parent() != Some(parent) {
+            continue;
+        }
+        let Some(expected_sha256) = decode_sha256_hex(&entry.sha) else {
+            continue;
+        };
+        let Ok(expected_size) = std::fs::metadata(&path).map(|value| value.len()) else {
+            continue;
+        };
+        let suites: Option<Vec<CompanionSuiteIdentity>> = entry
+            .provided_suites
+            .iter()
+            .map(|suite| {
+                Some(CompanionSuiteIdentity {
+                    name: suite.name.clone(),
+                    api_version: u32::try_from(suite.api_version).ok().filter(|v| *v != 0)?,
+                    internal_version: u32::try_from(suite.internal_version).ok()?,
+                })
+            })
+            .collect();
+        let Some(suites) = suites else {
+            continue;
+        };
+        let demanded: Vec<_> = suites
+            .iter()
+            .filter(|suite| {
+                effect_entry.demanded_suites.iter().any(|demand| {
+                    demand.name == suite.name
+                        && u32::try_from(demand.api_version).ok() == Some(suite.api_version)
+                })
+            })
+            .cloned()
+            .collect();
+        if demanded.is_empty() {
+            continue;
+        }
+        if demanded.iter().any(|suite| !claimed.insert(suite.clone())) {
+            // Two sibling providers claiming the same demanded identity are
+            // ambiguous. Loading either (or both) would make provider order an
+            // ABI decision, so fail closed instead of poisoning this PF.
+            return Err("ambiguous_companion_suite_provider");
+        }
+        providers.push(ApprovedCompanion {
+            artifact: ApprovedImageArtifact {
+                path,
+                expected_sha256,
+                expected_size,
+            },
+            suites: demanded,
+        });
+    }
+    providers.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
+    Ok(providers)
 }
 
 /// Drops cache entries for AEX that are no longer present.
@@ -940,6 +1048,13 @@ fn run_discovery_pass(
             interrupted = true;
             break;
         }
+    }
+    // Resident probes are never part of the synchronous first-launch path.
+    // Unresolved effects are queued above and completed only by this background
+    // pass, becoming registerable on the next launch.
+    if kind == DiscoveryPassKind::Background && complete_companion_demand_probes(repository, cache)
+    {
+        persisted = save_cache(cache);
     }
     report_discovery(effects, aegps, rejected, interrupted, persisted, kind);
 }
@@ -1840,6 +1955,9 @@ struct FilterCtx {
     dependency: DependencyConfig,
     sha: String,
     smart: bool,
+    /// Discovery-confirmed AEGPs installed beside this effect. Only providers
+    /// that successfully registered concrete suite identities are admitted.
+    companions: Vec<ApprovedCompanion>,
     /// This AEX's dependency-closure identity from discovery (issue #405).
     /// When other registered AEXes share it, renders route through the pooled
     /// cluster session instead of a per-effect worker.
@@ -1891,6 +2009,16 @@ struct CacheEntry {
     /// not be registered or handed to a PF render session.
     #[serde(default)]
     plugin_kind: DiscoveredPluginKind,
+    /// Exact process-local suites registered while a shipping AEGP discovery
+    /// worker initialized this plug-in. Empty for effects and older cache
+    /// entries. These identities, not filename/folder guesses, are the
+    /// authority for companion association.
+    #[serde(default)]
+    provided_suites: Vec<ProvidedSuite>,
+    #[serde(default)]
+    demanded_suites: Vec<ProvidedSuite>,
+    #[serde(default)]
+    companion_demand_probe_complete: bool,
     sha: String,
     smart: bool,
     /// Exact PF_OutFlags2 observed during discovery. Zero means an older cache
@@ -1964,6 +2092,13 @@ struct CacheEntry {
     /// session failed — never silently rounded into a plain success.
     #[serde(default)]
     cluster_fallback: Option<ClusterFallback>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProvidedSuite {
+    pub name: String,
+    pub api_version: i32,
+    pub internal_version: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2853,6 +2988,9 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         len,
         ok: false,
         plugin_kind: DiscoveredPluginKind::Effect,
+        provided_suites: Vec::new(),
+        demanded_suites: Vec::new(),
+        companion_demand_probe_complete: false,
         sha: String::new(),
         smart: false,
         out_flags2: 0,
