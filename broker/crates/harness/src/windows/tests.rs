@@ -3,6 +3,151 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aegp_roundtrip_gui_exposes_and_routes_each_shipping_action() {
+        let ui_kit = AexUiKit::default();
+        for expected in AegpRoundtripAction::ALL {
+            let click = |busy| {
+                let ctx = egui::Context::default();
+                let mut rect = egui::Rect::NOTHING;
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 500.0),
+                    )),
+                    ..Default::default()
+                });
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    let (clicked, buttons) = show_aegp_roundtrip_actions(ui, busy, &ui_kit);
+                    assert_eq!(clicked, None);
+                    assert_eq!(
+                        buttons
+                            .iter()
+                            .map(|(action, _)| *action)
+                            .collect::<Vec<_>>(),
+                        AegpRoundtripAction::ALL
+                    );
+                    rect = buttons
+                        .into_iter()
+                        .find(|(action, _)| *action == expected)
+                        .unwrap()
+                        .1;
+                });
+                let _ = ctx.end_pass();
+
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 500.0),
+                    )),
+                    events: vec![
+                        egui::Event::PointerMoved(rect.center()),
+                        egui::Event::PointerButton {
+                            pos: rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos: rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                });
+                let mut clicked = None;
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    clicked = show_aegp_roundtrip_actions(ui, busy, &ui_kit).0;
+                });
+                let _ = ctx.end_pass();
+                clicked
+            };
+            assert_eq!(click(false), Some(expected));
+            assert_eq!(click(true), None, "busy GUI must reject a second task");
+        }
+
+        let expected = [
+            (
+                "dispatch_aegp_keyframe_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_keyframe_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_seek_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_seek_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_trim_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_trim_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_switch_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_switch_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+        ];
+        for (action, (operation, dispatch)) in AegpRoundtripAction::ALL.into_iter().zip(expected) {
+            let spec = action.spec();
+            assert_eq!(spec.operation, operation);
+            assert!(std::ptr::fn_addr_eq(spec.dispatch, dispatch));
+        }
+    }
+
+    #[test]
+    fn aegp_roundtrip_app_dispatch_preserves_selection_and_task_lifecycle() {
+        let root = temporary_directory("ui-aegp-roundtrip-dispatch");
+        let plugin = root.join("provider.aex");
+        fs::write(&plugin, b"fixture").unwrap();
+        let mut app = HarnessApp::new(root.clone());
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            sha256: "approved-hash".into(),
+            size: 7,
+            modified: Some(SystemTime::UNIX_EPOCH),
+        });
+        let (observed_sender, observed_receiver) = mpsc::channel();
+        app.dispatch_aegp_roundtrip_with(
+            AegpRoundtripAction::Seek,
+            move |repository, path, hash| {
+                observed_sender
+                    .send((
+                        repository.to_path_buf(),
+                        path.to_path_buf(),
+                        hash.to_owned(),
+                    ))
+                    .unwrap();
+                Ok(serde_json::json!({"event_requested": "seek_roundtrip"}))
+            },
+        );
+
+        assert!(app.busy);
+        assert_eq!(app.status, AegpRoundtripAction::Seek.status());
+        let observed = observed_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(observed, (root.clone(), plugin, "approved-hash".into()));
+        let result = app
+            .receiver
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.operation.as_deref(),
+            Some(AegpRoundtripAction::Seek.spec().operation)
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.body).unwrap()["event_requested"],
+            "seek_roundtrip"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn input_image_path_uses_one_state_transition_for_picker_and_drop() {
         let root = temporary_directory("ui-dropped-input");
         let valid = root.join("frame.PNG");

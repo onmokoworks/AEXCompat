@@ -39,6 +39,108 @@ fn analysis_action_button(
         .on_hover_text(help)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AegpRoundtripAction {
+    Keyframes,
+    Seek,
+    Trim,
+    LayerSwitches,
+}
+
+type AegpRoundtripDispatch = fn(&Path, &Path, &str) -> std::io::Result<serde_json::Value>;
+
+#[derive(Clone, Copy)]
+struct AegpRoundtripSpec {
+    operation: &'static str,
+    dispatch: AegpRoundtripDispatch,
+}
+
+impl AegpRoundtripAction {
+    const ALL: [Self; 4] = [Self::Keyframes, Self::Seek, Self::Trim, Self::LayerSwitches];
+
+    fn label(self, ui_kit: &AexUiKit) -> &str {
+        match self {
+            Self::Keyframes => ui_kit.text("Keyframes", "キーフレーム"),
+            Self::Seek => ui_kit.text("Seek", "時間移動"),
+            Self::Trim => ui_kit.text("Layer trim", "レイヤートリム"),
+            Self::LayerSwitches => ui_kit.text("Layer switches", "レイヤースイッチ"),
+        }
+    }
+
+    fn help(self, ui_kit: &AexUiKit) -> &str {
+        match self {
+            Self::Keyframes => ui_kit.text(
+                "Round-trip keyframe times, values, and interpolation through the AEGP stream suites.",
+                "AEGPストリームSuite経由でキーフレームの時刻・値・補間を往復検査します。",
+            ),
+            Self::Seek => ui_kit.text(
+                "Set and read back the current composition time through the AEGP item suite.",
+                "AEGP Item Suite経由でコンポジションの現在時刻を設定し、読み戻します。",
+            ),
+            Self::Trim => ui_kit.text(
+                "Set and read back a layer in-point and duration through the AEGP layer suite.",
+                "AEGP Layer Suite経由でレイヤーのイン点とデュレーションを設定し、読み戻します。",
+            ),
+            Self::LayerSwitches => ui_kit.text(
+                "Toggle and read back layer switches through the AEGP layer suite.",
+                "AEGP Layer Suite経由でレイヤースイッチを切り替え、読み戻します。",
+            ),
+        }
+    }
+
+    fn spec(self) -> AegpRoundtripSpec {
+        match self {
+            Self::Keyframes => AegpRoundtripSpec {
+                operation: "dispatch_aegp_keyframe_roundtrip",
+                dispatch:
+                    aexcompat_broker::image_render::dispatch_experimental_aegp_keyframe_roundtrip,
+            },
+            Self::Seek => AegpRoundtripSpec {
+                operation: "dispatch_aegp_seek_roundtrip",
+                dispatch: aexcompat_broker::image_render::dispatch_experimental_aegp_seek_roundtrip,
+            },
+            Self::Trim => AegpRoundtripSpec {
+                operation: "dispatch_aegp_trim_roundtrip",
+                dispatch: aexcompat_broker::image_render::dispatch_experimental_aegp_trim_roundtrip,
+            },
+            Self::LayerSwitches => AegpRoundtripSpec {
+                operation: "dispatch_aegp_switch_roundtrip",
+                dispatch:
+                    aexcompat_broker::image_render::dispatch_experimental_aegp_switch_roundtrip,
+            },
+        }
+    }
+
+    fn status(self) -> &'static str {
+        match self {
+            Self::Keyframes => "Running the AEGP keyframe roundtrip in isolation...",
+            Self::Seek => "Running the AEGP current-time roundtrip in isolation...",
+            Self::Trim => "Running the AEGP layer-trim roundtrip in isolation...",
+            Self::LayerSwitches => "Running the AEGP layer-switch roundtrip in isolation...",
+        }
+    }
+}
+
+fn show_aegp_roundtrip_actions(
+    ui: &mut egui::Ui,
+    busy: bool,
+    ui_kit: &AexUiKit,
+) -> (
+    Option<AegpRoundtripAction>,
+    Vec<(AegpRoundtripAction, egui::Rect)>,
+) {
+    let mut clicked = None;
+    let mut buttons = Vec::with_capacity(AegpRoundtripAction::ALL.len());
+    for action in AegpRoundtripAction::ALL {
+        let response = analysis_action_button(ui, !busy, action.label(ui_kit), action.help(ui_kit));
+        buttons.push((action, response.rect));
+        if response.clicked() {
+            clicked = Some(action);
+        }
+    }
+    (clicked, buttons)
+}
+
 fn analysis_setting_row(ui: &mut egui::Ui, label: &str, add_controls: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.add_sized(
@@ -2318,6 +2420,31 @@ impl HarnessApp {
         });
     }
 
+    fn dispatch_aegp_roundtrip(&mut self, action: AegpRoundtripAction) {
+        self.dispatch_aegp_roundtrip_with(action, action.spec().dispatch);
+    }
+
+    fn dispatch_aegp_roundtrip_with<F>(&mut self, action: AegpRoundtripAction, dispatch: F)
+    where
+        F: FnOnce(&Path, &Path, &str) -> std::io::Result<serde_json::Value> + Send + 'static,
+    {
+        let Some(selection) = &self.selection else {
+            return;
+        };
+        let repository = self.repository.clone();
+        let plugin_path = selection.path.clone();
+        let hash = selection.sha256.clone();
+        self.status = action.status().into();
+        self.spawn_native(action.spec().operation, move || {
+            let report =
+                dispatch(&repository, &plugin_path, &hash).map_err(|error| error.to_string())?;
+            Ok((
+                serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
+                None,
+            ))
+        });
+    }
+
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
         fixed_column_header(ui, |ui| {
             ui.horizontal(|ui| {
@@ -3269,6 +3396,10 @@ impl eframe::App for HarnessApp {
                         if analysis_action_button(ui, !self.busy, self.ui_kit.text("Command ON / OFF", "コマンドON／OFF"), self.ui_kit.text("Run an AEGP command enable/disable round trip.", "AEGPコマンドの有効・無効往復を検査します。")).clicked() { self.dispatch_aegp_command_roundtrip(); }
                         if analysis_action_button(ui, !self.busy, self.ui_kit.text("Active idle", "アクティブアイドル"), self.ui_kit.text("Run the active-item idle callback round trip.", "アクティブ項目のアイドル往復を検査します。")).clicked() { self.dispatch_aegp_active_idle_roundtrip(); }
                         if analysis_action_button(ui, !self.busy, self.ui_kit.text("Comp idle", "コンポアイドル"), self.ui_kit.text("Run the composition idle callback round trip.", "コンポジションのアイドル往復を検査します。")).clicked() { self.dispatch_aegp_comp_idle_roundtrip(); }
+                        let (clicked, _) = show_aegp_roundtrip_actions(ui, self.busy, &self.ui_kit);
+                        if let Some(action) = clicked {
+                            self.dispatch_aegp_roundtrip(action);
+                        }
                     });
                     });
                     // Effect parameters live in the persistent left-side Effect Controls panel.
