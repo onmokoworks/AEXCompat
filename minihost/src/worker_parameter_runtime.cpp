@@ -19,6 +19,23 @@ const parameter_animation::ParameterTimeline* timeline(int32_t slot) noexcept {
   return found == timelines.end() ? nullptr : &*found;
 }
 
+void set_animation_layer_extent(int32_t width, int32_t height) noexcept {
+  g_state.animation_layer_width = width;
+  g_state.animation_layer_height = height;
+}
+
+double animation_component_value(const ParamRecord& param, int component,
+                                 double value) noexcept {
+  if ((param.type != 6 && param.type != 18) || component < 0 || component > 2 ||
+      g_state.animation_layer_width <= 0 ||
+      g_state.animation_layer_height <= 0)
+    return value;
+  const int32_t extent = component == 0 ? g_state.animation_layer_width
+                                        : g_state.animation_layer_height;
+  const double pixels = value / 100.0 * extent;
+  return param.type == 6 ? std::clamp(pixels, -32768.0, 32767.0) : pixels;
+}
+
 bool copy_definition_at_time(int32_t slot, int32_t time, uint32_t scale,
                              const Definition& hosted, Definition& result) {
   if (scale == 0 || slot < 0 ||
@@ -111,9 +128,14 @@ bool copy_definition_at_time(int32_t slot, int32_t time, uint32_t scale,
       return false;
     for (int component = 0; component < count; ++component) {
       if (param.type == 18) {
-        write(56 + component * 8, value.components[component]);
+        write(56 + component * 8,
+              animation_component_value(param, component,
+                                        value.components[component]));
       } else {
-        const double encoded = value.components[component] * 65536.0;
+        const double encoded =
+            animation_component_value(param, component,
+                                      value.components[component]) *
+            65536.0;
         if (encoded < std::numeric_limits<int32_t>::min() ||
             encoded > std::numeric_limits<int32_t>::max())
           return false;

@@ -114,6 +114,8 @@ struct CheckoutState {
 struct State {
   std::vector<ParamRecord> records;
   std::vector<parameter_animation::ParameterTimeline> timelines;
+  int32_t animation_layer_width{};
+  int32_t animation_layer_height{};
   std::unordered_map<void*, Definition> keyframe_checkout_ledger;
   std::mutex keyframe_checkout_mutex;
   ArbitraryTelemetry arbitrary;
@@ -124,6 +126,9 @@ struct State {
 
 State& state() noexcept;
 const parameter_animation::ParameterTimeline* timeline(int32_t slot) noexcept;
+void set_animation_layer_extent(int32_t width, int32_t height) noexcept;
+double animation_component_value(const ParamRecord& param, int component,
+                                 double value) noexcept;
 bool copy_definition_at_time(int32_t slot, int32_t time, uint32_t scale,
                              const Definition& hosted, Definition& result);
 
