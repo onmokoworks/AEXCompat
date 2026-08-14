@@ -756,6 +756,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     write<double>(definitions[5], 56, parameter_profile.mix);
     if (parameter_profile.inverted_map) write<int32_t>(definitions[7], 56, 1);
   }
+  aexcompat::worker_runtime::parameters::set_animation_layer_extent(width, height);
   if (!apply_parameter_animation(definitions, external_current_time, external_time_scale)) return -3;
   if (!apply_arbitrary_parameter_animation(entry, input, command_output, definitions,
                                             external_current_time, external_time_scale)) return -3;
@@ -996,6 +997,35 @@ int32_t render_once(EffectEntry entry, std::array<std::byte, kInSize>& input,
        &classic_render_dependencies_ready},
       g_module_audit.required};
   return aexcompat::worker_runtime::classic::dispatch(context);
+}
+
+bool verify_classic_animation_extent_wiring_for_test() {
+  if (g_params.size() < 3) return false;
+  aexcompat::worker_runtime::classic::Context classic_context;
+  std::array<std::byte, kInSize> input{};
+  std::array<std::byte, kOutSize> output{};
+  write<uint32_t>(output, kOutFlags, kOutFlagNopRender);
+  std::vector<unsigned char> rgba(256u * 144u * 4u, 0);
+  int32_t width = 0, height = 0, rowbytes = 0;
+  std::string input_hash, output_hash;
+  bool guards_intact = false;
+  const auto inert_entry = +[](int32_t, void*, void*, void**, void*, void*) {
+    return int32_t{0};
+  };
+  if (classic_render_runtime(inert_entry, input, output, "request", width,
+                             height, rowbytes, input_hash, output_hash,
+                             guards_intact, nullptr, &rgba, 256, 144, nullptr,
+                             0, 1, 1, 24, 4, false) != 0)
+    return false;
+  aexcompat::worker_runtime::classic::ParameterDefinition point{}, point3d{};
+  return width == 256 && height == 144 && guards_intact &&
+         classic_context.copy_definition(2, point.data(), point.size()) &&
+         classic_context.copy_definition(3, point3d.data(), point3d.size()) &&
+         read<int32_t>(point, 56) == 128 * 65536 &&
+         read<int32_t>(point, 60) == 36 * 65536 &&
+         std::abs(read<double>(point3d, 56) - 64.0) < 1e-12 &&
+         std::abs(read<double>(point3d, 64) - 72.0) < 1e-12 &&
+         std::abs(read<double>(point3d, 72) - 108.0) < 1e-12;
 }
 
 using SmartResult = aexcompat::worker_runtime::smart_execution::Result;

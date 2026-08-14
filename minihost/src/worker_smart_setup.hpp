@@ -140,4 +140,8 @@ void publish_frame_times(const ParameterRequest&);
 bool prepare_parameters(const ParameterRequest&, ParameterState&,
                         const ParameterHooks&);
 
+// Exercises production Smart parameter preparation through the point
+// animation write and exposes only the resulting value assertion.
+bool verify_animation_extent_wiring_for_test();
+
 }  // namespace aexcompat::worker_runtime::smart_setup

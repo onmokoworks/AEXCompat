@@ -39,6 +39,7 @@ using aexcompat::parameter_animation::rational_less;
 using aexcompat::render_pixel_transport::argb_to_rgba_native;
 using aexcompat::worker_runtime::invoke_entry_seh;
 using aexcompat::worker_runtime::parameters::ParamRecord;
+using aexcompat::worker_runtime::parameters::animation_component_value;
 using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
 
 extern OpaqueHostObject g_effect;
@@ -146,9 +147,13 @@ bool write_animation_value(std::array<std::byte, kParamSize> &definition,
     for (int component = 0; component < component_count; ++component) {
       if (param.type == 18) {
         write<double>(definition, 56 + component * 8,
-                      key.components[component]);
+                      animation_component_value(param, component,
+                                                key.components[component]));
       } else {
-        const double encoded = key.components[component] * 65536.0;
+        const double encoded =
+            animation_component_value(param, component,
+                                      key.components[component]) *
+            65536.0;
         if (encoded < INT32_MIN || encoded > INT32_MAX)
           return false;
         write<int32_t>(definition, 56 + component * 4,
