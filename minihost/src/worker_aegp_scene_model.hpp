@@ -117,12 +117,23 @@ class Registry {
     std::size_t live{};
   };
 
+  struct ObjectRecordStatistics {
+    uint64_t issues{};
+    uint64_t reuses{};
+    uint64_t exhaustion_failures{};
+    std::size_t live{};
+  };
+
   struct MutationCheckpoint {
     std::array<ObjectSnapshot, kObjectCapacity> snapshots{};
     std::array<bool, kObjectCapacity> live{};
+    std::array<uintptr_t, kObjectCapacity> scheduler_keys{};
     std::size_t object_count{};
     std::size_t project_count{};
-    uint64_t next_dynamic_object_id{};
+    uint64_t reclaimable_object_slots{};
+    uint64_t object_record_issues{};
+    uint64_t object_record_reuses{};
+    uint64_t object_record_exhaustions{};
     Identity active_project{};
     Identity active_item{};
     uint64_t handle_table_fingerprint{};
@@ -218,10 +229,12 @@ class Registry {
   uint64_t handle_table_fingerprint() const noexcept;
   uint64_t fingerprint() const noexcept;
   BorrowedHandleStatistics borrowed_handle_statistics() const noexcept;
+  ObjectRecordStatistics object_record_statistics() const noexcept;
 
  private:
   struct ObjectRecord {
     ObjectSnapshot snapshot{};
+    uintptr_t scheduler_key_value{};
     bool live{};
   };
   struct BorrowedToken {
@@ -265,12 +278,17 @@ class Registry {
   std::size_t project_count_{};
   std::size_t issued_token_count_{};
   uint64_t next_dynamic_object_id_{100000};
+  uint64_t next_scheduler_key_identity_{1};
   uint64_t next_lease_identity_{1};
   uint32_t registry_cookie_{};
   bool lease_identity_exhausted_{};
   uint64_t borrowed_handle_issues_{};
   uint64_t borrowed_handle_reuses_{};
   uint64_t borrowed_handle_exhaustions_{};
+  uint64_t reclaimable_object_slots_{};
+  uint64_t object_record_issues_{};
+  uint64_t object_record_reuses_{};
+  uint64_t object_record_exhaustions_{};
   Identity active_project_{};
   Identity active_item_{};
   bool initialized_{};

@@ -142,6 +142,8 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
       aexcompat::worker_runtime::dynamic_suites::observed_suites();
   const auto borrowed_handle_statistics =
       aexcompat::scene_model::registry().borrowed_handle_statistics();
+  const auto object_record_statistics =
+      aexcompat::scene_model::registry().object_record_statistics();
   const bool scene_registry_initialized =
       scene_runtime_state().scene_registry_initialized;
   const uint32_t live_suite_references = live_suite_reference_count();
@@ -272,6 +274,14 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
             << borrowed_handle_statistics.live
             << ",\"borrowed_handle_exhaustion_failures\":"
             << borrowed_handle_statistics.exhaustion_failures
+            << ",\"object_record_issues\":"
+            << object_record_statistics.issues
+            << ",\"object_record_reuses\":"
+            << object_record_statistics.reuses
+            << ",\"object_record_live\":"
+            << object_record_statistics.live
+            << ",\"object_record_exhaustion_failures\":"
+            << object_record_statistics.exhaustion_failures
             << ",\"stream_value_acquires\":" << g_aegp_stream_value_acquires
             << ",\"stream_value_disposes\":" << g_aegp_stream_value_disposes
             << ",\"stream_sampled_selector_mask\":"
@@ -337,6 +347,7 @@ bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& in) {
 bool emit_aegp_borrowed_handle_report_selftest() {
   auto& registry = aexcompat::scene_model::registry();
   const auto before = registry.borrowed_handle_statistics();
+  const auto object_before = registry.object_record_statistics();
   const auto item = registry.active_item();
   std::array<void*, aexcompat::scene_model::kBorrowedHandleCapacity> handles{};
   bool exercised = item.kind == aexcompat::scene_model::ObjectKind::item &&
@@ -363,6 +374,43 @@ bool emit_aegp_borrowed_handle_report_selftest() {
   exercised = exercised &&
       after.issues == aexcompat::scene_model::kBorrowedHandleCapacity + 1 &&
       after.reuses == 1 && after.exhaustion_failures == 1 && after.live == 0;
+  aexcompat::scene_model::Identity first_erased{};
+  for (std::size_t index = 0;
+       exercised && index < 2 * aexcompat::scene_model::kObjectCapacity;
+       ++index) {
+    aexcompat::scene_model::Identity created{};
+    exercised = registry.create_child(
+        aexcompat::scene_model::ObjectKind::effect, item,
+        static_cast<int32_t>(index), nullptr, u"Cycled Effect", created);
+    if (!exercised) break;
+    if (index == 0) first_erased = created;
+    exercised = registry.erase_tree(created);
+  }
+  aexcompat::scene_model::ObjectSnapshot stale{};
+  exercised = exercised && !registry.snapshot(first_erased, stale);
+  const std::size_t capacity_to_fill =
+      aexcompat::scene_model::kObjectCapacity - object_before.live;
+  std::array<aexcompat::scene_model::Identity,
+             aexcompat::scene_model::kObjectCapacity> live_records{};
+  for (std::size_t index = 0; exercised && index < capacity_to_fill; ++index)
+    exercised = registry.create_child(
+        aexcompat::scene_model::ObjectKind::effect, item,
+        static_cast<int32_t>(index), nullptr, u"Live Effect",
+        live_records[index]);
+  aexcompat::scene_model::Identity rejected{};
+  exercised = exercised && !registry.create_child(
+      aexcompat::scene_model::ObjectKind::effect, item, 0, nullptr,
+      u"Exhausted Effect", rejected);
+  for (std::size_t index = 0; exercised && index < capacity_to_fill; ++index)
+    exercised = registry.erase_tree(live_records[index]);
+  const auto object_after = registry.object_record_statistics();
+  exercised = exercised && object_before.issues == object_before.live &&
+      object_before.reuses == 0 && object_before.exhaustion_failures == 0 &&
+      object_after.issues == object_before.issues +
+          2 * aexcompat::scene_model::kObjectCapacity + capacity_to_fill &&
+      object_after.reuses == 2 * aexcompat::scene_model::kObjectCapacity &&
+      object_after.exhaustion_failures == 1 &&
+      object_after.live == object_before.live;
   if (!exercised) {
     std::cout << "{\"aegp_borrowed_handle_report\":\"failed\"}\n";
     return false;

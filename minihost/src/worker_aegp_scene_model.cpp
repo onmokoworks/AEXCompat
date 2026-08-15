@@ -29,6 +29,13 @@ uintptr_t encoded_borrowed_handle(uint32_t registry_cookie,
       (static_cast<uintptr_t>(lease_identity) << 4);
 }
 
+uintptr_t encoded_scheduler_key(uint32_t registry_cookie,
+                                uint64_t key_identity) noexcept {
+  return kBorrowedHandleMarker |
+      (static_cast<uintptr_t>(registry_cookie) << 32) |
+      (static_cast<uintptr_t>(key_identity) << 4) | 0x8u;
+}
+
 }  // namespace
 
 Registry::Registry() noexcept {
@@ -52,8 +59,9 @@ bool Registry::append(ObjectKind kind, uint64_t project_id, uint64_t object_id,
                       std::u16string_view name, Identity& output) noexcept {
   if (kind == ObjectKind::none || project_id == 0 || object_id == 0 ||
       (legacy_handle && is_borrowed_handle_value(legacy_handle)) ||
-      object_count_ >= objects_.size() || name.size() >=
-          objects_[object_count_].snapshot.name.size())
+      name.size() >= objects_[0].snapshot.name.size() ||
+      registry_cookie_ == 0 || next_scheduler_key_identity_ == 0 ||
+      next_scheduler_key_identity_ > kMaxEncodedLeaseIdentity)
     return false;
   if (kind == ObjectKind::project &&
       project_count_ >= kProjectCapacity)
@@ -64,9 +72,15 @@ bool Registry::append(ObjectKind kind, uint64_t project_id, uint64_t object_id,
         identity.object_id == object_id && identity.kind == kind)
       return false;
   }
+  if (object_count_ >= objects_.size()) {
+    ++object_record_exhaustions_;
+    return false;
+  }
   auto& record = objects_[object_count_++];
   record = {};
   record.live = true;
+  record.scheduler_key_value = encoded_scheduler_key(
+      registry_cookie_, next_scheduler_key_identity_++);
   record.snapshot.identity = {project_id, object_id, 1, kind, {}};
   record.snapshot.owner = owner;
   record.snapshot.related_item = related_item;
@@ -76,6 +90,11 @@ bool Registry::append(ObjectKind kind, uint64_t project_id, uint64_t object_id,
   record.snapshot.legacy_handle = legacy_handle;
   std::copy(name.begin(), name.end(), record.snapshot.name.begin());
   if (kind == ObjectKind::project) ++project_count_;
+  ++object_record_issues_;
+  if (reclaimable_object_slots_ != 0) {
+    --reclaimable_object_slots_;
+    ++object_record_reuses_;
+  }
   output = record.snapshot.identity;
   return true;
 }
@@ -98,6 +117,12 @@ bool Registry::initialize_fixture(void* primary_item, void* primary_comp,
 
   const std::size_t baseline_count = object_count_;
   const std::size_t baseline_project_count = project_count_;
+  const uint64_t baseline_reclaimable_object_slots =
+      reclaimable_object_slots_;
+  const uint64_t baseline_object_record_issues = object_record_issues_;
+  const uint64_t baseline_object_record_reuses = object_record_reuses_;
+  const uint64_t baseline_object_record_exhaustions =
+      object_record_exhaustions_;
   const Identity baseline_active_project = active_project_;
   const Identity baseline_active_item = active_item_;
   const auto rollback = [&]() noexcept {
@@ -105,6 +130,10 @@ bool Registry::initialize_fixture(void* primary_item, void* primary_comp,
       objects_[index] = {};
     object_count_ = baseline_count;
     project_count_ = baseline_project_count;
+    reclaimable_object_slots_ = baseline_reclaimable_object_slots;
+    object_record_issues_ = baseline_object_record_issues;
+    object_record_reuses_ = baseline_object_record_reuses;
+    object_record_exhaustions_ = baseline_object_record_exhaustions;
     active_project_ = baseline_active_project;
     active_item_ = baseline_active_item;
   };
@@ -285,7 +314,7 @@ bool Registry::scheduler_key(Identity identity, void*& output) const noexcept {
   if (!record) return false;
   output = record->snapshot.legacy_handle
       ? record->snapshot.legacy_handle
-      : const_cast<ObjectRecord*>(record);
+      : reinterpret_cast<void*>(record->scheduler_key_value);
   return output != nullptr;
 }
 
@@ -378,8 +407,11 @@ bool Registry::create_child(ObjectKind kind, Identity owner,
   std::lock_guard<std::mutex> lock(mutex_);
   if (!find_locked(owner) || object_count_ >= objects_.size() ||
       next_dynamic_object_id_ == 0 ||
-      next_dynamic_object_id_ == UINT64_MAX)
+      next_dynamic_object_id_ == UINT64_MAX) {
+    if (find_locked(owner) && object_count_ >= objects_.size())
+      ++object_record_exhaustions_;
     return false;
+  }
   const uint64_t object_id = next_dynamic_object_id_;
   if (!append(kind, owner.project_id, object_id, owner, {}, {},
               ItemKind::none, local_index, legacy_handle, name, output))
@@ -399,10 +431,17 @@ bool Registry::create_child_pair(
   std::lock_guard<std::mutex> lock(mutex_);
   if (!find_locked(owner) || objects_.size() - object_count_ < 2 ||
       next_dynamic_object_id_ == 0 ||
-      next_dynamic_object_id_ > UINT64_MAX - 2)
+      next_dynamic_object_id_ > UINT64_MAX - 2) {
+    if (find_locked(owner) && objects_.size() - object_count_ < 2)
+      ++object_record_exhaustions_;
     return false;
+  }
 
   const std::size_t baseline_count = object_count_;
+  const uint64_t baseline_reclaimable_object_slots =
+      reclaimable_object_slots_;
+  const uint64_t baseline_object_record_issues = object_record_issues_;
+  const uint64_t baseline_object_record_reuses = object_record_reuses_;
   std::array<Identity, 2> staged{};
   for (std::size_t index = 0; index < staged.size(); ++index) {
     if (append(kind, owner.project_id,
@@ -414,6 +453,9 @@ bool Registry::create_child_pair(
          rollback < object_count_; ++rollback)
       objects_[rollback] = {};
     object_count_ = baseline_count;
+    reclaimable_object_slots_ = baseline_reclaimable_object_slots;
+    object_record_issues_ = baseline_object_record_issues;
+    object_record_reuses_ = baseline_object_record_reuses;
     return false;
   }
   next_dynamic_object_id_ += staged.size();
@@ -433,8 +475,11 @@ bool Registry::create_child_borrowed(
   bool reused = false;
   if (!find_locked(owner) || object_count_ >= objects_.size() ||
       next_dynamic_object_id_ == 0 ||
-      next_dynamic_object_id_ == UINT64_MAX)
+      next_dynamic_object_id_ == UINT64_MAX) {
+    if (find_locked(owner) && object_count_ >= objects_.size())
+      ++object_record_exhaustions_;
     return false;
+  }
   if (lease_identity_exhausted_ || registry_cookie_ == 0 ||
       next_lease_identity_ == 0 ||
       !available_borrowed_slot_locked(slot, reused)) {
@@ -579,6 +624,24 @@ bool Registry::erase_tree(Identity identity) noexcept {
     ++objects_[index].snapshot.identity.generation;
     objects_[index].live = false;
   }
+  std::size_t retained = 0;
+  std::size_t erased_count = 0;
+  for (std::size_t index = 0; index < object_count_; ++index) {
+    if (!objects_[index].live) {
+      if (objects_[index].snapshot.identity.kind == ObjectKind::project)
+        --project_count_;
+      ++erased_count;
+      continue;
+    }
+    if (retained != index) objects_[retained] = objects_[index];
+    ++retained;
+  }
+  for (std::size_t index = retained; index < object_count_; ++index)
+    objects_[index] = {};
+  object_count_ = retained;
+  reclaimable_object_slots_ += erased_count;
+  if (!find_locked(active_item_)) active_item_ = {};
+  if (!find_locked(active_project_)) active_project_ = {};
   return true;
 }
 
@@ -1001,16 +1064,20 @@ uint64_t Registry::handle_table_fingerprint_locked() const noexcept {
 bool Registry::capture_mutation_checkpoint(
     MutationCheckpoint& output) const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
-  output = {};
+  output.valid = false;
   output.object_count = object_count_;
   output.project_count = project_count_;
-  output.next_dynamic_object_id = next_dynamic_object_id_;
+  output.reclaimable_object_slots = reclaimable_object_slots_;
+  output.object_record_issues = object_record_issues_;
+  output.object_record_reuses = object_record_reuses_;
+  output.object_record_exhaustions = object_record_exhaustions_;
   output.active_project = active_project_;
   output.active_item = active_item_;
   output.handle_table_fingerprint = handle_table_fingerprint_locked();
   for (std::size_t index = 0; index < object_count_; ++index) {
     output.snapshots[index] = objects_[index].snapshot;
     output.live[index] = objects_[index].live;
+    output.scheduler_keys[index] = objects_[index].scheduler_key_value;
   }
   output.valid = true;
   return true;
@@ -1027,12 +1094,16 @@ bool Registry::restore_mutation_checkpoint(
   for (auto& record : objects_) record = {};
   object_count_ = checkpoint.object_count;
   project_count_ = checkpoint.project_count;
-  next_dynamic_object_id_ = checkpoint.next_dynamic_object_id;
+  reclaimable_object_slots_ = checkpoint.reclaimable_object_slots;
+  object_record_issues_ = checkpoint.object_record_issues;
+  object_record_reuses_ = checkpoint.object_record_reuses;
+  object_record_exhaustions_ = checkpoint.object_record_exhaustions;
   active_project_ = checkpoint.active_project;
   active_item_ = checkpoint.active_item;
   for (std::size_t index = 0; index < object_count_; ++index) {
     objects_[index].snapshot = checkpoint.snapshots[index];
     objects_[index].live = checkpoint.live[index];
+    objects_[index].scheduler_key_value = checkpoint.scheduler_keys[index];
   }
   return true;
 }
@@ -1048,13 +1119,16 @@ uint64_t Registry::fingerprint() const noexcept {
   hash = mix(hash, object_count_);
   hash = mix(hash, project_count_);
   hash = mix(hash, issued_token_count_);
-  hash = mix(hash, next_dynamic_object_id_);
   hash = mix(hash, next_lease_identity_);
   hash = mix(hash, registry_cookie_);
   hash = mix(hash, lease_identity_exhausted_);
   hash = mix(hash, borrowed_handle_issues_);
   hash = mix(hash, borrowed_handle_reuses_);
   hash = mix(hash, borrowed_handle_exhaustions_);
+  hash = mix(hash, reclaimable_object_slots_);
+  hash = mix(hash, object_record_issues_);
+  hash = mix(hash, object_record_reuses_);
+  hash = mix(hash, object_record_exhaustions_);
   const auto mix_identity = [&hash](const Identity& identity) {
     hash = mix(hash, identity.project_id);
     hash = mix(hash, identity.object_id);
@@ -1066,6 +1140,7 @@ uint64_t Registry::fingerprint() const noexcept {
   for (std::size_t index = 0; index < object_count_; ++index) {
     const auto& record = objects_[index];
     hash = mix(hash, record.live);
+    hash = mix(hash, record.scheduler_key_value);
     mix_identity(record.snapshot.identity);
     mix_identity(record.snapshot.owner);
     mix_identity(record.snapshot.related_item);
@@ -1138,6 +1213,13 @@ Registry::borrowed_handle_statistics() const noexcept {
       borrowed_leases_.begin(), borrowed_leases_.end(),
       [](const auto& lease) { return lease.live; }));
   return statistics;
+}
+
+Registry::ObjectRecordStatistics
+Registry::object_record_statistics() const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return {object_record_issues_, object_record_reuses_,
+          object_record_exhaustions_, object_count_};
 }
 
 Registry& registry() noexcept {
