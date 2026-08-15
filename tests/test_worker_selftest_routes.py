@@ -84,6 +84,10 @@ def test_aegp_borrowed_handle_report_passes_on_all_workers() -> None:
         assert report["borrowed_handle_reuses"] == 1
         assert report["borrowed_handle_exhaustion_failures"] == 1
         assert report["borrowed_handle_live"] == 0
+        assert report["object_record_issues"] == 768
+        assert report["object_record_reuses"] == 512
+        assert report["object_record_exhaustion_failures"] == 1
+        assert report["object_record_live"] == 18
 
 
 def test_aegp_installed_effect_catalog_passes_on_all_workers() -> None:

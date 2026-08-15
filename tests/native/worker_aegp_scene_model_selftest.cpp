@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -19,6 +20,7 @@ using aexcompat::scene_model::ObjectKind;
 using aexcompat::scene_model::ObjectSnapshot;
 using aexcompat::scene_model::Registry;
 using aexcompat::scene_model::kBorrowedHandleCapacity;
+using aexcompat::scene_model::kObjectCapacity;
 
 namespace {
 
@@ -471,6 +473,111 @@ int main() {
   assert(!mutation_registry.identity_for_legacy(
       &value_storage, ObjectKind::value, value_identity));
 
+  FixtureStorage record_reuse_storage{};
+  Registry record_reuse;
+  assert(initialize(record_reuse, record_reuse_storage));
+  ObjectSnapshot record_reuse_comp{};
+  ObjectSnapshot record_reuse_layer{};
+  assert(record_reuse.comp_from_item(
+      record_reuse.active_item(), record_reuse_comp));
+  assert(record_reuse.layer_by_index(
+      record_reuse_comp.identity, 0, record_reuse_layer));
+  const auto initial_record_statistics =
+      record_reuse.object_record_statistics();
+  Identity first_erased_record{};
+  void* first_erased_scheduler_key = nullptr;
+  for (std::size_t index = 0; index < 2 * kObjectCapacity; ++index) {
+    Identity cycled_record{};
+    assert(record_reuse.create_child(
+        ObjectKind::effect, record_reuse_layer.identity,
+        static_cast<int32_t>(index), nullptr, u"Cycled Effect",
+        cycled_record));
+    void* scheduler_key = nullptr;
+    assert(record_reuse.scheduler_key(cycled_record, scheduler_key));
+    if (index == 0) {
+      first_erased_record = cycled_record;
+      first_erased_scheduler_key = scheduler_key;
+    } else {
+      assert(scheduler_key != first_erased_scheduler_key);
+    }
+    assert(record_reuse.live_object_count(ObjectKind::effect) == 1);
+    assert(record_reuse.erase_tree(cycled_record));
+    assert(record_reuse.live_object_count(ObjectKind::effect) == 0);
+    assert(!record_reuse.snapshot(first_erased_record, unchanged));
+  }
+  auto record_statistics = record_reuse.object_record_statistics();
+  assert(record_statistics.issues ==
+      initial_record_statistics.issues + 2 * kObjectCapacity);
+  assert(record_statistics.reuses == 2 * kObjectCapacity - 1);
+  assert(record_statistics.exhaustion_failures == 0);
+  assert(record_statistics.live == initial_record_statistics.live);
+
+  std::array<Identity, kObjectCapacity> live_records{};
+  const std::size_t capacity_to_fill =
+      kObjectCapacity - initial_record_statistics.live;
+  for (std::size_t index = 0; index < capacity_to_fill; ++index)
+    assert(record_reuse.create_child(
+        ObjectKind::effect, record_reuse_layer.identity,
+        static_cast<int32_t>(index), nullptr, u"Live Effect",
+        live_records[index]));
+  Identity rejected_record{};
+  assert(!record_reuse.create_child(
+      ObjectKind::effect, record_reuse_layer.identity, 0, nullptr,
+      u"Exhausted Effect", rejected_record));
+  record_statistics = record_reuse.object_record_statistics();
+  assert(record_statistics.reuses == 2 * kObjectCapacity);
+  assert(record_statistics.exhaustion_failures == 1);
+  assert(record_statistics.live == kObjectCapacity);
+  for (std::size_t index = 0; index < capacity_to_fill; ++index)
+    assert(record_reuse.erase_tree(live_records[index]));
+  assert(record_reuse.object_record_statistics().live ==
+      initial_record_statistics.live);
+
+  FixtureStorage rollback_reuse_storage{};
+  auto rollback_reuse = std::make_unique<Registry>();
+  assert(initialize(*rollback_reuse, rollback_reuse_storage));
+  ObjectSnapshot rollback_comp{};
+  ObjectSnapshot rollback_layer{};
+  assert(rollback_reuse->comp_from_item(
+      rollback_reuse->active_item(), rollback_comp));
+  assert(rollback_reuse->layer_by_index(
+      rollback_comp.identity, 0, rollback_layer));
+  auto rollback_checkpoint =
+      std::make_unique<Registry::MutationCheckpoint>();
+  assert(rollback_reuse->capture_mutation_checkpoint(*rollback_checkpoint));
+  Identity rolled_back_identity{};
+  void* rolled_back_scheduler_key = nullptr;
+  g_transaction_generation.store(60);
+  {
+    aexcompat::scene_transaction::AtomicSceneTransaction transaction(
+        *rollback_reuse, 1, &read_transaction_generation);
+    assert(transaction.stage());
+    assert(transaction.validate(true));
+    assert(!transaction.commit(
+        [&]() noexcept {
+          return rollback_reuse->create_child(
+                     ObjectKind::effect, rollback_layer.identity, 0,
+                     nullptr, u"Rolled Back Effect", rolled_back_identity) &&
+              rollback_reuse->scheduler_key(
+                  rolled_back_identity, rolled_back_scheduler_key) && false;
+        },
+        [&]() noexcept {
+          return rollback_reuse->restore_mutation_checkpoint(
+              *rollback_checkpoint);
+        },
+        []() noexcept { ++g_transaction_generation; }));
+  }
+  assert(!rollback_reuse->snapshot(rolled_back_identity, unchanged));
+  Identity after_rollback_identity{};
+  void* after_rollback_scheduler_key = nullptr;
+  assert(rollback_reuse->create_child(
+      ObjectKind::effect, rollback_layer.identity, 0, nullptr,
+      u"After Rollback Effect", after_rollback_identity));
+  assert(rollback_reuse->scheduler_key(
+      after_rollback_identity, after_rollback_scheduler_key));
+  assert(!(after_rollback_identity == rolled_back_identity));
+  assert(after_rollback_scheduler_key != rolled_back_scheduler_key);
+
   FixtureStorage exhaustion_storage{};
   Registry exhaustion;
   assert(initialize(exhaustion, exhaustion_storage));
@@ -534,6 +641,12 @@ int main() {
       "\"dead_token_slots_reused\":true,"
       "\"stale_token_reuse_rejected\":true,"
       "\"token_reuse_cycles\":512,"
+      "\"dead_object_records_reused\":true,"
+      "\"stale_object_record_reuse_rejected\":true,"
+      "\"object_record_reuse_cycles\":512,"
+      "\"live_object_record_exhaustion_rejected\":true,"
+      "\"scheduler_key_reuse_aba_rejected\":true,"
+      "\"rollback_identity_reuse_aba_rejected\":true,"
       "\"relationships_propagated\":true,\"stale_rejected\":true,"
       "\"effect_stream_value_keyframe_registry\":true,"
       "\"stream_kinds\":[\"scalar\",\"color\",\"layer\",\"mask\",\"arbitrary\"],"
