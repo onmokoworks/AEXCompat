@@ -52,5 +52,6 @@ struct AegpInitCompletionInputs {
 // Emits the aegp_init completion JSON and returns the pass verdict that
 // worker_main_impl maps onto the process exit code.
 bool emit_aegp_init_completion_report(const AegpInitCompletionInputs& inputs);
+bool emit_aegp_borrowed_handle_report_selftest();
 
 }  // namespace aexcompat::l2_detail
