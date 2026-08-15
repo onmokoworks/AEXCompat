@@ -125,6 +125,16 @@ def test_smart_result_skipped_passes_on_all_workers() -> None:
         pass
 
 
+def test_smart_diagnostic_auxiliary_admission_passes_on_all_workers() -> None:
+    for name, report in _all_workers(
+        "--self-test-smart-diagnostic-auxiliary-admission",
+        "smart_diagnostic_auxiliary_admission",
+    ):
+        assert report["uses_effective_argc"] is True, name
+        assert report["fixed_image_case_admitted"] is True, name
+        assert report["commands_checked"] == 20, name
+
+
 def test_smart_runtime_concurrency_passes_on_all_workers() -> None:
     for _ in _all_workers(
         "--self-test-smart-runtime-concurrency", "smart_runtime_concurrency"

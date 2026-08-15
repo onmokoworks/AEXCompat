@@ -54,6 +54,11 @@ struct ImageRequest {
   bool partial_extent_hint{};
 };
 
+// The fixed image cases shared by the Classic and Smart diagnostic adapters.
+// Keep admission beside the common request/profile shaping so the two worker
+// paths cannot drift on which named cases are renderable.
+bool is_fixed_image_case(const std::string& case_id);
+
 // PF_World is a host ABI blob, but the bounded layout we expose to an effect
 // is common to Classic and SmartFX.  Keeping the raw-byte preparation here
 // makes its dimensions, row stride, and extent checks independent of either
