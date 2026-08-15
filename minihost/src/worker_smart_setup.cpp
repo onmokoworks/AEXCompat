@@ -99,12 +99,20 @@ Plan prepare(const Context& context, const Request& request) {
       plan.height > 4096) return plan;
   plan.pixel_bytes = plan.float32 ? 16 : (plan.deep16 ? 8 : 4);
   plan.rowbytes = case_id == "padded_stride" ? 64 : plan.width * plan.pixel_bytes;
-  if (case_id != "default" && case_id != "request" && !plan.deep16 &&
+  if (!render::is_fixed_image_case(case_id) && case_id != "request" && !plan.deep16 &&
       !plan.float32 && !plan.missing_input && !plan.crash_null_output &&
       !plan.temporal_context && !plan.partial_output_request &&
       !plan.connected_map) return plan;
   plan.valid = true;
   return plan;
+}
+
+bool verify_fixed_image_case_admission() {
+  parameter_execution::BufferOut output{};
+  const std::string case_id = "seed_max";
+  const auto plan = prepare({}, {&output, &case_id, false, 0, 0, 0, 1, 4});
+  return plan.valid && plan.width == 16 && plan.height == 12 &&
+      plan.pixel_bytes == 4 && plan.rowbytes == 64;
 }
 
 bool prepare_world_buffers(const Plan& plan, const std::string& case_id,

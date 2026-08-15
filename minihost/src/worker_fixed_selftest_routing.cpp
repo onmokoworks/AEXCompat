@@ -1,6 +1,8 @@
 #include "worker_fixed_selftest_routing.hpp"
 
+#include "l2_cli_dispatch.h"
 #include "worker_smart_dispatch.hpp"
+#include "worker_smart_setup.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 
 #include "worker_aegp_compat_selftests.hpp"
@@ -159,11 +161,27 @@ int selftest_aegp_borrowed_handle_report(int, wchar_t**) {
       : 1;
 }
 
+int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
+  const bool auxiliary =
+      aexcompat::l2cli::verify_smart_diagnostic_auxiliary_admission();
+  const bool fixed_case =
+      aexcompat::worker_runtime::smart_setup::verify_fixed_image_case_admission();
+  const bool passed = auxiliary && fixed_case;
+  std::cout << "{\"smart_diagnostic_auxiliary_admission\":\""
+            << (passed ? "passed" : "failed")
+            << "\",\"uses_effective_argc\":"
+            << (auxiliary ? "true" : "false")
+            << ",\"fixed_image_case_admitted\":"
+            << (fixed_case ? "true" : "false")
+            << ",\"commands_checked\":20}\n";
+  return passed ? 0 : 1;
+}
+
 }  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 11> host_commands{{
+  const std::array<selftest::HostCommand, 12> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
@@ -177,6 +195,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-aegp-borrowed-handle-report", 2,
        &selftest_aegp_borrowed_handle_report},
       {L"--self-test-smart-selector-inputs", 2, &selftest_smart_selector_inputs},
+      {L"--self-test-smart-diagnostic-auxiliary-admission", 2,
+       &selftest_smart_diagnostic_auxiliary_admission},
   }};
   if (const auto exit = selftest::dispatch_host(
           request.argc, request.argv, host_commands.data(), host_commands.size()))

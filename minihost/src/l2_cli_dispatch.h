@@ -97,4 +97,10 @@ struct WorkerMode {
 WorkerMode classify_worker_mode(
     WorkerKind kind, int argc, wchar_t** argv, int effective_argc);
 
+// Exercises the production Smart diagnostic classifier with the raw argv
+// shape retained after two auxiliary tail arguments were stripped. Every
+// diagnostic command must classify by effective_argc, while still reading the
+// command from the original argv vector.
+bool verify_smart_diagnostic_auxiliary_admission();
+
 }  // namespace aexcompat::l2cli

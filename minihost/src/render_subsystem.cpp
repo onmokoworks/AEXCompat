@@ -144,6 +144,15 @@ ParameterProfile prepare_parameter_profile(const std::string& case_id) {
   return profile;
 }
 
+bool is_fixed_image_case(const std::string& case_id) {
+  return case_id == "default" || case_id == "identity" ||
+      case_id == "horizontal" || case_id == "vertical_no_repeat" ||
+      case_id == "mixed" || case_id == "amount_max" ||
+      case_id == "seed_max" || case_id == "mix_zero" ||
+      case_id == "odd_dimensions" || case_id == "padded_stride" ||
+      case_id == "inverted_map" || case_id == "connected_map";
+}
+
 bool output_extent_unchanged(int32_t current_width, int32_t current_height,
                              int32_t requested_width, int32_t requested_height) {
   if (requested_width == 0 && requested_height == 0) return true;
@@ -314,12 +323,8 @@ int prepare_image_request(const std::string& case_id, bool has_external_input,
       request.height > 4096 ||
       (request.pixel_bytes != 4 && request.pixel_bytes != 8 && request.pixel_bytes != 16))
     return -3;
-  if (case_id != "default" && case_id != "identity" && case_id != "horizontal" &&
-      case_id != "vertical_no_repeat" && case_id != "mixed" &&
-      case_id != "amount_max" && case_id != "seed_max" && case_id != "mix_zero" &&
-      case_id != "odd_dimensions" && case_id != "padded_stride" &&
-      case_id != "inverted_map" && case_id != "connected_map" &&
-      case_id != "request" && !request.partial_extent_hint)
+  if (!is_fixed_image_case(case_id) && case_id != "request" &&
+      !request.partial_extent_hint)
     return -2;
   request.rowbytes = case_id == "padded_stride" ? 64 :
       request.width * request.pixel_bytes;
