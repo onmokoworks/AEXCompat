@@ -35,7 +35,10 @@ mod windows_e2e {
     #[cfg(debug_assertions)]
     use aexcompat_broker::image_render::FORCE_SESSION_FALLBACK_ENV;
     use aexcompat_broker::render_request::HostContext;
-    use aexcompat_broker::render_session::{FrameStatus, RenderSession, SessionOpenRequest};
+    use aexcompat_broker::render_session::{
+        ClusterRenderPlugins, FrameStatus, RenderSession, SessionOpenRequest, SwapOutcome,
+    };
+    use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use aexcompat_broker::secure_launch::LaunchEnvironment;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
@@ -2742,6 +2745,164 @@ mod windows_e2e {
                 )),
             ])
             .find(|path| path.is_file())
+    }
+
+    fn approved_image(path: &Path) -> ApprovedImageArtifact {
+        let bytes = std::fs::read(path).unwrap();
+        ApprovedImageArtifact {
+            path: path.to_path_buf(),
+            expected_sha256: Sha256::digest(&bytes).into(),
+            expected_size: bytes.len() as u64,
+        }
+    }
+
+    fn plain_windows_path(path: &Path) -> PathBuf {
+        let text = path.as_os_str().to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            PathBuf::from(format!(r"\\{rest}"))
+        } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+            PathBuf::from(rest)
+        } else {
+            path.to_path_buf()
+        }
+    }
+
+    fn open_visual_audio_cluster(
+        root: &Path,
+        plugins: [&Path; 2],
+    ) -> std::io::Result<RenderSession> {
+        let launch_sha = format!("{:x}", Sha256::digest(std::fs::read(plugins[0])?));
+        RenderSession::open_cluster(
+            SessionOpenRequest {
+                repository: root,
+                plugin_path: plugins[0],
+                plugin_sha256: &launch_sha,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                companions: Vec::new(),
+                dependency_search_dirs: vec![plugins[0].parent().unwrap().to_path_buf()],
+                width: 8,
+                height: 5,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 2,
+                time_scale: 1,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
+            },
+            ClusterRenderPlugins {
+                plugins: plugins.into_iter().map(approved_image).collect(),
+                swap_payloads: vec![None, None],
+                module_bound: 64,
+            },
+        )
+    }
+
+    fn rendered_pixels(
+        outcome: aexcompat_broker::render_session::FrameOutcome,
+        label: &str,
+    ) -> Vec<u8> {
+        match outcome.status {
+            FrameStatus::Rendered { pixels, .. } => pixels,
+            other => panic!("{label}: expected rendered frame, got {other:?}"),
+        }
+    }
+
+    /// AUDIO_EFFECT_ONLY is state of the currently loaded cluster member, not
+    /// a property of the launch executable. Both directions exercise the
+    /// production broker manifest, native swap bootstrap, and native frame
+    /// loop. The video fixture writes 0x29; the audio-only fixture returns an
+    /// error if its render selector is ever called, so passthrough is proven by
+    /// the exact input pixels rather than by a fixed success report.
+    #[test]
+    fn cluster_swap_tracks_audio_only_state_of_the_current_plugin() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = plain_windows_path(&repository_root());
+        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let Some(video) = visual_audio_probe(&root, "pf_visual_audio_cluster_video_probe") else {
+            eprintln!("skipping audio-only cluster: build pf-visual-audio-probe first");
+            return;
+        };
+        let Some(audio) = visual_audio_probe(&root, "pf_visual_audio_audio_only_probe") else {
+            eprintln!("skipping audio-only cluster: build pf-visual-audio-probe first");
+            return;
+        };
+        if !worker.is_file() {
+            eprintln!("skipping audio-only cluster: build aex_render_worker.exe first");
+            return;
+        }
+        let first_input = (0..8 * 5 * 4)
+            .map(|index| (index as u8).wrapping_mul(37).wrapping_add(11))
+            .collect::<Vec<_>>();
+        let second_input = (0..8 * 5 * 4)
+            .map(|index| (index as u8).wrapping_mul(19).wrapping_add(7))
+            .collect::<Vec<_>>();
+        let video_pixels = vec![0x29; first_input.len()];
+
+        let mut audio_to_video = open_visual_audio_cluster(&root, [&audio, &video])
+            .expect("open cluster on audio-only member");
+        assert_eq!(
+            rendered_pixels(
+                audio_to_video.render_frame(0, 0, &first_input).unwrap(),
+                "audio launch",
+            ),
+            first_input,
+            "audio-only launch member did not passthrough its input"
+        );
+        assert!(matches!(
+            audio_to_video.swap_plugin(1).unwrap(),
+            SwapOutcome::Swapped
+        ));
+        assert_eq!(
+            rendered_pixels(
+                audio_to_video.render_frame(1, 1, &second_input).unwrap(),
+                "audio to video",
+            ),
+            video_pixels,
+            "video member kept the launch member's audio passthrough state"
+        );
+        assert_eq!(audio_to_video.close()["session_clean"], true);
+
+        let mut video_to_audio = open_visual_audio_cluster(&root, [&video, &audio])
+            .expect("open cluster on video member");
+        assert_eq!(
+            rendered_pixels(
+                video_to_audio.render_frame(0, 0, &first_input).unwrap(),
+                "video launch",
+            ),
+            video_pixels,
+            "video launch member did not dispatch its render selector"
+        );
+        assert!(matches!(
+            video_to_audio.swap_plugin(1).unwrap(),
+            SwapOutcome::Swapped
+        ));
+        assert_eq!(
+            rendered_pixels(
+                video_to_audio.render_frame(1, 1, &second_input).unwrap(),
+                "video to audio",
+            ),
+            second_input,
+            "audio-only member dispatched render instead of passthrough after swap"
+        );
+        assert_eq!(video_to_audio.close()["session_clean"], true);
     }
 
     /// Image render + audio sidecar on the classic session (#339). Verified by

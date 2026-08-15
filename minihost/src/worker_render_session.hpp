@@ -48,6 +48,10 @@ struct SwapPluginResult {
   worker_runtime::parameter_execution::EffectEntry entry{};
   int32_t global_setup_error{-1};
   int32_t params_setup_error{-1};
+  // PF_OutFlag_AUDIO_EFFECT_ONLY from the incoming member's GLOBAL_SETUP.
+  // The frame loop replaces its current-plugin passthrough state only after a
+  // complete authenticated swap result reaches it.
+  bool audio_effect_only{};
   bool hard_failure{};
 };
 struct SwapPluginHook {

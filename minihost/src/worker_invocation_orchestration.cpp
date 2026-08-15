@@ -499,23 +499,21 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
         input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
   } else if (params_error == 0 &&
              ((image_render_supported && depth_supported) ||
-              (audio_effect_only && !request.cluster_swap)) &&
+              audio_effect_only) &&
              invocation.render_session_mode) {
     // An AUDIO_EFFECT_ONLY plug-in has no video selector to dispatch and no
     // depth to support; its session runs in passthrough mode, answering every
     // frame with the input (issue #1048). AE leaves the video of an audio-only
     // effect untouched, which is the behavior this reproduces. Cluster
-    // sessions are excluded: passthrough is launch-plugin-scoped, and a swap
-    // to a video plug-in would keep answering its frames with the input -
-    // a fabricated render. A cluster launch on an audio-only plug-in keeps
-    // the pre-#1048 refusal until passthrough is per-current-plugin state.
+    // sessions carry this as current-plugin state: each authenticated swap
+    // replaces it with the incoming bootstrap's AUDIO_EFFECT_ONLY bit (#1049).
     const auto session_outcome = run_render_session(
         entry, input, output, &invocation.requested_parameters, invocation.external_width,
         invocation.external_height, invocation.external_time_step,
         invocation.external_total_time,
         invocation.external_time_scale, invocation.external_pixel_bytes,
         invocation.external_layers.empty() ? nullptr : &invocation.external_layers,
-        request.cluster_swap, audio_effect_only && !request.cluster_swap);
+        request.cluster_swap, audio_effect_only);
     persistent_sequence_setup_error = session_outcome.setup_error;
     persistent_sequence_setdown_error = session_outcome.setdown_error;
     render_width = session_outcome.width;

@@ -844,6 +844,7 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   result.entry = new_entry;
   result.global_setup_error = bootstrap.global_error;
   result.params_setup_error = bootstrap.params_error;
+  result.audio_effect_only = bootstrap.audio_effect_only;
   context.current_global_error = bootstrap.global_error;
   // Step 6: the manifest payload (plugins[1..]) replaces the launch
   // assignments, riding the same argv encoding (design §2.2/§4.1).
