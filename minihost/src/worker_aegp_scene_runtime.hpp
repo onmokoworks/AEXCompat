@@ -148,6 +148,7 @@ struct SceneRuntimeState {
       {0x4c415930}, {0x4c415931}, {0x4c415932}}};
   AegpSceneObject dynamic_camera{0x43414d52};
   bool dynamic_camera_live{};
+  bool scene_registry_initialized{};
   scene_model::Identity dynamic_camera_identity{};
   double dynamic_camera_zoom{800.0};
   AegpSceneObject effect{0x45464643};

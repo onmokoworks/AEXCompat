@@ -30,10 +30,6 @@ struct FixtureStorage {
       &layers[0], &layers[1], &layers[2]}};
 };
 
-struct alignas(std::max_align_t) ForgedBorrowedToken {
-  uint64_t lease_identity{};
-};
-
 std::atomic<uint32_t> g_transaction_generation{41};
 std::atomic<uint32_t> g_generation_reads{};
 
@@ -56,6 +52,35 @@ bool aligned_token(void* handle) {
 }  // namespace
 
 int main() {
+  for (std::size_t rejected_position = 0; rejected_position < 6;
+       ++rejected_position) {
+    FixtureStorage rejected_storage{};
+    Registry rejected_registry;
+    void* item = &rejected_storage.item;
+    void* comp = &rejected_storage.comp;
+    auto layers = rejected_storage.layer_handles;
+    void* marker_handle = reinterpret_cast<void*>(
+        static_cast<uintptr_t>(0x0000600000000008ull));
+    if (rejected_position == 0)
+      item = marker_handle;
+    else if (rejected_position == 1)
+      comp = marker_handle;
+    else if (rejected_position < 5)
+      layers[rejected_position - 2] = marker_handle;
+    else
+      layers[2] = nullptr;
+    const uint64_t before_rejected_fixture = rejected_registry.fingerprint();
+    assert(!rejected_registry.initialize_fixture(
+        item, comp, layers.data(), layers.size()));
+    assert(rejected_registry.fingerprint() == before_rejected_fixture);
+    assert(rejected_registry.project_count() == 0);
+    assert(rejected_registry.live_object_count(ObjectKind::project) == 0);
+    assert(rejected_registry.initialize_fixture(
+        &rejected_storage.item, &rejected_storage.comp,
+        rejected_storage.layer_handles.data(),
+        rejected_storage.layer_handles.size()));
+  }
+
   FixtureStorage storage{};
   Registry registry;
   assert(initialize(registry, storage));
@@ -128,20 +153,23 @@ int main() {
       static_cast<uintptr_t>(0x12345678)), ObjectKind::layer, unchanged));
   assert(unchanged.identity.object_id == sentinel.identity.object_id);
 
-  auto* exposed_lease_identity = static_cast<uint64_t*>(layer_handle);
-  const uint64_t observed_lease_identity = *exposed_lease_identity;
-  assert(observed_lease_identity != 0);
-  ForgedBorrowedToken forged{observed_lease_identity};
-  static_assert(
-      alignof(ForgedBorrowedToken) >= alignof(std::max_align_t));
-  assert(aligned_token(&forged));
-  assert(!registry.resolve(&forged, ObjectKind::layer, unchanged, 1));
-  assert(unchanged.identity.object_id == sentinel.identity.object_id);
-  *exposed_lease_identity = observed_lease_identity + 1;
+  void* forged_token = reinterpret_cast<void*>(
+      reinterpret_cast<uintptr_t>(layer_handle) + alignof(std::max_align_t));
+  assert(aligned_token(forged_token));
   assert(!registry.resolve(
-      layer_handle, ObjectKind::layer, unchanged, 1));
+      forged_token, ObjectKind::layer, unchanged, 1));
   assert(unchanged.identity.object_id == sentinel.identity.object_id);
-  *exposed_lease_identity = observed_lease_identity;
+  Identity rejected_collision{
+      9, 9, 9, ObjectKind::effect, {}};
+  const Identity rejected_collision_sentinel = rejected_collision;
+  assert(!registry.create_child(
+      ObjectKind::effect, layer.identity, 0, forged_token,
+      u"Rejected token namespace", rejected_collision));
+  assert(rejected_collision == rejected_collision_sentinel);
+  assert(!registry.create_child(
+      ObjectKind::effect, layer.identity, 0, layer_handle,
+      u"Rejected live token collision", rejected_collision));
+  assert(rejected_collision == rejected_collision_sentinel);
   assert(registry.resolve(
       layer_handle, ObjectKind::layer, resolved_layer, 1));
 
@@ -452,29 +480,60 @@ int main() {
       exhaustion.active_item(), exhaustion_comp));
   assert(exhaustion.layer_by_index(
       exhaustion_comp.identity, 0, exhaustion_layer));
-  Identity current = exhaustion_layer.identity;
   std::array<void*, kBorrowedHandleCapacity> issued{};
   for (std::size_t index = 0; index < issued.size(); ++index) {
-    issued[index] = exhaustion.borrow(current);
+    issued[index] = exhaustion.borrow_unique(
+        exhaustion_layer.identity, static_cast<int32_t>(index + 1));
     assert(aligned_token(issued[index]));
-    assert(exhaustion.borrow(current) == issued[index]);
     assert(std::find(issued.begin(), issued.begin() + index,
                      issued[index]) == issued.begin() + index);
-    Identity next{};
-    assert(exhaustion.invalidate(current, next));
-    current = next;
   }
-  assert(exhaustion.borrow(current) == nullptr);
-  for (void* stale : issued)
-    assert(!exhaustion.resolve(
-        stale, ObjectKind::layer, unchanged, 1));
+  assert(exhaustion.borrow_unique(exhaustion_layer.identity, 1000) == nullptr);
+  assert(exhaustion.release(
+      issued[0], ObjectKind::layer, 1, true));
+  void* replacement_token = exhaustion.borrow_unique(
+      exhaustion_layer.identity, 1000);
+  assert(aligned_token(replacement_token));
+  assert(replacement_token != issued[0]);
+  assert(!exhaustion.resolve_possessed(
+      issued[0], ObjectKind::layer, 1, unchanged, 1));
+  assert(exhaustion.resolve_possessed(
+      replacement_token, ObjectKind::layer, 1000, unchanged, 1));
+  assert(exhaustion.release(
+      replacement_token, ObjectKind::layer, 1000, true));
+  void* previous_token = replacement_token;
+  for (std::size_t index = 0; index < 4 * kBorrowedHandleCapacity; ++index) {
+    const int32_t possession = static_cast<int32_t>(2000 + index);
+    void* cycled = exhaustion.borrow_unique(
+        exhaustion_layer.identity, possession);
+    assert(aligned_token(cycled));
+    assert(cycled != previous_token);
+    assert(!exhaustion.resolve_possessed(
+        previous_token, ObjectKind::layer, possession, unchanged, 1));
+    assert(exhaustion.resolve_possessed(
+        cycled, ObjectKind::layer, possession, unchanged, 1));
+    assert(exhaustion.release(
+        cycled, ObjectKind::layer, possession, true));
+    previous_token = cycled;
+  }
+  const auto handle_statistics = exhaustion.borrowed_handle_statistics();
+  assert(handle_statistics.issues == 1 + kBorrowedHandleCapacity +
+      4 * kBorrowedHandleCapacity);
+  assert(handle_statistics.reuses == 1 + 4 * kBorrowedHandleCapacity);
+  assert(handle_statistics.exhaustion_failures == 1);
+  assert(handle_statistics.live == kBorrowedHandleCapacity - 1);
 
   std::puts(
       "{\"scene_model\":\"passed\",\"projects\":2,\"folders\":3,"
       "\"footage\":1,\"items\":3,\"compositions\":3,\"layers\":5,"
       "\"aligned_tokens\":true,\"cross_registry_rejected\":true,"
-      "\"forged_token_rejected\":true,\"lease_identity_checked\":true,"
-      "\"token_exhaustion_rejected\":true,"
+      "\"forged_token_rejected\":true,\"opaque_token_namespace\":true,"
+      "\"legacy_token_namespace_collision_rejected\":true,"
+      "\"fixture_admission_atomic\":true,"
+      "\"live_token_exhaustion_rejected\":true,"
+      "\"dead_token_slots_reused\":true,"
+      "\"stale_token_reuse_rejected\":true,"
+      "\"token_reuse_cycles\":512,"
       "\"relationships_propagated\":true,\"stale_rejected\":true,"
       "\"effect_stream_value_keyframe_registry\":true,"
       "\"stream_kinds\":[\"scalar\",\"color\",\"layer\",\"mask\",\"arbitrary\"],"

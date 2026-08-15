@@ -4,6 +4,7 @@
 #include "worker_aegp_scene_runtime.hpp"
 
 #include "worker_aegp_compat_selftests.hpp"
+#include "worker_aegp_init_report.hpp"
 #include "worker_aegp_utility_suite.hpp"
 #include "worker_compute_cache_suite.hpp"
 #include "worker_host_guard_selftests.hpp"
@@ -152,11 +153,17 @@ int selftest_compute_cache(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+int selftest_aegp_borrowed_handle_report(int, wchar_t**) {
+  return aexcompat::l2_detail::emit_aegp_borrowed_handle_report_selftest()
+      ? 0
+      : 1;
+}
+
 }  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 10> host_commands{{
+  const std::array<selftest::HostCommand, 11> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
@@ -167,6 +174,8 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-aegp-effect-param-union-suite4", 2,
        &selftest_effect_param_union},
       {L"--self-test-compute-cache", 2, &selftest_compute_cache},
+      {L"--self-test-aegp-borrowed-handle-report", 2,
+       &selftest_aegp_borrowed_handle_report},
       {L"--self-test-smart-selector-inputs", 2, &selftest_smart_selector_inputs},
   }};
   if (const auto exit = selftest::dispatch_host(

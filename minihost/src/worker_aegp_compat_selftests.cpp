@@ -361,10 +361,6 @@ bool verify_aegp_scene_registry_suites() {
   using GetLayerIndex = int32_t (__cdecl*)(void*, int32_t*);
   using GetLayerParentComp = int32_t (__cdecl*)(void*, void**);
   using GetLayerFromId = int32_t (__cdecl*)(void*, int32_t, void**);
-  struct alignas(std::max_align_t) ForgedBorrowedToken {
-    uint64_t lease_identity{};
-  };
-
   const bool saved_mode = g_aegp_comp_idle_roundtrip_mode;
   g_aegp_comp_idle_roundtrip_mode = true;
   const void* item_suite_raw = nullptr;
@@ -446,13 +442,11 @@ bool verify_aegp_scene_registry_suites() {
       unchanged_i32 == i32_sentinel;
 
   auto& registry = scene_model::registry();
-  const auto observed_lease_identity =
-      *static_cast<const uint64_t*>(item);
-  ForgedBorrowedToken forged{observed_lease_identity};
+  void* forged = reinterpret_cast<void*>(
+      reinterpret_cast<uintptr_t>(item) + alignof(std::max_align_t));
   unchanged_handle =
       reinterpret_cast<void*>(static_cast<uintptr_t>(0x5550));
-  ok = ok && observed_lease_identity != 0 &&
-      get_comp_from_item(&forged, &unchanged_handle) != 0 &&
+  ok = ok && get_comp_from_item(forged, &unchanged_handle) != 0 &&
       unchanged_handle == handle_sentinel;
 
   alignas(std::max_align_t) std::array<std::byte, 64> foreign{};

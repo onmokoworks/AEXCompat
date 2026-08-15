@@ -1,6 +1,7 @@
 #include "worker_aegp_scene_model.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cstring>
 
@@ -12,9 +13,32 @@ uint64_t mix(uint64_t hash, uint64_t value) noexcept {
   return hash;
 }
 
+// Borrowed handles are opaque ABI values, not addresses to dereference. Keep
+// them aligned and in a recognizable namespace so a stale/foreign token can
+// never fall through to legacy-pointer resolution after its slot is reused.
+constexpr uintptr_t kBorrowedHandleMarker = 0x0000600000000000ull;
+constexpr uintptr_t kBorrowedHandleMarkerMask = 0x0000f00000000000ull;
+constexpr uint32_t kMaxRegistryCookie = 0x0fffu;
+constexpr uint64_t kMaxEncodedLeaseIdentity = 0x0fffffffull;
+std::atomic<uint64_t> g_next_registry_cookie{1};
+
+uintptr_t encoded_borrowed_handle(uint32_t registry_cookie,
+                                  uint64_t lease_identity) noexcept {
+  return kBorrowedHandleMarker |
+      (static_cast<uintptr_t>(registry_cookie) << 32) |
+      (static_cast<uintptr_t>(lease_identity) << 4);
+}
+
 }  // namespace
 
-Registry::Registry() noexcept = default;
+Registry::Registry() noexcept {
+  const uint64_t cookie =
+      g_next_registry_cookie.fetch_add(1, std::memory_order_relaxed);
+  if (cookie <= kMaxRegistryCookie)
+    registry_cookie_ = static_cast<uint32_t>(cookie);
+  else
+    lease_identity_exhausted_ = true;
+}
 
 bool Registry::is_item_kind(ObjectKind kind) const noexcept {
   return kind == ObjectKind::item || kind == ObjectKind::folder ||
@@ -27,6 +51,7 @@ bool Registry::append(ObjectKind kind, uint64_t project_id, uint64_t object_id,
                       int32_t local_index, void* legacy_handle,
                       std::u16string_view name, Identity& output) noexcept {
   if (kind == ObjectKind::none || project_id == 0 || object_id == 0 ||
+      (legacy_handle && is_borrowed_handle_value(legacy_handle)) ||
       object_count_ >= objects_.size() || name.size() >=
           objects_[object_count_].snapshot.name.size())
     return false;
@@ -63,6 +88,26 @@ bool Registry::initialize_fixture(void* primary_item, void* primary_comp,
   if (!primary_item || !primary_comp || !primary_layers ||
       primary_layer_count != 3)
     return false;
+  if (is_borrowed_handle_value(primary_item) ||
+      is_borrowed_handle_value(primary_comp))
+    return false;
+  for (std::size_t index = 0; index < primary_layer_count; ++index)
+    if (!primary_layers[index] ||
+        is_borrowed_handle_value(primary_layers[index]))
+      return false;
+
+  const std::size_t baseline_count = object_count_;
+  const std::size_t baseline_project_count = project_count_;
+  const Identity baseline_active_project = active_project_;
+  const Identity baseline_active_item = active_item_;
+  const auto rollback = [&]() noexcept {
+    for (std::size_t index = baseline_count; index < object_count_; ++index)
+      objects_[index] = {};
+    object_count_ = baseline_count;
+    project_count_ = baseline_project_count;
+    active_project_ = baseline_active_project;
+    active_item_ = baseline_active_item;
+  };
 
   Identity project_a{}, project_b{};
   Identity root_a{}, nested_a{}, footage_a{}, parent_item{}, parent_comp{};
@@ -85,7 +130,7 @@ bool Registry::initialize_fixture(void* primary_item, void* primary_comp,
               child_item) ||
       !append(ObjectKind::composition, 1, 5002, child_item, child_item, {},
               ItemKind::none, 1, nullptr, u"Child Comp", child_comp))
-    return false;
+    return rollback(), false;
 
   Identity layer0{}, layer1{}, layer2{}, child_layer{};
   if (!append(ObjectKind::layer, 1, 2001, parent_comp, child_item, {},
@@ -96,7 +141,7 @@ bool Registry::initialize_fixture(void* primary_item, void* primary_comp,
               ItemKind::none, 2, primary_layers[2], u"Layer 3", layer2) ||
       !append(ObjectKind::layer, 1, 2010, child_comp, footage_a, {},
               ItemKind::none, 0, nullptr, u"Child Layer", child_layer))
-    return false;
+    return rollback(), false;
 
   if (!append(ObjectKind::project, 2, 2, {}, {}, {}, ItemKind::none, -1,
               nullptr, u"Project B", project_b) ||
@@ -107,11 +152,11 @@ bool Registry::initialize_fixture(void* primary_item, void* primary_comp,
               item_b) ||
       !append(ObjectKind::composition, 2, 5101, item_b, item_b, {},
               ItemKind::none, 0, nullptr, u"Other Comp", comp_b))
-    return false;
+    return rollback(), false;
   Identity other_layer{};
   if (!append(ObjectKind::layer, 2, 2101, comp_b, {}, {},
               ItemKind::none, 0, nullptr, u"Other Layer", other_layer))
-    return false;
+    return rollback(), false;
 
   active_project_ = project_a;
   active_item_ = parent_item;
@@ -308,15 +353,20 @@ bool Registry::can_create_children(Identity owner,
                                    std::size_t requested_objects,
                                    std::size_t requested_borrowed) const noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
+  const std::size_t available_borrowed = static_cast<std::size_t>(
+      std::count_if(borrowed_leases_.begin(), borrowed_leases_.end(),
+                    [](const auto& lease) { return !lease.live; }));
   return find_locked(owner) && requested_objects != 0 &&
       requested_objects <= objects_.size() - object_count_ &&
-      requested_borrowed <= borrowed_tokens_.size() - issued_token_count_ &&
+      requested_borrowed <= available_borrowed &&
       next_dynamic_object_id_ != 0 &&
       next_dynamic_object_id_ <=
           UINT64_MAX - requested_objects &&
       (requested_borrowed == 0 ||
-       (!lease_identity_exhausted_ && next_lease_identity_ != 0 &&
-        next_lease_identity_ <= UINT64_MAX - requested_borrowed));
+       (!lease_identity_exhausted_ && registry_cookie_ != 0 &&
+        next_lease_identity_ != 0 &&
+        requested_borrowed - 1 <=
+            kMaxEncodedLeaseIdentity - next_lease_identity_));
 }
 
 bool Registry::create_child(ObjectKind kind, Identity owner,
@@ -379,32 +429,25 @@ bool Registry::create_child_borrowed(
       possession_id <= 0)
     return false;
   std::lock_guard<std::mutex> lock(mutex_);
+  std::size_t slot = 0;
+  bool reused = false;
   if (!find_locked(owner) || object_count_ >= objects_.size() ||
       next_dynamic_object_id_ == 0 ||
-      next_dynamic_object_id_ == UINT64_MAX ||
-      issued_token_count_ >= borrowed_tokens_.size() ||
-      lease_identity_exhausted_ || next_lease_identity_ == 0)
+      next_dynamic_object_id_ == UINT64_MAX)
     return false;
+  if (lease_identity_exhausted_ || registry_cookie_ == 0 ||
+      next_lease_identity_ == 0 ||
+      !available_borrowed_slot_locked(slot, reused)) {
+    ++borrowed_handle_exhaustions_;
+    return false;
+  }
   const uint64_t object_id = next_dynamic_object_id_;
   if (!append(kind, owner.project_id, object_id, owner, {}, {},
               ItemKind::none, local_index, legacy_handle, name, output))
     return false;
   ++next_dynamic_object_id_;
-  const std::size_t slot = issued_token_count_++;
-  auto& token = borrowed_tokens_[slot];
-  auto& lease = borrowed_leases_[slot];
-  token.lease_identity = next_lease_identity_;
-  lease.target = output;
-  lease.lease_identity = next_lease_identity_;
-  lease.possession_id = possession_id;
-  lease.issued = true;
-  lease.live = true;
-  if (next_lease_identity_ == UINT64_MAX)
-    lease_identity_exhausted_ = true;
-  else
-    ++next_lease_identity_;
-  handle = &token;
-  return true;
+  handle = issue_borrowed_locked(slot, reused, output, possession_id);
+  return handle != nullptr;
 }
 
 bool Registry::update_local_index(Identity identity,
@@ -542,13 +585,61 @@ bool Registry::erase_tree(Identity identity) noexcept {
 bool Registry::token_slot_for_address_locked(
     const void* handle, std::size_t& slot) const noexcept {
   if (!handle) return false;
-  for (std::size_t index = 0; index < borrowed_tokens_.size(); ++index) {
-    if (handle == static_cast<const void*>(&borrowed_tokens_[index])) {
+  const uintptr_t handle_value = reinterpret_cast<uintptr_t>(handle);
+  for (std::size_t index = 0; index < issued_token_count_; ++index) {
+    if (handle_value == borrowed_tokens_[index].handle_value) {
       slot = index;
       return true;
     }
   }
   return false;
+}
+
+bool Registry::available_borrowed_slot_locked(std::size_t& slot,
+                                              bool& reused) const noexcept {
+  for (std::size_t index = 0; index < issued_token_count_; ++index) {
+    if (!borrowed_leases_[index].live) {
+      slot = index;
+      reused = borrowed_leases_[index].issued;
+      return true;
+    }
+  }
+  if (issued_token_count_ >= borrowed_tokens_.size()) return false;
+  slot = issued_token_count_;
+  reused = false;
+  return true;
+}
+
+void* Registry::issue_borrowed_locked(std::size_t slot, bool reused,
+                                      Identity target,
+                                      int32_t possession_id) noexcept {
+  if (slot >= borrowed_tokens_.size() || lease_identity_exhausted_ ||
+      registry_cookie_ == 0 || next_lease_identity_ == 0 ||
+      next_lease_identity_ > kMaxEncodedLeaseIdentity)
+    return nullptr;
+  if (slot == issued_token_count_) ++issued_token_count_;
+  auto& token = borrowed_tokens_[slot];
+  auto& lease = borrowed_leases_[slot];
+  token.handle_value =
+      encoded_borrowed_handle(registry_cookie_, next_lease_identity_);
+  token.lease_identity = next_lease_identity_;
+  lease.target = target;
+  lease.lease_identity = next_lease_identity_;
+  lease.possession_id = possession_id;
+  lease.issued = true;
+  lease.live = true;
+  ++borrowed_handle_issues_;
+  if (reused) ++borrowed_handle_reuses_;
+  if (next_lease_identity_ == kMaxEncodedLeaseIdentity)
+    lease_identity_exhausted_ = true;
+  else
+    ++next_lease_identity_;
+  return reinterpret_cast<void*>(token.handle_value);
+}
+
+bool Registry::is_borrowed_handle_value(const void* handle) noexcept {
+  const uintptr_t value = reinterpret_cast<uintptr_t>(handle);
+  return (value & kBorrowedHandleMarkerMask) == kBorrowedHandleMarker;
 }
 
 void* Registry::borrow(Identity identity, int32_t possession_id) noexcept {
@@ -558,49 +649,33 @@ void* Registry::borrow(Identity identity, int32_t possession_id) noexcept {
     const auto& lease = borrowed_leases_[index];
     if (lease.live && lease.target == identity &&
         lease.possession_id == possession_id)
-      return &borrowed_tokens_[index];
+      return reinterpret_cast<void*>(borrowed_tokens_[index].handle_value);
   }
-  if (issued_token_count_ >= borrowed_tokens_.size() ||
-      lease_identity_exhausted_ || next_lease_identity_ == 0)
+  std::size_t slot = 0;
+  bool reused = false;
+  if (lease_identity_exhausted_ || registry_cookie_ == 0 ||
+      next_lease_identity_ == 0 ||
+      !available_borrowed_slot_locked(slot, reused)) {
+    ++borrowed_handle_exhaustions_;
     return nullptr;
-  const std::size_t slot = issued_token_count_++;
-  auto& token = borrowed_tokens_[slot];
-  auto& lease = borrowed_leases_[slot];
-  token.lease_identity = next_lease_identity_;
-  lease.target = identity;
-  lease.lease_identity = next_lease_identity_;
-  lease.possession_id = possession_id;
-  lease.issued = true;
-  lease.live = true;
-  if (next_lease_identity_ == UINT64_MAX)
-    lease_identity_exhausted_ = true;
-  else
-    ++next_lease_identity_;
-  return &token;
+  }
+  return issue_borrowed_locked(slot, reused, identity, possession_id);
 }
 
 void* Registry::borrow_unique(Identity identity,
                               int32_t possession_id) noexcept {
   if (possession_id <= 0) return nullptr;
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!find_locked(identity) ||
-      issued_token_count_ >= borrowed_tokens_.size() ||
-      lease_identity_exhausted_ || next_lease_identity_ == 0)
+  if (!find_locked(identity)) return nullptr;
+  std::size_t slot = 0;
+  bool reused = false;
+  if (lease_identity_exhausted_ || registry_cookie_ == 0 ||
+      next_lease_identity_ == 0 ||
+      !available_borrowed_slot_locked(slot, reused)) {
+    ++borrowed_handle_exhaustions_;
     return nullptr;
-  const std::size_t slot = issued_token_count_++;
-  auto& token = borrowed_tokens_[slot];
-  auto& lease = borrowed_leases_[slot];
-  token.lease_identity = next_lease_identity_;
-  lease.target = identity;
-  lease.lease_identity = next_lease_identity_;
-  lease.possession_id = possession_id;
-  lease.issued = true;
-  lease.live = true;
-  if (next_lease_identity_ == UINT64_MAX)
-    lease_identity_exhausted_ = true;
-  else
-    ++next_lease_identity_;
-  return &token;
+  }
+  return issue_borrowed_locked(slot, reused, identity, possession_id);
 }
 
 bool Registry::resolve_locked(void* handle, ObjectKind expected,
@@ -697,7 +772,9 @@ bool Registry::resolve_or_legacy(void* handle, ObjectKind expected,
   if (resolve_locked(handle, expected, false, output, required_project_id))
     return true;
   std::size_t borrowed_slot = 0;
-  if (token_slot_for_address_locked(handle, borrowed_slot)) return false;
+  if (token_slot_for_address_locked(handle, borrowed_slot) ||
+      is_borrowed_handle_value(handle))
+    return false;
   for (std::size_t index = 0; index < object_count_; ++index) {
     const auto& record = objects_[index];
     if (record.live && record.snapshot.legacy_handle == handle &&
@@ -720,7 +797,9 @@ bool Registry::resolve_item_or_legacy(
                      required_project_id))
     return true;
   std::size_t borrowed_slot = 0;
-  if (token_slot_for_address_locked(handle, borrowed_slot)) return false;
+  if (token_slot_for_address_locked(handle, borrowed_slot) ||
+      is_borrowed_handle_value(handle))
+    return false;
   for (std::size_t index = 0; index < object_count_; ++index) {
     const auto& record = objects_[index];
     if (record.live && record.snapshot.legacy_handle == handle &&
@@ -900,10 +979,12 @@ uint64_t Registry::handle_table_fingerprint_locked() const noexcept {
   uint64_t hash = 0x4f8b91c2d3e4a507ull;
   hash = mix(hash, issued_token_count_);
   hash = mix(hash, next_lease_identity_);
+  hash = mix(hash, registry_cookie_);
   hash = mix(hash, lease_identity_exhausted_);
   for (std::size_t index = 0; index < borrowed_tokens_.size(); ++index) {
     const auto& token = borrowed_tokens_[index];
     const auto& lease = borrowed_leases_[index];
+    hash = mix(hash, token.handle_value);
     hash = mix(hash, token.lease_identity);
     hash = mix(hash, lease.issued);
     hash = mix(hash, lease.live);
@@ -969,7 +1050,11 @@ uint64_t Registry::fingerprint() const noexcept {
   hash = mix(hash, issued_token_count_);
   hash = mix(hash, next_dynamic_object_id_);
   hash = mix(hash, next_lease_identity_);
+  hash = mix(hash, registry_cookie_);
   hash = mix(hash, lease_identity_exhausted_);
+  hash = mix(hash, borrowed_handle_issues_);
+  hash = mix(hash, borrowed_handle_reuses_);
+  hash = mix(hash, borrowed_handle_exhaustions_);
   const auto mix_identity = [&hash](const Identity& identity) {
     hash = mix(hash, identity.project_id);
     hash = mix(hash, identity.object_id);
@@ -1031,6 +1116,7 @@ uint64_t Registry::fingerprint() const noexcept {
   for (std::size_t index = 0; index < borrowed_tokens_.size(); ++index) {
     const auto& token = borrowed_tokens_[index];
     const auto& lease = borrowed_leases_[index];
+    hash = mix(hash, token.handle_value);
     hash = mix(hash, token.lease_identity);
     hash = mix(hash, lease.issued);
     hash = mix(hash, lease.live);
@@ -1039,6 +1125,19 @@ uint64_t Registry::fingerprint() const noexcept {
     mix_identity(lease.target);
   }
   return hash;
+}
+
+Registry::BorrowedHandleStatistics
+Registry::borrowed_handle_statistics() const noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  BorrowedHandleStatistics statistics{};
+  statistics.issues = borrowed_handle_issues_;
+  statistics.reuses = borrowed_handle_reuses_;
+  statistics.exhaustion_failures = borrowed_handle_exhaustions_;
+  statistics.live = static_cast<std::size_t>(std::count_if(
+      borrowed_leases_.begin(), borrowed_leases_.end(),
+      [](const auto& lease) { return lease.live; }));
+  return statistics;
 }
 
 Registry& registry() noexcept {
