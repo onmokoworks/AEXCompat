@@ -42,6 +42,9 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
       out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
+#if AEXCOMPAT_AUDIO_EFFECT_ONLY
+      out_data->out_flags |= PF_OutFlag_AUDIO_EFFECT_ONLY;
+#endif
 #if AEXCOMPAT_ADVERTISE_AUDIO
       out_data->out_flags |= PF_OutFlag_I_USE_AUDIO;
 #endif
@@ -54,6 +57,22 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       return PF_Err_NONE;
 #endif
     case PF_Cmd_RENDER: {
+#if AEXCOMPAT_AUDIO_EFFECT_ONLY
+      // The worker must passthrough an AUDIO_EFFECT_ONLY plug-in without
+      // dispatching its nonexistent video path. A render call makes the
+      // production cluster regression observable as a frame error.
+      return PF_Err_INTERNAL_STRUCT_DAMAGED;
+#elif AEXCOMPAT_CLUSTER_VIDEO_PROBE
+      // Dedicated cluster discriminator: no audio-suite observation is mixed
+      // into this fixture. The output makes dispatch of the current video
+      // member distinguishable from audio-only input passthrough.
+      if (!output || !output->data || output->rowbytes < output->width * 4)
+        return PF_Err_BAD_CALLBACK_PARAM;
+      for (A_long y = 0; y < output->height; ++y)
+        std::memset(reinterpret_cast<A_u_char*>(output->data) + y * output->rowbytes,
+                    0x29, static_cast<std::size_t>(output->width) * 4);
+      return PF_Err_NONE;
+#endif
 #if AEXCOMPAT_AUDIO_LAYER_PROBE
       float audio_window_start = 0.0f;
       float audio_window_end = 0.0f;

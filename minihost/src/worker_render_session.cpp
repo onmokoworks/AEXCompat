@@ -492,7 +492,7 @@ struct SessionFrameOutput {
 // persistent_sequence precedent; pixels move through the inherited anonymous
 // section (copy-through slots, the plug-in never sees the mapping) and control
 // messages over the inherited pipe pair with strict exact-key validation.
-// render_frame(current_time, frame_rgba, captured, frame_layers,
+// render_frame(current_entry, current_time, frame_rgba, captured, frame_layers,
 // frame_override, frame_ui) runs one frame under the hoisted sequence and
 // returns the SessionFrameOutput above with the packed ARGB output in
 // `captured`. frame_override is a v:2 per-frame parameter set (protocol
@@ -664,6 +664,7 @@ void run_session_frame_loop(
   // continuation-impossible response while the session stays alive for the
   // broker's continue/stop decision).
   int32_t current_plugin_index = swap_hook ? 0 : -1;
+  bool current_audio_passthrough = audio_passthrough;
   bool swapped_plugin_setup_failed = false;
 
   const std::size_t input_offset = wrs::input_slot_offset();
@@ -798,6 +799,7 @@ void run_session_frame_loop(
       }
       entry = swap.entry;
       current_plugin_index = plugin_index;
+      current_audio_passthrough = swap.audio_effect_only;
       swapped_plugin_setup_failed =
           swap.global_setup_error != 0 || swap.params_setup_error != 0;
       // Re-apply the session-static in_data fields the re-bootstrap cleared.
@@ -1066,7 +1068,7 @@ void run_session_frame_loop(
     // still runs - AE opens a sequence for every applied effect, and a setup
     // failure stays the genuine diagnostic it is for any other plug-in. No
     // FRAME pair, no layers, no capture buffer.
-    if (audio_passthrough) {
+    if (current_audio_passthrough) {
       // A custom-UI event is an explicit broker-requested action, not a
       // render input; a passthrough that swallowed it would be a silent
       // compatibility gap. Explicit frame-local refusal instead.
@@ -1121,8 +1123,8 @@ void run_session_frame_loop(
       break;
     }
     const SessionFrameOutput frame =
-        render_frame(current_time, frame_rgba, captured, frame_layers, frame_override,
-                     frame_ui);
+        render_frame(entry, current_time, frame_rgba, captured, frame_layers,
+                     frame_override, frame_ui);
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
@@ -1289,7 +1291,8 @@ RenderSessionOutcome run_render_session(
       outcome, entry, input, output, max_width, max_height, max_width,
       max_height, time_step, total_time,
       time_scale, pixel_bytes, external_layers,
-      [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
+      [&](EffectEntry current_entry, int32_t current_time,
+          const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
@@ -1302,7 +1305,7 @@ RenderSessionOutcome run_render_session(
         bool frame_guards = true;
         aexcompat::render::ClassicFrameOutput classic_output;
         frame.frame_error = render_once(
-            entry, input, output, "request", frame.width, frame.height,
+            current_entry, input, output, "request", frame.width, frame.height,
             frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
             frame_override ? frame_override : requested, &frame_rgba,
             max_width, max_height, frame_layers,
@@ -1345,7 +1348,8 @@ SmartRenderSessionOutcome run_smart_render_session(
       // Smart sessions (v1.1) render at fixed dimensions; no output expansion.
       max_width, max_height, time_step, total_time,
       time_scale, pixel_bytes, external_layers,
-      [&](int32_t current_time, const std::vector<unsigned char>& frame_rgba,
+      [&](EffectEntry current_entry, int32_t current_time,
+          const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
@@ -1354,7 +1358,8 @@ SmartRenderSessionOutcome run_smart_render_session(
         SessionFrameOutput frame;
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
         worker_runtime::smart_execution::Result frame_result = smart_render_once(
-            entry, input, output, case_id, frame_override ? frame_override : requested,
+            current_entry, input, output, case_id,
+            frame_override ? frame_override : requested,
             &frame_rgba,
             max_width, max_height, frame_layers, current_time, time_step, total_time,
             time_scale, pixel_bytes, &session_frame);
@@ -1371,7 +1376,8 @@ SmartRenderSessionOutcome run_smart_render_session(
           captured.clear();
           worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
           frame_result = smart_render_once(
-              entry, input, output, case_id, frame_override ? frame_override : requested,
+              current_entry, input, output, case_id,
+              frame_override ? frame_override : requested,
               &frame_rgba,
               max_width, max_height, frame_layers, current_time, time_step, total_time,
               time_scale, pixel_bytes, &retry_frame);
