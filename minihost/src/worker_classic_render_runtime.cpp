@@ -338,6 +338,7 @@ struct ClassicLifecycleOwner {
   std::vector<void*>& params;
   std::array<std::byte, kEffectWorldSize>& world;
   bool manage_sequence;
+  aexcompat::render_lifecycle::FrameSetupOutput frame_setup_output{};
 
   aexcompat::worker_runtime::classic_execution::LifecycleResult begin() {
     return aexcompat::worker_runtime::classic_execution::begin_lifecycle(this, hooks());
@@ -353,11 +354,12 @@ struct ClassicLifecycleOwner {
     static const aexcompat::worker_runtime::classic_execution::LifecycleHooks value{
         +[](void* opaque) -> void* {
           auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          const auto lifecycle = h.manage_sequence
+          auto lifecycle = h.manage_sequence
               ? begin_render_lifecycle(kRenderLifecycleLayout, h.entry, h.input,
                                        h.output, h.params.data(), h.world.data())
               : begin_frame_lifecycle(kRenderLifecycleLayout, h.entry, h.input,
                                       h.output, h.params.data(), h.world.data());
+          h.frame_setup_output = lifecycle.frame_setup_output;
           return new (std::nothrow) RenderLifecycle(lifecycle);
         },
         +[](void* lifecycle) {
@@ -414,6 +416,7 @@ struct ClassicRenderDispatchOwner {
   // resize path only became reachable once FRAME_SETUP started being offered a
   // real extent (issue #984), so these carry the source extent unchanged.
   int32_t source_width; int32_t source_height;
+  const aexcompat::render_lifecycle::FrameSetupOutput& frame_setup_output;
   // What the caller learns about this frame's output. Optional: the one-shot
   // routes that do not report frame geometry pass nullptr.
   aexcompat::render::ClassicFrameOutput* frame_output{};
@@ -485,8 +488,12 @@ struct ClassicRenderDispatchOwner {
       if (frame_output) frame_output->validation_failed = true;
       return error;
     };
-    const int32_t next_width = read<int32_t>(output, kOutWidth);
-    const int32_t next_height = read<int32_t>(output, kOutHeight);
+    if (!frame_setup_output.available) {
+      resize_reason = "frame_setup_geometry_missing";
+      return fail(4);
+    }
+    const int32_t next_width = frame_setup_output.width;
+    const int32_t next_height = frame_setup_output.height;
     // Declining the extent comes first, and is not validated: a zero or
     // half-zero pair is not an extent, and the pair `begin_frame` offered is the
     // extent the host already laid the world out at. Validating it would turn
@@ -505,7 +512,7 @@ struct ClassicRenderDispatchOwner {
     // with it. Recorded, because that is a real difference from AE if AE honours
     // it, and a diagnostic is what makes the difference findable.
     if (aexcompat::render::output_extent_unchanged(width, height, next_width, next_height)) {
-      if (read<int32_t>(output, kOutOrigin) != 0 || read<int32_t>(output, kOutOrigin + 4) != 0)
+      if (frame_setup_output.origin_x != 0 || frame_setup_output.origin_y != 0)
         resize_reason = "origin_without_resize";
       return 0;
     }
@@ -521,8 +528,8 @@ struct ClassicRenderDispatchOwner {
                 << " out_flags=" << read<uint32_t>(output, kOutFlags) << "\n" << std::flush;
       return fail(4);
     }
-    const int32_t origin_x = read<int32_t>(output, kOutOrigin);
-    const int32_t origin_y = read<int32_t>(output, kOutOrigin + 4);
+    const int32_t origin_x = frame_setup_output.origin_x;
+    const int32_t origin_y = frame_setup_output.origin_y;
     // Frame-local, not `fail`: this runs before `guarded.reset` and before the
     // world is re-laid or re-registered, so nothing the session owns has moved
     // and the next frame can run. `validation_failed` is the session's
@@ -837,10 +844,15 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     // touched the guarded buffer or the world registration, so the host's state
     // is intact and the next frame can run. Escalating would turn one effect's
     // unanswerable request into a dead session and a respawned worker per frame.
-    const int32_t revised_width = read<int32_t>(command_output, kOutWidth);
-    const int32_t revised_height = read<int32_t>(command_output, kOutHeight);
-    if (error == 0 && !aexcompat::render::output_extent_unchanged(
-                          width, height, revised_width, revised_height)) {
+    const auto& frame_setup_output = lifecycle_owner.frame_setup_output;
+    if (error == 0 && !frame_setup_output.available) {
+      std::cerr << "stage:classic_output_resize_end error=4 "
+                   "reason=frame_setup_geometry_missing\n"
+                << std::flush;
+      error = 4;
+    } else if (error == 0 && !aexcompat::render::output_extent_unchanged(
+                                 width, height, frame_setup_output.width,
+                                 frame_setup_output.height)) {
       // Emitted here rather than through RenderHooks: this branch never reaches
       // `prepare_output`, so nothing else files the stage. Without it the
       // broker's stage parser sees only the plug-in's own `render_end` and
@@ -867,7 +879,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
-        width, height, frame_output};
+        width, height, lifecycle_owner.frame_setup_output, frame_output};
     // The `stage:classic_render_*` and `stage:classic_output_resize_end` markers are
     // emitted per frame from inside RenderHooks (see ClassicRenderDispatchOwner)
     // so each brackets only the step it names. The session-wide `stage:render_*`

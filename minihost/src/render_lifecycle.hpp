@@ -5,10 +5,22 @@
 
 namespace aexcompat::render_lifecycle {
 
+struct FrameSetupOutput {
+  bool available{};
+  int32_t width{};
+  int32_t height{};
+  int32_t origin_x{};
+  int32_t origin_y{};
+};
+
 struct RenderLifecycle {
   bool sequence_started{};
   bool frame_started{};
   int32_t setup_error{};
+  // PF_OutData is reused by selectors that follow FRAME_SETUP. Geometry is
+  // FRAME_SETUP's answer, so the host owns this copy before dispatching any of
+  // those selectors (#999).
+  FrameSetupOutput frame_setup_output{};
 };
 
 struct Layout {
