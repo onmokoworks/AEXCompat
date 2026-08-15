@@ -69,6 +69,28 @@ void offer_output_extent(const Layout& layout, void* output, const void* world) 
   transfer<int32_t>(output, layout.out_height, world, layout.world_height);
 }
 
+FrameSetupOutput capture_frame_setup_output(const Layout& layout,
+                                            const void* output) {
+  FrameSetupOutput geometry;
+  if (!output || !layout.out_width || !layout.out_height || !layout.out_origin)
+    return geometry;
+  geometry.available = true;
+  std::memcpy(&geometry.width,
+              static_cast<const unsigned char*>(output) + layout.out_width,
+              sizeof(geometry.width));
+  std::memcpy(&geometry.height,
+              static_cast<const unsigned char*>(output) + layout.out_height,
+              sizeof(geometry.height));
+  std::memcpy(&geometry.origin_x,
+              static_cast<const unsigned char*>(output) + layout.out_origin,
+              sizeof(geometry.origin_x));
+  std::memcpy(&geometry.origin_y,
+              static_cast<const unsigned char*>(output) + layout.out_origin +
+                  sizeof(geometry.origin_x),
+              sizeof(geometry.origin_y));
+  return geometry;
+}
+
 }  // namespace
 
 RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
@@ -88,6 +110,7 @@ RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
     lifecycle.setup_error = frame_error;
     return lifecycle;
   }
+  lifecycle.frame_setup_output = capture_frame_setup_output(layout, output);
   lifecycle.frame_started = true;
   transfer_pointer(input, layout.in_frame_data, output, layout.out_frame_data);
   return lifecycle;
@@ -134,6 +157,7 @@ RenderLifecycle begin_render(const Hooks& hooks, const Layout& layout,
       begin_frame(hooks, layout, input, output, params, world);
   lifecycle.frame_started = frame.frame_started;
   lifecycle.setup_error = frame.setup_error;
+  lifecycle.frame_setup_output = frame.frame_setup_output;
   return lifecycle;
 }
 
