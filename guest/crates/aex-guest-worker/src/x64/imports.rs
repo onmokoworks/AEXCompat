@@ -91,6 +91,7 @@ enum LegacyWin64Import {
     LeaveCriticalSection,
     DeleteCriticalSection,
     GetModuleHandleW,
+    GetModuleHandleExA,
     GetProcAddress,
     InitializeSListHead,
     DisableThreadLibraryCalls,
@@ -301,6 +302,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "LeaveCriticalSection") => LegacyWin64Import::LeaveCriticalSection,
         ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
         ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
+        ("kernel32.dll", "GetModuleHandleExA") => LegacyWin64Import::GetModuleHandleExA,
         ("kernel32.dll", "GetProcAddress") => LegacyWin64Import::GetProcAddress,
         (
             _,
@@ -1069,6 +1071,18 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::GetModuleHandleExA => {
+                uc(
+                    "write GetModuleHandleExA return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetModuleHandleExA import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_module_handle_ex_a(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::GetProcAddress => {
                 uc(
                     "write GetProcAddress return",
@@ -1808,6 +1822,71 @@ fn emulate_get_module_handle_w(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         let _ = unicorn.emu_stop();
     }
+}
+
+fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    const PIN: u32 = 0x1;
+    const UNCHANGED_REFCOUNT: u32 = 0x2;
+    const FROM_ADDRESS: u32 = 0x4;
+    const VALID_FLAGS: u32 = PIN | UNCHANGED_REFCOUNT | FROM_ADDRESS;
+
+    let flags = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
+    let name_or_address = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    };
+
+    if flags & !VALID_FLAGS != 0 || flags & PIN != 0 && flags & UNCHANGED_REFCOUNT != 0 || output == 0
+    {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+
+    let module = if flags & FROM_ADDRESS != 0 {
+        unicorn
+            .get_data()
+            .image_region
+            .filter(|(start, end)| (*start..*end).contains(&name_or_address))
+            .map(|(start, _)| start)
+    } else if name_or_address == 0 {
+        unicorn.get_data().image_region.map(|(start, _)| start)
+    } else {
+        let mut bytes = Vec::new();
+        let mut terminated = false;
+        for index in 0..128u64 {
+            let Some(address) = name_or_address.checked_add(index) else {
+                break;
+            };
+            let Ok(value) = unicorn.mem_read_as_vec(address, 1) else {
+                break;
+            };
+            if value[0] == 0 {
+                terminated = true;
+                break;
+            }
+            bytes.push(value[0]);
+        }
+        if terminated && bytes.eq_ignore_ascii_case(b"kernel32.dll") {
+            Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+        } else {
+            None
+        }
+    };
+
+    let Some(module) = module else {
+        fail(unicorn, ERROR_MOD_NOT_FOUND);
+        return;
+    };
+    if unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    // Guest images and synthetic system modules live for the worker lifetime,
+    // so default, PIN, and UNCHANGED_REFCOUNT all preserve the same stable
+    // handle while retaining their documented lookup behavior.
+    let _ = unicorn.reg_write(RegisterX86::RAX, 1);
 }
 
 fn install_windows_condition_variable_callbacks(
