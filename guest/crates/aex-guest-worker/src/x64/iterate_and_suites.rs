@@ -206,6 +206,16 @@ fn emulate_iterate16(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     emulate_iterate_common(unicorn, false, 8, HOST_ITERATE16_CONTINUE, "Iterate16");
 }
 
+fn emulate_iterate_float(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    emulate_iterate_common(
+        unicorn,
+        false,
+        16,
+        HOST_ITERATE_FLOAT_CONTINUE,
+        "IterateFloat",
+    );
+}
+
 fn emulate_iterate_common(
     unicorn: &mut Unicorn<'_, GuestState>,
     has_origin: bool,
@@ -539,6 +549,28 @@ fn install_iterate8_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
             bytes[slot * 8..slot * 8 + 8].copy_from_slice(&stub.to_le_bytes());
         }
         uc("write PF Iterate8 Suite", unicorn.mem_write(table, &bytes))?;
+    }
+    Ok(())
+}
+
+fn install_typed_iterate_suites(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
+    for (name, table, callback) in [
+        ("PF iterate16 Suite", HOST_ITERATE16_SUITE, HOST_ITERATE16),
+        (
+            "PF iterateFloat Suite",
+            HOST_ITERATE_FLOAT_SUITE,
+            HOST_ITERATE_FLOAT,
+        ),
+    ] {
+        let expected = typed_iterate_suite_table_address(name, 1)
+            .expect("known typed PF iterate Suite version");
+        debug_assert_eq!(table, expected);
+        uc(
+            "write typed PF iterate Suite",
+            unicorn.mem_write(table, &callback.to_le_bytes()),
+        )?;
     }
     Ok(())
 }
@@ -1215,6 +1247,13 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
     if name == "PF Iterate8 Suite"
         && output != 0
         && let Some(table) = iterate8_suite_table_address(version)
+        && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if output != 0
+        && let Some(table) = typed_iterate_suite_table_address(name.as_ref(), version)
         && unicorn.mem_write(output, &table.to_le_bytes()).is_ok()
     {
         finish_acquire_suite_success(unicorn);
