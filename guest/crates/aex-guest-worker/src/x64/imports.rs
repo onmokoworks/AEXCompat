@@ -21,6 +21,7 @@ enum LegacyWin64Import {
     Calloc,
     Free,
     CrtStrdup,
+    CrtToLower,
     AlignedMalloc,
     AlignedFree,
     CallNewHandler,
@@ -379,6 +380,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtStrdup
         }
         (_, "_strdup") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "tolower") => {
+            LegacyWin64Import::CrtToLower
+        }
+        (_, "tolower") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-heap-l1-1-0.dll" | "ucrtbase.dll", "_aligned_malloc") => {
             LegacyWin64Import::AlignedMalloc
         }
@@ -517,6 +522,21 @@ fn install_win64_import(
                     "install _strdup import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_strdup(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtToLower => {
+                uc("write tolower return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install tolower import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let input = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
+                        let result = if (u32::from(b'A')..=u32::from(b'Z')).contains(&input) {
+                            input + u32::from(b'a' - b'A')
+                        } else {
+                            input
+                        };
+                        let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(result));
                     }),
                 )?;
             }
