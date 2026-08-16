@@ -590,6 +590,47 @@ fn win64_crt_tolower_uses_integer_abi_and_ascii_c_locale_semantics() {
 }
 
 #[test]
+fn win64_crt_toupper_uses_integer_abi_and_ascii_c_locale_semantics() {
+    const TOUPPER: u64 = STUB_BASE + 0x550;
+    let mut engine = test_engine(&[0xc3]);
+    for library in ["api-ms-win-crt-string-l1-1-0.dll", "UCRTBASE.DLL"] {
+        assert_eq!(
+            dispatch_win64_import(library, "toupper"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtToUpper)
+        );
+    }
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "toupper"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            TOUPPER,
+            "api-ms-win-crt-string-l1-1-0.dll",
+            "toupper",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtToUpper)
+    );
+
+    for (input, expected) in [
+        (u64::from(b'a'), u64::from(b'A')),
+        (u64::from(b'z'), u64::from(b'Z')),
+        (u64::from(b'`'), u64::from(b'`')),
+        (u64::from(b'{'), u64::from(b'{')),
+        (u64::from(b'A'), u64::from(b'A')),
+        (0xff, 0xff),
+        (u64::from(u32::MAX), u64::from(u32::MAX)),
+    ] {
+        assert_eq!(
+            engine.call_win64(TOUPPER, [input, 0, 0, 0, 0, 0]).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn crt_aligned_allocation_honors_alignment_reuses_and_owns_free() {
     const ALLOC: u64 = STUB_BASE + 0x570;
     const FREE: u64 = STUB_BASE + 0x580;
