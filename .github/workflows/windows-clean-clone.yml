@@ -23,6 +23,8 @@ jobs:
     timeout-minutes: 120
     env:
       PYTHONUTF8: "1"
+      # bindgen in the Windows guest workspace loads libclang at build time.
+      LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
       # built_artifact テストの broker/harness を、下の `cargo build --workspace`
       # が作る debug から取る。release に戻すと同じクレートを二度作る (#945)。
       AEXCOMPAT_CARGO_PROFILE: debug
@@ -74,6 +76,7 @@ jobs:
             broker
             bridges/aviutl2-multifilter
             bridges/ymm4-native
+            guest
       # Python 版は .python-version (3.12) に従う。
       # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
       - uses: astral-sh/setup-uv@v8.3.2
@@ -118,12 +121,31 @@ jobs:
         working-directory: broker
         run: cargo build --workspace --locked
 
-      # broker 外の Cargo ルートもテストを実行する (#899)。guest workspace は
-      # runner に無い libclang が要るので #917 へ分離してある。
+      # broker 外の Cargo ルートもテストを実行する (#899, #917)。
       - name: Test AviUtl2 multifilter bridge
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
       - name: Test YMM4 native bridge
         run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
+      - name: Verify guest libclang prerequisite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $library = Join-Path $env:LIBCLANG_PATH 'libclang.dll'
+          $clang = Join-Path $env:LIBCLANG_PATH 'clang.exe'
+          if (-not (Test-Path -LiteralPath $library -PathType Leaf)) {
+            throw "guest workspace requires libclang.dll under LIBCLANG_PATH: $env:LIBCLANG_PATH"
+          }
+          if (-not (Test-Path -LiteralPath $clang -PathType Leaf)) {
+            throw "guest workspace requires clang.exe under LIBCLANG_PATH: $env:LIBCLANG_PATH"
+          }
+          & $clang --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "clang --version failed with exit code $LASTEXITCODE"
+          }
+          $file = Get-Item -LiteralPath $library
+          Write-Host "guest_libclang_size=$($file.Length)"
+      - name: Test guest workspace
+        run: cargo test --manifest-path guest/Cargo.toml --workspace --locked
 
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。
