@@ -2866,7 +2866,14 @@ fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
         engine
             .call_win64(
                 GET_MODULE_EX,
-                [FROM_ADDRESS | UNCHANGED_REFCOUNT, TEST_CODE, output, 0, 0, 0],
+                [
+                    FROM_ADDRESS | UNCHANGED_REFCOUNT,
+                    TEST_CODE,
+                    output,
+                    0,
+                    0,
+                    0
+                ],
             )
             .unwrap(),
         1

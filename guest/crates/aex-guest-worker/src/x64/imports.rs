@@ -1838,7 +1838,9 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
     };
 
-    if flags & !VALID_FLAGS != 0 || flags & PIN != 0 && flags & UNCHANGED_REFCOUNT != 0 || output == 0
+    if flags & !VALID_FLAGS != 0
+        || flags & PIN != 0 && flags & UNCHANGED_REFCOUNT != 0
+        || output == 0
     {
         fail(unicorn, ERROR_INVALID_PARAMETER);
         return;
