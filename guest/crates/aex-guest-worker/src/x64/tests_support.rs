@@ -73,6 +73,8 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         HOST_CHECKIN_LAYER_PIXELS,
         HOST_ITERATE16,
         HOST_ITERATE16_CONTINUE,
+        HOST_ITERATE_FLOAT,
+        HOST_ITERATE_FLOAT_CONTINUE,
         HOST_CRT_INITTERM_CONTINUE,
         HOST_FLS_FREE_CONTINUE,
     ] {
@@ -183,6 +185,20 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         .add_code_hook(
             HOST_ITERATE16_CONTINUE,
             HOST_ITERATE16_CONTINUE,
+            continue_iterate,
+        )
+        .unwrap();
+    unicorn
+        .add_code_hook(
+            HOST_ITERATE_FLOAT,
+            HOST_ITERATE_FLOAT,
+            emulate_iterate_float,
+        )
+        .unwrap();
+    unicorn
+        .add_code_hook(
+            HOST_ITERATE_FLOAT_CONTINUE,
+            HOST_ITERATE_FLOAT_CONTINUE,
             continue_iterate,
         )
         .unwrap();
@@ -310,6 +326,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         )
         .unwrap();
     install_iterate8_suites(&mut unicorn).unwrap();
+    install_typed_iterate_suites(&mut unicorn).unwrap();
     install_pf_ansi_suite_v2(&mut unicorn).unwrap();
     install_gpu_device_suite(&mut unicorn).unwrap();
     install_windows_condition_variable_callbacks(&mut unicorn).unwrap();
@@ -5488,4 +5505,111 @@ fn iterate16_calls_guest_pixel_callback_for_each_argb16_pixel() {
     let mut output = [0u8; 16];
     engine.read(destination_pixels, &mut output).unwrap();
     assert_eq!(output.as_slice(), pixels);
+}
+
+#[test]
+fn typed_iterate_suites_acquire_and_invoke_their_pixel_callbacks() {
+    const CODE: u64 = 0x1000_0000;
+    // mov rax,[rsp+0x28]; movdqu xmm0,[r9]; movdqu [rax],xmm0;
+    // xor eax,eax; ret
+    let callback = [
+        0x48, 0x8b, 0x44, 0x24, 0x28, 0xf3, 0x41, 0x0f, 0x6f, 0x01, 0xf3, 0x0f, 0x7f, 0x00, 0x31,
+        0xc0, 0xc3,
+    ];
+    for (name, expected_table, expected_callback, pixel_bytes) in [
+        (
+            "PF iterate16 Suite",
+            HOST_ITERATE16_SUITE,
+            HOST_ITERATE16,
+            8usize,
+        ),
+        (
+            "PF iterateFloat Suite",
+            HOST_ITERATE_FLOAT_SUITE,
+            HOST_ITERATE_FLOAT,
+            16usize,
+        ),
+    ] {
+        let mut engine = test_engine(&callback);
+        let name_address = engine.allocate(name.len() + 1, 1).unwrap();
+        engine
+            .write(name_address, &[name.as_bytes(), &[0]].concat())
+            .unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(HOST_ACQUIRE_SUITE, [name_address, 1, suite_output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), expected_table);
+        engine.read(expected_table, &mut pointer).unwrap();
+        assert_eq!(u64::from_le_bytes(pointer), expected_callback);
+
+        let source_pixels = engine.allocate(16, 16).unwrap();
+        let destination_pixels = engine.allocate(16, 16).unwrap();
+        let source_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+        let pixels = (1u8..=16).collect::<Vec<_>>();
+        engine.write(source_pixels, &pixels).unwrap();
+        for (world, data) in [
+            (source_world, source_pixels),
+            (destination_world, destination_pixels),
+        ] {
+            let mut bytes = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+            bytes[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+                .copy_from_slice(&data.to_le_bytes());
+            bytes[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+                .copy_from_slice(&(pixel_bytes as i32).to_le_bytes());
+            bytes[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            bytes[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+                .copy_from_slice(&1i32.to_le_bytes());
+            engine.write(world, &bytes).unwrap();
+        }
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    expected_callback,
+                    &[0, 0, 1, source_world, 0, 0, CODE, destination_world],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            0
+        );
+        let mut output = [0u8; 16];
+        engine.read(destination_pixels, &mut output).unwrap();
+        assert_eq!(&output[..pixel_bytes], &pixels[..pixel_bytes]);
+
+        for short_world in [source_world, destination_world] {
+            engine
+                .write(
+                    short_world + abi::LAYER_ROWBYTES_OFFSET as u64,
+                    &i32::try_from(pixel_bytes - 1).unwrap().to_le_bytes(),
+                )
+                .unwrap();
+            let sentinel = [0xcc; 16];
+            engine.write(destination_pixels, &sentinel).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64_with_timeout(
+                        expected_callback,
+                        &[0, 0, 1, source_world, 0, 0, CODE, destination_world],
+                        TIMEOUT_MICROSECONDS,
+                    )
+                    .unwrap(),
+                4
+            );
+            engine.read(destination_pixels, &mut output).unwrap();
+            assert_eq!(output, sentinel, "short row must reject before callback");
+            engine
+                .write(
+                    short_world + abi::LAYER_ROWBYTES_OFFSET as u64,
+                    &i32::try_from(pixel_bytes).unwrap().to_le_bytes(),
+                )
+                .unwrap();
+        }
+    }
 }

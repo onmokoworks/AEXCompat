@@ -372,6 +372,11 @@ impl GuestEngine<'static> {
             ("write TransferRect8 callback", HOST_TRANSFER_RECT8),
             ("write Iterate16 callback", HOST_ITERATE16),
             ("write Iterate16 continuation", HOST_ITERATE16_CONTINUE),
+            ("write IterateFloat callback", HOST_ITERATE_FLOAT),
+            (
+                "write IterateFloat continuation",
+                HOST_ITERATE_FLOAT_CONTINUE,
+            ),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -524,6 +529,22 @@ impl GuestEngine<'static> {
             unicorn.add_code_hook(
                 HOST_ITERATE16_CONTINUE,
                 HOST_ITERATE16_CONTINUE,
+                continue_iterate,
+            ),
+        )?;
+        uc(
+            "install IterateFloat callback",
+            unicorn.add_code_hook(
+                HOST_ITERATE_FLOAT,
+                HOST_ITERATE_FLOAT,
+                emulate_iterate_float,
+            ),
+        )?;
+        uc(
+            "install IterateFloat continuation",
+            unicorn.add_code_hook(
+                HOST_ITERATE_FLOAT_CONTINUE,
+                HOST_ITERATE_FLOAT_CONTINUE,
                 continue_iterate,
             ),
         )?;
@@ -726,6 +747,7 @@ impl GuestEngine<'static> {
             unicorn.mem_write(HOST_WORLD_SUITE, &world_suite),
         )?;
         install_iterate8_suites(&mut unicorn)?;
+        install_typed_iterate_suites(&mut unicorn)?;
         install_pf_ansi_suite_v2(&mut unicorn)?;
         install_gpu_device_suite(&mut unicorn).map_err(|error| GuestError::Unicorn {
             operation: "install PF GPU Device Suite",

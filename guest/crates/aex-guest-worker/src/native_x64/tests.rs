@@ -6,6 +6,9 @@ thread_local! {
     static ITERATE_PROGRESS_ERROR: Cell<i32> = const { Cell::new(0) };
     static ITERATE_ABORT_CALLS: Cell<u32> = const { Cell::new(0) };
     static ITERATE_ABORT_ERROR: Cell<i32> = const { Cell::new(0) };
+    static TYPED_ITERATE_PIXEL_BYTES: Cell<usize> = const { Cell::new(0) };
+    static TYPED_ITERATE_PIXEL_ERROR: Cell<i32> = const { Cell::new(0) };
+    static TYPED_ITERATE_PIXEL_CALLS: std::cell::RefCell<Vec<(i32, i32, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 unsafe extern "win64" fn test_iterate_pixel(
@@ -29,6 +32,67 @@ unsafe extern "win64" fn test_iterate_abort(_effect_ref: u64) -> i32 {
     ITERATE_ABORT_CALLS.with(|calls| calls.set(calls.get() + 1));
     ITERATE_EVENTS.with(|events| events.borrow_mut().push((-1, -1)));
     ITERATE_ABORT_ERROR.with(Cell::get)
+}
+
+unsafe extern "win64" fn test_typed_iterate_pixel(
+    _refcon: u64,
+    x: i32,
+    y: i32,
+    input: u64,
+    output: u64,
+) -> i32 {
+    let pixel_bytes = TYPED_ITERATE_PIXEL_BYTES.with(Cell::get);
+    TYPED_ITERATE_PIXEL_CALLS.with(|calls| {
+        calls.borrow_mut().push((x, y, input == 0));
+    });
+    if input == 0 {
+        unsafe { ptr::write_bytes(output as *mut u8, 0xa5, pixel_bytes) };
+    } else {
+        unsafe {
+            ptr::copy_nonoverlapping(input as *const u8, output as *mut u8, pixel_bytes);
+        }
+    }
+    TYPED_ITERATE_PIXEL_ERROR.with(Cell::get)
+}
+
+fn typed_iterate_test_engine() -> GuestEngine<'static> {
+    let image = Mapping::anonymous(ptr::null_mut(), PAGE_SIZE as usize, false).unwrap();
+    let arena = Mapping::anonymous(ptr::null_mut(), ARENA_SIZE, false).unwrap();
+    let arena_base = arena.pointer as u64;
+    let mut engine = GuestEngine {
+        image,
+        arena,
+        state: NativeState {
+            arena_next: arena_base,
+            arena_end: arena_base + ARENA_SIZE as u64,
+            ..NativeState::default()
+        },
+        loaded_images: loaded_image_snapshot(),
+        dllmain_attached: true,
+        lifetime: PhantomData,
+    };
+    engine.install_typed_iterate_suites().unwrap();
+    engine
+}
+
+fn allocate_typed_world(
+    engine: &mut GuestEngine<'static>,
+    data: u64,
+    rowbytes: usize,
+    width: i32,
+    height: i32,
+) -> u64 {
+    let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let mut bytes = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+    bytes[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8].copy_from_slice(&data.to_le_bytes());
+    bytes[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+        .copy_from_slice(&i32::try_from(rowbytes).unwrap().to_le_bytes());
+    bytes[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+        .copy_from_slice(&width.to_le_bytes());
+    bytes[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+        .copy_from_slice(&height.to_le_bytes());
+    engine.write(world, &bytes).unwrap();
+    world
 }
 
 #[test]
@@ -125,6 +189,192 @@ fn iterate_progress_matches_forward_reverse_and_degenerate_contract() {
     assert_eq!(ITERATE_ABORT_CALLS.with(Cell::get), 1);
 
     ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+}
+
+#[test]
+fn typed_iterate_suites_use_native_acquire_abi_stride_and_failure_contracts() {
+    type TypedIterate = unsafe extern "win64" fn(u64, i32, i32, u64, u64, u64, u64, u64) -> u64;
+
+    for (name, pixel_bytes, expected_callback) in [
+        (
+            b"PF iterate16 Suite\0".as_slice(),
+            8usize,
+            callback_address!(iterate_world16),
+        ),
+        (
+            b"PF iterateFloat Suite\0".as_slice(),
+            16usize,
+            callback_address!(iterate_world_float),
+        ),
+    ] {
+        let mut engine = typed_iterate_test_engine();
+        let name_address = engine.allocate(name.len(), 1).unwrap();
+        engine.write(name_address, name).unwrap();
+        let suite_output = engine.allocate(8, 8).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    engine.acquire_suite_callback_address(),
+                    [name_address, 1, suite_output, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        let mut pointer = [0u8; 8];
+        engine.read(suite_output, &mut pointer).unwrap();
+        let table = u64::from_le_bytes(pointer);
+        engine.read(table, &mut pointer).unwrap();
+        let callback = u64::from_le_bytes(pointer);
+        assert_eq!(callback, expected_callback);
+        let iterate: TypedIterate = unsafe { std::mem::transmute(callback as usize) };
+
+        let width = 2i32;
+        let height = 2i32;
+        let rowbytes = pixel_bytes * width as usize;
+        let byte_count = rowbytes * height as usize;
+        let source_data = engine.allocate(byte_count, 16).unwrap();
+        let destination_data = engine.allocate(byte_count, 16).unwrap();
+        let source_world = allocate_typed_world(&mut engine, source_data, rowbytes, width, height);
+        let destination_world =
+            allocate_typed_world(&mut engine, destination_data, rowbytes, width, height);
+        let source = (1..=byte_count as u8).collect::<Vec<_>>();
+        engine.write(source_data, &source).unwrap();
+
+        let in_data = engine.allocate(abi::PF_IN_DATA_SIZE, 8).unwrap();
+        engine
+            .write_u64(
+                in_data + abi::INTER_PROGRESS_OFFSET as u64,
+                callback_address!(test_iterate_progress),
+            )
+            .unwrap();
+        engine
+            .write_u64(
+                in_data + abi::INTER_ABORT_OFFSET as u64,
+                callback_address!(test_iterate_abort),
+            )
+            .unwrap();
+        TYPED_ITERATE_PIXEL_BYTES.with(|bytes| bytes.set(pixel_bytes));
+        TYPED_ITERATE_PIXEL_ERROR.with(|error| error.set(0));
+        TYPED_ITERATE_PIXEL_CALLS.with(|calls| calls.borrow_mut().clear());
+        ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow_mut().clear());
+        ITERATE_ABORT_CALLS.with(|calls| calls.set(0));
+        ACTIVE_STATE.with(|slot| slot.set(&mut engine.state));
+        assert_eq!(
+            unsafe {
+                iterate(
+                    in_data,
+                    10,
+                    14,
+                    source_world,
+                    0,
+                    0,
+                    callback_address!(test_typed_iterate_pixel),
+                    destination_world,
+                )
+            },
+            0
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+        let mut output = vec![0u8; byte_count];
+        engine.read(destination_data, &mut output).unwrap();
+        assert_eq!(output, source);
+        assert_eq!(
+            TYPED_ITERATE_PIXEL_CALLS.with(|calls| calls.borrow().clone()),
+            [(0, 0, false), (1, 0, false), (0, 1, false), (1, 1, false)]
+        );
+        assert_eq!(
+            ITERATE_PROGRESS_CALLS.with(|calls| calls.borrow().clone()),
+            [(12, 14), (14, 14)]
+        );
+        assert_eq!(ITERATE_ABORT_CALLS.with(Cell::get), 1);
+
+        TYPED_ITERATE_PIXEL_CALLS.with(|calls| calls.borrow_mut().clear());
+        TYPED_ITERATE_PIXEL_ERROR.with(|error| error.set(37));
+        ACTIVE_STATE.with(|slot| slot.set(&mut engine.state));
+        assert_eq!(
+            unsafe {
+                iterate(
+                    0,
+                    0,
+                    0,
+                    source_world,
+                    0,
+                    0,
+                    callback_address!(test_typed_iterate_pixel),
+                    destination_world,
+                )
+            },
+            37
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+        TYPED_ITERATE_PIXEL_ERROR.with(|error| error.set(0));
+        assert_eq!(
+            TYPED_ITERATE_PIXEL_CALLS.with(|calls| calls.borrow().len()),
+            1
+        );
+
+        engine
+            .write(destination_data, &vec![0u8; byte_count])
+            .unwrap();
+        TYPED_ITERATE_PIXEL_CALLS.with(|calls| calls.borrow_mut().clear());
+        ACTIVE_STATE.with(|slot| slot.set(&mut engine.state));
+        assert_eq!(
+            unsafe {
+                iterate(
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    callback_address!(test_typed_iterate_pixel),
+                    destination_world,
+                )
+            },
+            0
+        );
+        ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+        engine.read(destination_data, &mut output).unwrap();
+        assert_eq!(output, vec![0xa5; byte_count]);
+        assert!(
+            TYPED_ITERATE_PIXEL_CALLS
+                .with(|calls| calls.borrow().iter().all(|(_, _, input_null)| *input_null))
+        );
+
+        for short_world in [source_world, destination_world] {
+            engine
+                .write(
+                    short_world + abi::LAYER_ROWBYTES_OFFSET as u64,
+                    &i32::try_from(rowbytes - 1).unwrap().to_le_bytes(),
+                )
+                .unwrap();
+            TYPED_ITERATE_PIXEL_CALLS.with(|calls| calls.borrow_mut().clear());
+            ACTIVE_STATE.with(|slot| slot.set(&mut engine.state));
+            assert_eq!(
+                unsafe {
+                    iterate(
+                        0,
+                        0,
+                        0,
+                        source_world,
+                        0,
+                        0,
+                        callback_address!(test_typed_iterate_pixel),
+                        destination_world,
+                    )
+                },
+                4
+            );
+            ACTIVE_STATE.with(|slot| slot.set(ptr::null_mut()));
+            assert!(TYPED_ITERATE_PIXEL_CALLS.with(|calls| calls.borrow().is_empty()));
+            engine
+                .write(
+                    short_world + abi::LAYER_ROWBYTES_OFFSET as u64,
+                    &i32::try_from(rowbytes).unwrap().to_le_bytes(),
+                )
+                .unwrap();
+        }
+    }
 }
 
 #[test]
