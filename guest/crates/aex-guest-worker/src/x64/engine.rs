@@ -373,7 +373,10 @@ impl GuestEngine<'static> {
             ("write Iterate16 callback", HOST_ITERATE16),
             ("write Iterate16 continuation", HOST_ITERATE16_CONTINUE),
             ("write IterateFloat callback", HOST_ITERATE_FLOAT),
-            ("write IterateFloat continuation", HOST_ITERATE_FLOAT_CONTINUE),
+            (
+                "write IterateFloat continuation",
+                HOST_ITERATE_FLOAT_CONTINUE,
+            ),
         ] {
             uc(operation, unicorn.mem_write(address, &[0xc3]))?;
         }
@@ -531,7 +534,11 @@ impl GuestEngine<'static> {
         )?;
         uc(
             "install IterateFloat callback",
-            unicorn.add_code_hook(HOST_ITERATE_FLOAT, HOST_ITERATE_FLOAT, emulate_iterate_float),
+            unicorn.add_code_hook(
+                HOST_ITERATE_FLOAT,
+                HOST_ITERATE_FLOAT,
+                emulate_iterate_float,
+            ),
         )?;
         uc(
             "install IterateFloat continuation",

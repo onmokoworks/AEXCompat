@@ -189,7 +189,11 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         )
         .unwrap();
     unicorn
-        .add_code_hook(HOST_ITERATE_FLOAT, HOST_ITERATE_FLOAT, emulate_iterate_float)
+        .add_code_hook(
+            HOST_ITERATE_FLOAT,
+            HOST_ITERATE_FLOAT,
+            emulate_iterate_float,
+        )
         .unwrap();
     unicorn
         .add_code_hook(
@@ -5509,8 +5513,8 @@ fn typed_iterate_suites_acquire_and_invoke_their_pixel_callbacks() {
     // mov rax,[rsp+0x28]; movdqu xmm0,[r9]; movdqu [rax],xmm0;
     // xor eax,eax; ret
     let callback = [
-        0x48, 0x8b, 0x44, 0x24, 0x28, 0xf3, 0x41, 0x0f, 0x6f, 0x01, 0xf3, 0x0f, 0x7f, 0x00,
-        0x31, 0xc0, 0xc3,
+        0x48, 0x8b, 0x44, 0x24, 0x28, 0xf3, 0x41, 0x0f, 0x6f, 0x01, 0xf3, 0x0f, 0x7f, 0x00, 0x31,
+        0xc0, 0xc3,
     ];
     for (name, expected_table, expected_callback, pixel_bytes) in [
         (

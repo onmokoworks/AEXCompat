@@ -553,9 +553,7 @@ fn install_iterate8_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), 
     Ok(())
 }
 
-fn install_typed_iterate_suites(
-    unicorn: &mut Unicorn<'_, GuestState>,
-) -> Result<(), GuestError> {
+fn install_typed_iterate_suites(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
     for (name, table, callback) in [
         ("PF iterate16 Suite", HOST_ITERATE16_SUITE, HOST_ITERATE16),
         (
