@@ -114,11 +114,12 @@ flags は FLT Blur Suite と同じ語: 0x0f = チャンネル (A=1,R=2,G=4,B=8)�
   box、それ以外は gaussian。
 - gaussian (PF_GaussianBlur1D): n = ceil(radius)、整数重み w[0]=255、
   w[i]=(int)(PFp_GaussianValue(i/(radius+1))*255)、正規化は
-  255+2Σw[i]。8-bit も 16-bit も同じ整数重み (16-bit の実測が 16-bit の
-  1 段階 = 3e-5 以内で一致)。
+  255+2Σw[i]。8-bit も 16-bit も同じ整数重み (16-bit の r=1 の実測
+  8240/16288/8240 がこの重みそのもの)。
 - box (PF_BoxBlur1D): 1 pass の半幅 n = ceil(rho)、両端タップの重みは
   1-(n-rho) を 1/1024 単位で切り捨て、正規化は (2n+1)*1024-2*deficit。
-  quality 1 は同じ box を 3 pass。8-bit は pass ごとに 8-bit に丸まる。
+  quality 1 は同じ box を 3 pass。8-bit は pass ごとに 8-bit に丸まる
+  (16-bit も pass ごとに丸めると r=6.3 の 19 タップが完全一致。推論)。
 - alpha type 0 (mode 1 の関数) = ワールドを straight alpha として扱う:
   色チャンネルが選ばれていれば入力を premultiply (8-bit は
   `(c*a+0x80)`, `(t+(t>>8))>>8`) → blur → 最後の pass の出力で
@@ -161,15 +162,21 @@ host = 本 PR の worker、AE = 上のキャプチャの PNG。入力は §1 の
   端画素複製」でも「1 回の複製詰め」でも「再正規化」でも完全には
   一致しないため (推論: RenderGraph の中間バッファの詰め方が違う)。
   内部 (端から extent 以上離れた画素) は 0。
-- 16-bit はカーネル形状と straight/premul の半透明インパルスを確認
-  (インパルス応答が 3e-5 = 16-bit の 1 段階以内)。32f は手組みのワールドを
-  AE が例外で拒んだので未確認。float 経路の unpremultiply は host では
-  クリップしない (16-bit は AE の整数経路に倣って最大値でクリップ)。
+- 16-bit はカーネル形状と straight/premul の半透明インパルスを確認。
+  pass ごとに 16-bit 段階へ丸め、premultiply を切り捨てにすると、
+  キャプチャした 16-bit の値 (r=6.3 の 3-pass box 19 タップ、半透明
+  インパルスの緑 13106) と完全一致する (推論: AE の 16-bit 経路も整数演算。
+  8-bit と同じ構造から自然だが、16-bit の逆アセンブルは読んでいない)。
+  32f は手組みのワールドを AE が例外で拒んだので未確認で、host の float
+  経路は丸めもクリップもしない。16-bit の unpremultiply の最大値飽和は
+  AE で観測していない (host は 8-bit と同様に飽和させる)。
 - worker self-test `--self-test-pf-private-callbacks` が、installed
   `in_data->utils` 経由で取った関数に対して §2.3 の値、§2.4 の 8-bit
   インパルス応答 (r=1 → [64,127,64]、r=2 → [23,62,84,62,23]、q1 r=6.3 の
   15 タップ、q0 r=6.3 → [9,34×7,9])、straight/premul の半透明インパルス、
-  alpha-only、fail-closed 群を検査する。
+  alpha-only、AE の 65x65 ステップでの 2 軸 straight (端はゼロ詰め)、
+  16-bit の r=1 / r=6.3 / 半透明 straight、fail-closed 群を検査する。
+  期待値はすべて AE の関数が書いた値。
 
 ## 4. 未解決 / 別 issue
 

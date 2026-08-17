@@ -97,6 +97,12 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out).resolve()
     if out_dir.exists():
         raise SystemExit(f"refusing to reuse an existing output directory: {out_dir}")
+    for spec in args.effect:
+        fields = spec.split("|")
+        if len(fields) < 3 or not fields[0] or not fields[1] or not fields[2] or \
+                not all(ch.isalnum() or ch in "_-" for ch in fields[2]):
+            raise SystemExit(f"--effect must be 'matchName|displayName|outName[|Param=value,...]' "
+                             f"with outName in [A-Za-z0-9_-]: {spec!r}")
     running = running_ae_processes(psutil)
     if running:
         raise SystemExit(f"After Effects is already running; refusing to attach: {running}")
@@ -137,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("the launched host never became attachable")
     print(f"[+] AE host pid {target_pid}", flush=True)
 
-    state = {"ready": False}
+    state = {"ready": False, "hooked": 0}
     with events_path.open("w", encoding="utf-8") as events:
         def on_message(message, data):
             if message.get("type") == "send":
@@ -152,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
                 events.flush()
                 if kind == "ready":
                     state["ready"] = True
+                if kind == "hooked":
+                    state["hooked"] += 1
                 if kind in ("hooked", "gca_found", "gca_call", "returned_fn", "m5_probe", "m2_call",
                             "m2_probe_done", "m2_probe_failed", "dispatcher_enum_failed"):
                     print(json.dumps(payload)[:300], flush=True)
@@ -191,11 +199,19 @@ def main(argv: list[str] | None = None) -> int:
         pass
     result = out_dir / "result.json"
     print(f"[+] done: {out_dir}")
-    if result.exists():
-        print(result.read_text(encoding="utf-8"))
-        return 0 if '"status":"captured"' in result.read_text(encoding="utf-8") else 1
-    print("no result.json (the JSX did not run to completion)")
-    return 1
+    if not result.exists():
+        print("no result.json (the JSX did not run to completion)")
+        return 1
+    print(result.read_text(encoding="utf-8"))
+    if '"status":"captured"' not in result.read_text(encoding="utf-8"):
+        return 1
+    if state["hooked"] == 0:
+        # The render ran but no target module was ever hooked in the process we
+        # attached to (a host layout where the plug-ins load in a child would
+        # look like this): a capture with no observations is a failure.
+        print("[!] no target module was hooked in the attached process; nothing was observed")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

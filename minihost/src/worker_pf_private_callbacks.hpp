@@ -37,9 +37,11 @@
 // PF_GaussianBlur1D with integer weights w[0] = 255,
 // w[i] = (int)(PFp_GaussianValue(i / (radius + 1)) * 255) for i <= ceil(radius).
 // A radius of 0 builds no node and the call succeeds with the world untouched
-// (observed: CC Cross Blur at its default radius 0 renders its input). A flags
-// word naming neither axis is treated the same way; that case has no observed
-// caller and is the host's reading of the same FLT.dll code, not a measurement.
+// (CC Cross Blur at its default radius 0 called it twice with radius 0 and
+// rendered its input in AE; the probe's own radius table starts at 0.1). A
+// flags word naming neither axis is treated the same way; that case has no
+// observed caller and is the host's reading of the same FLT.dll code, not a
+// measurement.
 // docs/PRIVATE_CALLBACK_IDS_OBSERVATION_2026-08-17.md records the captures.
 namespace aexcompat::pf_private {
 

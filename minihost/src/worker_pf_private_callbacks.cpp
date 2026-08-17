@@ -100,8 +100,10 @@ struct Arith8 {
 struct ArithDeep {
   using Value = double;
   double maximum{};
+  bool integer_depth{};
   Value premultiply(Value color, Value alpha) const noexcept {
-    return color * alpha / maximum;
+    const double product = color * alpha / maximum;
+    return integer_depth ? std::floor(product) : product;
   }
 };
 
@@ -112,11 +114,15 @@ struct PassPlan {
   std::vector<int32_t> gaussian;
   bool repeat{};
   bool straight_out{};
-  // Deep path only: clip unpremultiplied colors to the format maximum. True
-  // for 16-bit (AE's integer paths saturate: min(255) in the 8-bit
-  // unpremultiply), false for float, where AE's saturation was not observed
-  // and an HDR value must not be clipped by the host on a guess.
-  bool clamp_output{};
+  // Deep path only: true for 16-bit, whose AE path is still integer - every
+  // pass output is rounded to a whole 16-bit step, the premultiply truncates,
+  // and the unpremultiply saturates at the maximum. With those three the
+  // captured 16-bit impulse / half-alpha values reproduce exactly (r=6.3
+  // three-pass box: all 19 taps; half-alpha green 13106, where a rounding
+  // premultiply would give 13107). False for float, which carries what it
+  // carries: no rounding, no clipping (AE's float saturation was not
+  // observed and an HDR value must not be clipped on a guess).
+  bool integer_depth{};
   std::array<bool, 4> channel{};
 };
 
@@ -238,23 +244,29 @@ void box_line_deep(const std::vector<double>& in, std::vector<double>& out,
       num[c] = window[c] - ends * deficit;
     }
     auto* pixel = &out[static_cast<std::size_t>(x) * 4];
+    const auto quantize = [&](double value) {
+      return plan.integer_depth ? std::round(value) : value;
+    };
     if (last && plan.straight_out) {
       const double alpha_num = plan.channel[0]
           ? num[0] : in[static_cast<std::size_t>(x) * 4] * den;
+      // Zero alpha under a straight request zeroes the selected channels;
+      // a negative float alpha lands here too, which is host policy (AE's
+      // float behaviour there was not observed), not a measurement.
       if (alpha_num <= 0.0) {
         for (int32_t c = 0; c < 4; ++c)
           if (plan.channel[c]) pixel[c] = 0.0;
         continue;
       }
-      if (plan.channel[0]) pixel[0] = num[0] / den;
+      if (plan.channel[0]) pixel[0] = quantize(num[0] / den);
       for (int32_t c = 1; c < 4; ++c)
         if (plan.channel[c]) {
           const double value = num[c] * maximum / alpha_num;
-          pixel[c] = plan.clamp_output ? std::min(maximum, value) : value;
+          pixel[c] = plan.integer_depth ? std::min(maximum, std::round(value)) : value;
         }
     } else {
       for (int32_t c = 0; c < 4; ++c)
-        if (plan.channel[c]) pixel[c] = num[c] / den;
+        if (plan.channel[c]) pixel[c] = quantize(num[c] / den);
     }
   }
 }
@@ -278,6 +290,9 @@ void gaussian_line_deep(const std::vector<double>& in, std::vector<double>& out,
     }
     const double tot = plan.repeat ? in_bounds : total;
     auto* pixel = &out[static_cast<std::size_t>(x) * 4];
+    const auto quantize = [&](double value) {
+      return plan.integer_depth ? std::round(value) : value;
+    };
     if (plan.straight_out) {
       const double alpha_num = plan.channel[0]
           ? sums[0] : in[static_cast<std::size_t>(x) * 4] * tot;
@@ -286,15 +301,15 @@ void gaussian_line_deep(const std::vector<double>& in, std::vector<double>& out,
           if (plan.channel[c]) pixel[c] = 0.0;
         continue;
       }
-      if (plan.channel[0]) pixel[0] = sums[0] / tot;
+      if (plan.channel[0]) pixel[0] = quantize(sums[0] / tot);
       for (int32_t c = 1; c < 4; ++c)
         if (plan.channel[c]) {
           const double value = sums[c] * maximum / alpha_num;
-          pixel[c] = plan.clamp_output ? std::min(maximum, value) : value;
+          pixel[c] = plan.integer_depth ? std::min(maximum, std::round(value)) : value;
         }
     } else {
       for (int32_t c = 0; c < 4; ++c)
-        if (plan.channel[c]) pixel[c] = tot > 0.0 ? sums[c] / tot : 0.0;
+        if (plan.channel[c]) pixel[c] = tot > 0.0 ? quantize(sums[c] / tot) : 0.0;
     }
   }
 }
@@ -353,7 +368,7 @@ void premultiply_image(std::vector<Value>& image, const PassPlan& plan,
       if constexpr (std::is_same_v<Value, int32_t>)
         image[p + c] = Arith8::premultiply(image[p + c], alpha);
       else
-        image[p + c] = ArithDeep{maximum}.premultiply(image[p + c], alpha);
+        image[p + c] = ArithDeep{maximum, plan.integer_depth}.premultiply(image[p + c], alpha);
     }
   }
 }
@@ -383,7 +398,7 @@ void run_blur(std::vector<Value>& image, int32_t width, int32_t height,
   const bool colors = (flags & (kFlagRed | kFlagGreen | kFlagBlue)) != 0;
   PassPlan plan{};
   plan_axis(plan, radius, flags, quality);
-  plan.clamp_output = maximum > 1.0;
+  plan.integer_depth = maximum > 1.0;
   // Straight input is premultiplied once, before the first pass, when any
   // color channel is blurred (Blur_1DImgOpInfo's "input needs matting");
   // straight output is unpremultiplied by the last pass of the last axis.

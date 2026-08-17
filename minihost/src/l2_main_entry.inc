@@ -1147,35 +1147,22 @@ bool verify_pf_private_callbacks() {
     deep_impulse(32768, 32768, 32768);
     check(blur_premul(state.input.data(), nullptr, 6.3, nullptr, kHorizontalAll, deep_world.data()) == 0,
           "16-bit r=6.3 refused");
-    {
-      const std::vector<int> expected{6, 57, 234, 593, 1134, 1856, 2721, 3549, 4094, 4276, 4094, 3549,
-                                      2721, 1856, 1134, 593, 234, 57, 6};
-      const auto got = deep_row(0, 7, 19);
-      bool within_one = got.size() == expected.size();
-      for (std::size_t i = 0; within_one && i < got.size(); ++i)
-        within_one = std::abs(got[i] - expected[i]) <= 1;
-      // AE rounds each of the three passes to 16 bits; the host keeps the
-      // passes in double, so one 16-bit step is the tolerance.
-      check(within_one, "16-bit q1 r=6.3 kernel (within one step)");
-    }
+    // Exact: the 16-bit path rounds every pass to a whole step the way AE's
+    // integer path does (kept in double, the 3rd pass lands one step off at
+    // two taps).
+    check(deep_row(0, 7, 19) == std::vector<int>{6, 57, 234, 593, 1134, 1856, 2721, 3549, 4094, 4276,
+                                                 4094, 3549, 2721, 1856, 1134, 593, 234, 57, 6},
+          "16-bit q1 r=6.3 kernel");
     deep_impulse(16384, 26214, 13107);
     check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, deep_world.data()) == 0,
           "16-bit straight refused");
-    {
-      // Same one-step tolerance: AE's 16-bit unpremultiply truncates where
-      // the host's double path rounds (AE wrote 13106 for green, the exact
-      // quotient is 13106.9).
-      const auto a = deep_row(0, 15, 3), r = deep_row(1, 15, 3), g = deep_row(2, 15, 3);
-      auto within = [](const std::vector<int>& got, std::initializer_list<int> want) {
-        if (got.size() != want.size()) return false;
-        std::size_t i = 0;
-        for (int w : want) if (std::abs(got[i++] - w) > 1) return false;
-        return true;
-      };
-      check(within(a, {4120, 8144, 4120}) && within(r, {26214, 26214, 26214}) &&
-                within(g, {13106, 13106, 13106}),
-            "16-bit straight half-alpha result (within one step)");
-    }
+    // Exact: green is 13106, not 13107, only when the 16-bit premultiply
+    // truncates (13107 * 16384 / 32768 = 6553.5 -> 6553), which is what the
+    // host does at that depth.
+    check(deep_row(0, 15, 3) == std::vector<int>{4120, 8144, 4120} &&
+              deep_row(1, 15, 3) == std::vector<int>{26214, 26214, 26214} &&
+              deep_row(2, 15, 3) == std::vector<int>{13106, 13106, 13106},
+          "16-bit straight half-alpha result");
   }
   // Fail-closed: each malformed call answers PF_Err_BAD_CALLBACK_PARAM (516)
   // and leaves the world untouched.
