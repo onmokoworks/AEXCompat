@@ -1,6 +1,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 
+#include "worker_pf_progress_info.hpp"
 #include "parameter_animation_transport.hpp"
 #include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
@@ -42,7 +43,7 @@ using aexcompat::worker_runtime::parameters::ParamRecord;
 using aexcompat::worker_runtime::parameters::animation_component_value;
 using EffectEntry = int32_t(__cdecl*)(int32_t, void*, void*, void**, void*, void*);
 
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 std::string sha256_bytes(const unsigned char* data, std::size_t size);
 
 namespace {

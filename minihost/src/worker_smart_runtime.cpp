@@ -531,7 +531,7 @@ bool checkout_intersection_self_test() {
   runtime.height = 360;
   runtime.current_time = 7;
   runtime.current_time_scale = 30;
-  std::array<std::byte, 120> input_world{}, input_view{};
+  aexcompat::world_safety::EffectWorldStorage input_world{}, input_view{};
   runtime.input_world = input_world.data();
   runtime.input_checkout_view_world = input_view.data();
   const auto verify = [&](const std::array<int32_t, 4>* requested,
@@ -567,7 +567,7 @@ bool checkout_intersection_self_test() {
   const uint32_t malformed_before = runtime.malformed_checkout_requests;
   passed = verify(&inverted, 4, {}) &&
       runtime.malformed_checkout_requests == malformed_before + 1 && passed;
-  std::array<std::byte, 120> hosted_world{}, hosted_view{};
+  aexcompat::world_safety::EffectWorldStorage hosted_world{}, hosted_view{};
   runtime.hosted_layers.push_back({3, 0, 1, false, 50, 40, -1,
       hosted_world.data(), hosted_view.data(), {-1, -1, -1, -1}});
   const std::array<int32_t, 4> hosted_request_rect{10, 10, 60, 60};

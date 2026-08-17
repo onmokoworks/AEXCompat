@@ -1,3 +1,4 @@
+#include "worker_pf_progress_info.hpp"
 #include "worker_pf_pixel_format_registry.hpp"
 
 #include "worker_mask_runtime_internal.hpp"
@@ -16,7 +17,7 @@ using world_registry::kPixelFormatArgb32;
 using world_registry::kPixelFormatArgb64;
 using world_registry::kPixelFormatArgb128;
 
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 
 namespace {
 std::mutex g_pixel_format_mutex;

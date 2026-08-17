@@ -263,3 +263,37 @@ def test_bee_scene_facade_is_published_behind_the_effect_layer_on_all_workers() 
     """
     for _ in _all_workers("--self-test-bee-scene-facade", "bee_scene_facade"):
         pass
+
+
+def test_pf_progress_info_is_installed_behind_effect_ref_on_all_workers() -> None:
+    """The PF_ProgressInfo-shaped object behind ``in_data->effect_ref``
+    (issue #1275). Adobe-bundled effects and PF.dll read the effect ref as
+    ``{refcon, abort, progress}`` and call the two function slots (CannedWarp's
+    RENDER and PF.dll's PF_TransferRect body call the +0x10 progress slot once
+    per row; Echo substitutes the +8 slot for it). The route checks on every
+    worker that the production bootstrap installs the published layout at the
+    effect ref the in_data carries, that both slots read at their raw offsets
+    forward to the host's abort / progress callbacks, and that a plug-in edit
+    (Echo's substitution) is restored at the next hand-out. The verdict is what
+    is asserted here.
+    """
+    for _ in _all_workers("--self-test-pf-progress-info", "pf_progress_info"):
+        pass
+
+
+def test_pf_world_facade_is_behind_reserved_long4_on_all_workers() -> None:
+    """The PF_World-compatible object around / behind every handed-out world's
+    ``reserved_long4`` (issue #1276). Adobe-bundled effects and PF.dll read the
+    world as AE's PF_World: Glow calls vtable slot 1 for the depth, Spill2 and
+    Curl_Noise take ``world - 8`` as a PF_World and call PF_World::CopyWorld
+    (slot 14), and Channel Blur writes the world's origin through
+    ``reserved_long4``. The route checks on every worker that a world prepared
+    and registered the way the render paths do it carries AE's embedded shape
+    (vtable at ``world - 8``), that slot 1 answers the registered depth and
+    slot 14 copies pixels with the bounded, same-depth semantics PF.dll
+    describes, that a bare struct gets an equivalent mirror object, and that
+    sampled unobserved slots trap with a code naming the slot and record it in
+    the report. The verdict is what is asserted here.
+    """
+    for _ in _all_workers("--self-test-pf-world-facade", "pf_world_facade"):
+        pass

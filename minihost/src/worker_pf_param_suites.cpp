@@ -1,3 +1,4 @@
+#include "worker_pf_progress_info.hpp"
 #include "worker_pf_param_suites.hpp"
 
 #include "worker_mask_runtime_internal.hpp"
@@ -22,7 +23,7 @@ using aexcompat::worker_runtime::parameters::ParamRecord;
 // Worker-entry owned effect identity and the shared animation helpers stay in
 // l2_main with the lifecycle apply path; the callbacks here read them
 // cross-TU.
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 const ParameterTimeline* parameter_timeline(int32_t slot);
 bool valid_param_utils_index(int32_t index, bool allow_groups = false);
 ParameterAnimationKey evaluate_animation(const ParameterTimeline& timeline,

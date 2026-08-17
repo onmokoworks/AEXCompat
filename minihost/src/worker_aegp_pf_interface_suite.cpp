@@ -1,3 +1,4 @@
+#include "worker_pf_progress_info.hpp"
 #include "worker_aegp_pf_interface_suite.hpp"
 
 #include "render_subsystem.h"
@@ -17,7 +18,7 @@ using aexcompat::pf_state_runtime::effect_is_live;
 
 // Worker-entry owned effect/layer identity objects stay in l2_main with the
 // callback ABI that hands them out; the callbacks here read them cross-TU.
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 extern aexcompat::worker_runtime::bee_facade::LayerObject g_layer;
 
 namespace {

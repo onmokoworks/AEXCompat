@@ -1,5 +1,8 @@
 #include "worker_world_safety.hpp"
 
+#include "worker_pf_world_facade.hpp"
+#include "worker_world_registry.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -21,6 +24,41 @@ bool read_world_layout(const void* world, void*& data, int32_t& rowbytes,
   return true;
 }
 
+int32_t facade_pixel_bytes(int32_t pixel_format) {
+  using namespace aexcompat::world_registry;
+  if (pixel_format == kPixelFormatArgb32) return 4;
+  if (pixel_format == kPixelFormatArgb64) return 8;
+  if (pixel_format == kPixelFormatArgb128 || pixel_format == kPixelFormatGpuBgra128)
+    return 16;
+  return 0;
+}
+
+// Every world registered for dispatch is a world the host hands the plug-in,
+// so this is where it gets AE's PF_World identity behind reserved_long4
+// (worker_pf_world_facade, issue #1276). A registration that succeeds without
+// a facade (pool exhausted) is still a registration: the world is usable, the
+// plug-in just meets the pre-#1276 null there.
+// A world backed by a GPU frame (data pointer null, platform_ref at +0x40 set;
+// PF.dll's ae::pf::VideoFrameFactory::IsEffectWorldGPUBased test) is not the
+// CPU PF_World shape a plug-in dereferences behind reserved_long4, and its
+// +0x50 is owned by the VideoFrame/GPUFoundation stack (registering the color
+// effects' GPU input/output worlds with a facade crashed CreateGPUVideoFrame,
+// issue #1276). The facade is for CPU worlds only.
+bool gpu_based_world(const void* world) {
+  const auto* bytes = static_cast<const std::byte*>(world);
+  void* data{};
+  void* platform_ref{};
+  std::memcpy(&data, bytes + 24, sizeof(data));
+  std::memcpy(&platform_ref, bytes + 64, sizeof(platform_ref));
+  return data == nullptr && platform_ref != nullptr;
+}
+
+void attach_facade(void* world, int32_t pixel_format) {
+  if (gpu_based_world(world)) return;
+  (void)aexcompat::worker_runtime::pf_world_facade::attach(
+      world, facade_pixel_bytes(pixel_format));
+}
+
 }  // namespace
 
 DispatchWorldFormatScope::DispatchWorldFormatScope() {
@@ -31,8 +69,7 @@ DispatchWorldFormatScope::~DispatchWorldFormatScope() {
   g_dispatch_world_formats.pop_back();
 }
 
-bool DispatchWorldFormatScope::register_world(const void* world,
-                                               int32_t pixel_format) {
+bool DispatchWorldFormatScope::register_world(void* world, int32_t pixel_format) {
   if (!world || g_dispatch_world_formats.empty()) return false;
   DispatchWorldFormat entry{};
   entry.world = world;
@@ -46,11 +83,11 @@ bool DispatchWorldFormatScope::register_world(const void* world,
                                [&](const auto& old) { return old.world == world; }),
                 entries.end());
   entries.push_back(entry);
+  attach_facade(world, pixel_format);
   return true;
 }
 
-bool DispatchWorldFormatScope::register_gpu_world(const void* world,
-                                                  int32_t pixel_format) {
+bool DispatchWorldFormatScope::register_gpu_world(void* world, int32_t pixel_format) {
   if (!world || g_dispatch_world_formats.empty()) return false;
   DispatchWorldFormat entry{};
   entry.world = world;
@@ -68,6 +105,7 @@ bool DispatchWorldFormatScope::register_gpu_world(const void* world,
                                [&](const auto& old) { return old.world == world; }),
                 entries.end());
   entries.push_back(entry);
+  attach_facade(world, pixel_format);
   return true;
 }
 

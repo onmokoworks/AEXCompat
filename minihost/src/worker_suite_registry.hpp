@@ -79,6 +79,9 @@ enum class UnsupportedSuiteId : uint8_t {
   bee_item_vtable,          // comp item
   bee_footage_item_vtable,  // source (footage) item
   bee_project_vtable,
+  // The vtable of the PF_World-compatible object behind every handed-out
+  // world's reserved_long4 (worker_pf_world_facade, issue #1276).
+  pf_world_vtable,
 };
 
 int32_t record_unsupported_suite_call(UnsupportedSuiteId suite,

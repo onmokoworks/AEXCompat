@@ -5,6 +5,8 @@
 #include <io.h>
 #include <excpt.h>
 
+#include "worker_pf_progress_info.hpp"
+#include "worker_pf_world_facade.hpp"
 #include "trace_writer.hpp"
 
 #include <array>
@@ -184,7 +186,7 @@ using AegpStreamValue = aexcompat::scene_runtime::AegpStreamValue;
 bool world_lifetimes_balanced();
 
 // Host identity and entry-owned helpers that stay in l2_main.
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 bool is_render_worker();
 // Asks the production `make_bootstrap_abi_hooks` whether it left a utility
 // callback null. Defined beside it in l2_main so the answer comes from the
@@ -203,6 +205,10 @@ bool verify_pf_private_callbacks();
 // The BEE-layout effect layer handle and the AE Timecode Helper gate suite
 // through the production suites (issue #1210).
 bool verify_bee_scene_facade();
+// The PF_ProgressInfo layout of the production effect ref (issue #1275) and
+// the PF_World facade behind registered worlds (issue #1276).
+bool verify_pf_progress_info();
+bool verify_pf_world_facade();
 void* aegp_comp_item_handle();
 bool suite_leases_balanced();
 uint32_t suite_acquire_count();
@@ -588,6 +594,13 @@ int configure_worker_entry_bootstrap() {
   if (!aexcompat::pf_private::configure(
           {&g_effect, &aexcompat::flt_blur::resolve_in_place_world}))
     return 1;
+  // A PF_World facade trap (worker_pf_world_facade, issue #1276) records its
+  // slot in the report's unsupported_suite_calls list as `PF_World vtable`.
+  aexcompat::worker_runtime::pf_world_facade::set_trap_recorder(
+      [](uint32_t slot) noexcept {
+        (void)aexcompat::worker_runtime::record_unsupported_suite_call(
+            aexcompat::worker_runtime::UnsupportedSuiteId::pf_world_vtable, slot);
+      });
   return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
 }
 
@@ -645,6 +658,8 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_checkout_param_beyond_table,
         &verify_pf_private_callbacks,
         &verify_bee_scene_facade,
+        &verify_pf_progress_info,
+        &verify_pf_world_facade,
         &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
         &aexcompat::worker_runtime::persistent_data::selftest,
         &aexcompat::worker_runtime::selftest_native_stdout_routing,

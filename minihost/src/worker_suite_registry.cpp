@@ -150,6 +150,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
       return {"BEE_FootageItem vtable", 1};
     case UnsupportedSuiteId::bee_project_vtable:
       return {"BEE_Project vtable", 1};
+    case UnsupportedSuiteId::pf_world_vtable: return {"PF_World vtable", 1};
   }
   return {};
 }

@@ -247,7 +247,12 @@ inline bool gpu_frame_device_memory(void* mapping, void** out_ptr, int32_t* out_
 // their world lifecycle exports, and expose no guessed PPix layout here.
 class VideoFrameCpuWorlds {
  public:
+  // VideoFrame owns these LayerDefs (VF::NewPF_WorldWithNewVideoFrame /
+  // CreateGPUVideoFrame fill and free them); they are not the host's
+  // EffectWorldStorage and carry no PF_World facade prefix. The host worlds
+  // this adapter copies to/from are EffectWorldStorage (HostWorld).
   using World = std::array<std::byte, 120>;
+  using HostWorld = aexcompat::world_safety::EffectWorldStorage;
 
   bool available() {
     // Cache the full resolution result, not a re-derived subset: an earlier
@@ -376,7 +381,7 @@ class VideoFrameCpuWorlds {
     return available_;
   }
 
-  bool create_input(int32_t width, int32_t height, const World& source,
+  bool create_input(int32_t width, int32_t height, const HostWorld& source,
     bool gpu, int32_t framework) {
     if (gpu) {
       input_gpu_ = create_gpu(input_, input_live_, width, height, framework);
@@ -475,7 +480,7 @@ class VideoFrameCpuWorlds {
                                                                       : nullptr;
   }
 
-  bool copy_output_to(World& destination) {
+  bool copy_output_to(HostWorld& destination) {
     if (!output_live_) return false;
     if (!output_gpu_) return copy_pixels(output_, destination);
     // #1072:transfer_gpu_to_cpu does the CUDA
@@ -543,13 +548,15 @@ class VideoFrameCpuWorlds {
                                      const int32_t*, int32_t);
   using DisposePpix = void(__cdecl*)(void**);
 
-  static int32_t world_i32(const World& world, std::size_t offset) {
+  template <typename AnyWorld>
+  static int32_t world_i32(const AnyWorld& world, std::size_t offset) {
     int32_t value{};
     std::memcpy(&value, world.data() + offset, sizeof(value));
     return value;
   }
 
-  static void* world_pixels(const World& world) {
+  template <typename AnyWorld>
+  static void* world_pixels(const AnyWorld& world) {
     void* value{};
     std::memcpy(&value, world.data() + 24, sizeof(value));
     return value;
@@ -577,7 +584,8 @@ class VideoFrameCpuWorlds {
     return pointer;
   }
 
-  static bool copy_pixels(const World& source, World& destination) {
+  template <typename SourceWorld, typename DestinationWorld>
+  static bool copy_pixels(const SourceWorld& source, DestinationWorld& destination) {
     const int32_t width = world_i32(source, 36);
     const int32_t height = world_i32(source, 40);
     const int32_t source_rowbytes = world_i32(source, 32);
@@ -834,7 +842,8 @@ class VideoFrameCpuWorlds {
     return ok && popped_ok;
   }
 
-  bool transfer_gpu_to_cpu(const World& gpu, World& destination) {
+  template <typename DestinationWorld>
+  bool transfer_gpu_to_cpu(const World& gpu, DestinationWorld& destination) {
     return gpu_memcpy_frame(gpu, world_pixels(destination), world_i32(destination, 32),
                             world_i32(destination, 36), world_i32(destination, 40),
                             /*to_gpu=*/false);
@@ -897,6 +906,16 @@ T read(const std::array<std::byte, N>& buffer, std::size_t offset) {
   T value{};
   std::memcpy(&value, buffer.data() + offset, sizeof(value));
   return value;
+}
+
+// The same accessors on a world storage (the LayerDef part).
+template <typename T>
+T read(const aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset) {
+  return read<T>(world.layer_def, offset);
+}
+template <typename T>
+void write(aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset, T value) {
+  write(world.layer_def, offset, value);
 }
 
 void write_render_request(std::byte* destination,

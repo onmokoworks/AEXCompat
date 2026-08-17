@@ -360,7 +360,7 @@ bool verify_animation_extent_wiring_for_test() {
   plan.rowbytes = plan.width * plan.pixel_bytes;
   parameter_execution::BufferIn input{};
   parameter_execution::BufferOut output{};
-  std::array<std::byte, 120> input_world{};
+  aexcompat::world_safety::EffectWorldStorage input_world{};
   render_safety::InputPixelBuffer source(
       static_cast<std::size_t>(plan.rowbytes) * plan.height);
   if (!source || !render::prepare_world_layout(

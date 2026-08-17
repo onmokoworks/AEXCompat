@@ -1319,7 +1319,7 @@ int u_birth_seh_filter(EXCEPTION_POINTERS*) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
-void initialize_legacy_support_libraries() {
+void initialize_u_dll_allocator() {
   namespace legacy = aexcompat::worker_runtime::legacy_support;
   static legacy::State state;
   // The absent/no-export markers are logged once per process: the decision is
@@ -1364,6 +1364,59 @@ void initialize_legacy_support_libraries() {
   }
   std::cerr << "stage:legacy_support_init status=called result=" << result
             << "\n" << std::flush;
+}
+
+// PF.dll (AE's PF host layer) keeps its own dispatch table (`PFp_G_OverFuncs`,
+// PF.dll+0x44d9b0..) that its exported entry points jump through:
+// `PF_TransferRect` is `jmp [PFp_G_OverFuncs+0xe8]`, `PF_TransformWorld` calls
+// through +0xf0, `PF_Blend` reads the block, and so on. Real AE fills the table
+// at startup by calling the exported `PF_Birth` (which reads U.dll's CPU
+// feature block, so U_Birth has to have run first; PF.dll imports U.dll, so it
+// is mapped whenever PF.dll is). Adobe-bundled effects import those exports
+// directly (Echo: PF_TransferRect, Transform: PF_TransformWorld, Spill2:
+// PF_Blend, CannedWarp: PFp_G_fcd_table) and nothing in a plug-in closure
+// calls PF_Birth, so without this step every such call jumps to address 0
+// (observed as `stage:selector_seh ... access=execute fault=null` with the
+// return address in the plug-in or PF.dll; issue #1212's Echo / Transform /
+// Spill2 rows). Same latch as the U.dll step: once per PF.dll mapping.
+void initialize_pf_dll_host_layer() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  static bool no_birth_logged = false;
+  const HMODULE pf_module = GetModuleHandleW(L"PF.dll");
+  using PfBirth = uint32_t(__cdecl*)();
+  const auto pf_birth = pf_module
+      ? reinterpret_cast<PfBirth>(GetProcAddress(pf_module, "PF_Birth"))
+      : nullptr;
+  switch (legacy::decide(state, pf_module, pf_birth != nullptr)) {
+    case legacy::Decision::Absent:
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      if (!no_birth_logged) {
+        no_birth_logged = true;
+        std::cerr << "stage:pf_host_layer_init status=no_pf_birth\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::Call:
+      break;
+  }
+  legacy::note_called(state, pf_module);
+  uint32_t result = 0xffffffffu;
+  bool faulted = false;
+  __try {
+    result = pf_birth();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    faulted = true;
+  }
+  std::cerr << "stage:pf_host_layer_init status=called result=" << result
+            << (faulted ? " faulted=1" : "") << "\n" << std::flush;
+}
+
+void initialize_legacy_support_libraries() {
+  initialize_u_dll_allocator();
+  initialize_pf_dll_host_layer();
 }
 
 const aexcompat::host_audio::Telemetry& audio_telemetry() {
@@ -1484,7 +1537,18 @@ OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
 // and layer refs every suite callback validates against. They are the
 // dispatch-boundary identity the suites pin, so they stay owned beside the
 // callback ABI in this TU. Lifetime: process-lifetime constants.
-OpaqueHostObject g_effect{0x45464658};
+// The effect ref is a PF_ProgressInfo-shaped object (issue #1212): its
+// identity is still this address, but a plug-in (or PF.dll) that reads it as
+// AE's `PF_ProgressInfo` finds the refcon / abort / progress slots instead of a
+// 4-byte tag. The slots are published by publish_effect_ref_object() before
+// every plug-in bootstrap (worker_pf_progress_info).
+aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect{};
+// Called before every plug-in bootstrap (one-shot, cluster member, swap):
+// republishes the effect-ref layout in case the previous member left a slot
+// edited.
+void publish_effect_ref_object() {
+  aexcompat::worker_runtime::pf_progress_info::publish(g_effect);
+}
 // The effect layer handle is a BEE.dll-compatible object (issue #1210): its
 // identity is still this address, but a plug-in that reads it as a
 // `BEE_AVLayer*` finds the observed layout instead of a 4-byte tag. The
@@ -1986,6 +2050,16 @@ T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
 template <typename T, std::size_t N>
 void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+
+// The same accessors on a world storage (the LayerDef part).
+template <typename T>
+T read(const aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset) {
+  return read<T>(world.layer_def, offset);
+}
+template <typename T>
+void write(aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset, T value) {
+  write(world.layer_def, offset, value);
 }
 
 // The render-worker click/draw probes and close_render_ui_context moved to
