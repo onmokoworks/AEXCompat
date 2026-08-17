@@ -1485,7 +1485,12 @@ OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
 // dispatch-boundary identity the suites pin, so they stay owned beside the
 // callback ABI in this TU. Lifetime: process-lifetime constants.
 OpaqueHostObject g_effect{0x45464658};
-OpaqueHostObject g_layer{0x4c415952};
+// The effect layer handle is a BEE.dll-compatible object (issue #1210): its
+// identity is still this address, but a plug-in that reads it as a
+// `BEE_AVLayer*` finds the observed layout instead of a 4-byte tag. The
+// vtable and object graph behind it are installed at hand-out time by
+// AEGP_GetEffectLayer (worker_bee_scene_facade).
+aexcompat::worker_runtime::bee_facade::LayerObject g_layer{};
 
 // The mask scene helpers and configure_mask_scene moved to their state
 // owner, worker_mask_runtime_callbacks.cpp (issue #170); worker_main keeps

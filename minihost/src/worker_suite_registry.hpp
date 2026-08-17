@@ -68,6 +68,17 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_dynamic_stream_2,
   pf_batch_sampling_1,
   aefx_ace_1,
+  // AE-private suites acquired as a host-presence gate (issue #1210): the
+  // observed callers acquire and release them and never call a slot, so every
+  // slot is a diagnosed unsupported stub.
+  ae_timecode_helper_1,
+  // Not suites: the vtables of the BEE.dll-compatible scene objects behind the
+  // effect layer handle (worker_bee_scene_facade). An unobserved virtual slot
+  // is recorded here by index so the report names it (issue #1210).
+  bee_av_layer_vtable,
+  bee_item_vtable,          // comp item
+  bee_footage_item_vtable,  // source (footage) item
+  bee_project_vtable,
 };
 
 int32_t record_unsupported_suite_call(UnsupportedSuiteId suite,

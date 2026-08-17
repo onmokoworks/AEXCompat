@@ -198,6 +198,9 @@ bool verify_checkout_param_beyond_table();
 // Calls AE's private get_callback_addr ids -5 / -2 through in_data->utils
 // (issue #985).
 bool verify_pf_private_callbacks();
+// The BEE-layout effect layer handle and the AE Timecode Helper gate suite
+// through the production suites (issue #1210).
+bool verify_bee_scene_facade();
 void* aegp_comp_item_handle();
 bool suite_leases_balanced();
 uint32_t suite_acquire_count();
@@ -638,6 +641,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_production_composite_rect_callback,
         &verify_checkout_param_beyond_table,
         &verify_pf_private_callbacks,
+        &verify_bee_scene_facade,
         &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
         &aexcompat::worker_runtime::persistent_data::selftest,
         &aexcompat::worker_runtime::selftest_native_stdout_routing,
