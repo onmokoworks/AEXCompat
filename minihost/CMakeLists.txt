@@ -598,6 +598,14 @@ target_compile_definitions(worker_openmp_policy_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_openmp_policy_selftest PRIVATE src)
 
+add_executable(worker_legacy_support_init_selftest
+  ../tests/native/worker_legacy_support_init_selftest.cpp
+)
+target_compile_features(worker_legacy_support_init_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_legacy_support_init_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_legacy_support_init_selftest PRIVATE src)
+
 add_executable(worker_aegp_init_runtime_selftest
   ../tests/native/worker_aegp_init_runtime_selftest.cpp
   src/worker_aegp_init_runtime.cpp

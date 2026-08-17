@@ -1301,33 +1301,44 @@ auto& g_parameter_timelines = g_parameter_runtime.timelines;
 std::wstring g_plugin_file_path;
 
 // Legacy-support-library process initialization (issue #362 selector
-// families): PIN-era bundled effects (Curves, FILE.dll-based classics)
-// allocate through U.dll's process-wide allocator, which real AE initializes
-// at process start by calling U_Birth. Nothing in the plug-in closure calls
-// it (verified: no staged DLL imports U_Birth), so the host must, once per
-// process, the first time a closure containing U.dll is loaded. Failures
-// leave the plug-in no worse off than before (its U_AllocateHandle calls
-// keep failing as they already did).
+// families): PIN-era bundled effects (Curves, Reshape, FILE.dll-based
+// classics) allocate through U.dll's process-wide allocator, which real AE
+// initializes at process start by calling U_Birth. Nothing in the plug-in
+// closure calls it (verified: no staged DLL imports U_Birth), so the host
+// must, once per U.dll mapping. Failures leave the plug-in no worse off than
+// before (its U_AllocateHandle calls keep failing as they already did).
+//
+// Called before every plug-in's inspect/bootstrap, one-shot and session alike.
+// The latch (worker_legacy_support_init.hpp) keys on the U.dll mapping, not on
+// "already tried": a session whose first member has no U.dll must still birth
+// the allocator when a later member maps it (issue #1063; the former
+// once-per-process `attempted` flag left Reshape_New failing PARAMS_SETUP with
+// 4 whenever it followed a U.dll-free plug-in in the same discovery session).
 int u_birth_seh_filter(EXCEPTION_POINTERS*) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
 void initialize_legacy_support_libraries() {
-  static bool attempted = false;
-  if (attempted) return;
-  attempted = true;
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
   const HMODULE u_module = GetModuleHandleW(L"U.dll");
-  if (!u_module) {
-    std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
-    return;
-  }
   using UBirth = int(__cdecl*)(void*, uint8_t);
-  const auto u_birth =
-      reinterpret_cast<UBirth>(GetProcAddress(u_module, "U_Birth"));
-  if (!u_birth) {
-    std::cerr << "stage:legacy_support_init status=no_u_birth\n" << std::flush;
-    return;
+  const auto u_birth = u_module
+      ? reinterpret_cast<UBirth>(GetProcAddress(u_module, "U_Birth"))
+      : nullptr;
+  switch (legacy::decide(state, u_module, u_birth != nullptr)) {
+    case legacy::Decision::Absent:
+      std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
+      return;
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      std::cerr << "stage:legacy_support_init status=no_u_birth\n" << std::flush;
+      return;
+    case legacy::Decision::Call:
+      break;
   }
+  legacy::note_called(state, u_module);
   int result = -1;
   __try {
     // The first argument is an optional host context block; a zeroed buffer

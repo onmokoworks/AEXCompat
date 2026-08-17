@@ -59,6 +59,26 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   drill-down で close report の他フィールドまで要るときだけで、full-corpus では
   大きすぎる。
 - 変数なしの既定 report は共有前提で stderr を持たない。
+- discovery 失敗 (`not_discovered:*`) は render と違って worker の stderr が record に
+  乗らない。Effects folder の discovery は in-place cluster session (1 worker が
+  複数 AEX を順に inspect) で走り、session の stderr は close 時の末尾 4 KB しか
+  broker に戻らず、member 単位には割り付けられないため。record の
+  `detail.discovery_diagnostics` (#1063 以降) には worker の partial report の
+  selector 別 error code (`global_setup_error` / `params_setup_error` /
+  `global_setdown_error`、`missing_suites`) が乗るのでまずそれを見る。1 本の
+  生 stderr が要るときは one-shot の l2 worker を直接叩く:
+  ```powershell
+  $env:AEXCOMPAT_EXTENDED_DIAG = "1"
+  $sha = (Get-FileHash $aex -Algorithm SHA256).Hash.ToLower()
+  & target\minihost-build\aex_l2_worker.exe --l2-params-only $aex $sha `
+      --dependency-dirs-v1 "<AE>\Support Files\Plug-ins\Effects;<AE>\Support Files"
+  ```
+  exit 20 = selector が非 0 (report の status=selector_error)、exit 11 = LoadLibrary
+  失敗。`--dependency-dirs-v1` に AE の `Support Files` (Effects の 2 つ上) を
+  含めないと AE 同梱 AEX は依存 DLL 不足で全部 exit 11 になる (sweep は
+  multifilter の configured dependency dirs でこれを補っている)。one-shot で通るが
+  full sweep で落ちる AEX は cluster の同居 member 依存なので、one-shot の結果だけで
+  「再現しない」と判定しない (Reshape_New が実例)。
 
 ## 3. worktree 運用
 
