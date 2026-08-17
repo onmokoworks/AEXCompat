@@ -333,8 +333,7 @@ bool resolve_blur_worlds(const void* source_world, void* destination_world,
 // multi-instance plug-in handing the wrong effect_ref is a different diagnosis
 // from a bad radius, and the marker is the only place either shows up.
 bool effect_ref_matches(void* effect_ref) noexcept {
-  return g_hooks.effect_ref && effect_ref == g_hooks.effect_ref &&
-      g_hooks.resolve_world;
+  return g_hooks.effect_ref && effect_ref == g_hooks.effect_ref;
 }
 
 int32_t __cdecl gaussian_blur(
@@ -687,10 +686,18 @@ bool selftest() {
       g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
       kHorizontal | kAllChannels, 0, 1, &destination_world) == 0 &&
       destination == expected8;
-  ok = ok && suite->box_blur(
-      g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
-      kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) == 0 &&
-      foreign_destination == expected8;
+  // The both-foreign case is pinned to an "argb8" session anchor here rather
+  // than whatever the fixed-selftest chain left in smart_state, so this check
+  // does not depend on the order the chain runs in.
+  {
+    const Hooks saved = g_hooks;
+    g_hooks.session_pixel_format = +[]() -> const char* { return "argb8"; };
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) == 0 &&
+        foreign_destination == expected8;
+    g_hooks = saved;
+  }
   // The alias re-declares the registered source's pixel base with a wider
   // stride but the same width/height, so the pair check still passes and the
   // only check that can refuse it is the registry-known gate (a height

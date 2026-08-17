@@ -15,9 +15,10 @@
 
 using namespace aexcompat::worker_runtime::classic;
 
-// worker_l2_suite_abi.hpp declares report_progress in the global namespace
-// but is not otherwise reachable from here, so the one declaration this
-// harness needs is repeated verbatim rather than pulling the whole ABI header.
+// worker_l2_suite_abi.hpp declares report_progress in the global namespace,
+// but that header is not self-contained (no <cstdint>) and carries a dozen
+// unrelated callback declarations, so the one declaration this harness needs
+// is repeated verbatim instead.
 extern "C" int32_t __cdecl report_progress(void*, int32_t, int32_t);
 
 namespace {
