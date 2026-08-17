@@ -209,7 +209,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 36> simple_commands{{
+  const std::array<selftest::SimpleCommand, 37> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -288,6 +288,13 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-checkout-param-beyond-table", "checkout_param_beyond_table",
        hooks.simple.checkout_param_beyond_table, 1,
        ",\"reached_via_in_data_inter\":true"},
+      // The BEE.dll-compatible scene object behind AEGP_GetEffectLayer's handle
+      // and the "AE Timecode Helper Suite" v1 gate suite (issue #1210): the
+      // production hand-out publishes the observed BEE_AVLayer / BEE_Item /
+      // BEE_Project layout, and every unobserved vtable slot traps by index.
+      {L"--self-test-bee-scene-facade", "bee_scene_facade",
+       hooks.simple.bee_scene_facade, 1,
+       ",\"reached_via_aegp_pf_interface_suite\":true"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",

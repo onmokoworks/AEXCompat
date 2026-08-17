@@ -911,6 +911,134 @@ bool verify_checkout_param_beyond_table() {
   }
   return passed;
 }
+
+// The BEE.dll-compatible scene object behind the effect layer handle (issue
+// #1210). Timecode.aex acquires "AE Timecode Helper Suite" v1 as a
+// host-presence gate (never calls a slot), then reads the AEGP_LayerH from
+// AEGP PF Interface Suite::AEGP_GetEffectLayer as a `BEE_AVLayer*`: parent
+// comp item at +0x260, its project at item+0x38, the item tag/type/flags, and
+// the vtable slots BEE.dll's exports call (docs/BEE_SCENE_OBJECT_ABI_2026-08-17.md).
+// This proves the production hand-out path publishes that object: the helper
+// suite acquires with 32 distinct slots (three of them called and answering
+// the diagnosed refusal), the layer the production suite returns carries the
+// facade vtable and object graph with the host's comp dimensions, and the
+// facade's own contract (observed slots implemented, sampled unobserved slots
+// on each object trapping with their code) holds.
+bool verify_bee_scene_facade() {
+  namespace bee = aexcompat::worker_runtime::bee_facade;
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "bee_scene_facade: " << what << "\n" << std::flush;
+  };
+  const auto recorded = [](const char* name, int32_t version, uint32_t slot) {
+    std::ostringstream needle;
+    needle << "{\"name\":\"" << name << "\",\"version\":" << version
+           << ",\"slot\":" << slot << ",";
+    return aexcompat::worker_runtime::suite_registry()
+               .unsupported_suite_calls_report_json()
+               .find(needle.str()) != std::string::npos;
+  };
+  // The facade's own contract first (observed slots answer as recorded, every
+  // unobserved slot traps with its code on each object). It also proves the
+  // record half of a trap: the slots it takes must show up in the report list
+  // the workers emit, under the object's pseudo-suite name. The list is
+  // bounded (32 distinct entries per worker life), so this runs before the
+  // helper-suite probes below and those sample three slots instead of 32.
+  check(bee::selftest(), "facade contract self-test failed");
+  check(recorded("BEE_AVLayer vtable", 1, 0) &&
+            recorded("BEE_AVLayer vtable", 1,
+                     static_cast<uint32_t>(bee::kLayerVtableSlots - 1)) &&
+            recorded("BEE_CompItem vtable", 1, 3) &&
+            recorded("BEE_FootageItem vtable", 1, 3) &&
+            recorded("BEE_Project vtable", 1,
+                     static_cast<uint32_t>(bee::kProjectVtableSlots - 1)),
+        "trapped vtable slots are not in the unsupported_suite_calls report");
+  const void* helper = nullptr;
+  check(acquire_suite("AE Timecode Helper Suite", 1, &helper) == 0 && helper,
+        "AE Timecode Helper Suite v1 did not acquire");
+  if (helper) {
+    using Slot = int32_t(__cdecl*)();
+    const auto* slots = static_cast<void* const*>(helper);
+    for (std::size_t slot = 0; slot < 32; ++slot) {
+      check(slots[slot] != nullptr, "helper suite slot is null");
+      for (std::size_t earlier = 0; earlier < slot; ++earlier)
+        check(slots[earlier] != slots[slot], "helper suite slots are not distinct");
+    }
+    for (const std::size_t slot : {std::size_t{0}, std::size_t{15}, std::size_t{31}}) {
+      if (!slots[slot]) continue;
+      check(reinterpret_cast<Slot>(slots[slot])() == 4,
+            "helper suite slot did not answer the diagnosed refusal");
+      check(recorded("AE Timecode Helper Suite", 1, static_cast<uint32_t>(slot)),
+            "helper suite slot call is not in the unsupported_suite_calls report");
+    }
+    check(release_suite("AE Timecode Helper Suite", 1) == 0,
+          "AE Timecode Helper Suite v1 did not release");
+  }
+  // A render context for the dimension checks below (this route has none of
+  // its own); the same pattern the scene self-tests use, restored on exit.
+  constexpr int32_t kFacadeContextWidth = 640, kFacadeContextHeight = 360;
+  const int32_t saved_width = g_full_resolution_width;
+  const int32_t saved_height = g_full_resolution_height;
+  g_full_resolution_width = kFacadeContextWidth;
+  g_full_resolution_height = kFacadeContextHeight;
+  struct RestoreContext {
+    int32_t width, height;
+    ~RestoreContext() {
+      g_full_resolution_width = width;
+      g_full_resolution_height = height;
+    }
+  } restore_context{saved_width, saved_height};
+  const void* interface_suite = nullptr;
+  check(acquire_suite("AEGP PF Interface Suite", 1, &interface_suite) == 0 &&
+            interface_suite,
+        "AEGP PF Interface Suite v1 did not acquire");
+  if (interface_suite) {
+    using GetEffectLayer = int32_t(__cdecl*)(void*, void**);
+    const auto get_layer =
+        reinterpret_cast<GetEffectLayer>(static_cast<void* const*>(interface_suite)[0]);
+    void* layer = nullptr;
+    check(get_layer(&g_effect, &layer) == 0 && layer == &g_layer,
+          "AEGP_GetEffectLayer did not hand out the effect layer");
+    void* foreign = nullptr;
+    check(get_layer(&g_layer, &foreign) != 0 && foreign == nullptr,
+          "AEGP_GetEffectLayer accepted a non-effect handle");
+    if (layer == &g_layer) {
+      const auto* object = static_cast<const bee::LayerObject*>(layer);
+      check(object->vtable == bee::layer_vtable(), "layer handle lacks the facade vtable");
+      check(object->parent_comp_item == &bee::comp_item(), "layer+0x260 is not the comp item");
+      check(object->source_item == &bee::footage_item(), "layer+0x2720 is not the source item");
+      const bee::ItemObject& comp = bee::comp_item();
+      check(comp.tag == bee::kItemTag && comp.type == bee::kItemTypeComposition &&
+                comp.parent_project == &bee::project(),
+            "comp item header is not the observed BEE_Item shape");
+      // The comp dimensions are the ones the AEGP item suite reports for the
+      // configured render context (the item suite refuses without one, so
+      // one is configured for this check and restored afterwards).
+      int32_t width = 0, height = 0;
+      check(aegp_get_item_dimensions(aegp_comp_item_handle(), &width, &height) == 0 &&
+                width == kFacadeContextWidth && height == kFacadeContextHeight,
+            "AEGP item dimensions do not report the configured render context");
+      check(comp.width == kFacadeContextWidth && comp.height == kFacadeContextHeight &&
+                comp.width == width && comp.height == height,
+            "comp item dimensions differ from the AEGP item suite");
+      double fps = 0.0;
+      check(aegp_get_comp_framerate(aexcompat::scene_runtime::composition_handle(), &fps) == 0 &&
+                comp.frame_rate_fixed == static_cast<int32_t>(fps) << 16,
+            "comp item frame rate differs from the AEGP comp suite");
+      AegpTime duration{};
+      check(aegp_get_item_duration(aegp_comp_item_handle(), &duration) == 0 &&
+                comp.duration.value == duration.value &&
+                comp.duration.scale == duration.scale,
+            "comp item duration differs from the AEGP item suite");
+    }
+    check(release_suite("AEGP PF Interface Suite", 1) == 0,
+          "AEGP PF Interface Suite v1 did not release");
+  }
+  check(suite_leases_balanced(), "suite leases did not balance");
+  return passed;
+}
 }  // namespace aexcompat::l2_detail
 
 aexcompat::worker_runtime::effect_bootstrap::RuntimeHooks make_bootstrap_runtime_hooks() {

@@ -24,6 +24,11 @@ struct OwnedCatalog {
   std::array<void*, 1> duck{};
   std::array<void*, 1> effect_ui{};
   std::array<void*, 10> adv_app1{};
+  // Slot count is a bound, not an observation: no caller has been seen
+  // calling a slot of this suite (Timecode.aex acquires and releases it only),
+  // so 32 stubs are published and any call past them would run into the next
+  // table below and be attributed to that suite (issue #1210).
+  std::array<void*, 32> ae_timecode_helper1{};
   std::array<void*, 11> adv_app2{};
   std::array<void*, 2> drawbot_draw{};
   std::array<void*, 13> drawbot_supplier{};
@@ -94,6 +99,7 @@ const void* provide_path_data1(void*) { auto& c=state(); c.path_data=c.assembly.
 const void* provide_duck1(void*) { auto& c=state(); c.duck[0]=c.assembly.duck; return c.duck.data(); }
 const void* provide_effect_ui1(void*) { auto& c=state(); c.effect_ui[0]=c.assembly.effect_ui; return c.effect_ui.data(); }
 const void* provide_adv_app1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_1>(c.adv_app1); c.adv_app1[6]=c.assembly.adv_info; c.adv_app1[8]=c.assembly.adv_info3; c.adv_app1[9]=c.assembly.adv_info3_plus; return c.adv_app1.data(); }
+const void* provide_ae_timecode_helper1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::ae_timecode_helper_1>(c.ae_timecode_helper1); return c.ae_timecode_helper1.data(); }
 const void* provide_adv_app2(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::pf_ae_adv_app_2>(c.adv_app2); c.adv_app2[6]=c.assembly.adv_info; c.adv_app2[8]=c.assembly.adv_info3; c.adv_app2[9]=c.assembly.adv_info3_plus; return c.adv_app2.data(); }
 const void* provide_drawbot_draw1(void*) { auto& c=state(); c.drawbot_draw=c.assembly.drawbot_draw; return c.drawbot_draw.data(); }
 const void* provide_drawbot_supplier1(void*) { auto& c=state(); fill_unsupported<UnsupportedSuiteId::drawbot_supplier_1>(c.drawbot_supplier); c.drawbot_supplier[0]=c.assembly.drawbot_new_pen; c.drawbot_supplier[1]=c.assembly.drawbot_new_brush; c.drawbot_supplier[6]=c.assembly.drawbot_new_path; c.drawbot_supplier[12]=c.assembly.drawbot_release; return c.drawbot_supplier.data(); }

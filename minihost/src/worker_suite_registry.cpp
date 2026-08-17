@@ -141,6 +141,15 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::pf_batch_sampling_1:
       return {"PF Batch Sampling Suite", 1};
     case UnsupportedSuiteId::aefx_ace_1: return {"AEFX ACE Suite", 1};
+    case UnsupportedSuiteId::ae_timecode_helper_1:
+      return {"AE Timecode Helper Suite", 1};
+    case UnsupportedSuiteId::bee_av_layer_vtable:
+      return {"BEE_AVLayer vtable", 1};
+    case UnsupportedSuiteId::bee_item_vtable: return {"BEE_CompItem vtable", 1};
+    case UnsupportedSuiteId::bee_footage_item_vtable:
+      return {"BEE_FootageItem vtable", 1};
+    case UnsupportedSuiteId::bee_project_vtable:
+      return {"BEE_Project vtable", 1};
   }
   return {};
 }

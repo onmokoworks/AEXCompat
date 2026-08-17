@@ -210,3 +210,22 @@ def test_checkout_param_beyond_table_answers_like_ae_on_all_workers() -> None:
         "--self-test-checkout-param-beyond-table", "checkout_param_beyond_table"
     ):
         pass
+
+
+def test_bee_scene_facade_is_published_behind_the_effect_layer_on_all_workers() -> None:
+    """The BEE.dll-compatible scene object behind the effect layer handle
+    (issue #1210). Adobe-bundled Timecode.aex acquires "AE Timecode Helper
+    Suite" v1 as a host-presence gate and then reads the AEGP_LayerH from
+    AEGP PF Interface Suite::AEGP_GetEffectLayer as a `BEE_AVLayer*` (parent
+    comp item at +0x260, its project at item+0x38, the item tag/type/flags, and
+    the vtable slots BEE.dll's exports call; docs/BEE_SCENE_OBJECT_ABI_2026-08-17.md).
+    The route checks on every worker that the gate suite acquires with 32
+    distinct slots (three of them called and answering the diagnosed refusal),
+    that the production hand-out returns the facade object whose comp values
+    match the AEGP item/comp suites, that the observed vtable slots answer as
+    recorded, and that sampled unobserved slots on each object trap with a
+    code naming the slot and record the calling frame. The verdict is what is
+    asserted here.
+    """
+    for _ in _all_workers("--self-test-bee-scene-facade", "bee_scene_facade"):
+        pass
