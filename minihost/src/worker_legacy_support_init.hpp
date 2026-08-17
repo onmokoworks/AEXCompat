@@ -15,8 +15,9 @@
 // after another into one process, and the first member must decide nothing
 // for the ones after it. Circle (no U.dll) followed by Reshape (U.dll) has to
 // birth the allocator when Reshape's load maps it, or Reshape's PARAMS_SETUP
-// fails its first U_AllocateHandle (observed as PF_Err_INTERNAL_STRUCT_DAMAGED
-// on the arbitrary-data default, issue #1063).
+// fails its first U_AllocateHandle (observed as PARAMS_SETUP returning 4,
+// PF_Err_OUT_OF_MEMORY, while building the arbitrary-data default; issue
+// #1063).
 namespace aexcompat::worker_runtime::legacy_support {
 
 // What the latch remembers across calls: the U.dll mapping U_Birth was called

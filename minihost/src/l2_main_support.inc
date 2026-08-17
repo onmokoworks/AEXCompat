@@ -1313,7 +1313,8 @@ std::wstring g_plugin_file_path;
 // "already tried": a session whose first member has no U.dll must still birth
 // the allocator when a later member maps it (issue #1063; the former
 // once-per-process `attempted` flag left Reshape_New failing PARAMS_SETUP with
-// 4 whenever it followed a U.dll-free plug-in in the same discovery session).
+// 4 (PF_Err_OUT_OF_MEMORY) whenever it followed a U.dll-free plug-in in the
+// same discovery session).
 int u_birth_seh_filter(EXCEPTION_POINTERS*) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -1321,6 +1322,11 @@ int u_birth_seh_filter(EXCEPTION_POINTERS*) {
 void initialize_legacy_support_libraries() {
   namespace legacy = aexcompat::worker_runtime::legacy_support;
   static legacy::State state;
+  // The absent/no-export markers are logged once per process: the decision is
+  // re-asked for every member, but a 300-member session must not fill the
+  // bounded stderr tail the broker keeps with the same line.
+  static bool absent_logged = false;
+  static bool no_birth_logged = false;
   const HMODULE u_module = GetModuleHandleW(L"U.dll");
   using UBirth = int(__cdecl*)(void*, uint8_t);
   const auto u_birth = u_module
@@ -1328,12 +1334,19 @@ void initialize_legacy_support_libraries() {
       : nullptr;
   switch (legacy::decide(state, u_module, u_birth != nullptr)) {
     case legacy::Decision::Absent:
-      std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
+      if (!absent_logged) {
+        absent_logged = true;
+        std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
+      }
       return;
     case legacy::Decision::AlreadyInitialized:
       return;
     case legacy::Decision::NoBirthExport:
-      std::cerr << "stage:legacy_support_init status=no_u_birth\n" << std::flush;
+      if (!no_birth_logged) {
+        no_birth_logged = true;
+        std::cerr << "stage:legacy_support_init status=no_u_birth\n"
+                  << std::flush;
+      }
       return;
     case legacy::Decision::Call:
       break;

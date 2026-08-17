@@ -1034,7 +1034,9 @@ fn discovery_failure_bucket(diagnostics: Option<&Value>, classification: Option<
 /// GLOBAL_SETUP / PARAMS_SETUP / GLOBAL_SETDOWN with its code; else the
 /// parameter-count contract when the selectors all returned 0; else
 /// `no_selector_error` (the worker refused for a reason the report fields do
-/// not carry, e.g. the arbitrary defaults could not be disposed).
+/// not carry, e.g. the arbitrary defaults could not be disposed). A negative
+/// field is the worker's "not invoked" sentinel (-1), never a plug-in code, so
+/// it is skipped rather than named.
 fn selector_error_suffix(diagnostics: Option<&Value>) -> String {
     let field = |name: &str| {
         diagnostics
@@ -1047,7 +1049,7 @@ fn selector_error_suffix(diagnostics: Option<&Value>) -> String {
         ("global_setdown_error", "global_setdown"),
     ] {
         match field(name) {
-            Some(0) => continue,
+            Some(code) if code <= 0 => continue,
             Some(code) => return format!("{label}:{code}"),
             // A field the record never carried: nothing after it can be
             // read as "the earlier selectors passed".
@@ -1641,6 +1643,16 @@ mod tests {
         consistent["parameter_count"] = json!(7);
         assert_eq!(
             discovery_failure_bucket(Some(&consistent), Some("nonzero_exit")),
+            "exit_20_no_selector_error"
+        );
+        // -1 is the worker's "not invoked" sentinel, not a selector code: a
+        // setdown that never ran after a clean setup/params pair does not
+        // become the refusing selector.
+        let mut sentinel = selector(0, 0, -1);
+        sentinel["reported_num_params"] = json!(8);
+        sentinel["parameter_count"] = json!(7);
+        assert_eq!(
+            discovery_failure_bucket(Some(&sentinel), Some("nonzero_exit")),
             "exit_20_no_selector_error"
         );
         // A record without the report fields (a pre-#1063 one-shot record).

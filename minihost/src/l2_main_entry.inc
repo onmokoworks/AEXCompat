@@ -1353,7 +1353,8 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   // (issue #396), replacing the launch plug-in's table.
   activate_plugin_string_table(module, context.aex_string_table);
   // Legacy support libraries in the closure (U.dll allocator for PIN-era
-  // effects) get their one-time process init on first sight (issue #362).
+  // effects) get their init once per U.dll mapping, asked again for every
+  // member so a first member without U.dll decides nothing (#362, #1063).
   initialize_legacy_support_libraries();
   // GLOBAL_SETUP / PARAMS_SETUP through the launch bootstrap on fresh
   // buffers and fresh host records (ABOUT stays whatever the launch did).
@@ -1725,7 +1726,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
         current_entry = nullptr;
       if (current_entry) {
         activate_plugin_string_table(current_module, aex_string_table);
-        // One-time U.dll process init for PIN-era closures (issue #362).
+        // U.dll init for PIN-era closures, once per mapping (#362, #1063).
         initialize_legacy_support_libraries();
         inspect_column();
       } else {
@@ -2132,7 +2133,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 
   aexcompat::aex_strings::StringTable aex_string_table;
   load_aex_string_table(module, aex_string_table);
-  // One-time U.dll process init for PIN-era closures (issue #362).
+  // U.dll init for PIN-era closures, once per mapping (#362, #1063).
   initialize_legacy_support_libraries();
   const char* string_table_status =
       aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid
