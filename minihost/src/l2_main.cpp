@@ -63,6 +63,7 @@
 #include "worker_parameter_selftests.hpp"
 #include "worker_parameter_selftest_routing.hpp"
 #include "worker_pf_color_selftests.hpp"
+#include "worker_pf_gaussian_kernel.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"

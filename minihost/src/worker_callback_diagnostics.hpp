@@ -28,6 +28,7 @@ enum class Callback : std::size_t {
   Fill,
   Premultiply,
   CompositeRect,
+  GaussianKernel,
   TransferRect,
   TransformWorld,
   NewWorld,
@@ -79,7 +80,7 @@ inline constexpr std::array<const char*, static_cast<std::size_t>(Callback::Coun
     CALLBACK_NAMES{{"pre_checkout_layer", "checkout_pixels", "checkin_pixels",
                     "checkout_output", "iterate", "iterate_origin", "sampling",
                     "begin_sampling", "end_sampling", "get_callback_addr", "blend", "convolve", "copy",
-                    "fill", "premultiply", "composite_rect", "transfer_rect", "transform_world",
+                    "fill", "premultiply", "composite_rect", "gaussian_kernel", "transfer_rect", "transform_world",
                     "new_world", "dispose_world", "handle", "platform_data", "pixel_data",
                     "app", "ansi", "checkout_param", "checkin_param",
                     "iterate_generic", "effect_sequence_data"}};

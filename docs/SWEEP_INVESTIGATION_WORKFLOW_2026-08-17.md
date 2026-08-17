@@ -59,6 +59,20 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   drill-down で close report の他フィールドまで要るときだけで、full-corpus では
   大きすぎる。
 - 変数なしの既定 report は共有前提で stderr を持たない。
+- `--dump-frames <dir>`: rendered した frame の raw pixel を
+  `<dir>/<plugin>.f<n>.<W>x<H>.<format>` に落とす (#1253)。`rendered` が AE の
+  参照 (mask 無しの Scribble は全 pixel 透明、Inner/Outer Key / Reshape は
+  passthrough、など) と合っているかを見るためのもので、生の画像なので report と
+  一緒に共有しない。record 側には `pixel_sha256` だけが常に乗る。
+- host 拒否痕跡が出ないまま 4 / 512 になる plug-in は、trace に出ていない
+  callback を疑う。`PF Path Query Suite` の checkout / checkin と
+  `PF_CHECKOUT_LAYER_AUDIO` は #1253 で trace 行を足した
+  (`extended_diag:path_checkout ...` / `extended_diag:checkout_layer_audio ...`)。
+  それでも見えないときは cdb で worker ごと debug する (`cdb -o` で
+  `render_sweep --filter` を子プロセスごと debug、`sxe -c "bu <mod>!<sym>
+  ..." cpr` で子に deferred bp、C++ 例外は `sxe eh` + `k`、Adobe DLL 内部の
+  戻り値は `bp /1 @$ra "r rax"`。手順と観測例は
+  `docs/MASKLESS_PATH_EFFECTS_OBSERVATION_2026-08-17.md` §1)。
 - discovery 失敗 (`not_discovered:*`) は render と違って worker の stderr が record に
   乗らない。Effects folder の discovery は in-place cluster session (1 worker が
   複数 AEX を順に inspect) で走り、session の stderr は close 時の末尾 4 KB しか

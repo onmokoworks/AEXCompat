@@ -309,7 +309,9 @@ struct ClassicSubsystemDiagnostics {
   bool suite_fault{};
   bool handle_balanced{};
   bool path_balanced{};
-  std::array<int64_t, 8> path_counts{};
+  // checkouts, checkins, mask calls, preps created/disposed, invalid ops,
+  // reject reason, live preps, absent checkouts, absent checkins (#1253)
+  std::array<int64_t, 10> path_counts{};
   std::array<double, 2> path_feather{};
   double path_opacity{};
   int64_t path_quality{};

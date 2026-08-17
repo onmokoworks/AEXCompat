@@ -194,6 +194,21 @@ def test_pf_utils_composite_rect_is_reachable_through_in_data_utils() -> None:
         pass
 
 
+def test_pf_utils_gaussian_kernel_is_reachable_through_in_data_utils() -> None:
+    """`PF_UtilCallbacks.gaussian_kernel` on every worker, called the way a
+    plug-in calls it: the pointer is read back out of the installed
+    `in_data->utils` block and invoked (issue #1253, Inner/Outer Key's RENDER
+    jumped to address 0 through the slot once its mask checkout succeeded).
+    The route checks AE's PF_GaussianKernel values for the 1D NORMALIZED and
+    2D kernels and that malformed calls fail closed with the buffer untouched;
+    the verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-pf-utils-gaussian-kernel", "pf_utils_gaussian_kernel"
+    ):
+        pass
+
+
 def test_checkout_param_beyond_table_answers_like_ae_on_all_workers() -> None:
     """`PF_InteractCallbacks.checkout_param` on every worker, called through the
     installed `in_data->inter` block for slots past the published parameter

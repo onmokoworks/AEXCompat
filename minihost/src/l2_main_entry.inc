@@ -313,11 +313,24 @@ int32_t __cdecl timeline_checkout_layer_audio(
     void* effect_ref, int32_t index, int32_t start_time, int32_t duration,
     uint32_t time_scale, uint32_t rate, int32_t bytes_per_sample,
     int32_t channels, int32_t format, void** audio) {
-  return timeline_result(
+  // Trace the request as the plug-in made it (issue #1253: AudWave's
+  // SMART_RENDER answered PF_Err_OUT_OF_MEMORY with the audio counters at
+  // zero because the checkout was refused before any counter it increments,
+  // and nothing showed the arguments it was refused on).
+  const void* audio_in = audio ? *audio : nullptr;
+  const int32_t result = timeline_result(
       "inter.checkout_layer_audio",
       checkout_layer_audio(
           effect_ref, index, start_time, duration, time_scale, rate,
           bytes_per_sample, channels, format, audio));
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:checkout_layer_audio index=" << index
+              << " start=" << start_time << " duration=" << duration
+              << " scale=" << time_scale << " rate=" << rate
+              << " bytes=" << bytes_per_sample << " channels=" << channels
+              << " format=" << format << " audio_out=" << static_cast<const void*>(audio)
+              << " audio_in=" << audio_in << " -> " << result << "\n" << std::flush;
+  return result;
 }
 
 int32_t __cdecl timeline_checkin_layer_audio(
@@ -456,6 +469,19 @@ int32_t __cdecl diag_composite_rect(void* effect_ref, ::LegacyRect* source_rect,
           ? aexcompat::callback_diagnostics::Reason::InvalidArguments
           : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
+// PF_UtilCallbacks.gaussian_kernel (0x50). AE's PF_GaussianKernel values
+// (worker_pf_gaussian_kernel.cpp); Inner/Outer Key's RENDER builds its 1D
+// NORMALIZED edge-blur kernel through it (issue #1253).
+int32_t __cdecl diag_gaussian_kernel(void* effect_ref, double radius, uint32_t flags,
+                                     double multiplier, int32_t* diameter, void* kernel) {
+  // Every non-zero answer of this callback is an argument refusal (null
+  // effect_ref / diameter / kernel, negative or unbounded radius) made before
+  // anything is written; it has no other failure mode.
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::GaussianKernel,
+      aexcompat::pf_gaussian_kernel::gaussian_kernel(effect_ref, radius, flags, multiplier,
+                                                    diameter, kernel),
+      aexcompat::callback_diagnostics::Reason::InvalidArguments);
+}
 int32_t __cdecl diag_transfer_rect(void* effect_ref, int32_t quality, uint32_t mode_flags,
                                   int32_t field, const ::LegacyRect* source_rect,
                                   const void* source_world, const void* composite_mode,
@@ -590,6 +616,10 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
   // "On Original Image") composites the input behind its strokes through this
   // slot and jumped to address 0.
   sources.composite_rect = reinterpret_cast<void*>(&diag_composite_rect);
+  // gaussian_kernel (0x50) had no contract offset until issue #1253, so the
+  // table handed plug-ins a null pointer there: Inner/Outer Key's RENDER
+  // builds its edge-blur kernel through this slot and jumped to address 0.
+  sources.gaussian_kernel = reinterpret_cast<void*>(&diag_gaussian_kernel);
   sources.blend = reinterpret_cast<void*>(&diag_blend_world);
   sources.convolve = reinterpret_cast<void*>(&diag_convolve_world);
   sources.copy = reinterpret_cast<void*>(&diag_copy_world);
@@ -793,6 +823,78 @@ bool verify_production_composite_rect_callback() {
   check(composite(effect_ref, &whole, 255, &foreign_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
         "unregistered source world accepted");
   check(destination == before, "a rejected call wrote the destination");
+  return passed;
+}
+
+// PF_UtilCallbacks.gaussian_kernel reached the way a plug-in reaches it: the
+// pointer read back out of the installed `in_data->utils` block at the
+// generated offset and called through it (issue #1253, Inner/Outer Key's
+// RENDER). The table check proves the slot non-null; this proves the pointer
+// behind it produces AE's PF_GaussianKernel values (radius 1, 1D, NORMALIZED
+// -> 192, 380, 192, diameter 3; radius 1, 2D, unnormalized -> the ceil-radius
+// bell rounded to 0..255 with the centre at 255) and that malformed calls come
+// back as errors with the buffer untouched.
+bool verify_production_gaussian_kernel_callback() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  using GaussianKernel = int32_t(__cdecl*)(void*, double, uint32_t, double, int32_t*, void*);
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  void* utils{};
+  std::memcpy(&utils, state.input.data() + contract::IN_UTILS_OFFSET, sizeof(utils));
+  GaussianKernel gaussian{};
+  std::memcpy(&gaussian, static_cast<const std::byte*>(utils) + contract::UTILS_GAUSSIAN_KERNEL_OFFSET,
+              sizeof(gaussian));
+  if (!gaussian) {
+    std::cerr << "utils_gaussian_kernel: slot at offset " << contract::UTILS_GAUSSIAN_KERNEL_OFFSET
+              << " is null\n" << std::flush;
+    return false;
+  }
+  void* effect_ref{};
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET, sizeof(effect_ref));
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "utils_gaussian_kernel: " << what << "\n" << std::flush;
+  };
+  // Inner/Outer Key's call shape: 1D, NORMALIZED, longs; radius 1 -> 3 entries.
+  std::array<int32_t, 9> kernel{};
+  int32_t diameter = -1;
+  check(gaussian(effect_ref, 1.0, 0x3, 1.0, &diameter, kernel.data()) == 0,
+        "1D normalized call failed");
+  check(diameter == 3, "1D normalized diameter");
+  check((kernel[0] == 192 && kernel[1] == 380 && kernel[2] == 192),
+        "1D normalized values (AE PF_GaussianKernel: 192, 380, 192)");
+  // 2D unnormalized radius 1: the bell over hypot(x, y) / 2, times 255,
+  // rounded: corners d = 0.7071 -> exp(-1.189) = 0.3045 -> 1 - 0.6955 * 1.102
+  // = 0.2336 -> 60; edges d = 0.5 -> 129; centre 255.
+  kernel.fill(-1);
+  diameter = -1;
+  check(gaussian(effect_ref, 1.0, 0x0, 1.0, &diameter, kernel.data()) == 0,
+        "2D unnormalized call failed");
+  check(diameter == 3, "2D diameter");
+  check((kernel == std::array<int32_t, 9>{60, 129, 60, 129, 255, 129, 60, 129, 60}),
+        "2D unnormalized values");
+  // The multiplier scales before rounding and clamping (2.0 clamps the centre
+  // at 255 and doubles the rest); a fractional radius ceils.
+  kernel.fill(-1);
+  check(gaussian(effect_ref, 0.5, 0x1, 2.0, &diameter, kernel.data()) == 0 && diameter == 3 &&
+            kernel[1] == 255 && kernel[0] == kernel[2] && kernel[0] > 0 && kernel[0] < 255,
+        "multiplier / fractional radius");
+  // Fail-closed: AE's own refusals (negative radius, null outputs) and the
+  // host's (null effect_ref, radius past the bound) leave the buffer untouched.
+  kernel.fill(-1);
+  diameter = -1;
+  check(gaussian(effect_ref, -1.0, 0x1, 1.0, &diameter, kernel.data()) != 0, "negative radius accepted");
+  check(gaussian(effect_ref, 1.0, 0x1, 1.0, nullptr, kernel.data()) != 0, "null diameter accepted");
+  check(gaussian(effect_ref, 1.0, 0x1, 1.0, &diameter, nullptr) != 0, "null kernel accepted");
+  check(gaussian(nullptr, 1.0, 0x1, 1.0, &diameter, kernel.data()) == kPfBadCallbackParam,
+        "null effect_ref accepted");
+  check(gaussian(effect_ref, 1e9, 0x1, 1.0, &diameter, kernel.data()) == kPfBadCallbackParam,
+        "unbounded radius accepted");
+  check(diameter == -1 && kernel == std::array<int32_t, 9>{-1, -1, -1, -1, -1, -1, -1, -1, -1},
+        "a rejected call wrote its outputs");
   return passed;
 }
 

@@ -235,6 +235,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_minidump_runtime.cpp
     src/worker_pf_helper_runtime.cpp
     src/worker_mask_runtime_callbacks.cpp
+    src/worker_pf_gaussian_kernel.cpp
     src/worker_pf_path_runtime.cpp
     src/worker_pf_path_selftests.cpp
     src/worker_aegp_render_options.cpp

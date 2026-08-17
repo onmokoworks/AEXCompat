@@ -886,7 +886,17 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     record.valid_max = read<int16_t>(bytes, u + 4);
     record.slider_min = record.valid_min;
     record.slider_max = record.valid_max;
-    record.default_value = read<int16_t>(bytes, u + 6);
+    // A PF popup value is 1-based (SDK PF_PopupDef). Reshape declares its
+    // Elasticity (9 choices) and Interpolation Method (3 choices) popups with
+    // dephault = value = 0, and AE materializes both as 1 (AE 2026 oracle,
+    // ExtendScript effect.property("Elasticity").value == 1 with no user
+    // edit, issue #1253); handing the plug-in the raw 0 made its RENDER map
+    // "Interpolation Method - 1" to a mode its grid generator rejects, and
+    // FLO_DoDistortion answered PF_Err_OUT_OF_MEMORY. Lift a non-positive
+    // declared default to the first choice the way AE does; a default above
+    // num_choices is not an observed case and is left as declared.
+    const int16_t declared_default = read<int16_t>(bytes, u + 6);
+    record.default_value = declared_default < 1 ? 1 : declared_default;
     const char* choices = read<const char*>(bytes, u + 8);
     if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
   } else if (record.type == 4) {

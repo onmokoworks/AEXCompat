@@ -60,6 +60,14 @@
 //!   --include-scan-paths record absolute folder paths in the report. Off by
 //!                        default: the report is meant to be shareable, and
 //!                        private absolute paths are not (EVIDENCE_POLICY §)
+//!   --dump-frames <dir>  write every rendered frame's raw pixels to
+//!                        <dir>/<plugin>.<sha8>.f<n>.<W>x<H>.<format> so "rendered"
+//!                        can be checked against an AE reference (a Scribble
+//!                        with no mask renders fully transparent in AE, an
+//!                        Inner/Outer Key or Reshape with no mask passes the
+//!                        input through; #1253). Raw image contents, so the
+//!                        directory is not part of the shareable report; the
+//!                        record carries only the pixel SHA-256
 //!
 //! `AEXCOMPAT_EXTENDED_DIAG=1` additionally turns on the worker's host-callback
 //! trace on stderr, which is worth having on a re-run of one bucket, not on a
@@ -269,6 +277,7 @@ struct Options {
     plugin_defaults: bool,
     frames: u32,
     discovery_only: bool,
+    dump_frames: Option<PathBuf>,
     dirs: Vec<PathBuf>,
 }
 
@@ -289,6 +298,7 @@ fn parse_options() -> Options {
         plugin_defaults: false,
         frames: 1,
         discovery_only: false,
+        dump_frames: None,
         dirs: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -330,6 +340,15 @@ fn parse_options() -> Options {
             "--force-classic" => options.force_classic = true,
             "--include-scan-paths" => options.include_scan_paths = true,
             "--close-report" => options.close_report = true,
+            "--dump-frames" => {
+                let dir = PathBuf::from(value());
+                // Fail here, not once per frame: a mistyped directory would
+                // otherwise leave a whole sweep of `dump_error` records and
+                // no dumps.
+                std::fs::create_dir_all(&dir)
+                    .unwrap_or_else(|error| panic!("--dump-frames {}: {error}", dir.display()));
+                options.dump_frames = Some(dir);
+            }
             "--plugin-defaults" => options.plugin_defaults = true,
             "--frames" => {
                 options.frames = value().parse().expect("--frames takes a count");
@@ -843,12 +862,31 @@ fn sweep_one(
     // a failing one to a sweep that only ever asks for frame 0.
     let mut frames: Vec<Outcome> = Vec::with_capacity(options.frames as usize);
     for frame_index in 0..options.frames {
-        let frame = frame_outcome(session.render_frame_with_parameters(
+        let plugin_stem = record
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("plugin");
+        let dump = options.dump_frames.as_deref().map(|dir| FrameDump {
+            dir,
+            plugin_stem,
+            plugin_sha256_prefix: record.sha256.get(..8).unwrap_or(&record.sha256),
             frame_index,
-            options.current_time + (frame_index as i32) * TIME_STEP,
-            input,
-            parameters,
-        ));
+            format: match options.pixel_format {
+                RenderPixelFormat::Argb8 => "argb8",
+                RenderPixelFormat::Argb16 => "argb16",
+                RenderPixelFormat::Argb32f => "argb32f",
+            },
+        });
+        let frame = frame_outcome_dumping(
+            session.render_frame_with_parameters(
+                frame_index,
+                options.current_time + (frame_index as i32) * TIME_STEP,
+                input,
+                parameters,
+            ),
+            dump,
+        );
         // A refused frame invalidates the session, so there is no next frame to
         // ask for; anything else leaves it usable.
         let ended = frame.bucket == "render_frame_failed";
@@ -1132,9 +1170,32 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
     }
 }
 
-/// One frame's bucket and evidence. A session renders several and each is
-/// classified the same way.
+/// The unit tests' shape of `frame_outcome_dumping`: no dump.
+#[cfg(test)]
 fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
+    frame_outcome_dumping(outcome, None)
+}
+
+/// Where a rendered frame's raw pixels go under `--dump-frames`: the directory,
+/// the plug-in's file stem plus a prefix of its SHA-256 (two `Foo.aex` in
+/// different scan folders must not overwrite each other), the frame index and
+/// the pixel-format tag for the file name.
+struct FrameDump<'a> {
+    dir: &'a Path,
+    plugin_stem: &'a str,
+    plugin_sha256_prefix: &'a str,
+    frame_index: u32,
+    format: &'static str,
+}
+
+/// One frame's bucket and evidence. A session renders several and each is
+/// classified the same way. With a `FrameDump` the pixels of a rendered frame
+/// are also written out (an empty frame writes nothing: it is `rendered_empty`,
+/// and there is nothing to compare).
+fn frame_outcome_dumping(
+    outcome: std::io::Result<FrameOutcome>,
+    dump: Option<FrameDump<'_>>,
+) -> Outcome {
     let mut detail = Map::new();
     let bucket = match outcome {
         Ok(outcome) => match outcome.status {
@@ -1150,6 +1211,35 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
                 detail.insert("height".to_owned(), json!(height));
                 detail.insert("origin_x".to_owned(), json!(origin_x));
                 detail.insert("origin_y".to_owned(), json!(origin_y));
+                // The hash of the bytes the worker answered, so two runs (or a
+                // run and an AE reference decoded to the same layout) can be
+                // compared without carrying the pixels in the report.
+                detail.insert(
+                    "pixel_sha256".to_owned(),
+                    json!(format!("{:x}", Sha256::digest(&pixels))),
+                );
+                if let Some(dump) = dump.filter(|_| !pixels.is_empty()) {
+                    let path = dump.dir.join(format!(
+                        "{}.{}.f{}.{}x{}.{}",
+                        dump.plugin_stem,
+                        dump.plugin_sha256_prefix,
+                        dump.frame_index,
+                        width,
+                        height,
+                        dump.format
+                    ));
+                    match std::fs::write(&path, &pixels) {
+                        Ok(()) => {
+                            detail.insert(
+                                "dumped_frame".to_owned(),
+                                json!(path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+                            );
+                        }
+                        Err(error) => {
+                            detail.insert("dump_error".to_owned(), json!(error.to_string()));
+                        }
+                    }
+                }
                 // A rendered frame of no pixels is not a render: an effect that
                 // answers 0x0 has produced nothing, and rounding it into
                 // `rendered` is how a sweep reports progress it did not make.
@@ -1388,6 +1478,7 @@ mod tests {
             plugin_defaults: false,
             frames: 1,
             discovery_only: true,
+            dump_frames: None,
             dirs: Vec::new(),
         }
     }
