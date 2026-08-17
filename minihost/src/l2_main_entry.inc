@@ -912,6 +912,288 @@ bool verify_checkout_param_beyond_table() {
   return passed;
 }
 
+// AE's private get_callback_addr ids -5 and -2, obtained the way a plug-in
+// obtains them: through the get_callback_addr slot read back out of the
+// installed in_data->utils block (issue #985; Bulge asks for -5, Compound
+// Blur / CC Cross Blur / Matte Choker for -2). Expected values are AE 2026's
+// own answers, captured by hooking the live dispatcher with Frida
+// (docs/PRIVATE_CALLBACK_IDS_OBSERVATION_2026-08-17.md): PFp_GaussianValue's
+// curve for -5, and for -2 the 8-bit impulse responses and straight/premul
+// alpha handling of the FLT.dll blur on synthetic worlds handed to AE's own
+// function. Malformed calls fail closed with the world untouched.
+bool verify_pf_private_callbacks() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  using GetCallbackAddr = int32_t(__cdecl*)(void*, int32_t, uint32_t, int32_t, void**);
+  using Easing = double(__cdecl*)(double);
+  using PrivateBlur = int32_t(__cdecl*)(void*, void*, double, void*, int32_t, void*);
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  void* utils{};
+  std::memcpy(&utils, state.input.data() + contract::IN_UTILS_OFFSET, sizeof(utils));
+  GetCallbackAddr get_callback_addr{};
+  std::memcpy(&get_callback_addr,
+              static_cast<const std::byte*>(utils) + contract::UTILS_GET_CALLBACK_ADDR_OFFSET,
+              sizeof(get_callback_addr));
+  if (!get_callback_addr) {
+    std::cerr << "pf_private_callbacks: get_callback_addr slot is null\n" << std::flush;
+    return false;
+  }
+  void* effect_ref{};
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET, sizeof(effect_ref));
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "pf_private_callbacks: " << what << "\n" << std::flush;
+  };
+  auto set_quality = [&](int32_t quality) {
+    std::memcpy(state.input.data() + contract::IN_QUALITY_OFFSET, &quality, sizeof(quality));
+  };
+
+  // id -5: the same function for every (quality, mode); PFp_GaussianValue's
+  // values as AE returned them (double, tolerance for the CRT's exp).
+  void* raw_easing{};
+  check(get_callback_addr(effect_ref, 1, 0, -5, &raw_easing) == 0 && raw_easing,
+        "id -5 refused");
+  for (int32_t quality = 0; quality <= 1; ++quality)
+    for (uint32_t mode = 0; mode <= 2; ++mode) {
+      void* other{};
+      check(get_callback_addr(effect_ref, quality, mode, -5, &other) == 0 && other == raw_easing,
+            "id -5 depends on quality/mode");
+    }
+  if (raw_easing) {
+    const auto easing = reinterpret_cast<Easing>(raw_easing);
+    auto close_to = [](double a, double b) { return std::fabs(a - b) <= 1e-12; };
+    check(easing(0.0) == 1.0, "easing(0) != 1");
+    check(close_to(easing(0.5), 0.5061259345505494), "easing(0.5)");
+    check(close_to(easing(0.25), 0.847805274821874), "easing(0.25)");
+    check(close_to(easing(0.9), 0.05856550493005852), "easing(0.9)");
+    check(close_to(easing(1.0), 0.00019492200675952365), "easing(1.0)");
+    check(easing(1.1) == 0.0 && easing(2.0) == 0.0, "easing(>1) != 0");
+    check(close_to(easing(-0.5), 0.5061259345505494) && close_to(easing(-1.0), 0.00019492200675952365),
+          "easing(negative)");
+  }
+
+  // id -2: mode 1 selects the straight-alpha entry, any other mode the
+  // premultiplied one; quality does not matter at request time.
+  void* raw_straight{};
+  void* raw_premul{};
+  void* raw_mode2{};
+  void* raw_q0{};
+  check(get_callback_addr(effect_ref, 1, 1, -2, &raw_straight) == 0 && raw_straight, "id -2 mode 1 refused");
+  check(get_callback_addr(effect_ref, 1, 0, -2, &raw_premul) == 0 && raw_premul, "id -2 mode 0 refused");
+  check(get_callback_addr(effect_ref, 1, 2, -2, &raw_mode2) == 0 && raw_mode2 == raw_premul, "id -2 mode 2");
+  check(get_callback_addr(effect_ref, 0, 1, -2, &raw_q0) == 0 && raw_q0 == raw_straight, "id -2 quality 0");
+  check(raw_straight != raw_premul, "id -2 mode 1 and mode 0 answer the same function");
+  void* raw_unknown = reinterpret_cast<void*>(1);
+  check(get_callback_addr(effect_ref, 1, 0, -3, &raw_unknown) == kPfBadCallbackParam && raw_unknown == nullptr,
+        "id -3 answered");
+  if (!raw_straight || !raw_premul) return false;
+  const auto blur_straight = reinterpret_cast<PrivateBlur>(raw_straight);
+  const auto blur_premul = reinterpret_cast<PrivateBlur>(raw_premul);
+
+  // A 33x1 ARGB8 world registered like the classic render path's worlds.
+  constexpr int32_t width = 33, height = 1, rowbytes = width * 4;
+  DispatchWorldFormatScope worlds;
+  std::array<unsigned char, static_cast<std::size_t>(rowbytes) * height> pixels{};
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> world{};
+  {
+    unsigned char* data = pixels.data();
+    std::memcpy(world.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+    std::memcpy(world.data() + contract::LAYER_ROWBYTES_OFFSET, &rowbytes, sizeof(rowbytes));
+    std::memcpy(world.data() + contract::LAYER_WIDTH_OFFSET, &width, sizeof(width));
+    std::memcpy(world.data() + contract::LAYER_HEIGHT_OFFSET, &height, sizeof(height));
+    if (!worlds.register_world(world.data(), kPixelFormatArgb32)) {
+      std::cerr << "pf_private_callbacks: world registration failed\n" << std::flush;
+      return false;
+    }
+  }
+  auto impulse = [&](unsigned char a, unsigned char r, unsigned char g, unsigned char b) {
+    pixels.fill(0);
+    pixels[16 * 4 + 0] = a; pixels[16 * 4 + 1] = r; pixels[16 * 4 + 2] = g; pixels[16 * 4 + 3] = b;
+  };
+  auto channel_row = [&](int channel, int first, int count) {
+    std::vector<int> row;
+    for (int i = 0; i < count; ++i) row.push_back(pixels[static_cast<std::size_t>(first + i) * 4 + channel]);
+    return row;
+  };
+  const int32_t kHorizontalAll = 0x4f;  // horizontal, all channels, no repeat
+
+  // Gaussian path (rho <= 1): AE's integer kernel, r=1 -> [64,127,64], r=2 -> [23,62,84,62,23].
+  set_quality(1);
+  impulse(255, 255, 255, 255);
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == 0, "premul r=1 refused");
+  check(channel_row(0, 14, 5) == std::vector<int>{0, 64, 127, 64, 0}, "premul r=1 alpha kernel");
+  check(channel_row(1, 14, 5) == std::vector<int>{0, 64, 127, 64, 0}, "premul r=1 red kernel");
+  impulse(255, 255, 255, 255);
+  check(blur_premul(state.input.data(), nullptr, 2.0, nullptr, kHorizontalAll, world.data()) == 0, "premul r=2 refused");
+  check(channel_row(0, 13, 7) == std::vector<int>{0, 23, 62, 84, 62, 23, 0}, "premul r=2 kernel");
+  // Box path (rho > 1): quality 1 = three passes, r=6.3 -> AE's 15-tap response;
+  // quality 0 = one pass at 1.4x, r=6.3 -> [9,34x7,9].
+  impulse(255, 255, 255, 255);
+  check(blur_premul(state.input.data(), nullptr, 6.3, nullptr, kHorizontalAll, world.data()) == 0, "premul r=6.3 refused");
+  check(channel_row(0, 9, 15) == std::vector<int>{2, 5, 9, 14, 21, 28, 32, 33, 32, 28, 21, 14, 9, 5, 2},
+        "premul q1 r=6.3 kernel");
+  set_quality(0);
+  impulse(255, 255, 255, 255);
+  check(blur_premul(state.input.data(), nullptr, 6.3, nullptr, kHorizontalAll, world.data()) == 0, "premul q0 r=6.3 refused");
+  check(channel_row(0, 12, 9) == std::vector<int>{9, 34, 34, 34, 34, 34, 34, 34, 9}, "premul q0 r=6.3 kernel");
+  // Straight vs premultiplied on a half-alpha impulse (a=127, r=204, g=102):
+  // the straight entry keeps the color where alpha spreads, the premultiplied
+  // one spreads the color values themselves.
+  set_quality(1);
+  impulse(127, 204, 102, 0);
+  check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == 0, "straight r=1 refused");
+  check(channel_row(0, 15, 3) == std::vector<int>{32, 63, 32} &&
+        channel_row(1, 15, 3) == std::vector<int>{205, 205, 205} &&
+        channel_row(2, 15, 3) == std::vector<int>{102, 102, 102},
+        "straight half-alpha result");
+  impulse(127, 204, 102, 0);
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == 0, "premul half-alpha refused");
+  check(channel_row(0, 15, 3) == std::vector<int>{32, 63, 32} &&
+        channel_row(1, 15, 3) == std::vector<int>{51, 101, 51} &&
+        channel_row(2, 15, 3) == std::vector<int>{26, 51, 26},
+        "premul half-alpha result");
+  // Alpha-only channel flag leaves the colors alone (Matte Choker's 0x71).
+  impulse(255, 200, 100, 50);
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, 0x41, world.data()) == 0, "alpha-only refused");
+  check(channel_row(0, 15, 3) == std::vector<int>{64, 127, 64} &&
+        channel_row(1, 15, 3) == std::vector<int>{0, 200, 0}, "alpha-only result");
+  // Radius 0 is a no-op that succeeds (AE builds no blur node), the pixels
+  // untouched.
+  impulse(255, 200, 100, 50);
+  check(blur_premul(state.input.data(), nullptr, 0.0, nullptr, kHorizontalAll, world.data()) == 0 &&
+        channel_row(1, 15, 3) == std::vector<int>{0, 200, 0}, "radius 0");
+  // Both axes, straight, no repeat, on AE's 65x65 step world (opaque
+  // (255,200,100,50) for x<32 && y<32, transparent elsewhere; r=1, flags
+  // 0x6f): X pass premultiplied intermediate, Y pass unpremultiplies at the
+  // end, zero beyond the world. Values are the ones AE's function wrote
+  // (probe case "step m=1 q=1 r=1 flags=0x6f", 8-bit).
+  {
+    constexpr int32_t side = 65;
+    std::vector<unsigned char> step(static_cast<std::size_t>(side) * side * 4);
+    for (int32_t y = 0; y < side; ++y)
+      for (int32_t x = 0; x < side; ++x) {
+        auto* px = &step[(static_cast<std::size_t>(y) * side + x) * 4];
+        const bool on = x < 32 && y < 32;
+        px[0] = on ? 255 : 0; px[1] = on ? 200 : 0; px[2] = on ? 100 : 0; px[3] = on ? 50 : 0;
+      }
+    std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> step_world{};
+    unsigned char* data = step.data();
+    const int32_t step_rowbytes = side * 4;
+    std::memcpy(step_world.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+    std::memcpy(step_world.data() + contract::LAYER_ROWBYTES_OFFSET, &step_rowbytes, sizeof(step_rowbytes));
+    std::memcpy(step_world.data() + contract::LAYER_WIDTH_OFFSET, &side, sizeof(side));
+    std::memcpy(step_world.data() + contract::LAYER_HEIGHT_OFFSET, &side, sizeof(side));
+    check(worlds.register_world(step_world.data(), kPixelFormatArgb32), "step world registration");
+    check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, 0x6f, step_world.data()) == 0,
+          "straight two-axis step refused");
+    auto at = [&](int32_t x, int32_t y, int32_t c) {
+      return static_cast<int>(step[(static_cast<std::size_t>(y) * side + x) * 4 + c]);
+    };
+    // Corner (30..34, 30..34): alpha falls off in both axes, colors keep their
+    // straight values, blue shows AE's premul/unpremul rounding (50/49/52).
+    const std::vector<int> alpha_rows{255, 191, 64, 0, 0, 191, 143, 48, 0, 0, 64, 48, 16, 0, 0};
+    std::vector<int> got_alpha, got_red, got_blue;
+    for (int32_t y = 30; y < 33; ++y)
+      for (int32_t x = 30; x < 35; ++x) {
+        got_alpha.push_back(at(x, y, 0));
+        got_red.push_back(at(x, y, 1));
+        got_blue.push_back(at(x, y, 3));
+      }
+    check(got_alpha == alpha_rows, "two-axis straight alpha corner");
+    check(got_red == std::vector<int>{200, 200, 199, 0, 0, 200, 200, 199, 0, 0, 200, 200, 199, 0, 0},
+          "two-axis straight red corner");
+    check(got_blue == std::vector<int>{50, 49, 52, 0, 0, 50, 49, 52, 0, 0, 50, 49, 52, 0, 0},
+          "two-axis straight blue corner");
+    check(at(33, 33, 0) == 0 && at(33, 33, 1) == 0, "two-axis straight outside the step");
+    // World border: zero beyond the world in both axes (row 0 / column 0 of the
+    // opaque region reads 143 at the corner, 191 along the edges).
+    check(at(0, 0, 0) == 143 && at(1, 0, 0) == 191 && at(4, 0, 0) == 191 && at(0, 1, 0) == 191 &&
+              at(0, 4, 0) == 191 && at(0, 0, 1) == 200 && at(4, 0, 1) == 200,
+          "two-axis straight world border");
+  }
+  // 16-bit (ARGB64, 0..32768): the same integer gaussian weights and the same
+  // three-pass box, values as AE wrote them into a 16-bit world (probe cases
+  // "impulse deep m=0 q=1 r=1 / r=6.3", "halfalpha deep m=1 q=1 r=1").
+  {
+    constexpr int32_t deep_width = 33, deep_rowbytes = deep_width * 8;
+    std::vector<uint16_t> deep(static_cast<std::size_t>(deep_width) * 4);
+    std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> deep_world{};
+    uint16_t* data = deep.data();
+    const int32_t one = 1;
+    std::memcpy(deep_world.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+    std::memcpy(deep_world.data() + contract::LAYER_ROWBYTES_OFFSET, &deep_rowbytes, sizeof(deep_rowbytes));
+    std::memcpy(deep_world.data() + contract::LAYER_WIDTH_OFFSET, &deep_width, sizeof(deep_width));
+    std::memcpy(deep_world.data() + contract::LAYER_HEIGHT_OFFSET, &one, sizeof(one));
+    check(worlds.register_world(deep_world.data(), kPixelFormatArgb64), "16-bit world registration");
+    auto deep_impulse = [&](uint16_t a, uint16_t r, uint16_t g) {
+      std::fill(deep.begin(), deep.end(), uint16_t{0});
+      deep[16 * 4 + 0] = a; deep[16 * 4 + 1] = r; deep[16 * 4 + 2] = g;
+    };
+    auto deep_row = [&](int channel, int first, int count) {
+      std::vector<int> row;
+      for (int i = 0; i < count; ++i) row.push_back(deep[static_cast<std::size_t>(first + i) * 4 + channel]);
+      return row;
+    };
+    set_quality(1);
+    deep_impulse(32768, 32768, 32768);
+    check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit r=1 refused");
+    check(deep_row(0, 15, 3) == std::vector<int>{8240, 16288, 8240} &&
+              deep_row(1, 15, 3) == std::vector<int>{8240, 16288, 8240},
+          "16-bit r=1 kernel");
+    deep_impulse(32768, 32768, 32768);
+    check(blur_premul(state.input.data(), nullptr, 6.3, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit r=6.3 refused");
+    // Exact: the 16-bit path rounds every pass to a whole step the way AE's
+    // integer path does (kept in double, the 3rd pass lands one step off at
+    // two taps).
+    check(deep_row(0, 7, 19) == std::vector<int>{6, 57, 234, 593, 1134, 1856, 2721, 3549, 4094, 4276,
+                                                 4094, 3549, 2721, 1856, 1134, 593, 234, 57, 6},
+          "16-bit q1 r=6.3 kernel");
+    deep_impulse(16384, 26214, 13107);
+    check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit straight refused");
+    // Exact: green is 13106, not 13107, only when the 16-bit premultiply
+    // truncates (13107 * 16384 / 32768 = 6553.5 -> 6553), which is what the
+    // host does at that depth.
+    check(deep_row(0, 15, 3) == std::vector<int>{4120, 8144, 4120} &&
+              deep_row(1, 15, 3) == std::vector<int>{26214, 26214, 26214} &&
+              deep_row(2, 15, 3) == std::vector<int>{13106, 13106, 13106},
+          "16-bit straight half-alpha result");
+  }
+  // Fail-closed: each malformed call answers PF_Err_BAD_CALLBACK_PARAM (516)
+  // and leaves the world untouched.
+  impulse(255, 200, 100, 50);
+  const auto before = pixels;
+  check(blur_premul(nullptr, nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == kPfBadCallbackParam,
+        "null in_data accepted");
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, nullptr) == kPfBadCallbackParam,
+        "null world accepted");
+  check(blur_premul(state.input.data(), nullptr, -1.0, nullptr, kHorizontalAll, world.data()) == kPfBadCallbackParam,
+        "negative radius accepted");
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll | 0x200, world.data()) == kPfBadCallbackParam,
+        "unknown flag accepted");
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, 0x40, world.data()) == kPfBadCallbackParam,
+        "no channel accepted");
+  set_quality(2);
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == kPfBadCallbackParam,
+        "quality 2 accepted");
+  set_quality(1);
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> foreign_world{};
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, foreign_world.data()) == kPfBadCallbackParam,
+        "empty unregistered world accepted");
+  auto other_in_data = state.input;
+  void* wrong_ref = reinterpret_cast<void*>(0x1234);
+  std::memcpy(other_in_data.data() + contract::IN_EFFECT_REF_OFFSET, &wrong_ref, sizeof(wrong_ref));
+  check(blur_premul(other_in_data.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == kPfBadCallbackParam,
+        "foreign effect_ref accepted");
+  check(pixels == before, "a rejected call wrote the world");
+  return passed;
+}
+
 // The BEE.dll-compatible scene object behind the effect layer handle (issue
 // #1210). Timecode.aex acquires "AE Timecode Helper Suite" v1 as a
 // host-presence gate (never calls a slot), then reads the AEGP_LayerH from
@@ -1199,7 +1481,8 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   // (issue #396), replacing the launch plug-in's table.
   activate_plugin_string_table(module, context.aex_string_table);
   // Legacy support libraries in the closure (U.dll allocator for PIN-era
-  // effects) get their one-time process init on first sight (issue #362).
+  // effects) get their init once per U.dll mapping, asked again for every
+  // member so a first member without U.dll decides nothing (#362, #1063).
   initialize_legacy_support_libraries();
   // GLOBAL_SETUP / PARAMS_SETUP through the launch bootstrap on fresh
   // buffers and fresh host records (ABOUT stays whatever the launch did).
@@ -1571,7 +1854,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
         current_entry = nullptr;
       if (current_entry) {
         activate_plugin_string_table(current_module, aex_string_table);
-        // One-time U.dll process init for PIN-era closures (issue #362).
+        // U.dll init for PIN-era closures, once per mapping (#362, #1063).
         initialize_legacy_support_libraries();
         inspect_column();
       } else {
@@ -1978,7 +2261,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 
   aexcompat::aex_strings::StringTable aex_string_table;
   load_aex_string_table(module, aex_string_table);
-  // One-time U.dll process init for PIN-era closures (issue #362).
+  // U.dll init for PIN-era closures, once per mapping (#362, #1063).
   initialize_legacy_support_libraries();
   const char* string_table_status =
       aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid

@@ -108,5 +108,9 @@ static_assert(offsetof(Suite1, directional_blur) == 3 * sizeof(void*));
 bool configure(const Hooks&) noexcept;
 const Suite1* suite1() noexcept;
 bool selftest();
+// The suite's operand admission for one world blurred in place (registered, or
+// foreign under the issue #1069 rules), for AE's private id -2 blur
+// (worker_pf_private_callbacks.hpp), which takes a single PF_LayerDef.
+bool resolve_in_place_world(void* world, world_safety::DispatchWorldFormat& format);
 
 }  // namespace aexcompat::flt_blur

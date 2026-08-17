@@ -1,6 +1,7 @@
 #include "worker_pf_suites_internal.hpp"
 #include "worker_callback_diagnostics.hpp"
 #include "worker_extended_diag.hpp"
+#include "worker_pf_private_callbacks.hpp"
 #include "worker_pf_sampling_runtime.hpp"
 #include "worker_world_registry.hpp"
 #include "worker_world_safety.hpp"
@@ -392,7 +393,10 @@ void configure_pf_host_context(const PfHostContext& context) {
   g_pf_host = context;
   configure_pf_sampling_runtime({context.hooks.resolve_world,
       context.hooks.acquire_suite, context.hooks.release_suite,
-      context.effect_ref, context.batch_sampling_suite});
+      context.effect_ref, context.batch_sampling_suite,
+      &aexcompat::pf_private::gaussian_value,
+      &aexcompat::pf_private::blur_straight,
+      &aexcompat::pf_private::blur_premultiplied});
   g_pf_host_configured = context.hooks.resolve_world && context.hooks.pixel_format &&
       context.hooks.set_pixel_format && context.hooks.acquire_suite &&
       context.hooks.release_suite && context.hooks.resolve_dispatch_world_format &&

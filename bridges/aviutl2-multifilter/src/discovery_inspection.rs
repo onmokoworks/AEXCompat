@@ -542,24 +542,104 @@ fn parameters_from_inspect_report(
     Ok(parameters)
 }
 
+/// The report fields a discovery failure record carries out of the worker's
+/// (partial) L2 report: which selector refused and with what code, and the
+/// parameter-count contract inputs. Bounded by construction (scalars plus the
+/// worker's own bounded `missing_suites` list), so the record stays cache- and
+/// report-sized whatever the plug-in did.
+fn inspect_report_failure_fields(
+    diagnostics: &mut serde_json::Map<String, serde_json::Value>,
+    report: &serde_json::Value,
+) {
+    if let Some(status) = report.get("status").and_then(serde_json::Value::as_str) {
+        diagnostics.insert("inspection_status".to_owned(), status.into());
+    }
+    for field in [
+        "global_setup_error",
+        "params_setup_error",
+        "global_setdown_error",
+        "reported_num_params",
+    ] {
+        if let Some(value) = report.get(field).and_then(serde_json::Value::as_i64) {
+            diagnostics.insert(field.to_owned(), value.into());
+        }
+    }
+    if let Some(parameters) = report.get("parameters").and_then(serde_json::Value::as_array) {
+        diagnostics.insert("parameter_count".to_owned(), parameters.len().into());
+    }
+    if let Some(missing) = report.get("missing_suites").and_then(serde_json::Value::as_array) {
+        diagnostics.insert(
+            "missing_suites".to_owned(),
+            serde_json::Value::Array(missing.clone()),
+        );
+    }
+}
+
+/// The `failure_diagnostics` of a session-path member whose inspect came back
+/// as `InspectError` (issue #1063): the same `classification` /
+/// `cluster_error_kind` / `exit_code` / `plugin_kind` shape as before, plus
+/// the worker's partial report fields when it sent one. `classification` is
+/// present but null when the failure is unclassified (`identity_changed`,
+/// `hash_unavailable`), so a reader can tell "unclassified by design" from
+/// "no diagnostics recorded".
+fn cluster_inspect_error_diagnostics(
+    classification: Option<&str>,
+    error_kind: &str,
+    exit_code: Option<i64>,
+    plugin_kind: Option<&str>,
+    report: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut diagnostics = serde_json::Map::new();
+    diagnostics.insert("classification".to_owned(), classification.into());
+    diagnostics.insert("cluster_error_kind".to_owned(), error_kind.into());
+    if let Some(exit_code) = exit_code {
+        diagnostics.insert("exit_code".to_owned(), exit_code.into());
+    }
+    if let Some(plugin_kind) = plugin_kind {
+        diagnostics.insert("plugin_kind".to_owned(), plugin_kind.into());
+    }
+    if let Some(report) = report {
+        inspect_report_failure_fields(&mut diagnostics, report);
+    }
+    serde_json::Value::Object(diagnostics)
+}
+
 /// Folds a successful cluster-inspect report into a member's cache entry,
 /// the cluster counterpart of the one-shot inspect tail. A report whose
 /// PARAMS_SETUP did not succeed is a plugin-local failure with no
 /// classification (retried), exactly like the one-shot
 /// "AEX rejected PF_PARAMS_SETUP"; a report without the key at all reads as
 /// success, since a failure is always reported through the `error` status
-/// the broker maps to `InspectError`.
+/// the broker maps to `InspectError`. Either way the entry records why it
+/// stayed negative (issue #1063): a `status: ok` report the host could not
+/// use is otherwise indistinguishable from no report at all.
 fn fill_entry_from_inspect_report(entry: &mut CacheEntry, report: &serde_json::Value) {
+    let unusable = |reason: &str| {
+        let mut diagnostics = serde_json::Map::new();
+        diagnostics.insert("classification".to_owned(), serde_json::Value::Null);
+        diagnostics.insert(
+            "cluster_error_kind".to_owned(),
+            "inspected_report_unusable".into(),
+        );
+        diagnostics.insert("reason".to_owned(), reason.into());
+        inspect_report_failure_fields(&mut diagnostics, report);
+        Some(serde_json::Value::Object(diagnostics))
+    };
     if report
         .get("params_setup_error")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0)
         != 0
     {
+        entry.failure_diagnostics = unusable("params_setup_rejected");
         return;
     }
-    let Ok(params) = parameters_from_inspect_report(report) else {
-        return;
+    let params = match parameters_from_inspect_report(report) {
+        Ok(params) => params,
+        Err(reason) => {
+            entry.failure_diagnostics = unusable(&reason);
+            return;
+        }
     };
     entry.out_flags2 = report
         .get("out_flags2")
@@ -911,7 +991,23 @@ fn discover_cluster_in_place(
                     // state transition), or could not be read at all: leave
                     // unclassified so the next launch re-discovers.
                     "identity_changed" | "hash_unavailable" => None,
-                    // PARAMS_SETUP rejected: retried like the one-shot path.
+                    // The inspect column ran but a selector refused
+                    // (GLOBAL_SETUP / PARAMS_SETUP / GLOBAL_SETDOWN nonzero,
+                    // or the parameter-count contract failed): the one-shot
+                    // worker exits 20 for the same outcome and the broker
+                    // classifies that `nonzero_exit`, so the session path
+                    // converges the same way (issue #1063; the former `None`
+                    // here left the sweep with `not_discovered:unknown` and no
+                    // diagnostics at all). Consequence, accepted for parity
+                    // with the one-shot path: `keep_best` treats `nonzero_exit`
+                    // as deterministic, so an `ok && stale` entry re-checked
+                    // through a session that answers `selector_error` converges
+                    // to negative. A session-path selector error can depend on
+                    // the members before it (the #1063 U.dll case, fixed in the
+                    // worker); such a negative is re-discovered when the host
+                    // build, the bytes, or the resolved closure change, exactly
+                    // as a one-shot exit-20 negative is.
+                    "selector_error" => Some("nonzero_exit".to_owned()),
                     _ => None,
                 };
                 let plugin_kind = report
@@ -929,21 +1025,18 @@ fn discover_cluster_in_place(
                     results.push((path, entry));
                     continue;
                 }
-                entry.failure_diagnostics =
-                    entry.failure_classification.as_ref().map(|classification| {
-                        let mut diagnostics = serde_json::Map::new();
-                        diagnostics
-                            .insert("classification".to_owned(), classification.clone().into());
-                        diagnostics
-                            .insert("cluster_error_kind".to_owned(), error_kind.clone().into());
-                        if let Some(exit_code) = exit_code {
-                            diagnostics.insert("exit_code".to_owned(), exit_code.into());
-                        }
-                        if let Some(plugin_kind) = plugin_kind {
-                            diagnostics.insert("plugin_kind".to_owned(), plugin_kind.into());
-                        }
-                        serde_json::Value::Object(diagnostics)
-                    });
+                // Every session-path failure carries diagnostics, classified
+                // or not: an unclassified `identity_changed` still says why
+                // the entry is being re-discovered, and a `selector_error`
+                // carries the worker's partial report so the failing selector
+                // and its error code are legible without a one-shot re-run.
+                entry.failure_diagnostics = Some(cluster_inspect_error_diagnostics(
+                    entry.failure_classification.as_deref(),
+                    &error_kind,
+                    exit_code,
+                    plugin_kind,
+                    report.as_ref(),
+                ));
                 results.push((path, entry));
             }
             Ok(InspectOutcome::CleanupCrashCheckpoint { authorization }) => {

@@ -1310,6 +1310,29 @@ mod worker {
                     "error_kind": "selector_error"
                 })
                 .to_string()
+            } else if behavior == "inspect_selector_error_report_plugin_1" && new_index == 1 {
+                // The same parameter-local failure with the partial report the
+                // real worker's inspect column attaches (issue #1063): the
+                // selector outcome fields the caller records so the failure
+                // is attributable without a one-shot re-run.
+                json!({
+                    "v": 1,
+                    "type": "inspect_done",
+                    "plugin_index": plugin_index,
+                    "request_index": request_index,
+                    "status": "error",
+                    "error_kind": "selector_error",
+                    "report": {
+                        "status": "selector_error",
+                        "global_setup_error": 14,
+                        "params_setup_error": -1,
+                        "global_setdown_error": -1,
+                        "reported_num_params": 0,
+                        "parameters": [],
+                        "missing_suites": [{"name": "PF AE Private Effect Suite", "version": 3}]
+                    }
+                })
+                .to_string()
             } else if behavior == "inspect_entrypoint_aegp_plugin_1" && new_index == 1 {
                 json!({
                     "v": 1,

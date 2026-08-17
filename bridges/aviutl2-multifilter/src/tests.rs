@@ -3283,12 +3283,91 @@ mod tests {
         assert_eq!(entry.params[2].choices, vec!["A", "B", "C"]);
         assert_eq!(entry.params[3].color, [255, 10, 20, 30]);
 
-        // PARAMS_SETUP rejection is a plugin-local failure, not a discovery.
-        let rejected = serde_json::json!({"params_setup_error": 25, "parameters": []});
+        // PARAMS_SETUP rejection is a plugin-local failure, not a discovery,
+        // and the entry says so (issue #1063) instead of staying a bare
+        // negative.
+        let rejected = serde_json::json!({
+            "status": "selector_error", "params_setup_error": 25, "parameters": []
+        });
         let mut entry = negative_entry(Path::new("effect.aex"), build(1));
         fill_entry_from_inspect_report(&mut entry, &rejected);
         assert!(!entry.ok);
         assert!(entry.params.is_empty());
+        assert!(entry.failure_classification.is_none(), "unclassified: retried");
+        let diagnostics = entry.failure_diagnostics.expect("an unusable report is recorded");
+        assert_eq!(diagnostics["classification"], serde_json::Value::Null);
+        assert_eq!(diagnostics["cluster_error_kind"], "inspected_report_unusable");
+        assert_eq!(diagnostics["reason"], "params_setup_rejected");
+        assert_eq!(diagnostics["params_setup_error"], 25);
+        assert_eq!(diagnostics["inspection_status"], "selector_error");
+        assert_eq!(diagnostics["parameter_count"], 0);
+
+        // A report the conversion cannot read is recorded with its reason.
+        let unreadable = serde_json::json!({"params_setup_error": 0});
+        let mut entry = negative_entry(Path::new("effect.aex"), build(1));
+        fill_entry_from_inspect_report(&mut entry, &unreadable);
+        assert!(!entry.ok);
+        let diagnostics = entry.failure_diagnostics.expect("recorded");
+        assert_eq!(diagnostics["cluster_error_kind"], "inspected_report_unusable");
+        assert_eq!(diagnostics["reason"], "inspection report has no parameters");
+    }
+
+    /// The session-path failure record (issue #1063): every `InspectError`
+    /// carries diagnostics, classified or not, and a partial worker report's
+    /// selector fields ride along.
+    #[test]
+    fn cluster_inspect_error_diagnostics_carry_the_partial_report() {
+        let report = serde_json::json!({
+            "status": "selector_error",
+            "global_setup_error": 0,
+            "params_setup_error": 13,
+            "global_setdown_error": 0,
+            "reported_num_params": 0,
+            "parameters": [],
+            "missing_suites": [{"name": "PF AE Private Effect Suite", "version": 5}],
+            "missing_suites_truncated": false,
+            "host_callback_timeline": {"records": [1, 2, 3]}
+        });
+        let diagnostics = cluster_inspect_error_diagnostics(
+            Some("nonzero_exit"),
+            "selector_error",
+            Some(20),
+            None,
+            Some(&report),
+        );
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["cluster_error_kind"], "selector_error");
+        assert_eq!(diagnostics["exit_code"], 20);
+        assert_eq!(diagnostics["inspection_status"], "selector_error");
+        assert_eq!(diagnostics["params_setup_error"], 13);
+        assert_eq!(diagnostics["global_setup_error"], 0);
+        assert_eq!(diagnostics["reported_num_params"], 0);
+        assert_eq!(diagnostics["parameter_count"], 0);
+        assert_eq!(diagnostics["missing_suites"][0]["version"], 5);
+        assert!(
+            diagnostics.get("host_callback_timeline").is_none(),
+            "only the bounded selector fields travel, not the whole report"
+        );
+        assert!(diagnostics.get("plugin_kind").is_none());
+
+        // Unclassified by design (the #309 state transition) still names why.
+        let diagnostics =
+            cluster_inspect_error_diagnostics(None, "identity_changed", None, None, None);
+        assert_eq!(diagnostics["classification"], serde_json::Value::Null);
+        assert_eq!(diagnostics["cluster_error_kind"], "identity_changed");
+        assert!(diagnostics.get("exit_code").is_none());
+        assert!(diagnostics.get("inspection_status").is_none());
+
+        // The entrypoint case keeps its plugin_kind for the AEGP router.
+        let diagnostics = cluster_inspect_error_diagnostics(
+            Some("nonzero_exit"),
+            "entrypoint_unresolved",
+            Some(12),
+            Some("invalid_pipl"),
+            Some(&serde_json::json!({"plugin_kind": "invalid_pipl"})),
+        );
+        assert_eq!(diagnostics["exit_code"], 12);
+        assert_eq!(diagnostics["plugin_kind"], "invalid_pipl");
     }
 
     // --- cluster session smoke tests against the protocol fixture (issue #405) ---
@@ -3547,6 +3626,70 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner());
             completed.sort_by(|left, right| left.0.cmp(&right.0));
             assert_eq!(completed, vec![(one.clone(), false), (two.clone(), false)]);
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
+        /// A member whose inspect column ran and whose selector refused
+        /// (issue #1063): the session continues, the member is a classified
+        /// negative (`nonzero_exit`, the one-shot exit-20 equivalent), and its
+        /// diagnostics carry the worker's partial report — which selector,
+        /// what code, which suite it could not acquire — instead of nothing.
+        #[test]
+        fn in_place_cluster_selector_error_keeps_the_worker_report_as_diagnostics() {
+            let _guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::set_var(
+                    "AEXCOMPAT_TEST_SESSION_BEHAVIOR",
+                    "inspect_selector_error_report_plugin_1",
+                );
+                std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+            }
+            let (root, one, two) = cluster_repository();
+            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+            }
+            assert_eq!(results.len(), 2, "every plug-in gets a result");
+            let entry_of = |wanted: &PathBuf| {
+                results
+                    .iter()
+                    .find(|(path, _)| path == wanted)
+                    .map(|(_, entry)| entry)
+                    .expect("member has an entry")
+            };
+            let first = entry_of(&one);
+            assert!(first.ok, "the member before the failure still discovers");
+            assert!(first.failure_diagnostics.is_none());
+            let second = entry_of(&two);
+            assert!(!second.ok, "a refused selector is never rounded to success");
+            assert!(
+                second.cluster_fallback.is_none(),
+                "plug-in-local: the session was not invalidated"
+            );
+            assert_eq!(
+                second.failure_classification.as_deref(),
+                Some("nonzero_exit"),
+                "converges like the one-shot exit-20 path"
+            );
+            let diagnostics = second
+                .failure_diagnostics
+                .as_ref()
+                .expect("a selector_error records diagnostics");
+            assert_eq!(diagnostics["classification"], "nonzero_exit");
+            assert_eq!(diagnostics["cluster_error_kind"], "selector_error");
+            assert_eq!(diagnostics["exit_code"], 20);
+            assert_eq!(diagnostics["inspection_status"], "selector_error");
+            assert_eq!(diagnostics["global_setup_error"], 14);
+            assert_eq!(diagnostics["params_setup_error"], -1);
+            assert_eq!(diagnostics["global_setdown_error"], -1);
+            assert_eq!(diagnostics["reported_num_params"], 0);
+            assert_eq!(diagnostics["parameter_count"], 0);
+            assert_eq!(
+                diagnostics["missing_suites"],
+                serde_json::json!([{"name": "PF AE Private Effect Suite", "version": 3}])
+            );
             std::fs::remove_dir_all(&root).unwrap();
         }
 

@@ -1009,8 +1009,58 @@ fn discovery_failure_bucket(diagnostics: Option<&Value>, classification: Option<
             .and_then(Value::as_str)
             .map(|kind| format!("exit_12_{kind}"))
             .unwrap_or_else(|| "exit_12".to_owned()),
+        // The inspect column ran and a selector refused (the one-shot exit
+        // 20; the session path's `selector_error`). Which selector, and its
+        // code, is what a fix is planned from, so it is the bucket (#1063).
+        Some(20) => format!("exit_20_{}", selector_error_suffix(diagnostics)),
         Some(code) => format!("exit_{code}"),
-        None => classification.unwrap_or("unknown").to_owned(),
+        // No exit code: an unclassified session-path failure still names its
+        // cause (`identity_changed`, `hash_unavailable`,
+        // `inspected_report_unusable`) instead of folding into `unknown`.
+        None => classification
+            .or_else(|| {
+                diagnostics
+                    .and_then(|value| value.get("cluster_error_kind"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("unknown")
+            .to_owned(),
+    }
+}
+
+/// Names the selector an exit-20 discovery failure stopped at, from the
+/// worker's report fields: `unattributed` when the record does not carry them
+/// (one written before the fields were recorded); else the first nonzero of
+/// GLOBAL_SETUP / PARAMS_SETUP / GLOBAL_SETDOWN with its code; else the
+/// parameter-count contract when the selectors all returned 0; else
+/// `no_selector_error` (the worker refused for a reason the report fields do
+/// not carry, e.g. the arbitrary defaults could not be disposed). A negative
+/// field is the worker's "not invoked" sentinel (-1), never a plug-in code, so
+/// it is skipped rather than named.
+fn selector_error_suffix(diagnostics: Option<&Value>) -> String {
+    let field = |name: &str| {
+        diagnostics
+            .and_then(|value| value.get(name))
+            .and_then(Value::as_i64)
+    };
+    for (name, label) in [
+        ("global_setup_error", "global_setup"),
+        ("params_setup_error", "params_setup"),
+        ("global_setdown_error", "global_setdown"),
+    ] {
+        match field(name) {
+            Some(code) if code <= 0 => continue,
+            Some(code) => return format!("{label}:{code}"),
+            // A field the record never carried: nothing after it can be
+            // read as "the earlier selectors passed".
+            None => return "unattributed".to_owned(),
+        }
+    }
+    match (field("reported_num_params"), field("parameter_count")) {
+        (Some(reported), Some(count)) if reported != count + 1 => {
+            format!("param_count_contract:{reported}_vs_{count}")
+        }
+        _ => "no_selector_error".to_owned(),
     }
 }
 
@@ -1546,6 +1596,79 @@ mod tests {
             discovery_failure_bucket(Some(&diagnostics), Some("nonzero_exit")),
             "exit_11_load_library"
         );
+    }
+
+    /// Issue #1063: an exit-20 discovery failure is bucketed by the selector
+    /// that refused and its code, and an unclassified session-path failure by
+    /// its cause, so `not_discovered:unknown` is reserved for a record with
+    /// genuinely nothing in it.
+    #[test]
+    fn discovery_buckets_name_the_refusing_selector() {
+        let selector = |setup: i64, params: i64, setdown: i64| {
+            json!({
+                "classification": "nonzero_exit",
+                "cluster_error_kind": "selector_error",
+                "exit_code": 20,
+                "global_setup_error": setup,
+                "params_setup_error": params,
+                "global_setdown_error": setdown,
+                "reported_num_params": 0,
+                "parameter_count": 0,
+            })
+        };
+        assert_eq!(
+            discovery_failure_bucket(Some(&selector(14, -1, -1)), Some("nonzero_exit")),
+            "exit_20_global_setup:14"
+        );
+        assert_eq!(
+            discovery_failure_bucket(Some(&selector(0, 13, 0)), Some("nonzero_exit")),
+            "exit_20_params_setup:13"
+        );
+        assert_eq!(
+            discovery_failure_bucket(Some(&selector(0, 0, 25)), Some("nonzero_exit")),
+            "exit_20_global_setdown:25"
+        );
+        // Selectors all 0: the parameter-count contract is what failed.
+        let mut contract = selector(0, 0, 0);
+        contract["reported_num_params"] = json!(9);
+        contract["parameter_count"] = json!(7);
+        assert_eq!(
+            discovery_failure_bucket(Some(&contract), Some("nonzero_exit")),
+            "exit_20_param_count_contract:9_vs_7"
+        );
+        // Selectors 0 and the count contract holds (reported = declared + 1):
+        // the worker refused for a reason the report fields do not carry.
+        let mut consistent = selector(0, 0, 0);
+        consistent["reported_num_params"] = json!(8);
+        consistent["parameter_count"] = json!(7);
+        assert_eq!(
+            discovery_failure_bucket(Some(&consistent), Some("nonzero_exit")),
+            "exit_20_no_selector_error"
+        );
+        // -1 is the worker's "not invoked" sentinel, not a selector code: a
+        // setdown that never ran after a clean setup/params pair does not
+        // become the refusing selector.
+        let mut sentinel = selector(0, 0, -1);
+        sentinel["reported_num_params"] = json!(8);
+        sentinel["parameter_count"] = json!(7);
+        assert_eq!(
+            discovery_failure_bucket(Some(&sentinel), Some("nonzero_exit")),
+            "exit_20_no_selector_error"
+        );
+        // A record without the report fields (a pre-#1063 one-shot record).
+        let bare = json!({"classification": "nonzero_exit", "exit_code": 20});
+        assert_eq!(
+            discovery_failure_bucket(Some(&bare), Some("nonzero_exit")),
+            "exit_20_unattributed"
+        );
+        // Unclassified session-path failures name their cause.
+        let unclassified =
+            json!({"classification": null, "cluster_error_kind": "identity_changed"});
+        assert_eq!(
+            discovery_failure_bucket(Some(&unclassified), None),
+            "identity_changed"
+        );
+        assert_eq!(discovery_failure_bucket(None, None), "unknown");
     }
 
     #[test]
