@@ -132,6 +132,11 @@ and bounded image input/output are now the main implementation path.
 - The After Effects installation is an exclusive machine resource. Before any
   capture or aerender run, verify no AfterFX/aerender/aerendercore process is
   running; if one is, another session owns it — wait instead of killing it.
+  The self-hosted CI runner shares that machine, so an open AfterFX session
+  also turns a PR's CI red on `test_ae_reference_capture_automation` (the
+  fail-closed guard, not a regression); after AfterFX exits,
+  `gh run rerun <run-id> --failed` recovers it
+  (`docs/SWEEP_INVESTIGATION_WORKFLOW_2026-08-17.md` §5).
 - Do not hold back on implementation, reverse engineering, or AE-oracle
   verification work, and do not ask the user for permission before starting it.
   These are the ordinary work of this project: proceed confidence-first and
@@ -201,11 +206,16 @@ and bounded image input/output are now the main implementation path.
 - Merge when CI is green on the PR head and no owner comment is unresolved. A
   green run on an older head does not count; re-check after every push, and
   merge with
-  `gh pr merge <PR> --merge --delete-branch --match-head-commit <the SHA CI went green on>`
+  `gh pr merge <PR> --merge --match-head-commit <the SHA CI went green on>`
   so a push that lands between the check and the merge call fails the merge
   instead of slipping in unverified. If the merge call refuses, the head
-  moved: go back through the loop. External failures (billing/usage limits,
-  runner outages) are not success: report them as blocked instead of merging.
+  moved: go back through the loop. After the merge, delete the remote branch
+  with `git push origin --delete <branch>` rather than `--delete-branch`: in
+  a worktree that flag's post-merge `main` checkout fails with
+  `'main' is already used by worktree` and the branch cleanup it promises
+  does not complete (the merge itself has already happened). External
+  failures (billing/usage limits, runner outages) are not success: report
+  them as blocked instead of merging.
 - Repo-owner review comments (`onmokoworks`, `naari3`) still outrank
   everything. Never merge while an owner comment on the PR is unresolved, even
   if CI is green. Resolution means the review thread is answered and marked
@@ -231,6 +241,12 @@ Some runtime and oracle gates additionally require locally built workers, the
 After Effects SDK, approved AEX fixtures, a matching GPU driver, or AE itself.
 Run the named build/gate script rather than relying on untracked `target/`
 artifacts from a previous checkout.
+
+The worker C++ build (`docs/BUILD_REQUIREMENTS.md`, "C++ worker") needs an
+MSVC developer environment (vcvars64). From a plain PowerShell,
+`cmake --build target\minihost-build` fails with
+`fatal error C1083: Cannot open include file: 'cstddef'`; that is the missing
+environment, not a source problem.
 
 There is more than one worker exe and they must all be rebuilt after any change
 to shared worker code. `aex_worker_runtime_core` (which holds `l2_main*.inc`,
@@ -281,4 +297,7 @@ worker isolation in security terms, read
 implemented, what is documented plan only (mitigation policies, UI limits,
 integrity levels, AppContainer are NOT implemented), and which routes are
 sealed versus normal-token. The audit and decision record behind the
-single-floor policy is `docs/ENFORCEMENT_AUDIT_2026-08-05.md`.
+single-floor policy is `docs/ENFORCEMENT_AUDIT_2026-08-05.md`. Before running
+or citing a render sweep (which folder was swept, how a sweep session and its
+worker builds are set up, which local pytest failures are environmental), read
+`docs/SWEEP_INVESTIGATION_WORKFLOW_2026-08-17.md`.
