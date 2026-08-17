@@ -60,7 +60,7 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   大きすぎる。
 - 変数なしの既定 report は共有前提で stderr を持たない。
 - `--dump-frames <dir>`: rendered した frame の raw pixel を
-  `<dir>/<plugin>.f<n>.<W>x<H>.<format>` に落とす (#1253)。`rendered` が AE の
+  `<dir>/<plugin>.<sha8>.f<n>.<W>x<H>.<format>` に落とす (#1253)。`rendered` が AE の
   参照 (mask 無しの Scribble は全 pixel 透明、Inner/Outer Key / Reshape は
   passthrough、など) と合っているかを見るためのもので、生の画像なので report と
   一緒に共有しない。record 側には `pixel_sha256` だけが常に乗る。

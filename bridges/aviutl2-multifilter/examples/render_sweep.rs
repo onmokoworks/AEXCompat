@@ -1218,7 +1218,8 @@ fn frame_outcome_dumping(
                     "pixel_sha256".to_owned(),
                     json!(format!("{:x}", Sha256::digest(&pixels))),
                 );
-                if let Some(dump) = dump.filter(|_| !pixels.is_empty()) {
+                if let Some(dump) = dump.filter(|_| !pixels.is_empty() && width != 0 && height != 0)
+                {
                     let path = dump.dir.join(format!(
                         "{}.{}.f{}.{}x{}.{}",
                         dump.plugin_stem,

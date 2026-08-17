@@ -6,8 +6,9 @@ issue #1253 の観測記録。AE 2026 `Support Files\Plug-ins\Effects` (304 AEX)
 PF_Err_OUT_OF_MEMORY (4) を返していた AudWave / Scribble / Inner-Outer-Key と、
 PR #1267 で discovered になった直後に同じ bucket に入った Reshape_New。
 4 本とも「host が AE と違う答えを返していた callback」を直すと default
-(mask 無し / audio layer 無し) の render で AE と同じ出力になった (原因の
-判定は §3、根拠は §2)。観測 (実測) と推論を分けて書く。
+(mask 無し / audio layer 無し) の render で AE と同じ出力になった (AudWave は
+alpha の表現 (AE の PNG は premultiplied、host は straight) を揃えたうえで
+一致。原因の判定は §3、根拠は §2)。観測 (実測) と推論を分けて書く。
 
 ## 1. 手順 (再現可能)
 
@@ -19,8 +20,9 @@ PR #1267 で discovered になった直後に同じ bucket に入った Reshape_
   以前は path 系 callback が呼ばれたかどうかが trace から読めず、issue #1253
   本文の「num_paths 等は一切呼ばれていない」は checkout の観測漏れだった。
 - 静的: Ghidra `AEXCompat.gpr` に 4 本の .aex と FLO.dll を import
-  (skill `aexcompat-ghidra`、headless `DumpDecomp.java` に `sym:` / `ref:` /
-  `mk:` セレクタ、`DumpListing.java` を追加)。Scribble の C++ 例外 catch は
+  (headless、`tools/ghidra/DumpDecomp.java` に `sym:` / `ref:` / `mk:`
+  セレクタ、`tools/ghidra/DumpListing.java` を追加。使い方は
+  `tools/ghidra/README.md`)。Scribble の C++ 例外 catch は
   FH4 (`__CxxFrameHandler4`) の funclet で Ghidra が関数を作らないので、
   `.pdata` → UNWIND_INFO → FuncInfo4 → TryBlockMap → HandlerType を
   読んで catch funclet のアドレスを出し、`mk:` で関数化して読んだ。
@@ -28,10 +30,10 @@ PR #1267 で discovered になった直後に同じ bucket に入った Reshape_
   `sxe -c "..." cpr` で子 (worker) に deferred bp を張る。C++ 例外の
   throw site (`sxe eh` + `k`)、Adobe DLL 内部関数の戻り値
   (`bp /1 @$ra "r rax"`) を取った。
-- AE oracle: `tools/capture-ae-reference.ps1` に param dump 付きの JSX
-  (`tools/ae-reference-capture.jsx` に effect の全 property の
-  name/matchName/value を payload に足したもの) を `-ScriptPath` で渡し、
-  4 effect を default のまま 1 frame render。入力は
+- AE oracle: `tools/capture-ae-reference.ps1` (`tools/ae-reference-capture.jsx`
+  が result JSON の `params` に effect の全 property の
+  index|name|matchName|type|value を書くようにした) で 4 effect を default の
+  まま 1 frame render。入力は
   `tools/generate-oracle-rgba-input.py --width 256 --height 144`
   (decoded_rgba_sha256 `d609f80d…9e973`)。AE 26.3x87、
   loaded_aex_identity verified。

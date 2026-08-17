@@ -181,12 +181,14 @@ int32_t __cdecl path_info(void* effect,int32_t index,int32_t* id){auto p=paths()
 // counted, exactly as before.
 int32_t __cdecl checkout_path(void* effect,int32_t id,int32_t,int32_t step,uint32_t scale,void** out){
   auto p=paths();auto* found=find(p,id);std::lock_guard lock(g_mutex);
-  if(!effect||!out||step<=0||!scale){++g_report.invalid_operations;diag_paths("checkout",effect,id,step,4);return 4;}
+  // No enumeration hook is a host misconfiguration, not "no masks": keep it a
+  // refusal so it stays visible instead of reading as an absent path.
+  if(!effect||!out||step<=0||!scale||!g_hooks.enumerate){++g_report.invalid_operations;diag_paths("checkout",effect,id,step,4);return 4;}
   if(!found){*out=nullptr;++g_report.absent_checkouts;diag_paths("checkout_absent",effect,id,step,0);return 0;}
   ++g_checkouts[found->handle];++g_report.checkout_calls;*out=found->handle;diag_paths("checkout",effect,id,step,0);return 0;}
 int32_t __cdecl checkin_path(void* effect,int32_t id,int32_t changed,void* path){
   std::lock_guard lock(g_mutex);auto it=g_checkouts.find(path);auto p=paths();auto* found=find(p,id);
-  if(effect&&!changed&&!found&&!path){++g_report.absent_checkins;diag_paths("checkin_absent",effect,id,changed,0);return 0;}
+  if(effect&&!changed&&!found&&!path&&g_hooks.enumerate){++g_report.absent_checkins;diag_paths("checkin_absent",effect,id,changed,0);return 0;}
   if(!effect||changed||!found||found->handle!=path||it==g_checkouts.end()||!it->second){++g_report.invalid_operations;diag_paths("checkin",effect,id,changed,4);return 4;}
   if(!--it->second)g_checkouts.erase(it);++g_report.checkin_calls;diag_paths("checkin",effect,id,changed,0);return 0;}
 int32_t __cdecl path_is_open(void* effect,void* path,int8_t* open){std::lock_guard lock(g_mutex);mask_runtime::CurveSnapshot c;if(!effect||!open||!checked(path,c))return 4;*open=c.open?1:0;return 0;}
