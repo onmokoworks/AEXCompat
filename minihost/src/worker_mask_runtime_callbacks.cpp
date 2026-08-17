@@ -2014,7 +2014,7 @@ int32_t __cdecl delete_mask_outline_feather(void* outline, int32_t index) {
 namespace aexcompat::l2_detail {
 
 extern OpaqueHostObject g_effect;
-extern OpaqueHostObject g_layer;
+extern aexcompat::worker_runtime::bee_facade::LayerObject g_layer;
 using aexcompat::world_safety::bounded_typed_world;
 
 void raise_mask_access_violation() {

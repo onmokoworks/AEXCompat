@@ -302,6 +302,13 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-pf-private-callbacks", "pf_private_callbacks",
        hooks.simple.pf_private_callbacks, 1,
        ",\"reached_via_in_data_utils\":true"},
+      // The BEE.dll-compatible scene object behind AEGP_GetEffectLayer's handle
+      // and the "AE Timecode Helper Suite" v1 gate suite (issue #1210): the
+      // production hand-out publishes the observed BEE_AVLayer / BEE_Item /
+      // BEE_Project layout, and every unobserved vtable slot traps by index.
+      {L"--self-test-bee-scene-facade", "bee_scene_facade",
+       hooks.simple.bee_scene_facade, 1,
+       ",\"reached_via_aegp_pf_interface_suite\":true"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",

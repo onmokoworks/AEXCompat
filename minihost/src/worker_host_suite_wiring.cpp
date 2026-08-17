@@ -726,6 +726,7 @@ bool configure_component_suite_catalog() {
       {"PF Effect UI Suite", 1, nullptr, &provide_effect_ui1},
       {"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1},
       {"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2},
+      {"AE Timecode Helper Suite", 1, nullptr, &provide_ae_timecode_helper1},
       {aexcompat::worker_runtime::suite_call_slot_probe::
            kPrivateEffectSuiteName,
        aexcompat::worker_runtime::suite_call_slot_probe::

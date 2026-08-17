@@ -52,6 +52,7 @@
 #include "gpu_memory_world_transport.hpp"
 #include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
+#include "worker_bee_scene_facade.hpp"
 #include "worker_extended_diag.hpp"
 #include "worker_callback_diagnostics.hpp"
 #include "aex_string_table.hpp"
