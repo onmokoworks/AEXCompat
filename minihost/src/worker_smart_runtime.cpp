@@ -196,9 +196,17 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   // made on a thread other than the selector thread cannot be bound safely.
   using callback_diagnostics::Callback;
   using callback_diagnostics::Reason;
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:pre_checkout_layer index=" << index
+              << " id=" << checkout_id << " time=" << what_time << "/"
+              << time_scale << " step=" << time_step << "\n" << std::flush;
   if (!g_active_state)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::NoActiveState);
-  if (time_step <= 0 || time_scale == 0)
+  // time_step == 0 is accepted, same acceptance as checkout_param: ForceMB and
+  // WideTime (AE-shipped) request their input layer with a zero step and
+  // render in AE (the #777 inference form). The step is recorded for
+  // diagnostics only; negative stays refused.
+  if (time_step < 0 || time_scale == 0)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::InvalidArguments);
   auto& runtime = *g_active_state;
   const bool current_time =

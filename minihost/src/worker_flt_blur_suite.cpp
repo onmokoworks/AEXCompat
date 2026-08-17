@@ -2,6 +2,8 @@
 
 #include "worker_world_registry.hpp"
 
+#include <iostream>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -186,13 +188,19 @@ void convolve_axis(const std::vector<float>& input, std::vector<float>& output,
 int32_t blur_worlds(const world_safety::DispatchWorldFormat& source,
                     const world_safety::DispatchWorldFormat& destination,
                     float radius_x, float radius_y, int32_t flags,
-                    bool gaussian, int32_t iterations) {
+                    bool gaussian, int32_t iterations,
+                    const char** reason = nullptr) {
+  const auto refused = [reason](const char* value) {
+    if (reason) *reason = value;
+    return kBadCallbackParam;
+  };
   int32_t pixel_bytes{};
-  if (!compatible_worlds(source, destination, pixel_bytes) ||
-      !valid_radius(radius_x) || !valid_radius(radius_y) ||
+  if (!compatible_worlds(source, destination, pixel_bytes))
+    return refused("world_pair");
+  if (!valid_radius(radius_x) || !valid_radius(radius_y) ||
       !valid_flags(flags) || iterations <= 0 ||
       iterations > kMaximumIterations)
-    return kBadCallbackParam;
+    return refused("invalid_arguments");
   try {
     const std::size_t values = static_cast<std::size_t>(source.width) *
         source.height * 4;
@@ -225,8 +233,98 @@ int32_t blur_worlds(const world_safety::DispatchWorldFormat& source,
     else store_pixels<float>(current, destination);
     return 0;
   } catch (const std::bad_alloc&) {
-    return kBadCallbackParam;
+    return refused("allocation_failed");
   }
+}
+
+// Answers a refused FLT call naming the condition that refused it, the
+// copy_denied shape (worker_pf_world_transform_runtime.cpp, issue #1037): the
+// plug-in folds the 4 into its own frame error and names neither the callback
+// nor the argument, so without the marker the refusing check is recoverable
+// only by rebuilding the worker with prints (issue #1069 filed Cartoon as
+// "frame_error:4 with no trace" for exactly this gap). Always on; both fields
+// are lower-case identifiers, the shape the broker's `callback_denials`
+// parser vouches for.
+int32_t flt_denied(const char* callback, const char* reason) {
+  std::cerr << "stage:callback_denied callback=" << callback
+            << " reason=" << reason << "\n" << std::flush;
+  return kBadCallbackParam;
+}
+
+// A blur operand the dispatch-format registry has never seen, admitted the way
+// copy_world8 admits its foreign operands (issue #1037's Wave Warp pattern):
+// by the declared-stride bounds check, not by ownership. Cartoon builds its
+// edge-detection scratch in its own allocations, wraps them in stack
+// PF_EffectWorlds, and hands both to FLT box_blur; AE's FLT.dll takes any
+// PF_World the caller can describe, and refusing them failed the whole frame
+// with 4 (issue #1069). The same two refusals survive for the same reasons as
+// copy_world8's: a reference the registry already knows (a registered struct
+// gone stale, or a re-declaration of a registered pixel base) stays the
+// registry's fail-closed mismatch refusal, and a pixel base the host allocated
+// keeps its own allocation's geometry check authoritative. Both guards hold on
+// the thread that holds the dispatch scope (the registry is thread_local),
+// which is every thread the host itself dispatches on; a plug-in-spawned
+// thread bypasses the scope and is contained by the worker process, the same
+// residual copy_world8 documents.
+bool resolve_foreign_blur_world(const void* world, int32_t pixel_format,
+                                world_safety::DispatchWorldFormat& result) {
+  if (!g_hooks.bounded_world || !g_hooks.world_reference_known ||
+      !g_hooks.world_pixels_owned || !g_hooks.session_pixel_format ||
+      g_hooks.world_reference_known(world))
+    return false;
+  auto* mutable_world = const_cast<void*>(world);
+  if (g_hooks.world_pixels_owned(mutable_world)) return false;
+  const int32_t pixel_bytes = bytes_per_pixel(pixel_format);
+  unsigned char* pixels{};
+  int32_t rowbytes{}, width{}, height{};
+  if (!pixel_bytes || !g_hooks.bounded_world(mutable_world, pixel_bytes, pixels,
+                                             rowbytes, width, height))
+    return false;
+  result = {};
+  result.world = world;
+  result.data = pixels;
+  result.width = width;
+  result.height = height;
+  result.rowbytes = rowbytes;
+  result.pixel_format = pixel_format;
+  return true;
+}
+
+int32_t session_pixel_format_value() {
+  const char* name = g_hooks.session_pixel_format
+      ? g_hooks.session_pixel_format() : nullptr;
+  if (!name) return 0;
+  if (std::strcmp(name, "argb8") == 0) return world_registry::kPixelFormatArgb32;
+  if (std::strcmp(name, "argb16") == 0) return world_registry::kPixelFormatArgb64;
+  if (std::strcmp(name, "argb32f") == 0) return world_registry::kPixelFormatArgb128;
+  return 0;
+}
+
+// Resolves the source/destination pair, admitting foreign operands against a
+// format anchor: the resolved side's format when one side is known, else the
+// session's negotiated pixel format (Cartoon passes two foreign scratch worlds
+// inside an argb32f render, so there is no resolved side to borrow from). A
+// misanchored foreign world fails closed in the stride check -
+// `bounded_world` requires rowbytes >= width * pixel_bytes at the anchor's
+// pixel size, and `compatible_worlds` in the caller re-checks the pair as a
+// whole - so the anchor can under-read a wider world's row but never walk
+// outside what the plug-in declared.
+bool resolve_blur_worlds(const void* source_world, void* destination_world,
+                         world_safety::DispatchWorldFormat& source,
+                         world_safety::DispatchWorldFormat& destination) {
+  if (!g_hooks.resolve_world) return false;
+  const bool source_known = g_hooks.resolve_world(source_world, source);
+  const bool destination_known =
+      g_hooks.resolve_world(destination_world, destination);
+  if (source_known && destination_known) return true;
+  const int32_t anchor = source_known ? source.pixel_format
+      : destination_known ? destination.pixel_format
+                          : session_pixel_format_value();
+  if (!bytes_per_pixel(anchor)) return false;
+  if (!source_known && !resolve_foreign_blur_world(source_world, anchor, source))
+    return false;
+  return destination_known ||
+      resolve_foreign_blur_world(destination_world, anchor, destination);
 }
 
 int32_t __cdecl gaussian_blur(
@@ -236,12 +334,14 @@ int32_t __cdecl gaussian_blur(
   if (!g_hooks.effect_ref || effect_ref != g_hooks.effect_ref ||
       !g_hooks.resolve_world || (quality != 0 && quality != 1) ||
       !valid_progress(progress_base, progress_final))
-    return kBadCallbackParam;
+    return flt_denied("flt_gaussian_blur", "invalid_arguments");
   world_safety::DispatchWorldFormat source{}, destination{};
-  if (!g_hooks.resolve_world(source_world, source) ||
-      !g_hooks.resolve_world(destination_world, destination))
-    return kBadCallbackParam;
-  return blur_worlds(source, destination, radius_x, radius_y, flags, true, 1);
+  if (!resolve_blur_worlds(source_world, destination_world, source, destination))
+    return flt_denied("flt_gaussian_blur", "unresolved_world");
+  const char* reason = "";
+  const int32_t result = blur_worlds(source, destination, radius_x, radius_y,
+                                     flags, true, 1, &reason);
+  return result == 0 ? 0 : flt_denied("flt_gaussian_blur", reason);
 }
 
 int32_t __cdecl box_blur(
@@ -250,13 +350,14 @@ int32_t __cdecl box_blur(
     int32_t progress_final, void* destination_world) {
   if (!g_hooks.effect_ref || effect_ref != g_hooks.effect_ref ||
       !g_hooks.resolve_world || !valid_progress(progress_base, progress_final))
-    return kBadCallbackParam;
+    return flt_denied("flt_box_blur", "invalid_arguments");
   world_safety::DispatchWorldFormat source{}, destination{};
-  if (!g_hooks.resolve_world(source_world, source) ||
-      !g_hooks.resolve_world(destination_world, destination))
-    return kBadCallbackParam;
-  return blur_worlds(source, destination, radius_x, radius_y, flags, false,
-                     iterations);
+  if (!resolve_blur_worlds(source_world, destination_world, source, destination))
+    return flt_denied("flt_box_blur", "unresolved_world");
+  const char* reason = "";
+  const int32_t result = blur_worlds(source, destination, radius_x, radius_y,
+                                     flags, false, iterations, &reason);
+  return result == 0 ? 0 : flt_denied("flt_box_blur", reason);
 }
 
 // AE's FLT_ComputeDirectionalBlurRadii, byte-for-byte from FLT.dll (0x1800324c0):
@@ -330,14 +431,13 @@ int32_t __cdecl directional_blur(
       !std::isfinite(direction_degrees) || !std::isfinite(downsample_x) ||
       !std::isfinite(downsample_y) || downsample_x <= 0.0 ||
       downsample_y <= 0.0)
-    return kBadCallbackParam;
+    return flt_denied("flt_directional_blur", "invalid_arguments");
   world_safety::DispatchWorldFormat source{}, destination{};
-  if (!g_hooks.resolve_world(source_world, source) ||
-      !g_hooks.resolve_world(destination_world, destination))
-    return kBadCallbackParam;
+  if (!resolve_blur_worlds(source_world, destination_world, source, destination))
+    return flt_denied("flt_directional_blur", "unresolved_world");
   int32_t pixel_bytes{};
   if (!compatible_worlds(source, destination, pixel_bytes))
-    return kBadCallbackParam;
+    return flt_denied("flt_directional_blur", "world_pair");
 
   const double radians = direction_degrees * kDegreesToRadians;
   const double sin_theta = std::sin(radians);
@@ -357,7 +457,7 @@ int32_t __cdecl directional_blur(
   // matching slot 2's bounded_ceil_to_int guard.
   if (!std::isfinite(half_length) ||
       half_length > static_cast<double>(kMaximumDirectionalTaps))
-    return kBadCallbackParam;
+    return flt_denied("flt_directional_blur", "extent_bound");
   const int32_t taps = static_cast<int32_t>(std::ceil(half_length));
   // Signed half-vector of the centered smear (both directions blend around the
   // pixel, so the sign only orients the axis, not the result).
@@ -409,7 +509,7 @@ int32_t __cdecl directional_blur(
     else store_pixels<float>(output, destination);
     return 0;
   } catch (const std::bad_alloc&) {
-    return kBadCallbackParam;
+    return flt_denied("flt_directional_blur", "allocation_failed");
   }
 }
 
@@ -553,6 +653,37 @@ bool selftest() {
           g_hooks.effect_ref, nullptr, 1.0f, 0.0f, 1,
           kHorizontal | kAllChannels, 0, 1, &destination_world) ==
           kBadCallbackParam;
+
+  // Foreign-operand admission (issue #1069, the copy_world8 latitude from
+  // issue #1037): worlds the registry never saw are admitted by the
+  // declared-stride bounds check. Cartoon hands box_blur two of its own
+  // scratch worlds, so both the one-sided anchor (format borrowed from the
+  // resolved side) and the both-foreign anchor (the session's negotiated
+  // format, "argb8" here) must answer. A re-declaration of a registered
+  // world's pixel base under a different geometry stays refused: that
+  // reference is the registry's to validate, and it must not degrade into
+  // foreign admission.
+  std::array<uint8_t, width * height * 4> foreign_source{
+      255, 0, 0, 0, 255, 255, 60, 30, 255, 0, 0, 0};
+  std::array<uint8_t, width * height * 4> foreign_destination{};
+  auto foreign_source_world = make_world(foreign_source.data(), width * 4);
+  auto foreign_destination_world =
+      make_world(foreign_destination.data(), width * 4);
+  destination = {};
+  ok = ok && suite->box_blur(
+      g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+      kHorizontal | kAllChannels, 0, 1, &destination_world) == 0 &&
+      destination == expected8;
+  ok = ok && suite->box_blur(
+      g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+      kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) == 0 &&
+      foreign_destination == expected8;
+  auto aliased_registered_base = make_world(source.data(), width * 4);
+  aliased_registered_base.height = height + 1;
+  ok = ok && suite->box_blur(
+      g_hooks.effect_ref, &aliased_registered_base, 1.0f, 0.0f, 1,
+      kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) ==
+      kBadCallbackParam;
 
   // compute_directional_blur_radii (slot 2): the smear projected onto x/y,
   // rounded up. At 90 degrees the blur is horizontal, so x takes the whole

@@ -261,26 +261,29 @@ int32_t __cdecl abort_render(void* effect_ref) {
   return 0;
 }
 
-// `current > total` is accepted and clamped, not refused. Wave Warp's RENDER
-// reports progress as `2 * row + 3` against a total of `2 * height`, so its
-// final row always reports `total + 1`; refusing that answered 4 for the last
-// row of every frame, which the plug-in surfaced as "insufficient memory for
-// Wave Warp." (issue #1037). That a first-party effect ships this way and
-// renders in AE is the evidence that AE tolerates an overshooting progress
-// report (an inference from the plug-in's behaviour, not an observation of
-// AE's own callback - the same inference #777 records for a null effect_ref).
-// The remaining refusals answer with an always-on denial marker because this
-// callback's 4 is otherwise invisible: it reaches the plug-in, which folds it
-// into its own frame error and names neither the callback nor the argument.
-// The marker is latched to the first refusal per reason per worker process:
-// progress is a per-scanline callback, and a plug-in that keeps passing the
-// same bad arguments would otherwise stream an unbounded line per row into
-// the captured stderr (the other `stage:callback_denied` emitters sit on
-// per-call callbacks and do not have this problem). Per reason, not one shot
-// for the whole callback: a probing null-ref call during setup must not spend
-// the only line and leave a later range refusal traceless - the exact gap
-// this marker exists to close. One line per reason carries the diagnosis;
-// the broker's parser deduplicates repeats anyway.
+// Out-of-range progress values are accepted and clamped, not refused. Wave
+// Warp's RENDER reports progress as `2 * row + 3` against a total of
+// `2 * height`, so its final row always reports `total + 1`; refusing that
+// answered 4 for the last row of every frame, which the plug-in surfaced as
+// "insufficient memory for Wave Warp." (issue #1037). The same shape recurred
+// on the rest of the range: PW reports `current = -1` (issue #1079) and
+// Write-on reports `total = 0` (issue #1055), and both fold the refusal into
+// the same frame_error:4. That first-party effects ship all three shapes and
+// render in AE is the evidence that AE reads PF_PROGRESS as an abort poll and
+// does not validate the ratio (an inference from the plug-ins' behaviour, not
+// an observation of AE's own callback - the same inference #777 records for a
+// null effect_ref). A non-positive total carries no ratio, so the call counts
+// but the last-progress telemetry keeps its previous value.
+// The remaining refusal (null effect_ref) answers with an always-on denial
+// marker because this callback's 4 is otherwise invisible: it reaches the
+// plug-in, which folds it into its own frame error and names neither the
+// callback nor the argument. The marker is latched to the first refusal per
+// reason per worker process: progress is a per-scanline callback, and a
+// plug-in that keeps passing the same bad arguments would otherwise stream an
+// unbounded line per row into the captured stderr (the other
+// `stage:callback_denied` emitters sit on per-call callbacks and do not have
+// this problem). One line per reason carries the diagnosis; the broker's
+// parser deduplicates repeats anyway.
 int32_t __cdecl report_progress(void* effect_ref, int32_t current, int32_t total) {
   static std::atomic<uint32_t> reported_reasons{};
   const auto denied = [](uint32_t reason_bit, const char* reason, int64_t value) {
@@ -290,11 +293,11 @@ int32_t __cdecl report_progress(void* effect_ref, int32_t current, int32_t total
     return 4;
   };
   if (!effect_ref) return denied(1u << 0, "null_effect_ref", 0);
-  if (total <= 0) return denied(1u << 1, "total_range", total);
-  if (current < 0) return denied(1u << 2, "current_range", current);
   ++g_progress_calls;
-  g_last_progress_current = (std::min)(current, total);
-  g_last_progress_total = total;
+  if (total > 0) {
+    g_last_progress_current = std::clamp(current, 0, total);
+    g_last_progress_total = total;
+  }
   return 0;
 }
 

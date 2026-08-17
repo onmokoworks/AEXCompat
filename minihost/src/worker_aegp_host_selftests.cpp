@@ -78,6 +78,20 @@ bool verify_pre_checkout_result_contract() {
   host_smart_state().full_resolution_width = 1280;
   host_smart_state().full_resolution_height = 720;
   passed = verify_pre_checkout_result_case(10, 11, 1280, 720) && passed;
+  // time_step == 0 is a request shape AE-shipped effects use (ForceMB and
+  // WideTime, issue #1052) and must be answered like any current-time
+  // checkout; a negative step stays refused.
+  {
+    std::array<std::byte, kCheckoutResultBytes> result{};
+    passed = aexcompat::worker_runtime::smart::pre_checkout_layer(
+                 nullptr, 0, 0, nullptr, host_smart_state().current_time, 0,
+                 host_smart_state().current_time_scale, result.data()) == 0 &&
+        passed;
+    passed = aexcompat::worker_runtime::smart::pre_checkout_layer(
+                 nullptr, 0, 0, nullptr, host_smart_state().current_time, -1,
+                 host_smart_state().current_time_scale, result.data()) == 4 &&
+        passed;
+  }
   host_smart_state().width = saved_width;
   host_smart_state().height = saved_height;
   return passed;

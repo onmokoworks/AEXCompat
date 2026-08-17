@@ -14,6 +14,8 @@
 
 using namespace aexcompat::worker_runtime::classic;
 
+extern "C" int32_t __cdecl report_progress(void*, int32_t, int32_t);
+
 namespace {
 std::atomic<int> g_context_observations{};
 std::atomic<int> g_table_mismatches{};
@@ -144,6 +146,28 @@ int32_t __cdecl observe_frame_setup_checkout_time(
 }  // namespace
 
 int main() {
+  // PF_PROGRESS is an abort poll, not a validated ratio: AE-shipped effects
+  // report current=-1 (PW, issue #1079), total=0 (Write-on, issue #1055), and
+  // current>total (Wave Warp, issue #1037), and all render in AE. The host
+  // accepts and clamps; only a null effect_ref stays refused. A non-positive
+  // total leaves the last-progress telemetry untouched (no ratio to record).
+  {
+    auto& telemetry = host_callback_telemetry();
+    int marker{};
+    if (report_progress(nullptr, 1, 2) != 4) return 40;
+    if (report_progress(&marker, -1, 10) != 0 ||
+        telemetry.last_progress_current != 0 ||
+        telemetry.last_progress_total != 10) return 41;
+    if (report_progress(&marker, 11, 10) != 0 ||
+        telemetry.last_progress_current != 10 ||
+        telemetry.last_progress_total != 10) return 42;
+    if (report_progress(&marker, 5, 0) != 0 ||
+        telemetry.last_progress_current != 10 ||
+        telemetry.last_progress_total != 10) return 43;
+    if (report_progress(&marker, 5, -3) != 0 ||
+        telemetry.last_progress_total != 10) return 44;
+    if (telemetry.progress_calls != 4) return 45;
+  }
   ParameterDefinition outer_definition{};
   outer_definition[0] = std::byte{0x11};
   Context outer;
