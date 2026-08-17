@@ -177,3 +177,18 @@ def test_utility_callback_table_has_no_unwired_slot_on_all_workers() -> None:
         "--self-test-utility-callback-table", "utility_callback_table"
     ):
         pass
+
+
+def test_pf_utils_composite_rect_is_reachable_through_in_data_utils() -> None:
+    """`PF_UtilCallbacks.composite_rect` on every worker, called the way a
+    plug-in calls it: the pointer is read back out of the installed
+    `in_data->utils` block and invoked (issue #1252, Write_on's RENDER jumped
+    to address 0 through the slot). The route checks BEHIND / COPY / IN_FRONT
+    against known pixels and that malformed calls fail closed with the
+    destination untouched; the verdict is what is asserted here (the route's
+    metadata is a constant and would only be compared against itself).
+    """
+    for _ in _all_workers(
+        "--self-test-pf-utils-composite-rect", "pf_utils_composite_rect"
+    ):
+        pass

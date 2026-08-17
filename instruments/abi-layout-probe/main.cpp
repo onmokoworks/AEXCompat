@@ -174,6 +174,11 @@ static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, fmod
 static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log) == 280);
 static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, log10) == 288);
 static_assert(offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, tan) == 320);
+// composite_rect, between end_sampling and blend (issue #1252): the contract
+// left it out, so the host wired blend at 0x30 and left 0x28 null; Write_on's
+// RENDER composites the input layer behind its strokes through it and jumped
+// to address 0.
+static_assert(offsetof(PF_UtilCallbacks, composite_rect) == 40);
 
 template <typename T>
 void field(const char* name, std::size_t offset, bool& first) {
@@ -359,6 +364,10 @@ int main() {
   field<decltype(PF_ANSICallbacks::tan)>("utils.ansi_tan",
       offsetof(PF_UtilCallbacks, ansi) + offsetof(PF_ANSICallbacks, tan), first);
   field<decltype(PF_UtilCallbacks::colorCB)>("utils.color_callbacks", offsetof(PF_UtilCallbacks, colorCB), first);
+  // composite_rect sits between end_sampling and blend. It was left out of the
+  // emitted contract, so the host never wired it and Write_on's RENDER (paint
+  // style "On Original Image") jumped to address 0 (issue #1252).
+  field<decltype(PF_UtilCallbacks::composite_rect)>("utils.composite_rect", offsetof(PF_UtilCallbacks, composite_rect), first);
   field<decltype(PF_UtilCallbacks::blend)>("utils.blend", offsetof(PF_UtilCallbacks, blend), first);
   field<decltype(PF_UtilCallbacks::convolve)>("utils.convolve", offsetof(PF_UtilCallbacks, convolve), first);
   field<decltype(PF_UtilCallbacks::copy)>("utils.copy", offsetof(PF_UtilCallbacks, copy), first);

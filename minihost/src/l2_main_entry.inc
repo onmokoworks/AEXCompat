@@ -440,6 +440,22 @@ int32_t __cdecl diag_dispose_world(void* effect_ref, void* world) {
       !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
              : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
+// PF_UtilCallbacks.composite_rect (0x28). Same implementation the World
+// Transform Suite hands out as its slot 0, so the two entry points agree on
+// arguments, bounds and transfer modes. Write_on's RENDER calls it with the
+// input layer as source and the output as destination (issue #1252).
+int32_t __cdecl diag_composite_rect(void* effect_ref, ::LegacyRect* source_rect,
+                                   int32_t source_opacity, void* source_world,
+                                   int32_t destination_x, int32_t destination_y,
+                                   int32_t field, int32_t transfer_mode,
+                                   void* destination_world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::CompositeRect,
+      composite_rect8(effect_ref, source_rect, source_opacity, source_world, destination_x,
+                      destination_y, field, transfer_mode, destination_world),
+      !effect_ref || !source_rect || !source_world || !destination_world
+          ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
 int32_t __cdecl diag_transfer_rect(void* effect_ref, int32_t quality, uint32_t mode_flags,
                                   int32_t field, const ::LegacyRect* source_rect,
                                   const void* source_world, const void* composite_mode,
@@ -569,6 +585,11 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
   sources.subpixel_sample = reinterpret_cast<void*>(&subpixel_sample8);
   sources.area_sample = reinterpret_cast<void*>(&area_sample8);
   sources.end_sampling = reinterpret_cast<void*>(&end_sampling8);
+  // composite_rect (0x28) had no contract offset until issue #1252, so the
+  // table handed plug-ins a null pointer there: Write_on's RENDER (paint style
+  // "On Original Image") composites the input behind its strokes through this
+  // slot and jumped to address 0.
+  sources.composite_rect = reinterpret_cast<void*>(&diag_composite_rect);
   sources.blend = reinterpret_cast<void*>(&diag_blend_world);
   sources.convolve = reinterpret_cast<void*>(&diag_convolve_world);
   sources.copy = reinterpret_cast<void*>(&diag_copy_world);
@@ -673,6 +694,106 @@ bool verify_production_utility_callback_table() {
     std::cerr << "utility_callback_table: unwired block=" << slot.block
               << " offset=" << slot.offset << "\n" << std::flush;
   return unwired.empty();
+}
+
+// PF_UtilCallbacks.composite_rect reached the way a plug-in reaches it: read
+// the pointer back out of the installed `in_data->utils` block at the generated
+// offset and call through it (issue #1252, Write_on's RENDER). The table check
+// above proves the slot is non-null; this proves the pointer behind it is the
+// composite that PF_Xfer_BEHIND / COPY / IN_FRONT describe and that malformed
+// arguments come back as PF_Err_BAD_CALLBACK_PARAM with the destination
+// untouched, rather than as a write through an unchecked world.
+bool verify_production_composite_rect_callback() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  using CompositeRect = int32_t(__cdecl*)(void*, ::LegacyRect*, int32_t, void*, int32_t,
+                                          int32_t, int32_t, int32_t, void*);
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  void* utils{};
+  std::memcpy(&utils, state.input.data() + contract::IN_UTILS_OFFSET, sizeof(utils));
+  CompositeRect composite{};
+  std::memcpy(&composite, static_cast<const std::byte*>(utils) + contract::UTILS_COMPOSITE_RECT_OFFSET,
+              sizeof(composite));
+  if (!composite) {
+    std::cerr << "utils_composite_rect: slot at offset " << contract::UTILS_COMPOSITE_RECT_OFFSET
+              << " is null\n" << std::flush;
+    return false;
+  }
+  void* effect_ref{};
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET, sizeof(effect_ref));
+
+  // Two 2x1 ARGB8 worlds registered the way the classic render path registers
+  // the input and output worlds. Layout offsets are the LAYER_* contract ones.
+  DispatchWorldFormatScope worlds;
+  auto make_world = [&](std::array<std::byte, aexcompat::world_safety::kEffectWorldSize>& world, unsigned char* pixels) {
+    world.fill(std::byte{});
+    const int32_t rowbytes = 8, width = 2, height = 1;
+    std::memcpy(world.data() + contract::LAYER_DATA_OFFSET, &pixels, sizeof(pixels));
+    std::memcpy(world.data() + contract::LAYER_ROWBYTES_OFFSET, &rowbytes, sizeof(rowbytes));
+    std::memcpy(world.data() + contract::LAYER_WIDTH_OFFSET, &width, sizeof(width));
+    std::memcpy(world.data() + contract::LAYER_HEIGHT_OFFSET, &height, sizeof(height));
+    return worlds.register_world(world.data(), kPixelFormatArgb32);
+  };
+  // Source: two opaque pixels. Destination: pixel 0 transparent, pixel 1 opaque.
+  std::array<unsigned char, 8> source{255, 200, 100, 50, 255, 10, 20, 30};
+  std::array<unsigned char, 8> destination{0, 0, 0, 0, 255, 90, 80, 70};
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> source_world{}, destination_world{};
+  if (!make_world(source_world, source.data()) ||
+      !make_world(destination_world, destination.data())) {
+    std::cerr << "utils_composite_rect: world registration failed\n" << std::flush;
+    return false;
+  }
+  ::LegacyRect whole{0, 0, 2, 1};
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "utils_composite_rect: " << what << "\n" << std::flush;
+  };
+  // BEHIND (Write_on's mode): a transparent destination pixel takes the source,
+  // an opaque one keeps its own value.
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 0, 1, &destination_world) == 0,
+        "PF_Xfer_BEHIND call failed");
+  check((destination == std::array<unsigned char, 8>{255, 200, 100, 50, 255, 90, 80, 70}),
+        "PF_Xfer_BEHIND result");
+  // COPY at full opacity replaces the destination outright.
+  destination = {0, 0, 0, 0, 255, 90, 80, 70};
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 0, 0, &destination_world) == 0,
+        "PF_Xfer_COPY call failed");
+  check(destination == source, "PF_Xfer_COPY result");
+  // IN_FRONT with an opaque source covers the destination.
+  destination = {0, 0, 0, 0, 255, 90, 80, 70};
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 0, 2, &destination_world) == 0,
+        "PF_Xfer_IN_FRONT call failed");
+  check(destination == source, "PF_Xfer_IN_FRONT result");
+  // Fail-closed: each malformed call returns PF_Err_BAD_CALLBACK_PARAM (516) and
+  // leaves the destination as it was.
+  const std::array<unsigned char, 8> before = destination;
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 0, 3, &destination_world) == kPfBadCallbackParam,
+        "transfer mode 3 accepted");
+  check(composite(effect_ref, &whole, 256, &source_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "opacity 256 accepted");
+  check(composite(effect_ref, nullptr, 255, &source_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "null source rect accepted");
+  check(composite(nullptr, &whole, 255, &source_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "null effect_ref accepted");
+  check(composite(effect_ref, &whole, 255, nullptr, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "null source world accepted");
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 3, 1, &destination_world) == kPfBadCallbackParam,
+        "field 3 accepted");
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> foreign_world{};
+  unsigned char foreign_pixels[8]{};
+  unsigned char* foreign_data = foreign_pixels;
+  const int32_t foreign_rowbytes = 8, foreign_width = 2, foreign_height = 1;
+  std::memcpy(foreign_world.data() + contract::LAYER_DATA_OFFSET, &foreign_data, sizeof(foreign_data));
+  std::memcpy(foreign_world.data() + contract::LAYER_ROWBYTES_OFFSET, &foreign_rowbytes, sizeof(foreign_rowbytes));
+  std::memcpy(foreign_world.data() + contract::LAYER_WIDTH_OFFSET, &foreign_width, sizeof(foreign_width));
+  std::memcpy(foreign_world.data() + contract::LAYER_HEIGHT_OFFSET, &foreign_height, sizeof(foreign_height));
+  check(composite(effect_ref, &whole, 255, &foreign_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "unregistered source world accepted");
+  check(destination == before, "a rejected call wrote the destination");
+  return passed;
 }
 }  // namespace aexcompat::l2_detail
 
