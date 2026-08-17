@@ -18,6 +18,7 @@ fn render_with_artifact(
     parameter_animation: Option<&[ParameterAnimation]>,
     timed_layers: Option<&[TimedLayerImage]>,
     dependencies: Vec<ApprovedImageArtifact>,
+    explicit_dependency_search_dirs: Vec<PathBuf>,
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
     deep_png_output: bool,
     artifact_kind: Option<RenderArtifactKind>,
@@ -426,6 +427,7 @@ fn render_with_artifact(
             pixel_format,
             deep_png_output,
             dependencies: &dependencies,
+            explicit_dependency_search_dirs: &explicit_dependency_search_dirs,
             rgba: &rgba,
             width,
             height,
@@ -562,6 +564,10 @@ struct SessionWrapperRequest<'a> {
     pixel_format: RenderPixelFormat,
     deep_png_output: bool,
     dependencies: &'a [ApprovedImageArtifact],
+    /// Operator-approved in-place runtime roots. These are validated again by
+    /// the secure dispatch boundary and are kept distinct from artifact
+    /// identities: selecting a directory never manufactures a DLL approval.
+    explicit_dependency_search_dirs: &'a [PathBuf],
     rgba: &'a [u8],
     width: u32,
     height: u32,
@@ -642,6 +648,11 @@ fn render_classic_via_length_one_session(
             dependency_search_dirs.push(parent.to_path_buf());
         }
     }
+    for root in request.explicit_dependency_search_dirs {
+        if !dependency_search_dirs.iter().any(|seen| seen == root) {
+            dependency_search_dirs.push(root.clone());
+        }
+    }
     let session_request = SessionOpenRequest {
         repository: request.repository,
         plugin_path: request.plugin_path,
@@ -660,6 +671,7 @@ fn render_classic_via_length_one_session(
         alpha_as_coverage_params: request.alpha_as_coverage_params,
         conformance_render_settings: request.conformance_render_settings,
         dependencies: Vec::new(),
+        companions: Vec::new(),
         // #816 made a non-empty search root set part of the in-place protocol,
         // so an empty one fails session open for every route that reaches here.
         dependency_search_dirs,
@@ -1084,6 +1096,9 @@ pub struct InteractiveSessionOpen<'a> {
     /// inspection state.
     pub selection: InteractiveSessionSelection,
     pub dependencies: Vec<ApprovedImageArtifact>,
+    /// Explicit in-place runtime roots approved by the interactive caller.
+    /// Secure launch canonicalizes, bounds, and revalidates this set.
+    pub dependency_search_dirs: Vec<PathBuf>,
     pub width: u32,
     pub height: u32,
     pub pixel_format: RenderPixelFormat,
@@ -1118,6 +1133,27 @@ pub struct InteractiveRenderSession {
 #[cfg(windows)]
 impl InteractiveRenderSession {
     pub fn open(request: InteractiveSessionOpen<'_>) -> io::Result<Self> {
+        let mut dependency_search_dirs = vec![
+            request
+                .plugin_path
+                .parent()
+                .ok_or_else(|| invalid("interactive plugin path has no parent directory"))?
+                .to_path_buf(),
+        ];
+        for dependency in &request.dependencies {
+            let parent = dependency
+                .path
+                .parent()
+                .ok_or_else(|| invalid("interactive dependency has no parent directory"))?;
+            if !dependency_search_dirs.iter().any(|root| root == parent) {
+                dependency_search_dirs.push(parent.to_path_buf());
+            }
+        }
+        for root in request.dependency_search_dirs {
+            if !dependency_search_dirs.iter().any(|seen| seen == &root) {
+                dependency_search_dirs.push(root);
+            }
+        }
         let session = crate::render_session::RenderSession::open(
             crate::render_session::SessionOpenRequest {
                 repository: request.repository,
@@ -1140,13 +1176,8 @@ impl InteractiveRenderSession {
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
                 dependencies: request.dependencies,
-                dependency_search_dirs: vec![
-                    request
-                        .plugin_path
-                        .parent()
-                        .ok_or_else(|| invalid("interactive plugin path has no parent directory"))?
-                        .to_path_buf(),
-                ],
+                companions: Vec::new(),
+                dependency_search_dirs,
                 width: request.width,
                 height: request.height,
                 pixel_format: request.pixel_format,

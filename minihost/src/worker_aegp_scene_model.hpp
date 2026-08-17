@@ -110,12 +110,30 @@ inline constexpr std::size_t kBorrowedHandleCapacity = 128;
 
 class Registry {
  public:
+  struct BorrowedHandleStatistics {
+    uint64_t issues{};
+    uint64_t reuses{};
+    uint64_t exhaustion_failures{};
+    std::size_t live{};
+  };
+
+  struct ObjectRecordStatistics {
+    uint64_t issues{};
+    uint64_t reuses{};
+    uint64_t exhaustion_failures{};
+    std::size_t live{};
+  };
+
   struct MutationCheckpoint {
     std::array<ObjectSnapshot, kObjectCapacity> snapshots{};
     std::array<bool, kObjectCapacity> live{};
+    std::array<uintptr_t, kObjectCapacity> scheduler_keys{};
     std::size_t object_count{};
     std::size_t project_count{};
-    uint64_t next_dynamic_object_id{};
+    uint64_t reclaimable_object_slots{};
+    uint64_t object_record_issues{};
+    uint64_t object_record_reuses{};
+    uint64_t object_record_exhaustions{};
     Identity active_project{};
     Identity active_item{};
     uint64_t handle_table_fingerprint{};
@@ -210,13 +228,17 @@ class Registry {
       const MutationCheckpoint& checkpoint) noexcept;
   uint64_t handle_table_fingerprint() const noexcept;
   uint64_t fingerprint() const noexcept;
+  BorrowedHandleStatistics borrowed_handle_statistics() const noexcept;
+  ObjectRecordStatistics object_record_statistics() const noexcept;
 
  private:
   struct ObjectRecord {
     ObjectSnapshot snapshot{};
+    uintptr_t scheduler_key_value{};
     bool live{};
   };
-  struct alignas(std::max_align_t) BorrowedToken {
+  struct BorrowedToken {
+    uintptr_t handle_value{};
     uint64_t lease_identity{};
   };
   struct BorrowedLease {
@@ -226,8 +248,6 @@ class Registry {
     bool issued{};
     bool live{};
   };
-  static_assert(alignof(BorrowedToken) >= alignof(std::max_align_t));
-
   bool append(ObjectKind kind, uint64_t project_id, uint64_t object_id,
               Identity owner, Identity related_item, Identity parent_layer,
               ItemKind item_kind, int32_t local_index, void* legacy_handle,
@@ -237,6 +257,12 @@ class Registry {
   bool is_item_kind(ObjectKind kind) const noexcept;
   bool token_slot_for_address_locked(
       const void* handle, std::size_t& slot) const noexcept;
+  bool available_borrowed_slot_locked(std::size_t& slot,
+                                      bool& reused) const noexcept;
+  void* issue_borrowed_locked(std::size_t slot, bool reused,
+                              Identity target,
+                              int32_t possession_id) noexcept;
+  static bool is_borrowed_handle_value(const void* handle) noexcept;
   bool resolve_locked(void* handle, ObjectKind expected,
                       bool item_family, ObjectSnapshot& output,
                       uint64_t required_project_id,
@@ -252,8 +278,17 @@ class Registry {
   std::size_t project_count_{};
   std::size_t issued_token_count_{};
   uint64_t next_dynamic_object_id_{100000};
+  uint64_t next_scheduler_key_identity_{1};
   uint64_t next_lease_identity_{1};
+  uint32_t registry_cookie_{};
   bool lease_identity_exhausted_{};
+  uint64_t borrowed_handle_issues_{};
+  uint64_t borrowed_handle_reuses_{};
+  uint64_t borrowed_handle_exhaustions_{};
+  uint64_t reclaimable_object_slots_{};
+  uint64_t object_record_issues_{};
+  uint64_t object_record_reuses_{};
+  uint64_t object_record_exhaustions_{};
   Identity active_project_{};
   Identity active_item_{};
   bool initialized_{};

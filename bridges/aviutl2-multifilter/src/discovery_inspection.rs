@@ -99,8 +99,36 @@ fn finish_one_shot_in_place(
     if roots.is_empty() {
         return entry;
     }
-    match inspect_experimental_in_place(repository, plugin, &entry.sha, roots.clone()) {
+    let inspect =
+        |roots: Vec<PathBuf>| inspect_experimental_in_place(repository, plugin, &entry.sha, roots);
+    let mut effective_roots = roots.clone();
+    let inspected = match inspect(roots.clone()) {
+        Err(original) if inspection_is_load_failure(&original) => {
+            match registered_runtime_retry_roots(plugin, &roots, |basenames| {
+                cached_matching_registered_runtime_roots(plugin, &entry.sha, basenames)
+            }) {
+                RuntimeRootResolution::Resolved(retry_roots) => {
+                    effective_roots = retry_roots.clone();
+                    inspect(retry_roots)
+                }
+                failure @ (RuntimeRootResolution::Ambiguous { .. }
+                | RuntimeRootResolution::CapacityExceeded { .. }
+                | RuntimeRootResolution::DiagnosticsTruncated) => {
+                    Err(runtime_root_resolution_error(&failure))
+                }
+                RuntimeRootResolution::Unresolved => Err(original),
+            }
+        }
+        result => result,
+    };
+    match inspected {
         Ok((params, diagnostics)) => {
+            entry.demanded_suites = demanded_suites_from_report(&diagnostics);
+            entry.closure.roots = effective_roots
+                .iter()
+                .map(|root| root.to_string_lossy().into_owned())
+                .collect();
+            entry.closure_identity = Some(in_place_identity(&effective_roots));
             entry.out_flags2 = diagnostics
                 .get("advertised_out_flags2")
                 .and_then(|value| value.as_u64())
@@ -122,10 +150,216 @@ fn finish_one_shot_in_place(
             }
             entry.failure_classification = inspection_failure_classification(&error);
             entry.failure_diagnostics = inspection_failure_diagnostics(&error);
-            record_survey_for_failed_in_place(&mut entry, plugin, &roots);
+            record_survey_for_failed_in_place(&mut entry, plugin, &effective_roots);
         }
     }
     entry
+}
+
+fn inspection_is_load_failure(error: &std::io::Error) -> bool {
+    let Some(diagnostics) = inspection_failure_diagnostics(error) else {
+        return false;
+    };
+    diagnostics
+        .get("cluster_error_kind")
+        .and_then(|value| value.as_str())
+        == Some("load_failed")
+        || diagnostics
+            .get("load_failure")
+            .and_then(|value| value.get("stage"))
+            .and_then(|value| value.as_str())
+            == Some("load_library")
+}
+
+#[derive(Debug, PartialEq)]
+enum RuntimeRootResolution {
+    Resolved(Vec<PathBuf>),
+    Ambiguous {
+        basename: String,
+        candidate_count: usize,
+    },
+    CapacityExceeded {
+        basename: String,
+        root_count: usize,
+    },
+    DiagnosticsTruncated,
+    Unresolved,
+}
+
+fn runtime_root_resolution_error(resolution: &RuntimeRootResolution) -> std::io::Error {
+    let diagnostics = match resolution {
+        RuntimeRootResolution::Ambiguous {
+            basename,
+            candidate_count,
+        } => serde_json::json!({
+            "classification": "registered_runtime_ambiguous",
+            "reason": "different_provider_bytes",
+            "basename": basename,
+            "candidate_count": candidate_count,
+        }),
+        RuntimeRootResolution::CapacityExceeded {
+            basename,
+            root_count,
+        } => serde_json::json!({
+            "classification": "registered_runtime_capacity_exceeded",
+            "reason": "search_root_limit",
+            "basename": basename,
+            "root_count": root_count,
+        }),
+        RuntimeRootResolution::DiagnosticsTruncated => serde_json::json!({
+            "classification": "registered_runtime_diagnostics_truncated",
+            "reason": "dependency_diagnostics_limit",
+        }),
+        _ => serde_json::Value::Null,
+    };
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("diagnostics={diagnostics}"),
+    )
+}
+
+/// Resolve a failed LoadLibrary closure only. Each basename must have exactly
+/// one registered provider; ambiguity fails closed because AddDllDirectory does
+/// not define precedence between multiple USER_DIRS providers. Re-survey after
+/// every admitted root so transitive runtime dependencies reach a fixed point.
+fn registered_runtime_retry_roots(
+    plugin: &Path,
+    initial_roots: &[PathBuf],
+    mut resolve: impl FnMut(
+        &[String],
+    ) -> aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup,
+) -> RuntimeRootResolution {
+    const MAX_SEARCH_ROOTS: usize = aexcompat_broker::plugin_dependency_closure::MAX_SEARCH_ROOTS;
+    let mut roots = initial_roots.to_vec();
+    let initial_len = roots.len();
+    loop {
+        let Ok(survey) = survey_dependency_closure(plugin, &roots) else {
+            return RuntimeRootResolution::Unresolved;
+        };
+        if survey.dependency_diagnostics_truncated {
+            return RuntimeRootResolution::DiagnosticsTruncated;
+        }
+        for diagnostic in &survey.dependency_diagnostics {
+            if diagnostic.search_classification != "ambiguous" {
+                continue;
+            }
+            let candidates: Vec<PathBuf> = roots
+                .iter()
+                .filter(|root| root.join(&diagnostic.import_basename).is_file())
+                .cloned()
+                .collect();
+            let candidate_count = candidates.len();
+            if equivalent_runtime_candidate(&diagnostic.import_basename, candidates).is_none() {
+                return RuntimeRootResolution::Ambiguous {
+                    basename: diagnostic.import_basename.clone(),
+                    candidate_count,
+                };
+            }
+        }
+        if survey.unresolved.is_empty() {
+            return if roots.len() > initial_len {
+                RuntimeRootResolution::Resolved(roots)
+            } else {
+                RuntimeRootResolution::Unresolved
+            };
+        }
+        let actionable_names: Vec<String> = survey
+            .unresolved
+            .iter()
+            .filter(|basename| {
+                !is_api_set(basename)
+                    && !std::env::var_os("WINDIR")
+                        .map(PathBuf::from)
+                        .is_some_and(|windows| windows.join("System32").join(basename).is_file())
+            })
+            .cloned()
+            .collect();
+        if actionable_names.is_empty() {
+            return if roots.len() > initial_len {
+                RuntimeRootResolution::Resolved(roots)
+            } else {
+                RuntimeRootResolution::Unresolved
+            };
+        }
+        // Resolve the whole dependency set in one indexed lookup. The cache key
+        // includes this sorted set, the associated install roots, and the index
+        // snapshot, so distinct plug-ins sharing one runtime closure reuse it.
+        let candidates_by_basename = match resolve(&actionable_names) {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(found) => {
+                found
+            }
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::IndexTruncated => {
+                return RuntimeRootResolution::DiagnosticsTruncated;
+            }
+        };
+        let mut added = false;
+        let mut deferred_ambiguity = None;
+        for basename in &actionable_names {
+            let candidates = candidates_by_basename
+                .get(&basename.to_ascii_lowercase())
+                .cloned()
+                .unwrap_or_default();
+            let candidate_count = candidates.len();
+            let had_candidates = !candidates.is_empty();
+            let Some(candidate) = equivalent_runtime_candidate(basename, candidates) else {
+                if had_candidates {
+                    deferred_ambiguity = Some(RuntimeRootResolution::Ambiguous {
+                        basename: basename.clone(),
+                        candidate_count,
+                    });
+                }
+                continue;
+            };
+            let Ok(candidate) = candidate.canonicalize() else {
+                continue;
+            };
+            if !candidate.is_dir()
+                || roots.iter().any(|root| {
+                    root.to_string_lossy()
+                        .eq_ignore_ascii_case(&candidate.to_string_lossy())
+                })
+            {
+                continue;
+            }
+            if roots.len() == MAX_SEARCH_ROOTS {
+                return RuntimeRootResolution::CapacityExceeded {
+                    basename: basename.clone(),
+                    root_count: roots.len(),
+                };
+            }
+            roots.push(candidate);
+            added = true;
+            // Recompute the entire closure after each admitted directory: it
+            // may satisfy other names from this now-stale unresolved set.
+            break;
+        }
+        if !added {
+            if let Some(ambiguity) = deferred_ambiguity {
+                return ambiguity;
+            }
+            return RuntimeRootResolution::Unresolved;
+        }
+    }
+}
+
+/// Multiple registered directories are equivalent only when the requested DLL
+/// itself is byte-identical in every one. The deterministic first directory is
+/// then safe for this import; differing providers remain ambiguous.
+fn equivalent_runtime_candidate(basename: &str, mut candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    let mut expected = None;
+    for directory in &candidates {
+        let bytes = std::fs::read(directory.join(basename)).ok()?;
+        let digest = Sha256::digest(bytes);
+        if expected.as_ref().is_some_and(|value| value != &digest) {
+            return None;
+        }
+        expected = Some(digest);
+    }
+    candidates.into_iter().next()
 }
 
 /// Completes discovery for a PiPL that the PF worker positively identified as
@@ -140,7 +374,28 @@ fn finish_aegp_discovery(
     roots: &[PathBuf],
 ) -> CacheEntry {
     match initialize_experimental_aegp_in_place(repository, plugin, &entry.sha, roots.to_vec()) {
-        Ok(_) => {
+        Ok(report) => {
+            entry.provided_suites = report
+                .get("dynamic_suites")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|suite| {
+                    let name = suite.get("name")?.as_str()?;
+                    let api_version = i32::try_from(suite.get("api_version")?.as_i64()?).ok()?;
+                    let internal_version =
+                        i32::try_from(suite.get("internal_version")?.as_i64()?).ok()?;
+                    (name.as_bytes().len() <= 255
+                        && !name.is_empty()
+                        && api_version > 0
+                        && internal_version >= 0)
+                        .then(|| ProvidedSuite {
+                            name: name.to_owned(),
+                            api_version,
+                            internal_version,
+                        })
+                })
+                .collect();
             entry.ok = true;
             entry.plugin_kind = DiscoveredPluginKind::Aegp;
             entry.smart = false;
@@ -313,8 +568,45 @@ fn fill_entry_from_inspect_report(entry: &mut CacheEntry, report: &serde_json::V
     // PF_OutFlag2_SUPPORTS_SMART_RENDER = bit 10.
     entry.smart = entry.out_flags2 & (1 << 10) != 0;
     entry.params = params;
+    entry.demanded_suites = demanded_suites_from_report(report);
     normalize_parameters_for_cache(&mut entry.params);
     entry.ok = true;
+}
+
+fn demanded_suites_from_report(report: &serde_json::Value) -> Vec<ProvidedSuite> {
+    let report = report
+        .get("final_report")
+        .or_else(|| report.get("worker_report"))
+        .unwrap_or(report);
+    report
+        .get("missing_suites")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|suite| {
+            let name = suite.get("name")?.as_str()?;
+            let api_version = i32::try_from(suite.get("version")?.as_i64()?).ok()?;
+            (api_version > 0 && !name.is_empty()).then(|| ProvidedSuite {
+                name: name.to_owned(),
+                api_version,
+                internal_version: 0,
+            })
+        })
+        .collect()
+}
+
+fn companion_demand_from_probe_report(close: &serde_json::Value) -> Option<Vec<ProvidedSuite>> {
+    let bounded_report = close.get("final_report").is_some_and(|report| {
+        report.get("missing_suites").is_some()
+            && report.get("missing_suites_truncated") == Some(&serde_json::Value::Bool(false))
+    });
+    bounded_report.then(|| {
+        if close.get("session_clean") == Some(&serde_json::Value::Bool(true)) {
+            Vec::new()
+        } else {
+            demanded_suites_from_report(close)
+        }
+    })
 }
 
 /// One unit of discovery work (issue #405): with the same worker budget as
@@ -451,11 +743,13 @@ fn discover_cluster_in_place(
     dependency: &DependencyConfig,
     build: BuildFingerprint,
     members: Vec<(PathBuf, PreparedDiscovery)>,
+    override_search_dirs: Option<Vec<PathBuf>>,
 ) -> Vec<(PathBuf, CacheEntry)> {
     let member_count = members.len();
     // Every member shares one search-root set by construction (the in-place
     // identity), so the first member's roots stand for the cluster.
-    let search_dirs = search_roots_for(&members[0].0, &dependency.dirs);
+    let search_dirs =
+        override_search_dirs.unwrap_or_else(|| search_roots_for(&members[0].0, &dependency.dirs));
     if search_dirs.is_empty() {
         return fallback_members_in_place(
             repository,
@@ -518,10 +812,16 @@ fn discover_cluster_in_place(
                 // repeat the same uncontained setdown). Give each remaining
                 // member a fresh ordinary session so it must independently
                 // earn its own checkpoint before the one-shot fallback.
-                discover_cluster_in_place(repository, dependency, build, vec![(path, prepared)])
-                    .into_iter()
-                    .next()
-                    .expect("one member yields one entry")
+                discover_cluster_in_place(
+                    repository,
+                    dependency,
+                    build,
+                    vec![(path, prepared)],
+                    None,
+                )
+                .into_iter()
+                .next()
+                .expect("one member yields one entry")
             } else {
                 fallback_members_in_place(
                     repository,
@@ -545,6 +845,48 @@ fn discover_cluster_in_place(
                 results.push((path, entry));
             }
             Ok(InspectOutcome::InspectError { error_kind, report }) => {
+                if error_kind == "load_failed" {
+                    match registered_runtime_retry_roots(&path, &search_dirs, |basenames| {
+                        cached_matching_registered_runtime_roots(
+                            &path,
+                            &prepared.entry.sha,
+                            basenames,
+                        )
+                    }) {
+                        RuntimeRootResolution::Resolved(retry_roots) => {
+                            let mut prepared = prepared;
+                            prepared.entry.closure.roots = retry_roots
+                                .iter()
+                                .map(|root| root.to_string_lossy().into_owned())
+                                .collect();
+                            prepared.entry.closure_identity = Some(in_place_identity(&retry_roots));
+                            let retried = discover_cluster_in_place(
+                                repository,
+                                dependency,
+                                build,
+                                vec![(path, prepared)],
+                                Some(retry_roots),
+                            )
+                            .into_iter()
+                            .next()
+                            .expect("one member yields one entry");
+                            results.push(retried);
+                            continue;
+                        }
+                        failure @ (RuntimeRootResolution::Ambiguous { .. }
+                        | RuntimeRootResolution::CapacityExceeded { .. }
+                        | RuntimeRootResolution::DiagnosticsTruncated) => {
+                            let mut entry = prepared.entry;
+                            let error = runtime_root_resolution_error(&failure);
+                            entry.failure_classification =
+                                inspection_failure_classification(&error);
+                            entry.failure_diagnostics = inspection_failure_diagnostics(&error);
+                            results.push((path, entry));
+                            continue;
+                        }
+                        RuntimeRootResolution::Unresolved => {}
+                    }
+                }
                 let mut entry = prepared.entry;
                 let exit_code = match error_kind.as_str() {
                     "load_failed" => Some(11),
@@ -768,6 +1110,9 @@ pub struct DiagnosticDiscovery {
     /// The plug-in was inspected and its parameters are the declared ones.
     pub ok: bool,
     pub plugin_kind: DiscoveredPluginKind,
+    pub provided_suites: Vec<ProvidedSuite>,
+    pub demanded_suites: Vec<ProvidedSuite>,
+    pub companion_demand_probe_complete: bool,
     pub sha256: String,
     pub byte_size: u64,
     /// `PF_OutFlag2_SUPPORTS_SMART_RENDER`; which render path a session opens on.
@@ -828,9 +1173,20 @@ pub fn discover_records_for_diagnostics_with_progress(
                 .collect(),
         );
     };
-    discover_all_with_progress(repository, paths, &dependency, build, &report_completed)
+    let discovered =
+        discover_all_with_progress(repository, paths, &dependency, build, &report_completed);
+    // Diagnostic/shipping CLI callers do not have the persistent UI cache
+    // orchestrator. Complete the same demand phase once, after their entire
+    // selected discovery set is available, so provider/effect chunk ordering
+    // cannot change the result.
+    let mut combined: HashMap<String, CacheEntry> = discovered
         .into_iter()
-        .map(|(path, entry)| diagnostic_discovery(path, entry))
+        .map(|(path, entry)| (path.to_string_lossy().into_owned(), entry))
+        .collect();
+    let _ = complete_companion_demand_probes(repository, &mut combined);
+    combined
+        .into_iter()
+        .map(|(path, entry)| diagnostic_discovery(PathBuf::from(path), entry))
         .collect()
 }
 
@@ -839,6 +1195,9 @@ fn diagnostic_discovery(path: PathBuf, entry: CacheEntry) -> DiagnosticDiscovery
         path,
         ok: entry.ok,
         plugin_kind: entry.plugin_kind,
+        provided_suites: entry.provided_suites,
+        demanded_suites: entry.demanded_suites,
+        companion_demand_probe_complete: entry.companion_demand_probe_complete,
         sha256: entry.sha,
         byte_size: entry.len,
         smart: entry.smart,
@@ -992,7 +1351,7 @@ fn discover_all_with_progress(
                             let cluster_results =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     discover_cluster_in_place(
-                                        repository, dependency, build, members,
+                                        repository, dependency, build, members, None,
                                     )
                                 }))
                                 .unwrap_or_else(|_| {
@@ -1016,6 +1375,136 @@ fn discover_all_with_progress(
     results
         .into_inner()
         .unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Completes provider-free demand probes against the combined discovery cache.
+/// This deliberately runs after all discovery chunks have been merged: an
+/// effect and its sibling AEGP provider may land on opposite chunk boundaries.
+/// Returns whether any cache entry changed.
+fn complete_companion_demand_probes(
+    repository: &Path,
+    completed: &mut HashMap<String, CacheEntry>,
+) -> bool {
+    let targets = companion_demand_probe_targets(completed);
+    let mut changed = false;
+    for path in targets {
+        if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
+            break;
+        }
+        let Some(entry) = completed.get(&path).cloned() else {
+            continue;
+        };
+        if !entry.ok
+            || entry.plugin_kind != DiscoveredPluginKind::Effect
+            || entry.companion_demand_probe_complete
+        {
+            continue;
+        }
+        let roots: Vec<PathBuf> = entry.closure.roots.iter().map(PathBuf::from).collect();
+        let run_probe = |companions| {
+            RenderSession::open(SessionOpenRequest {
+                repository,
+                plugin_path: Path::new(&path),
+                plugin_sha256: &entry.sha,
+                parameters: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                companions,
+                dependency_search_dirs: roots.clone(),
+                width: 1,
+                height: 1,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 1,
+                time_scale: 1,
+                frame_deadline: Duration::from_secs(5),
+                smart: smart_render_route_supported(entry.smart, entry.out_flags2),
+                gpu_backend: RenderGpuBackend::Auto,
+                gpu_runtime_policy: None,
+                payload_override: None,
+                launch_environment: Default::default(),
+            })
+        };
+        if let Ok(mut session) = run_probe(Vec::new()) {
+            let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
+            let close = session.close();
+            if let Some(candidate_suites) = companion_demand_from_probe_report(&close) {
+                // A clean effect merely queried an optional host capability and
+                // successfully used its fallback. Only a non-clean provider-free
+                // lifecycle is a candidate. Confirm causality by requiring the
+                // exact provider injection to make the same lifecycle clean.
+                let demanded_suites = if candidate_suites.is_empty() {
+                    Some(Vec::new())
+                } else {
+                    let mut candidate_cache = completed.clone();
+                    if let Some(candidate) = candidate_cache.get_mut(&path) {
+                        candidate.demanded_suites = candidate_suites.clone();
+                        candidate.companion_demand_probe_complete = true;
+                    }
+                    companion_providers_for(Path::new(&path), &candidate_cache)
+                        .ok()
+                        .and_then(|companions| {
+                            let mut session = run_probe(companions).ok()?;
+                            let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
+                            let close = session.close();
+                            Some(
+                                if close.get("session_clean")
+                                    == Some(&serde_json::Value::Bool(true))
+                                {
+                                    candidate_suites
+                                } else {
+                                    // The provider did not repair the lifecycle;
+                                    // the observed miss was optional/unrelated.
+                                    Vec::new()
+                                },
+                            )
+                        })
+                };
+                if let Some(demanded_suites) = demanded_suites {
+                    if let Some(entry) = completed.get_mut(&path) {
+                        entry.demanded_suites = demanded_suites;
+                        entry.companion_demand_probe_complete = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    changed
+}
+
+fn companion_demand_probe_targets(completed: &HashMap<String, CacheEntry>) -> Vec<String> {
+    let provider_parents: std::collections::HashSet<PathBuf> = completed
+        .iter()
+        .filter(|(_, entry)| {
+            entry.ok
+                && entry.plugin_kind == DiscoveredPluginKind::Aegp
+                && !entry.provided_suites.is_empty()
+        })
+        .filter_map(|(path, _)| Path::new(path).parent().map(Path::to_path_buf))
+        .collect();
+    completed
+        .iter()
+        .filter(|(path, entry)| {
+            entry.ok
+                && entry.plugin_kind == DiscoveredPluginKind::Effect
+                && !entry.companion_demand_probe_complete
+                && Path::new(path)
+                    .parent()
+                    .is_some_and(|parent| provider_parents.contains(parent))
+        })
+        .map(|(path, _)| path.clone())
+        .collect()
 }
 
 /// A numerically-comparable key for a version token ("25.0" > "7.0", unlike a
@@ -1118,8 +1607,13 @@ fn register_discovered(
     plugin: &Path,
     dependency: &DependencyConfig,
     entry: &CacheEntry,
+    companions: Vec<ApprovedCompanion>,
     name: &str,
 ) {
+    let mut resolved_dependency = dependency.clone();
+    if !entry.closure.roots.is_empty() {
+        resolved_dependency.dirs = entry.closure.roots.iter().map(PathBuf::from).collect();
+    }
     // Build config items + readers + normalized defaults from the exposed params.
     let mut items: Vec<*const c_void> = Vec::new();
     let mut readers: Vec<ItemReader> = Vec::new();
@@ -1141,9 +1635,10 @@ fn register_discovered(
     let userdata = Box::leak(Box::new(FilterCtx {
         repository: repository.to_path_buf(),
         plugin: plugin.to_path_buf(),
-        dependency: dependency.clone(),
+        dependency: resolved_dependency,
         sha: entry.sha.clone(),
         smart: smart_render_route_supported(entry.smart, entry.out_flags2),
+        companions: companions.clone(),
         closure_identity: entry.closure_identity.clone(),
         // From the raw discovery parameters, NOT from `defaults`: `build_item`
         // maps only value-carrying kinds (float/integer/color) into config
@@ -1172,6 +1667,7 @@ fn register_discovered(
                 plugin: plugin.to_path_buf(),
                 sha: entry.sha.clone(),
                 smart: entry.smart,
+                companions,
             });
     }
 

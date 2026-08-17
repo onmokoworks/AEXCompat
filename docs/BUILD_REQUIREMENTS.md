@@ -47,6 +47,24 @@ unsupported suite evidence、欠落/不正PNGはfail-closedで非0終了する�
 - Windows 10 / 11 x64
 - Git
 
+## Windows guest workspace tests
+
+The Windows guest workspace tests exercise the Unicorn correctness backend and
+require LLVM's `libclang.dll` because `unicorn-engine-sys` invokes bindgen at
+build time. Install LLVM x64 and set `LIBCLANG_PATH` to the directory containing
+both `libclang.dll` and `clang.exe`. The clean-clone runner uses the standard
+installation path below and fails before Cargo when either file is missing:
+
+```powershell
+$env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
+cargo test --manifest-path guest\Cargo.toml --workspace --locked
+```
+
+LLVM/Clang 22.1.1 is the currently verified runner configuration. The test
+count is intentionally not pinned because it grows with compatibility work.
+The macOS `native-carrier` path remains a separate Apple Silicon/Rosetta build
+and is not compiled by this Windows gate.
+
 ## Rust broker / harness
 
 - Rust toolchain (rustup / cargo)。workspace は edition 2024 (Rust 1.85 以降)。
@@ -342,6 +360,12 @@ Python は CI・ローカルとも `.python-version` (3.12) に従い uv が解�
 
 Per-component prerequisites on Windows x64:
 
+- **Guest workspace tests**: Rust plus an x64 LLVM installation whose `bin`
+  directory contains `libclang.dll` and `clang.exe`. Set `LIBCLANG_PATH` to
+  that directory, then run
+  `cargo test --manifest-path guest\Cargo.toml --workspace --locked`. LLVM
+  22.1.1 is verified on the self-hosted runner. This Windows gate covers the
+  Unicorn backend; the macOS-only native carrier is a separate check.
 - **Rust broker / harness**: Rust toolchain plus MSVC Build Tools and the
   Windows SDK (the default `x86_64-pc-windows-msvc` target needs the MSVC
   linker). No After Effects SDK.

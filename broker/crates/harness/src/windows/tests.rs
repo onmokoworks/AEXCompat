@@ -3,6 +3,221 @@ mod tests {
     use super::*;
 
     #[test]
+    fn aegp_roundtrip_gui_exposes_and_routes_each_shipping_action() {
+        let ui_kit = AexUiKit::default();
+        for expected in AegpRoundtripAction::ALL {
+            let click = |busy| {
+                let ctx = egui::Context::default();
+                let mut rect = egui::Rect::NOTHING;
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 500.0),
+                    )),
+                    ..Default::default()
+                });
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    let (clicked, buttons) = show_aegp_roundtrip_actions(ui, busy, &ui_kit);
+                    assert_eq!(clicked, None);
+                    assert_eq!(
+                        buttons
+                            .iter()
+                            .map(|(action, _)| *action)
+                            .collect::<Vec<_>>(),
+                        AegpRoundtripAction::ALL
+                    );
+                    rect = buttons
+                        .into_iter()
+                        .find(|(action, _)| *action == expected)
+                        .unwrap()
+                        .1;
+                });
+                let _ = ctx.end_pass();
+
+                ctx.begin_pass(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 500.0),
+                    )),
+                    events: vec![
+                        egui::Event::PointerMoved(rect.center()),
+                        egui::Event::PointerButton {
+                            pos: rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos: rect.center(),
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                    ..Default::default()
+                });
+                let mut clicked = None;
+                egui::CentralPanel::default().show(&ctx, |ui| {
+                    clicked = show_aegp_roundtrip_actions(ui, busy, &ui_kit).0;
+                });
+                let _ = ctx.end_pass();
+                clicked
+            };
+            assert_eq!(click(false), Some(expected));
+            assert_eq!(click(true), None, "busy GUI must reject a second task");
+        }
+
+        let expected = [
+            (
+                "dispatch_aegp_keyframe_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_keyframe_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_seek_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_seek_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_trim_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_trim_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+            (
+                "dispatch_aegp_switch_roundtrip",
+                aexcompat_broker::image_render::dispatch_experimental_aegp_switch_roundtrip
+                    as AegpRoundtripDispatch,
+            ),
+        ];
+        for (action, (operation, dispatch)) in AegpRoundtripAction::ALL.into_iter().zip(expected) {
+            let spec = action.spec();
+            assert_eq!(spec.operation, operation);
+            assert!(std::ptr::fn_addr_eq(spec.dispatch, dispatch));
+        }
+    }
+
+    #[test]
+    fn aegp_roundtrip_app_dispatch_preserves_selection_and_task_lifecycle() {
+        let root = temporary_directory("ui-aegp-roundtrip-dispatch");
+        let plugin = root.join("provider.aex");
+        fs::write(&plugin, b"fixture").unwrap();
+        let mut app = HarnessApp::new(root.clone());
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            sha256: "approved-hash".into(),
+            size: 7,
+            modified: Some(SystemTime::UNIX_EPOCH),
+        });
+        let (observed_sender, observed_receiver) = mpsc::channel();
+        app.dispatch_aegp_roundtrip_with(
+            AegpRoundtripAction::Seek,
+            move |repository, path, hash| {
+                observed_sender
+                    .send((
+                        repository.to_path_buf(),
+                        path.to_path_buf(),
+                        hash.to_owned(),
+                    ))
+                    .unwrap();
+                Ok(serde_json::json!({"event_requested": "seek_roundtrip"}))
+            },
+        );
+
+        assert!(app.busy);
+        assert_eq!(app.status, AegpRoundtripAction::Seek.status());
+        let observed = observed_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(observed, (root.clone(), plugin, "approved-hash".into()));
+        let result = app
+            .receiver
+            .as_ref()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.operation.as_deref(),
+            Some(AegpRoundtripAction::Seek.spec().operation)
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&result.body).unwrap()["event_requested"],
+            "seek_roundtrip"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn input_image_path_uses_one_state_transition_for_picker_and_drop() {
+        let root = temporary_directory("ui-dropped-input");
+        let valid = root.join("frame.PNG");
+        let invalid = root.join("notes.txt");
+        image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&valid)
+            .unwrap();
+        fs::write(&invalid, b"not an image").unwrap();
+        assert!(is_supported_input_image(&valid));
+        assert!(!is_supported_input_image(&invalid));
+        assert!(!is_supported_input_image(&root.join("missing.png")));
+        let path_drop = egui::DroppedFile {
+            path: Some(valid.clone()),
+            ..Default::default()
+        };
+        let memory_drop = egui::DroppedFile {
+            name: "clipboard.png".into(),
+            bytes: Some(std::sync::Arc::from(&b"payload"[..])),
+            ..Default::default()
+        };
+        assert_eq!(
+            single_supported_dropped_path(std::slice::from_ref(&path_drop)),
+            Some(valid.clone())
+        );
+        assert!(single_supported_dropped_path(std::slice::from_ref(&memory_drop)).is_none());
+        assert!(single_supported_dropped_path(&[path_drop, memory_drop]).is_none());
+
+        let ctx = egui::Context::default();
+        let mut app = HarnessApp::new(root.clone());
+        app.output_image = Some(root.join("stale-output.png"));
+        app.viewer_mode = 2;
+        app.load_input_path(&ctx, valid.clone());
+        assert_eq!(app.input_image.as_deref(), Some(valid.as_path()));
+        assert_eq!(app.input_preview.as_ref().unwrap().size(), [3, 2]);
+        assert!(app.output_image.is_none());
+        assert_eq!(app.viewer_mode, 0);
+        assert_eq!(app.status, "Input image loaded. Ready to render.");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn analysis_panel_width_uses_the_padded_action_layout_and_stable_collapsed_rail() {
+        assert_eq!(
+            analysis_panel_min_width(),
+            ANALYSIS_PANEL_ACTION_WIDTH + ANALYSIS_PANEL_PADDING * 2.0
+        );
+        assert_eq!(clamp_analysis_panel_width(0.0), analysis_panel_min_width());
+        assert_eq!(
+            clamp_analysis_panel_width(f32::MAX),
+            ANALYSIS_PANEL_MAX_WIDTH
+        );
+        assert_eq!(
+            analysis_panel_display_width(analysis_panel_min_width(), 0.0),
+            ANALYSIS_PANEL_COLLAPSED_WIDTH
+        );
+        assert_eq!(
+            analysis_panel_display_width(analysis_panel_min_width(), 1.0),
+            analysis_panel_min_width()
+        );
+        let stored = 540.0;
+        assert!(analysis_panel_display_width(stored, 0.25) < stored);
+        assert_eq!(
+            resized_analysis_panel_width(stored, 8.0),
+            548.0,
+            "dragging during reopen must use the stored target, not animated visible width"
+        );
+    }
+
+    #[test]
     fn render_success_requires_a_displayable_output_image() {
         let root = std::env::temp_dir().join(format!(
             "aexcompat-ui-output-{}-{}",
@@ -371,16 +586,32 @@ mod tests {
             debug_summary: None,
             ..parameter.clone()
         };
-        let normalized = normalize_inspected_ui_parameters(&[parameter.clone(), arbitrary]);
+        let descriptor = |slot, kind: &str| aexcompat_broker::image_render::InteractiveParameter {
+            slot,
+            name: kind.to_owned(),
+            kind: kind.to_owned(),
+            minimum: 0.0,
+            maximum: 0.0,
+            value: 0.0,
+            ..parameter.clone()
+        };
+        let radial_blur_parameters = [
+            parameter.clone(),
+            arbitrary,
+            descriptor(3, "group_start"),
+            descriptor(8, "group_end"),
+            descriptor(26, "layer"),
+        ];
+        let normalized = normalize_inspected_ui_parameters(&radial_blur_parameters);
         assert_eq!(normalized[0].value, 1.0);
-        assert_eq!(normalized.len(), 2, "UI keeps every discovered descriptor");
+        assert_eq!(normalized.len(), 5, "UI keeps every discovered descriptor");
         assert_eq!(normalized[1].kind, "arbitrary_data");
         let defaults = normalized.clone();
         let sendable = parameters_for_native_action(&normalized, &defaults);
         assert_eq!(
             sendable.len(),
             1,
-            "render omits only the unsendable default"
+            "render omits unsendable defaults and display-only descriptors"
         );
         assert!(
             aexcompat_broker::image_render::encode_interactive_payload(&sendable).is_ok(),
@@ -452,6 +683,7 @@ mod tests {
         let key = |selection| LiveSessionKey {
             plugin_sha256: "a".repeat(64),
             dependency_identities: vec![],
+            dependency_search_dirs: vec![],
             parameter_signature: "[]".into(),
             selection,
             width: 16,
@@ -465,6 +697,12 @@ mod tests {
         // resident key so `render_live_request` closes and reopens instead of
         // reporting a new source from a stale session.
         assert!(key(auto) != key(manual));
+        let mut rooted = key(auto);
+        rooted.dependency_search_dirs = vec![PathBuf::from(r"C:\runtime")];
+        assert!(
+            key(auto) != rooted,
+            "a runtime-root change must reopen the resident worker"
+        );
         assert!(selected_interactive_session_selection(smart, false, true).is_err());
 
         let classic = InspectedRenderCapability {

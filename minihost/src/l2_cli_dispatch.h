@@ -21,6 +21,9 @@ struct AuxiliaryOptionHooks {
   // auxiliary option for cluster sessions (render swap / discovery session).
   // Null on paths that never carry it.
   bool (*load_cluster_manifest)(void* context, const wchar_t* value){};
+  // Optional: captures the authenticated AEGP companion manifest used by a
+  // render/smart session. It is independent of cluster membership.
+  bool (*load_companion_manifest)(void* context, const wchar_t* value){};
   // Optional (issue #751): captures the `--dependency-dirs-v1 <dirs>` value
   // (absolute directories joined by ';') that switches admission to the
   // in-place load mode. Null on paths that never carry it.
@@ -93,5 +96,11 @@ struct WorkerMode {
 
 WorkerMode classify_worker_mode(
     WorkerKind kind, int argc, wchar_t** argv, int effective_argc);
+
+// Exercises the production Smart diagnostic classifier with the raw argv
+// shape retained after two auxiliary tail arguments were stripped. Every
+// diagnostic command must classify by effective_argc, while still reading the
+// command from the original argv vector.
+bool verify_smart_diagnostic_auxiliary_admission();
 
 }  // namespace aexcompat::l2cli

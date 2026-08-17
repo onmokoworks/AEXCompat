@@ -58,4 +58,8 @@ int32_t render_once(EffectEntry entry, BufferIn& input,
                     std::vector<unsigned char>* captured_argb = nullptr,
                     aexcompat::render::ClassicFrameOutput* frame_output = nullptr);
 
+// Exercises the production Classic frame preparation through the point
+// animation write and exposes only the resulting value assertion.
+bool verify_classic_animation_extent_wiring_for_test();
+
 }  // namespace aexcompat::l2_detail

@@ -1,6 +1,7 @@
 #include "worker_classic_runtime.hpp"
 #include "worker_classic_render_entry.hpp"
 #include "worker_active_plugin_context.hpp"
+#include "generated/aex_abi_contract.hpp"
 #include "worker_invocation_orchestration.hpp"
 #include "worker_selector_dispatch.hpp"
 
@@ -42,6 +43,9 @@ int g_selector_result{};
 int g_cleanup_result{};
 bool g_explicit_checkin{};
 bool g_invalid_double_checkin{};
+int g_frame_setup_geometry_render_observations{};
+int32_t g_frame_setup_offered_width{};
+int32_t g_frame_setup_offered_height{};
 
 void observe_concurrent_render_context() {
   using namespace aexcompat::worker_runtime;
@@ -141,6 +145,52 @@ int32_t __cdecl observe_frame_setup_checkout_time(
        !context->checkout_time_allowed(g_previous_frame_time, 24)))
     return 4;
   ++g_frame_setup_time_observations;
+  return 0;
+}
+
+int32_t __cdecl mutate_out_data_after_frame_setup(
+    int32_t command, void* input, void* output, void**, void* world, void*) {
+  using namespace aexcompat::abi::x86_64_windows;
+  constexpr int32_t kOutputWidth = 260;
+  constexpr int32_t kOutputHeight = 150;
+  constexpr int32_t kOriginX = 2;
+  constexpr int32_t kOriginY = 3;
+  const auto write_i32 = [](void* bytes, std::size_t offset, int32_t value) {
+    std::memcpy(static_cast<std::byte*>(bytes) + offset, &value, sizeof(value));
+  };
+  const auto read_i32 = [](const void* bytes, std::size_t offset) {
+    int32_t value{};
+    std::memcpy(&value, static_cast<const std::byte*>(bytes) + offset,
+                sizeof(value));
+    return value;
+  };
+
+  if (command == PF_CMD_FRAME_SETUP) {
+    g_frame_setup_offered_width = read_i32(output, OUT_WIDTH_OFFSET);
+    g_frame_setup_offered_height = read_i32(output, OUT_HEIGHT_OFFSET);
+    write_i32(output, OUT_WIDTH_OFFSET, kOutputWidth);
+    write_i32(output, OUT_HEIGHT_OFFSET, kOutputHeight);
+    write_i32(output, OUT_ORIGIN_OFFSET, kOriginX);
+    write_i32(output, OUT_ORIGIN_OFFSET + sizeof(int32_t), kOriginY);
+    return 0;
+  }
+  if (command == PF_CMD_QUERY_DYNAMIC_FLAGS) {
+    // QUERY_DYNAMIC_FLAGS legitimately reuses PF_OutData but owns only the
+    // flags. Mutating geometry here models a plug-in that treats every other
+    // field as scratch; the FRAME_SETUP answer must already be host-owned.
+    write_i32(output, OUT_WIDTH_OFFSET, g_frame_setup_offered_width);
+    write_i32(output, OUT_HEIGHT_OFFSET, g_frame_setup_offered_height);
+    write_i32(output, OUT_ORIGIN_OFFSET, 0);
+    write_i32(output, OUT_ORIGIN_OFFSET + sizeof(int32_t), 0);
+    return 0;
+  }
+  if (command != PF_CMD_RENDER) return 0;
+  if (read_i32(input, IN_OUTPUT_ORIGIN_X_OFFSET) != kOriginX ||
+      read_i32(input, IN_OUTPUT_ORIGIN_Y_OFFSET) != kOriginY || !world ||
+      read_i32(world, LAYER_WIDTH_OFFSET) != kOutputWidth ||
+      read_i32(world, LAYER_HEIGHT_OFFSET) != kOutputHeight)
+    return 4;
+  ++g_frame_setup_geometry_render_observations;
   return 0;
 }
 }  // namespace
@@ -333,6 +383,54 @@ int main() {
       g_frame_setup_time_observations != 4 ||
       g_render_wide_time_observations != 1)
     return 33;
+  aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = false;
+
+  // `begin_lifecycle` dispatches QUERY_DYNAMIC_FLAGS after FRAME_SETUP and
+  // before production output preparation. Both selectors receive the same
+  // PF_OutData buffer, so output geometry must be snapshotted at the first
+  // boundary rather than read from that shared buffer later (#999).
+  constexpr uint32_t kExpandBuffer = 1u << 9;
+  aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = true;
+  g_frame_setup_geometry_render_observations = 0;
+  for (const bool manage_sequence : {true, false}) {
+    frame_input = {};
+    frame_output = {};
+    std::memcpy(frame_output.data() +
+                    aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET,
+                &kExpandBuffer, sizeof(kExpandBuffer));
+    aexcompat::render::ClassicFrameOutput geometry{};
+    if (aexcompat::l2_detail::render_once(
+            &mutate_out_data_after_frame_setup, frame_input, frame_output,
+            "default", frame_width, frame_height, frame_rowbytes,
+            frame_input_hash, frame_output_hash, frame_guards, nullptr, nullptr,
+            0, 0, nullptr, 0, 1, 1, 1, 4, manage_sequence, nullptr,
+            &geometry) != 0 ||
+        frame_width != 260 || frame_height != 150 ||
+        geometry.input_origin_x != 2 || geometry.input_origin_y != 3)
+      return manage_sequence ? 40 : 41;
+  }
+  if (g_frame_setup_geometry_render_observations != 2) return 42;
+
+  // NOP_RENDER has no prepare_output call, but it must consume the same
+  // snapshot when deciding whether FRAME_SETUP requested the resize that #1002
+  // currently requires it to refuse explicitly. A later selector must not turn
+  // that refusal into a silent old-extent passthrough.
+  frame_input = {};
+  frame_output = {};
+  constexpr uint32_t kNopRender = 1u << 18;
+  constexpr uint32_t kNopExpand = kExpandBuffer | kNopRender;
+  std::memcpy(frame_output.data() +
+                  aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET,
+              &kNopExpand, sizeof(kNopExpand));
+  if (aexcompat::l2_detail::render_once(
+          &mutate_out_data_after_frame_setup, frame_input, frame_output, "default",
+          frame_width, frame_height, frame_rowbytes, frame_input_hash,
+          frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr, 0,
+          1, 1, 1, 4, false) != 4 ||
+      frame_width != g_frame_setup_offered_width ||
+      frame_height != g_frame_setup_offered_height ||
+      g_frame_setup_geometry_render_observations != 2)
+    return 43;
   aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = false;
 
   using namespace aexcompat::worker_runtime;

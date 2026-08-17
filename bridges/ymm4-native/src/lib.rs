@@ -163,6 +163,7 @@ fn open_session(
         conformance_render_settings: None,
         layers: &[],
         dependencies: Vec::new(),
+        companions: Vec::new(),
         dependency_search_dirs: search_root(&plugin),
         width,
         height,

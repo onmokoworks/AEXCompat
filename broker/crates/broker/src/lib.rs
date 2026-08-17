@@ -1,10 +1,12 @@
 pub mod cluster_manifest;
+pub mod companion_manifest;
 pub mod cuda_compute_probe;
 pub mod fixture_profiles;
 pub mod gpu_platform_collector;
 pub mod host_core;
 #[cfg(windows)]
 pub mod image_render;
+pub mod installed_runtime_roots;
 #[cfg(windows)]
 pub mod l2;
 pub mod minidump_policy;
@@ -37,8 +39,8 @@ pub mod session_dependency_manifest;
 #[cfg(windows)]
 pub mod smart;
 pub mod staging_trust;
-#[cfg(test)]
-mod test_pe;
+#[cfg(any(test, feature = "test-pe-fixtures"))]
+pub mod test_pe;
 pub mod trace_policy;
 pub mod trusted_worker_stage;
 pub mod wgpu_dx12_pf_probe;

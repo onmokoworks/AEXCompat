@@ -20,6 +20,9 @@ mod tests {
             len,
             ok: true,
             plugin_kind: DiscoveredPluginKind::Effect,
+            provided_suites: Vec::new(),
+            demanded_suites: Vec::new(),
+            companion_demand_probe_complete: false,
             sha: "aa".into(),
             smart: true,
             out_flags2: 1 << 10,
@@ -46,6 +49,365 @@ mod tests {
             smart: false,
             ..discovered(mtime_secs, len, build)
         }
+    }
+
+    #[test]
+    fn clean_provider_free_probe_does_not_require_optional_missing_suite() {
+        let clean = serde_json::json!({
+            "session_clean": true,
+            "final_report": {
+                "missing_suites": [{"name": "Optional Preview Suite", "version": 1}],
+                "missing_suites_truncated": false
+            }
+        });
+        assert_eq!(companion_demand_from_probe_report(&clean), Some(Vec::new()));
+
+        let failed = serde_json::json!({
+            "session_clean": false,
+            "final_report": {
+                "missing_suites": [{"name": "Required Runtime Suite 2026.1", "version": 2}],
+                "missing_suites_truncated": false
+            }
+        });
+        let demanded = companion_demand_from_probe_report(&failed).unwrap();
+        assert_eq!(demanded.len(), 1);
+        assert_eq!(demanded[0].name, "Required Runtime Suite 2026.1");
+        assert_eq!(demanded[0].api_version, 2);
+
+        let truncated = serde_json::json!({
+            "session_clean": false,
+            "final_report": {
+                "missing_suites": [],
+                "missing_suites_truncated": true
+            }
+        });
+        assert_eq!(companion_demand_from_probe_report(&truncated), None);
+    }
+
+    #[test]
+    fn companion_probe_targets_use_the_combined_cache_across_save_chunks() {
+        let root = std::env::temp_dir().join("aexcompat-demand-probe-chunks");
+        let package = root.join("package");
+        let mut cache = HashMap::new();
+        for index in 0..DISCOVERY_SAVE_CHUNK {
+            cache.insert(
+                root.join(format!("filler-{index}.aex"))
+                    .to_string_lossy()
+                    .into_owned(),
+                discovered(1, 7, build(1)),
+            );
+        }
+        let effect = package.join("consumer.aex");
+        cache.insert(
+            effect.to_string_lossy().into_owned(),
+            discovered(1, 7, build(1)),
+        );
+        let mut provider = discovered(1, 7, build(1));
+        provider.plugin_kind = DiscoveredPluginKind::Aegp;
+        provider.provided_suites = vec![ProvidedSuite {
+            name: "Package Runtime Suite".into(),
+            api_version: 1,
+            internal_version: 1,
+        }];
+        cache.insert(
+            package.join("provider.aex").to_string_lossy().into_owned(),
+            provider,
+        );
+
+        assert_eq!(
+            companion_demand_probe_targets(&cache),
+            vec![effect.to_string_lossy().into_owned()]
+        );
+    }
+
+    #[test]
+    fn companion_association_uses_discovered_aegp_suites_in_exact_install_dir() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-mf-companions-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let package = root.join("package");
+        let other = root.join("other");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let effect = package.join("effect.aex");
+        let provider = package.join("effect-helper.aex");
+        let unrelated_provider = package.join("unrelated-provider.aex");
+        let arbitrary = package.join("arbitrary.aex");
+        let remote_provider = other.join("provider.aex");
+        for path in [
+            &effect,
+            &provider,
+            &unrelated_provider,
+            &arbitrary,
+            &remote_provider,
+        ] {
+            std::fs::write(path, b"fixture").unwrap();
+        }
+        let mut provider_entry = discovered(1, 7, build(1));
+        provider_entry.plugin_kind = DiscoveredPluginKind::Aegp;
+        provider_entry.sha = "11".repeat(32);
+        provider_entry.provided_suites = vec![ProvidedSuite {
+            name: "Opaque Runtime Service 2026.1".into(),
+            api_version: 1,
+            internal_version: 2,
+        }];
+        let mut effect_entry = discovered(1, 7, build(1));
+        effect_entry.demanded_suites = vec![ProvidedSuite {
+            name: "Opaque Runtime Service 2026.1".into(),
+            api_version: 1,
+            internal_version: 0,
+        }];
+        effect_entry.companion_demand_probe_complete = true;
+        let mut arbitrary_entry = provider_entry.clone();
+        arbitrary_entry.plugin_kind = DiscoveredPluginKind::Effect;
+        let mut cache = HashMap::new();
+        cache.insert(effect.to_string_lossy().into_owned(), effect_entry);
+        cache.insert(
+            provider.to_string_lossy().into_owned(),
+            provider_entry.clone(),
+        );
+        let mut unrelated_entry = provider_entry.clone();
+        unrelated_entry.provided_suites[0].name = "Aftereffect Runtime Service".into();
+        cache.insert(
+            unrelated_provider.to_string_lossy().into_owned(),
+            unrelated_entry,
+        );
+        cache.insert(arbitrary.to_string_lossy().into_owned(), arbitrary_entry);
+        cache.insert(
+            remote_provider.to_string_lossy().into_owned(),
+            provider_entry,
+        );
+
+        let associated = companion_providers_for(&effect, &cache).unwrap();
+        assert_eq!(associated.len(), 1);
+        assert_eq!(associated[0].artifact.path, provider);
+        assert_eq!(
+            associated[0].suites[0].name,
+            "Opaque Runtime Service 2026.1"
+        );
+        assert_eq!(associated[0].suites[0].api_version, 1);
+        assert_eq!(associated[0].suites[0].internal_version, 2);
+
+        let duplicate = package.join("duplicate-provider.aex");
+        std::fs::write(&duplicate, b"fixture").unwrap();
+        let duplicate_entry = cache
+            .get(&provider.to_string_lossy().into_owned())
+            .unwrap()
+            .clone();
+        cache.insert(duplicate.to_string_lossy().into_owned(), duplicate_entry);
+        assert_eq!(
+            companion_providers_for(&effect, &cache),
+            Err("ambiguous_companion_suite_provider")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_load_resolves_one_registered_runtime_provider_fail_closed() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-mf-runtime-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plugin_root = root.join("plugins");
+        let registered_install = root.join("registered-install");
+        let runtime = registered_install.join("redist").join("intel64");
+        let transitive_runtime = registered_install.join("redist").join("shared");
+        let unrelated = registered_install.join("unrelated");
+        std::fs::create_dir_all(&plugin_root).unwrap();
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&transitive_runtime).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        let plugin = plugin_root.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            aexcompat_broker::test_pe::pe64_importing(&["libmmd.dll", "sibling.dll"]),
+        )
+        .unwrap();
+        std::fs::write(
+            runtime.join("libmmd.dll"),
+            aexcompat_broker::test_pe::pe64_importing(&["shared-runtime.dll", "common.dll"]),
+        )
+        .unwrap();
+        let common = aexcompat_broker::test_pe::pe64_importing(&[]);
+        std::fs::write(runtime.join("common.dll"), &common).unwrap();
+        std::fs::write(
+            runtime.join("sibling.dll"),
+            aexcompat_broker::test_pe::pe64_importing(&[]),
+        )
+        .unwrap();
+        std::fs::write(transitive_runtime.join("common.dll"), &common).unwrap();
+        std::fs::write(
+            transitive_runtime.join("shared-runtime.dll"),
+            aexcompat_broker::test_pe::pe64_importing(&[]),
+        )
+        .unwrap();
+        std::fs::write(unrelated.join("other.dll"), b"unrelated fixture").unwrap();
+
+        let roots = vec![plugin_root.canonicalize().unwrap()];
+        let mut resolved_sets = Vec::new();
+        let resolved = registered_runtime_retry_roots(&plugin, &roots, |wanted| {
+            resolved_sets.push(wanted.to_owned());
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                wanted
+                    .iter()
+                    .map(|basename| {
+                        (
+                            basename.to_ascii_lowercase(),
+                            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+                                std::slice::from_ref(basename),
+                                [registered_install.clone()],
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        });
+        assert_eq!(
+            resolved,
+            RuntimeRootResolution::Resolved(vec![
+                plugin_root.canonicalize().unwrap(),
+                runtime.canonicalize().unwrap(),
+                transitive_runtime.canonicalize().unwrap()
+            ])
+        );
+        assert_eq!(resolved_sets.first().map(Vec::len), Some(2));
+        assert!(
+            resolved_sets
+                .iter()
+                .flatten()
+                .any(|name| name == "sibling.dll")
+        );
+        assert_eq!(
+            resolved_sets.len(),
+            2,
+            "one indexed lookup per fixed-point pass"
+        );
+
+        std::fs::write(
+            transitive_runtime.join("common.dll"),
+            aexcompat_broker::test_pe::pe64_importing(&["different.dll"]),
+        )
+        .unwrap();
+        let conflicting = registered_runtime_retry_roots(&plugin, &roots, |wanted| {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                wanted
+                    .iter()
+                    .map(|basename| {
+                        (
+                            basename.to_ascii_lowercase(),
+                            aexcompat_broker::installed_runtime_roots::matching_runtime_roots(
+                                std::slice::from_ref(basename),
+                                [registered_install.clone()],
+                            ),
+                        )
+                    })
+                    .collect(),
+            )
+        });
+        assert!(matches!(
+            conflicting,
+            RuntimeRootResolution::Ambiguous { ref basename, .. } if basename == "common.dll"
+        ));
+        std::fs::write(transitive_runtime.join("common.dll"), &common).unwrap();
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cluster_load_failure_enters_the_registered_runtime_retry_gate() {
+        let error = std::io::Error::other(
+            "diagnostics={\"classification\":\"nonzero_exit\",\"cluster_error_kind\":\"load_failed\",\"exit_code\":11}",
+        );
+        assert!(inspection_is_load_failure(&error));
+        assert!(!inspection_is_load_failure(&std::io::Error::other(
+            "unclassified failure"
+        )));
+    }
+
+    #[test]
+    fn registered_runtime_retry_fails_closed_when_dependency_diagnostics_truncate() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-mf-runtime-truncated-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let names: Vec<String> = (0..65)
+            .map(|index| format!("missing-{index}.dll"))
+            .collect();
+        let borrowed: Vec<&str> = names.iter().map(String::as_str).collect();
+        let plugin = root.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            aexcompat_broker::test_pe::pe64_importing(&borrowed),
+        )
+        .unwrap();
+        let result = registered_runtime_retry_roots(&plugin, &[root.clone()], |_| {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                std::collections::BTreeMap::new(),
+            )
+        });
+        assert_eq!(result, RuntimeRootResolution::DiagnosticsTruncated);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registered_runtime_retry_checks_every_provider_before_choosing_a_root() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-mf-runtime-provider-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let plugin = root.join("effect.aex");
+        std::fs::write(
+            &plugin,
+            aexcompat_broker::test_pe::pe64_importing(&["common.dll"]),
+        )
+        .unwrap();
+        let mut providers = Vec::new();
+        for index in 0..16 {
+            let directory = root.join(format!("provider-{index:02}"));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join("common.dll"),
+                if index == 15 {
+                    b"different".as_slice()
+                } else {
+                    b"same".as_slice()
+                },
+            )
+            .unwrap();
+            providers.push(directory);
+        }
+        let result = registered_runtime_retry_roots(&plugin, &[root.clone()], |_| {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
+                std::collections::BTreeMap::from([("common.dll".into(), providers.clone())]),
+            )
+        });
+        assert!(matches!(
+            result,
+            RuntimeRootResolution::Ambiguous {
+                ref basename,
+                candidate_count: 16,
+            } if basename == "common.dll"
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3249,6 +3611,7 @@ mod tests {
                     time_scale: 30,
                 },
                 layers: Vec::new(),
+                companions: Vec::new(),
                 cluster: Some(ClusterLaunch {
                     plugins: vec![(one.clone(), sha_of(&one)), (two.clone(), sha_of(&two))],
                     swap_payloads: vec![None, None],

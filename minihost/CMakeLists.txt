@@ -250,6 +250,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_aegp_init_orchestration.cpp
     src/worker_aegp_init_report.cpp
     src/worker_ui_event_report.cpp
+    src/worker_system_sound_suppression.cpp
     src/worker_audio_execution.cpp
     src/worker_drawbot_runtime.cpp
     src/worker_param_checkout_runtime.cpp
@@ -278,6 +279,9 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_handle_runtime.cpp
     src/worker_host_suite_router.cpp
     src/worker_host_suite_catalog.cpp
+    src/worker_dynamic_suite_registry.cpp
+    src/worker_companion_manifest.cpp
+    src/worker_companion_runtime.cpp
     src/worker_pf_suites.cpp
     src/worker_pf_sampling_runtime.cpp
     src/worker_pf_effect_sequence_selftests.cpp
@@ -300,6 +304,8 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
 
 set_source_files_properties(src/worker_aegp_compute_cache.cpp
   PROPERTIES COMPILE_OPTIONS "/EHsc")
+set_source_files_properties(src/l2_main.cpp PROPERTIES OBJECT_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/l2_main_support.inc;${CMAKE_CURRENT_SOURCE_DIR}/src/l2_main_entry.inc")
 set_source_files_properties(
   ../tests/native/worker_aegp_compute_cache_selftest.cpp
   PROPERTIES COMPILE_OPTIONS "/EHsc")
@@ -610,3 +616,55 @@ target_compile_definitions(worker_aegp_register_suite_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(worker_aegp_register_suite_selftest PRIVATE /UNDEBUG)
 target_include_directories(worker_aegp_register_suite_selftest PRIVATE src)
+
+add_executable(worker_dynamic_suite_registry_selftest
+  ../tests/native/worker_dynamic_suite_registry_selftest.cpp
+  src/worker_aegp_entry_guard.cpp
+  src/worker_aegp_init_runtime.cpp
+  src/worker_companion_runtime.cpp
+  src/worker_dynamic_suite_registry.cpp
+  src/worker_host_suite_catalog.cpp
+  src/worker_host_suite_router.cpp
+  src/worker_pf_ansi_runtime.cpp
+  src/suite_lease_tracker.cpp
+  src/worker_aegp_compute_cache.cpp
+  src/worker_minidump_runtime.cpp
+  src/worker_selector_dispatch.cpp
+  src/worker_suite_call_slot_probe.cpp
+  src/worker_suite_registry.cpp
+)
+add_library(worker_dynamic_suite_companion_fixture SHARED
+  ../tests/native/worker_dynamic_suite_companion_fixture.cpp)
+add_library(worker_dynamic_suite_consumer_fixture SHARED
+  ../tests/native/worker_dynamic_suite_consumer_fixture.cpp)
+target_compile_features(worker_dynamic_suite_companion_fixture PRIVATE cxx_std_17)
+target_compile_features(worker_dynamic_suite_consumer_fixture PRIVATE cxx_std_17)
+target_compile_definitions(worker_dynamic_suite_companion_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(worker_dynamic_suite_consumer_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_dynamic_suite_companion_fixture PRIVATE
+  ../tests/native)
+target_include_directories(worker_dynamic_suite_consumer_fixture PRIVATE
+  ../tests/native)
+add_dependencies(worker_dynamic_suite_registry_selftest
+  worker_dynamic_suite_companion_fixture
+  worker_dynamic_suite_consumer_fixture)
+target_compile_features(worker_dynamic_suite_registry_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_dynamic_suite_registry_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_dynamic_suite_registry_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_dynamic_suite_registry_selftest PRIVATE
+  src ../tests/native)
+target_link_libraries(worker_dynamic_suite_registry_selftest PRIVATE
+  bcrypt aexcompat_trace_writer)
+
+add_executable(worker_companion_manifest_selftest
+  ../tests/native/worker_companion_manifest_selftest.cpp
+  src/worker_companion_manifest.cpp
+  src/strict_json.cpp)
+target_compile_features(worker_companion_manifest_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_companion_manifest_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_companion_manifest_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_companion_manifest_selftest PRIVATE src)

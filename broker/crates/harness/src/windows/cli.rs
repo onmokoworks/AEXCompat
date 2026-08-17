@@ -20,6 +20,19 @@ fn decode_preview_image(path: &Path) -> Result<egui::ColorImage, String> {
     ))
 }
 
+fn is_supported_input_image(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "bmp" | "tif" | "tiff" | "webp"
+                )
+            })
+}
+
 fn canonical_deverbatim(path: &Path) -> Result<PathBuf, String> {
     let canonical = path
         .canonicalize()

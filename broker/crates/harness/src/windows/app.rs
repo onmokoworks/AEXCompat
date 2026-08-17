@@ -1,4 +1,156 @@
 const COLUMN_HEADER_HEIGHT: f32 = 84.0;
+const ANALYSIS_PANEL_PADDING: f32 = 12.0;
+const ANALYSIS_PANEL_ACTION_WIDTH: f32 = 268.0;
+const ANALYSIS_PANEL_COLLAPSED_WIDTH: f32 = 18.0;
+const ANALYSIS_PANEL_MAX_WIDTH: f32 = 620.0;
+
+fn analysis_panel_min_width() -> f32 {
+    ANALYSIS_PANEL_ACTION_WIDTH + ANALYSIS_PANEL_PADDING * 2.0
+}
+
+fn clamp_analysis_panel_width(width: f32) -> f32 {
+    width.clamp(analysis_panel_min_width(), ANALYSIS_PANEL_MAX_WIDTH)
+}
+
+fn analysis_panel_display_width(width: f32, openness: f32) -> f32 {
+    egui::lerp(
+        ANALYSIS_PANEL_COLLAPSED_WIDTH..=clamp_analysis_panel_width(width),
+        openness.clamp(0.0, 1.0),
+    )
+}
+
+fn resized_analysis_panel_width(stored_width: f32, delta_x: f32) -> f32 {
+    clamp_analysis_panel_width(stored_width + delta_x)
+}
+
+fn analysis_section_heading(ui: &mut egui::Ui, title: &str, color: Color32) {
+    ui.add_space(8.0);
+    ui.label(RichText::new(title).small().strong().color(color));
+    ui.separator();
+}
+
+fn analysis_action_button(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    label: &str,
+    help: &str,
+) -> egui::Response {
+    ui.add_enabled(enabled, egui::Button::new(label))
+        .on_hover_text(help)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AegpRoundtripAction {
+    Keyframes,
+    Seek,
+    Trim,
+    LayerSwitches,
+}
+
+type AegpRoundtripDispatch = fn(&Path, &Path, &str) -> std::io::Result<serde_json::Value>;
+
+#[derive(Clone, Copy)]
+struct AegpRoundtripSpec {
+    operation: &'static str,
+    dispatch: AegpRoundtripDispatch,
+}
+
+impl AegpRoundtripAction {
+    const ALL: [Self; 4] = [Self::Keyframes, Self::Seek, Self::Trim, Self::LayerSwitches];
+
+    fn label(self, ui_kit: &AexUiKit) -> &str {
+        match self {
+            Self::Keyframes => ui_kit.text("Keyframes", "キーフレーム"),
+            Self::Seek => ui_kit.text("Seek", "時間移動"),
+            Self::Trim => ui_kit.text("Layer trim", "レイヤートリム"),
+            Self::LayerSwitches => ui_kit.text("Layer switches", "レイヤースイッチ"),
+        }
+    }
+
+    fn help(self, ui_kit: &AexUiKit) -> &str {
+        match self {
+            Self::Keyframes => ui_kit.text(
+                "Round-trip keyframe times, values, and interpolation through the AEGP stream suites.",
+                "AEGPストリームSuite経由でキーフレームの時刻・値・補間を往復検査します。",
+            ),
+            Self::Seek => ui_kit.text(
+                "Set and read back the current composition time through the AEGP item suite.",
+                "AEGP Item Suite経由でコンポジションの現在時刻を設定し、読み戻します。",
+            ),
+            Self::Trim => ui_kit.text(
+                "Set and read back a layer in-point and duration through the AEGP layer suite.",
+                "AEGP Layer Suite経由でレイヤーのイン点とデュレーションを設定し、読み戻します。",
+            ),
+            Self::LayerSwitches => ui_kit.text(
+                "Toggle and read back layer switches through the AEGP layer suite.",
+                "AEGP Layer Suite経由でレイヤースイッチを切り替え、読み戻します。",
+            ),
+        }
+    }
+
+    fn spec(self) -> AegpRoundtripSpec {
+        match self {
+            Self::Keyframes => AegpRoundtripSpec {
+                operation: "dispatch_aegp_keyframe_roundtrip",
+                dispatch:
+                    aexcompat_broker::image_render::dispatch_experimental_aegp_keyframe_roundtrip,
+            },
+            Self::Seek => AegpRoundtripSpec {
+                operation: "dispatch_aegp_seek_roundtrip",
+                dispatch: aexcompat_broker::image_render::dispatch_experimental_aegp_seek_roundtrip,
+            },
+            Self::Trim => AegpRoundtripSpec {
+                operation: "dispatch_aegp_trim_roundtrip",
+                dispatch: aexcompat_broker::image_render::dispatch_experimental_aegp_trim_roundtrip,
+            },
+            Self::LayerSwitches => AegpRoundtripSpec {
+                operation: "dispatch_aegp_switch_roundtrip",
+                dispatch:
+                    aexcompat_broker::image_render::dispatch_experimental_aegp_switch_roundtrip,
+            },
+        }
+    }
+
+    fn status(self) -> &'static str {
+        match self {
+            Self::Keyframes => "Running the AEGP keyframe roundtrip in isolation...",
+            Self::Seek => "Running the AEGP current-time roundtrip in isolation...",
+            Self::Trim => "Running the AEGP layer-trim roundtrip in isolation...",
+            Self::LayerSwitches => "Running the AEGP layer-switch roundtrip in isolation...",
+        }
+    }
+}
+
+fn show_aegp_roundtrip_actions(
+    ui: &mut egui::Ui,
+    busy: bool,
+    ui_kit: &AexUiKit,
+) -> (
+    Option<AegpRoundtripAction>,
+    Vec<(AegpRoundtripAction, egui::Rect)>,
+) {
+    let mut clicked = None;
+    let mut buttons = Vec::with_capacity(AegpRoundtripAction::ALL.len());
+    for action in AegpRoundtripAction::ALL {
+        let response = analysis_action_button(ui, !busy, action.label(ui_kit), action.help(ui_kit));
+        buttons.push((action, response.rect));
+        if response.clicked() {
+            clicked = Some(action);
+        }
+    }
+    (clicked, buttons)
+}
+
+fn analysis_setting_row(ui: &mut egui::Ui, label: &str, add_controls: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            egui::vec2(112.0, ui.spacing().interact_size.y),
+            egui::Label::new(label),
+        );
+        ui.add_space(8.0);
+        add_controls(ui);
+    });
+}
 
 fn fixed_column_header(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     let (header_rect, _) = ui.allocate_exact_size(
@@ -46,6 +198,12 @@ fn parameters_for_native_action(
     parameters
         .iter()
         .filter(|parameter| {
+            if matches!(
+                parameter.kind.as_str(),
+                "layer" | "group_start" | "group_end" | "button" | "custom" | "no_data"
+            ) {
+                return false;
+            }
             if parameter.kind != "arbitrary_data" {
                 return true;
             }
@@ -61,6 +219,70 @@ fn parameters_for_native_action(
         .collect()
 }
 
+fn canonical_runtime_dependency_root(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("Runtime dependency folder must be an absolute path.".into());
+    }
+    let canonical = canonical_deverbatim(path)
+        .map_err(|error| format!("Runtime dependency folder is unavailable: {error}"))?;
+    if !canonical.is_dir() {
+        return Err("Runtime dependency folder is not a directory.".into());
+    }
+    let text = canonical
+        .to_str()
+        .ok_or("Runtime dependency folder must be UTF-8.")?;
+    if text.contains(';') {
+        return Err("Runtime dependency folder must not contain ';'.".into());
+    }
+    Ok(canonical)
+}
+
+fn same_windows_path(left: &Path, right: &Path) -> bool {
+    left.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+}
+
+fn approved_dependency_search_dirs(
+    plugin_path: &Path,
+    dependencies: &[aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact],
+    runtime_roots: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    let plugin_parent = plugin_path
+        .parent()
+        .ok_or("Selected AEX has no parent folder.")?;
+    let mut roots = vec![plugin_parent.to_path_buf()];
+    for dependency in dependencies {
+        let parent = dependency
+            .path
+            .parent()
+            .ok_or("Approved dependency has no parent folder.")?;
+        if !roots.iter().any(|root| same_windows_path(root, parent)) {
+            roots.push(parent.to_path_buf());
+        }
+    }
+    for root in runtime_roots {
+        if !roots.iter().any(|seen| same_windows_path(seen, root)) {
+            roots.push(root.clone());
+        }
+    }
+    if roots.len() > 16 {
+        return Err("At most 16 dependency search folders may be approved.".into());
+    }
+    Ok(roots)
+}
+
+fn single_supported_dropped_path(dropped: &[egui::DroppedFile]) -> Option<PathBuf> {
+    if dropped.len() != 1 {
+        return None;
+    }
+    dropped[0]
+        .path
+        .as_ref()
+        .filter(|path| is_supported_input_image(path))
+        .cloned()
+}
+
 struct HarnessApp {
     ui_kit: AexUiKit,
     repository: PathBuf,
@@ -68,6 +290,7 @@ struct HarnessApp {
     session_approved: bool,
     dependencies: Vec<SessionDependency>,
     approved_dependencies: Vec<aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact>,
+    runtime_dependency_roots: Vec<PathBuf>,
     approval_check: bool,
     trust_rebuilds: bool,
     selection_stale: bool,
@@ -146,6 +369,7 @@ impl HarnessApp {
             session_approved: false,
             dependencies: Vec::new(),
             approved_dependencies: Vec::new(),
+            runtime_dependency_roots: Vec::new(),
             approval_check: false,
             trust_rebuilds: false,
             selection_stale: false,
@@ -229,6 +453,7 @@ impl HarnessApp {
         self.session_approved = false;
         self.dependencies.clear();
         self.approved_dependencies.clear();
+        self.runtime_dependency_roots.clear();
         self.approval_check = false;
         self.trust_rebuilds = false;
         self.selection_stale = false;
@@ -293,6 +518,37 @@ impl HarnessApp {
     fn accept_adjacent_discovery(&mut self, discovery: AdjacentImportDiscovery) {
         self.dependencies = discovery.dependencies;
         self.preflight_warnings = discovery.warnings;
+        let unresolved = self
+            .preflight_warnings
+            .iter()
+            .map(|warning| warning.basename.clone())
+            .collect::<Vec<_>>();
+        self.runtime_dependency_roots = match
+            aexcompat_broker::installed_runtime_roots::matching_registered_runtime_roots(&unresolved)
+        {
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(found) => {
+                let admitted = found
+                    .into_iter()
+                    .map(|(basename, roots)| {
+                        (
+                            basename,
+                            roots
+                                .into_iter()
+                                .filter_map(|path| canonical_runtime_dependency_root(&path).ok())
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                aexcompat_broker::installed_runtime_roots::unique_runtime_roots(admitted, 15)
+            }
+            aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::IndexTruncated => {
+                self.diagnostic_warning = Some(
+                    "Registered runtime index exceeded its safety bound; no partial runtime roots were admitted. Restart after narrowing registered install roots."
+                        .to_owned(),
+                );
+                Vec::new()
+            }
+        };
         let Some(selection) = self.selection.as_ref() else {
             return;
         };
@@ -795,6 +1051,27 @@ impl HarnessApp {
         }
     }
 
+    fn invalidate_effect_controls_for_dependency_change(&mut self) {
+        self.close_live_session();
+        self.parameters.clear();
+        self.parameter_defaults.clear();
+        self.parameter_inspection_state = if self.selection.is_some() {
+            ParameterInspectionState::Failed
+        } else {
+            ParameterInspectionState::NotSelected
+        };
+        self.audio_effect_only = false;
+        self.smart_render = false;
+        self.smart_render_advertised = None;
+        self.smart_render_capability = None;
+        self.smart_render_manual_override = false;
+        self.pending_parameter_slot = None;
+        self.pending_live_render = false;
+        self.live_render_due = None;
+        self.render_after_parameter_change = false;
+        self.invalidate_render_output();
+    }
+
     fn invalidate_session_approval(&mut self, status: &str) {
         self.session_approved = false;
         self.approval_check = false;
@@ -850,6 +1127,10 @@ impl HarnessApp {
         let Some(path) = selected else {
             return;
         };
+        self.load_input_path(ctx, path);
+    }
+
+    fn load_input_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         match load_preview(ctx, "input", &path) {
             Ok(preview) => {
                 self.input_image = Some(path);
@@ -863,6 +1144,22 @@ impl HarnessApp {
                 self.report = error;
             }
         }
+    }
+
+    fn accept_dropped_input(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        if self.busy {
+            self.status = "Image drop ignored while a native task is running.".into();
+            return;
+        }
+        let Some(path) = single_supported_dropped_path(&dropped) else {
+            self.status = "Drop exactly one supported image file.".into();
+            return;
+        };
+        self.load_input_path(ctx, path);
     }
 
     fn start_live_render_if_ready(&mut self) {
@@ -1112,16 +1409,19 @@ impl HarnessApp {
         let plugin_path = selection.path.clone();
         let hash = selection.sha256.clone();
         let plugin_size = selection.size;
-        let mut dependency_search_dirs = self
-            .approved_dependencies
-            .iter()
-            .filter_map(|artifact| artifact.path.parent().map(Path::to_path_buf))
-            .collect::<Vec<_>>();
-        if let Some(parent) = plugin_path.parent() {
-            dependency_search_dirs.push(parent.to_path_buf());
-        }
-        dependency_search_dirs.sort();
-        dependency_search_dirs.dedup();
+        let dependency_search_dirs = match approved_dependency_search_dirs(
+            &plugin_path,
+            &self.approved_dependencies,
+            &self.runtime_dependency_roots,
+        ) {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.invalidate_effect_controls_for_dependency_change();
+                self.status = "Effect Controls inspection has invalid dependency folders.".into();
+                self.report = error;
+                return;
+            }
+        };
         self.status = "Loading Effect Controls...".into();
         self.parameter_inspection_state = ParameterInspectionState::Loading;
         self.spawn_native("inspect_parameters", move || {
@@ -1692,6 +1992,18 @@ impl HarnessApp {
         let gpu_backend = self.gpu_backend;
         let audio_sidecar = self.audio_input.clone();
         let dependencies = self.approved_dependencies.clone();
+        let dependency_search_dirs = match approved_dependency_search_dirs(
+            &plugin_path,
+            &dependencies,
+            &self.runtime_dependency_roots,
+        ) {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.status = "Render blocked: dependency folders are invalid.".into();
+                self.report = error;
+                return;
+            }
+        };
         let custom_ui_action = if self.apply_custom_ui_click_to_render {
             Some(aexcompat_broker::image_render::RenderUiAction::Click {
                 point: self.custom_ui_click_point,
@@ -1725,11 +2037,13 @@ impl HarnessApp {
             self.report = "Disable SmartFX, deep color, mask/spatial/render context, and custom UI actions before rendering with audio.".into();
             return;
         }
-        if audio_sidecar.is_some() && !dependencies.is_empty() {
+        if audio_sidecar.is_some()
+            && (!dependencies.is_empty() || !self.runtime_dependency_roots.is_empty())
+        {
             self.status =
-                "Dependency DLLs are not supported by the audio-sidecar render path.".into();
+                "Dependency DLLs or runtime folders are not supported by the audio-sidecar render path.".into();
             self.report =
-                "Remove dependencies or disable the audio sidecar before rendering.".into();
+                "Remove dependencies and runtime folders or disable the audio sidecar before rendering.".into();
             return;
         }
         // The resident-session selector path follows the existing inspection
@@ -1756,6 +2070,7 @@ impl HarnessApp {
                     plugin_path,
                     plugin_sha256: hash,
                     dependencies,
+                    dependency_search_dirs,
                     parameters,
                     selection: interactive_selection,
                     input_path: input,
@@ -1807,7 +2122,7 @@ impl HarnessApp {
                     timing,
                 )
             } else {
-                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
                     &repository,
                     &plugin_path,
                     &hash,
@@ -1821,6 +2136,7 @@ impl HarnessApp {
                     custom_ui_action,
                     gpu_backend,
                     dependencies,
+                    dependency_search_dirs,
                 )
             }
             .map_err(|error| interactive_selection_failure(interactive_selection, error.to_string()))?;
@@ -2104,6 +2420,31 @@ impl HarnessApp {
         });
     }
 
+    fn dispatch_aegp_roundtrip(&mut self, action: AegpRoundtripAction) {
+        self.dispatch_aegp_roundtrip_with(action, action.spec().dispatch);
+    }
+
+    fn dispatch_aegp_roundtrip_with<F>(&mut self, action: AegpRoundtripAction, dispatch: F)
+    where
+        F: FnOnce(&Path, &Path, &str) -> std::io::Result<serde_json::Value> + Send + 'static,
+    {
+        let Some(selection) = &self.selection else {
+            return;
+        };
+        let repository = self.repository.clone();
+        let plugin_path = selection.path.clone();
+        let hash = selection.sha256.clone();
+        self.status = action.status().into();
+        self.spawn_native(action.spec().operation, move || {
+            let report =
+                dispatch(&repository, &plugin_path, &hash).map_err(|error| error.to_string())?;
+            Ok((
+                serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?,
+                None,
+            ))
+        });
+    }
+
     fn show_effect_controls(&mut self, ui: &mut egui::Ui) {
         fixed_column_header(ui, |ui| {
             ui.horizontal(|ui| {
@@ -2325,12 +2666,11 @@ impl HarnessApp {
                                 parameter.value = f64::from(checked);
                             }
                         } else {
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut parameter.value,
-                                    parameter.minimum..=parameter.maximum,
-                                )
-                                .show_value(true),
+                            self.ui_kit.modern_slider(
+                                ui,
+                                &mut parameter.value,
+                                parameter.minimum..=parameter.maximum,
+                                &parameter.name,
                             );
                         }
                     });
@@ -2597,6 +2937,7 @@ impl HarnessApp {
 impl eframe::App for HarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui_kit.install(ctx);
+        self.accept_dropped_input(ctx);
         self.poll(ctx);
         self.dispatch_pending_parameter_change(ctx);
         self.check_selected_identity();
@@ -2773,11 +3114,19 @@ impl eframe::App for HarnessApp {
             egui::Id::new("analysis_and_logs_animation"),
             self.show_analysis_panel,
         );
-        let analysis_width = egui::lerp(18.0..=self.analysis_panel_width, analysis_openness);
+        self.analysis_panel_width = clamp_analysis_panel_width(self.analysis_panel_width);
+        let analysis_width =
+            analysis_panel_display_width(self.analysis_panel_width, analysis_openness);
         let analysis_response = egui::SidePanel::left("analysis_and_logs")
             .exact_width(analysis_width)
             .resizable(false)
             .show_separator_line(false)
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin::symmetric(
+                    ANALYSIS_PANEL_PADDING as i8,
+                    0,
+                )),
+            )
             .show(ctx, |ui| {
                 if analysis_openness > 0.12 {
                     fixed_column_header(ui, |ui| {
@@ -2795,19 +3144,24 @@ impl eframe::App for HarnessApp {
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-            ui.label(
-                RichText::new(self.ui_kit.text(
+            analysis_section_heading(
+                ui,
+                self.ui_kit.text(
                     "PROJECT / SESSION SETTINGS",
                     "プロジェクト／セッション設定",
-                ))
-                .small()
-                .strong()
-                .color(self.ui_kit.muted_foreground()),
+                ),
+                self.ui_kit.muted_foreground(),
             );
-            ui.separator();
-            if ui
-                .add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Change AEX source...", "AEXを変更...")))
-                .clicked()
+            if analysis_action_button(
+                ui,
+                !self.busy,
+                self.ui_kit.text("Change AEX source...", "AEXを変更..."),
+                self.ui_kit.text(
+                    "Close the current plug-in session and choose another AEX.",
+                    "現在のプラグインセッションを閉じ、別のAEXを選択します。",
+                ),
+            )
+            .clicked()
             {
                 self.reset_and_choose_aex();
             }
@@ -2830,7 +3184,15 @@ impl eframe::App for HarnessApp {
                     if let Some(warning) = &self.diagnostic_warning {
                         ui.colored_label(Color32::from_rgb(210, 145, 40), warning);
                     }
-                    if ui.button(self.ui_kit.text("Reload diagnostics", "診断を再読込")).clicked() {
+                    if analysis_action_button(
+                        ui,
+                        true,
+                        self.ui_kit.text("Reload diagnostics", "診断を再読込"),
+                        self.ui_kit.text(
+                            "Reload saved diagnostics for the selected AEX identity.",
+                            "選択中AEXの識別情報に紐づく保存済み診断を再読込します。",
+                        ),
+                    ).clicked() {
                         self.diagnostic_history = load_diagnostic_history(&self.repository, &selected_hash);
                         self.missing_suite_aggregate = aggregate_missing_suites(&self.repository);
                     }
@@ -2904,43 +3266,49 @@ impl eframe::App for HarnessApp {
                         }
                     }
                     ui.label("The selected binary is hashed automatically and runs in a crash-contained worker. This is not a security sandbox.");
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Reload rebuilt AEX", "再ビルドしたAEXを再読込"))).clicked() {
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Reload rebuilt AEX", "再ビルドしたAEXを再読込"), self.ui_kit.text("Re-hash the selected file and rebuild its approved session.", "選択中ファイルを再ハッシュし、承認済みセッションを作り直します。")).clicked() {
                         self.refresh_aex();
                     }
                     });
                 });
                 if self.session_approved && !self.selection_stale {
                     ui.add_space(10.0);
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Reload Effect Controls", "エフェクトコントロールを再読込"))).clicked() { self.inspect_parameters_async(); }
-                    ui.label(
-                        RichText::new(self.ui_kit.text("ADVANCED", "高度な機能"))
-                            .small()
-                            .strong()
-                            .color(self.ui_kit.muted_foreground()),
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Reload Effect Controls", "エフェクトコントロールを再読込"), self.ui_kit.text("Inspect the selected AEX controls again in an isolated worker.", "隔離ワーカーで選択中AEXのコントロールを再検査します。")).clicked() { self.inspect_parameters_async(); }
+                    analysis_section_heading(
+                        ui,
+                        self.ui_kit.text("ADVANCED", "高度な機能"),
+                        self.ui_kit.muted_foreground(),
                     );
                     ui.collapsing(self.ui_kit.text("Developer probes and diagnostics", "開発者向けプローブと診断"), |ui| {
+                    ui.label(RichText::new(self.ui_kit.text("DEPENDENCIES", "依存関係")).small().strong());
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Inspect all dependencies", "全依存関係を検査"))).clicked() { self.inspect_external_dependencies(false); }
-                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Inspect missing dependencies", "不足依存関係を検査"))).clicked() { self.inspect_external_dependencies(true); }
+                        if analysis_action_button(ui, !self.busy, self.ui_kit.text("Inspect all", "すべて検査"), self.ui_kit.text("Inspect every imported dependency in isolation.", "読み込まれるすべての依存DLLを隔離検査します。")).clicked() { self.inspect_external_dependencies(false); }
+                        if analysis_action_button(ui, !self.busy, self.ui_kit.text("Inspect missing", "不足分を検査"), self.ui_kit.text("Inspect only dependencies that are currently unresolved.", "現在不足している依存DLLだけを検査します。")).clicked() { self.inspect_external_dependencies(true); }
                     });
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe 2-frame persistent sequence", "2フレーム永続シーケンスを検査"))).clicked() { self.probe_persistent_sequence(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe sequence save/reload", "シーケンス保存／再読込を検査"))).clicked() { self.probe_flattened_sequence(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe non-destructive sequence save", "非破壊シーケンス保存を検査"))).clicked() { self.probe_copied_flattened_sequence(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe options dialog", "オプションダイアログを検査"))).clicked() { self.probe_options_dialog(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe automatic options dialog", "自動オプションダイアログを検査"))).clicked() { self.probe_automatic_options_dialog(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe NOP_RENDER passthrough", "NOP_RENDERパススルーを検査"))).clicked() { self.probe_nop_render(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe SmartFX NOP_RENDER passthrough", "SmartFX NOP_RENDERパススルーを検査"))).clicked() { self.probe_smart_nop_render(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe input-buffer write access", "入力バッファー書込を検査"))).clicked() { self.probe_input_buffer_write(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe SmartFX input-buffer write access", "SmartFX入力バッファー書込を検査"))).clicked() { self.probe_smart_input_buffer_write(); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe FRAME_SETUP expansion", "FRAME_SETUP拡張を検査"))).clicked() { self.probe_frame_resize(true); }
-                    if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe FRAME_SETUP shrink", "FRAME_SETUP縮小を検査"))).clicked() { self.probe_frame_resize(false); }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(self.ui_kit.text("SEQUENCE STATE", "シーケンス状態")).small().strong());
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Two-frame persistence", "2フレーム永続性"), self.ui_kit.text("Check whether sequence state survives across two frames.", "シーケンス状態が2フレーム間で維持されるか検査します。")).clicked() { self.probe_persistent_sequence(); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Save / reload", "保存／再読込"), self.ui_kit.text("Round-trip flattened sequence data through save and reload.", "シーケンスデータを保存・再読込して復元性を検査します。")).clicked() { self.probe_flattened_sequence(); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Non-destructive save", "非破壊保存"), self.ui_kit.text("Verify that saving a copy does not mutate the live sequence.", "コピー保存が実行中のシーケンスを変更しないか検査します。")).clicked() { self.probe_copied_flattened_sequence(); }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(self.ui_kit.text("RENDER CONTRACT", "レンダー契約")).small().strong());
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Options dialog", "オプション画面"), self.ui_kit.text("Open the effect options dialog in the isolated worker.", "隔離ワーカーでエフェクトのオプション画面を検査します。")).clicked() { self.probe_options_dialog(); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Automatic options", "自動オプション"), self.ui_kit.text("Exercise the automatic options-dialog selector path.", "自動オプションダイアログのセレクター経路を検査します。")).clicked() { self.probe_automatic_options_dialog(); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Classic NOP_RENDER", "Classic NOP_RENDER"), self.ui_kit.text("Verify classic NOP_RENDER input passthrough.", "Classic経路のNOP_RENDER入力パススルーを検査します。")).clicked() { self.probe_nop_render(); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("SmartFX NOP_RENDER", "SmartFX NOP_RENDER"), self.ui_kit.text("Verify SmartFX NOP_RENDER input passthrough.", "SmartFX経路のNOP_RENDER入力パススルーを検査します。")).clicked() { self.probe_smart_nop_render(); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("Classic input write", "Classic入力書込"), self.ui_kit.text("Detect writes to the protected classic input buffer.", "保護されたClassic入力バッファーへの書込みを検査します。")).clicked() { self.probe_input_buffer_write(); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("SmartFX input write", "SmartFX入力書込"), self.ui_kit.text("Detect writes to the protected SmartFX input buffer.", "保護されたSmartFX入力バッファーへの書込みを検査します。")).clicked() { self.probe_smart_input_buffer_write(); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("FRAME_SETUP expand", "FRAME_SETUP拡張"), self.ui_kit.text("Probe an effect that requests a larger output frame.", "出力フレームの拡張要求を検査します。")).clicked() { self.probe_frame_resize(true); }
+                    if analysis_action_button(ui, !self.busy, self.ui_kit.text("FRAME_SETUP shrink", "FRAME_SETUP縮小"), self.ui_kit.text("Probe an effect that requests a smaller output frame.", "出力フレームの縮小要求を検査します。")).clicked() { self.probe_frame_resize(false); }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(self.ui_kit.text("CUSTOM UI EVENTS", "カスタムUIイベント")).small().strong());
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events & 4 != 0)
-                        && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Probe custom UI cursor", "カスタムUIカーソルを検査"))).clicked()
+                        && analysis_action_button(ui, !self.busy, self.ui_kit.text("Cursor query", "カーソル照会"), self.ui_kit.text("Ask the effect which cursor should be shown at the test point.", "指定位置で表示するカーソルをエフェクトへ照会します。")).clicked()
                     {
                         self.probe_custom_ui_cursor();
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events != 0)
-                        && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Record custom UI draw", "カスタムUI描画を記録"))).clicked()
+                        && analysis_action_button(ui, !self.busy, self.ui_kit.text("Record draw", "描画を記録"), self.ui_kit.text("Capture the effect's custom-control draw commands.", "カスタムコントロールの描画命令を記録します。")).clicked()
                     {
                         self.probe_custom_ui_draw();
                     }
@@ -2954,12 +3322,12 @@ impl eframe::App for HarnessApp {
                         }
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events != 0)
-                        && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Test custom UI lifecycle", "カスタムUIライフサイクルを検査"))).clicked()
+                        && analysis_action_button(ui, !self.busy, self.ui_kit.text("Lifecycle", "ライフサイクル"), self.ui_kit.text("Run the custom UI open, draw, and close lifecycle.", "カスタムUIの開始・描画・終了を順に検査します。")).clicked()
                     {
                         self.probe_custom_ui_lifecycle();
                     }
                     if self.parameters.iter().any(|parameter| parameter.custom_ui_events != 0)
-                        && ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch custom UI idle", "カスタムUIアイドルを送信"))).clicked()
+                        && analysis_action_button(ui, !self.busy, self.ui_kit.text("Dispatch idle", "アイドル送信"), self.ui_kit.text("Send one idle event to the custom UI.", "カスタムUIへアイドルイベントを1回送信します。")).clicked()
                     {
                         self.probe_custom_ui_idle();
                     }
@@ -2972,7 +3340,7 @@ impl eframe::App for HarnessApp {
                                 ui.label(format!("0x{:08X}", self.custom_ui_keycode));
                                 ui.label(self.ui_kit.text("Modifiers", "修飾キー"));
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_key_modifiers));
-                                if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch key", "キーを送信"))).clicked() {
+                                if analysis_action_button(ui, !self.busy, self.ui_kit.text("Dispatch key", "キーを送信"), self.ui_kit.text("Send this key event to the custom control.", "このキーイベントをカスタムコントロールへ送信します。")).clicked() {
                                     self.probe_custom_ui_keydown();
                                 }
                             });
@@ -2988,7 +3356,7 @@ impl eframe::App for HarnessApp {
                                 ui.label("Y");
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_click_point[1]).range(0..=8192));
                                 ui.color_edit_button_rgba_unmultiplied(&mut self.custom_ui_click_color);
-                                if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch click", "クリックを送信"))).clicked() {
+                                if analysis_action_button(ui, !self.busy, self.ui_kit.text("Dispatch click", "クリックを送信"), self.ui_kit.text("Send a click with the selected point and color.", "指定した位置と色でクリックを送信します。")).clicked() {
                                     self.probe_custom_ui_click();
                                 }
                             });
@@ -3011,23 +3379,27 @@ impl eframe::App for HarnessApp {
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_drag_end[1]).range(0..=8192));
                                 ui.label(self.ui_kit.text("Steps", "ステップ数"));
                                 ui.add(egui::DragValue::new(&mut self.custom_ui_drag_steps).range(1..=32));
-                                if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch drag", "ドラッグを送信"))).clicked() {
+                                if analysis_action_button(ui, !self.busy, self.ui_kit.text("Dispatch drag", "ドラッグを送信"), self.ui_kit.text("Send the configured multi-step drag gesture.", "設定した複数ステップのドラッグ操作を送信します。")).clicked() {
                                     self.probe_custom_ui_drag();
                                 }
                             });
                             ui.label(self.ui_kit.text("The custom UI click X/Y values above are used as the drag start.", "上のクリックX/Yをドラッグ開始位置として使います。"));
-                            if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch mouse exited", "マウス退出を送信"))).clicked() {
+                            if analysis_action_button(ui, !self.busy, self.ui_kit.text("Mouse exited", "マウス退出"), self.ui_kit.text("Notify the custom control that the pointer left its bounds.", "ポインターが領域外へ出たことを通知します。")).clicked() {
                                 self.probe_custom_ui_mouse_exited();
                             }
                         });
                     }
                     ui.collapsing(self.ui_kit.text("AEGP diagnostics (advanced)", "AEGP診断（高度）"), |ui| {
-                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Initialize as AEGP", "AEGPとして初期化"))).clicked() { self.initialize_aegp(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch AEGP update-menu", "AEGPメニュー更新を送信"))).clicked() { self.update_aegp_menu(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Dispatch one AEGP idle tick", "AEGPアイドルを1回送信"))).clicked() { self.dispatch_aegp_idle(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Run AEGP command ON/OFF roundtrip", "AEGPコマンドON/OFFを実行"))).clicked() { self.dispatch_aegp_command_roundtrip(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Run AEGP active-idle roundtrip", "AEGPアクティブアイドルを実行"))).clicked() { self.dispatch_aegp_active_idle_roundtrip(); }
-                        if ui.add_enabled(!self.busy, egui::Button::new(self.ui_kit.text("Run AEGP comp-idle roundtrip", "AEGPコンポアイドルを実行"))).clicked() { self.dispatch_aegp_comp_idle_roundtrip(); }
+                        if analysis_action_button(ui, !self.busy, self.ui_kit.text("Initialize", "初期化"), self.ui_kit.text("Initialize the selected binary through the AEGP entry path.", "選択中のバイナリをAEGP経路で初期化します。")).clicked() { self.initialize_aegp(); }
+                        if analysis_action_button(ui, !self.busy, self.ui_kit.text("Update menu", "メニュー更新"), self.ui_kit.text("Dispatch one AEGP update-menu callback.", "AEGPメニュー更新コールバックを1回送信します。")).clicked() { self.update_aegp_menu(); }
+                        if analysis_action_button(ui, !self.busy, self.ui_kit.text("Idle tick", "アイドル1回"), self.ui_kit.text("Dispatch one AEGP idle callback.", "AEGPアイドルコールバックを1回送信します。")).clicked() { self.dispatch_aegp_idle(); }
+                        if analysis_action_button(ui, !self.busy, self.ui_kit.text("Command ON / OFF", "コマンドON／OFF"), self.ui_kit.text("Run an AEGP command enable/disable round trip.", "AEGPコマンドの有効・無効往復を検査します。")).clicked() { self.dispatch_aegp_command_roundtrip(); }
+                        if analysis_action_button(ui, !self.busy, self.ui_kit.text("Active idle", "アクティブアイドル"), self.ui_kit.text("Run the active-item idle callback round trip.", "アクティブ項目のアイドル往復を検査します。")).clicked() { self.dispatch_aegp_active_idle_roundtrip(); }
+                        if analysis_action_button(ui, !self.busy, self.ui_kit.text("Comp idle", "コンポアイドル"), self.ui_kit.text("Run the composition idle callback round trip.", "コンポジションのアイドル往復を検査します。")).clicked() { self.dispatch_aegp_comp_idle_roundtrip(); }
+                        let (clicked, _) = show_aegp_roundtrip_actions(ui, self.busy, &self.ui_kit);
+                        if let Some(action) = clicked {
+                            self.dispatch_aegp_roundtrip(action);
+                        }
                     });
                     });
                     // Effect parameters live in the persistent left-side Effect Controls panel.
@@ -3133,7 +3505,12 @@ impl eframe::App for HarnessApp {
                                 let mut checked = parameter.value != 0.0;
                                 if ui.checkbox(&mut checked, "").changed() { parameter.value = if checked { 1.0 } else { 0.0 }; }
                             } else {
-                                ui.add(egui::Slider::new(&mut parameter.value, parameter.minimum..=parameter.maximum));
+                                self.ui_kit.modern_slider(
+                                    ui,
+                                    &mut parameter.value,
+                                    parameter.minimum..=parameter.maximum,
+                                    &parameter.name,
+                                );
                             }
                         }));
                         if parameter.supervised
@@ -3150,15 +3527,12 @@ impl eframe::App for HarnessApp {
                         self.trigger_button(slot);
                     }
                     }
-                    ui.separator();
-                    ui.label(
-                        RichText::new(self.ui_kit.text("RENDER SETTINGS", "レンダー設定"))
-                            .small()
-                            .strong()
-                            .color(self.ui_kit.muted_foreground()),
+                    analysis_section_heading(
+                        ui,
+                        self.ui_kit.text("RENDER SETTINGS", "レンダー設定"),
+                        self.ui_kit.muted_foreground(),
                     );
-                    ui.horizontal(|ui| {
-                        ui.label(self.ui_kit.text("Render path:", "レンダー方式:"));
+                    analysis_setting_row(ui, self.ui_kit.text("Render path", "レンダー方式"), |ui| {
                         let classic_changed = ui
                             .selectable_value(&mut self.smart_render, false, "Classic")
                             .changed();
@@ -3181,39 +3555,34 @@ impl eframe::App for HarnessApp {
                             }
                         }
                     });
-                    ui.horizontal(|ui| {
+                    analysis_setting_row(ui, self.ui_kit.text("Pixel depth", "色深度"), |ui| {
                         use aexcompat_broker::image_render::RenderPixelFormat;
-                        ui.label(self.ui_kit.text("Pixel depth:", "色深度:"));
                         ui.selectable_value(&mut self.pixel_format, RenderPixelFormat::Argb8, "8 bpc");
                         ui.selectable_value(&mut self.pixel_format, RenderPixelFormat::Argb16, "16 bpc");
                         ui.selectable_value(&mut self.pixel_format, RenderPixelFormat::Argb32f, "32 bpc float");
                     });
-                    ui.horizontal(|ui| {
+                    analysis_setting_row(ui, self.ui_kit.text("GPU backend", "GPUバックエンド"), |ui| {
                         use aexcompat_broker::image_render::RenderGpuBackend;
-                        ui.label(self.ui_kit.text("GPU backend:", "GPUバックエンド:"));
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::Auto, "Auto");
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::Cuda, "CUDA");
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::OpenCl, "OpenCL");
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::DirectX, "DirectX");
                         ui.selectable_value(&mut self.gpu_backend, RenderGpuBackend::Cpu, "CPU");
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(self.ui_kit.text("Frame:", "フレーム:"));
+                    analysis_setting_row(ui, self.ui_kit.text("Frame / duration", "フレーム／長さ"), |ui| {
                         if ui.add(egui::DragValue::new(&mut self.frame).range(0..=10_000_000)).changed() {
                             self.duration_frames = self.duration_frames.max(self.frame.saturating_add(1));
                         }
-                        ui.label(self.ui_kit.text("Duration frames:", "デュレーション:"));
+                        ui.label(self.ui_kit.text("Duration", "長さ"));
                         ui.add(egui::DragValue::new(&mut self.duration_frames).range(self.frame.saturating_add(1)..=10_000_001));
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(self.ui_kit.text("Time scale:", "タイムスケール:"));
+                    analysis_setting_row(ui, self.ui_kit.text("Time base", "時間基準"), |ui| {
                         ui.add(egui::DragValue::new(&mut self.frames_per_second).range(1..=1_000_000));
                         ui.label(self.ui_kit.text("Frame step:", "フレーム間隔:"));
                         ui.add(egui::DragValue::new(&mut self.frame_time_step).range(1..=100_000));
                         ui.label(format!("{:.5} fps", self.frames_per_second as f64 / self.frame_time_step as f64));
                     });
-                    ui.horizontal(|ui| {
-                        ui.label(self.ui_kit.text("Rate presets:", "フレームレート:"));
+                    analysis_setting_row(ui, self.ui_kit.text("Rate presets", "フレームレート"), |ui| {
                         for (label, scale, step) in [("23.976", 24_000, 1_001), ("29.97", 30_000, 1_001), ("59.94", 60_000, 1_001)] {
                             if ui.button(label).clicked() {
                                 self.frames_per_second = scale;
@@ -3414,12 +3783,10 @@ impl eframe::App for HarnessApp {
                     }
                 }
             }
-            ui.separator();
-            ui.label(
-                RichText::new(self.ui_kit.text("ANALYSIS / LOG OUTPUT", "解析／ログ出力"))
-                    .small()
-                    .strong()
-                    .color(self.ui_kit.muted_foreground()),
+            analysis_section_heading(
+                ui,
+                self.ui_kit.text("ANALYSIS / LOG OUTPUT", "解析／ログ出力"),
+                self.ui_kit.muted_foreground(),
             );
             ui.label(RichText::new(self.ui_kit.status_text(&self.status)).strong());
             if let Some(path) = &self.output_image { ui.monospace(format!("Output: {}", path.display())); }
@@ -3628,13 +3995,17 @@ impl eframe::App for HarnessApp {
         let analysis_rect = analysis_response.response.rect;
         let rail_x = analysis_rect.right();
         egui::Area::new(egui::Id::new("analysis_and_logs_rail"))
-            .fixed_pos(egui::pos2(rail_x - 6.0, analysis_rect.top()))
+            .fixed_pos(egui::pos2(rail_x - 8.0, analysis_rect.top()))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 let (rail_rect, rail) = ui.allocate_exact_size(
-                    egui::vec2(12.0, analysis_rect.height()),
+                    egui::vec2(16.0, analysis_rect.height()),
                     egui::Sense::click_and_drag(),
                 );
+                let rail = rail.on_hover_text(self.ui_kit.text(
+                    "Click to collapse or reopen. Drag to resize.",
+                    "クリックで開閉、ドラッグで幅を変更します。",
+                ));
                 rail.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::Checkbox,
@@ -3653,7 +4024,7 @@ impl eframe::App for HarnessApp {
                 if self.show_analysis_panel && rail.dragged() {
                     let delta_x = ui.input(|input| input.pointer.delta().x);
                     self.analysis_panel_width =
-                        (analysis_rect.width() + delta_x).clamp(260.0, 560.0);
+                        resized_analysis_panel_width(self.analysis_panel_width, delta_x);
                     ctx.request_repaint();
                 }
                 if rail.clicked() {
@@ -3662,15 +4033,15 @@ impl eframe::App for HarnessApp {
                 let center = egui::pos2(line_x, rail_rect.top() + 16.0);
                 let points = if self.show_analysis_panel {
                     vec![
-                        egui::pos2(center.x + 2.5, center.y - 4.0),
-                        egui::pos2(center.x - 2.5, center.y),
-                        egui::pos2(center.x + 2.5, center.y + 4.0),
+                        egui::pos2(center.x + 3.5, center.y - 5.5),
+                        egui::pos2(center.x - 3.5, center.y),
+                        egui::pos2(center.x + 3.5, center.y + 5.5),
                     ]
                 } else {
                     vec![
-                        egui::pos2(center.x - 2.5, center.y - 4.0),
-                        egui::pos2(center.x + 2.5, center.y),
-                        egui::pos2(center.x - 2.5, center.y + 4.0),
+                        egui::pos2(center.x - 3.5, center.y - 5.5),
+                        egui::pos2(center.x + 3.5, center.y),
+                        egui::pos2(center.x - 3.5, center.y + 5.5),
                     ]
                 };
                 ui.painter().add(egui::Shape::convex_polygon(
@@ -3693,5 +4064,27 @@ impl eframe::App for HarnessApp {
             self.show_workspace_viewer(ui);
         });
         self.show_image_viewer(ctx);
+        if ctx.input(|input| !input.raw.hovered_files.is_empty()) {
+            let rect = ctx.content_rect().shrink(18.0);
+            let painter = ctx.layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("input-image-drop-target"),
+            ));
+            painter.rect(
+                rect,
+                12.0,
+                self.ui_kit.theme.palette.background.gamma_multiply(0.92),
+                egui::Stroke::new(2.0, self.ui_kit.theme.palette.primary),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                self.ui_kit
+                    .text("Drop one input image", "入力画像を1枚ドロップ"),
+                egui::FontId::proportional(22.0),
+                self.ui_kit.theme.palette.foreground,
+            );
+        }
     }
 }

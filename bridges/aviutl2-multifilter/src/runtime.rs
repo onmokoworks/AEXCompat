@@ -874,6 +874,12 @@ fn pool_open_route(
     // defaults are definitions, not host assignments; actual per-object
     // changes arrive with the subsequent frame request.
     let swap_payloads = vec![None; members.len()];
+    let mut companions: Vec<ApprovedCompanion> = members
+        .iter()
+        .flat_map(|member| member.companions.iter().cloned())
+        .collect();
+    companions.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
+    companions.dedup_by(|left, right| left.artifact.path == right.artifact.path);
     let opened = open_mf_session(MfSessionConfig {
         repository: ctx.repository.clone(),
         plugin: ctx.plugin.clone(),
@@ -887,6 +893,7 @@ fn pool_open_route(
         // worker fails closed (-3) — a regression for members that rendered
         // fine before. A layer-fed AEX keeps its per-effect session (issue #645).
         layers: Vec::new(),
+        companions,
         cluster: Some(ClusterLaunch {
             plugins: plugins.clone(),
             swap_payloads,
@@ -949,6 +956,7 @@ struct MfSessionConfig {
     /// feeding an AEX layer parameter. Read on the AviUtl2 callback thread (only
     /// there can the host texture be read) and moved here for the session thread.
     layers: Vec<SessionLayer>,
+    companions: Vec<ApprovedCompanion>,
     /// Cluster launch (issue #405): when set, the session opens over the
     /// whole same-closure cluster and swaps plugins per request instead of
     /// serving a single AEX.
@@ -1081,6 +1089,7 @@ fn run_classic_fallback_once(
         conformance_render_settings: None,
         layers: &classic_config.layers,
         dependencies: Vec::new(),
+        companions: classic_config.companions.clone(),
         dependency_search_dirs: roots.to_vec(),
         width: classic_config.identity.width,
         height: classic_config.identity.height,
@@ -1176,6 +1185,7 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                 conformance_render_settings: None,
                 layers: &config.layers,
                 dependencies,
+                companions: config.companions.clone(),
                 dependency_search_dirs,
                 width: config.identity.width,
                 height: config.identity.height,
@@ -1558,6 +1568,7 @@ fn open_and_get_sender(
         smart,
         identity: identity.clone(),
         layers: open_layers(),
+        companions: ctx.companions.clone(),
         cluster: None,
     })?;
     let serial = opened.serial;

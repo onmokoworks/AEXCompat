@@ -215,6 +215,8 @@ struct NativeState {
     dropped_unsupported_suite_calls: u64,
     utility_suites: HashMap<u32, u64>,
     iterate8_suite: u64,
+    iterate16_suite: u64,
+    iterate_float_suite: u64,
     pre_checkout_calls: u32,
     pre_checkout_requests: Vec<[i32; 4]>,
     smart_checkout_ids: HashMap<i32, NativeSmartCheckout>,
@@ -409,6 +411,7 @@ impl GuestEngine<'static> {
             engine.write_u64(iterate8_suite + (slot * 8) as u64, callback)?;
         }
         engine.state.iterate8_suite = iterate8_suite;
+        engine.install_typed_iterate_suites()?;
         let color_param_suite = engine.allocate(8, 8)?;
         engine.write_u64(color_param_suite, callback_address!(color_param_value))?;
         engine.state.color_param_suite = color_param_suite;
@@ -571,6 +574,22 @@ impl GuestEngine<'static> {
         } else {
             Ok(result)
         }
+    }
+
+    fn install_typed_iterate_suites(&mut self) -> Result<(), GuestError> {
+        for (is_float, callback) in [
+            (false, callback_address!(iterate_world16)),
+            (true, callback_address!(iterate_world_float)),
+        ] {
+            let table = self.allocate(8, 8)?;
+            self.write_u64(table, callback)?;
+            if is_float {
+                self.state.iterate_float_suite = table;
+            } else {
+                self.state.iterate16_suite = table;
+            }
+        }
+        Ok(())
     }
 
     pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
@@ -1313,7 +1332,10 @@ struct NativeMaskWorld8 {
     flags: u32,
 }
 
-fn native_world8(state: &NativeState, world: u64) -> Option<NativeWorld8> {
+fn native_world_typed(state: &NativeState, world: u64, pixel_bytes: usize) -> Option<NativeWorld8> {
+    if !matches!(pixel_bytes, 4 | 8 | 16) {
+        return None;
+    }
     let arena_base = state.arena_end.saturating_sub(ARENA_SIZE as u64);
     if world < arena_base || world.checked_add(abi::PF_LAYER_DEF_SIZE as u64)? > state.arena_end {
         return None;
@@ -1329,7 +1351,7 @@ fn native_world8(state: &NativeState, world: u64) -> Option<NativeWorld8> {
     if data == 0
         || width <= 0
         || height <= 0
-        || rowbytes < usize::try_from(width).ok()?.checked_mul(4)?
+        || rowbytes < usize::try_from(width).ok()?.checked_mul(pixel_bytes)?
         || height > 16_777_216
     {
         return None;
@@ -1455,10 +1477,11 @@ unsafe extern "win64" fn transfer_rect8(
         if !(0..=2).contains(&transfer_mode) || rgb_only > 1 || opacity16 > 32768 {
             return PF_BAD_CALLBACK_PARAM;
         }
-        let Some(source) = native_world8(state, source_world) else {
+        let Some(source) = native_world_typed(state, source_world, abi::PF_PIXEL_SIZE) else {
             return PF_BAD_CALLBACK_PARAM;
         };
-        let Some(destination) = native_world8(state, destination_world) else {
+        let Some(destination) = native_world_typed(state, destination_world, abi::PF_PIXEL_SIZE)
+        else {
             return PF_BAD_CALLBACK_PARAM;
         };
         let mask = if mask_world == 0 {
@@ -1673,18 +1696,96 @@ unsafe extern "win64" fn iterate_world8(
     pixel_function: u64,
     destination_world: u64,
 ) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            4,
+        )
+    }
+}
+
+unsafe extern "win64" fn iterate_world16(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            8,
+        )
+    }
+}
+
+unsafe extern "win64" fn iterate_world_float(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+) -> u64 {
+    unsafe {
+        iterate_world_typed(
+            in_data,
+            progress_base,
+            progress_final,
+            source_world,
+            area,
+            refcon,
+            pixel_function,
+            destination_world,
+            16,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn iterate_world_typed(
+    in_data: u64,
+    progress_base: i32,
+    progress_final: i32,
+    source_world: u64,
+    area: u64,
+    refcon: u64,
+    pixel_function: u64,
+    destination_world: u64,
+    pixel_bytes: usize,
+) -> u64 {
     if pixel_function == 0 {
         return 4;
     }
     let Some(Some((destination, source, bounds, effect_ref, abort, progress))) =
         with_state(|state| {
-            let Some(destination) = native_world8(state, destination_world) else {
+            let Some(destination) = native_world_typed(state, destination_world, pixel_bytes)
+            else {
                 return None;
             };
             let source = if source_world == 0 {
                 None
             } else {
-                let Some(source) = native_world8(state, source_world) else {
+                let Some(source) = native_world_typed(state, source_world, pixel_bytes) else {
                     return None;
                 };
                 Some(source)
@@ -1723,9 +1824,11 @@ unsafe extern "win64" fn iterate_world8(
     let rows = bottom - top;
     for y in top..bottom {
         for x in left..right {
-            let output = destination.data + y as u64 * destination.rowbytes as u64 + x as u64 * 4;
+            let output = destination.data
+                + y as u64 * destination.rowbytes as u64
+                + x as u64 * pixel_bytes as u64;
             let input = source.map_or(0, |source| {
-                source.data + y as u64 * source.rowbytes as u64 + x as u64 * 4
+                source.data + y as u64 * source.rowbytes as u64 + x as u64 * pixel_bytes as u64
             });
             let error = unsafe { pixel(refcon, x, y, input, output) };
             if error != 0 || with_state(|state| state.callback_error.is_some()).unwrap_or(true) {
@@ -1846,10 +1949,11 @@ unsafe extern "win64" fn iterate_lut8(
     destination_world: u64,
 ) -> u64 {
     with_state(|state| {
-        let Some(source) = native_world8(state, source_world) else {
+        let Some(source) = native_world_typed(state, source_world, abi::PF_PIXEL_SIZE) else {
             return 4;
         };
-        let Some(destination) = native_world8(state, destination_world) else {
+        let Some(destination) = native_world_typed(state, destination_world, abi::PF_PIXEL_SIZE)
+        else {
             return 4;
         };
         let Some([left, top, right, bottom]) = native_bounds(
@@ -2272,6 +2376,16 @@ unsafe extern "win64" fn acquire_suite(
         } else if name == "PF Iterate8 Suite" && matches!(version, 1 | 2) && output != 0 {
             unsafe {
                 *(output as *mut u64) = state.iterate8_suite;
+            }
+            0
+        } else if name == "PF iterate16 Suite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.iterate16_suite;
+            }
+            0
+        } else if name == "PF iterateFloat Suite" && version == 1 && output != 0 {
+            unsafe {
+                *(output as *mut u64) = state.iterate_float_suite;
             }
             0
         } else if name == "PF ColorParamSuite" && version == 1 && output != 0 {

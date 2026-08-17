@@ -48,9 +48,7 @@ def _all_workers(flag: str, result_key: str):
 
 
 def test_legacy_effect_compat_suites_pass_on_all_workers() -> None:
-    for _ in _all_workers(
-        "--self-test-legacy-effect-compat", "legacy_effect_compat"
-    ):
+    for _ in _all_workers("--self-test-legacy-effect-compat", "legacy_effect_compat"):
         pass
 
 
@@ -72,6 +70,24 @@ def test_aegp_scene_registry_suites_pass_on_all_workers() -> None:
         "--self-test-aegp-scene-registry-suites", "aegp_scene_registry_suites"
     ):
         pass
+
+
+def test_aegp_borrowed_handle_report_passes_on_all_workers() -> None:
+    for worker in WORKERS:
+        completed = _run_route(worker, "--self-test-aegp-borrowed-handle-report")
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+        report = json.loads(completed.stdout)
+        assert report["stage"] == "aegp_init"
+        assert report["status"] == "initialized"
+        assert report["scene_registry_initialized"] is True
+        assert report["borrowed_handle_issues"] == 129
+        assert report["borrowed_handle_reuses"] == 1
+        assert report["borrowed_handle_exhaustion_failures"] == 1
+        assert report["borrowed_handle_live"] == 0
+        assert report["object_record_issues"] == 768
+        assert report["object_record_reuses"] == 512
+        assert report["object_record_exhaustion_failures"] == 1
+        assert report["object_record_live"] == 18
 
 
 def test_aegp_installed_effect_catalog_passes_on_all_workers() -> None:
@@ -107,6 +123,16 @@ def test_pf_batch_sampling_suite_passes_on_all_workers() -> None:
 def test_smart_result_skipped_passes_on_all_workers() -> None:
     for _ in _all_workers("--self-test-smart-result-skipped", "smart_result_skipped"):
         pass
+
+
+def test_smart_diagnostic_auxiliary_admission_passes_on_all_workers() -> None:
+    for name, report in _all_workers(
+        "--self-test-smart-diagnostic-auxiliary-admission",
+        "smart_diagnostic_auxiliary_admission",
+    ):
+        assert report["uses_effective_argc"] is True, name
+        assert report["fixed_image_case_admitted"] is True, name
+        assert report["commands_checked"] == 20, name
 
 
 def test_smart_runtime_concurrency_passes_on_all_workers() -> None:

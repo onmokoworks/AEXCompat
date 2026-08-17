@@ -1,9 +1,12 @@
 #include "worker_fixed_selftest_routing.hpp"
 
+#include "l2_cli_dispatch.h"
 #include "worker_smart_dispatch.hpp"
+#include "worker_smart_setup.hpp"
 #include "worker_aegp_scene_runtime.hpp"
 
 #include "worker_aegp_compat_selftests.hpp"
+#include "worker_aegp_init_report.hpp"
 #include "worker_aegp_utility_suite.hpp"
 #include "worker_compute_cache_suite.hpp"
 #include "worker_host_guard_selftests.hpp"
@@ -152,11 +155,33 @@ int selftest_compute_cache(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+int selftest_aegp_borrowed_handle_report(int, wchar_t**) {
+  return aexcompat::l2_detail::emit_aegp_borrowed_handle_report_selftest()
+      ? 0
+      : 1;
+}
+
+int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
+  const bool auxiliary =
+      aexcompat::l2cli::verify_smart_diagnostic_auxiliary_admission();
+  const bool fixed_case =
+      aexcompat::worker_runtime::smart_setup::verify_fixed_image_case_admission();
+  const bool passed = auxiliary && fixed_case;
+  std::cout << "{\"smart_diagnostic_auxiliary_admission\":\""
+            << (passed ? "passed" : "failed")
+            << "\",\"uses_effective_argc\":"
+            << (auxiliary ? "true" : "false")
+            << ",\"fixed_image_case_admitted\":"
+            << (fixed_case ? "true" : "false")
+            << ",\"commands_checked\":20}\n";
+  return passed ? 0 : 1;
+}
+
 }  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 10> host_commands{{
+  const std::array<selftest::HostCommand, 12> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
@@ -167,7 +192,11 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-aegp-effect-param-union-suite4", 2,
        &selftest_effect_param_union},
       {L"--self-test-compute-cache", 2, &selftest_compute_cache},
+      {L"--self-test-aegp-borrowed-handle-report", 2,
+       &selftest_aegp_borrowed_handle_report},
       {L"--self-test-smart-selector-inputs", 2, &selftest_smart_selector_inputs},
+      {L"--self-test-smart-diagnostic-auxiliary-admission", 2,
+       &selftest_smart_diagnostic_auxiliary_admission},
   }};
   if (const auto exit = selftest::dispatch_host(
           request.argc, request.argv, host_commands.data(), host_commands.size()))
@@ -180,7 +209,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 33> simple_commands{{
+  const std::array<selftest::SimpleCommand, 34> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -257,6 +286,10 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-aegp-persistent-data-suite4",
        "aegp_persistent_data_suite4",
        hooks.simple.aegp_persistent_data_suite4},
+      {L"--self-test-headless-system-sound-suppression",
+       "headless_system_sound_suppression",
+       hooks.simple.headless_system_sound_suppression, 1,
+       ",\"process_local\":true,\"dialog_containment_unchanged\":true"},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))

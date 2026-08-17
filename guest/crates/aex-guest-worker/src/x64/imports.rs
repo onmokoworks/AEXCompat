@@ -21,6 +21,8 @@ enum LegacyWin64Import {
     Calloc,
     Free,
     CrtStrdup,
+    CrtToLower,
+    CrtToUpper,
     AlignedMalloc,
     AlignedFree,
     CallNewHandler,
@@ -89,6 +91,8 @@ enum LegacyWin64Import {
     LeaveCriticalSection,
     DeleteCriticalSection,
     GetModuleHandleW,
+    GetModuleHandleExA,
+    GetModuleFileNameW,
     GetProcAddress,
     InitializeSListHead,
     DisableThreadLibraryCalls,
@@ -299,6 +303,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "LeaveCriticalSection") => LegacyWin64Import::LeaveCriticalSection,
         ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
         ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
+        ("kernel32.dll", "GetModuleHandleExA") => LegacyWin64Import::GetModuleHandleExA,
+        ("kernel32.dll", "GetModuleFileNameW") => LegacyWin64Import::GetModuleFileNameW,
         ("kernel32.dll", "GetProcAddress") => LegacyWin64Import::GetProcAddress,
         (
             _,
@@ -379,6 +385,14 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtStrdup
         }
         (_, "_strdup") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "tolower") => {
+            LegacyWin64Import::CrtToLower
+        }
+        (_, "tolower") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "toupper") => {
+            LegacyWin64Import::CrtToUpper
+        }
+        (_, "toupper") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-heap-l1-1-0.dll" | "ucrtbase.dll", "_aligned_malloc") => {
             LegacyWin64Import::AlignedMalloc
         }
@@ -517,6 +531,36 @@ fn install_win64_import(
                     "install _strdup import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_strdup(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtToLower => {
+                uc("write tolower return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install tolower import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let input = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
+                        let result = if (u32::from(b'A')..=u32::from(b'Z')).contains(&input) {
+                            input + u32::from(b'a' - b'A')
+                        } else {
+                            input
+                        };
+                        let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(result));
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtToUpper => {
+                uc("write toupper return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install toupper import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let input = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
+                        let result = if (u32::from(b'a')..=u32::from(b'z')).contains(&input) {
+                            input - u32::from(b'a' - b'A')
+                        } else {
+                            input
+                        };
+                        let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(result));
                     }),
                 )?;
             }
@@ -1026,6 +1070,30 @@ fn install_win64_import(
                     "install GetModuleHandleW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_module_handle_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetModuleHandleExA => {
+                uc(
+                    "write GetModuleHandleExA return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetModuleHandleExA import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_module_handle_ex_a(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetModuleFileNameW => {
+                uc(
+                    "write GetModuleFileNameW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetModuleFileNameW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_module_file_name_w(unicorn);
                     }),
                 )?;
             }
@@ -1767,6 +1835,122 @@ fn emulate_get_module_handle_w(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn.get_data_mut().callback_error = Some(error);
         }
         let _ = unicorn.emu_stop();
+    }
+}
+
+fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    const PIN: u32 = 0x1;
+    const UNCHANGED_REFCOUNT: u32 = 0x2;
+    const FROM_ADDRESS: u32 = 0x4;
+    const VALID_FLAGS: u32 = PIN | UNCHANGED_REFCOUNT | FROM_ADDRESS;
+
+    let flags = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
+    let name_or_address = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    };
+
+    if flags & !VALID_FLAGS != 0
+        || flags & PIN != 0 && flags & UNCHANGED_REFCOUNT != 0
+        || output == 0
+    {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+
+    let module = if flags & FROM_ADDRESS != 0 {
+        unicorn
+            .get_data()
+            .image_region
+            .filter(|(start, end)| (*start..*end).contains(&name_or_address))
+            .map(|(start, _)| start)
+    } else if name_or_address == 0 {
+        unicorn.get_data().image_region.map(|(start, _)| start)
+    } else {
+        let mut bytes = Vec::new();
+        let mut terminated = false;
+        for index in 0..128u64 {
+            let Some(address) = name_or_address.checked_add(index) else {
+                break;
+            };
+            let Ok(value) = unicorn.mem_read_as_vec(address, 1) else {
+                break;
+            };
+            if value[0] == 0 {
+                terminated = true;
+                break;
+            }
+            bytes.push(value[0]);
+        }
+        if terminated && bytes.eq_ignore_ascii_case(b"kernel32.dll") {
+            Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+        } else {
+            None
+        }
+    };
+
+    let Some(module) = module else {
+        fail(unicorn, ERROR_MOD_NOT_FOUND);
+        return;
+    };
+    if unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    // Guest images and synthetic system modules live for the worker lifetime,
+    // so default, PIN, and UNCHANGED_REFCOUNT all preserve the same stable
+    // handle while retaining their documented lookup behavior.
+    let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+}
+
+fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    let module = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX);
+    let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let capacity = unicorn.reg_read(RegisterX86::R8).unwrap_or_default() as u32;
+    let image_base = unicorn.get_data().image_region.map(|region| region.0);
+    let path = if (module == 0 && image_base.is_some()) || Some(module) == image_base {
+        Some(r"C:\AEXCompat\guest-plugin.aex")
+    } else if module == WINDOWS_KERNEL32_MODULE_TOKEN {
+        Some(r"C:\Windows\System32\kernel32.dll")
+    } else {
+        None
+    };
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    };
+    let Some(path) = path else {
+        fail(unicorn, ERROR_MOD_NOT_FOUND);
+        return;
+    };
+    if output == 0 {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    if capacity == 0 {
+        fail(unicorn, ERROR_INSUFFICIENT_BUFFER);
+        return;
+    }
+
+    let units = path.encode_utf16().collect::<Vec<_>>();
+    let truncated = units.len() + 1 > capacity as usize;
+    let copied = units.len().min(capacity.saturating_sub(1) as usize);
+    let mut bytes = Vec::with_capacity((copied + 1) * 2);
+    for unit in &units[..copied] {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    if unicorn.mem_write(output, &bytes).is_err() {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    if truncated {
+        unicorn.get_data_mut().windows_last_error = ERROR_INSUFFICIENT_BUFFER;
+        let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(capacity));
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, copied as u64);
     }
 }
 

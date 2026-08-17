@@ -833,6 +833,14 @@ int main() {
         suite == nullptr && g_resolver_calls == calls_before;
   }
 
+  SuiteRegistry dotted_missing_registry;
+  suite = nullptr;
+  passed = passed &&
+      dotted_missing_registry.acquire("Opaque Helper Suite 2026.1", 1, &suite,
+                                      &resolve_known, nullptr, nullptr) == 1 &&
+      dotted_missing_registry.missing_suites_report_json().find(
+          "Opaque Helper Suite 2026.1") != std::string::npos;
+
   for (int index = 0; index < 17; ++index) {
     const std::string name = "Missing Suite " + std::to_string(index);
     suite = reinterpret_cast<const void*>(0x5678);

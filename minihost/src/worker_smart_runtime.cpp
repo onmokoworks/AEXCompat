@@ -318,6 +318,15 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         false});
     return finish_callback(Callback::PreCheckoutLayer, 0);
   }
+  // This slot is not an arbitrary unset layer parameter: the render request
+  // designates it as the external secondary input. If no world was supplied,
+  // registering a synthetic transparent layer changes the plug-in's control
+  // flow from "secondary unavailable" to "real transparent footage". Refuse
+  // the checkout so effects with a procedural no-secondary fallback can use it;
+  // other declared layer parameters still receive the empty-layer contract
+  // below (issue #1243).
+  if (index == runtime.secondary_layer_slot)
+    return finish_callback(Callback::PreCheckoutLayer, 4, Reason::MissingWorld);
   // A layer parameter this host has no world for.
   //
   // The SDK admits this answer directly: PF_CheckoutResult::result_rect is
@@ -700,9 +709,18 @@ bool checkout_intersection_self_test() {
       !pixel_checkouts_balanced() &&
       checkin_pixels(nullptr, 21) == 0 &&
       pixel_checkouts_balanced() && passed;
-  // A second empty parameter reuses it rather than allocating again: the
-  // registry it comes from is bounded and shared with the plug-in's own worlds.
+  // The configured secondary input is not an arbitrary unset parameter. When
+  // no secondary world was supplied, refusing its checkout leaves the effect
+  // free to use its own procedural fallback instead of presenting a synthetic
+  // transparent input as real footage.
+  checked_out = input_world.data();
   passed = pre_checkout_layer(nullptr, 6, 24, nullptr, 7, 1, 30,
+                              empty_result.data()) == 4 &&
+      checkout_pixels(nullptr, 24, &checked_out) == 4 && !checked_out && passed;
+  // A second ordinary empty parameter reuses the lazily allocated world rather
+  // than allocating again: the registry it comes from is bounded and shared
+  // with the plug-in's own worlds.
+  passed = pre_checkout_layer(nullptr, 8, 24, nullptr, 7, 1, 30,
                               empty_result.data()) == 0 &&
       checkout_pixels(nullptr, 24, &checked_out) == 0 &&
       g_empty_layer_allocations_for_self_test == 1 &&

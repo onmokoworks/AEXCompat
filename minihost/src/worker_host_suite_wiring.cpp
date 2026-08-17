@@ -1,6 +1,8 @@
 #include "worker_host_suite_catalog.hpp"
+#include "worker_companion_runtime.hpp"
 #include "worker_host_suite_router.hpp"
 #include "worker_extended_diag.hpp"
+#include "worker_dynamic_suite_registry.hpp"
 #include "worker_aefx_ace_suite.hpp"
 #include "worker_aegp_persistent_data_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
@@ -496,7 +498,10 @@ bool render_suite2_provider_available(void*) {
       (is_render_worker() && aexcompat::aegp_layer_render_runtime::active());
 }
 
-bool aegp_init_suite_provider_available(void*) { return g_aegp_init_mode; }
+bool aegp_init_suite_provider_available(void*) {
+  return g_aegp_init_mode ||
+         aexcompat::worker_runtime::companions::host_services_active();
+}
 bool render_worker_suite_provider_available(void*) { return is_render_worker(); }
 
 const void* provide_batch_sampling1(void*) {
@@ -640,6 +645,9 @@ bool configure_component_suite_catalog() {
       {reinterpret_cast<void*>(&checkout_item_frame_async), reinterpret_cast<void*>(&checkout_layer_frame_async)}};
   if (!configure_suite_assembly(assembly)) return false;
   const StaticSuite component_suites[] = {
+      {aexcompat::worker_runtime::dynamic_suites::kSPSuitesSuiteName,
+       aexcompat::worker_runtime::dynamic_suites::kSPSuitesSuiteVersion,
+       aexcompat::worker_runtime::dynamic_suites::sp_suites_suite2()},
       {"AE Plugin Helper Suite", 1, aexcompat::pf_helper::suite1()},
       {"AE Plugin Helper Suite2", 2, aexcompat::pf_helper::suite2()},
       {"AEFX Text BIB Suite", 1, nullptr, &provide_bib_suite},

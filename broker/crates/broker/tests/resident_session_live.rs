@@ -81,6 +81,7 @@ mod windows_e2e {
             )
             .expect("valid classic selection"),
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width,
             height,
             pixel_format: RenderPixelFormat::Argb8,
@@ -185,6 +186,7 @@ mod windows_e2e {
             )
             .expect("valid classic selection"),
             dependencies: Vec::new(),
+            dependency_search_dirs: Vec::new(),
             width,
             height,
             pixel_format: RenderPixelFormat::Argb8,

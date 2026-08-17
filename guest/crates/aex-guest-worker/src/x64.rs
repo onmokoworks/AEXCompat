@@ -100,6 +100,8 @@ const HOST_AREA_SAMPLE8: u64 = STUB_BASE + 0x80410;
 const HOST_TRANSFER_RECT8: u64 = STUB_BASE + 0x80420;
 const HOST_ITERATE16: u64 = STUB_BASE + 0x80430;
 const HOST_ITERATE16_CONTINUE: u64 = STUB_BASE + 0x80440;
+const HOST_ITERATE_FLOAT: u64 = STUB_BASE + 0x804d0;
+const HOST_ITERATE_FLOAT_CONTINUE: u64 = STUB_BASE + 0x804e0;
 const HOST_BLEND: u64 = STUB_BASE + 0x80450;
 const HOST_CRT_INITTERM_CONTINUE: u64 = STUB_BASE + 0x80470;
 const HOST_INITIALIZE_CONDITION_VARIABLE: u64 = STUB_BASE + 0x80480;
@@ -152,6 +154,8 @@ const HOST_GPU_SUITE_CALLBACKS: [u64; 15] = [
 const MAX_SMART_CHECKOUT_IDS: usize = 64;
 const HOST_HANDLE_SUITE: u64 = STUB_BASE + 0x81000;
 const HOST_ITERATE8_SUITE: u64 = STUB_BASE + 0x81100;
+const HOST_ITERATE16_SUITE: u64 = STUB_BASE + 0x81180;
+const HOST_ITERATE_FLOAT_SUITE: u64 = STUB_BASE + 0x81188;
 const HOST_COLOR_PARAM_SUITE: u64 = STUB_BASE + 0x81200;
 const HOST_POINT_PARAM_SUITE: u64 = STUB_BASE + 0x81300;
 const HOST_AEGP_MEMORY_SUITE: u64 = STUB_BASE + 0x81400;
@@ -222,6 +226,9 @@ const MAX_WINDOWS_CONDITION_VARIABLES: usize = 256;
 const MAX_WINDOWS_FLS_SLOTS: u32 = 128;
 const MAX_WINDOWS_ENVIRONMENT_NAME_BYTES: usize = 255;
 const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+const ERROR_MOD_NOT_FOUND: u32 = 126;
 const OBSERVED_MSVCP_MUTEX_TYPE: u32 = 0x102;
 const MAX_MSVCP_MUTEXES: usize = 256;
 const MAX_MSVCP_MUTEX_RECURSION: u32 = 1024;
@@ -263,6 +270,14 @@ fn iterate8_suite_table_address(version: u64) -> Option<u64> {
     match version {
         1 => Some(HOST_ITERATE8_SUITE),
         2 => Some(HOST_ITERATE8_SUITE + 0x40),
+        _ => None,
+    }
+}
+
+fn typed_iterate_suite_table_address(name: &str, version: u64) -> Option<u64> {
+    match (name, version) {
+        ("PF iterate16 Suite", 1) => Some(HOST_ITERATE16_SUITE),
+        ("PF iterateFloat Suite", 1) => Some(HOST_ITERATE_FLOAT_SUITE),
         _ => None,
     }
 }

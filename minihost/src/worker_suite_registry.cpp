@@ -63,7 +63,7 @@ bool valid_schema_text(const std::string& text, std::size_t maximum,
       std::isalnum(static_cast<unsigned char>(text.back())) &&
       std::all_of(text.begin(), text.end(), [](unsigned char character) {
         return std::isalnum(character) || character == ' ' ||
-            character == '_' || character == '-';
+            character == '_' || character == '-' || character == '.';
       });
 }
 

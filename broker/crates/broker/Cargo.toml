@@ -21,6 +21,9 @@ object = { version = "0.39.1", default-features = false, features = ["read", "pe
 name = "aexcompat_broker"
 path = "src/lib.rs"
 
+[features]
+test-pe-fixtures = []
+
 [[bin]]
 name = "broker"
 path = "src/main.rs"

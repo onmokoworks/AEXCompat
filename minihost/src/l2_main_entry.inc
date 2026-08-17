@@ -84,6 +84,25 @@ bool capture_l2_cluster_manifest(void*, const wchar_t* value) {
   return true;
 }
 
+std::wstring g_companion_manifest_path;
+bool capture_l2_companion_manifest(void*, const wchar_t* value) {
+  if (!value || !*value) return false;
+  g_companion_manifest_path = value;
+  return true;
+}
+
+struct SessionPreUnloadContext {
+  aexcompat::worker_runtime::companions::Runtime* companions{};
+};
+
+bool __cdecl teardown_session_providers(void* opaque) noexcept {
+  auto* context = static_cast<SessionPreUnloadContext*>(opaque);
+  const bool companions_ok =
+      !context || !context->companions || context->companions->shutdown();
+  const bool bib_ok = teardown_bib_suite(nullptr);
+  return companions_ok && bib_ok;
+}
+
 // Captures the in-place dependency search directories carried by a
 // `--dependency-dirs-v1` auxiliary option (issue #751): absolute directories
 // joined by ';', validated by the broker and re-bounded by
@@ -825,6 +844,7 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   result.entry = new_entry;
   result.global_setup_error = bootstrap.global_error;
   result.params_setup_error = bootstrap.params_error;
+  result.audio_effect_only = bootstrap.audio_effect_only;
   context.current_global_error = bootstrap.global_error;
   // Step 6: the manifest payload (plugins[1..]) replaces the launch
   // assignments, riding the same argv encoding (design §2.2/§4.1).
@@ -1363,7 +1383,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
         parse_l2_conformance_render_settings,
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
-        capture_l2_dependency_search_dirs},
+        capture_l2_companion_manifest, capture_l2_dependency_search_dirs},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -1377,7 +1397,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
           load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
           parse_l2_conformance_render_settings,
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
-        capture_l2_dependency_search_dirs},
+        capture_l2_companion_manifest, capture_l2_dependency_search_dirs},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -1458,12 +1478,42 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   runtime_request.allow_aegp_plugin = g_aegp_init_mode;
   std::unique_ptr<aexcompat::TraceWriter> trace_writer;
   RuntimeContext runtime_context;
-  const int admission_error = aexcompat::worker_runtime::admit_worker_entry(
+  const int prepare_error = aexcompat::worker_runtime::prepare_worker_entry(
       runtime_hooks, runtime_request, trace_worker_label(), trace_writer,
       runtime_context);
-  if (admission_error != 0) return admission_error;
+  if (prepare_error != 0) return prepare_error;
+  // Companion AEGPs are host providers. Initialize them after the worker has
+  // established its authenticated DLL-search/stdout context, but before the
+  // consumer PF module executes.
+  aexcompat::worker_runtime::companions::Runtime companion_runtime;
+  if (!g_companion_manifest_path.empty()) {
+    aexcompat::worker_runtime::companions::Manifest companion_manifest;
+    const bool previous_aegp_init_mode = g_aegp_init_mode;
+    g_aegp_init_mode = true;
+    const bool manifest_loaded =
+        aexcompat::worker_runtime::companions::load_manifest(
+            g_companion_manifest_path, companion_manifest);
+    const bool companion_initialized = manifest_loaded &&
+        companion_runtime.initialize(companion_manifest, &g_basic_suite,
+                                     &sha256);
+    g_aegp_init_mode = previous_aegp_init_mode;
+    if (!companion_initialized) {
+      aexcompat::worker_runtime::release_runtime_context(runtime_context);
+      return 26;
+    }
+  }
+  const int admission_error =
+      aexcompat::worker_runtime::load_runtime_plugin(runtime_request,
+                                                     runtime_context);
+  if (admission_error != 0) {
+    (void)companion_runtime.shutdown();
+    aexcompat::worker_runtime::release_runtime_context(runtime_context);
+    return admission_error;
+  }
   WorkerSession session(runtime_context, trace_writer.get(), &g_trace_writer);
-  (void)session.set_pre_unload_hook(&teardown_bib_suite, nullptr);
+  SessionPreUnloadContext pre_unload_context{&companion_runtime};
+  (void)session.set_pre_unload_hook(
+      &teardown_session_providers, &pre_unload_context);
   g_plugin_file_path = session.plugin_path().wstring();
   HMODULE module = session.module();
   if (g_aegp_init_mode) {
@@ -2246,6 +2296,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 }
 
 int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {
+  std::string sound_diagnostic;
+  if (!worker_runtime::system_sound_suppression::install(sound_diagnostic)) {
+    std::cerr << "stage:system_sound_suppression_failed detail="
+              << sound_diagnostic << '\n' << std::flush;
+    return 11;
+  }
   std::string openmp_diagnostic;
   if (!worker_runtime::openmp::install_deterministic_policy(
           openmp_diagnostic)) {

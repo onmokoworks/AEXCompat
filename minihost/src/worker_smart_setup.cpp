@@ -8,9 +8,17 @@
 #include "worker_world_registry.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
+namespace aexcompat::l2_detail {
+bool apply_parameter_animation(
+    worker_runtime::parameter_execution::Definitions&, int32_t, uint32_t);
+}
+
 namespace aexcompat::worker_runtime::smart_setup {
+
+namespace aexcompat_l2 = ::aexcompat::l2_detail;
 namespace {
 template <typename T>
 T read(const parameter_execution::BufferOut& bytes, std::size_t offset) {
@@ -91,12 +99,20 @@ Plan prepare(const Context& context, const Request& request) {
       plan.height > 4096) return plan;
   plan.pixel_bytes = plan.float32 ? 16 : (plan.deep16 ? 8 : 4);
   plan.rowbytes = case_id == "padded_stride" ? 64 : plan.width * plan.pixel_bytes;
-  if (case_id != "default" && case_id != "request" && !plan.deep16 &&
+  if (!render::is_fixed_image_case(case_id) && case_id != "request" && !plan.deep16 &&
       !plan.float32 && !plan.missing_input && !plan.crash_null_output &&
       !plan.temporal_context && !plan.partial_output_request &&
       !plan.connected_map) return plan;
   plan.valid = true;
   return plan;
+}
+
+bool verify_fixed_image_case_admission() {
+  parameter_execution::BufferOut output{};
+  const std::string case_id = "seed_max";
+  const auto plan = prepare({}, {&output, &case_id, false, 0, 0, 0, 1, 4});
+  return plan.valid && plan.width == 16 && plan.height == 12 &&
+      plan.pixel_bytes == 4 && plan.rowbytes == 64;
 }
 
 bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
@@ -283,6 +299,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       request.external_current_time;
   const uint32_t animation_scale = plan.temporal_context ? 24 :
       request.external_time_scale;
+  parameters::set_animation_layer_extent(plan.width, plan.height);
   if (!hooks.apply_animation(definitions, animation_time, animation_scale) ||
       !parameter_execution::apply_arbitrary_parameter_animation(
           request.entry, *request.input, *request.output, definitions,
@@ -330,6 +347,76 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
   hooks.dump_world("smart-input", prepared.pre_render_source.data(), plan.width,
                    plan.height, plan.pixel_bytes);
   return true;
+}
+
+bool verify_animation_extent_wiring_for_test() {
+  auto& runtime = parameters::state();
+  if (runtime.records.size() < 3) return false;
+  Plan plan{};
+  plan.valid = true;
+  plan.width = 256;
+  plan.height = 144;
+  plan.pixel_bytes = 4;
+  plan.rowbytes = plan.width * plan.pixel_bytes;
+  parameter_execution::BufferIn input{};
+  parameter_execution::BufferOut output{};
+  std::array<std::byte, 120> input_world{};
+  render_safety::InputPixelBuffer source(
+      static_cast<std::size_t>(plan.rowbytes) * plan.height);
+  if (!source || !render::prepare_world_layout(
+                     input_world, {0, plan.pixel_bytes, plan.width, plan.height,
+                                   plan.rowbytes},
+                     source.data()))
+    return false;
+  world_safety::DispatchWorldFormatScope formats;
+  if (!formats.register_world(input_world.data(),
+                              world_registry::kPixelFormatArgb32))
+    return false;
+  ParameterState prepared(runtime.records.size() + 1, 0);
+  std::memcpy(prepared.definitions[0].data() + 56, input_world.data(),
+              input_world.size());
+  parameter_execution::initialize_parameter_definitions(
+      prepared.definitions, plan.width, plan.height);
+  const std::string case_id = "request";
+  ParameterRequest request{
+      +[](int32_t, void*, void*, void**, void*, void*) { return int32_t{0}; },
+      &input,
+      &output,
+      &case_id,
+      &plan,
+      nullptr,
+      nullptr,
+      0,
+      1,
+      1,
+      24,
+      plan.width,
+      plan.height,
+      0,
+      &input_world,
+      &formats,
+      &source};
+  const ParameterHooks hooks{
+      &aexcompat_l2::apply_parameter_animation,
+      +[](const std::string&, const unsigned char*, int32_t, int32_t, int32_t) {}};
+  if (!prepare_parameters(request, prepared, hooks)) return false;
+  const auto& point = prepared.definitions[2];
+  const auto& point3d = prepared.definitions[3];
+  auto read_definition = [](const auto& definition, std::size_t offset,
+                            auto* value) {
+    std::memcpy(value, definition.data() + offset, sizeof(*value));
+  };
+  int32_t point_x = 0, point_y = 0;
+  double point3d_x = 0, point3d_y = 0, point3d_z = 0;
+  read_definition(point, 56, &point_x);
+  read_definition(point, 60, &point_y);
+  read_definition(point3d, 56, &point3d_x);
+  read_definition(point3d, 64, &point3d_y);
+  read_definition(point3d, 72, &point3d_z);
+  return point_x == 128 * 65536 && point_y == 36 * 65536 &&
+         std::abs(point3d_x - 64.0) < 1e-12 &&
+         std::abs(point3d_y - 72.0) < 1e-12 &&
+         std::abs(point3d_z - 108.0) < 1e-12;
 }
 
 }  // namespace aexcompat::worker_runtime::smart_setup

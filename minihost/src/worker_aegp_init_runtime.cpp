@@ -14,7 +14,7 @@ int32_t register_command_hook(int32_t plugin_id, int32_t priority,
                               int32_t command, void* hook, void* refcon) {
   if (plugin_id <= 0 || (priority != 1 && priority != 2) || command < 0 || !hook ||
       g_state.command_registrations.size() >= kMaxHooks) return 4;
-  g_state.command_registrations.push_back({static_cast<uint32_t>(priority), command,
+  g_state.command_registrations.push_back({plugin_id, static_cast<uint32_t>(priority), command,
       reinterpret_cast<CommandHook>(hook), refcon});
   ++g_state.command_hooks;
   return 0;
@@ -24,21 +24,23 @@ int32_t register_update_menu_hook(int32_t plugin_id, void* hook, void* refcon) {
   if (plugin_id <= 0 || !hook || g_state.update_menu_registrations.size() >= kMaxHooks)
     return 4;
   g_state.update_menu_registrations.push_back(
-      {reinterpret_cast<UpdateMenuHook>(hook), refcon});
+      {plugin_id, reinterpret_cast<UpdateMenuHook>(hook), refcon});
   ++g_state.update_menu_hooks;
   return 0;
 }
 
 int32_t register_idle_hook(int32_t plugin_id, void* hook, void* refcon) {
   if (plugin_id <= 0 || !hook || g_state.idle_registrations.size() >= kMaxHooks) return 4;
-  g_state.idle_registrations.push_back({reinterpret_cast<IdleHook>(hook), refcon});
+  g_state.idle_registrations.push_back(
+      {plugin_id, reinterpret_cast<IdleHook>(hook), refcon});
   ++g_state.idle_hooks;
   return 0;
 }
 
 int32_t register_death_hook(int32_t plugin_id, void* hook, void* refcon) {
   if (plugin_id <= 0 || !hook || g_state.death_registrations.size() >= kMaxHooks) return 4;
-  g_state.death_registrations.push_back({reinterpret_cast<DeathHook>(hook), refcon});
+  g_state.death_registrations.push_back(
+      {plugin_id, reinterpret_cast<DeathHook>(hook), refcon});
   ++g_state.death_hooks;
   return 0;
 }
@@ -104,6 +106,37 @@ EventResult dispatch_death(void* global_refcon) {
     if (error && !result.error) result.error = error;
   }
   return result;
+}
+
+EventResult dispatch_death_for_plugin(int32_t plugin_id, void* global_refcon) {
+  EventResult result;
+  if (plugin_id <= 0) {
+    result.error = 4;
+    return result;
+  }
+  for (const auto& registration : g_state.death_registrations) {
+    if (registration.plugin_id != plugin_id) continue;
+    const int32_t error = registration.hook(global_refcon, registration.refcon);
+    ++result.invoked;
+    if (error && !result.error) result.error = error;
+  }
+  return result;
+}
+
+void forget_plugin_registrations(int32_t plugin_id) noexcept {
+  if (plugin_id <= 0) return;
+  const auto erase_plugin = [plugin_id](auto& registrations) {
+    registrations.erase(
+        std::remove_if(registrations.begin(), registrations.end(),
+                       [plugin_id](const auto& registration) {
+                         return registration.plugin_id == plugin_id;
+                       }),
+        registrations.end());
+  };
+  erase_plugin(g_state.command_registrations);
+  erase_plugin(g_state.update_menu_registrations);
+  erase_plugin(g_state.idle_registrations);
+  erase_plugin(g_state.death_registrations);
 }
 
 BasicDispatchResult dispatch_basic_events(void* global_refcon,
