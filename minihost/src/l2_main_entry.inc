@@ -795,6 +795,122 @@ bool verify_production_composite_rect_callback() {
   check(destination == before, "a rejected call wrote the destination");
   return passed;
 }
+
+// PF_InteractCallbacks.checkout_param / checkin_param reached through the
+// installed in_data block, asked for slots past the published table (issue
+// #1251, Pixel Motion Blur's checkout of Timewarp's slots 29/31 against a
+// 5-slot table). AE 2026 answers those with PF_Err_NONE and an empty layer
+// definition and takes the checkin (instruments/pf-checkout-index-probe,
+// docs/CHECKOUT_PARAM_INDEX_OBSERVATION_2026-08-17.md); this proves the host
+// does the same on both the classic-context and the hosted-table path, that
+// the checkout is recorded (the checkin balances instead of counting as
+// invalid), that an in-table slot still comes back with its definition, and
+// that a negative slot and an unpublished table stay refused.
+bool verify_checkout_param_beyond_table() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  namespace classic = aexcompat::worker_runtime::classic;
+  namespace parameters = aexcompat::worker_runtime::parameters;
+  using Checkout = int32_t(__cdecl*)(void*, int32_t, int32_t, int32_t, uint32_t, void*);
+  using Checkin = int32_t(__cdecl*)(void*, void*);
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  Checkout checkout{};
+  Checkin checkin{};
+  std::memcpy(&checkout, state.input.data() + contract::IN_INTER_OFFSET +
+                             contract::INTER_CHECKOUT_PARAM_OFFSET, sizeof(checkout));
+  std::memcpy(&checkin, state.input.data() + contract::IN_INTER_OFFSET +
+                            contract::INTER_CHECKIN_PARAM_OFFSET, sizeof(checkin));
+  if (!checkout || !checkin) {
+    std::cerr << "checkout_param_beyond_table: inter slot is null\n" << std::flush;
+    return false;
+  }
+  void* effect_ref{};
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET, sizeof(effect_ref));
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "checkout_param_beyond_table: " << what << "\n" << std::flush;
+  };
+  const classic::ParameterDefinition zero{};
+  auto marked = [](std::byte marker) {
+    classic::ParameterDefinition definition{};
+    definition.fill(marker);
+    return definition;
+  };
+  constexpr int32_t kTime = 0, kStep = 1;
+  constexpr uint32_t kScale = 30;
+  // Classic-context path: the table the classic render publishes (slots 0..4,
+  // Pixel Motion Blur's shape) with each slot carrying its own marker.
+  {
+    classic::Context context;
+    for (int32_t slot = 0; slot <= 4; ++slot)
+      context.set_definition(slot, marked(std::byte{static_cast<unsigned char>(0x10 + slot)}));
+    for (const int32_t slot : {29, 31, 5}) {
+      classic::ParameterDefinition definition = marked(std::byte{0xAB});
+      check(checkout(effect_ref, slot, kTime, kStep, kScale, definition.data()) == 0,
+            "classic: slot past the table refused");
+      check(definition == zero, "classic: slot past the table did not come back empty");
+      check(checkin(effect_ref, definition.data()) == 0,
+            "classic: checkin of a past-the-table checkout refused");
+    }
+    classic::ParameterDefinition in_table{};
+    check(checkout(effect_ref, 2, kTime, kStep, kScale, in_table.data()) == 0 &&
+              in_table == marked(std::byte{0x12}),
+          "classic: in-table slot lost its definition");
+    check(checkin(effect_ref, in_table.data()) == 0, "classic: in-table checkin refused");
+    classic::ParameterDefinition negative = marked(std::byte{0xAB});
+    check(checkout(effect_ref, -1, kTime, kStep, kScale, negative.data()) != 0,
+          "classic: negative slot accepted");
+    check(negative == marked(std::byte{0xAB}), "classic: refused checkout wrote the def");
+    check(context.checkouts_balanced(), "classic: checkouts did not balance");
+  }
+  {
+    // No table published yet: nothing is "beyond" it, so the slot is refused.
+    classic::Context unpublished;
+    classic::ParameterDefinition definition = marked(std::byte{0xAB});
+    check(checkout(effect_ref, 29, kTime, kStep, kScale, definition.data()) != 0,
+          "classic: slot accepted before the table was published");
+    check(definition == marked(std::byte{0xAB}), "classic: refused checkout wrote the def");
+  }
+  // Hosted-table path (no classic context; the lifecycle / smart routes).
+  {
+    auto& hosted = parameters::state().checkout;
+    struct HostedScope {
+      parameters::CheckoutState& hosted;
+      ~HostedScope() {
+        hosted.definitions.clear();
+        std::lock_guard<std::mutex> lock(hosted.mutex);
+        hosted.live.clear();
+      }
+    } hosted_scope{hosted};
+    hosted.definitions.clear();
+    {
+      std::lock_guard<std::mutex> lock(hosted.mutex);
+      hosted.live.clear();
+    }
+    classic::ParameterDefinition definition = marked(std::byte{0xAB});
+    check(checkout(effect_ref, 29, kTime, kStep, kScale, definition.data()) != 0,
+          "hosted: slot accepted with no table published");
+    for (int32_t slot = 0; slot <= 4; ++slot)
+      hosted.definitions[slot] = marked(std::byte{static_cast<unsigned char>(0x20 + slot)});
+    for (const int32_t slot : {29, 31, 5}) {
+      definition = marked(std::byte{0xAB});
+      check(checkout(effect_ref, slot, kTime, kStep, kScale, definition.data()) == 0,
+            "hosted: slot past the table refused");
+      check(definition == zero, "hosted: slot past the table did not come back empty");
+      check(checkin(effect_ref, definition.data()) == 0,
+            "hosted: checkin of a past-the-table checkout refused");
+    }
+    definition = marked(std::byte{0xAB});
+    check(checkout(effect_ref, -1, kTime, kStep, kScale, definition.data()) != 0,
+          "hosted: negative slot accepted");
+    std::lock_guard<std::mutex> lock(hosted.mutex);
+    check(hosted.live.empty(), "hosted: checkouts did not balance");
+  }
+  return passed;
+}
 }  // namespace aexcompat::l2_detail
 
 aexcompat::worker_runtime::effect_bootstrap::RuntimeHooks make_bootstrap_runtime_hooks() {

@@ -50,6 +50,7 @@ struct SimpleHooks {
   bool (*pf_utils_handle_callbacks)(){};
   bool (*utility_callback_table)(){};
   bool (*pf_utils_composite_rect)(){};
+  bool (*checkout_param_beyond_table)(){};
   bool (*flt_blur_suite1)(){};
   bool (*aefx_ace_suite1)(){};
   bool (*aegp_persistent_data_suite3)(){};

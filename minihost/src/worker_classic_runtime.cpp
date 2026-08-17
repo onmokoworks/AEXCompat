@@ -116,6 +116,12 @@ bool Context::copy_definition(int32_t slot, void* destination,
   return true;
 }
 
+bool Context::beyond_definition_table(int32_t slot) const {
+  // Tables are published contiguously from slot 0, so "past the last slot"
+  // already excludes negative slots.
+  return !definitions_.empty() && slot > definitions_.rbegin()->first;
+}
+
 void Context::set_fallback_definition(
     int32_t slot, const ParameterDefinition& definition) {
   fallback_definitions_[slot] = definition;
