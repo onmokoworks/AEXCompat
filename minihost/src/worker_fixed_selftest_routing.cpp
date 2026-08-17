@@ -209,7 +209,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 36> simple_commands{{
+  const std::array<selftest::SimpleCommand, 37> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -288,6 +288,13 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-checkout-param-beyond-table", "checkout_param_beyond_table",
        hooks.simple.checkout_param_beyond_table, 1,
        ",\"reached_via_in_data_inter\":true"},
+      // AE's private get_callback_addr ids -5 (PFp_GaussianValue) and -2 (the
+      // FLT.dll in-place blur) reached through the installed in_data->utils
+      // get_callback_addr slot (issue #985): the answers AE 2026's own
+      // dispatcher gave, and malformed blur calls failing closed.
+      {L"--self-test-pf-private-callbacks", "pf_private_callbacks",
+       hooks.simple.pf_private_callbacks, 1,
+       ",\"reached_via_in_data_utils\":true"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",

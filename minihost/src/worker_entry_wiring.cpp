@@ -59,6 +59,7 @@
 #include "worker_aefx_ace_suite.hpp"
 #include "worker_aegp_persistent_data_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
+#include "worker_pf_private_callbacks.hpp"
 #include "worker_ui_event_execution.hpp"
 #include "pf_cache_on_load_suite.hpp"
 #include "render_lifecycle.hpp"
@@ -194,6 +195,9 @@ bool verify_production_composite_rect_callback();
 // Calls the production checkout_param / checkin_param slots through
 // in_data->inter for slots past the published table (issue #1251).
 bool verify_checkout_param_beyond_table();
+// Calls AE's private get_callback_addr ids -5 / -2 through in_data->utils
+// (issue #985).
+bool verify_pf_private_callbacks();
 void* aegp_comp_item_handle();
 bool suite_leases_balanced();
 uint32_t suite_acquire_count();
@@ -574,6 +578,11 @@ int configure_worker_entry_bootstrap() {
           &aexcompat::world_registry::hosts_world_pixels,
           []() -> const char* { return smart_state().pixel_format.c_str(); }}))
     return 1;
+  // AE's private get_callback_addr ids (issue #985) share the FLT blur suite's
+  // operand admission; the sampling runtime hands the pointers out.
+  if (!aexcompat::pf_private::configure(
+          {&g_effect, &aexcompat::flt_blur::resolve_in_place_world}))
+    return 1;
   return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
 }
 
@@ -628,6 +637,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_production_utility_callback_table,
         &verify_production_composite_rect_callback,
         &verify_checkout_param_beyond_table,
+        &verify_pf_private_callbacks,
         &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
         &aexcompat::worker_runtime::persistent_data::selftest,
         &aexcompat::worker_runtime::selftest_native_stdout_routing,

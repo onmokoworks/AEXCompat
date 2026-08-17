@@ -540,6 +540,13 @@ bool configure(const Hooks& hooks) noexcept {
 
 const Suite1* suite1() noexcept { return &g_suite1; }
 
+bool resolve_in_place_world(void* world, world_safety::DispatchWorldFormat& format) {
+  world_safety::DispatchWorldFormat destination{};
+  if (!resolve_blur_worlds(world, world, format, destination)) return false;
+  int32_t pixel_bytes{};
+  return compatible_worlds(format, destination, pixel_bytes);
+}
+
 bool selftest() {
   constexpr int32_t width = 3;
   constexpr int32_t height = 1;
