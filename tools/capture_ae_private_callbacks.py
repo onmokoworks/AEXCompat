@@ -119,19 +119,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"[+] launched {ae_com.name} pid {launched.pid}", flush=True)
 
+    # The host is the process this run launched (AfterFX.com loads
+    # AfterFXLib.dll itself under -noui -r; observed on 26.3, no AfterFX.exe
+    # child). Only that pid is attached and, on timeout, terminated; an AE
+    # session another owner starts in the meantime is never touched.
     device = frida.get_local_device()
-    target_pid = None
+    target_pid = launched.pid
     deadline = time.time() + args.attach_timeout
-    while time.time() < deadline and target_pid is None:
-        for process in device.enumerate_processes():
-            if process.name.lower() in ("afterfx.com", "afterfx.exe"):
-                target_pid = process.pid
-                break
-        if target_pid is None:
-            time.sleep(0.5)
-    if target_pid is None:
+    while time.time() < deadline:
+        if launched.poll() is not None:
+            raise SystemExit(f"the launched host exited early with code {launched.returncode}")
+        if any(process.pid == target_pid for process in device.enumerate_processes()):
+            break
+        time.sleep(0.5)
+    else:
         launched.kill()
-        raise SystemExit("no After Effects host process appeared")
+        raise SystemExit("the launched host never became attachable")
     print(f"[+] AE host pid {target_pid}", flush=True)
 
     state = {"ready": False}
@@ -174,11 +177,10 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(1.0)
         if psutil.pid_exists(target_pid):
             print("[!] AE still alive after the run timeout; terminating the process this run launched", flush=True)
-            for pid in {target_pid, launched.pid}:
-                try:
-                    psutil.Process(pid).kill()
-                except Exception:  # pragma: no cover - best effort
-                    pass
+            try:
+                launched.kill()
+            except Exception:  # pragma: no cover - best effort
+                pass
         try:
             session.detach()
         except Exception:  # pragma: no cover

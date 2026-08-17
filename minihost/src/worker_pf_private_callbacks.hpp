@@ -11,13 +11,14 @@
 //
 //   id -5 -> PF.dll `PFp_GaussianValue` (0x52f70), the same for every
 //            (quality, mode): double(double), the falloff curve Bulge lerps with.
-//   id -2 -> FLT.dll 0x311f0 when mode == 1, 0x30ff0 otherwise, the same for
-//            every quality: an in-place separable blur of one PF_LayerDef
-//            through PF.dll's PF_BoxBlur1D / PF_GaussianBlur1D. The two entry
-//            points differ only in the alpha type they hand the blur nodes:
-//            0x311f0 treats the world as straight alpha (premultiplies, blurs,
-//            unpremultiplies), 0x30ff0 as premultiplied (blurs the channels as
-//            they are).
+//   id -2 -> FLT.dll 0x311f0 when mode == 1 (PF_MF_Alpha_STRAIGHT), 0x30ff0
+//            otherwise (mode 0 is PF_MF_Alpha_PREMUL; mode 2 answered the same
+//            entry), the same for every quality: an in-place separable blur of
+//            one PF_LayerDef through PF.dll's PF_BoxBlur1D / PF_GaussianBlur1D.
+//            The two entry points differ only in the alpha type they hand the
+//            blur nodes: 0x311f0 treats the world as straight alpha
+//            (premultiplies, blurs, unpremultiplies), 0x30ff0 as premultiplied
+//            (blurs the channels as they are).
 //
 // Signature of the id -2 function, from the three callers and FLT.dll:
 //   PF_Err fn(PF_InData* in_data, void* unused, double radius,
@@ -35,6 +36,10 @@
 // weigh 1 - (ceil(rho) - rho) (kept in 1/1024 units); otherwise
 // PF_GaussianBlur1D with integer weights w[0] = 255,
 // w[i] = (int)(PFp_GaussianValue(i / (radius + 1)) * 255) for i <= ceil(radius).
+// A radius of 0 builds no node and the call succeeds with the world untouched
+// (observed: CC Cross Blur at its default radius 0 renders its input). A flags
+// word naming neither axis is treated the same way; that case has no observed
+// caller and is the host's reading of the same FLT.dll code, not a measurement.
 // docs/PRIVATE_CALLBACK_IDS_OBSERVATION_2026-08-17.md records the captures.
 namespace aexcompat::pf_private {
 
@@ -57,11 +62,8 @@ inline constexpr float kMaximumRadius = 4096.0f;
 //   x > 1.0 -> 0.0, else 1.0 - (1.0 - exp((x * -2.378) * x)) * 1.102
 double __cdecl gaussian_value(double x) noexcept;
 
-// id -2. `mode == 1` of the get_callback_addr request selects the straight
-// entry, anything else the premultiplied one.
-using PrivateBlur = int32_t(__cdecl*)(void* in_data, void* unused, double radius,
-                                      void* unused_progress, int32_t flags,
-                                      void* world);
+// id -2. `mode == 1` (PF_MF_Alpha_STRAIGHT) of the get_callback_addr request
+// selects the straight entry, anything else the premultiplied one.
 int32_t __cdecl blur_straight(void* in_data, void* unused, double radius,
                               void* unused_progress, int32_t flags, void* world);
 int32_t __cdecl blur_premultiplied(void* in_data, void* unused, double radius,

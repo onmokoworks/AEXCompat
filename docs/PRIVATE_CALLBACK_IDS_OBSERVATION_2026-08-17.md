@@ -49,8 +49,8 @@ Frida でフックして「AE が実際に返す関数」と「その関数の�
 | id | quality / mode | 返る関数 |
 | --- | --- | --- |
 | -5 | 全 6 通り同じ | PF.dll+0x52f70 = export `PFp_GaussianValue` |
-| -2 | mode == 1 (quality 0/1) | FLT.dll+0x311f0 |
-| -2 | mode 0 / 2 (quality 0/1) | FLT.dll+0x30ff0 |
+| -2 | mode == 1 = PF_MF_Alpha_STRAIGHT (quality 0/1) | FLT.dll+0x311f0 |
+| -2 | mode 0 = PF_MF_Alpha_PREMUL, mode 2 (quality 0/1) | FLT.dll+0x30ff0 |
 | 9 (COPY) | q1 m1 / q1 m0,2 / q0 | PF.dll+0x37fa0 / +0x3e000 / +0x37d10 |
 
 id -1, -3, -4, -6, -8, -9, -11, -12 にも PF.dll 内の関数が返る (未解読、
@@ -114,8 +114,8 @@ flags は FLT Blur Suite と同じ語: 0x0f = チャンネル (A=1,R=2,G=4,B=8)�
   box、それ以外は gaussian。
 - gaussian (PF_GaussianBlur1D): n = ceil(radius)、整数重み w[0]=255、
   w[i]=(int)(PFp_GaussianValue(i/(radius+1))*255)、正規化は
-  255+2Σw[i]。8-bit も 16-bit も同じ整数重み (16-bit の実測が 1/32768
-  以内で一致)。
+  255+2Σw[i]。8-bit も 16-bit も同じ整数重み (16-bit の実測が 16-bit の
+  1 段階 = 3e-5 以内で一致)。
 - box (PF_BoxBlur1D): 1 pass の半幅 n = ceil(rho)、両端タップの重みは
   1-(n-rho) を 1/1024 単位で切り捨て、正規化は (2n+1)*1024-2*deficit。
   quality 1 は同じ box を 3 pass。8-bit は pass ごとに 8-bit に丸まる。
@@ -161,8 +161,10 @@ host = 本 PR の worker、AE = 上のキャプチャの PNG。入力は §1 の
   端画素複製」でも「1 回の複製詰め」でも「再正規化」でも完全には
   一致しないため (推論: RenderGraph の中間バッファの詰め方が違う)。
   内部 (端から extent 以上離れた画素) は 0。
-- 16-bit はカーネル形状のみ確認 (インパルス応答が 1e-5 以内)。32f は
-  手組みのワールドを AE が例外で拒んだので未確認。
+- 16-bit はカーネル形状と straight/premul の半透明インパルスを確認
+  (インパルス応答が 3e-5 = 16-bit の 1 段階以内)。32f は手組みのワールドを
+  AE が例外で拒んだので未確認。float 経路の unpremultiply は host では
+  クリップしない (16-bit は AE の整数経路に倣って最大値でクリップ)。
 - worker self-test `--self-test-pf-private-callbacks` が、installed
   `in_data->utils` 経由で取った関数に対して §2.3 の値、§2.4 の 8-bit
   インパルス応答 (r=1 → [64,127,64]、r=2 → [23,62,84,62,23]、q1 r=6.3 の

@@ -1065,6 +1065,118 @@ bool verify_pf_private_callbacks() {
   impulse(255, 200, 100, 50);
   check(blur_premul(state.input.data(), nullptr, 0.0, nullptr, kHorizontalAll, world.data()) == 0 &&
         channel_row(1, 15, 3) == std::vector<int>{0, 200, 0}, "radius 0");
+  // Both axes, straight, no repeat, on AE's 65x65 step world (opaque
+  // (255,200,100,50) for x<32 && y<32, transparent elsewhere; r=1, flags
+  // 0x6f): X pass premultiplied intermediate, Y pass unpremultiplies at the
+  // end, zero beyond the world. Values are the ones AE's function wrote
+  // (probe case "step m=1 q=1 r=1 flags=0x6f", 8-bit).
+  {
+    constexpr int32_t side = 65;
+    std::vector<unsigned char> step(static_cast<std::size_t>(side) * side * 4);
+    for (int32_t y = 0; y < side; ++y)
+      for (int32_t x = 0; x < side; ++x) {
+        auto* px = &step[(static_cast<std::size_t>(y) * side + x) * 4];
+        const bool on = x < 32 && y < 32;
+        px[0] = on ? 255 : 0; px[1] = on ? 200 : 0; px[2] = on ? 100 : 0; px[3] = on ? 50 : 0;
+      }
+    std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> step_world{};
+    unsigned char* data = step.data();
+    const int32_t step_rowbytes = side * 4;
+    std::memcpy(step_world.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+    std::memcpy(step_world.data() + contract::LAYER_ROWBYTES_OFFSET, &step_rowbytes, sizeof(step_rowbytes));
+    std::memcpy(step_world.data() + contract::LAYER_WIDTH_OFFSET, &side, sizeof(side));
+    std::memcpy(step_world.data() + contract::LAYER_HEIGHT_OFFSET, &side, sizeof(side));
+    check(worlds.register_world(step_world.data(), kPixelFormatArgb32), "step world registration");
+    check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, 0x6f, step_world.data()) == 0,
+          "straight two-axis step refused");
+    auto at = [&](int32_t x, int32_t y, int32_t c) {
+      return static_cast<int>(step[(static_cast<std::size_t>(y) * side + x) * 4 + c]);
+    };
+    // Corner (30..34, 30..34): alpha falls off in both axes, colors keep their
+    // straight values, blue shows AE's premul/unpremul rounding (50/49/52).
+    const std::vector<int> alpha_rows{255, 191, 64, 0, 0, 191, 143, 48, 0, 0, 64, 48, 16, 0, 0};
+    std::vector<int> got_alpha, got_red, got_blue;
+    for (int32_t y = 30; y < 33; ++y)
+      for (int32_t x = 30; x < 35; ++x) {
+        got_alpha.push_back(at(x, y, 0));
+        got_red.push_back(at(x, y, 1));
+        got_blue.push_back(at(x, y, 3));
+      }
+    check(got_alpha == alpha_rows, "two-axis straight alpha corner");
+    check(got_red == std::vector<int>{200, 200, 199, 0, 0, 200, 200, 199, 0, 0, 200, 200, 199, 0, 0},
+          "two-axis straight red corner");
+    check(got_blue == std::vector<int>{50, 49, 52, 0, 0, 50, 49, 52, 0, 0, 50, 49, 52, 0, 0},
+          "two-axis straight blue corner");
+    check(at(33, 33, 0) == 0 && at(33, 33, 1) == 0, "two-axis straight outside the step");
+    // World border: zero beyond the world in both axes (row 0 / column 0 of the
+    // opaque region reads 143 at the corner, 191 along the edges).
+    check(at(0, 0, 0) == 143 && at(1, 0, 0) == 191 && at(4, 0, 0) == 191 && at(0, 1, 0) == 191 &&
+              at(0, 4, 0) == 191 && at(0, 0, 1) == 200 && at(4, 0, 1) == 200,
+          "two-axis straight world border");
+  }
+  // 16-bit (ARGB64, 0..32768): the same integer gaussian weights and the same
+  // three-pass box, values as AE wrote them into a 16-bit world (probe cases
+  // "impulse deep m=0 q=1 r=1 / r=6.3", "halfalpha deep m=1 q=1 r=1").
+  {
+    constexpr int32_t deep_width = 33, deep_rowbytes = deep_width * 8;
+    std::vector<uint16_t> deep(static_cast<std::size_t>(deep_width) * 4);
+    std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> deep_world{};
+    uint16_t* data = deep.data();
+    const int32_t one = 1;
+    std::memcpy(deep_world.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+    std::memcpy(deep_world.data() + contract::LAYER_ROWBYTES_OFFSET, &deep_rowbytes, sizeof(deep_rowbytes));
+    std::memcpy(deep_world.data() + contract::LAYER_WIDTH_OFFSET, &deep_width, sizeof(deep_width));
+    std::memcpy(deep_world.data() + contract::LAYER_HEIGHT_OFFSET, &one, sizeof(one));
+    check(worlds.register_world(deep_world.data(), kPixelFormatArgb64), "16-bit world registration");
+    auto deep_impulse = [&](uint16_t a, uint16_t r, uint16_t g) {
+      std::fill(deep.begin(), deep.end(), uint16_t{0});
+      deep[16 * 4 + 0] = a; deep[16 * 4 + 1] = r; deep[16 * 4 + 2] = g;
+    };
+    auto deep_row = [&](int channel, int first, int count) {
+      std::vector<int> row;
+      for (int i = 0; i < count; ++i) row.push_back(deep[static_cast<std::size_t>(first + i) * 4 + channel]);
+      return row;
+    };
+    set_quality(1);
+    deep_impulse(32768, 32768, 32768);
+    check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit r=1 refused");
+    check(deep_row(0, 15, 3) == std::vector<int>{8240, 16288, 8240} &&
+              deep_row(1, 15, 3) == std::vector<int>{8240, 16288, 8240},
+          "16-bit r=1 kernel");
+    deep_impulse(32768, 32768, 32768);
+    check(blur_premul(state.input.data(), nullptr, 6.3, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit r=6.3 refused");
+    {
+      const std::vector<int> expected{6, 57, 234, 593, 1134, 1856, 2721, 3549, 4094, 4276, 4094, 3549,
+                                      2721, 1856, 1134, 593, 234, 57, 6};
+      const auto got = deep_row(0, 7, 19);
+      bool within_one = got.size() == expected.size();
+      for (std::size_t i = 0; within_one && i < got.size(); ++i)
+        within_one = std::abs(got[i] - expected[i]) <= 1;
+      // AE rounds each of the three passes to 16 bits; the host keeps the
+      // passes in double, so one 16-bit step is the tolerance.
+      check(within_one, "16-bit q1 r=6.3 kernel (within one step)");
+    }
+    deep_impulse(16384, 26214, 13107);
+    check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit straight refused");
+    {
+      // Same one-step tolerance: AE's 16-bit unpremultiply truncates where
+      // the host's double path rounds (AE wrote 13106 for green, the exact
+      // quotient is 13106.9).
+      const auto a = deep_row(0, 15, 3), r = deep_row(1, 15, 3), g = deep_row(2, 15, 3);
+      auto within = [](const std::vector<int>& got, std::initializer_list<int> want) {
+        if (got.size() != want.size()) return false;
+        std::size_t i = 0;
+        for (int w : want) if (std::abs(got[i++] - w) > 1) return false;
+        return true;
+      };
+      check(within(a, {4120, 8144, 4120}) && within(r, {26214, 26214, 26214}) &&
+                within(g, {13106, 13106, 13106}),
+            "16-bit straight half-alpha result (within one step)");
+    }
+  }
   // Fail-closed: each malformed call answers PF_Err_BAD_CALLBACK_PARAM (516)
   // and leaves the world untouched.
   impulse(255, 200, 100, 50);

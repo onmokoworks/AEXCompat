@@ -44,8 +44,8 @@ int32_t bytes_per_pixel(int32_t pixel_format) noexcept {
 // PF_GaussianBlur1D's integer kernel: w[0] = 255 and
 // w[i] = (int)(PFp_GaussianValue(i / (radius + 1.0)) * 255.0) for
 // 1 <= i <= ceil(radius). AE truncates each product to int and uses the same
-// integer weights at every bit depth (16-bit impulse responses match them to
-// 1/32768).
+// integer weights at every bit depth (16-bit impulse responses match them
+// within one 16-bit step, 3e-5).
 std::vector<int32_t> gaussian_weights(float radius) {
   const int32_t taps = static_cast<int32_t>(std::ceil(radius));
   std::vector<int32_t> weights;
@@ -112,6 +112,11 @@ struct PassPlan {
   std::vector<int32_t> gaussian;
   bool repeat{};
   bool straight_out{};
+  // Deep path only: clip unpremultiplied colors to the format maximum. True
+  // for 16-bit (AE's integer paths saturate: min(255) in the 8-bit
+  // unpremultiply), false for float, where AE's saturation was not observed
+  // and an HDR value must not be clipped by the host on a guess.
+  bool clamp_output{};
   std::array<bool, 4> channel{};
 };
 
@@ -243,11 +248,13 @@ void box_line_deep(const std::vector<double>& in, std::vector<double>& out,
       }
       if (plan.channel[0]) pixel[0] = num[0] / den;
       for (int32_t c = 1; c < 4; ++c)
-        if (plan.channel[c])
-          pixel[c] = std::min(maximum, num[c] * maximum / alpha_num);
+        if (plan.channel[c]) {
+          const double value = num[c] * maximum / alpha_num;
+          pixel[c] = plan.clamp_output ? std::min(maximum, value) : value;
+        }
     } else {
       for (int32_t c = 0; c < 4; ++c)
-        if (plan.channel[c]) pixel[c] = num[c] > 0.0 ? num[c] / den : 0.0;
+        if (plan.channel[c]) pixel[c] = num[c] / den;
     }
   }
 }
@@ -281,8 +288,10 @@ void gaussian_line_deep(const std::vector<double>& in, std::vector<double>& out,
       }
       if (plan.channel[0]) pixel[0] = sums[0] / tot;
       for (int32_t c = 1; c < 4; ++c)
-        if (plan.channel[c])
-          pixel[c] = std::min(maximum, sums[c] * maximum / alpha_num);
+        if (plan.channel[c]) {
+          const double value = sums[c] * maximum / alpha_num;
+          pixel[c] = plan.clamp_output ? std::min(maximum, value) : value;
+        }
     } else {
       for (int32_t c = 0; c < 4; ++c)
         if (plan.channel[c]) pixel[c] = tot > 0.0 ? sums[c] / tot : 0.0;
@@ -374,6 +383,7 @@ void run_blur(std::vector<Value>& image, int32_t width, int32_t height,
   const bool colors = (flags & (kFlagRed | kFlagGreen | kFlagBlue)) != 0;
   PassPlan plan{};
   plan_axis(plan, radius, flags, quality);
+  plan.clamp_output = maximum > 1.0;
   // Straight input is premultiplied once, before the first pass, when any
   // color channel is blurred (Blur_1DImgOpInfo's "input needs matting");
   // straight output is unpremultiplied by the last pass of the last axis.

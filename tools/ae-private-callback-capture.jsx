@@ -69,6 +69,7 @@
                 }
             }
             comp.time = 0;
+            if (!/^[A-Za-z0-9_-]+$/.test(spec[2])) { throw new Error("outName must be [A-Za-z0-9_-]+: " + spec[2]); }
             var outFile = new File(outDir + "/" + spec[2] + ".png");
             comp.saveFrameToPng(comp.time, outFile);
             var w = 0;
