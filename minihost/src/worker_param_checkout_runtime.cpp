@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstring>
+#include <map>
 #include <mutex>
 
 namespace aexcompat::l2_detail {
@@ -34,6 +35,14 @@ auto& g_last_param_checkout_time = g_parameter_runtime.checkout.last_time;
 auto& g_last_param_checkout_time_step = g_parameter_runtime.checkout.last_time_step;
 auto& g_last_param_checkout_time_scale = g_parameter_runtime.checkout.last_time_scale;
 
+// The published tables are contiguous 0..N (classic render, smart setup, l2
+// lifecycle all publish every slot), so "past the table" is "past the last
+// published slot". Mirrors Context::beyond_definition_table for the hosted map.
+bool beyond_definition_table(const std::map<int32_t, aexcompat::worker_runtime::parameters::Definition>& table,
+                             int32_t index) {
+  return !table.empty() && index > table.rbegin()->first;
+}
+
 int32_t finish_param_callback(aexcompat::callback_diagnostics::Callback callback,
                               int32_t result,
                               aexcompat::callback_diagnostics::Reason reason =
@@ -44,7 +53,7 @@ int32_t finish_param_callback(aexcompat::callback_diagnostics::Callback callback
               << aexcompat::callback_diagnostics::CALLBACK_NAMES[
                      static_cast<std::size_t>(callback)]
               << " -> " << result;
-    if (result != 0)
+    if (result != 0 || reason != aexcompat::callback_diagnostics::Reason::None)
       std::cerr << " ("
                 << aexcompat::callback_diagnostics::REASON_NAMES[
                        static_cast<std::size_t>(reason)]
@@ -100,12 +109,36 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   }
   if (classic_context && classic_context->has_timed_slot(index))
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
+  // A slot past the published table (index > last registered slot) is not a
+  // refusal: AE answers it with PF_Err_NONE and an empty layer definition
+  // (param_type LAYER, u.ld.data NULL), and the matching checkin also returns
+  // PF_Err_NONE. Observed directly in AE 2026 through
+  // instruments/pf-checkout-index-probe (5-slot table, indices 29/31/5
+  // queried; docs/CHECKOUT_PARAM_INDEX_OBSERVATION_2026-08-17.md), which is
+  // what lets Pixel Motion Blur (RollingShutter.aex, issue #1251) render:
+  // its Kronos render core checks out Timewarp's Matte/Warp Layer slots 29
+  // and 31 unconditionally, zero-fills the def first, reads `data == NULL` as
+  // "no layer", and gates its main loop on that checkout's return code. The
+  // host hands back the same zero-filled def and records the checkout, so the
+  // checkin balances; the result-0 history entry carries `beyond_param_table`
+  // so the report marks that a checkout resolved past the table (the slot
+  // number itself is only in the extended_diag trace line). Negative slots and
+  // slots inside the table with no definition stay refused (unknown_layer),
+  // and so does a table that has not been published yet.
+  const auto answer_beyond_table = [&] {
+    std::memset(definition, 0, kParamSize);
+    record_checkout();
+    return finish_param_callback(Callback::CheckoutParam, 0,
+                                 Reason::BeyondParamTable);
+  };
   if (classic_context) {
     if (classic_context->copy_definition(index, definition, kParamSize) ||
         classic_context->copy_fallback_definition(index, definition, kParamSize)) {
       record_checkout();
       return finish_param_callback(Callback::CheckoutParam, 0);
     }
+    if (classic_context->beyond_definition_table(index))
+      return answer_beyond_table();
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
   }
   const auto hosted = g_checkout_layer_definitions.find(index);
@@ -121,6 +154,8 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
     record_checkout();
     return finish_param_callback(Callback::CheckoutParam, 0);
   }
+  if (beyond_definition_table(g_checkout_layer_definitions, index))
+    return answer_beyond_table();
   return finish_param_callback(Callback::CheckoutParam, 4, Reason::UnknownLayer);
 }
 

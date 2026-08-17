@@ -192,3 +192,21 @@ def test_pf_utils_composite_rect_is_reachable_through_in_data_utils() -> None:
         "--self-test-pf-utils-composite-rect", "pf_utils_composite_rect"
     ):
         pass
+
+
+def test_checkout_param_beyond_table_answers_like_ae_on_all_workers() -> None:
+    """`PF_InteractCallbacks.checkout_param` on every worker, called through the
+    installed `in_data->inter` block for slots past the published parameter
+    table (issue #1251: Pixel Motion Blur checks out Timewarp's slots 29/31
+    against its own 5-slot table). AE 2026 answers those with PF_Err_NONE and
+    an empty layer definition and takes the checkin
+    (instruments/pf-checkout-index-probe, docs/CHECKOUT_PARAM_INDEX_OBSERVATION_2026-08-17.md);
+    the route checks that both the classic-context and the hosted-table path
+    do the same, that the checkin balances, that an in-table slot still comes
+    back with its definition, and that a negative slot and an unpublished table
+    stay refused. The verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-checkout-param-beyond-table", "checkout_param_beyond_table"
+    ):
+        pass

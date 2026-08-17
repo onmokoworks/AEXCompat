@@ -209,7 +209,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 35> simple_commands{{
+  const std::array<selftest::SimpleCommand, 36> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -281,6 +281,13 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-pf-utils-composite-rect", "pf_utils_composite_rect",
        hooks.simple.pf_utils_composite_rect, 1,
        ",\"reached_via_in_data_utils\":true"},
+      // PF_InteractCallbacks.checkout_param through the installed in_data
+      // block asked for slots past the published table (issue #1251): AE
+      // answers PF_Err_NONE with an empty layer def and takes the checkin;
+      // negative slots and an unpublished table stay refused.
+      {L"--self-test-checkout-param-beyond-table", "checkout_param_beyond_table",
+       hooks.simple.checkout_param_beyond_table, 1,
+       ",\"reached_via_in_data_inter\":true"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",

@@ -67,6 +67,11 @@ enum class Reason : std::size_t {
   AbortCallback,
   Unsupported,
   CallbackError,
+  // Not a refusal: checkout_param answered a slot past the published table
+  // with an empty layer definition, the AE-observed shape (issue #1251). It
+  // rides on a result-0 history entry so the report shows which checkouts
+  // resolved to nothing.
+  BeyondParamTable,
   Count,
 };
 
@@ -84,7 +89,8 @@ inline constexpr std::array<const char*, static_cast<std::size_t>(Reason::Count)
                   "unknown_layer", "unknown_checkout", "missing_world",
                   "already_checked_out", "not_checked_out", "empty_result",
                   "invalid_area", "pixel_callback", "progress_callback",
-                  "abort_callback", "unsupported", "callback_error"}};
+                  "abort_callback", "unsupported", "callback_error",
+                  "beyond_param_table"}};
 
 struct Entry {
   std::atomic<uint32_t> calls{};

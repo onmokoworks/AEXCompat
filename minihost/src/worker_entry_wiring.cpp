@@ -191,6 +191,9 @@ bool is_render_worker();
 bool verify_production_utility_callback_table();
 // Calls the production composite_rect slot through in_data->utils (issue #1252).
 bool verify_production_composite_rect_callback();
+// Calls the production checkout_param / checkin_param slots through
+// in_data->inter for slots past the published table (issue #1251).
+bool verify_checkout_param_beyond_table();
 void* aegp_comp_item_handle();
 bool suite_leases_balanced();
 uint32_t suite_acquire_count();
@@ -624,6 +627,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_utils_handle_callbacks_wired,
         &verify_production_utility_callback_table,
         &verify_production_composite_rect_callback,
+        &verify_checkout_param_beyond_table,
         &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
         &aexcompat::worker_runtime::persistent_data::selftest,
         &aexcompat::worker_runtime::selftest_native_stdout_routing,
