@@ -14,6 +14,7 @@ struct Sources {
   void* subpixel_sample{};
   void* area_sample{};
   void* end_sampling{};
+  void* composite_rect{};
   void* blend{};
   void* convolve{};
   void* copy{};
@@ -70,11 +71,12 @@ struct Binding {
   void* Sources::*source;
 };
 
-inline constexpr std::array<Binding, 53> BINDINGS{{
+inline constexpr std::array<Binding, 54> BINDINGS{{
     {contract::UTILS_BEGIN_SAMPLING_OFFSET, &Sources::begin_sampling},
     {contract::UTILS_SUBPIXEL_SAMPLE_OFFSET, &Sources::subpixel_sample},
     {contract::UTILS_AREA_SAMPLE_OFFSET, &Sources::area_sample},
     {contract::UTILS_END_SAMPLING_OFFSET, &Sources::end_sampling},
+    {contract::UTILS_COMPOSITE_RECT_OFFSET, &Sources::composite_rect},
     {contract::UTILS_BLEND_OFFSET, &Sources::blend},
     {contract::UTILS_CONVOLVE_OFFSET, &Sources::convolve},
     {contract::UTILS_COPY_OFFSET, &Sources::copy},

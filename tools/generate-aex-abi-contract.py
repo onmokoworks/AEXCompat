@@ -131,6 +131,11 @@ CALLBACK_TABLES = {
         "utils.subpixel_sample",
         "utils.area_sample",
         "utils.end_sampling",
+        # composite_rect (PF_UtilCallbacks+0x28) was missing from the emitted
+        # contract, so the host wired blend at 0x30 and left 0x28 null; Write_on
+        # calls it from RENDER to put the input layer behind its strokes and
+        # jumped to address 0 (issue #1252). Same shape as #777 / #981.
+        "utils.composite_rect",
         "utils.blend",
         "utils.convolve",
         "utils.copy",

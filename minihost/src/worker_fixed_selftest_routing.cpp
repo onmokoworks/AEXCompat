@@ -209,7 +209,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 34> simple_commands{{
+  const std::array<selftest::SimpleCommand, 35> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -274,6 +274,13 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       // stderr.
       {L"--self-test-utility-callback-table", "utility_callback_table",
        hooks.simple.utility_callback_table},
+      // PF_UtilCallbacks.composite_rect called through the installed
+      // in_data->utils block (issue #1252): the slot the table check above
+      // proves non-null is the composite the transfer modes describe, and a
+      // malformed call fails closed with the destination untouched.
+      {L"--self-test-pf-utils-composite-rect", "pf_utils_composite_rect",
+       hooks.simple.pf_utils_composite_rect, 1,
+       ",\"reached_via_in_data_utils\":true"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",
