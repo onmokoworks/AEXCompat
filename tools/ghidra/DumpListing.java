@@ -17,6 +17,7 @@ public class DumpListing extends GhidraScript {
     AddressFactory af = currentProgram.getAddressFactory();
     Address start = af.getAddress(args[1]);
     Address end = af.getAddress(args[2]);
+    if (start == null || end == null) { out.println("BAD ADDRESS " + args[1] + " " + args[2]); out.close(); return; }
     Listing listing = currentProgram.getListing();
     FunctionManager fm = currentProgram.getFunctionManager();
     ReferenceManager rm = currentProgram.getReferenceManager();

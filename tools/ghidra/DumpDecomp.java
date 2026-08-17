@@ -105,6 +105,7 @@ public class DumpDecomp extends GhidraScript {
         // Functions holding a reference to this address (e.g. the MSVC catch funclet that
         // LEA-loads a continuation address inside its parent). Added 2026-08-17 (#1253).
         Address a = currentProgram.getAddressFactory().getAddress(sel.substring(4));
+        if (a == null) { out.println("BAD ADDRESS " + sel); continue; }
         for (Reference r : rm.getReferencesTo(a)) {
           Function f = fm.getFunctionContaining(r.getFromAddress());
           out.println("REF to " + a + " from " + r.getFromAddress() + (f != null ? " in " + f.getName() : " (no function)"));

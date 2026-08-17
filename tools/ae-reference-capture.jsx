@@ -208,13 +208,15 @@
             for (var pi = 1; pi <= effect.numProperties; pi++) {
                 var prop = effect.property(pi);
                 var propValue = "";
+                var propType = "";
                 try {
+                    propType = String(prop.propertyValueType);
                     propValue = String(prop.value);
                 } catch (readError) {
                     propValue = "<" + String(readError) + ">";
                 }
                 dumped.push(String(pi) + "|" + prop.name + "|" + prop.matchName +
-                    "|" + String(prop.propertyValueType) + "|" + propValue);
+                    "|" + propType + "|" + propValue);
             }
             payload.params = dumped.join(";;");
         }

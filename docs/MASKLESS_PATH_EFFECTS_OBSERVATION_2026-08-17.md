@@ -151,7 +151,8 @@ alpha の表現 (AE の PNG は premultiplied、host は straight) を揃えた�
 - mask を 1 つ以上与えたときの Scribble / Inner-Outer-Key / Reshape の
   出力を AE と比較する経路 (`render_sweep --mask ...`) は作っていない。
   session の mask trailer (`v2|...`) 自体は broker にあるので、比較したく
-  なったら sweep のオプションとして足せる。
+  なったら sweep のオプションとして足せる。ただしその trailer 経路で
+  PF Path Query の enumeration hook が入っているかは未確認 (#1269)。
 - Inner-Outer-Key の gaussian_kernel 数値は PF.dll の RE から実装し、
   selftest で AE 値 (192,380,192 など) を固定した。実機 AE の
   `PF_GaussianKernel` を Frida で叩いた動的キャプチャはしていない。
