@@ -197,6 +197,29 @@
             payload.param_name = paramApplied.name;
             payload.param_value = paramApplied.value;
         }
+        // The effect's own parameters as AE materializes them for this
+        // capture (index|name|matchName|propertyValueType|value, ";;"
+        // separated), so a host default can be compared against AE's
+        // (issue #1253: Reshape declares its popups with dephault 0 and AE
+        // reads them back as 1). Values AE cannot read (NO_VALUE groups,
+        // CUSTOM_VALUE arbitrary data) are recorded as the error text.
+        if (effect) {
+            var dumped = [];
+            for (var pi = 1; pi <= effect.numProperties; pi++) {
+                var prop = effect.property(pi);
+                var propValue = "";
+                var propType = "";
+                try {
+                    propType = String(prop.propertyValueType);
+                    propValue = String(prop.value);
+                } catch (readError) {
+                    propValue = "<" + String(readError) + ">";
+                }
+                dumped.push(String(pi) + "|" + prop.name + "|" + prop.matchName +
+                    "|" + propType + "|" + propValue);
+            }
+            payload.params = dumped.join(";;");
+        }
         writeResult(payload);
     } catch (error) {
         try {

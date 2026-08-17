@@ -192,6 +192,8 @@ bool is_render_worker();
 bool verify_production_utility_callback_table();
 // Calls the production composite_rect slot through in_data->utils (issue #1252).
 bool verify_production_composite_rect_callback();
+// Calls the production gaussian_kernel slot through in_data->utils (issue #1253).
+bool verify_production_gaussian_kernel_callback();
 // Calls the production checkout_param / checkin_param slots through
 // in_data->inter for slots past the published table (issue #1251).
 bool verify_checkout_param_beyond_table();
@@ -639,6 +641,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_utils_handle_callbacks_wired,
         &verify_production_utility_callback_table,
         &verify_production_composite_rect_callback,
+        &verify_production_gaussian_kernel_callback,
         &verify_checkout_param_beyond_table,
         &verify_pf_private_callbacks,
         &verify_bee_scene_facade,

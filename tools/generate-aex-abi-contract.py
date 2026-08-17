@@ -140,6 +140,11 @@ CALLBACK_TABLES = {
         "utils.convolve",
         "utils.copy",
         "utils.fill",
+        # gaussian_kernel (PF_UtilCallbacks+0x50) was missing from the emitted
+        # contract, so the host left 0x50 null; Inner/Outer Key builds its
+        # 1D blur kernel through it from RENDER and jumped to address 0
+        # (issue #1253). Same shape as #777 / #981 / #1252.
+        "utils.gaussian_kernel",
         "utils.premultiply",
         "utils.premultiply_color",
         "utils.subpixel_sample16",

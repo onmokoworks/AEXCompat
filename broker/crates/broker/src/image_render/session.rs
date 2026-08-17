@@ -1925,6 +1925,8 @@ pub(crate) fn build_interactive_image_report(
         "pf_path_preps_disposed",
         "invalid_pf_path_operations",
         "pf_path_reject_reason",
+        "pf_path_absent_checkouts",
+        "pf_path_absent_checkins",
     ] {
         report_object.insert(field.into(), worker_report[field].clone());
     }

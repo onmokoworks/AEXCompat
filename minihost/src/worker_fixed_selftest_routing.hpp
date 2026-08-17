@@ -50,6 +50,7 @@ struct SimpleHooks {
   bool (*pf_utils_handle_callbacks)(){};
   bool (*utility_callback_table)(){};
   bool (*pf_utils_composite_rect)(){};
+  bool (*pf_utils_gaussian_kernel)(){};
   bool (*checkout_param_beyond_table)(){};
   bool (*pf_private_callbacks)(){};
   bool (*bee_scene_facade)(){};

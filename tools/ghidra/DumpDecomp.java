@@ -4,7 +4,11 @@
 //   defined string containing needle), "imp:<needle>" (functions referencing an external symbol
 //   whose name contains needle; "imp:" alone = every import), "vt:<needle>" (the functions behind
 //   every entry of a `...::vftable` symbol whose name contains needle; needs RTTI/analysis),
-//   "callees"/"callers" (expand one level from the functions selected so far).
+//   "sym:<needle>" (the function at a non-external symbol whose name contains needle, e.g. an
+//   export such as sym:FilterMain), "ref:<hex>" (functions holding a reference to that address),
+//   "mk:<hex>" (create a function at that address first: code auto-analysis left undiscovered,
+//   such as MSVC FH4 catch funclets), "callees"/"callers" (expand one level from the functions
+//   selected so far).
 import ghidra.app.script.GhidraScript;
 import ghidra.app.decompiler.*;
 import ghidra.program.model.address.*;
@@ -77,6 +81,18 @@ public class DumpDecomp extends GhidraScript {
             targets.add(f);
           }
         }
+      } else if (sel.startsWith("sym:")) {
+        // Functions whose (non-external) symbol name contains needle, e.g. sym:EffectMain
+        // for the export, or a Ghidra label. Added 2026-08-17 (#1253).
+        String needle = sel.substring(4);
+        for (Symbol sym : currentProgram.getSymbolTable().getAllSymbols(true)) {
+          if (sym.isExternal() || !sym.getName().contains(needle)) continue;
+          Function f = fm.getFunctionAt(sym.getAddress());
+          if (f == null) f = fm.getFunctionContaining(sym.getAddress());
+          if (f == null) continue;
+          out.println("SYMBOL " + sym.getName(true) + " @ " + sym.getAddress() + " -> " + f.getName());
+          targets.add(f);
+        }
       } else if (sel.equals("callees")) {
         Set<Function> more = new LinkedHashSet<>();
         for (Function f : targets) more.addAll(f.getCalledFunctions(monitor));
@@ -85,6 +101,26 @@ public class DumpDecomp extends GhidraScript {
         Set<Function> more = new LinkedHashSet<>();
         for (Function f : targets) more.addAll(f.getCallingFunctions(monitor));
         targets.addAll(more);
+      } else if (sel.startsWith("ref:")) {
+        // Functions holding a reference to this address (e.g. the MSVC catch funclet that
+        // LEA-loads a continuation address inside its parent). Added 2026-08-17 (#1253).
+        Address a = currentProgram.getAddressFactory().getAddress(sel.substring(4));
+        if (a == null) { out.println("BAD ADDRESS " + sel); continue; }
+        for (Reference r : rm.getReferencesTo(a)) {
+          Function f = fm.getFunctionContaining(r.getFromAddress());
+          out.println("REF to " + a + " from " + r.getFromAddress() + (f != null ? " in " + f.getName() : " (no function)"));
+          if (f != null) targets.add(f);
+        }
+      } else if (sel.startsWith("mk:")) {
+        // Force a function at this address (undiscovered code such as MSVC catch
+        // funclets that auto-analysis left as raw bytes). Added 2026-08-17 (#1253).
+        Address a = currentProgram.getAddressFactory().getAddress(sel.substring(3));
+        Function f = a != null ? fm.getFunctionAt(a) : null;
+        if (f == null && a != null) {
+          disassemble(a);
+          f = createFunction(a, null);
+        }
+        if (f == null) out.println("NO FUNCTION created at " + sel); else targets.add(f);
       } else {
         Address a = currentProgram.getAddressFactory().getAddress(sel);
         Function f = a != null ? fm.getFunctionContaining(a) : null;

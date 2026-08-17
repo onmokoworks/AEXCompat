@@ -154,6 +154,7 @@
     "utils.ansi_tan":{"offset":320,"size":8},
     "utils.color_callbacks":{"offset":368,"size":64},
     "utils.composite_rect":{"offset":40,"size":8},
+    "utils.gaussian_kernel":{"offset":80,"size":8},
     "utils.blend":{"offset":48,"size":8},
     "utils.convolve":{"offset":56,"size":8},
     "utils.copy":{"offset":64,"size":8},
