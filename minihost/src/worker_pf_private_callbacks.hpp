@@ -33,7 +33,8 @@
 // radius is scaled by 1.4 and one box pass runs, with quality 1 three passes;
 // rho = scale * radius / 2.71 (float). rho > 1 (and no 0x100) selects
 // PF_BoxBlur1D with a per-pass box of half-width ceil(rho) whose two end taps
-// weigh 1 - (ceil(rho) - rho) (kept in 1/1024 units); otherwise
+// weigh 1 - (ceil(rho) - rho) (the 8-bit span keeps it in 1/1024 units, the
+// 16-bit values fit the exact weight); otherwise
 // PF_GaussianBlur1D with integer weights w[0] = 255,
 // w[i] = (int)(PFp_GaussianValue(i / (radius + 1)) * 255) for i <= ceil(radius).
 // A radius of 0 builds no node and the call succeeds with the world untouched

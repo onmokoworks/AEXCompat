@@ -99,10 +99,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"refusing to reuse an existing output directory: {out_dir}")
     for spec in args.effect:
         fields = spec.split("|")
-        if len(fields) < 3 or not fields[0] or not fields[1] or not fields[2] or \
-                not all(ch.isalnum() or ch in "_-" for ch in fields[2]):
+        # ';' joins the specs for the JSX and '|' splits the fields, so neither
+        # may appear inside a field; outName is the JSX's [A-Za-z0-9_-]+.
+        if ";" in spec or len(fields) not in (3, 4) or not fields[0] or not fields[1] or \
+                not fields[2] or \
+                not all((ch.isascii() and ch.isalnum()) or ch in "_-" for ch in fields[2]):
             raise SystemExit(f"--effect must be 'matchName|displayName|outName[|Param=value,...]' "
-                             f"with outName in [A-Za-z0-9_-]: {spec!r}")
+                             f"with outName in [A-Za-z0-9_-] and no ';': {spec!r}")
     running = running_ae_processes(psutil)
     if running:
         raise SystemExit(f"After Effects is already running; refusing to attach: {running}")

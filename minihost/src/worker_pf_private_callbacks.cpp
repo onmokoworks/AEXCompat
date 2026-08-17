@@ -44,8 +44,8 @@ int32_t bytes_per_pixel(int32_t pixel_format) noexcept {
 // PF_GaussianBlur1D's integer kernel: w[0] = 255 and
 // w[i] = (int)(PFp_GaussianValue(i / (radius + 1.0)) * 255.0) for
 // 1 <= i <= ceil(radius). AE truncates each product to int and uses the same
-// integer weights at every bit depth (16-bit impulse responses match them
-// within one 16-bit step, 3e-5).
+// integer weights at 16-bit (the captured 16-bit r=1 impulse response,
+// 8240/16288/8240 of 32768, is these weights exactly).
 std::vector<int32_t> gaussian_weights(float radius) {
   const int32_t taps = static_cast<int32_t>(std::ceil(radius));
   std::vector<int32_t> weights;
@@ -59,8 +59,10 @@ std::vector<int32_t> gaussian_weights(float radius) {
 }
 
 // PF_BoxBlur1D's per-pass box: half-width n = ceil(rho), the two end taps
-// weigh 1 - (n - rho); AE keeps that deficit in 1/1024 units (truncated) and
-// normalizes by (2n+1)*1024 - 2*deficit.
+// weigh 1 - (n - rho). AE's 8-bit span keeps that deficit in 1/1024 units
+// (truncated) and normalizes by (2n+1)*1024 - 2*deficit; the deep path uses
+// the exact deficit, which is what reproduces the captured 16-bit taps (a
+// 1/1024-truncated deficit lands one step off at four of the r=6.3 taps).
 struct BoxShape {
   int32_t half_width{};
   int32_t deficit_1024{};
@@ -114,12 +116,13 @@ struct PassPlan {
   std::vector<int32_t> gaussian;
   bool repeat{};
   bool straight_out{};
-  // Deep path only: true for 16-bit, whose AE path is still integer - every
-  // pass output is rounded to a whole 16-bit step, the premultiply truncates,
-  // and the unpremultiply saturates at the maximum. With those three the
-  // captured 16-bit impulse / half-alpha values reproduce exactly (r=6.3
-  // three-pass box: all 19 taps; half-alpha green 13106, where a rounding
-  // premultiply would give 13107). False for float, which carries what it
+  // Deep path only: true for 16-bit - every pass output is rounded to a
+  // whole 16-bit step, the premultiply truncates, and the unpremultiply
+  // saturates at the maximum. With those three the captured 16-bit impulse /
+  // half-alpha values reproduce exactly (r=6.3 three-pass box: all 19 taps;
+  // half-alpha green 13106, where a rounding premultiply would give 13107);
+  // that AE's 16-bit path is integer arithmetic is inferred from that fit,
+  // its 16-bit spans were not read. False for float, which carries what it
   // carries: no rounding, no clipping (AE's float saturation was not
   // observed and an HDR value must not be clipped on a guess).
   bool integer_depth{};

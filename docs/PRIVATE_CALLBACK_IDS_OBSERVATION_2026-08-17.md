@@ -117,7 +117,9 @@ flags は FLT Blur Suite と同じ語: 0x0f = チャンネル (A=1,R=2,G=4,B=8)�
   255+2Σw[i]。8-bit も 16-bit も同じ整数重み (16-bit の r=1 の実測
   8240/16288/8240 がこの重みそのもの)。
 - box (PF_BoxBlur1D): 1 pass の半幅 n = ceil(rho)、両端タップの重みは
-  1-(n-rho) を 1/1024 単位で切り捨て、正規化は (2n+1)*1024-2*deficit。
+  1-(n-rho)。8-bit の span はこれを 1/1024 単位で切り捨て、正規化は
+  (2n+1)*1024-2*deficit (16-bit のキャプチャは切り捨てない正確な重みで
+  一致し、1/1024 で切り捨てると r=6.3 の 4 タップが 1 段階ずれる)。
   quality 1 は同じ box を 3 pass。8-bit は pass ごとに 8-bit に丸まる
   (16-bit も pass ごとに丸めると r=6.3 の 19 タップが完全一致。推論)。
 - alpha type 0 (mode 1 の関数) = ワールドを straight alpha として扱う:
@@ -148,8 +150,9 @@ host = 本 PR の worker、AE = 上のキャプチャの PNG。入力は §1 の
 ## 3. host 実装 (`minihost/src/worker_pf_private_callbacks.cpp`) と残差
 
 - id -5: 上の式をそのまま。
-- id -2: §2.4 の構造を 8-bit は整数演算で AE と同じ丸め、16-bit / 32f は
-  同じ構造を double で。`in_data->effect_ref` の一致・quality 0/1・
+- id -2: §2.4 の構造を 8-bit は整数演算で AE と同じ丸め、16-bit は double
+  で計算して pass ごとに 16-bit 段階へ丸め (premultiply は切り捨て、
+  unpremultiply は最大値で飽和)、32f は丸めもクリップもしない double。`in_data->effect_ref` の一致・quality 0/1・
   半径 [0, 4096]・既知 flags のみ・チャンネル指定あり・ワールドが解決
   できる (FLT Blur Suite と同じ admission) を満たさない呼び出しは 516 と
   `stage:callback_denied callback=private_blur_* reason=...` で拒否し、
