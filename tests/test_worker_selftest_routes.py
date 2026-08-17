@@ -210,3 +210,22 @@ def test_checkout_param_beyond_table_answers_like_ae_on_all_workers() -> None:
         "--self-test-checkout-param-beyond-table", "checkout_param_beyond_table"
     ):
         pass
+
+
+def test_pf_private_callbacks_answer_like_ae_on_all_workers() -> None:
+    """AE's private `get_callback_addr` ids on every worker, obtained the way a
+    plug-in obtains them, through the slot in the installed `in_data->utils`
+    block (issue #985: Bulge asks for -5, Compound Blur / CC Cross Blur / Matte
+    Choker for -2). AE 2026 answers -5 with PF.dll's PFp_GaussianValue and -2
+    with FLT.dll's in-place blur, straight-alpha for request mode 1 and
+    premultiplied otherwise (docs/PRIVATE_CALLBACK_IDS_OBSERVATION_2026-08-17.md,
+    Frida capture of the live dispatcher); the route checks the curve values,
+    the 8-bit impulse responses of both kernels and both alpha treatments
+    against those captures, that an unread private id stays refused, and that
+    malformed blur calls fail closed with the world untouched. The verdict is
+    what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-pf-private-callbacks", "pf_private_callbacks"
+    ):
+        pass

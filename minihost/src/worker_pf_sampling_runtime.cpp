@@ -75,14 +75,34 @@ void configure_pf_sampling_runtime(const PfSamplingHostHooks& hooks) noexcept {
   g_hooks = hooks;
 }
 
-int32_t __cdecl get_callback_addr(void*, int32_t, uint32_t, int32_t callback_id,
+int32_t __cdecl get_callback_addr(void*, int32_t, uint32_t mode_flags, int32_t callback_id,
                                   void** callback) {
   if (!callback) return kPfBadCallbackParam;
   *callback = nullptr;
   // PF_CallbackID values from AE_EffectCB.h. Only return callbacks this host
   // actually implements; an unknown selector stays a structured PF error
   // rather than a non-null poison function (issue #793).
+  //
+  // The two negative ids are Adobe-private and were read off AE 2026's own
+  // dispatcher (issue #985; worker_pf_private_callbacks.hpp): AE answers -5
+  // with PFp_GaussianValue for every (quality, mode), and -2 with the
+  // straight-alpha blur entry when mode == 1 and the premultiplied one
+  // otherwise, quality ignored (the callee reads in_data->quality when
+  // called). Any other private id stays refused - AE has functions behind
+  // -1, -3, -4, -6, -8, -9, -11, -12 too, but nothing in the corpus asks for
+  // them and none has been read.
   switch (callback_id) {
+    case -5:
+      if (!g_hooks.private_gaussian_value) return kPfBadCallbackParam;
+      *callback = reinterpret_cast<void*>(g_hooks.private_gaussian_value);
+      break;
+    case -2: {
+      const auto blur = mode_flags == 1 ? g_hooks.private_blur_straight
+                                        : g_hooks.private_blur_premultiplied;
+      if (!blur) return kPfBadCallbackParam;
+      *callback = reinterpret_cast<void*>(blur);
+      break;
+    }
     case 2: *callback = reinterpret_cast<void*>(&subpixel_sample8); break;
     case 3: *callback = reinterpret_cast<void*>(&area_sample8); break;
     case 9: *callback = reinterpret_cast<void*>(&copy_world8); break;
