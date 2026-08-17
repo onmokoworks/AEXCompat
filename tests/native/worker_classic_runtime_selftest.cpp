@@ -15,6 +15,9 @@
 
 using namespace aexcompat::worker_runtime::classic;
 
+// worker_l2_suite_abi.hpp declares report_progress in the global namespace
+// but is not otherwise reachable from here, so the one declaration this
+// harness needs is repeated verbatim rather than pulling the whole ABI header.
 extern "C" int32_t __cdecl report_progress(void*, int32_t, int32_t);
 
 namespace {
@@ -215,6 +218,7 @@ int main() {
         telemetry.last_progress_current != 10 ||
         telemetry.last_progress_total != 10) return 43;
     if (report_progress(&marker, 5, -3) != 0 ||
+        telemetry.last_progress_current != 10 ||
         telemetry.last_progress_total != 10) return 44;
     if (telemetry.progress_calls != 4) return 45;
   }

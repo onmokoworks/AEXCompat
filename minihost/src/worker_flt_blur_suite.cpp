@@ -2,13 +2,12 @@
 
 #include "worker_world_registry.hpp"
 
-#include <iostream>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <new>
 #include <vector>
@@ -188,10 +187,13 @@ void convolve_axis(const std::vector<float>& input, std::vector<float>& output,
 int32_t blur_worlds(const world_safety::DispatchWorldFormat& source,
                     const world_safety::DispatchWorldFormat& destination,
                     float radius_x, float radius_y, int32_t flags,
-                    bool gaussian, int32_t iterations,
-                    const char** reason = nullptr) {
-  const auto refused = [reason](const char* value) {
-    if (reason) *reason = value;
+                    bool gaussian, int32_t iterations, const char*& reason) {
+  // Every refusal names itself; the caller emits `reason` on the always-on
+  // denial marker, so a path that forgot to set it would print an empty
+  // identifier the broker parser drops. Required out-parameter for that
+  // reason, and the caller seeds it with a real identifier as a backstop.
+  const auto refused = [&reason](const char* value) {
+    reason = value;
     return kBadCallbackParam;
   };
   int32_t pixel_bytes{};
@@ -327,20 +329,29 @@ bool resolve_blur_worlds(const void* source_world, void* destination_world,
       resolve_foreign_blur_world(destination_world, anchor, destination);
 }
 
+// The identity check is reported apart from the argument checks: a
+// multi-instance plug-in handing the wrong effect_ref is a different diagnosis
+// from a bad radius, and the marker is the only place either shows up.
+bool effect_ref_matches(void* effect_ref) noexcept {
+  return g_hooks.effect_ref && effect_ref == g_hooks.effect_ref &&
+      g_hooks.resolve_world;
+}
+
 int32_t __cdecl gaussian_blur(
     void* effect_ref, const void* source_world, float radius_x, float radius_y,
     int32_t flags, int32_t quality, int32_t progress_base,
     int32_t progress_final, void* destination_world) {
-  if (!g_hooks.effect_ref || effect_ref != g_hooks.effect_ref ||
-      !g_hooks.resolve_world || (quality != 0 && quality != 1) ||
+  if (!effect_ref_matches(effect_ref))
+    return flt_denied("flt_gaussian_blur", "effect_ref");
+  if ((quality != 0 && quality != 1) ||
       !valid_progress(progress_base, progress_final))
     return flt_denied("flt_gaussian_blur", "invalid_arguments");
   world_safety::DispatchWorldFormat source{}, destination{};
   if (!resolve_blur_worlds(source_world, destination_world, source, destination))
     return flt_denied("flt_gaussian_blur", "unresolved_world");
-  const char* reason = "";
+  const char* reason = "refused";
   const int32_t result = blur_worlds(source, destination, radius_x, radius_y,
-                                     flags, true, 1, &reason);
+                                     flags, true, 1, reason);
   return result == 0 ? 0 : flt_denied("flt_gaussian_blur", reason);
 }
 
@@ -348,15 +359,16 @@ int32_t __cdecl box_blur(
     void* effect_ref, const void* source_world, float radius_x, float radius_y,
     int32_t iterations, int32_t flags, int32_t progress_base,
     int32_t progress_final, void* destination_world) {
-  if (!g_hooks.effect_ref || effect_ref != g_hooks.effect_ref ||
-      !g_hooks.resolve_world || !valid_progress(progress_base, progress_final))
+  if (!effect_ref_matches(effect_ref))
+    return flt_denied("flt_box_blur", "effect_ref");
+  if (!valid_progress(progress_base, progress_final))
     return flt_denied("flt_box_blur", "invalid_arguments");
   world_safety::DispatchWorldFormat source{}, destination{};
   if (!resolve_blur_worlds(source_world, destination_world, source, destination))
     return flt_denied("flt_box_blur", "unresolved_world");
-  const char* reason = "";
+  const char* reason = "refused";
   const int32_t result = blur_worlds(source, destination, radius_x, radius_y,
-                                     flags, false, iterations, &reason);
+                                     flags, false, iterations, reason);
   return result == 0 ? 0 : flt_denied("flt_box_blur", reason);
 }
 
@@ -424,8 +436,9 @@ int32_t __cdecl directional_blur(
     void* effect_ref, int32_t quality, double downsample_x, double downsample_y,
     double length, double direction_degrees, const void* source_world,
     void* destination_world) {
-  if (!g_hooks.effect_ref || effect_ref != g_hooks.effect_ref ||
-      !g_hooks.resolve_world || (quality != 0 && quality != 1) ||
+  if (!effect_ref_matches(effect_ref))
+    return flt_denied("flt_directional_blur", "effect_ref");
+  if ((quality != 0 && quality != 1) ||
       !std::isfinite(length) || length <= 0.0 ||
       length > static_cast<double>(kMaximumRadius) ||
       !std::isfinite(direction_degrees) || !std::isfinite(downsample_x) ||
@@ -678,12 +691,43 @@ bool selftest() {
       g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
       kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) == 0 &&
       foreign_destination == expected8;
-  auto aliased_registered_base = make_world(source.data(), width * 4);
-  aliased_registered_base.height = height + 1;
+  // The alias re-declares the registered source's pixel base with a wider
+  // stride but the same width/height, so the pair check still passes and the
+  // only check that can refuse it is the registry-known gate (a height
+  // mismatch would be refused by the pair check first and prove nothing about
+  // the gate). One row of three pixels never reads past the 12-byte buffer
+  // even if the gate regressed. The destination carries a sentinel that the
+  // refused call must leave in place.
+  auto aliased_registered_base = make_world(source.data(), width * 4 + 4);
+  foreign_destination.fill(0x5a);
+  const auto foreign_sentinel = foreign_destination;
   ok = ok && suite->box_blur(
       g_hooks.effect_ref, &aliased_registered_base, 1.0f, 0.0f, 1,
       kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) ==
-      kBadCallbackParam;
+      kBadCallbackParam &&
+      foreign_destination == foreign_sentinel;
+  // The both-foreign anchor is the session's negotiated format, so a session
+  // whose format is wider than the pair refuses it in the stride check
+  // (rowbytes 12 < width * 16): a wrong anchor never walks past the declared
+  // bytes. And with the admission hooks unset (the header's "optional as a
+  // group") the pair is refused outright, the pre-#1069 behaviour.
+  {
+    const Hooks saved = g_hooks;
+    g_hooks.session_pixel_format = +[]() -> const char* { return "argb32f"; };
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) ==
+        kBadCallbackParam &&
+        foreign_destination == foreign_sentinel;
+    g_hooks = saved;
+    g_hooks.bounded_world = nullptr;
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) ==
+        kBadCallbackParam &&
+        foreign_destination == foreign_sentinel;
+    g_hooks = saved;
+  }
 
   // compute_directional_blur_radii (slot 2): the smear projected onto x/y,
   // rounded up. At 90 degrees the blur is horizontal, so x takes the whole

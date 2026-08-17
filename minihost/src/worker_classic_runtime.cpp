@@ -282,8 +282,9 @@ int32_t __cdecl abort_render(void* effect_ref) {
 // plug-in that keeps passing the same bad arguments would otherwise stream an
 // unbounded line per row into the captured stderr (the other
 // `stage:callback_denied` emitters sit on per-call callbacks and do not have
-// this problem). One line per reason carries the diagnosis; the broker's
-// parser deduplicates repeats anyway.
+// this problem). The per-reason bitmask latch is kept although only one
+// reason remains, so a future refusal gets its own line rather than sharing
+// the null-ref one; the broker's parser deduplicates repeats anyway.
 int32_t __cdecl report_progress(void* effect_ref, int32_t current, int32_t total) {
   static std::atomic<uint32_t> reported_reasons{};
   const auto denied = [](uint32_t reason_bit, const char* reason, int64_t value) {
