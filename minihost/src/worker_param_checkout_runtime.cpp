@@ -61,9 +61,16 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
   using aexcompat::callback_diagnostics::Reason;
   if (extended_diag_enabled())
     std::cerr << "extended_diag:checkout_param index=" << index
-              << " time=" << what_time << "/" << time_scale << "\n"
+              << " time=" << what_time << "/" << time_scale
+              << " step=" << time_step << "\n"
               << std::flush;
-  if (!definition || time_step <= 0 || time_scale == 0) {
+  // time_step == 0 is accepted: AE-shipped effects (CycoreFXHD RipplePulse
+  // here; ForceMB/WideTime make the same request through pre_checkout_layer)
+  // pass a zero step and render in AE, so AE tolerates it (an inference from
+  // the plug-ins' behaviour, not an observation of AE's own callback - the
+  // #777 form). The host evaluates at `what_time` only, so the step carries no
+  // semantic weight here; a negative step stays refused as nonsense.
+  if (!definition || time_step < 0 || time_scale == 0) {
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::InvalidArguments);
   }
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();

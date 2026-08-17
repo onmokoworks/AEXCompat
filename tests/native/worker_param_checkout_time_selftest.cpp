@@ -155,6 +155,26 @@ void classic_static_value_is_answered_without_wide_time() {
         "classic temporal checkout ledger balances");
 }
 
+// AE-shipped effects pass a zero step (CycoreFXHD RipplePulse through this
+// callback; ForceMB/WideTime through pre_checkout_layer) and render in AE, so
+// zero is a request shape the host answers (issue #1052). Negative remains
+// nonsense and fails closed.
+void zero_time_step_is_accepted_negative_is_refused() {
+  seed_definition();
+  aexcompat::l2_detail::configure_hosted_checkout_time(0, kScale, false);
+  params::Definition result{};
+  check(aexcompat::l2_detail::checkout_param(nullptr, kSlot, 0, 0, kScale,
+                                              result.data()) == 0,
+        "a checkout with time_step zero succeeds");
+  check(aexcompat::l2_detail::checkin_param(nullptr, result.data()) == 0,
+        "the zero-step checkout checks in");
+  check(aexcompat::l2_detail::checkout_param(nullptr, kSlot, 0, -1, kScale,
+                                              result.data()) == 4,
+        "a checkout with a negative time_step fails closed");
+  check(aexcompat::l2_detail::param_checkouts_balanced(),
+        "the zero-step ledger balances");
+}
+
 void classic_zero_configured_scale_fails_closed() {
   using aexcompat::worker_runtime::classic::Context;
   Context context;
@@ -178,6 +198,7 @@ int main() {
   an_unconfigured_ledger_still_answers_static_values();
   timeline_is_evaluated_at_requested_time();
   input_layer_slot_zero_remains_answerable();
+  zero_time_step_is_accepted_negative_is_refused();
   classic_static_value_is_answered_without_wide_time();
   classic_zero_configured_scale_fails_closed();
   if (failures == 0) std::printf("{\"param_checkout_time_selftest\":\"passed\"}\n");

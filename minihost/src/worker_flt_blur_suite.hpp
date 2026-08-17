@@ -22,6 +22,16 @@ using ResolveWorld = bool (*)(
     const void*, world_safety::DispatchWorldFormat&);
 using AcquireSuite = int32_t (__cdecl *)(const char*, int32_t, const void**);
 using ReleaseSuite = int32_t (__cdecl *)(const char*, int32_t);
+// The foreign-operand admission hooks (issue #1069, the copy_world8 pattern
+// from issue #1037): the declared-stride bounds check, the "registry already
+// knows this reference" refusal, the "host allocated this pixel base" refusal,
+// and the session's negotiated pixel format ("argb8"/"argb16"/"argb32f") as
+// the format anchor when neither operand resolves.
+using BoundedWorld = bool (*)(void*, int32_t, unsigned char*&, int32_t&,
+                              int32_t&, int32_t&);
+using WorldReferenceKnown = bool (*)(const void*);
+using WorldPixelsOwned = bool (*)(void*);
+using SessionPixelFormat = const char* (*)();
 
 // ABI recovered from the four AE 2026 callers tracked by issue #737. Both
 // worlds are borrowed for the duration of the call: source is read-only and
@@ -36,6 +46,13 @@ struct Hooks {
   ResolveWorld resolve_world{};
   AcquireSuite acquire_suite{};
   ReleaseSuite release_suite{};
+  // Optional as a group: with any of the four unset the suite keeps the
+  // registry-only resolution (foreign operands stay refused), so a caller that
+  // wires only the original four hooks keeps the pre-#1069 behaviour.
+  BoundedWorld bounded_world{};
+  WorldReferenceKnown world_reference_known{};
+  WorldPixelsOwned world_pixels_owned{};
+  SessionPixelFormat session_pixel_format{};
 };
 
 using GaussianBlur = int32_t (__cdecl *)(

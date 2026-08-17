@@ -553,7 +553,21 @@ int configure_worker_entry_bootstrap() {
             return resolve_dispatch_world_format(world, result);
           },
           &acquire_suite,
-          &release_suite}))
+          &release_suite,
+          // Foreign-operand admission (issue #1069): the same bounds check,
+          // registry-known refusal, and host-owned-base refusal the copy
+          // callbacks use (issue #1037's pattern), plus the session's
+          // negotiated pixel format as the anchor when neither operand
+          // resolves - that anchor is FLT's own (copy refuses the
+          // both-foreign case), justified in resolve_blur_worlds.
+          [](void* world, int32_t pixel_bytes, unsigned char*& pixels,
+             int32_t& rowbytes, int32_t& width, int32_t& height) -> bool {
+            return bounded_typed_world(world, pixel_bytes, pixels, rowbytes,
+                                       width, height);
+          },
+          &aexcompat::world_safety::dispatch_world_reference_known,
+          &aexcompat::world_registry::hosts_world_pixels,
+          []() -> const char* { return smart_state().pixel_format.c_str(); }}))
     return 1;
   return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
 }
