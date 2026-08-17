@@ -228,6 +228,9 @@ def test_pf_private_callbacks_answer_like_ae_on_all_workers() -> None:
     for _ in _all_workers(
         "--self-test-pf-private-callbacks", "pf_private_callbacks"
     ):
+        pass
+
+
 def test_bee_scene_facade_is_published_behind_the_effect_layer_on_all_workers() -> None:
     """The BEE.dll-compatible scene object behind the effect layer handle
     (issue #1210). Adobe-bundled Timecode.aex acquires "AE Timecode Helper
