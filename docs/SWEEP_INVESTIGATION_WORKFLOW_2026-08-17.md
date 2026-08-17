@@ -114,7 +114,9 @@ exe で測り、「修正が効いていない」ように見える (08-17 に�
 | `test_pf_smart_geometry_probe[4]` | 2 | `pf_smart_geometry_probe.aex` をその worktree で build していない |
 | `test_rust_host_core_phase5` 〜 `phase8` | 4 | `CARGO_TARGET_DIR` を分離しているため `broker\target\release` に FFI dll (`aexcompat_host_core_ffi.dll`) が無い |
 | worker stderr を読む test (`test_active_plugin_context` / `test_worker_effect_bootstrap_timing` など) | 環境次第 | cp932 locale で worker stderr の decode が `UnicodeDecodeError` になる |
-| `build aex_l2_worker.exe before running the native test` / `missing self-test binary` で落ちる native test 群 | 2026-08-17 の文書のみ worktree で 11 | その worktree に `target\minihost-build\` が無い (worker と selftest exe を一度も build していない) |
+| `build aex_l2_worker.exe before running the native test` で落ちる native test 群 | 2026-08-17 の文書のみ worktree で 5 | その worktree の `target\minihost-build\` に worker 3 exe が無い |
+| `missing self-test binary` で落ちる selftest 系 test | 同 worktree で 3 | selftest exe (`worker_*_selftest.exe`) を build していない。worker だけ build した worktree ではこちらだけ残る |
+| `missing VS2022 worker` (`test_pf_parameter_animation_transport`) | 同 worktree で 1 | 別 build dir `target\minihost-build-v18\` の worker を build していない |
 
 扱いは共通: 自分の diff がその test / 経路に非接触なことを確認し、PR body に
 件数と内訳を明記し、CI を権威にする。fail が上の表に無い、または diff に接触する

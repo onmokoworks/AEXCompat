@@ -242,7 +242,7 @@ After Effects SDK, approved AEX fixtures, a matching GPU driver, or AE itself.
 Run the named build/gate script rather than relying on untracked `target/`
 artifacts from a previous checkout.
 
-The worker C++ build (`docs/BUILD_REQUIREMENTS.md`, "C++ worker") needs an
+The worker C++ build (`docs/BUILD_REQUIREMENTS.md`, "C++ worker (minihost)") needs an
 MSVC developer environment (vcvars64). From a plain PowerShell,
 `cmake --build target\minihost-build` fails with
 `fatal error C1083: Cannot open include file: 'cstddef'`; that is the missing
