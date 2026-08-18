@@ -198,10 +198,28 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   std::memcpy(bytes + 44, extent.data(), sizeof(extent));
   std::memcpy(bytes + 88, &aspect_num, sizeof(aspect_num));
   std::memcpy(bytes + 92, &aspect_den, sizeof(aspect_den));
+  // Registered before the facade is published: the map insert is the one step
+  // here that can throw, and a throw after publishing would leave the caller
+  // holding a world that names a companion this registry no longer knows about
+  // (dispose could never retire it).
+  try {
+    g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
+  } catch (...) {
+    ::operator delete(pixels);
+    delete companion;
+    return 1;
+  }
   // Publishes the facade (vtable, LayerDef mirror) and writes reserved_long4.
-  (void)aexcompat::worker_runtime::pf_world_facade::publish(*companion, world,
-                                                             pixel_bytes);
-  g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
+  // Failing closed rather than handing back a world whose reserved_long4 is
+  // null - that null is exactly what issue #1276's plug-ins dereference.
+  if (!aexcompat::worker_runtime::pf_world_facade::publish(*companion, world,
+                                                            pixel_bytes)) {
+    g_worlds.erase(pixels);
+    ::operator delete(pixels);
+    delete companion;
+    std::memset(world, 0, world_safety::kEffectWorldSize);
+    return 1;
+  }
   ++g_created;
   g_live_bytes += size;
   if (aexcompat::l2_detail::g_trace_writer &&

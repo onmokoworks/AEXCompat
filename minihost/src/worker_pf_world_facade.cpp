@@ -458,6 +458,9 @@ bool attach(void* world, int32_t pixel_bytes) noexcept {
   return true;
 }
 
+// Defined below, next to `retire`.
+void retire_locked(WorldObject* object) noexcept;
+
 void detach(void* world) noexcept {
   if (!world) return;
   Exclusive lock;
@@ -471,8 +474,15 @@ void detach(void* world) noexcept {
     std::memcpy(static_cast<std::byte*>(world) + kReservedLong4Offset, &null,
                 sizeof(null));
   }
-  g_published_objects.erase(found->second.get());
+  // Only *this* struct was taken off the object; a plug-in that copied the
+  // world it was handed still has a copy whose reserved_long4 names it. So the
+  // object is neutralised and quarantined rather than freed, the same way a
+  // disposed world's object is - freeing here would leave that copy pointing
+  // at memory that later holds something callable.
+  std::unique_ptr<WorldObject> owned = std::move(found->second);
+  g_published_objects.erase(owned.get());
   g_objects.erase(found);
+  retire_locked(owned.release());
 }
 
 const WorldObject* attached(const void* world) noexcept {
@@ -485,10 +495,11 @@ const WorldObject* attached(const void* world) noexcept {
 void set_trap_recorder(TrapRecorder recorder) noexcept { g_trap_recorder.store(recorder); }
 void set_world_resolver(WorldResolver resolver) noexcept { g_world_resolver.store(resolver); }
 
-void retire(WorldObject* object) noexcept {
+// Takes ownership of an object nobody should call again. The caller holds the
+// lock and has already taken the object out of `g_objects` /
+// `g_published_objects`.
+void retire_locked(WorldObject* object) noexcept {
   if (!object) return;
-  Exclusive lock;
-  g_published_objects.erase(object);
   // The object stays readable, but inert: a stale `reserved_long4` a plug-in
   // kept now leads to a null vtable slot (a contained fault at a known place)
   // rather than to freed memory that later holds something callable.
@@ -503,6 +514,13 @@ void retire(WorldObject* object) noexcept {
     return;
   }
   while (g_retired.size() > kMaxRetiredObjects) g_retired.pop_front();
+}
+
+void retire(WorldObject* object) noexcept {
+  if (!object) return;
+  Exclusive lock;
+  g_published_objects.erase(object);
+  retire_locked(object);
 }
 
 std::size_t live_count() noexcept {
