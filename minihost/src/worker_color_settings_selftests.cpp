@@ -1,12 +1,15 @@
 #include "worker_color_settings_selftests.hpp"
 #include "worker_color_settings_runtime.hpp"
+#include "worker_cor_ace_profile.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_world_registry.hpp"
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace aexcompat::color_settings::selftests {
 namespace { Hooks g_hooks; }
@@ -17,6 +20,98 @@ using namespace aexcompat::world_registry;
 
 #define acquire_suite g_hooks.acquire_suite
 #define release_suite g_hooks.release_suite
+
+namespace {
+
+// A stand-in for `COR_ACE_Profile::Make`. It answers equal ICC bytes with the
+// same address, which is the one property of COR's factory the colour-settings
+// registry's accounting depends on, and the reason that accounting cannot be
+// reached in any environment without COR.dll - which is every environment a
+// self-test runs in (issue #1300).
+//
+// Distinct addresses for distinct bytes come from a static array; the objects
+// are never dereferenced by anything here, and `profile_from_icc` caches by
+// bytes, so this is only ever asked once per distinct blob.
+std::array<std::uint64_t, 8> g_fake_profiles{};
+std::size_t g_fake_profiles_issued = 0;
+
+void* __cdecl fake_profile_factory(const void*, unsigned int) {
+  if (g_fake_profiles_issued >= g_fake_profiles.size()) return nullptr;
+  return &g_fake_profiles[g_fake_profiles_issued++];
+}
+
+// What changes when the handle is a shared address rather than a fresh token:
+// one record can stand for several outstanding hand-outs, so the cap has to
+// count hand-outs, dispose has to retire one at a time, and a re-issue has to
+// agree with the record it joins.
+// Removes the seam on every way out, including a throw: leaving it installed
+// would route the rest of the process's profiles through the fake factory,
+// which is a worse failure than whatever ended this function.
+struct InstalledFactory {
+  explicit InstalledFactory(cor_ace::ProfileFactory factory) {
+    cor_ace::set_profile_factory_for_test(factory);
+  }
+  ~InstalledFactory() { cor_ace::set_profile_factory_for_test(nullptr); }
+  InstalledFactory(const InstalledFactory&) = delete;
+  InstalledFactory& operator=(const InstalledFactory&) = delete;
+};
+
+bool verify_shared_identity_profile_accounting() {
+  reset_working_space_to_srgb();
+  if (!color_settings_profiles_balanced()) return false;
+  g_fake_profiles_issued = 0;
+  const InstalledFactory installed{&fake_profile_factory};
+  const auto& suite = g_color_settings_suite6;
+  bool ok = true;
+
+  // Two requests for the same working space come back as the same handle, and
+  // each is its own hand-out: the first dispose must not retire the second.
+  void* first = nullptr;
+  void* second = nullptr;
+  ok = ok && suite.get_new_working_space_profile(1, g_hooks.composition, &first) == 0 &&
+      first != nullptr;
+  ok = ok && suite.get_new_working_space_profile(1, g_hooks.composition, &second) == 0 &&
+      second == first;
+  ok = ok && suite.dispose_profile(first) == 0;
+  // Still live for the second hand-out: the accessors answer and a further
+  // dispose is accepted.
+  uint8_t is_rgb = 0;
+  ok = ok && suite.is_rgb_profile(second, &is_rgb) == 0 && is_rgb == 1;
+  ok = ok && suite.dispose_profile(second) == 0;
+  // One more dispose is one too many, and the handle is refused now that every
+  // hand-out has been retired.
+  ok = ok && suite.dispose_profile(second) != 0;
+  ok = ok && suite.is_rgb_profile(second, &is_rgb) != 0;
+  ok = ok && color_settings_profiles_balanced();
+
+  // The cap counts outstanding hand-outs, not records. With one shared address
+  // behind all of them, counting records would stop bounding anything.
+  std::array<void*, kMaxColorProfiles> held{};
+  for (auto& handle : held)
+    ok = ok && suite.get_new_working_space_profile(1, g_hooks.composition, &handle) == 0 &&
+        handle == first;
+  void* over_the_cap = nullptr;
+  ok = ok && suite.get_new_working_space_profile(1, g_hooks.composition,
+                                                 &over_the_cap) != 0 &&
+      over_the_cap == nullptr;
+  for (void* handle : held) ok = ok && suite.dispose_profile(handle) == 0;
+  ok = ok && color_settings_profiles_balanced();
+
+  // A different profile is a different address, and the two are tracked apart.
+  const auto& linear_icc = color_settings_builtin_linear_icc();
+  void* imported = nullptr;
+  ok = ok && suite.get_new_profile_from_icc(1, static_cast<int32_t>(linear_icc.size()),
+                                            linear_icc.data(), &imported) == 0 &&
+      imported != nullptr && imported != first;
+  float gamma = 0.0f;
+  ok = ok && suite.get_profile_approximate_gamma(imported, &gamma) == 0 && gamma == 1.0f;
+  ok = ok && suite.dispose_profile(imported) == 0;
+  ok = ok && color_settings_profiles_balanced();
+  return ok;
+}
+
+}  // namespace
+
 bool verify_pf_color_settings_suite6() {
   reset_working_space_to_srgb();
   if (!color_settings_profiles_balanced() || !aegp_memory_balanced()) return false;
@@ -209,7 +304,12 @@ bool verify_pf_color_settings_suite6() {
     ok = false;
   }
   ok = release_suite("PF Color Settings Suite", 4) == 0 && ok;
-  return ok && color_settings_profiles_balanced() && aegp_memory_balanced();
+  // Evaluated rather than short-circuited: an earlier failure must not hide
+  // whether the shared-identity accounting also broke, and this is the only
+  // place that accounting runs at all.
+  const bool shared_identity_ok = verify_shared_identity_profile_accounting();
+  return ok && shared_identity_ok && color_settings_profiles_balanced() &&
+      aegp_memory_balanced();
 }
 #undef release_suite
 #undef acquire_suite

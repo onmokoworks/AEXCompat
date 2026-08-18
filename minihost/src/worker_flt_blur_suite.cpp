@@ -264,10 +264,10 @@ int32_t flt_denied(const char* callback, const char* reason) {
 // gone stale, or a re-declaration of a registered pixel base) stays the
 // registry's fail-closed mismatch refusal, and a pixel base the host allocated
 // keeps its own allocation's geometry check authoritative. Both guards hold on
-// the thread that holds the dispatch scope (the registry is thread_local),
-// which is every thread the host itself dispatches on; a plug-in-spawned
-// thread bypasses the scope and is contained by the worker process, the same
-// residual copy_world8 documents.
+// every thread, including one the plug-in spawned itself: the dispatch-format
+// registry keeps its scope stack per-thread but publishes every live stack,
+// so a lookup from a plug-in-owned thread sees the same registrations the
+// dispatch thread does and reaches the same refusal (issue #1299).
 bool resolve_foreign_blur_world(const void* world, int32_t pixel_format,
                                 world_safety::DispatchWorldFormat& result) {
   if (!g_hooks.bounded_world || !g_hooks.world_reference_known ||

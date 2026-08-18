@@ -796,11 +796,10 @@ int32_t dispatch_pixel_format_bytes(int32_t pixel_format) {
 //   this path: reaching a failed resolve with one is the registry's
 //   fail-closed mismatch refusal on a host-handed reference (the frame input
 //   and output worlds above all), and it must stay a refusal instead of
-//   degrading into foreign admission. That refusal is only as wide as the
-//   dispatch scope's thread: the registry is thread_local, so on a thread the
-//   plug-in spawned itself the scope stack is empty and this check cannot see
-//   the dispatch worlds - the guarantee holds for the thread that holds the
-//   scope, which is every thread the host itself dispatches on.
+//   degrading into foreign admission. The refusal is as wide as the process:
+//   the registry keeps its scope stack per-thread but publishes every live
+//   stack, so this check sees the dispatch worlds from a thread the plug-in
+//   spawned itself as well as from the one holding the scope (issue #1299).
 // - A world whose pixel base the host allocated (`PF_NEW_WORLD`, AEGP
 //   platform/owned backings) never takes this path either:
 //   `world_pixels_owned` keeps each allocation's own fail-closed geometry
