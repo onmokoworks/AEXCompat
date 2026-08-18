@@ -246,8 +246,9 @@ extent 注記と同じ話)。単色入力なので「effect が何か描いた�
 
 - baseline 側の worker 3 exe は、別 worktree で `origin/main` の `6ad36c04`
   (#1280 merge 後) を build したもの。
-- 変更後の worker 3 exe は、この branch の merge commit 後の `minihost/` を
-  build したもの。
+- 変更後の worker 3 exe は、この branch の merge commit `47f80f4b`
+  (2 つ目の親が `6ad36c04`) 以降の `minihost/` を build したもの。この branch には
+  同じ message の merge commit が 2 つあるので SHA で書く。
 - sweep CLI は **どちらの run もこの branch で build した同じバイナリ**
   (下表の `cli` が一致しているのがその証拠)。この PR は
   `render_sweep.rs` にも record key を 1 つ足しているので、baseline を
@@ -269,11 +270,19 @@ bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ 
 (突き合わせの key は `plugin_relative_path`)。
 
 silent-wrong の確認として、両方の run で `detail.pixel_sha256` を持つ record を
-突き合わせた (baseline 291、変更後 293、baseline で hash を持つ record が変更後に
-落ちたものは 0)。hash が変わったのは Grow_Bounds と Set_Channels の 2 本だけで、
-どちらも `e3b0c442…b855` (空バイト列の SHA-256、= 0 byte 出力) から
-`8d030dce…4445` (入力の RGBA、= AE oracle と同一) への変化。残りの 289 本は
-hash 一致。
+突き合わせた。`pixel_sha256` は `rendered` と `rendered_empty` の両方に載るので、
+baseline 側は 289 + 2 = 291、変更後は 293 + 0 = 293。増えた 2 は Upscale と
+MochaAE で、baseline では hash を持たない bucket (discovery 失敗 /
+worker_invariant_failure) にいたもの。
+
+- baseline で hash を持つ record が変更後に落ちたもの: 0
+- hash が変わったもの: Grow_Bounds と Set_Channels の 2 本だけ。どちらも
+  `e3b0c442…b855` (空バイト列の SHA-256、= 0 byte 出力) から
+  `8d030dce…4445` (入力の RGBA、= AE oracle と同一) への変化
+- 残り 289 本: hash 一致
+
+この段落の数値と hash も §2.8.1 と同じく手元の report JSON からの転記で、
+この文書は record ではない。
 
 ### 2.8.1 計測した build の指紋
 
