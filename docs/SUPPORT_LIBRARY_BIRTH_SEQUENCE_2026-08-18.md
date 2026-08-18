@@ -122,16 +122,20 @@ entry point だけ) ので、呼ぶ責任はホストにある。
 - `minihost/src/worker_sweetpea_bootstrap.hpp` +
   `worker_host_suite_wiring.cpp`: Sweet Pea の起動を U.dll の `U_SP_Birth`
   優先にした。U.dll が無い closure では従来どおり ae_sweetpea を直接起動する。
-  latch は U.dll の mapping をキーにするので、cluster session の最初の member に
-  U.dll が無くても後続 member で birth される (#1267 の U_Birth latch と同型)。
-  teardown は起動した層を通す (`U_SP_Death` か、ae_sweetpea の
-  `SPShutdownPlugins`+`SPTerm` のどちらか一方)。
+  latch のキーは U 経路が U.dll の mapping、direct 経路が
+  (ae_sweetpea の mapping, admitted plug-in directory) の組。cluster session の
+  最初の member が後続 member の分まで決めないため (#1267 の U_Birth latch と
+  同型)。suite resolver は cache されず、この判断は `AcquireSuite` ごとに
+  聞かれるので、失敗を「毎回やり直す」判断にすると LoadLibraryEx と SPInit が
+  acquire ごとに走ってしまう。それを避けつつ、member が変われば聞き直す。
 - `minihost/src/l2_main_support.inc` の
   `initialize_pin_support_libraries()`: mapping されている support library を
   AE と同じ順・同じ引数形で birth する
   (`BEZ_Birth` / `FILE_Birth` / `M_Birth(3,0)` / `RND_Birth` / `VAL_Birth` /
   `COR_Conception(false)`)。各 library ごとに独立の latch。
-- teardown は起動した層だけを通す。実測では **one-shot 直叩きの時点で U.dll は
+- teardown は起動した層だけを通し、起動していなければどちらも通さない
+  (ae_sweetpea は closure が map しているだけのことがあり、それを shutdown
+  するのは所有していない層を畳むことになる)。実測では **one-shot 直叩きの時点で U.dll は
   既に unmap されている** (`extended_diag:pica_component stage=teardown
   sweetpea=u_unmapped`)。記録した HMODULE をそのまま使うと解放済み image を
   GetProcAddress で読むことになるので、teardown 時に `GetModuleHandleW` で
@@ -178,9 +182,9 @@ origin/main `997d3b7d` を専用の worktree で同じ build 手順で測った�
 
 | bucket | baseline (997d3b7d) | 変更後 |
 | --- | --- | --- |
-| rendered | 289 | BUCKET_RENDERED |
-| frame_error:512 | 4 | BUCKET_512 |
-| frame_error:4 | 0 | BUCKET_4 |
+| rendered | 289 | 289 |
+| frame_error:512 | 4 | 5 |
+| frame_error:4 | 0 | 1 |
 | not_discovered:exit_20_params_setup:13 | 2 | 2 |
 | not_discovered:exit_20_global_setup:11 | 1 | 0 |
 | not_discovered:exit_20_global_setup:14 | 1 | 0 |
@@ -201,8 +205,19 @@ bucket が動いたのは 3 本だけで、他の 301 本は baseline と同じ 
 512 が増えたのは ProfileToProfile が render 段まで進んだ分で、baseline の 4 本
 (ColorAndContrast / Curl_Noise / ShapeBlur / VRSphereToPlane) は変わっていない。
 
-silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ record
+silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ 290 record
 すべてについて変更後の hash と突き合わせ、差分ゼロ・欠落ゼロを確認した。
+
+計測に使った build fingerprint (report JSON の `build`):
+
+| | baseline | 変更後 |
+| --- | --- | --- |
+| l2_worker | `78ee4bd6…` | `1e480a48…` |
+| classic_worker | `f2db99da…` | `c291c2ae…` |
+| smart_worker | `d6cc3774…` | `6ecfced3…` |
+| cli | `ca0ea4ca…` | `ca0ea4ca…` (同一) |
+
+report JSON の SHA-256: baseline `6FA292BB…`、変更後 `E63B2013…`。
 
 ## 5. 残件 (別 issue)
 
