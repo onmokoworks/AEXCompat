@@ -73,6 +73,16 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   ..." cpr` で子に deferred bp、C++ 例外は `sxe eh` + `k`、Adobe DLL 内部の
   戻り値は `bp /1 @$ra "r rax"`。手順と観測例は
   `docs/MASKLESS_PATH_EFFECTS_OBSERVATION_2026-08-17.md` §1)。
+- AE の PNG は premultiplied alpha、host の dump は straight。alpha が 255 で
+  ない pixel を含む出力を AE と比べるときは host 側を premultiply してから
+  比較する (#1253 の AudWave、#1276 の CannedWarp)。また host は expand buffer
+  を返すので、出力の extent が AE の comp より大きいことがある
+  (record の `width`/`height`/`origin_x`/`origin_y` で AE 側の座標に写す)。
+- `tools/capture-ae-reference.ps1` の `-EffectName` は matchName。AEX の PiPL が
+  読めない (AE 同梱は `no_pipl` になる) ので、AEX のバイト列から `ADBE ...`
+  文字列を拾うのが早い (`Spill2.aex` → `ADBE Spill2`、`CannedWarp.aex` →
+  `ADBE WRPMESH`)。失敗すると `.result.json` が残り、次の実行が
+  `Reference result file already exists.` で止まるので消してから再実行する。
 - discovery 失敗 (`not_discovered:*`) は render と違って worker の stderr が record に
   乗らない。Effects folder の discovery は in-place cluster session (1 worker が
   複数 AEX を順に inspect) で走り、session の stderr は close 時の末尾 4 KB しか

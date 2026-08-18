@@ -369,10 +369,19 @@ std::string last_trap_caller() {
 
 namespace {
 
+// A vtable entry read as the function a caller (plug-in / PF.dll) would call:
+// the table holds code addresses, so the const of the table's storage says
+// nothing about the callee. `const_cast` before the function-pointer cast is
+// what clang requires (MSVC accepts the direct reinterpret_cast).
+template <typename Fn>
+Fn slot_as(const void* const* vtable, std::size_t slot) {
+  return reinterpret_cast<Fn>(const_cast<void*>(vtable[slot]));
+}
+
 __declspec(noinline) uint32_t call_slot_expecting_trap(const void* const* vtable,
                                                        std::size_t slot) {
   using Slot = void* (__cdecl*)();
-  const auto function = reinterpret_cast<Slot>(vtable[slot]);
+  const auto function = slot_as<Slot>(vtable, slot);
   __try {
     (void)function();
     return 0;
@@ -424,7 +433,7 @@ bool selftest() {
   check(vtable == vtable_for(4) && is_facade_vtable(vtable) && depth_of(vtable) == 8,
         "attached object does not carry the 8-bit vtable");
   if (!passed) return false;
-  check(reinterpret_cast<Depth>(vtable[kSlotDepth])(object) == 8,
+  check(slot_as<Depth>(vtable, kSlotDepth)(object) == 8,
         "slot 1 did not answer 8 for an 8-bit world");
   // The mirror: the LayerDef as handed out, +0x58 pointing at the object
   // (PF_WorldX: data at +0x20, rowbytes +0x28, width +0x2c, height +0x30,
@@ -438,10 +447,10 @@ bool selftest() {
   // Re-attaching the same struct at another depth updates in place (same
   // object, same address a copy would still hold).
   check(attach(world.data(), 16) && attached(world.data()) == object &&
-            reinterpret_cast<Depth>(object->vtable[kSlotDepth])(object) == 32,
+            slot_as<Depth>(object->vtable, kSlotDepth)(object) == 32,
         "re-attach did not update the same object to 32");
   check(attach(deep.data(), 8) && attached(deep.data()) != object &&
-            reinterpret_cast<Depth>(attached(deep.data())->vtable[kSlotDepth])(
+            slot_as<Depth>(attached(deep.data())->vtable, kSlotDepth)(
                 attached(deep.data())) == 16,
         "a second world did not get its own 16-bit object");
   check(live_count() == live_before + 2, "live count did not advance by two");
@@ -473,9 +482,9 @@ bool selftest() {
   const void* src_object = source.data() - 8;
   void* dst_object = destination.data() - 8;
   const auto* src_vtable = read_at<const void* const*>(src_object, 0);
-  check(reinterpret_cast<Depth>(src_vtable[kSlotDepth])(src_object) == 8,
+  check(slot_as<Depth>(src_vtable, kSlotDepth)(src_object) == 8,
         "embedded slot 1 did not answer 8");
-  const auto copy_rect = reinterpret_cast<CopyRect>(src_vtable[kSlotCopyRect]);
+  const auto copy_rect = slot_as<CopyRect>(src_vtable, kSlotCopyRect);
   const uint32_t copies_before = copy_rect_calls();
   const uint32_t refusals_before = copy_rect_refusals();
   const Rect whole{0, 0, 4, 3};
