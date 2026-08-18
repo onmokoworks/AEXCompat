@@ -259,12 +259,17 @@ silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ 2
 
 | | baseline | 変更後 |
 | --- | --- | --- |
-| l2_worker | `78ee4bd6…` | `1e480a48…` |
-| classic_worker | `f2db99da…` | `c291c2ae…` |
-| smart_worker | `d6cc3774…` | `6ecfced3…` |
+| l2_worker | `78ee4bd6…` | `dd065f23…` |
+| classic_worker | `f2db99da…` | `cd84e39c…` |
+| smart_worker | `d6cc3774…` | `7131703b…` |
 | cli | `ca0ea4ca…` | `ca0ea4ca…` (同一) |
 
-report JSON の SHA-256: baseline `6FA292BB…`、変更後 `E63B2013…`。
+report JSON の SHA-256: baseline
+`6FA292BBD4F5AFADC73EFACF62A9589378DF65C682DEF75ED5C982FD9AB78EC1`、変更後
+`C3CED043D88E54EB50A2EA456D039EBE75BAD086EC099C633D7338A8E91A00DD`。
+
+この表は review ループを抜けた最終 build で測り直したもの。途中の build でも
+同じ 3 本だけが動き、pixel hash 差分ゼロで、結果は変わらなかった。
 
 ## 5. 残件 (別 issue)
 
