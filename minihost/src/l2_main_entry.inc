@@ -152,7 +152,12 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
   // needs the PF_World shape put on it here: the discovery path hands it to
   // FRAME_SETUP / FRAME_SETDOWN, and an effect that reads `world + 0x50` and
   // calls slot 1 without a null check (the Glow shape, issue #1276) would
-  // otherwise dereference null right here.
+  // otherwise dereference null right here. This covers the world handed over
+  // directly; the copy inside `lifecycle_definitions[0]` carries the same
+  // `reserved_long4`, but `world - 8` on *that* copy is ParamDef bytes rather
+  // than a prefix, so a Spill2/Curl_Noise-shape effect computing it during
+  // discovery still finds no vtable there (as it does for every ParamDef
+  // world; see copy_world_into_param_def in the render runtimes).
   (void)aexcompat::worker_runtime::pf_world_facade::embed(lifecycle_world.data(), 4);
   std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
   for (std::size_t i = 0; i < g_params.size(); ++i) {

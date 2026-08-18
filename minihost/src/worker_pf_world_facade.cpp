@@ -61,10 +61,13 @@ struct Shared {
   Shared& operator=(const Shared&) = delete;
 };
 std::unordered_map<const void*, std::unique_ptr<WorldObject>> g_objects;
-// Every object this module has published, by address. `attach` consults this
-// by pointer comparison only: `reserved_long4` is plug-in-writable, so reading
-// through it to ask "is this one of ours" would let a forged value fault the
-// host (outside the plug-in's SEH) or read past a neighbouring object.
+// Every object this module has published, by address: the pool's own mirrors
+// (erased in `detach`) and the world registry's companions (erased in
+// `retire`). `attach` asks this set *first*, by pointer, because
+// `reserved_long4` is plug-in-writable and reading through a forged value
+// would fault the host outside the plug-in's SEH; only once membership has
+// proved the pointer is an object this module allocated does it read that
+// object's own back-reference.
 std::unordered_set<const void*> g_published_objects;
 // Disposed world-registry objects, kept inert (see `retire`). Bounded, because
 // a session disposes scratch worlds per frame and the quarantine must not grow
@@ -390,14 +393,13 @@ bool publish_locked(WorldObject& object, void* world, int32_t pixel_bytes) noexc
 
 bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept {
   Exclusive lock;
-  if (!publish_locked(object, world, pixel_bytes)) return false;
   try {
     g_published_objects.insert(&object);
   } catch (...) {
-    // The object is the caller's (the world registry's companion, alive for
-    // the allocation's lifetime), so the world is left pointing at a perfectly
-    // good facade; only this module's later "already published" recognition is
-    // lost, which costs a redundant mirror at worst.
+    return false;
+  }
+  if (!publish_locked(object, world, pixel_bytes)) {
+    g_published_objects.erase(&object);
     return false;
   }
   return true;
@@ -439,17 +441,17 @@ bool attach(void* world, int32_t pixel_bytes) noexcept {
   } catch (...) {
     return false;
   }
-  if (!publish_locked(*object, world, pixel_bytes)) {
-    g_objects.erase(world);
-    return false;
-  }
+  // Membership first, so a failure here has published nothing and the object
+  // can simply go away; publishing first and then failing to record it would
+  // free an object the world already points at.
   try {
     g_published_objects.insert(object);
   } catch (...) {
-    // The publication already pointed the world at this object, so the world
-    // has to be taken off it before the object goes away.
-    void* null = nullptr;
-    std::memcpy(static_cast<std::byte*>(world) + kReservedLong4Offset, &null, sizeof(null));
+    g_objects.erase(world);
+    return false;
+  }
+  if (!publish_locked(*object, world, pixel_bytes)) {
+    g_published_objects.erase(object);
     g_objects.erase(world);
     return false;
   }
