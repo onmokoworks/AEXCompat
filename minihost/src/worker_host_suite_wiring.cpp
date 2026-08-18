@@ -8,6 +8,7 @@
 #include "worker_flt_blur_suite.hpp"
 #include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
+#include "worker_sweetpea_bootstrap.hpp"
 
 #include "pf_cache_on_load_suite.hpp"
 #include "gpu_memory_world_transport.hpp"
@@ -263,14 +264,40 @@ void run_bib_memory_probe() {
 // after ae_sweetpea's SPInit + SPStartupPlugins, which the real host runs
 // at process start. SPInit(nullptr, nullptr, 0) installs ae_sweetpea's own
 // default host procs for every null slot (verified in its disassembly).
+//
+// Starting Sweet Pea that way is not enough for the plug-ins that reach it
+// through U.dll (issue #1279). `U_SP_GetSPBasicSuite` hands out a table of
+// U.dll's own locking thunks and answers 11 while U.dll's underlying
+// `SPBasicSuite*` global is null; U.dll only latches that pointer from the
+// `("SP Interface", "Startup")` message delivered to the "Sweet Pea 2
+// Adapter" host plug-in it registers itself. The whole sequence is U.dll's
+// exported `U_SP_Birth`: install U's `SPHostProcs`, `SPInit` with them,
+// `SPAddHostPlugin` for the adapter, add the two `AS ZString` suites, then
+// `SPStartupPlugins`. Calling ae_sweetpea directly starts Sweet Pea but
+// never registers that adapter, so the Startup message never arrives and
+// `U_SP_GetSPBasicSuite` keeps answering 11 - which is the only nonzero
+// value that function can return, and the only U.dll symbol
+// Particle_Playground imports. Run the vendor's own bootstrap when U.dll is
+// mapped, and keep the direct ae_sweetpea start for closures without it.
 int bravo_init_seh_filter(EXCEPTION_POINTERS*);
 typedef int(__cdecl* SPInitFn)(void*, void*, int32_t);
 typedef int(__cdecl* SPStartupPluginsFn)();
+typedef int(__cdecl* USweetPeaLifecycleFn)();
 int sweetpea_init_guarded(SPInitFn sp_init, SPStartupPluginsFn sp_startup) {
   __try {
     const int init_result = sp_init(nullptr, nullptr, 0);
     if (init_result != 0) return init_result;
     return sp_startup();
+  } __except (bravo_init_seh_filter(GetExceptionInformation())) {
+    return -1;
+  }
+}
+
+// `U_SP_Birth` reports SPAddSuite failures by throwing, so the guard has to
+// cover C++ exceptions as well as faults; both arrive here as SEH.
+int u_sweetpea_lifecycle_guarded(USweetPeaLifecycleFn entry) {
+  __try {
+    return entry();
   } __except (bravo_init_seh_filter(GetExceptionInformation())) {
     return -1;
   }
@@ -308,6 +335,35 @@ int bravo_call_guarded(HMODULE module, const char* export_name,
   }
 }
 
+// Which bootstrap actually started Sweet Pea, and the mappings already
+// attempted (issue #1279). The decision itself lives in
+// worker_sweetpea_bootstrap.hpp, so the latch is exercisable without a real
+// U.dll; this holds only the state it is asked about.
+//
+// The PICA component init is reached from `provide_bib_suite`, which runs
+// with the BIB mutex released, and suite acquires arrive from plug-in
+// threads. Before this change the whole tail was a one-shot `attempted`
+// flag, so a second thread found the work already done; now the decision is
+// re-asked on every acquire, so it needs a lock of its own. It must not be
+// `BibSuiteState::mutex`: the component init deliberately runs outside that
+// one (issue #362).
+namespace sweetpea = aexcompat::worker_runtime::sweetpea_bootstrap;
+
+// Recursive on purpose: both bootstraps run foreign code (`SPStartupPlugins`,
+// `InitBravoComponents`) that can acquire a suite and re-enter this path on
+// the same thread. A plain mutex would deadlock there; the recursive one lets
+// the re-entrant call run the decision, which answers "nothing to do" because
+// every attempt is recorded before it is made.
+std::recursive_mutex& pica_component_mutex() {
+  static std::recursive_mutex mutex;
+  return mutex;
+}
+
+sweetpea::State& sweetpea_state() {
+  static sweetpea::State state;
+  return state;
+}
+
 // Reverse-order teardown for the PICA components (issue #362): dvacore
 // fast-fails during LdrShutdownProcess when the Bravo/sweetpea-initialized
 // subsystems were never torn down through the host path. Registering this
@@ -320,11 +376,21 @@ void teardown_pica_components() {
   std::cout.flush();
   std::fflush(stdout);
   __try {
-    if (HMODULE sweetpea = GetModuleHandleW(L"ae_sweetpea.dll")) {
-      const auto sp_shutdown = reinterpret_cast<int(__cdecl*)()>(
-          GetProcAddress(sweetpea, "?SPShutdownPlugins@ae_sweetpea@@YAHXZ"));
+    // The U.dll mapping that was actually bootstrapped, not whatever is
+    // mapped now. When that mapping has no `U_SP_Death` there is nothing to
+    // run: falling through to ae_sweetpea's exports would tear down a layer
+    // this process did not start.
+    const HMODULE u_module = sweetpea::teardown_u_module(sweetpea_state());
+    if (u_module) {
+      const auto u_sp_death = reinterpret_cast<USweetPeaLifecycleFn>(
+          GetProcAddress(u_module, "?U_SP_Death@@YAHXZ"));
+      if (u_sp_death) u_sp_death();
+    } else if (HMODULE sweetpea_module =
+                   GetModuleHandleW(L"ae_sweetpea.dll")) {
+      const auto sp_shutdown = reinterpret_cast<int(__cdecl*)()>(GetProcAddress(
+          sweetpea_module, "?SPShutdownPlugins@ae_sweetpea@@YAHXZ"));
       const auto sp_term = reinterpret_cast<int(__cdecl*)()>(
-          GetProcAddress(sweetpea, "?SPTerm@ae_sweetpea@@YAHXZ"));
+          GetProcAddress(sweetpea_module, "?SPTerm@ae_sweetpea@@YAHXZ"));
       if (sp_shutdown) sp_shutdown();
       if (sp_term) sp_term();
     }
@@ -338,32 +404,148 @@ void teardown_pica_components() {
   }
 }
 
-void ensure_pica_components_initialized() {
-  auto& state = bib_suite_state();
-  static bool attempted = false;
-  if (attempted) return;
-  attempted = true;
-  HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll");
-  if (!bravo && !g_plugin_file_path.empty()) {
-    const std::filesystem::path sealed_bravo =
+// The pre-#1279 bootstrap: start ae_sweetpea itself. This is what a closure
+// that reaches SP without going through U.dll needs, and it stays the
+// fallback when U.dll is absent or its own bootstrap failed.
+// Resolves ae_sweetpea the way the BIB fallback above resolves BIB.dll: the
+// admitted plug-in directory, then the admitted USER_DIRS name search. The
+// load is attempted once per process; after that only an already-mapped
+// module counts, so a closure without ae_sweetpea does not re-run
+// LoadLibraryEx on every suite acquire.
+HMODULE resolve_sweetpea_module(bool allow_load) {
+  HMODULE module = GetModuleHandleW(L"ae_sweetpea.dll");
+  if (module || !allow_load) return module;
+  if (!g_plugin_file_path.empty()) {
+    const std::filesystem::path sealed_sp =
         std::filesystem::path(g_plugin_file_path).parent_path() /
-        L"dvabravoinitializer.dll";
-    bravo = LoadLibraryExW(sealed_bravo.c_str(), nullptr,
-                           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                               LOAD_LIBRARY_SEARCH_SYSTEM32);
+        L"ae_sweetpea.dll";
+    module = LoadLibraryExW(sealed_sp.c_str(), nullptr,
+                            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                LOAD_LIBRARY_SEARCH_SYSTEM32);
   }
   // In-place loads (issue #751): same admitted USER_DIRS name resolution as
   // the BIB fallback above.
-  if (!bravo)
-    bravo = LoadLibraryExW(L"dvabravoinitializer.dll", nullptr,
-                           LOAD_LIBRARY_SEARCH_USER_DIRS |
-                               LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!module)
+    module = LoadLibraryExW(L"ae_sweetpea.dll", nullptr,
+                            LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                LOAD_LIBRARY_SEARCH_SYSTEM32);
+  return module;
+}
+
+// The pre-#1279 bootstrap: start ae_sweetpea itself. This is what a closure
+// that reaches SP without going through U.dll needs, and it stays the
+// fallback when U.dll is absent or its own bootstrap failed.
+void start_sweetpea_directly(HMODULE module) {
+  const auto sp_init = module
+      ? reinterpret_cast<SPInitFn>(GetProcAddress(
+            module,
+            "?SPInit@ae_sweetpea@@YAHPEAUSPHostProcs@@PEBUSPPlatformFileSpecification@@H@Z"))
+      : nullptr;
+  const auto sp_startup = module
+      ? reinterpret_cast<SPStartupPluginsFn>(
+            GetProcAddress(module, "?SPStartupPlugins@ae_sweetpea@@YAHXZ"))
+      : nullptr;
+  const int result = (sp_init && sp_startup)
+      ? sweetpea_init_guarded(sp_init, sp_startup) : -1;
+  sweetpea::finish_direct_start(sweetpea_state(), result == 0);
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:pica_component dll=ae_sweetpea.dll status=called result="
+              << result << "\n" << std::flush;
+}
+
+// Sweet Pea bootstrap, asked again for every member of an in-place cluster
+// session (issue #1279). U.dll enters the process with the member that
+// imports it, so a first member without U.dll must not decide for the ones
+// after it; what is remembered is the mapping already attempted, the same
+// shape as the U_Birth latch in worker_legacy_support_init.hpp (#1267).
+//
+// Both bootstraps run foreign code that can acquire a suite and re-enter
+// here, so each attempt is recorded before it is made: the re-entrant
+// decision then answers "nothing to do" instead of starting a second
+// bootstrap. `pica_component_mutex()` is held by
+// `ensure_pica_components_initialized` across this call; this function
+// assumes it is held.
+void ensure_sweetpea_started() {
+  sweetpea::State& state = sweetpea_state();
+  const HMODULE u_module = GetModuleHandleW(L"U.dll");
+  const auto u_sp_birth = u_module
+      ? reinterpret_cast<USweetPeaLifecycleFn>(
+            GetProcAddress(u_module, "?U_SP_Birth@@YAHXZ"))
+      : nullptr;
+  // Only let the ae_sweetpea load happen on the first direct attempt.
+  const HMODULE mapped_sweetpea = resolve_sweetpea_module(false);
+  switch (sweetpea::decide(state, u_module, u_sp_birth != nullptr,
+                           mapped_sweetpea)) {
+    case sweetpea::Decision::AlreadyBootstrappedThroughU:
+    case sweetpea::Decision::Nothing:
+      return;
+    case sweetpea::Decision::StartDirectly: {
+      // No U.dll bootstrap available: start Sweet Pea the way closures that
+      // reach SP without going through U.dll need it started.
+      const bool first_attempt = !state.direct_attempted;
+      const HMODULE module = mapped_sweetpea
+          ? mapped_sweetpea : resolve_sweetpea_module(first_attempt);
+      sweetpea::begin_direct_start(state, module);
+      start_sweetpea_directly(module);
+      return;
+    }
+    case sweetpea::Decision::CallUSpBirth:
+      break;
+  }
+  sweetpea::begin_u_sp_birth(state, u_module);
+  const int result = u_sweetpea_lifecycle_guarded(u_sp_birth);
+  sweetpea::finish_u_sp_birth(state, u_module, result == 0);
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:pica_component dll=U.dll entry=U_SP_Birth"
+                 " status=called result=" << result << "\n" << std::flush;
+  // A failed U_SP_Birth leaves Sweet Pea unstarted; ask again now that this
+  // mapping is recorded, which yields the direct start (or Nothing when a
+  // direct start already happened).
+  if (result != 0) ensure_sweetpea_started();
+}
+
+void ensure_pica_components_initialized() {
+  auto& state = bib_suite_state();
+  std::lock_guard<std::recursive_mutex> component_lock(pica_component_mutex());
+  // The Bravo load is attempted once per process, but the initialization is
+  // keyed on the mapping: a later member of an in-place cluster session that
+  // maps dvabravoinitializer.dll itself is still initialized, instead of the
+  // first member's answer deciding for everyone (the #1063 latch lesson).
+  static bool load_attempted = false;
+  static bool absent_logged = false;
+  static HMODULE initialized_bravo = nullptr;
+  static bool teardown_registered = false;
+  HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll");
+  if (!bravo && !load_attempted) {
+    load_attempted = true;
+    if (!g_plugin_file_path.empty()) {
+      const std::filesystem::path sealed_bravo =
+          std::filesystem::path(g_plugin_file_path).parent_path() /
+          L"dvabravoinitializer.dll";
+      bravo = LoadLibraryExW(sealed_bravo.c_str(), nullptr,
+                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                 LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    // In-place loads (issue #751): same admitted USER_DIRS name resolution as
+    // the BIB fallback above.
+    if (!bravo)
+      bravo = LoadLibraryExW(L"dvabravoinitializer.dll", nullptr,
+                             LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                 LOAD_LIBRARY_SEARCH_SYSTEM32);
+  }
   if (!bravo) {
-    if (aexcompat::l2_detail::extended_diag_enabled())
+    if (aexcompat::l2_detail::extended_diag_enabled() && !absent_logged) {
+      absent_logged = true;
       std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=absent"
                 "\n" << std::flush;
+    }
     return;
   }
+  if (bravo == initialized_bravo) {
+    ensure_sweetpea_started();
+    return;
+  }
+  initialized_bravo = bravo;
   BravoResolver current = state.resolver;
   int result = bravo_call_guarded(
       bravo, "?SetBIBProcAddress@dvabravoinitializer@@YAXP6APEAXPEBD00@Z@Z",
@@ -378,36 +560,19 @@ void ensure_pica_components_initialized() {
     state.resolver = current;
   }
   if (aexcompat::l2_detail::extended_diag_enabled())
+    // The resolver is logged because `COR_Conception` (issue #1279) calls
+    // `InitBravoComponents(nullptr)` itself, at plug-in load, before any
+    // suite acquire reaches this function. Recording the pointer this call
+    // answers with is what makes "both calls hand out the same resolver"
+    // an observation rather than an assumption.
     std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=called result="
-              << result << "\n" << std::flush;
-  HMODULE sweetpea = GetModuleHandleW(L"ae_sweetpea.dll");
-  if (!sweetpea && !g_plugin_file_path.empty()) {
-    const std::filesystem::path sealed_sp =
-        std::filesystem::path(g_plugin_file_path).parent_path() /
-        L"ae_sweetpea.dll";
-    sweetpea = LoadLibraryExW(sealed_sp.c_str(), nullptr,
-                              LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                                  LOAD_LIBRARY_SEARCH_SYSTEM32);
+              << result << " resolver=" << reinterpret_cast<const void*>(current)
+              << "\n" << std::flush;
+  ensure_sweetpea_started();
+  if (!teardown_registered) {
+    teardown_registered = true;
+    std::atexit(&teardown_pica_components);
   }
-  // In-place loads (issue #751): same admitted USER_DIRS name resolution as
-  // the BIB fallback above.
-  if (!sweetpea)
-    sweetpea = LoadLibraryExW(L"ae_sweetpea.dll", nullptr,
-                              LOAD_LIBRARY_SEARCH_USER_DIRS |
-                                  LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (sweetpea) {
-    const auto sp_init = reinterpret_cast<SPInitFn>(GetProcAddress(
-        sweetpea,
-        "?SPInit@ae_sweetpea@@YAHPEAUSPHostProcs@@PEBUSPPlatformFileSpecification@@H@Z"));
-    const auto sp_startup = reinterpret_cast<SPStartupPluginsFn>(
-        GetProcAddress(sweetpea, "?SPStartupPlugins@ae_sweetpea@@YAHXZ"));
-    const int sp_result = (sp_init && sp_startup)
-        ? sweetpea_init_guarded(sp_init, sp_startup) : -1;
-    if (aexcompat::l2_detail::extended_diag_enabled())
-      std::cerr << "extended_diag:pica_component dll=ae_sweetpea.dll status=called result="
-                << sp_result << "\n" << std::flush;
-  }
-  std::atexit(&teardown_pica_components);
 }
 
 const void* provide_bib_suite(void*) {
