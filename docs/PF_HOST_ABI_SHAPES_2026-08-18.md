@@ -167,6 +167,12 @@ full-corpus (AE 2026 `Support Files\Plug-ins\Effects` 304 AEX、depth 8、
   AV する (観測)。原因は未特定で、除外で回避している。
 - AE の live な `effect_ref` / `reserved_long4` の中身を Frida で dump しては
   いない (実装は PF.dll / plug-in 側の逆アセンブルと AE 出力の一致による)。
+- Glow の AE capture は `loaded_aex_identity` が 2 回とも `unverified`
+  (`reason=loaded_module_not_observed`)。`-RequireLoadedAexIdentity` を付けた
+  2 回目も同じで、AE の process tree に `Glow.aex` が mapped な瞬間を観測
+  できていない (Spill2 では verified になる)。ただし 2 回の capture の PNG は
+  byte 一致 (`ecc8ddde…`) で、host 出力とも byte 一致なので、突合の再現性は
+  ある。Glow の AE 側 provenance は「未検証」のまま記録する。
 
 ## 6. main (#1278 / VR depth) を取り込んだ後の再測定 (2026-08-18)
 
