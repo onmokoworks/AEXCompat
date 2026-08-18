@@ -12,7 +12,7 @@ PROBE = ROOT / "target" / "pf-smart-geometry-probe-build" / "Release" / "pf_smar
 WIDTH, HEIGHT = 16, 12
 DEPTH_FORMATS = ("argb8", "argb16", "argb32f")
 
-# The probe drives one geometry scenario per render time (current_time % 4),
+# The probe drives one geometry scenario per render time (current_time % 5),
 # so every scenario is reached through the generic time argument with no
 # probe-specific host branch.
 MODES = {
@@ -23,6 +23,7 @@ MODES = {
         "result_within_request": True,
         "extra_pixels_contract_violation": False,
         "empty_result_rect": False,
+        "empty_result_passthrough": False,
         "smart_render_selector_dispatched": True,
         "width": WIDTH,
         "height": HEIGHT,
@@ -34,6 +35,7 @@ MODES = {
         "result_within_request": False,
         "extra_pixels_contract_violation": False,
         "empty_result_rect": False,
+        "empty_result_passthrough": False,
         "smart_render_selector_dispatched": True,
         "width": WIDTH + 4,
         "height": HEIGHT + 4,
@@ -45,20 +47,30 @@ MODES = {
         "result_within_request": False,
         "extra_pixels_contract_violation": True,
         "empty_result_rect": False,
+        "empty_result_passthrough": False,
         "smart_render_selector_dispatched": True,
         "width": WIDTH + 4,
         "height": HEIGHT + 4,
     },
-    3: {  # a legally empty result skips the selector and renders nothing
+    3: {  # a legally empty result skips the selector; the input passes through
+        # The selector still never runs -- the effect promised no pixels and is
+        # not asked for any. What changed in issue #1285 is what the host then
+        # emits: AE 26.3x87 answers an empty SmartFX result with the effect's
+        # input, unchanged (captured from Grow_Bounds.aex, which has no
+        # SMART_PRE_RENDER/SMART_RENDER case at all, and from Set_Channels.aex,
+        # which sets the empty rect explicitly). `empty_result_passthrough`
+        # keeps the two apart, so a frame the host copied can never be read as
+        # one the effect rendered.
         "result_rect": [0, 0, 0, 0],
         "max_result_rect": [0, 0, WIDTH, HEIGHT],
         "returns_extra_pixels": False,
         "result_within_request": True,
         "extra_pixels_contract_violation": False,
         "empty_result_rect": True,
+        "empty_result_passthrough": True,
         "smart_render_selector_dispatched": False,
-        "width": 0,
-        "height": 0,
+        "width": WIDTH,
+        "height": HEIGHT,
     },
     4: {  # a large availability envelope does not size the output allocation
         "result_rect": [0, 0, WIDTH, HEIGHT],
@@ -67,6 +79,7 @@ MODES = {
         "result_within_request": True,
         "extra_pixels_contract_violation": False,
         "empty_result_rect": False,
+        "empty_result_passthrough": False,
         "smart_render_selector_dispatched": True,
         "width": WIDTH,
         "height": HEIGHT,
@@ -105,6 +118,29 @@ def test_probe_modes_pin_the_geometry_contract(tmp_path, mode):
     assert report["input_checkout_result_rect"] == [0, 0, WIDTH, HEIGHT]
     assert report["malformed_checkout_request_count"] == 0
     assert report["empty_checkout_pixel_denial_count"] == 0
+
+
+def test_empty_result_emits_the_input_unchanged(tmp_path):
+    """The empty-result passthrough copies pixels, it does not invent them."""
+    input_path = tmp_path / "passthrough-input.rgba"
+    output_path = tmp_path / "passthrough-output.bin"
+    input_path.write_bytes(bytes(index % 251 for index in range(WIDTH * HEIGHT * 4)))
+    assert WORKER.exists(), "build aex_smart_worker.exe before running this test"
+    assert PROBE.exists(), (
+        "build the probe first: tools/build-pf-smart-geometry-probe.ps1"
+    )
+    assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)
+    report = run_session_render(
+        tmp_path, PROBE, input_path, output_path, width=WIDTH, height=HEIGHT,
+        pixel_format="argb8", smart=True, current_time=3, total_time=5,
+        time_scale=1,
+    )
+    assert report["empty_result_rect"] is True
+    assert report["empty_result_passthrough"] is True
+    assert report["smart_render_selector_dispatched"] is False
+    # Byte equality, not "nonempty": a passthrough that altered a pixel would
+    # be a silently wrong frame, which is worse than the empty one it replaced.
+    assert output_path.read_bytes() == input_path.read_bytes()
 
 
 @pytest.mark.parametrize("mode", sorted(MODES))

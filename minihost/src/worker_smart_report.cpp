@@ -133,7 +133,8 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       smart.input_hash,
       smart.output_hash, smart.rects_valid, world_debug_report_json(),
       smart.empty_layer_param_checkouts,
-      smart.empty_layer_param_pixel_checkouts});
+      smart.empty_layer_param_pixel_checkouts,
+      smart.empty_result_passthrough});
   const auto& audio = audio_telemetry();
   report::append_audio(report_snapshot, {
       audio.usage_advertised, audio.checkout_allowed, audio.source_available,

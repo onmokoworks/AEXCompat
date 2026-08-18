@@ -71,6 +71,9 @@ KeyframeSuite4 g_keyframe_suite4{&get_stream_num_keyframes, &get_keyframe_time,
     &get_keyframe_interpolation, &set_keyframe_interpolation,
     &start_add_keyframes, &add_keyframes, &set_add_keyframe,
     &end_add_keyframes};
+// Same TU, defined after the v4 table it copies, so the initialization order is
+// fixed. See the header for why v3 and v4 are the same table on x64.
+KeyframeSuite4 g_keyframe_suite3 = g_keyframe_suite4;
 
 bool keyframe_suite5_abi_wiring_valid() {
   const KeyframeSuite expected{&get_stream_num_keyframes, &get_keyframe_time,

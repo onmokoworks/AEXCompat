@@ -1183,6 +1183,34 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
     {
         worker.insert("pr_gpu_route".to_owned(), reason.clone());
     }
+    // Why a frame with pixels can come out of a session whose plug-in rendered
+    // nothing: a SmartFX PreRender that promises an empty `result_rect` gets
+    // the effect's input copied into the output instead of an empty frame
+    // (issue #1285), which puts it in `rendered` rather than `rendered_empty`.
+    // `input_copied` means the copy happened; any other reason means the host
+    // declined and the frame stayed empty. Named `_reason` because the worker
+    // and session reports already carry a boolean `empty_result_passthrough`,
+    // and one name holding a bool in one record and a string in another is how
+    // a reader's filter silently matches nothing. Same per-session caveat as
+    // `pr_gpu_route`: this names the last such frame the capped event list
+    // reached.
+    if let Some(reason) = diagnostics
+        .and_then(|value| value.get("stage_events"))
+        .and_then(|events| events.as_array())
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.get("stage").and_then(Value::as_str)
+                        == Some("smart_empty_result_passthrough")
+                        && event.get("state").and_then(Value::as_str) == Some("end")
+                })
+                .and_then(|event| event.pointer("/errors/reason"))
+        })
+    {
+        worker.insert("empty_result_passthrough_reason".to_owned(), reason.clone());
+    }
     outcome.detail.insert("worker".to_owned(), worker.into());
     outcome
         .detail

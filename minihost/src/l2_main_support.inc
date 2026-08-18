@@ -969,37 +969,33 @@ int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
               << " size=0x" << std::hex << size << std::dec << "\n"
               << std::flush;
   }
-  if (!out || size == 0 || size > (size_t{1} << 24)) {
-    record_host_callback_invocation(
-        "inter.extended_alloc", 4,
-        HostCallbackClassification::implemented);
-    return 4;
-  }
-  void* buffer = std::calloc(1, size);
-  if (!buffer) {
-    record_host_callback_invocation(
-        "inter.extended_alloc", 4,
-        HostCallbackClassification::implemented);
-    return 4;
-  }
-  *out = buffer;
-  observe_extended_allocation(buffer);
+  // Ownership and the zero-size contract live in one place
+  // (extended_inter_memory.cpp): a zero-size request succeeds with a releasable
+  // one-byte token, `*out` is always written before the allocator can fail so a
+  // rejected request leaves the plug-in holding nullptr rather than whatever
+  // its uninitialized local held, and the release below refuses any pointer
+  // this host did not hand out. Upscale.aex asks for size 0 first thing in
+  // GLOBAL_SETUP; the old code rejected that without clearing `*out`, so the
+  // plug-in released a stack-garbage pointer and free()ing that unowned pointer
+  // took the worker down with STATUS_HEAP_CORRUPTION (issue #1285).
+  const int32_t status = aexcompat::extended_inter::allocate(out, size);
+  if (status == 0 && out) observe_extended_allocation(*out);
   record_host_callback_invocation(
-      "inter.extended_alloc", 0,
+      "inter.extended_alloc", status,
       HostCallbackClassification::implemented);
-  return 0;
+  return status;
 }
 int32_t __cdecl host_extended_free(void** ptr) {
   // The plug-in passes the address of its buffer pointer (lea rcx,[local]),
-  // not the buffer itself.
-  if (ptr) {
-    observe_extended_free(*ptr);
-    std::free(*ptr);
-  }
+  // not the buffer itself. `observe_extended_free` only counts what the
+  // diagnostics saw; `release` is what decides whether free() may run, and it
+  // fails closed on a foreign, stale, or already-released pointer.
+  if (ptr) observe_extended_free(*ptr);
+  const int32_t status = aexcompat::extended_inter::release(ptr);
   record_host_callback_invocation(
-      "inter.extended_free", 0,
+      "inter.extended_free", status,
       HostCallbackClassification::implemented);
-  return 0;
+  return status;
 }
 
 constexpr std::uintmax_t kMaxAexStringTableFileBytes = 256u * 1024u * 1024u;
