@@ -256,9 +256,23 @@ build して測ったもの。sweep CLI は両者同一バイナリで、worker 
 | not_discovered:exit_20_global_setup:2 | 1 | 1 |
 | not_discovered:exit_12 | 1 | 1 |
 
-計測は review loop を出た build (`smart_worker` `3e6cd45b…`、
-`classic_worker` `78330df3…`、`l2_worker` `8b5ed426…`、sweep CLI は baseline と
-同一の `2992b8d4…`) で取り直したもの。bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ bucket
+どちらの run も report JSON の `build` は次のとおり
+(key は report のもので、`classic_worker` は `aex_render_worker.exe`):
+
+| | baseline | 変更後 |
+| --- | --- | --- |
+| smart_worker | `1c0cd7cc…` | `925a89eb…` |
+| classic_worker | `ac4a5b9a…` | `50dadf7e…` |
+| l2_worker | `93c6264c…` | `e1fa8dc2…` |
+| cli (sweep) | `2992b8d4…` | `2992b8d4…` |
+
+変更後の worker 3 exe は本 PR の HEAD が持つ `minihost/` から build したもので、
+この表を書いたあとに変わったのは `docs/` だけ。表の数字はその build で sweep を
+回し直して取ったもので、前の build の値を持ち越してはいない。baseline 側は
+worktree を分けて `9804ae6f` を同じ手順で build した。sweep CLI は両者同一
+バイナリで (上表の `cli` が一致)、違うのは worker 3 exe だけ。
+
+bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ bucket
 (突き合わせの key は `plugin_relative_path`)。
 
 silent-wrong の確認として、両方の run で `detail.pixel_sha256` を持つ record を

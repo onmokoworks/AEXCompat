@@ -2350,7 +2350,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
       // Filed as #1292 and not touched here. What the passthrough does not do
       // is widen it: its rect is required to lie inside the input world, so it
       // never asks for more than the construction size, which is the bound the
-      // grown-rect case breaks.
+      // other two vectors break. It does reach the reset more often, though --
+      // before it, an empty result skipped this block entirely and no reset ran
+      // at all -- so a passthrough behind a declined GPU route is a new way to
+      // arrive at the shrunken buffer, which #1292 records.
       result.empty_result_passthrough = false;
     }
     *request.destination = request.guarded->data();
