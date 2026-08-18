@@ -209,7 +209,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 39> simple_commands{{
+  const std::array<selftest::SimpleCommand, 40> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -325,6 +325,12 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        "headless_system_sound_suppression",
        hooks.simple.headless_system_sound_suppression, 1,
        ",\"process_local\":true,\"dialog_containment_unchanged\":true"},
+      // The 8/16bpc <-> float32 ARGB conversion the Premiere GPU-filter route
+      // (VR family) widens its input through and narrows its output through
+      // when the session is not float32 (issue #1271): exact round trip at
+      // both integer depths, bounded narrowing, float32 pass-through.
+      {L"--self-test-argb32f-depth-conversion", "argb32f_depth_conversion",
+       hooks.simple.argb32f_depth_conversion, 1, ",\"depths\":[8,16,32]"},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))

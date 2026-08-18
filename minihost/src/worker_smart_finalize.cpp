@@ -60,7 +60,12 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
       std::all_of(logical_output.begin(), logical_output.end(),
                   [](unsigned char value) { return value == 0xCC; });
   result.output_untouched = untouched;
-  const bool finite = r.pixel_bytes != 16 || render::finite_float_world(logical_output);
+  // An 8/16bpc world cannot hold a non-finite value, so the check is on the
+  // float32 world; the Premiere GPU-filter route reports the same condition
+  // for the float32 frame it narrowed into an 8/16bpc world (issue #1271).
+  const bool finite =
+      (r.pixel_bytes != 16 || render::finite_float_world(logical_output)) &&
+      !result.output_non_finite;
   // A legally empty result promised no pixels; zero output bytes are the
   // correct fulfillment of that contract, not a validation failure.
   result.output_pixels_valid = result.empty_result_rect

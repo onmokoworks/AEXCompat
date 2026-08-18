@@ -626,6 +626,14 @@ fn worker_diagnostics(
         "audio_render",
         "audio_setdown",
         "global_setdown",
+        // Not a selector either: one entry into the Premiere GPU-filter route
+        // (xGPUFilterEntry, the VR family), whose `_end` carries a `reason`
+        // naming how it ended - `committed` when it produced the frame, or the
+        // decline that sent the render back to the ordinary PF path (issue
+        // #1271). The route's faults are contained, so without this a plug-in
+        // whose GPU route died on entry would land in `rendered` off the PF
+        // path with nothing in the record saying the route was tried at all.
+        "pr_gpu_route",
         // Not a selector: the worker's own refusal to run with a utility
         // callback table whose entries do not sit at the offsets the generated
         // contract names for them. It aborts immediately after, so without this

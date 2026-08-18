@@ -82,6 +82,22 @@ struct Result {
   // passthrough, an empty-result skip, and an invalid-geometry refusal all
   // leave it false so the report reflects the real dispatch decision.
   bool selector_dispatched{};
+  // The Premiere GPU-filter route (xGPUFilterEntry) was entered on this
+  // dispatch, whatever it answered. The session frame loop reads it so a CPU
+  // SMART_RENDER 512 is retried through that route only when the route was not
+  // already offered (issue #1271).
+  bool pr_gpu_route_attempted{};
+  // `selector_error` is the host's substitute (a caught fault, an escaped C++
+  // exception, a failed module audit), not what the plug-in returned. Measured
+  // around the Smart Render selector call alone, so a fault in another selector
+  // of the same frame does not colour this one (issue #1271).
+  bool selector_failure_substituted{};
+  // The Premiere GPU-filter route saw a non-finite value in the float32 frame
+  // the plug-in produced before narrowing it to an 8/16bpc session's depth.
+  // finalize folds it into the same `output_pixels_valid` / -6 verdict a
+  // float32 session gets from its own finite check, so the depth a session
+  // renders at does not decide whether a broken output is a diagnostic.
+  bool output_non_finite{};
   std::array<int32_t, 4> output_extent_hint{};
 };
 
