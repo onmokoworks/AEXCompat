@@ -71,9 +71,7 @@ struct Failures {
 // arrive; the counters in State say how many attempts they produced.
 void drive(State& state, HMODULE u_module, bool u_sp_birth_exported,
            HMODULE sweetpea_module, const std::wstring& directory,
-           bool u_succeeds, bool direct_succeeds, int asks,
-           bool initialized_override = false) {
-  const bool initialized = direct_succeeds || initialized_override;
+           bool u_succeeds, bool direct_succeeds, int asks) {
   for (int index = 0; index < asks; ++index) {
     switch (sweetpea::decide(state, u_module, u_sp_birth_exported,
                              sweetpea_module, directory)) {
@@ -87,9 +85,12 @@ void drive(State& state, HMODULE u_module, bool u_sp_birth_exported,
       case Decision::StartDirectly:
         sweetpea::begin_direct_attempt(state, directory);
         sweetpea::note_direct_module(state, sweetpea_module);
-        // The wiring passes the SPInit outcome and the overall one
-        // separately; `initialized` is what the teardown debt keys on.
-        sweetpea::finish_direct_start(state, initialized, direct_succeeds);
+        // A start that succeeded initialized SP too. The case where the
+        // two differ (SPInit ok, SPStartupPlugins failed) is driven
+        // explicitly below rather than through this helper, because it
+        // is the one the teardown debt turns on.
+        sweetpea::finish_direct_start(state, direct_succeeds,
+                                      direct_succeeds);
         break;
     }
   }
