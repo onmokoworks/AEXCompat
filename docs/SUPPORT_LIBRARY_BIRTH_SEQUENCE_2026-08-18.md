@@ -650,20 +650,19 @@ field of view で行列を組み、非有限の行列を host に渡して 516 �
 
 母集団: AE 2026 `Support Files\Plug-ins\Effects` を `render_sweep` の引数に
 渡した 304 AEX、`--depth` 既定 (8)、size/time/frames も既定。baseline は
-main `6ad36c04` (= #1280 マージ後) を別 worktree で同じ手順で build し、
-**同一の sweep CLI バイナリ**で測ったもの (worker 3 exe だけが違う)。
+main `7f88d210` (= #1285 の PR #1296 をマージした後。この branch も同じ commit を
+マージ済み) を別 worktree で同じ手順で build し、**同一の sweep CLI バイナリ**で
+測ったもの (worker 3 exe だけが違う)。
 
-| bucket | baseline (6ad36c04) | 変更後 |
+| bucket | baseline (7f88d210) | 変更後 |
 | --- | --- | --- |
-| rendered | 289 | 291 |
+| rendered | 293 | 295 |
 | frame_error:512 | 5 | 2 |
 | frame_error:4 | 1 | 3 |
 | frame_error:516 | 1 | 2 |
 | not_discovered:exit_20_params_setup:13 | 2 | 0 |
 | not_discovered:exit_12 | 1 | 1 |
-| not_discovered:cluster_session_invalidated | 1 | 1 |
-| render_frame_failed:worker_invariant_failure | 2 | 2 |
-| rendered_empty | 2 | 2 |
+| render_frame_failed:worker_invariant_failure | 1 | 1 |
 
 bucket が動いたのは 5 本だけで、他の 299 本は baseline と同じ bucket
 (突き合わせの key は `plugin_relative_path`):
@@ -680,21 +679,23 @@ bucket が動いたのは 5 本だけで、他の 299 本は baseline と同じ 
   0 件)。残るのは Localizer だけ — いずれも観察)
 - `VRSphereToPlane.aex`: `frame_error:512` → `frame_error:516` (元から失敗、上記参照)
 
-silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ 291 record
+silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ 293 record
 すべてについて変更後の hash と突き合わせ、差分ゼロ・欠落ゼロを確認した
-(変更後は新たに render できた 2 本が増えて 293 record)。`rendered` に留まった
+(変更後は新たに render できた 2 本が増えて 295 record)。`rendered` に留まった
 VR 11 本は `worker.pr_gpu_route` が `committed` のままで、pixel hash も一致。
+その 12 本 (VRSphereToPlane を含む) には新しい
+`worker.pr_gpu_route_entered_from = cpu_bad_callback_param` が付く。
 
 計測に使った build fingerprint (report JSON の `build`) と report の SHA-256:
 
-| | baseline (6ad36c04) | 変更後 |
+| | baseline (7f88d210) | 変更後 |
 | --- | --- | --- |
-| l2_worker | `495a0c77…` | `011d8923…` |
-| classic_worker | `f8b36313…` | `05c910a4…` |
-| smart_worker | `687bf5c2…` | `ad340e97…` |
-| cli | `77b55673…` | `77b55673…` (同一) |
+| l2_worker | `ec6d7fe4…` | `1d0b1ea7…` |
+| classic_worker | `bf6d8946…` | `5287f57e…` |
+| smart_worker | `f030fac1…` | `11a1fd6a…` |
+| cli | `5d8279de…` | `5d8279de…` (同一) |
 
-report JSON の SHA-256: baseline `8DEE7AECC7EA8D6C04A72F13B9425305253CEC375DEE023D72FE05551CF355C9`、変更後 `EF29AB31F1A8FD757A2BCBF0D18164EBAC0C5DACD9BA70E710B53E7B2946F3C9`。
+report JSON の SHA-256: baseline `454BAC68FFAE4C7B6385CADE7F1A289C93F8340BCB62719C392D5915D44C4B6A`、変更後 `1C7C87E0A2A64D0396DE10C3BEC889E199E88A8FA26EFE71BDB785E72C323E1B`。
 
 ### 残件
 
