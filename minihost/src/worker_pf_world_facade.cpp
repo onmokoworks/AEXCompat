@@ -394,6 +394,10 @@ bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept {
   try {
     g_published_objects.insert(&object);
   } catch (...) {
+    // The object is the caller's (the world registry's companion, alive for
+    // the allocation's lifetime), so the world is left pointing at a perfectly
+    // good facade; only this module's later "already published" recognition is
+    // lost, which costs a redundant mirror at worst.
     return false;
   }
   return true;
@@ -442,6 +446,10 @@ bool attach(void* world, int32_t pixel_bytes) noexcept {
   try {
     g_published_objects.insert(object);
   } catch (...) {
+    // The publication already pointed the world at this object, so the world
+    // has to be taken off it before the object goes away.
+    void* null = nullptr;
+    std::memcpy(static_cast<std::byte*>(world) + kReservedLong4Offset, &null, sizeof(null));
     g_objects.erase(world);
     return false;
   }
