@@ -117,7 +117,7 @@ Get-CimInstance Win32_Process -Filter "Name='render_sweep.exe'" |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 ```
 
-同じ理由で、sweep 中に `<worktree>	arget\minihost-build\` の worker exe を
+同じ理由で、sweep 中に `<worktree>\target\minihost-build\` の worker exe を
 上書きしない (§4 のコピー運用)。走っている sweep が測る exe が途中で入れ替わり、
 その計測は build fingerprint と一致しなくなる。exe を差し替えたら sweep を
 やり直す。
