@@ -1383,9 +1383,10 @@ void initialize_u_dll_allocator() {
 //     when COR's cached BIB resolver is null - and that global is set by
 //     `COR_Conception`, which nothing but the host's birth sequence calls.
 //
-// The entries below are the part of AE's own startup sequence (read out of
-// `aelib.dll`, transcribed in that document) that this host runs, in AE's
-// order and with AE's arguments:
+// The entries below are the part of AE's own startup sequence that this host
+// runs, in AE's order and with AE's arguments. The sequence was read out of
+// `aelib.dll` and is transcribed in
+// docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md:
 // BEZ_Birth() / FILE_Birth() / M_Birth(3, 0) / RND_Birth() / VAL_Birth() /
 // COR_Conception(quiet_bib_errors), where `quiet_bib_errors` is AE's
 // "flags & 1" and is false for a host that does not set that flag, so this is
@@ -1405,8 +1406,9 @@ void initialize_u_dll_allocator() {
 //     touch user state, so they stay out until something demonstrably needs
 //     them.
 //   * `COR_Birth(a, quiet_bib_errors, b)`, two steps after COR_Conception:
-//     it blocks indefinitely in this worker (observed: the l2 worker never
-//     returns from it, while COR_Conception returns 0), and COR_Conception is
+//     it does not return in this worker (observed: the l2 worker was still
+//     inside it after 60 seconds, while COR_Conception returns 0), and
+//     COR_Conception is
 //     the step that sets the BIB resolver the 21249 comes from. Whatever
 //     COR_Birth waits for is recorded as its own follow-up rather than worked
 //     around.

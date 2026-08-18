@@ -479,21 +479,34 @@ std::wstring admitted_plugin_directory() {
 // state keeps it to one attempt per (mapping, admitted directory) pair, so it
 // never re-runs on every suite acquire and a later member admitted from a
 // different directory still gets its own attempt.
+// A load runs the DllMain of the module and of everything it pulls in. If
+// that faults, the attempt this load sits inside would never be closed - the
+// in-flight flag would stay set and the bootstrap would be skipped, silently,
+// for the rest of the process. Contain the fault here so the caller always
+// gets an answer, even if the answer is "no module".
+HMODULE load_library_guarded(const wchar_t* path, DWORD flags) {
+  __try {
+    return LoadLibraryExW(path, nullptr, flags);
+  } __except (bravo_init_seh_filter(GetExceptionInformation())) {
+    return nullptr;
+  }
+}
+
 HMODULE load_sweetpea_module(const std::wstring& directory) {
   HMODULE module = nullptr;
   if (!directory.empty()) {
     const std::filesystem::path sealed_sp =
         std::filesystem::path(directory) / L"ae_sweetpea.dll";
-    module = LoadLibraryExW(sealed_sp.c_str(), nullptr,
-                            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                                LOAD_LIBRARY_SEARCH_SYSTEM32);
+    module = load_library_guarded(sealed_sp.c_str(),
+                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                      LOAD_LIBRARY_SEARCH_SYSTEM32);
   }
   // In-place loads (issue #751): same admitted USER_DIRS name resolution as
   // the BIB fallback above.
   if (!module)
-    module = LoadLibraryExW(L"ae_sweetpea.dll", nullptr,
-                            LOAD_LIBRARY_SEARCH_USER_DIRS |
-                                LOAD_LIBRARY_SEARCH_SYSTEM32);
+    module = load_library_guarded(L"ae_sweetpea.dll",
+                                  LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                      LOAD_LIBRARY_SEARCH_SYSTEM32);
   return module;
 }
 
@@ -612,10 +625,15 @@ void ensure_sweetpea_started() {
 void ensure_pica_components_initialized() {
   auto& state = bib_suite_state();
   std::lock_guard<std::recursive_mutex> component_lock(pica_component_mutex());
-  // The Bravo load is attempted once per process, but the initialization is
-  // keyed on the mapping: a later member of an in-place cluster session that
-  // maps dvabravoinitializer.dll itself is still initialized, instead of the
-  // first member's answer deciding for everyone (the #1063 latch lesson).
+  // The initialization is keyed on the mapping: a later member of an in-place
+  // cluster session that maps dvabravoinitializer.dll itself is still
+  // initialized, instead of the first member's answer deciding for everyone
+  // (the #1063 latch lesson). The *load* is still a process-wide one-shot,
+  // unlike the ae_sweetpea one, which keys on the admitted directory too: a
+  // later member whose own directory holds dvabravoinitializer.dll but which
+  // does not import it keeps the first member's answer. Nothing measured
+  // needs that, and admission puts every member's directory in USER_DIRS up
+  // front, so the first attempt already searches all of them.
   static bool load_attempted = false;
   static bool absent_logged = false;
   static HMODULE initialized_bravo = nullptr;
@@ -634,16 +652,16 @@ void ensure_pica_components_initialized() {
       const std::filesystem::path sealed_bravo =
           std::filesystem::path(g_plugin_file_path).parent_path() /
           L"dvabravoinitializer.dll";
-      bravo = LoadLibraryExW(sealed_bravo.c_str(), nullptr,
-                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                                 LOAD_LIBRARY_SEARCH_SYSTEM32);
+      bravo = load_library_guarded(sealed_bravo.c_str(),
+                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                       LOAD_LIBRARY_SEARCH_SYSTEM32);
     }
     // In-place loads (issue #751): same admitted USER_DIRS name resolution as
     // the BIB fallback above.
     if (!bravo)
-      bravo = LoadLibraryExW(L"dvabravoinitializer.dll", nullptr,
-                             LOAD_LIBRARY_SEARCH_USER_DIRS |
-                                 LOAD_LIBRARY_SEARCH_SYSTEM32);
+      bravo = load_library_guarded(L"dvabravoinitializer.dll",
+                                   LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                       LOAD_LIBRARY_SEARCH_SYSTEM32);
     bravo_init_in_flight = false;
   }
   // No Bravo initializer means no Sweet Pea bootstrap either: this early
@@ -653,6 +671,10 @@ void ensure_pica_components_initialized() {
   // U_SP_Birth path now depends on it, so it is written down rather than
   // left implicit.
   if (!bravo) {
+    // Once per process: the decision is re-asked for every member, and a
+    // 300-member session must not fill the bounded stderr tail the broker
+    // keeps with the same line. The count of members without Bravo is
+    // therefore not recoverable from the trace.
     if (aexcompat::l2_detail::extended_diag_enabled() && !absent_logged) {
       absent_logged = true;
       std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=absent"

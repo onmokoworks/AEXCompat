@@ -143,15 +143,25 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   聞かれるので、失敗を「毎回やり直す」判断にすると LoadLibraryEx と SPInit が
   acquire ごとに走ってしまう。それを避けつつ、member が変われば聞き直す。
 - `minihost/src/l2_main_support.inc` の
-  `initialize_pin_support_libraries()`: mapping されている support library を
+  `initialize_process_support_libraries()`: mapping されている support library を
   AE と同じ順・同じ引数形で birth する
   (`BEZ_Birth` / `FILE_Birth` / `M_Birth(3,0)` / `RND_Birth` / `VAL_Birth` /
   `COR_Conception(false)`)。各 library ごとに独立の latch。
 - teardown は起動した層だけを通し、起動していなければどちらも通さない
   (ae_sweetpea は closure が map しているだけのことがあり、それを shutdown
-  するのは所有していない層を畳むことになる)。実測では **one-shot 直叩きの時点で U.dll は
-  既に unmap されている** (`extended_diag:pica_component stage=teardown
-  u=remapped_or_unmapped`)。記録した HMODULE をそのまま使うと解放済み image を
+  するのは所有していない層を畳むことになる)。実測では **one-shot 直叩きの時点で
+  U.dll は既に unmap されている**。最終 build (`ProfileToProfile` の one-shot、
+  `AEXCOMPAT_EXTENDED_DIAG=1`) が出す 2 行そのまま:
+
+```
+extended_diag:pica_component stage=teardown_begin u=remapped_or_unmapped
+extended_diag:pica_component stage=teardown u=remapped_or_unmapped sweetpea=none
+```
+
+  (この観察自体は最初に teardown の trace を足した時点で取れており、そのときの
+  label は `u=unmapped` だった。label はその後 review で
+  `remapped_or_unmapped` に変わったので、上の 2 行は最終 build で取り直した
+  もの。) 記録した HMODULE をそのまま使うと解放済み image を
   GetProcAddress で読むことになるので、teardown 時に `GetModuleHandleW` で
   同じ mapping であることを確かめてから呼ぶ。結果として one-shot では
   `U_SP_Death` は走らない。unmap の出所は `WorkerSession::unload_module` の
@@ -189,7 +199,7 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   DllMain から host suite を acquire する形は観測していないが、構造的に
   排除されてはいない。受け入れて記録する扱いで、追跡は #1287。
 - 呼び出し順は `initialize_u_dll_allocator()` (U_Birth、#362 / #1063) →
-  `initialize_pin_support_libraries()` (この issue) →
+  `initialize_process_support_libraries()` (この issue) →
   `initialize_pf_dll_host_layer()` (PF_Birth、#1212 / PR #1284) で、AE の
   相対順 (step 3〜10 → tail の PF_Birth) と一致する。
 - `COR_Birth` は**呼んでいない**: この worker では戻ってこない (60 秒待って
@@ -205,7 +215,7 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   dispatch table の書き込みはどちらの戻り値でも完了している。
 - AE と初期化順が違う点 (観察): AE は BIB / Bravo のハンドシェイクを済ませて
   から step 10 で `COR_Conception` を呼ぶ。このホストの
-  `initialize_pin_support_libraries` はプラグイン load 直後に走るので、
+  `initialize_process_support_libraries` はプラグイン load 直後に走るので、
   `COR_Conception` の中の `dvabravoinitializer::InitBravoComponents(nullptr)` が
   **ホスト自身の `SetBIBProcAddress` + `InitBravoComponents` より先**に走る
   (ホスト側は最初の `AcquireSuite` が BIB suite を要求したときに走る)。

@@ -125,6 +125,15 @@ inline Decision decide(const State& state, HMODULE u_module,
   // got that far (ae_sweetpea not mapped and not loadable from that member's
   // directory); once one succeeded, this process owes exactly one `SPTerm`
   // and a second init would make that debt uncountable.
+  //
+  // This knowingly gives up retrying `SPStartupPlugins` as well: an
+  // `SPInit` that succeeded and a `SPStartupPlugins` that then failed
+  // leaves SP initialized with no plug-ins started, and no later member
+  // will try to start them. Separating the two would need a decision that
+  // says "start the plug-ins, do not init again"; nothing measured needs
+  // it, and the pair only comes apart when ae_sweetpea's own startup
+  // fails. A member that maps U.dll still runs U's bootstrap on top,
+  // which ends in its own `SPStartupPlugins`.
   if (state.direct_started) return Decision::Nothing;
   if (!state.direct_attempted ||
       sweetpea_module != state.attempted_sweetpea_module ||
