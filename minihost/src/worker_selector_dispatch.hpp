@@ -183,6 +183,22 @@ struct SelectorReturnMessage {
 };
 
 struct SelectorDispatchTelemetry {
+  // Selector return codes this host substituted for the plug-in's own since
+  // the worker started, all selectors together: a fault the SEH boundary
+  // caught, a C++ exception that escaped the entry point, a module audit the
+  // call did not pass, and the guards that refuse to dispatch at all. Every
+  // one of them surfaces as `kAuditFailure` (512), which is indistinguishable
+  // from a plug-in that returned 512 itself. Monotonic
+  // and never reset, so a caller snapshots it around a single selector call
+  // and compares afterwards to know which of the two it got (the invocation
+  // list below is capped and cannot answer that once the cap is reached).
+  // Not atomic, and neither are this struct's other fields: smart selector
+  // dispatch is driven serially from one frame loop, so the snapshot and the
+  // increments it is compared against are the same thread's. A second thread
+  // incrementing inside somebody's snapshot window can only make that window
+  // look substituted when it was not, which suppresses a fallback route - it
+  // can never present a faulted selector's 512 as the plug-in's own.
+  uint64_t substituted_selector_failures{};
   uint32_t seh_code{};
   uint64_t seh_address{};
   std::string seh_module;

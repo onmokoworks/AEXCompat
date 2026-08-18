@@ -2230,6 +2230,57 @@ mod tests {
     }
 
     #[test]
+    fn the_premiere_gpu_route_outcome_survives_the_allowlist_and_the_reason_filter() {
+        // The other half of the contract `render_sweep`'s
+        // `the_premiere_gpu_route_outcome_reaches_the_record_without_extended_diag`
+        // reads: the route's faults are contained, so a plug-in whose GPU route
+        // dies on entry renders through the PF path, and this event is the only
+        // thing that says the route was tried (issue #1271). A rename here, or a
+        // tighter reason filter, would empty that record silently.
+        let declined = worker_diagnostics(
+            "stage:pr_gpu_route_begin\nstage:pr_gpu_route_end reason=startup_fault\n",
+            false,
+            "ok",
+            0,
+            5,
+        );
+        let events = declined["stage_events"].as_array().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1]["stage"], "pr_gpu_route");
+        assert_eq!(events[1]["state"], "end");
+        assert_eq!(events[1]["errors"]["reason"], "startup_fault");
+        // A decline is not a failed stage: the render carries on down the PF
+        // path, and calling it one would misattribute that render's verdict.
+        assert_eq!(declined["failure_stage"], Value::Null);
+        assert_eq!(declined["last_completed_stage"], "pr_gpu_route");
+
+        // A worker that died inside the route leaves the begin unmatched, which
+        // is what names the route as the active stage.
+        let died_inside = worker_diagnostics(
+            "stage:pr_gpu_route_begin\n",
+            false,
+            "crash",
+            0xC0000005,
+            5,
+        );
+        assert_eq!(died_inside["active_stage"], "pr_gpu_route");
+
+        // The reason is dropped rather than truncated when it is not the fixed
+        // lower-case identifier shape, so plug-in authored text - it shares this
+        // stderr - cannot ride into a shareable report through this field.
+        let forged = worker_diagnostics(
+            "stage:pr_gpu_route_end reason=C:\\private\\plugin.aex\n",
+            false,
+            "ok",
+            0,
+            5,
+        );
+        let forged_events = forged["stage_events"].as_array().unwrap();
+        assert_eq!(forged_events.len(), 1);
+        assert!(forged_events[0]["errors"].get("reason").is_none());
+    }
+
+    #[test]
     fn worker_stage_diagnostics_identify_active_and_failed_selectors() {
         let diagnostics = worker_diagnostics(
             "untrusted C:\\private\\plugin\nstage:global_setup_begin\nstage:global_setup_end error=0\nstage:render_begin\n",

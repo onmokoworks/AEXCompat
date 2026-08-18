@@ -1154,6 +1154,35 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
                 .unwrap_or(Value::Null),
         );
     }
+    // How the Premiere GPU-filter route ended, lifted out of `stage_events`
+    // (issue #1271). The whole event list is too big for a 300-plug-in sweep,
+    // but this one identifier is what a sweep reader needs: the route's faults
+    // are contained, so a plug-in whose GPU route died on entry renders
+    // through the PF path and lands in `rendered` with nothing else saying the
+    // route was tried. Absent when the route never ran, and also when the
+    // capped event list did not reach it: the cap is per session, so on a
+    // many-frame session this names an early frame's outcome. The entry rule is
+    // the same every frame, but neither the entry nor the outcome is: at 8/16
+    // only a frame whose own PF selector answered 512 enters the route at all,
+    // and a frame that enters can decline where an earlier one committed. So a
+    // late decline can sit behind an early `committed` on a multi-frame
+    // session.
+    if let Some(reason) = diagnostics
+        .and_then(|value| value.get("stage_events"))
+        .and_then(|events| events.as_array())
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.get("stage").and_then(Value::as_str) == Some("pr_gpu_route")
+                        && event.get("state").and_then(Value::as_str) == Some("end")
+                })
+                .and_then(|event| event.pointer("/errors/reason"))
+        })
+    {
+        worker.insert("pr_gpu_route".to_owned(), reason.clone());
+    }
     outcome.detail.insert("worker".to_owned(), worker.into());
     outcome
         .detail
@@ -1761,6 +1790,120 @@ mod tests {
             "identity_changed"
         );
         assert_eq!(discovery_failure_bucket(None, None), "unknown");
+    }
+
+    #[test]
+    fn the_premiere_gpu_route_outcome_reaches_the_record_without_extended_diag() {
+        // The route's faults are contained, so a plug-in whose GPU route died
+        // on entry renders through the PF path and lands in `rendered`. What
+        // keeps that from being a silent success is this key, and it depends on
+        // three shapes the broker owns - the stage name, the `end` state and
+        // the `reason` inside `errors`. This pins the sweep side against them;
+        // the broker side that produces them is pinned by
+        // `the_premiere_gpu_route_outcome_survives_the_allowlist_and_the_reason_filter`
+        // in the broker's image_render tests, because fixtures built here
+        // cannot notice a change on that side.
+        let close_with = |events: Value| {
+            json!({
+                "session_clean": true,
+                "invalidated_reason": Value::Null,
+                "worker": {
+                    "classification": "ok",
+                    "exit_code": 0,
+                    "diagnostics": { "stage_events": events }
+                }
+            })
+        };
+        let route_event = |state: &str, reason: Value| json!({"stage": "pr_gpu_route", "state": state, "errors": {"reason": reason}});
+
+        let mut declined = Outcome::bare("rendered");
+        attach_close(
+            &mut declined,
+            close_with(json!([
+                route_event("begin", Value::Null),
+                route_event("end", json!("startup_fault")),
+            ])),
+            false,
+        );
+        assert_eq!(
+            declined.detail["worker"]["pr_gpu_route"],
+            json!("startup_fault"),
+            "a declined route has to be readable off an ordinary rendered record"
+        );
+
+        let mut committed = Outcome::bare("rendered");
+        attach_close(
+            &mut committed,
+            close_with(json!([
+                route_event("end", json!("output_frame_alloc")),
+                json!({"stage": "smart_render_cpu", "state": "end", "errors": {"error": 0}}),
+                route_event("end", json!("committed")),
+            ])),
+            false,
+        );
+        assert_eq!(
+            committed.detail["worker"]["pr_gpu_route"],
+            json!("committed"),
+            "the last entry into the route is the one the record names"
+        );
+
+        // The other stage carries a `reason` of its own (classic_output_resize
+        // really does, issue #984), so an extraction that stopped checking the
+        // stage name would mislabel that reason as the route's outcome.
+        let mut never_ran = Outcome::bare("rendered");
+        attach_close(
+            &mut never_ran,
+            close_with(json!([json!({
+                "stage": "classic_output_resize",
+                "state": "end",
+                "errors": {"reason": "output_resize_refused"}
+            })])),
+            false,
+        );
+        assert!(
+            never_ran.detail["worker"].get("pr_gpu_route").is_none(),
+            "an effect that never entered the route carries no key at all"
+        );
+
+        // Two ways an entered route still carries no reason, and they take
+        // different paths through the search: a `_begin` with no `_end` at all
+        // (the worker died inside the route) finds nothing, while an `_end`
+        // whose reason the broker's shape check dropped finds an event without
+        // one. Neither may invent a reason; `active_stage` is what names those.
+        let mut died_inside = Outcome::bare("render_frame_failed");
+        attach_close(
+            &mut died_inside,
+            close_with(json!([route_event("begin", Value::Null)])),
+            false,
+        );
+        assert!(died_inside.detail["worker"].get("pr_gpu_route").is_none());
+
+        let mut no_reason = Outcome::bare("render_frame_failed");
+        attach_close(
+            &mut no_reason,
+            close_with(json!([
+                route_event("begin", Value::Null),
+                json!({"stage": "pr_gpu_route", "state": "end", "errors": {}}),
+            ])),
+            false,
+        );
+        assert!(no_reason.detail["worker"].get("pr_gpu_route").is_none());
+
+        let mut missing_events = Outcome::bare("rendered");
+        attach_close(
+            &mut missing_events,
+            json!({
+                "session_clean": true,
+                "invalidated_reason": Value::Null,
+                "worker": {"classification": "ok", "exit_code": 0, "diagnostics": {}}
+            }),
+            false,
+        );
+        assert!(
+            missing_events.detail["worker"]
+                .get("pr_gpu_route")
+                .is_none()
+        );
     }
 
     #[test]

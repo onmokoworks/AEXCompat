@@ -10,6 +10,7 @@
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_request_parser.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_smart_dispatch.hpp"
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
 #include "worker_ui_event_execution.hpp"
@@ -1357,6 +1358,11 @@ SmartRenderSessionOutcome run_smart_render_session(
         apply_session_ui_action(frame_ui);
         SessionFrameOutput frame;
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
+        // A retry below renders into its own SessionFrame; `verdict` always
+        // names the frame that produced `frame_result`, so the guard verdict
+        // read at the end is the one from the pass whose pixels are reported.
+        worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
+        const worker_runtime::smart_execution::SessionFrame* verdict = &session_frame;
         worker_runtime::smart_execution::Result frame_result = smart_render_once(
             current_entry, input, output, case_id,
             frame_override ? frame_override : requested,
@@ -1374,7 +1380,40 @@ SmartRenderSessionOutcome run_smart_render_session(
             !worker_runtime::smart_setup::force_gpu_retry_requested()) {
           const worker_runtime::smart_setup::ForceGpuRetryScope force_gpu;
           captured.clear();
-          worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
+          retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
+          verdict = &retry_frame;
+          frame_result = smart_render_once(
+              current_entry, input, output, case_id,
+              frame_override ? frame_override : requested,
+              &frame_rgba,
+              max_width, max_height, frame_layers, current_time, time_step, total_time,
+              time_scale, pixel_bytes, &retry_frame);
+        }
+        // Premiere GPU-filter fallback (#1271): an effect exporting
+        // xGPUFilterEntry whose SMART_RENDER selector answered PF_Err 512 only
+        // implements the GPU path (the VR family draws a "requires GPU
+        // acceleration" notice and returns 512). The export alone does not
+        // separate those from exporters whose PF CPU path works, so the
+        // selector's 512 is the signal (the selector, not a FRAME_SETUP /
+        // SETDOWN 512 folded into render_error), and only the plug-in's own
+        // 512: the host substitutes the same code whenever it stands in for
+        // the plug-in's return (a caught fault, an escaped C++ exception, a
+        // failed module audit), and a plug-in that just faulted is not
+        // re-entered on a GPU route. A dispatch that
+        // already offered the route (a float32 session, a gpu_*_float32 case,
+        // or the #1072 retry above, whose plan is float32) is not retried: the
+        // route declined once and would again. Re-run the frame once with the
+        // route enabled; if it declines, the PF path answers 512 again.
+        if (frame_result.selector_dispatched &&
+            frame_result.selector_error == 512 &&
+            !frame_result.selector_failure_substituted &&
+            !frame_result.pr_gpu_route_attempted &&
+            worker_runtime::smart_dispatch::pr_gpu_filter_route_available() &&
+            !worker_runtime::smart_setup::force_pr_gpu_retry_requested()) {
+          const worker_runtime::smart_setup::ForcePrGpuRetryScope force_pr_gpu;
+          captured.clear();
+          retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
+          verdict = &retry_frame;
           frame_result = smart_render_once(
               current_entry, input, output, case_id,
               frame_override ? frame_override : requested,
@@ -1426,7 +1465,7 @@ SmartRenderSessionOutcome run_smart_render_session(
         // built; refusals before that point are frame-local diagnostics, not
         // corruption.
         frame.guard_violation =
-            session_frame.output_buffer_allocated && !session_frame.guards_intact;
+            verdict->output_buffer_allocated && !verdict->guards_intact;
         // The per-frame diagnostic keeps the one-shot error priority: GPU
         // device setup, then PreRender, then the render/finalize error, then
         // GPU device setdown. ROI/rect diagnostics stay in the final report;
