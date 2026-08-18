@@ -49,6 +49,16 @@ opaque と書いているもの (`PF_ProgPtr`、`PF_LayerDef.reserved_long4`) �
   書き込みはその手前で完了し、21249 は末尾の COR/BIB 初期化段の戻り値。
   同じ 21249 は `not_discovered:exit_20_global_setup:21249` (PSL_Adjustments)
   にも出るが関連は未確認。
+  - **追記 (issue #1279、2026-08-18)**: 関連は確定した。21249 = 0x5301 は
+    `COR.dll` の `COR_GetBIBAddressProc` が「COR の BIB resolver 大域が
+    null」("BIB is uninitialized.") のときに返す唯一の非 0 値で、その大域を
+    立てるのは `COR_Conception`。PSL_Adjustments の 21249 は
+    `COR_InitPSL()` 経由で同じ関数から出ていた
+    (`docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md` §2)。
+    #1279 が `COR_Conception(false)` を `PF_Birth` の前に呼ぶようにしたので、
+    **`PF_Birth()` の戻り値は 0 になった** (実測。merge 後の worker で
+    `stage:pf_host_layer_init status=called result=0`)。table 書き込みは
+    どちらの戻り値でも完了しているので #1212 の修正内容は変わらない。
 
 ### 2.2 `effect_ref` は PF_ProgressInfo (#1275)
 
