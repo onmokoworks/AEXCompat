@@ -169,6 +169,9 @@ std::size_t retired_count() noexcept;
 uint32_t trap_count() noexcept;
 uint32_t copy_rect_calls() noexcept;
 uint32_t copy_rect_refusals() noexcept;
+// Times the quarantine has evicted (and therefore freed) its oldest object -
+// the point past which a stale reference to that object stops being contained.
+uint32_t quarantine_evictions() noexcept;
 std::string last_trap_caller();
 
 bool selftest();

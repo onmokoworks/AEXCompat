@@ -71,13 +71,12 @@ std::unordered_map<const void*, std::unique_ptr<WorldObject>> g_objects;
 std::unordered_set<const void*> g_published_objects;
 // Objects nobody may call again, kept inert (see `retire_locked`): the world
 // registry's companions when a world is disposed, and the pool's mirrors when
-// a scope detaches them. Bounded, because
-// a session disposes scratch worlds per frame and the quarantine must not grow
-// without limit; past the bound the oldest is released, which is the point
-// where a stale pointer to *that* object becomes a plain use-after-free again.
-// 4096 objects is 640 KB at 0xa0 bytes each - a whole interactive session's
-// worth of scratch worlds, and negligible beside the 256 MB the world registry
-// itself may hold.
+// a scope detaches them. Bounded, because a session disposes scratch worlds
+// per frame and the quarantine must not grow without limit; past the bound the
+// oldest is released, which is the point where a stale pointer to *that*
+// object becomes a plain use-after-free again. 4096 objects is 640 KB at 0xa0
+// bytes each - a whole interactive session's worth of scratch worlds, and
+// negligible beside the 256 MB the world registry itself may hold.
 constexpr std::size_t kMaxRetiredObjects = 4096;
 std::deque<std::unique_ptr<WorldObject>> g_retired;
 std::atomic<uint32_t> g_trap_count{};
@@ -91,8 +90,12 @@ std::atomic<WorldResolver> g_world_resolver{};
 // per-frame path, so an unlatched line would stream. The reasons are host
 // classifications, not plug-in data.
 std::atomic<uint32_t> g_reported_refusals{};
-// Latch for the first quarantine eviction (see `retire_locked`).
+// Latch for the first quarantine eviction line, and the count behind it (see
+// `retire_locked`): the line is easy to lose - it fires once, mid-session, and
+// only reaches a report through the bounded stderr tail - so the fact is also
+// readable as a number.
 std::atomic<bool> g_reported_eviction{};
+std::atomic<uint32_t> g_quarantine_evictions{};
 
 void report_refusal(uint32_t bit, const char* reason) {
   if ((g_reported_refusals.fetch_or(bit) & bit) != 0) return;
@@ -520,6 +523,7 @@ void retire_locked(WorldObject* object) noexcept {
   while (g_retired.size() > kMaxRetiredObjects) {
     // The one moment where a stale reference to *that* object stops being
     // contained, so it is said out loud once. Recording, not enforcement.
+    ++g_quarantine_evictions;
     if (!g_reported_eviction.exchange(true)) {
       try {
         std::cerr << "stage:pf_world_facade_quarantine_evicted bound="
@@ -549,6 +553,7 @@ std::size_t retired_count() noexcept {
 uint32_t trap_count() noexcept { return g_trap_count.load(); }
 uint32_t copy_rect_calls() noexcept { return g_copy_rect_calls.load(); }
 uint32_t copy_rect_refusals() noexcept { return g_copy_rect_refusals.load(); }
+uint32_t quarantine_evictions() noexcept { return g_quarantine_evictions.load(); }
 std::string last_trap_caller() {
   AcquireSRWLockShared(&g_last_trap_caller_lock);
   struct ReleaseShared {
@@ -831,8 +836,12 @@ bool selftest() {
   detach(world.data());
   check(read_ptr(world.data(), kReservedLong4Offset) == nullptr && attached(world.data()) == nullptr,
         "detach did not clear reserved_long4 / the pool entry");
-  check(retired_count() == retired_before + 1, "detach did not retire the object");
-  if (detached_object) {
+  const bool retired = retired_count() == retired_before + 1;
+  check(retired, "detach did not retire the object");
+  // Only read the object when the count says it is still alive: in a build
+  // that regressed to freeing, reading it here would crash the worker and the
+  // route would never print the verdict that names the regression.
+  if (retired && detached_object) {
     // A stale copy of the world would reach exactly this: a live object whose
     // vtable slot is null (a contained fault at a known place) and whose
     // mirror no longer describes anybody's pixels.
@@ -851,6 +860,30 @@ bool selftest() {
         "detach touched a reserved_long4 the plug-in re-pointed");
   check(live_count() == live_before, "objects were not released");
   check(retired_count() == retired_before + 2, "the second detach did not retire its object");
+  // The bound itself: attach/detach one struct past the quarantine's capacity
+  // and the deque must stop growing, evict, and say so exactly once. This is
+  // the only place the eviction branch runs.
+  {
+    const uint32_t evictions_before = quarantine_evictions();
+    alignas(16) std::array<std::byte, world_safety::kEffectWorldSize> churn{};
+    std::array<std::byte, 16> churn_pixels{};
+    void* churn_data = churn_pixels.data();
+    store(churn, kDataOffset, churn_data);
+    store(churn, kRowbytesOffset, int32_t{16});
+    store(churn, kWidthOffset, int32_t{4});
+    store(churn, kHeightOffset, int32_t{1});
+    for (std::size_t i = 0; i <= kMaxRetiredObjects; ++i) {
+      void* null = nullptr;
+      std::memcpy(churn.data() + kReservedLong4Offset, &null, sizeof(null));
+      if (!attach(churn.data(), 4)) { check(false, "churn attach failed"); break; }
+      detach(churn.data());
+    }
+    check(retired_count() == kMaxRetiredObjects,
+          "the quarantine did not stop at its bound");
+    check(quarantine_evictions() > evictions_before,
+          "the quarantine did not report an eviction at the bound");
+    check(live_count() == live_before, "the churn left pool objects behind");
+  }
   detach(nullptr);
   return passed;
 }
