@@ -12,3 +12,4 @@ def test_sweetpea_bootstrap_prefers_u_dll_and_keys_on_the_mapping():
         "worker_sweetpea_bootstrap_selftest",
     )
     assert report["failures"] == []
+    assert report["checks"] > 0

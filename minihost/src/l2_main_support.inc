@@ -1431,16 +1431,26 @@ void initialize_pin_support_libraries() {
   };
   struct SupportLibrary {
     const wchar_t* module;
+    // `name` is the narrow spelling of `module` for the trace (std::cerr
+    // takes no wide strings); `birth` is the exported symbol, which for
+    // COR is a C++ mangled name.
+    const char* name;
     const char* birth;
     BirthShape shape;
   };
   static constexpr SupportLibrary kLibraries[] = {
-      {L"BEZ.dll", "BEZ_Birth", BirthShape::no_arguments},
-      {L"FILE.dll", "FILE_Birth", BirthShape::no_arguments},
-      {L"U.dll", "M_Birth", BirthShape::m_birth},
-      {L"U.dll", "RND_Birth", BirthShape::no_arguments},
-      {L"VAL.dll", "VAL_Birth", BirthShape::no_arguments_void},
-      {L"COR.dll", "?COR_Conception@@YAH_N@Z", BirthShape::cor_conception},
+      {L"BEZ.dll", "BEZ.dll", "BEZ_Birth",
+       BirthShape::no_arguments},
+      {L"FILE.dll", "FILE.dll", "FILE_Birth",
+       BirthShape::no_arguments},
+      {L"U.dll", "U.dll", "M_Birth",
+       BirthShape::m_birth},
+      {L"U.dll", "U.dll", "RND_Birth",
+       BirthShape::no_arguments},
+      {L"VAL.dll", "VAL.dll", "VAL_Birth",
+       BirthShape::no_arguments_void},
+      {L"COR.dll", "COR.dll", "?COR_Conception@@YAH_N@Z",
+       BirthShape::cor_conception},
   };
   static legacy::State states[std::size(kLibraries)];
   // A mapped library whose birth export is missing is reported once per
@@ -1457,8 +1467,9 @@ void initialize_pin_support_libraries() {
     if (decision == legacy::Decision::NoBirthExport &&
         !no_export_logged[index]) {
       no_export_logged[index] = true;
-      std::cerr << "stage:legacy_support_init library=" << library.birth
-                << " status=no_export\n" << std::flush;
+      std::cerr << "stage:legacy_support_init library=" << library.name
+                << " entry=" << library.birth << " status=no_export\n"
+                << std::flush;
     }
     if (decision != legacy::Decision::Call) continue;
     legacy::note_called(states[index], module);
@@ -1481,14 +1492,23 @@ void initialize_pin_support_libraries() {
           break;
       }
     } __except (u_birth_seh_filter(GetExceptionInformation())) {
-      // COR_Conception reports failures by throwing, which arrives here as SEH.
+      // COR_Conception reports failures by throwing, which arrives here as
+      // SEH. The sequence continues after a fault rather than stopping:
+      // each entry initializes its own library, a faulted one leaves that
+      // library exactly as unusable as it was before this step existed,
+      // and stopping would deny the later libraries an initialization they
+      // do not depend on the faulted one for. The one real dependency in
+      // this table (VAL needs U) is satisfied by initialize_u_dll_allocator
+      // running first, not by an earlier entry here.
       result = -1;
-      std::cerr << "stage:legacy_support_init library=" << library.birth
-                << " status=faulted\n" << std::flush;
+      std::cerr << "stage:legacy_support_init library=" << library.name
+                << " entry=" << library.birth << " status=faulted\n"
+                << std::flush;
       continue;
     }
-    std::cerr << "stage:legacy_support_init library=" << library.birth
-              << " status=called result=" << result << "\n" << std::flush;
+    std::cerr << "stage:legacy_support_init library=" << library.name
+              << " entry=" << library.birth << " status=called result="
+              << result << "\n" << std::flush;
   }
 }
 

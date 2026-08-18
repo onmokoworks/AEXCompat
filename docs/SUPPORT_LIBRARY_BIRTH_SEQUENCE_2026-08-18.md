@@ -27,9 +27,14 @@ process 起動時に呼ぶ support library の birth が並んでいる。Ghidra
 | 12 | `COR_Birth(mode == 1 \|\| (flags>>3 & 1), flags & 1, mode == 3)` |
 | … | `PLUG_Birth` / `TDB_Birth` / `PF_Birth(0)` / `P_Birth` / `TXT_Birth` / `TDL_Birth` / `PREM_Birth` / `PIN_Birth` / `SND_Birth` / `OM_Birth` / `MSK_Birth` / `FLT_Birth` / `PR_Birth` / `BEE_Birth` / `MEE_Birth` / `FIM_Birth` / `FLO_Birth` / **`U_SP_Birth()`** / `MC_SP_Birth` / `PT_Birth` |
 
+この表は aelib.dll の step 3 以降で、`U_Birth` は含まれていない (より前段で
+別の経路から呼ばれる)。したがって「U を最初に birth する」根拠はこの表ではなく、
+各 library 側の依存 (`VAL_Birth` は `U_CopyString` と LIST を通る、`PF_Birth` は
+U.dll の CPU feature block を読む) の観察による。
+
 このホストは従来 `U_Birth` だけを呼んでいた (#362 / #1063)。`PF_Birth` は
-この作業と並行して PR #1284 (issue #1212) が入れた (`docs/PF_HOST_ABI_SHAPES_2026-08-18.md`)。
-列の他の birth は
+この作業と並行して PR #1284 (issue #1212) が入れた
+(`docs/PF_HOST_ABI_SHAPES_2026-08-18.md`)。列の他の birth は
 どれもプラグインの closure からは呼ばれない (closure が import するのは working
 entry point だけ) ので、呼ぶ責任はホストにある。
 
@@ -126,9 +131,27 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   AE と同じ順・同じ引数形で birth する
   (`BEZ_Birth` / `FILE_Birth` / `M_Birth(3,0)` / `RND_Birth` / `VAL_Birth` /
   `COR_Conception(false)`)。各 library ごとに独立の latch。
+- teardown は起動した層だけを通す。実測では **one-shot 直叩きの時点で U.dll は
+  既に unmap されている** (`extended_diag:pica_component stage=teardown
+  sweetpea=u_unmapped`)。記録した HMODULE をそのまま使うと解放済み image を
+  GetProcAddress で読むことになるので、teardown 時に `GetModuleHandleW` で
+  同じ mapping であることを確かめてから呼ぶ。結果として one-shot では
+  `U_SP_Death` は走らない。
+- 呼び出し順は `initialize_u_dll_allocator()` (U_Birth、#362 / #1063) →
+  `initialize_pin_support_libraries()` (この issue) →
+  `initialize_pf_dll_host_layer()` (PF_Birth、#1212 / PR #1284) で、AE の
+  相対順 (step 3〜10 → tail の PF_Birth) と一致する。
 - `COR_Birth` は**呼んでいない**: この worker では戻ってこない (60 秒待って
   返らないことを実測。`COR_Conception` は 0 を返す)。21249 の原因は
-  `COR_Conception` 側なので、そこまでで止めている。
+  `COR_Conception` 側なので、そこまでで止めている。その結果このホストは
+  「Conception 済み・Birth 未了の COR」という、実 AE には存在しない状態で
+  以降 (PF_Birth を含む) を走らせている。順序は AE と同じだが状態は同じでは
+  ない、という限定つきの一致であることを明記しておく。
+- 副作用として `PF_Birth()` の戻り値が変わった: PR #1284 の計測時は
+  21249 (COR の BIB resolver が null) だったが、`COR_Conception` が先に走る
+  ようになったので 0 を返す (実測、
+  `stage:pf_host_layer_init status=called result=0`)。#1212 の修正対象である
+  dispatch table の書き込みはどちらの戻り値でも完了している。
 - AE と初期化順が違う点 (観察): AE は BIB / Bravo のハンドシェイクを済ませて
   から step 10 で `COR_Conception` を呼ぶ。このホストの
   `initialize_pin_support_libraries` はプラグイン load 直後に走るので、
@@ -141,18 +164,23 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   Particle_Playground では `0x18000E480` で BIB.dll の mapping 内)、
   ProfileToProfile / PSL_Adjustments の discovery も通る。COR が受け取った
   resolver と同一ポインタかどうかはこの trace からは見えない (未確定)。
+  なお返る resolver はプラグインによって違う: Particle_Playground /
+  ProfileToProfile では `0x18000E480` (BIB.dll の mapping 内)、
+  PSL_Adjustments では heap 上のアドレス。どちらでも discovery は通っている
+  (観察のみ、意味は未確定)。
 
 ## 4. 計測 (full corpus)
 
 母集団: AE 2026 `Support Files\Plug-ins\Effects` を `render_sweep` の引数に
 渡した 304 AEX、`--depth` 既定 (8)、size/time/frames も既定。baseline は
-origin/main `175c4844` を同じ worktree・同じ build 手順で測ったもの。
+origin/main `997d3b7d` を専用の worktree で同じ build 手順で測ったもの
+(sweep CLI は両者同一バイナリ、worker 3 exe だけが違う)。
 
-| bucket | baseline | 変更後 |
+| bucket | baseline (997d3b7d) | 変更後 |
 | --- | --- | --- |
-| rendered | 284 | 284 |
-| frame_error:512 | 9 | 10 |
-| frame_error:4 | 0 | 1 |
+| rendered | 289 | BUCKET_RENDERED |
+| frame_error:512 | 4 | BUCKET_512 |
+| frame_error:4 | 0 | BUCKET_4 |
 | not_discovered:exit_20_params_setup:13 | 2 | 2 |
 | not_discovered:exit_20_global_setup:11 | 1 | 0 |
 | not_discovered:exit_20_global_setup:14 | 1 | 0 |
@@ -170,8 +198,11 @@ bucket が動いたのは 3 本だけで、他の 301 本は baseline と同じ 
 - `ProfileToProfile.aex`: `not_discovered:exit_20_global_setup:14` → `frame_error:512`
 - `Particle_Playground.aex`: `not_discovered:exit_20_global_setup:11` → `not_discovered:exit_20_global_setup:2`
 
-512 が 9 → 10 になったのは ProfileToProfile が render 段まで進んだ分で、
-既存の 9 本は変わっていない。
+512 が増えたのは ProfileToProfile が render 段まで進んだ分で、baseline の 4 本
+(ColorAndContrast / Curl_Noise / ShapeBlur / VRSphereToPlane) は変わっていない。
+
+silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ record
+すべてについて変更後の hash と突き合わせ、差分ゼロ・欠落ゼロを確認した。
 
 ## 5. 残件 (別 issue)
 
@@ -183,8 +214,9 @@ bucket が動いたのは 3 本だけで、他の 301 本は baseline と同じ 
   選択された LStr group (`$$$/AE/Playground/LStr/` は 0..231) に存在しない。
   Particle_Playground は `ext_alloc(out, 0x101b)` のように **resource id で
   string table を取得**しており、ホストはその id を無視して 1 group だけを
-  返している。ここが次の境界 (観察)。
-- PSL_Adjustments: discovery は通るが render で `frame_error:4`。
+  返している。ここが次の境界 (観察)。→ #1280
+- PSL_Adjustments (`frame_error:4`) と ProfileToProfile (`frame_error:512`) の
+  render 段。→ #1281
 - PSL_Adjustments を `aex_l2_worker.exe --l2-params-only` で直接叩くと、
   report (`status=parameters_inspected`、5 params) を書き終えたあと process
   終了時に access violation で落ちる (exit 0xC0000005)。COR PSL thread /
@@ -193,9 +225,9 @@ bucket が動いたのは 3 本だけで、他の 301 本は baseline と同じ 
   multifilter の discovery 経路には出ていない**: cluster session (full sweep) でも
   singleton (`render_sweep --filter PSL_Adjustments`、member 1 本) でも
   `frame_error:4` = discovery 成功で、`worker failed` 系の分類にはならない
-  (どちらも実測)。
-- `COR_Birth` がこの worker で返らない件。
-- 3D Camera Tracker / Stabilizer の `PF AE Private Effect Suite` v3/v5。
+  (どちらも実測)。→ #1282
+- `COR_Birth` がこの worker で返らない件。→ #1282
+- 3D Camera Tracker / Stabilizer の `PF AE Private Effect Suite` v3/v5。→ #1283
 
 ---
 
