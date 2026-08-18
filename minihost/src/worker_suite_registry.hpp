@@ -48,6 +48,7 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_effect_4,
   aegp_effect_2,
   aegp_effect_3,
+  aegp_effect_1,
   aegp_stream_11,
   aegp_stream_7,
   aegp_stream_8,

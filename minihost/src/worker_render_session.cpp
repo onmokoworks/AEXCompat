@@ -1470,14 +1470,24 @@ SmartRenderSessionOutcome run_smart_render_session(
         // still holds whatever the plug-in wrote, and a caller placing a frame
         // by it would be placing it by an unvalidated number.
         if (frame_result.rects_valid) {
-          frame.origin_x = frame_result.result_rect[0];
-          frame.origin_y = frame_result.result_rect[1];
+          // The plug-in's own `result_rect` places a frame it rendered. It
+          // cannot place the empty-result passthrough: that rect is empty and
+          // its top-left need not be (0,0) (an effect may answer, say,
+          // {5,5,5,5}), while the copied frame sits at the request rect
+          // (issue #1285).
+          frame.origin_x = frame_result.empty_result_passthrough
+              ? frame_result.output_origin_x : frame_result.result_rect[0];
+          frame.origin_y = frame_result.empty_result_passthrough
+              ? frame_result.output_origin_y : frame_result.result_rect[1];
         }
         frame.input_hash = frame_result.input_hash;
         frame.output_hash = frame_result.output_hash;
         // A legally empty PreRender result_rect (#278): no pixels were rendered,
         // so this is a valid empty frame, not a zero-dimension invariant failure.
-        frame.empty_result = frame_result.empty_result_rect;
+        // ... unless the host emitted the input in its place, which is a real
+        // frame with real pixels (issue #1285).
+        frame.empty_result = frame_result.empty_result_rect &&
+            !frame_result.empty_result_passthrough;
         // Sentinel evidence only exists once the guarded output buffer was
         // built; refusals before that point are frame-local diagnostics, not
         // corruption.

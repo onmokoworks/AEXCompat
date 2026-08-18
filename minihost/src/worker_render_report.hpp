@@ -209,6 +209,9 @@ struct SmartReport {
     // every value after it.
     uint32_t empty_layer_param_checkouts{};
     uint32_t empty_layer_param_pixel_checkouts{};
+    // Appended for the same reason (issue #1285). The empty result the host
+    // answered with the effect's input instead of an empty frame.
+    bool empty_result_passthrough{};
   } head;
   struct Context {
     std::array<int32_t, 4> result_rect{};

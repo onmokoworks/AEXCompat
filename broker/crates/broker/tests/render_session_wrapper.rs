@@ -309,8 +309,11 @@ mod windows_e2e {
         );
 
         // A legally empty result still has to be reported as one: the probe
-        // answers an empty result_rect at current_time % 4 == 3, and neither the
-        // PNG nor a checksum may be invented for it.
+        // answers an empty result_rect at current_time % 5 == 3. Since #1285 the
+        // host emits the effect's input in place of the promised-nothing frame,
+        // matching what AE does with the same answer, so there is a PNG -- but
+        // it is the input, not a frame the probe drew, and the report says so
+        // through `empty_result_passthrough`.
         let out_empty = scratch.join("empty.png");
         let empty = render_experimental_smart_image_at_time(
             &root,
@@ -333,9 +336,26 @@ mod windows_e2e {
             Some(&serde_json::json!(true)),
             "the session must report the empty result: {empty}"
         );
+        assert_eq!(
+            empty.get("empty_result_passthrough"),
+            Some(&serde_json::json!(true)),
+            "the session must report the passthrough: {empty}"
+        );
+        assert_eq!(
+            empty.get("smart_render_selector_dispatched"),
+            Some(&serde_json::json!(false)),
+            "the empty result must still skip the render selector: {empty}"
+        );
         assert!(
-            !out_empty.exists(),
-            "an empty result must not write a PNG: {empty}"
+            out_empty.exists(),
+            "the passthrough frame must be written: {empty}"
+        );
+        // The passthrough copies; it does not invent. Anything but equality
+        // here would be a silently wrong frame.
+        assert_eq!(
+            empty.get("output_sha256"),
+            empty.get("input_sha256"),
+            "the passthrough frame is not the input: {empty}"
         );
 
         let _ = std::fs::remove_dir_all(&scratch);

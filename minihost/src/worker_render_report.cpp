@@ -329,6 +329,8 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"extra_pixels_contract_violation\":"
       << (v.extra_pixels_contract_violation ? "true" : "false")
       << ",\"empty_result_rect\":" << (v.empty_result_rect ? "true" : "false")
+      << ",\"empty_result_passthrough\":"
+      << (v.empty_result_passthrough ? "true" : "false")
       << ",\"global_setdown_error\":" << v.global_setdown_error
       << ",\"case_id\":\"" << v.case_id << "\",\"pixel_format\":\"" << v.pixel_format
       << "\",\"width\":" << v.dimensions[0] << ",\"height\":" << v.dimensions[1]

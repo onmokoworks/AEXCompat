@@ -118,6 +118,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::aegp_effect_4: return {"AEGP Effect Suite", 4};
     case UnsupportedSuiteId::aegp_effect_2: return {"AEGP Effect Suite", 2};
     case UnsupportedSuiteId::aegp_effect_3: return {"AEGP Effect Suite", 3};
+    case UnsupportedSuiteId::aegp_effect_1: return {"AEGP Effect Suite", 1};
     case UnsupportedSuiteId::aegp_stream_11: return {"AEGP Stream Suite", 11};
     case UnsupportedSuiteId::aegp_stream_7: return {"AEGP Stream Suite", 7};
     case UnsupportedSuiteId::aegp_stream_8: return {"AEGP Stream Suite", 8};
