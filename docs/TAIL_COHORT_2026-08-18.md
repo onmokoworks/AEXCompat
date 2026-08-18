@@ -148,9 +148,15 @@ Grow_Bounds の方が情報量が多い。**plug-in が書いた値では AE の
 host をこれに合わせた (`worker_smart_dispatch.cpp` の
 `empty_result_passthrough`)。selector を回さないのは従来通りで、変わったのは
 「その後に何を出すか」だけ。**Classic fallback ではない** (別経路を走らせない、
-selector を再 dispatch しない)。入力が無い dispatch
-(`plan.missing_input`) と GPU negotiation 中は従来の空のままで、フレームを
-捏造しない。
+selector を再 dispatch しない)。複製できないと分かった dispatch は
+従来の空のままで、フレームを捏造しない: 入力の無い dispatch
+(`plan.missing_input`)、GPU negotiation 中 (pixel が device 側にある)、
+入力 world が register 時の layout と一致しなくなっているとき
+(`resolve_registered_dispatch_world` の fail-closed。PreRender は既に走って
+いて、plug-in に渡した layer ParamDef はこの world の前半を alias している
+ので、pixel pointer だけは `plan` では保証できない)、要求 rect が入力の外に
+出るとき、rect が空/負のとき。output world を組めなかったときは複製せず
+`render_error = -6` を返す (空フレームの成功にはしない)。
 
 記録は 3 か所:
 

@@ -2263,8 +2263,23 @@ bool dispatch(const Request& request, const Hooks& hooks,
   // negotiation is excluded because the pixels then live on the device rather
   // than in this world. Note that a generator-shaped effect applied to a layer
   // still has an input here (the layer), and emitting it is what AE does.
-  const unsigned char* passthrough_source =
-      request.input_world ? read<unsigned char*>(*request.input_world, 24) : nullptr;
+  //
+  // The pixel pointer is the one field `plan` cannot vouch for: PreRender has
+  // already run, and the layer ParamDef the plug-in was handed aliases this
+  // world's prefix (`copy_world_into_param_def` does not re-point
+  // `reserved_long4`), so a plug-in that writes through it writes the live
+  // world's fields -- the #1090 shape. Resolving through the dispatch-world
+  // registry is what refuses that: `register_world` captured data, rowbytes,
+  // width and height when the host handed the world over, and the resolve
+  // fails closed when any of them no longer match. A raw read of +24 would
+  // have pointed `plan.height` rows of memcpy wherever the plug-in wanted.
+  aexcompat::world_safety::DispatchWorldFormat passthrough_world{};
+  const bool passthrough_world_intact =
+      request.input_world &&
+      aexcompat::world_safety::resolve_registered_dispatch_world(
+          request.input_world->data(), passthrough_world);
+  const unsigned char* passthrough_source = passthrough_world_intact
+      ? static_cast<const unsigned char*>(passthrough_world.data) : nullptr;
   // The emitted frame is exactly the rect AE asked for. Width/height/rowbytes
   // and the world origin come off that rect the same way
   // `prepare_smart_output_bounds` derives them for a rendered result, so one
@@ -2272,17 +2287,25 @@ bool dispatch(const Request& request, const Hooks& hooks,
   const std::array<int32_t, 4> passthrough_rect = expected_request;
   const int32_t passthrough_width = passthrough_rect[2] - passthrough_rect[0];
   const int32_t passthrough_height = passthrough_rect[3] - passthrough_rect[1];
-  const int32_t passthrough_rowbytes = plan.rowbytes;
+  // Bound the copy with what the registry captured, not with `plan`: the two
+  // agree for an intact world, and if they ever disagree the resolve above has
+  // already refused. A non-negative top-left is required outright so the
+  // unsigned row arithmetic below cannot be reached with one.
+  const int32_t passthrough_rowbytes = passthrough_world.rowbytes;
   result.empty_result_passthrough = result.empty_result_rect && !plan.missing_input &&
       !plan.gpu_negotiation && passthrough_source &&
-      plan.rowbytes >= plan.width * plan.pixel_bytes &&
+      passthrough_world.rowbytes >= passthrough_world.width * plan.pixel_bytes &&
+      passthrough_rect[0] >= 0 && passthrough_rect[1] >= 0 &&
       passthrough_width > 0 && passthrough_height > 0 &&
-      render::smart_rect_contained(passthrough_rect,
-                                   {0, 0, plan.width, plan.height});
+      render::smart_rect_contained(
+          passthrough_rect,
+          {0, 0, passthrough_world.width, passthrough_world.height});
   if (result.empty_result_passthrough) {
+    // `max_result_rect` is deliberately left alone. `result.max_result_rect`
+    // was already copied above and keeps the plug-in's own envelope, which is
+    // what the report should show; nothing downstream reads the local copy.
     smart_bounds.empty_result = false;
     smart_bounds.result_rect = passthrough_rect;
-    smart_bounds.max_result_rect = passthrough_rect;
     smart_bounds.width = passthrough_width;
     smart_bounds.height = passthrough_height;
     smart_bounds.rowbytes = passthrough_width * plan.pixel_bytes;
@@ -2295,8 +2318,11 @@ bool dispatch(const Request& request, const Hooks& hooks,
   // overrun is surfaced as an explicit diagnostic rather than a render
   // failure: AE silently clips, and blocking here would turn an observable
   // compatibility gap into a dead end for real-AEX observation.
+  // The plug-in's own rect, not the emitted one: `result.result_rect` was
+  // copied before the passthrough could overwrite `smart_bounds`, and this
+  // field is about what the plug-in answered (issue #1285).
   result.result_within_request =
-      render::smart_rect_contained(smart_bounds.result_rect, expected_request);
+      render::smart_rect_contained(result.result_rect, expected_request);
   result.extra_pixels_contract_violation = result.rects_valid &&
       !result.returns_extra_pixels && !result.result_within_request;
   if (result.rects_valid &&
@@ -2306,9 +2332,17 @@ bool dispatch(const Request& request, const Hooks& hooks,
       result.rects_valid = false;
       result.pre_error = -3;
       // A nonzero pre_error skips the empty-result branch below entirely, so
-      // the passthrough's own correction never runs. Clear the flag here or
-      // the record claims a copy that no code path performed (issue #1285).
+      // the passthrough's own correction never runs. Undo the whole emitted
+      // frame here: the flag, or the record claims a copy no code path
+      // performed, and the geometry, or `finalize` packs a buffer that was
+      // never resized to it -- `reset` keeps the previous, possibly smaller,
+      // allocation when it fails (issue #1285).
       result.empty_result_passthrough = false;
+      result.output_width = 0;
+      result.output_height = 0;
+      result.output_rowbytes = 0;
+      result.output_origin_x = 0;
+      result.output_origin_y = 0;
     }
     *request.destination = request.guarded->data();
     if (!render::prepare_world_layout(
@@ -2490,6 +2524,11 @@ bool dispatch(const Request& request, const Hooks& hooks,
         result.output_rowbytes = 0;
         result.output_origin_x = 0;
         result.output_origin_y = 0;
+        // The host failed to lay out or register the output world. That is not
+        // the effect legitimately producing no pixels, and reporting it as one
+        // would hand the session a clean empty frame for a host fault. The
+        // non-empty path answers -6 for the same failure; so does this one.
+        result.render_error = -6;
         passthrough_reason = "output_world_unavailable";
       } else {
         const std::size_t row = static_cast<std::size_t>(smart_bounds.width) *

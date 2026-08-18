@@ -472,10 +472,12 @@ AE 26.3x87 の実機観測 (`docs/TAIL_COHORT_2026-08-18.md` §2.3):
 であって「フレームが空」ではない。
 
 host はこれに合わせ、空 result のとき effect の入力を output world に複製して
-出す (`worker_smart_dispatch.cpp` の `empty_result_passthrough`)。0 byte 出力が
-残るのは複製できないとき (入力の無い dispatch、GPU negotiation、output world が
-組めなかったとき) だけで、そのときは `empty_result_passthrough` が false のまま
-`output_pixels_valid=true` の空フレームとして報告される。
+出す (`worker_smart_dispatch.cpp` の `empty_result_passthrough`)。複製できないと分かった
+dispatch (入力が無い、GPU negotiation 中、入力 world が register 時の layout と
+一致しない、要求 rect が入力の外、rect が空) では 0 byte 出力のままで、
+`empty_result_passthrough` は false、`output_pixels_valid=true` の空フレームと
+して報告される。output world を組めなかった場合だけは空フレームの成功にせず
+`render_error = -6` を返す。
 
 `pf_smart_geometry_probe` の mode 3 (`EmptyResult`) の期待値もこれに合わせて
 更新した (`tests/test_pf_smart_geometry_probe.py`)。
