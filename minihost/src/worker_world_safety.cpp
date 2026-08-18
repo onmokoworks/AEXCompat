@@ -1,5 +1,8 @@
 #include "worker_world_safety.hpp"
 
+#include "worker_pf_world_facade.hpp"
+#include "worker_world_registry.hpp"
+
 #include <algorithm>
 #include <cstring>
 #include <vector>
@@ -8,6 +11,8 @@ namespace aexcompat::world_safety {
 namespace {
 
 thread_local std::vector<std::vector<DispatchWorldFormat>> g_dispatch_world_formats;
+// Worlds this scope gave a pool facade to, so the scope can take them back.
+thread_local std::vector<std::vector<void*>> g_attached_facades;
 thread_local uint64_t g_dispatch_world_generation{};
 
 bool read_world_layout(const void* world, void*& data, int32_t& rowbytes,
@@ -21,18 +26,87 @@ bool read_world_layout(const void* world, void*& data, int32_t& rowbytes,
   return true;
 }
 
+int32_t facade_pixel_bytes(int32_t pixel_format) {
+  using namespace aexcompat::world_registry;
+  if (pixel_format == kPixelFormatArgb32) return 4;
+  if (pixel_format == kPixelFormatArgb64) return 8;
+  if (pixel_format == kPixelFormatArgb128 || pixel_format == kPixelFormatGpuBgra128)
+    return 16;
+  return 0;
+}
+
+// Every world registered for dispatch is a world the host hands the plug-in,
+// so this is where it gets AE's PF_World identity behind reserved_long4
+// (worker_pf_world_facade, issue #1276). A registration that succeeds without
+// a facade (pool exhausted) is still a registration: the world is usable, the
+// plug-in just meets the pre-#1276 null there.
+// A world that belongs to the GPU stack is not the CPU PF_World shape a
+// plug-in dereferences behind reserved_long4, and its +0x50 and +0x40 are the
+// VideoFrame / GPUFoundation stack's (registering the colour effects' GPU
+// worlds with a facade crashed CreateGPUVideoFrame, issue #1276). Three
+// separate signs, any of which disqualifies a world:
+//   * the GPU pixel format (the caller says so outright);
+//   * `platform_ref` (+0x40) set - the VideoFrame adapter stores its PPix
+//     handle there, and PF.dll's own
+//     `ae::pf::VideoFrameFactory::IsEffectWorldGPUBased` reads the same field;
+//   * a null pixel pointer, the other half of PF.dll's test.
+// The render transport also swaps a host world's +24 to a CUDA device pointer
+// before re-registering it; that world keeps its `platform_ref`, so the second
+// sign catches it and the facade is not refreshed onto device memory.
+bool gpu_stack_world(const void* world, int32_t pixel_format) {
+  if (pixel_format == aexcompat::world_registry::kPixelFormatGpuBgra128) return true;
+  const auto* bytes = static_cast<const std::byte*>(world);
+  void* data{};
+  void* platform_ref{};
+  std::memcpy(&data, bytes + 24, sizeof(data));
+  std::memcpy(&platform_ref, bytes + 64, sizeof(platform_ref));
+  return platform_ref != nullptr || data == nullptr;
+}
+
+void attach_facade(void* world, int32_t pixel_format) {
+  if (gpu_stack_world(world, pixel_format)) return;
+  namespace facade = aexcompat::worker_runtime::pf_world_facade;
+  if (!facade::attach(world, facade_pixel_bytes(pixel_format))) return;
+  // Only a pool object needs taking back; an embedded or registry-published
+  // world was left untouched by `attach` and outlives the scope with its owner.
+  if (facade::attached(world) && !g_attached_facades.empty())
+    g_attached_facades.back().push_back(world);
+}
+
 }  // namespace
 
 DispatchWorldFormatScope::DispatchWorldFormatScope() {
   g_dispatch_world_formats.emplace_back();
+  g_attached_facades.emplace_back();
 }
 
 DispatchWorldFormatScope::~DispatchWorldFormatScope() {
+  // The facade a registration attached lives exactly as long as the
+  // registration: past the scope the world's pixels may be gone, and a mirror
+  // that outlived them would still name them. Embedded worlds are not in this
+  // list (nothing was attached for them).
+  //
+  // A world an *enclosing* scope also registered keeps its facade: scopes
+  // nest (a callback's scope inside a dispatch's), and taking the facade away
+  // while the outer registration is still live would leave that registration
+  // handing the plug-in a world whose reserved_long4 the host just cleared.
+  const auto registered_by_an_outer_scope = [](const void* world) {
+    for (std::size_t depth = 0; depth + 1 < g_dispatch_world_formats.size(); ++depth) {
+      const auto& entries = g_dispatch_world_formats[depth];
+      if (std::any_of(entries.begin(), entries.end(),
+                      [&](const DispatchWorldFormat& entry) { return entry.world == world; }))
+        return true;
+    }
+    return false;
+  };
+  for (void* world : g_attached_facades.back())
+    if (!registered_by_an_outer_scope(world))
+      aexcompat::worker_runtime::pf_world_facade::detach(world);
+  g_attached_facades.pop_back();
   g_dispatch_world_formats.pop_back();
 }
 
-bool DispatchWorldFormatScope::register_world(const void* world,
-                                               int32_t pixel_format) {
+bool DispatchWorldFormatScope::register_world(void* world, int32_t pixel_format) {
   if (!world || g_dispatch_world_formats.empty()) return false;
   DispatchWorldFormat entry{};
   entry.world = world;
@@ -46,11 +120,12 @@ bool DispatchWorldFormatScope::register_world(const void* world,
                                [&](const auto& old) { return old.world == world; }),
                 entries.end());
   entries.push_back(entry);
+  attach_facade(world, pixel_format);
   return true;
 }
 
-bool DispatchWorldFormatScope::register_gpu_world(const void* world,
-                                                  int32_t pixel_format) {
+// No facade here by construction: this registers a world the GPU stack owns.
+bool DispatchWorldFormatScope::register_gpu_world(void* world, int32_t pixel_format) {
   if (!world || g_dispatch_world_formats.empty()) return false;
   DispatchWorldFormat entry{};
   entry.world = world;

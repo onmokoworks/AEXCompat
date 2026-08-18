@@ -95,6 +95,16 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   ..." cpr` で子に deferred bp、C++ 例外は `sxe eh` + `k`、Adobe DLL 内部の
   戻り値は `bp /1 @$ra "r rax"`。手順と観測例は
   `docs/MASKLESS_PATH_EFFECTS_OBSERVATION_2026-08-17.md` §1)。
+- AE の PNG は premultiplied alpha、host の dump は straight。alpha が 255 で
+  ない pixel を含む出力を AE と比べるときは host 側を premultiply してから
+  比較する (#1253 の AudWave、#1276 の CannedWarp)。また host は expand buffer
+  を返すので、出力の extent が AE の comp より大きいことがある
+  (record の `width`/`height`/`origin_x`/`origin_y` で AE 側の座標に写す)。
+- `tools/capture-ae-reference.ps1` の `-EffectName` は matchName。AEX の PiPL が
+  読めない (AE 同梱は `no_pipl` になる) ので、AEX のバイト列から `ADBE ...`
+  文字列を拾うのが早い (`Spill2.aex` → `ADBE Spill2`、`CannedWarp.aex` →
+  `ADBE WRPMESH`)。失敗すると `.result.json` が残り、次の実行が
+  `Reference result file already exists.` で止まるので消してから再実行する。
 - discovery 失敗 (`not_discovered:*`) は render と違って worker の stderr が record に
   乗らない。Effects folder の discovery は in-place cluster session (1 worker が
   複数 AEX を順に inspect) で走り、session の stderr は close 時の末尾 4 KB しか
@@ -115,6 +125,24 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   multifilter の configured dependency dirs でこれを補っている)。one-shot で通るが
   full sweep で落ちる AEX は cluster の同居 member 依存なので、one-shot の結果だけで
   「再現しない」と判定しない (Reshape_New が実例)。
+
+## 2.1 並行セッションと sweep プロセス
+
+複数セッションがそれぞれの worktree で同時に sweep を回すことがある
+(2026-08-18 に #1271 (VR) と #1274-#1276 (非VR) が同時に走った)。自分の
+sweep を止めるときに `Get-Process render_sweep | Stop-Process` を使うと
+**他セッションの sweep も落ちる**。実際に 2 回巻き込んだ。path で絞ること:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='render_sweep.exe'" |
+  Where-Object { $_.ExecutablePath -like '*<自分の CARGO_TARGET_DIR>*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+同じ理由で、sweep 中に `<worktree>\target\minihost-build\` の worker exe を
+上書きしない (§4 のコピー運用)。走っている sweep が測る exe が途中で入れ替わり、
+その計測は build fingerprint と一致しなくなる。exe を差し替えたら sweep を
+やり直す。
 
 ## 3. worktree 運用
 

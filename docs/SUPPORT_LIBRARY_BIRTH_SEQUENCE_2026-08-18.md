@@ -27,7 +27,9 @@ process 起動時に呼ぶ support library の birth が並んでいる。Ghidra
 | 12 | `COR_Birth(mode == 1 \|\| (flags>>3 & 1), flags & 1, mode == 3)` |
 | … | `PLUG_Birth` / `TDB_Birth` / `PF_Birth(0)` / `P_Birth` / `TXT_Birth` / `TDL_Birth` / `PREM_Birth` / `PIN_Birth` / `SND_Birth` / `OM_Birth` / `MSK_Birth` / `FLT_Birth` / `PR_Birth` / `BEE_Birth` / `MEE_Birth` / `FIM_Birth` / `FLO_Birth` / **`U_SP_Birth()`** / `MC_SP_Birth` / `PT_Birth` |
 
-このホストは従来 `U_Birth` だけを呼んでいた (#362 / #1063)。列の他の birth は
+このホストは従来 `U_Birth` だけを呼んでいた (#362 / #1063)。`PF_Birth` は
+この作業と並行して PR #1284 (issue #1212) が入れた (`docs/PF_HOST_ABI_SHAPES_2026-08-18.md`)。
+列の他の birth は
 どれもプラグインの closure からは呼ばれない (closure が import するのは working
 entry point だけ) ので、呼ぶ責任はホストにある。
 

@@ -118,6 +118,19 @@ bool verify_fixed_image_case_admission() {
       plan.pixel_bytes == 4 && plan.rowbytes == 64;
 }
 
+// A world handed to a plug-in inside a PF_ParamDef. The copy keeps the
+// `reserved_long4` it inherits, which points at the *live* world's PF_World
+// object (the storage prefix): that is AE's own shape - a ParamDef's world
+// names AE's PF_World for that layer - and it is the only facade such a world
+// can have, because `world - 8` inside a ParamDef is the ParamDef's own bytes.
+// A plug-in that writes through it (the issue #1090 origin shape) therefore
+// writes the live world's fields, exactly as it would in AE; the host reads its
+// own geometry from the render plan, not from those fields.
+template <typename ParamDef, typename World>
+void copy_world_into_param_def(ParamDef& definition, const World& world) {
+  std::memcpy(definition.data() + 56, world.data(), world.size());
+}
+
 bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
                            const std::vector<unsigned char>* external_rgba,
                            bool input_write_advertised,
@@ -235,8 +248,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
   for (std::size_t slot = 1; slot < definitions.size(); ++slot) {
     if (runtime.records[slot - 1].type == 0 &&
         runtime.records[slot - 1].layer_default == -1)
-      std::memcpy(definitions[slot].data() + 56, request.input_world->data(),
-                  request.input_world->size());
+      copy_world_into_param_def(definitions[slot], *request.input_world);
   }
   auto& smart_state = smart::state();
   smart_state.hosted_layers.clear();
@@ -272,7 +284,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       const bool same_time = static_cast<int64_t>(layer.time) * requested_scale ==
           static_cast<int64_t>(requested_time) * layer.time_scale;
       if (!layer.timed || same_time)
-        std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
+        copy_world_into_param_def(definitions[layer.slot], world);
       smart_state.hosted_layers.push_back({layer.slot, layer.time, layer.time_scale,
           layer.timed, layer.width, layer.height, -1, world.data(),
           view_world.data(), {-1, -1, -1, -1}});
@@ -363,7 +375,7 @@ bool verify_animation_extent_wiring_for_test() {
   plan.rowbytes = plan.width * plan.pixel_bytes;
   parameter_execution::BufferIn input{};
   parameter_execution::BufferOut output{};
-  std::array<std::byte, 120> input_world{};
+  aexcompat::world_safety::EffectWorldStorage input_world{};
   render_safety::InputPixelBuffer source(
       static_cast<std::size_t>(plan.rowbytes) * plan.height);
   if (!source || !render::prepare_world_layout(
@@ -376,8 +388,7 @@ bool verify_animation_extent_wiring_for_test() {
                               world_registry::kPixelFormatArgb32))
     return false;
   ParameterState prepared(runtime.records.size() + 1, 0);
-  std::memcpy(prepared.definitions[0].data() + 56, input_world.data(),
-              input_world.size());
+  copy_world_into_param_def(prepared.definitions[0], input_world);
   parameter_execution::initialize_parameter_definitions(
       prepared.definitions, plan.width, plan.height);
   const std::string case_id = "request";

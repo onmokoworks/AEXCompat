@@ -105,10 +105,10 @@ struct WorldBuffers {
   render_safety::InputPixelBuffer* source{};
   render_safety::OutputPixelBuffer* output{};
   unsigned char** destination{};
-  std::array<std::byte, 120>* input_world{};
-  std::array<std::byte, 120>* output_world{};
-  std::array<std::byte, 120>* input_checkout_view{};
-  std::array<std::byte, 120>* map_checkout_view{};
+  aexcompat::world_safety::EffectWorldStorage* input_world{};
+  aexcompat::world_safety::EffectWorldStorage* output_world{};
+  aexcompat::world_safety::EffectWorldStorage* input_checkout_view{};
+  aexcompat::world_safety::EffectWorldStorage* map_checkout_view{};
   world_safety::DispatchWorldFormatScope* formats{};
   render::MapWorld* map{};
 };
@@ -129,8 +129,8 @@ struct ParameterState {
   ~ParameterState();
   parameter_execution::Definitions definitions;
   std::vector<std::vector<unsigned char>> hosted_pixels;
-  std::vector<std::array<std::byte, 120>> hosted_worlds;
-  std::vector<std::array<std::byte, 120>> hosted_view_worlds;
+  std::vector<aexcompat::world_safety::EffectWorldStorage> hosted_worlds;
+  std::vector<aexcompat::world_safety::EffectWorldStorage> hosted_view_worlds;
   std::vector<void*> params;
   std::vector<unsigned char> pre_render_source;
 };
@@ -150,7 +150,7 @@ struct ParameterRequest {
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t dispatch_pixel_format{};
-  std::array<std::byte, 120>* input_world{};
+  aexcompat::world_safety::EffectWorldStorage* input_world{};
   world_safety::DispatchWorldFormatScope* formats{};
   render_safety::InputPixelBuffer* source{};
 };

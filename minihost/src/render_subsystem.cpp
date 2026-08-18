@@ -1,5 +1,7 @@
 #include "render_subsystem.h"
 
+#include "worker_pf_world_facade.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -11,7 +13,7 @@ namespace aexcompat::render {
 
 namespace {
 template <typename T>
-void store_world_field(std::array<std::byte, 120>& world, std::size_t offset, T value) {
+void store_world_field(aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset, T value) {
   std::memcpy(world.data() + offset, &value, sizeof(value));
 }
 
@@ -97,7 +99,7 @@ bool smart_geometry_rect_self_test() {
   return passed;
 }
 
-bool prepare_world_layout(std::array<std::byte, 120>& world,
+bool prepare_world_layout(aexcompat::world_safety::EffectWorldStorage& world,
                           const WorldLayout& layout, void* pixels) {
   if (!pixels || !valid_world_layout(layout)) return false;
   world.fill(std::byte{});
@@ -108,7 +110,11 @@ bool prepare_world_layout(std::array<std::byte, 120>& world,
   store_world_field(world, 40, layout.height);
   const std::array<int32_t, 4> extent{0, 0, layout.width, layout.height};
   std::memcpy(world.data() + 44, extent.data(), sizeof(extent));
-  return true;
+  // AE's PF_World shape around the LayerDef (worker_pf_world_facade, issue
+  // #1276): the depth's vtable in the storage prefix and reserved_long4
+  // pointing at it. The layout was validated above, so the depth is one of
+  // the three the facade knows.
+  return aexcompat::worker_runtime::pf_world_facade::embed(world.data(), layout.pixel_bytes);
 }
 
 bool prepare_connected_map_world(const std::string& case_id, int32_t input_width,

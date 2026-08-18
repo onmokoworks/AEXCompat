@@ -176,6 +176,28 @@ template <typename T, std::size_t N>
 void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
+// A world handed to a plug-in inside a PF_ParamDef. The copy keeps the
+// `reserved_long4` it inherits, which points at the *live* world's PF_World
+// object (the storage prefix): that is AE's own shape - a ParamDef's world
+// names AE's PF_World for that layer - and it is the only facade such a world
+// can have, because `world - 8` inside a ParamDef is the ParamDef's own bytes.
+// A plug-in that writes through it (the issue #1090 origin shape) therefore
+// writes the live world's fields, exactly as it would in AE; the host reads its
+// own geometry from the render plan, not from those fields.
+template <typename ParamDef, typename World>
+void copy_world_into_param_def(ParamDef& definition, const World& world) {
+  std::memcpy(definition.data() + 56, world.data(), world.size());
+}
+
+// The same accessors on a world storage (the LayerDef part).
+template <typename T>
+T read(const aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset) {
+  return read<T>(world.layer_def, offset);
+}
+template <typename T>
+void write(aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset, T value) {
+  write(world.layer_def, offset, value);
+}
 }  // namespace
 
 // Keep every direct EffectMain selector call on the same audited boundary.
@@ -336,7 +358,7 @@ struct ClassicLifecycleOwner {
   std::array<std::byte, kOutSize>& output;
   std::vector<std::array<std::byte, kParamSize>>& definitions;
   std::vector<void*>& params;
-  std::array<std::byte, kEffectWorldSize>& world;
+  aexcompat::world_safety::EffectWorldStorage& world;
   bool manage_sequence;
   aexcompat::render_lifecycle::FrameSetupOutput frame_setup_output{};
 
@@ -393,7 +415,7 @@ struct ClassicRenderDispatchOwner {
   EffectEntry entry;
   std::array<std::byte, kInSize>& input;
   std::array<std::byte, kOutSize>& output;
-  std::array<std::byte, kEffectWorldSize>& world;
+  aexcompat::world_safety::EffectWorldStorage& world;
   OutputPixelBuffer& guarded;
   DispatchWorldFormatScope& worlds;
   std::vector<std::array<std::byte, kParamSize>>& definitions;
@@ -677,7 +699,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   unsigned char* destination = guarded.data();
   guards_intact = true;
 
-  std::array<std::byte, 120> input_world{}, output_world{};
+  aexcompat::world_safety::EffectWorldStorage input_world{}, output_world{};
   const aexcompat::render::WorldLayout primary_world{
       pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes};
   if (!aexcompat::render::prepare_world_layout(input_world, primary_world, source.data()) ||
@@ -694,19 +716,19 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return -3;
     aexcompat::worker_runtime::classic::ParameterDefinition checkout_definition{};
     write<int32_t>(checkout_definition, 12, 0);
-    std::memcpy(checkout_definition.data() + 56, map_world.world.data(), map_world.world.size());
+    copy_world_into_param_def(checkout_definition, map_world.world);
     classic_context->set_fallback_definition(g_secondary_layer_slot,
                                              checkout_definition);
   }
 
   std::vector<std::array<std::byte, kParamSize>> definitions(g_params.size() + 1);
   std::vector<std::vector<unsigned char>> hosted_pixels;
-  std::vector<std::array<std::byte, 120>> hosted_worlds;
+  std::vector<aexcompat::world_safety::EffectWorldStorage> hosted_worlds;
   if (external_layers) {
     hosted_pixels.resize(external_layers->size());
     hosted_worlds.resize(external_layers->size());
   }
-  std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
+  copy_world_into_param_def(definitions[0], input_world);
   // POINT/POINT_3D defaults are percentages of the layer size (SDK
   // PF_PointDef); the input world's extent is what turns them into pixels.
   initialize_parameter_definitions(
@@ -719,7 +741,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   probe_arbitrary_scan(entry, input, command_output, definitions);
   for (std::size_t slot = 1; slot < definitions.size(); ++slot)
     if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1)
-      std::memcpy(definitions[slot].data() + 56, input_world.data(), input_world.size());
+      copy_world_into_param_def(definitions[slot], input_world);
   if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
     const auto& layer = (*external_layers)[layer_index];
     if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
@@ -740,10 +762,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         !dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return -3;
     if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
             external_current_time, external_time_scale))
-      std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
+      copy_world_into_param_def(definitions[layer.slot], world);
     std::array<std::byte, kParamSize> checkout{};
     write<int32_t>(checkout, 12, 0);
-    std::memcpy(checkout.data() + 56, world.data(), world.size());
+    copy_world_into_param_def(checkout, world);
     if (layer.timed) {
       if (!classic_context->add_timed_layer(
               {layer.slot, layer.time, layer.time_scale, checkout})) return -3;
@@ -1121,8 +1143,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     }
   } session_guard_probe{session, guarded};
   if (session) session->output_buffer_allocated = true;
-  std::array<std::byte, 120> input_world{}, output_world{};
-  std::array<std::byte, 120> input_checkout_view{}, map_checkout_view{};
+  aexcompat::world_safety::EffectWorldStorage input_world{}, output_world{};
+  aexcompat::world_safety::EffectWorldStorage input_checkout_view{}, map_checkout_view{};
   DispatchWorldFormatScope dispatch_worlds;
   aexcompat::render::MapWorld map_world;
   const bool input_write_advertised =
@@ -1137,7 +1159,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   aexcompat::worker_runtime::smart_setup::ParameterState parameter_state(
       g_params.size() + 1, external_layers ? external_layers->size() : 0);
   auto& definitions = parameter_state.definitions;
-  std::memcpy(definitions[0].data() + 56, input_world.data(), input_world.size());
+  copy_world_into_param_def(definitions[0], input_world);
   initialize_parameter_definitions(
       definitions,
       read<int32_t>(input_world, aexcompat::abi::x86_64_windows::LAYER_WIDTH_OFFSET),

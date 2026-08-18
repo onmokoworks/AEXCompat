@@ -1,5 +1,7 @@
 #include "worker_world_registry.hpp"
 
+#include "worker_pf_world_facade.hpp"
+
 #include "gpu_memory_world_transport.hpp"
 #include "trace_writer.hpp"
 #include "worker_extended_diag.hpp"
@@ -46,27 +48,19 @@ const char* trace_pixel_format(int32_t pixel_format) {
 
 constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024;
 constexpr std::size_t kMaxWorldCount = 64;
-// AE's PF_NewWorld leaves a non-null pointer in the world's reserved_long4
-// (offset 0x50), and some effects dereference it without a null check: Channel
-// Blur's SMART_RENDER writes the scratch world's origin to
-// *(reserved_long4 + 0x70 / 0x74) right after creating it (issue #1090, found by
-// disassembly). The host never reads reserved_long4 - every callback resolves a
-// world by its pixel pointer - so this companion is inert bookkeeping that only
-// receives the plug-in's own writes; it exists so that dereference lands on real
-// memory instead of null. The observed reach is 0x78 bytes; a full page is
-// allocated so an effect outside the corpus that touches more of AE's internal
-// structure than Channel Blur does still lands in bounds (the size is a guess
-// about an AE-internal layout, so the margin is deliberate). Bounded by
-// kMaxWorldCount the total is at most 256 KiB. The full-corpus sweep is what
-// vouches that nothing needs a specific layout here, only presence.
-constexpr std::size_t kReservedLong4Offset = 0x50;
-constexpr std::size_t kNewWorldCompanionBytes = 4096;
+// AE's PF_NewWorld hands out a PF_LayerDef embedded in PF.dll's PF_World and
+// leaves that object's address in the world's reserved_long4 (offset 0x50);
+// Channel Blur writes the scratch world's origin through it (issue #1090) and
+// Glow calls its vtable (issue #1276). The companion is the host's PF_World
+// facade (worker_pf_world_facade), owned here for the world's lifetime and
+// published into the caller's struct at creation. The host never reads it.
+using WorldFacade = aexcompat::worker_runtime::pf_world_facade::WorldObject;
 
 struct OwnedWorld {
   void* pixels{};
   uint64_t size{};
   int32_t pixel_format{};
-  void* companion{};
+  WorldFacade* companion{};
 };
 
 struct AegpWorldView {
@@ -183,13 +177,12 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   }
   void* pixels = ::operator new(static_cast<std::size_t>(size), std::nothrow);
   if (!pixels) return 1;
-  void* companion = ::operator new(kNewWorldCompanionBytes, std::nothrow);
+  auto* companion = new (std::nothrow) WorldFacade{};
   if (!companion) {
     ::operator delete(pixels);
     return 1;
   }
   std::memset(pixels, clear_pixels ? 0 : 0xcd, static_cast<std::size_t>(size));
-  std::memset(companion, 0, kNewWorldCompanionBytes);
   std::memset(world, 0, world_safety::kEffectWorldSize);
   auto* bytes = static_cast<std::byte*>(world);
   const int32_t flags = 2 | (pixel_format == kPixelFormatArgb32 ? 0 : 1);
@@ -205,8 +198,34 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   std::memcpy(bytes + 44, extent.data(), sizeof(extent));
   std::memcpy(bytes + 88, &aspect_num, sizeof(aspect_num));
   std::memcpy(bytes + 92, &aspect_den, sizeof(aspect_den));
-  std::memcpy(bytes + kReservedLong4Offset, &companion, sizeof(companion));
-  g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
+  // Registered before the facade is published: the map insert is the one step
+  // here that can throw, and a throw after publishing would leave the caller
+  // holding a world that names a companion this registry no longer knows about
+  // (dispose could never retire it).
+  try {
+    g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
+  } catch (...) {
+    // The struct was already filled in above, so it has to be cleared with the
+    // allocation: `g_worlds` is keyed by the pixel pointer, and a caller left
+    // holding a struct that names a freed buffer would resolve - once the
+    // allocator hands that address to the next world - to somebody else's live
+    // allocation, and could dispose it out from under its owner.
+    ::operator delete(pixels);
+    delete companion;
+    std::memset(world, 0, world_safety::kEffectWorldSize);
+    return 1;
+  }
+  // Publishes the facade (vtable, LayerDef mirror) and writes reserved_long4.
+  // Failing closed rather than handing back a world whose reserved_long4 is
+  // null - that null is exactly what issue #1276's plug-ins dereference.
+  if (!aexcompat::worker_runtime::pf_world_facade::publish(*companion, world,
+                                                            pixel_bytes)) {
+    g_worlds.erase(pixels);
+    ::operator delete(pixels);
+    delete companion;
+    std::memset(world, 0, world_safety::kEffectWorldSize);
+    return 1;
+  }
   ++g_created;
   g_live_bytes += size;
   if (aexcompat::l2_detail::g_trace_writer &&
@@ -241,7 +260,12 @@ int32_t __cdecl dispose_world(void*, void* world) {
     return 4;
   }
   ::operator delete(found->second.pixels);
-  ::operator delete(found->second.companion);
+  // Not deleted: a plug-in may still hold a copy of the disposed struct whose
+  // reserved_long4 names this object (the registry resolves a dispose through
+  // any copy, by pixel pointer). Retiring it leaves that pointer aimed at an
+  // inert object with a null vtable instead of at freed memory that may later
+  // hold something callable (issue #1276 review).
+  aexcompat::worker_runtime::pf_world_facade::retire(found->second.companion);
   g_live_bytes -= found->second.size;
   g_worlds.erase(found);
   ++g_disposed;

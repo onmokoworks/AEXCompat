@@ -53,6 +53,8 @@
 #include "host_audio_runtime.hpp"
 #include "l2_cli_dispatch.h"
 #include "worker_bee_scene_facade.hpp"
+#include "worker_pf_progress_info.hpp"
+#include "worker_pf_world_facade.hpp"
 #include "worker_extended_diag.hpp"
 #include "worker_callback_diagnostics.hpp"
 #include "aex_string_table.hpp"

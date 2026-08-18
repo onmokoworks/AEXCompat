@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "worker_world_safety.hpp"
+
 // Render dispatch is deliberately opaque to the command-line worker.  The
 // runtime owns PF world, parameter, suite, and module-audit state; this
 // boundary only owns selector admission, error priority, and cleanup order.
@@ -71,14 +73,14 @@ struct WorldLayout {
   int32_t rowbytes{};
 };
 
-bool prepare_world_layout(std::array<std::byte, 120>& world,
+bool prepare_world_layout(aexcompat::world_safety::EffectWorldStorage& world,
                           const WorldLayout& layout, void* pixels);
 
 struct MapWorld {
   int32_t width{};
   int32_t height{};
   std::vector<unsigned char> pixels;
-  std::array<std::byte, 120> world{};
+  aexcompat::world_safety::EffectWorldStorage world{};
 };
 
 // Construct the bounded ARGB8 map world used by the connected-map Classic

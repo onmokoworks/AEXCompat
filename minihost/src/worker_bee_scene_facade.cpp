@@ -290,6 +290,8 @@ void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcep
         project.time_display.frames_per_second == fps &&
         project.time_display.frames_per_foot == 16 &&
         project.time_display.byte12 == 2 &&
+        project.color_settings == nullptr &&
+        project.color_settings_control == nullptr &&
         comp.vtable == vtables.item.data() && comp.tag == kItemTag &&
         comp.parent_project == &graph.project &&
         comp.type == kItemTypeComposition && comp.flags == kCompItemFlags &&
@@ -322,6 +324,9 @@ void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcep
   project.time_display.frames_per_second = fps;
   project.time_display.frames_per_foot = 16;
   project.time_display.byte12 = 2;
+  // No host colour settings: an empty shared_ptr for BEE_CompItem::GetColorSettings.
+  project.color_settings = nullptr;
+  project.color_settings_control = nullptr;
 
   ItemObject& comp = graph.comp_item;
   comp.vtable = vtables.item.data();
@@ -353,6 +358,14 @@ void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcep
 }
 
 const ItemObject& comp_item() noexcept { return objects().comp_item; }
+void* comp_item_handle() noexcept {
+  // Null until a hand-out published the graph: an unprepared item has a null
+  // vtable, and handing that out as an AEGP_CompH would turn a plug-in's
+  // virtual call into a null dereference instead of the facade's identifying
+  // trap.
+  Objects& graph = objects();
+  return graph.comp_item.vtable ? &graph.comp_item : nullptr;
+}
 const ItemObject& footage_item() noexcept { return objects().footage_item; }
 const ProjectObject& project() noexcept { return objects().project; }
 const void* const* layer_vtable() noexcept { return tables().layer.data(); }

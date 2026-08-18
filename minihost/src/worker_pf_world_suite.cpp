@@ -1,4 +1,5 @@
 #include "worker_pf_world_suite.hpp"
+#include "worker_pf_progress_info.hpp"
 
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_world_safety.hpp"
@@ -20,7 +21,7 @@ using world_registry::legacy_new_world;
 using world_registry::new_world;
 using world_safety::kEffectWorldSize;
 
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 
 namespace {
 bool world_lifetimes_balanced() {

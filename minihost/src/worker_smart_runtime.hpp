@@ -1,5 +1,6 @@
 #pragma once
 
+#include "worker_world_safety.hpp"
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -76,7 +77,7 @@ struct State {
   // for a host reason rather than a plug-in one: `PF_COPY` resolves its
   // arguments through the registry and refuses a world the registry does not
   // own (issues #958, #962).
-  alignas(8) std::array<std::byte, 120> empty_layer_world{};
+  aexcompat::world_safety::EffectWorldStorage empty_layer_world{};
   bool empty_layer_world_live{};
   /// Allocates `empty_layer_world` through the host's own new-world path and
   /// returns whether it did. Installed by the dispatch, which is the layer that
