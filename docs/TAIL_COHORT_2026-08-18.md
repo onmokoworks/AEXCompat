@@ -240,11 +240,20 @@ extent 注記と同じ話)。単色入力なので「effect が何か描いた�
 ## 2.8 計測 (full corpus)
 
 母集団: AE 2026 `Support Files\Plug-ins\Effects` を `render_sweep` の引数に
-渡した 304 AEX、`--depth` 既定 (8)、size/time/frames も既定。baseline は
-`origin/main` の `9804ae6f` (#1279 merge 後) を専用の worktree で同じ手順で
-build して測ったもの。sweep CLI は両者同一バイナリで、worker 3 exe だけが違う。
+渡した 304 AEX、`--depth` 既定 (8)、size/time/frames も既定。
 
-| bucket | baseline (9804ae6f) | 変更後 |
+2 つの run の違いは **worker 3 exe だけ**にしてある:
+
+- baseline 側の worker 3 exe は、別 worktree で `origin/main` の `6ad36c04`
+  (#1280 merge 後) を build したもの。
+- 変更後の worker 3 exe は、この branch の merge commit 後の `minihost/` を
+  build したもの。
+- sweep CLI は **どちらの run もこの branch で build した同じバイナリ**
+  (下表の `cli` が一致しているのがその証拠)。この PR は
+  `render_sweep.rs` にも record key を 1 つ足しているので、baseline を
+  `6ad36c04` の CLI で回すと CLI 差分が混ざる。それを避けるためにこうした。
+
+| bucket | baseline (`6ad36c04`) | 変更後 |
 | --- | --- | --- |
 | rendered | 289 | **293** |
 | rendered_empty | 2 | **0** |
@@ -252,25 +261,9 @@ build して測ったもの。sweep CLI は両者同一バイナリで、worker 
 | render_frame_failed:worker_invariant_failure | 2 | **1** |
 | frame_error:512 | 5 | 5 |
 | frame_error:4 | 1 | 1 |
+| frame_error:516 | 1 | 1 |
 | not_discovered:exit_20_params_setup:13 | 2 | 2 |
-| not_discovered:exit_20_global_setup:2 | 1 | 1 |
 | not_discovered:exit_12 | 1 | 1 |
-
-どちらの run も report JSON の `build` は次のとおり
-(key は report のもので、`classic_worker` は `aex_render_worker.exe`):
-
-| | baseline | 変更後 |
-| --- | --- | --- |
-| smart_worker | `1c0cd7cc…` | `925a89eb…` |
-| classic_worker | `ac4a5b9a…` | `50dadf7e…` |
-| l2_worker | `93c6264c…` | `e1fa8dc2…` |
-| cli (sweep) | `2992b8d4…` | `2992b8d4…` |
-
-変更後の worker 3 exe は本 PR の HEAD が持つ `minihost/` から build したもので、
-この表を書いたあとに変わったのは `docs/` だけ。表の数字はその build で sweep を
-回し直して取ったもので、前の build の値を持ち越してはいない。baseline 側は
-worktree を分けて `9804ae6f` を同じ手順で build した。sweep CLI は両者同一
-バイナリで (上表の `cli` が一致)、違うのは worker 3 exe だけ。
 
 bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ bucket
 (突き合わせの key は `plugin_relative_path`)。
@@ -281,6 +274,23 @@ silent-wrong の確認として、両方の run で `detail.pixel_sha256` を持
 どちらも `e3b0c442…b855` (空バイト列の SHA-256、= 0 byte 出力) から
 `8d030dce…4445` (入力の RGBA、= AE oracle と同一) への変化。残りの 289 本は
 hash 一致。
+
+### 2.8.1 計測した build の指紋
+
+**以下は手元の report JSON (未コミット) からの転記で、この文書自体は record では
+ない。** 再現するには両側を build して sweep を回し、report の `build` を見る。
+key は report のもので、`classic_worker` は `aex_render_worker.exe`:
+
+| | baseline | 変更後 |
+| --- | --- | --- |
+| smart_worker | `a7505331…2fbf` | `679efa2c…2821` |
+| classic_worker | `42f205a3…d416` | `83445ae7…2675` |
+| l2_worker | `eec5da88…035d` | `2a49c2e3…c88f` |
+| cli (sweep) | `28b5e254…fc95` | `28b5e254…fc95` |
+
+上の bucket 表と pixel hash の突き合わせは、この指紋を持つ 2 つの report から
+取ったもの。この節を書いたあとに `minihost/` `bridges/` `broker/` は触っていない
+(以降の変更は `docs/` のみ)。
 
 ## 3. 残っている不確かさ
 
