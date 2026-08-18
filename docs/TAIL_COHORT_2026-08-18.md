@@ -157,10 +157,13 @@ device 側にある)、入力 world が register 時の layout と一致しな�
 走っていて、plug-in に渡した layer ParamDef はこの world の前半を alias して
 いるので、pixel pointer だけは `plan` では保証できない)、captured の
 `rowbytes` が `width * pixel_bytes` に足りないとき、要求 rect が空・負・入力の
-外のとき、そして出力 buffer の `reset` が失敗したとき (この場合は
-`pre_error = -3` の frame error になる)。output world の layout / register に
-失敗したときは複製せず `render_error = -6` を返す (空フレームの成功には
-しない)。
+外のとき。
+
+predicate を通ったあとで降りる経路が 2 つあり、どちらも空フレームの成功には
+しない: 出力 buffer の `reset` 失敗は `pre_error = -3` の frame error
+(ただしこのとき report の `output_width/height/rowbytes` は新しい寸法のままで、
+buffer は前のサイズのまま残る。#1292)、output world の layout / register 失敗は
+`render_error = -6`。
 
 記録は 3 か所:
 
@@ -253,9 +256,9 @@ build して測ったもの。sweep CLI は両者同一バイナリで、worker 
 | not_discovered:exit_20_global_setup:2 | 1 | 1 |
 | not_discovered:exit_12 | 1 | 1 |
 
-計測は最終 build (`smart_worker` `80b939f5…`、`classic_worker` `b7fc55b5…`、
-`l2_worker` `79261837…`、sweep CLI は baseline と同一の `2992b8d4…`) で取り直した
-もの。bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ bucket
+計測は review loop を出た build (`smart_worker` `3e6cd45b…`、
+`classic_worker` `78330df3…`、`l2_worker` `8b5ed426…`、sweep CLI は baseline と
+同一の `2992b8d4…`) で取り直したもの。bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ bucket
 (突き合わせの key は `plugin_relative_path`)。
 
 silent-wrong の確認として、両方の run で `detail.pixel_sha256` を持つ record を

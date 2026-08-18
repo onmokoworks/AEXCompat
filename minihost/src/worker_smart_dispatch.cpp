@@ -2343,11 +2343,14 @@ bool dispatch(const Request& request, const Hooks& hooks,
       // this branch is shared with every other dispatch. That a failed `reset`
       // leaves the previous allocation (`OutputPixelBuffer::reset` releases
       // only after a successful VirtualAlloc) while the report keeps the new
-      // dimensions is a real hole, but not one the passthrough opens: `guarded`
-      // starts at `plan.rowbytes * plan.height` and the passthrough's rect is
-      // required to lie inside the input world, so its request is never larger
-      // than what is already held. Only a grown result_rect can ask for more,
-      // which predates this change and is filed as #1292.
+      // dimensions is a real hole, and it predates the passthrough: it is
+      // reachable through a grown `result_rect`, and through a declined
+      // `run_pr_gpu_filter`, which resets `guarded` down to the plug-in's own
+      // (possibly smaller) extent and documents that it does not restore it.
+      // Filed as #1292 and not touched here. What the passthrough does not do
+      // is widen it: its rect is required to lie inside the input world, so it
+      // never asks for more than the construction size, which is the bound the
+      // grown-rect case breaks.
       result.empty_result_passthrough = false;
     }
     *request.destination = request.guarded->data();
