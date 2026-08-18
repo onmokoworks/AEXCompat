@@ -616,6 +616,14 @@ target_compile_definitions(worker_legacy_support_init_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_legacy_support_init_selftest PRIVATE src)
 
+add_executable(worker_sweetpea_bootstrap_selftest
+  ../tests/native/worker_sweetpea_bootstrap_selftest.cpp
+)
+target_compile_features(worker_sweetpea_bootstrap_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_sweetpea_bootstrap_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_sweetpea_bootstrap_selftest PRIVATE src)
+
 add_executable(worker_aegp_init_runtime_selftest
   ../tests/native/worker_aegp_init_runtime_selftest.cpp
   src/worker_aegp_init_runtime.cpp

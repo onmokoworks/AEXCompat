@@ -1362,6 +1362,163 @@ void initialize_u_dll_allocator() {
             << "\n" << std::flush;
 }
 
+// The rest of the process-wide support-library births (issue #1279). U.dll is
+// not the only library real AE births at process start, and a plug-in closure
+// imports only their working entry points, never the birth. Two of the
+// discovery failures in that issue are exactly this gap:
+//
+//   * Particle_Playground, once past U's Sweet Pea gate, faults during
+//     GLOBAL_SETUP on a null read inside VAL.dll (observed:
+//     `stage:selector_seh selector=GLOBAL_SETUP code=0xc0000005
+//     site=other_module module=VAL.dll access=read fault=null`), and it
+//     stops faulting once VAL_Birth runs. That VAL's global value-type
+//     list is what was missing is the reading of VAL_Birth's
+//     disassembly, not something the trace shows directly.
+//   * PSL_Adjustments returns 21249 from GLOBAL_SETUP. That is COR.dll's
+//     0x5301, returned by `COR_GetBIBAddressProc` ("BIB is uninitialized.")
+//     when COR's cached BIB resolver is null - and that global is set by
+//     `COR_Conception`, which nothing but the host's birth sequence calls.
+//
+// The entries below are the part of AE's own startup sequence that this host
+// runs, in AE's order and with AE's arguments. The sequence was read out of
+// `aelib.dll` and is transcribed in
+// docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md:
+// BEZ_Birth() / FILE_Birth() / M_Birth(3, 0) / RND_Birth() / VAL_Birth() /
+// COR_Conception(quiet_bib_errors), where `quiet_bib_errors` is AE's
+// "flags & 1" and is false for a host that does not set that flag, so this is
+// what AE's own code produces rather than a guessed shape. Signatures come
+// from each library's disassembly: `void VAL_Birth(void)`,
+// `int FILE_Birth(void)`, `int BEZ_Birth(void)`, `int RND_Birth(void)`,
+// `int M_Birth(unsigned, void*)`, `int COR_Conception(bool)`.
+//
+// It is a subset, not the whole sequence. What AE also does and this does not,
+// and why:
+//
+//   * `FILE_AddExtensionMap(...)` x9 before FILE_Birth: registers AE's own
+//     document extensions, which no effect plug-in needs to inspect or render.
+//   * `PREF_Birth(...)` (between RND and VAL) and `MC_Birth(...)` (between VAL
+//     and COR_Conception): AE's preferences file and media core. Neither is
+//     needed by anything measured here, and both take AE-mode arguments and
+//     touch user state, so they stay out until something demonstrably needs
+//     them.
+//   * `COR_Birth(a, quiet_bib_errors, b)`, two steps after COR_Conception:
+//     it does not return in this worker (observed: the l2 worker was still
+//     inside it after 60 seconds, while COR_Conception returns 0), and
+//     COR_Conception is
+//     the step that sets the BIB resolver the 21249 comes from. Whatever
+//     COR_Birth waits for is recorded as its own follow-up rather than worked
+//     around.
+//   * PLUG_Birth, TDB_Birth, TXT_Birth, BEE_Birth and the rest of the tail:
+//     not reached by any failure measured for issue #1279. `PF_Birth`, which
+//     sits in that tail, is run by initialize_pf_dll_host_layer below
+//     (issue #1212 / PR #1284) - after this step, matching AE's order.
+//
+// VAL_Birth allocates through U (U_CopyString) and LIST, so U has to be
+// birthed first, which is why this runs after initialize_u_dll_allocator.
+// Same latch shape as U_Birth: keyed on the mapping, so a session whose first
+// member maps none of these still births them for a later member that does,
+// and a failed attempt is not retried on the same mapping.
+void initialize_process_support_libraries() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  enum class BirthShape {
+    // int (*)()
+    no_arguments,
+    // void (*)(), reported as result 0 when it returns: VAL_Birth has no
+    // return value, so reading one would report whatever is left in eax.
+    no_arguments_void,
+    // int (*)(unsigned, void*), called as AE calls M_Birth: (3, nullptr)
+    m_birth,
+    // int (*)(bool), called with AE's non-quiet value
+    cor_conception,
+  };
+  struct SupportLibrary {
+    const wchar_t* module;
+    // `name` is the narrow spelling of `module` for the trace (std::cerr
+    // takes no wide strings); `birth` is the exported symbol, which for
+    // COR is a C++ mangled name.
+    const char* name;
+    const char* birth;
+    BirthShape shape;
+  };
+  static constexpr SupportLibrary kLibraries[] = {
+      {L"BEZ.dll", "BEZ.dll", "BEZ_Birth",
+       BirthShape::no_arguments},
+      {L"FILE.dll", "FILE.dll", "FILE_Birth",
+       BirthShape::no_arguments},
+      {L"U.dll", "U.dll", "M_Birth",
+       BirthShape::m_birth},
+      {L"U.dll", "U.dll", "RND_Birth",
+       BirthShape::no_arguments},
+      {L"VAL.dll", "VAL.dll", "VAL_Birth",
+       BirthShape::no_arguments_void},
+      {L"COR.dll", "COR.dll", "?COR_Conception@@YAH_N@Z",
+       BirthShape::cor_conception},
+  };
+  static legacy::State states[std::size(kLibraries)];
+  // A mapped library whose birth export is missing is reported once per
+  // library: it means this AE build moved or renamed the entry, which must
+  // not look the same as "the library is not in this closure".
+  static bool no_export_logged[std::size(kLibraries)]{};
+  for (std::size_t index = 0; index < std::size(kLibraries); ++index) {
+    const SupportLibrary& library = kLibraries[index];
+    const HMODULE module = GetModuleHandleW(library.module);
+    const FARPROC birth =
+        module ? GetProcAddress(module, library.birth) : nullptr;
+    const legacy::Decision decision =
+        legacy::decide(states[index], module, birth != nullptr);
+    if (decision == legacy::Decision::NoBirthExport &&
+        !no_export_logged[index]) {
+      no_export_logged[index] = true;
+      std::cerr << "stage:legacy_support_init library=" << library.name
+                << " entry=" << library.birth << " status=no_export\n"
+                << std::flush;
+    }
+    if (decision != legacy::Decision::Call) continue;
+    legacy::note_called(states[index], module);
+    int result = -1;
+    __try {
+      switch (library.shape) {
+        case BirthShape::no_arguments:
+          result = reinterpret_cast<int(__cdecl*)()>(birth)();
+          break;
+        case BirthShape::no_arguments_void:
+          reinterpret_cast<void(__cdecl*)()>(birth)();
+          result = 0;
+          break;
+        case BirthShape::m_birth:
+          result = reinterpret_cast<int(__cdecl*)(uint32_t, void*)>(birth)(
+              3, nullptr);
+          break;
+        case BirthShape::cor_conception:
+          result = reinterpret_cast<int(__cdecl*)(bool)>(birth)(false);
+          break;
+      }
+    } __except (u_birth_seh_filter(GetExceptionInformation())) {
+      // COR_Conception reports failures by throwing, which arrives here as
+      // SEH. The sequence continues after a fault rather than stopping:
+      // each entry initializes its own library, a faulted one leaves that
+      // library exactly as unusable as it was before this step existed,
+      // and stopping would deny the later libraries an initialization they
+      // do not depend on the faulted one for. The one real dependency in
+      // this table (VAL needs U) is satisfied by initialize_u_dll_allocator
+      // running first, not by an earlier entry here. The result is not
+      // reported for a faulted entry: the trace says `status=faulted`, and a
+      // number there would look like the library answered.
+      std::cerr << "stage:legacy_support_init library=" << library.name
+                << " entry=" << library.birth << " status=faulted\n"
+                << std::flush;
+      continue;
+    }
+    // A void birth has no result: printing one would be
+    // indistinguishable from a library that answered with that value.
+    std::cerr << "stage:legacy_support_init library=" << library.name
+              << " entry=" << library.birth << " status=called";
+    if (library.shape != BirthShape::no_arguments_void)
+      std::cerr << " result=" << result;
+    std::cerr << "\n" << std::flush;
+  }
+}
+
 // PF.dll (AE's PF host layer) keeps its own dispatch table (`PFp_G_OverFuncs`,
 // PF.dll+0x44d9b0..) that its exported entry points jump through:
 // `PF_TransferRect` is `jmp [PFp_G_OverFuncs+0xe8]`, `PF_TransformWorld` calls
@@ -1412,6 +1569,7 @@ void initialize_pf_dll_host_layer() {
 
 void initialize_legacy_support_libraries() {
   initialize_u_dll_allocator();
+  initialize_process_support_libraries();
   initialize_pf_dll_host_layer();
 }
 
