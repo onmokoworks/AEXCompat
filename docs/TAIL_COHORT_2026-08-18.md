@@ -149,14 +149,18 @@ host をこれに合わせた (`worker_smart_dispatch.cpp` の
 `empty_result_passthrough`)。selector を回さないのは従来通りで、変わったのは
 「その後に何を出すか」だけ。**Classic fallback ではない** (別経路を走らせない、
 selector を再 dispatch しない)。複製できないと分かった dispatch は
-従来の空のままで、フレームを捏造しない: 入力の無い dispatch
-(`plan.missing_input`)、GPU negotiation 中 (pixel が device 側にある)、
-入力 world が register 時の layout と一致しなくなっているとき
-(`resolve_registered_dispatch_world` の fail-closed。PreRender は既に走って
-いて、plug-in に渡した layer ParamDef はこの world の前半を alias している
-ので、pixel pointer だけは `plan` では保証できない)、要求 rect が入力の外に
-出るとき、rect が空/負のとき。output world を組めなかったときは複製せず
-`render_error = -6` を返す (空フレームの成功にはしない)。
+従来の空のままで、フレームを捏造しない。降りる条件は
+`worker_smart_dispatch.cpp` の predicate が正本で、2026-08-18 時点では:
+入力の無い dispatch (`plan.missing_input`)、GPU negotiation 中 (pixel が
+device 側にある)、入力 world が register 時の layout と一致しなくなっている
+とき (`resolve_registered_dispatch_world` の fail-closed。PreRender は既に
+走っていて、plug-in に渡した layer ParamDef はこの world の前半を alias して
+いるので、pixel pointer だけは `plan` では保証できない)、captured の
+`rowbytes` が `width * pixel_bytes` に足りないとき、要求 rect が空・負・入力の
+外のとき、そして出力 buffer の `reset` が失敗したとき (この場合は
+`pre_error = -3` の frame error になる)。output world の layout / register に
+失敗したときは複製せず `render_error = -6` を返す (空フレームの成功には
+しない)。
 
 記録は 3 か所:
 
@@ -249,7 +253,9 @@ build して測ったもの。sweep CLI は両者同一バイナリで、worker 
 | not_discovered:exit_20_global_setup:2 | 1 | 1 |
 | not_discovered:exit_12 | 1 | 1 |
 
-bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ bucket
+計測は最終 build (`smart_worker` `80b939f5…`、`classic_worker` `b7fc55b5…`、
+`l2_worker` `79261837…`、sweep CLI は baseline と同一の `2992b8d4…`) で取り直した
+もの。bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ bucket
 (突き合わせの key は `plugin_relative_path`)。
 
 silent-wrong の確認として、両方の run で `detail.pixel_sha256` を持つ record を

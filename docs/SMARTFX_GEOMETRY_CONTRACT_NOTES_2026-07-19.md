@@ -473,11 +473,13 @@ AE 26.3x87 の実機観測 (`docs/TAIL_COHORT_2026-08-18.md` §2.3):
 
 host はこれに合わせ、空 result のとき effect の入力を output world に複製して
 出す (`worker_smart_dispatch.cpp` の `empty_result_passthrough`)。複製できないと分かった
-dispatch (入力が無い、GPU negotiation 中、入力 world が register 時の layout と
-一致しない、要求 rect が入力の外、rect が空) では 0 byte 出力のままで、
-`empty_result_passthrough` は false、`output_pixels_valid=true` の空フレームと
-して報告される。output world を組めなかった場合だけは空フレームの成功にせず
-`render_error = -6` を返す。
+dispatch では 0 byte 出力のままで、`empty_result_passthrough` は false、
+`output_pixels_valid=true` の空フレームとして報告される (降りる条件の正本は
+`worker_smart_dispatch.cpp` の predicate。入力が無い、GPU negotiation 中、
+入力 world が register 時の layout と一致しない、captured rowbytes が足りない、
+要求 rect が空・負・入力の外)。例外が 2 つあり、出力 buffer の `reset` 失敗は
+`pre_error = -3` の frame error、output world の layout / register 失敗は
+`render_error = -6` になる。どちらも空フレームの成功にはしない。
 
 `pf_smart_geometry_probe` の mode 3 (`EmptyResult`) の期待値もこれに合わせて
 更新した (`tests/test_pf_smart_geometry_probe.py`)。

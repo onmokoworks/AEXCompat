@@ -2289,8 +2289,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
   const int32_t passthrough_height = passthrough_rect[3] - passthrough_rect[1];
   // Bound the copy with what the registry captured, not with `plan`: the two
   // agree for an intact world, and if they ever disagree the resolve above has
-  // already refused. A non-negative top-left is required outright so the
-  // unsigned row arithmetic below cannot be reached with one.
+  // already refused. The non-negative top-left is belt-and-braces -- a
+  // non-empty rect contained in one anchored at the origin already has one --
+  // kept because it is what makes the unsigned row arithmetic below safe to
+  // read locally rather than by following `smart_rect_contained`.
   const int32_t passthrough_rowbytes = passthrough_world.rowbytes;
   result.empty_result_passthrough = result.empty_result_rect && !plan.missing_input &&
       !plan.gpu_negotiation && passthrough_source &&
@@ -2332,17 +2334,21 @@ bool dispatch(const Request& request, const Hooks& hooks,
       result.rects_valid = false;
       result.pre_error = -3;
       // A nonzero pre_error skips the empty-result branch below entirely, so
-      // the passthrough's own correction never runs. Undo the whole emitted
-      // frame here: the flag, or the record claims a copy no code path
-      // performed, and the geometry, or `finalize` packs a buffer that was
-      // never resized to it -- `reset` keeps the previous, possibly smaller,
-      // allocation when it fails (issue #1285).
+      // the passthrough's own correction never runs. Clear the flag here or the
+      // record claims a copy no code path performed (issue #1285).
+      //
+      // The emitted geometry is deliberately left alone. Zeroing it here would
+      // be dead: this block falls through and reassigns all of it from
+      // `smart_bounds` below. It also would not be a passthrough fix, since
+      // this branch is shared with every other dispatch. That a failed `reset`
+      // leaves the previous allocation (`OutputPixelBuffer::reset` releases
+      // only after a successful VirtualAlloc) while the report keeps the new
+      // dimensions is a real hole, but not one the passthrough opens: `guarded`
+      // starts at `plan.rowbytes * plan.height` and the passthrough's rect is
+      // required to lie inside the input world, so its request is never larger
+      // than what is already held. Only a grown result_rect can ask for more,
+      // which predates this change and is filed as #1292.
       result.empty_result_passthrough = false;
-      result.output_width = 0;
-      result.output_height = 0;
-      result.output_rowbytes = 0;
-      result.output_origin_x = 0;
-      result.output_origin_y = 0;
     }
     *request.destination = request.guarded->data();
     if (!render::prepare_world_layout(
