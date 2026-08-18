@@ -115,6 +115,16 @@ bool verify_fixed_image_case_admission() {
       plan.pixel_bytes == 4 && plan.rowbytes == 64;
 }
 
+// A world handed to a plug-in inside a PF_ParamDef is a plain 120-byte copy:
+// clear its reserved_long4 so it cannot alias the live world's PF_World object
+// (issue #1276 review; the same reasoning as the classic runtime's copy).
+template <typename ParamDef, typename World>
+void copy_world_into_param_def(ParamDef& definition, const World& world) {
+  std::memcpy(definition.data() + 56, world.data(), world.size());
+  void* inert = nullptr;
+  std::memcpy(definition.data() + 56 + 0x50, &inert, sizeof(inert));
+}
+
 bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
                            const std::vector<unsigned char>* external_rgba,
                            bool input_write_advertised,
@@ -232,8 +242,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
   for (std::size_t slot = 1; slot < definitions.size(); ++slot) {
     if (runtime.records[slot - 1].type == 0 &&
         runtime.records[slot - 1].layer_default == -1)
-      std::memcpy(definitions[slot].data() + 56, request.input_world->data(),
-                  request.input_world->size());
+      copy_world_into_param_def(definitions[slot], *request.input_world);
   }
   auto& smart_state = smart::state();
   smart_state.hosted_layers.clear();

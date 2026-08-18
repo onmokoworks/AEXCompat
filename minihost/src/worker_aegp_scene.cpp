@@ -1191,9 +1191,18 @@ int32_t __cdecl aegp_get_layer_parent_comp(void* layer, void** comp) {
   // registry token cannot survive. Every comp accessor resolves that pointer
   // as this worker's composition (canonical_comp_handle). Layers reached
   // through the registry keep their borrowed handles (the rest of #1264).
+  // Only when the effect layer's own owner really is this worker's
+  // composition, and only once the facade has been published (the hand-out in
+  // AEGP_GetEffectLayer does that): otherwise fall through to the registry's
+  // borrowed handle rather than answer about a comp this is not.
   if (layer == &g_layer) {
-    *comp = aexcompat::worker_runtime::bee_facade::comp_item_handle();
-    return 0;
+    void* facade_comp = aexcompat::worker_runtime::bee_facade::comp_item_handle();
+    ObjectSnapshot owner{};
+    if (facade_comp && scene_registry().snapshot(resolved.owner, owner) &&
+        owner.legacy_handle == aexcompat::scene_runtime::composition_handle()) {
+      *comp = facade_comp;
+      return 0;
+    }
   }
   void* borrowed = borrow_scene_object(resolved.owner);
   if (!borrowed) return 4;

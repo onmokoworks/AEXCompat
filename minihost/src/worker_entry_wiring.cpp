@@ -601,6 +601,26 @@ int configure_worker_entry_bootstrap() {
         (void)aexcompat::worker_runtime::record_unsupported_suite_call(
             aexcompat::worker_runtime::UnsupportedSuiteId::pf_world_vtable, slot);
       });
+  // The facade's CopyRect resolves both operands through the host's own
+  // registry before copying a pixel - the same gate the other copy callbacks
+  // use - so the geometry a plug-in can overwrite in the LayerDef never drives
+  // the copy. Without this hook the slot refuses every call.
+  aexcompat::worker_runtime::pf_world_facade::set_world_resolver(
+      [](const void* layer_def,
+         aexcompat::worker_runtime::pf_world_facade::ResolvedWorld& out) noexcept {
+        aexcompat::world_safety::DispatchWorldFormat resolved{};
+        if (!aexcompat::world_registry::resolve_dispatch_world_format(layer_def, resolved))
+          return false;
+        const int32_t pixel_bytes =
+            resolved.pixel_format == aexcompat::world_registry::kPixelFormatArgb32 ? 4
+            : resolved.pixel_format == aexcompat::world_registry::kPixelFormatArgb64 ? 8
+            : resolved.pixel_format == aexcompat::world_registry::kPixelFormatArgb128 ? 16
+            : 0;
+        if (pixel_bytes == 0) return false;
+        out = {resolved.data, resolved.rowbytes, resolved.width, resolved.height,
+               pixel_bytes};
+        return true;
+      });
   return aexcompat::worker_runtime::entry_bootstrap::configure(bootstrap_hooks);
 }
 

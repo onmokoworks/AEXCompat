@@ -23,6 +23,11 @@ inline constexpr std::size_t kEffectWorldSize = 120;
 struct alignas(16) EffectWorldStorage {
   const void* const* pf_world_vtable{};  // data() - 8
   std::array<std::byte, kEffectWorldSize> layer_def{};
+  // AE's PF_WorldX<T> is 0x90 bytes: 8 (vtable) + 120 (LayerDef) + two words
+  // its constructor writes (`this+0x88 = 0`). Without this tail a PF.dll path
+  // that constructs or assigns through a `world - 8` pointer would write into
+  // the *next* world of an array or a neighbouring local.
+  std::array<std::byte, 0x10> pf_world_tail{};
 
   EffectWorldStorage() = default;
   EffectWorldStorage(const EffectWorldStorage& other) noexcept { assign(other); }
@@ -50,6 +55,7 @@ struct alignas(16) EffectWorldStorage {
   void assign(const EffectWorldStorage& other) noexcept {
     pf_world_vtable = other.pf_world_vtable;
     layer_def = other.layer_def;
+    pf_world_tail = other.pf_world_tail;
     // reserved_long4 (+0x50) pointing at the source's prefix follows the copy
     // to this one's prefix; any other value (null, a plug-in's own pointer,
     // a pool object) is carried as it is.
@@ -61,8 +67,10 @@ struct alignas(16) EffectWorldStorage {
     }
   }
 };
-static_assert(sizeof(EffectWorldStorage) == 128);
+static_assert(sizeof(EffectWorldStorage) == 0x90,
+              "the embedded object must cover AE's whole PF_WorldX footprint");
 static_assert(offsetof(EffectWorldStorage, layer_def) == 8);
+static_assert(offsetof(EffectWorldStorage, pf_world_tail) == 8 + kEffectWorldSize);
 
 struct LocalRect { int32_t left, top, right, bottom; };
 struct LocalRationalScale { int32_t num; uint32_t den; };

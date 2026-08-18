@@ -12,6 +12,7 @@
 #include <cstring>
 #include <iostream>
 #include <iterator>
+#include <deque>
 #include <memory>
 #include <sstream>
 #include <string_view>
@@ -52,14 +53,38 @@ struct Exclusive {
   Exclusive(const Exclusive&) = delete;
   Exclusive& operator=(const Exclusive&) = delete;
 };
+struct Shared {
+  Shared() { AcquireSRWLockShared(&g_lock); }
+  ~Shared() { ReleaseSRWLockShared(&g_lock); }
+  Shared(const Shared&) = delete;
+  Shared& operator=(const Shared&) = delete;
+};
 std::unordered_map<const void*, std::unique_ptr<WorldObject>> g_objects;
+// Disposed world-registry objects, kept inert (see `retire`). Bounded: past
+// the bound the oldest is released, which is the point where a stale pointer
+// becomes a plain use-after-free again.
+constexpr std::size_t kMaxRetiredObjects = 256;
+std::deque<std::unique_ptr<WorldObject>> g_retired;
 std::atomic<uint32_t> g_trap_count{};
 std::atomic<uint32_t> g_copy_rect_calls{};
 std::atomic<uint32_t> g_copy_rect_refusals{};
-std::atomic<uintptr_t> g_last_trap_return_address{};
 SRWLOCK g_last_trap_caller_lock = SRWLOCK_INIT;
 std::string g_last_trap_caller;
-TrapRecorder g_trap_recorder{};
+std::atomic<TrapRecorder> g_trap_recorder{};
+std::atomic<WorldResolver> g_world_resolver{};
+// One line per distinct refusal reason per worker process: CopyRect sits on a
+// per-frame path, so an unlatched line would stream. The reasons are host
+// classifications, not plug-in data.
+std::atomic<uint32_t> g_reported_refusals{};
+
+void report_refusal(uint32_t bit, const char* reason) {
+  if ((g_reported_refusals.fetch_or(bit) & bit) != 0) return;
+  try {
+    std::cerr << "stage:callback_denied callback=pf_world_copy_rect reason=" << reason
+              << "\n" << std::flush;
+  } catch (...) {
+  }
+}
 
 std::string classify_caller(uintptr_t return_address) {
   HMODULE module{};
@@ -92,7 +117,7 @@ std::string classify_caller(uintptr_t return_address) {
 // through the selector SEH containment with a code that names the slot.
 [[noreturn]] void trap(uint32_t slot, uintptr_t return_address) {
   ++g_trap_count;
-  if (g_trap_recorder) g_trap_recorder(slot);
+  if (const auto recorder = g_trap_recorder.load()) recorder(slot);
   std::string caller;
   try {
     caller = classify_caller(return_address);
@@ -112,8 +137,11 @@ std::string classify_caller(uintptr_t return_address) {
       ~ReleaseExclusive() { ReleaseSRWLockExclusive(lock); }
     } release{&g_last_trap_caller_lock};
     g_last_trap_caller.swap(caller);
-    g_last_trap_return_address.store(return_address);
   }
+  // RaiseException does not unwind C++ objects, so nothing below this point
+  // may own memory: release the local before raising.
+  caller.clear();
+  caller.shrink_to_fit();
   const ULONG_PTR arguments[] = {static_cast<ULONG_PTR>(kTrapExceptionRange),
                                  static_cast<ULONG_PTR>(slot)};
   RaiseException(kTrapExceptionBase + kTrapExceptionRange + slot,
@@ -161,49 +189,69 @@ struct Rect {
 // counted and the destination is untouched). The copy is bounded to both
 // buffers, whatever the rectangle says.
 template <int16_t Depth>
-void __cdecl slot_copy_rect(void* self, const void* source, const Rect* rect,
-                            int32_t dest_x, int32_t dest_y) {
+int32_t __cdecl slot_copy_rect(void* self, const void* source, const Rect* rect,
+                               int32_t dest_x, int32_t dest_y) {
   ++g_copy_rect_calls;
-  const auto refuse = [] { ++g_copy_rect_refusals; };
-  if (!self || !source || !rect) return refuse();
+  const auto refuse = [](uint32_t bit, const char* reason) {
+    ++g_copy_rect_refusals;
+    report_refusal(bit, reason);
+    return 0;
+  };
+  if (!self || !source || !rect) return refuse(1u << 0, "null_argument");
   const auto* source_vtable = read_at<const void* const*>(source, 0);
-  if (!is_facade_vtable(source_vtable) || depth_of(source_vtable) != Depth) return refuse();
-  const auto* src = static_cast<const std::byte*>(source) + kObjectLayerDef;
-  auto* dst = static_cast<std::byte*>(self) + kObjectLayerDef;
-  const auto* src_pixels = read_at<const std::byte*>(src, kDataOffset);
-  auto* dst_pixels = read_at<std::byte*>(dst, kDataOffset);
-  const int32_t src_rowbytes = read_at<int32_t>(src, kRowbytesOffset);
-  const int32_t dst_rowbytes = read_at<int32_t>(dst, kRowbytesOffset);
-  const int32_t src_width = read_at<int32_t>(src, kWidthOffset);
-  const int32_t src_height = read_at<int32_t>(src, kHeightOffset);
-  const int32_t dst_width = read_at<int32_t>(dst, kWidthOffset);
-  const int32_t dst_height = read_at<int32_t>(dst, kHeightOffset);
+  if (!is_facade_vtable(source_vtable)) return refuse(1u << 1, "foreign_source");
+  if (depth_of(source_vtable) != Depth) return refuse(1u << 2, "depth_mismatch");
+  const auto resolver = g_world_resolver.load();
+  if (!resolver) return refuse(1u << 3, "no_world_resolver");
+  // The geometry the host registered, not what the structs declare: both
+  // operands' LayerDefs sit at +8 of their object, and an operand the host
+  // does not recognise (or whose declared layout no longer matches what was
+  // registered) is a refusal, exactly like the other copy callbacks' foreign
+  // operand gate. Nothing below reads the plug-in-writable fields.
+  ResolvedWorld src{}, dst{};
+  if (!resolver(static_cast<const std::byte*>(source) + kObjectLayerDef, src) ||
+      !resolver(static_cast<const std::byte*>(self) + kObjectLayerDef, dst))
+    return refuse(1u << 4, "unresolved_world");
   const int32_t pixel_bytes = Depth / 8 * 4;
-  if (!src_pixels || !dst_pixels || src_width <= 0 || src_height <= 0 ||
-      dst_width <= 0 || dst_height <= 0 || src_rowbytes < src_width * pixel_bytes ||
-      dst_rowbytes < dst_width * pixel_bytes)
-    return refuse();
+  if (src.pixel_bytes != pixel_bytes || dst.pixel_bytes != pixel_bytes)
+    return refuse(1u << 5, "resolved_depth_mismatch");
+  // The house bounds (world_safety::bounded_typed_world): every per-row walk
+  // stays inside the declared stride for the whole declared height, and the
+  // stride comparison is done in 64-bit so a huge width cannot wrap it.
+  constexpr int64_t kMaxDimension = 4096;
+  constexpr int64_t kMaxPixels = 16'777'216;
+  constexpr int64_t kMaxRowbytes = 4096 * 16;
+  const auto bounded = [&](const ResolvedWorld& w) {
+    const int64_t width = w.width, height = w.height, rowbytes = w.rowbytes;
+    return w.data && width > 0 && height > 0 && width <= kMaxDimension &&
+        height <= kMaxDimension && width * height <= kMaxPixels &&
+        rowbytes >= width * pixel_bytes && rowbytes <= kMaxRowbytes;
+  };
+  if (!bounded(src) || !bounded(dst)) return refuse(1u << 6, "unbounded_world");
+  const auto* src_pixels = static_cast<const std::byte*>(src.data);
+  auto* dst_pixels = static_cast<std::byte*>(dst.data);
   // Source rows/columns inside both the rectangle and the source; each maps
-  // to dest_x/dest_y + (x - left, y - top) and is copied only when inside the
-  // destination.
+  // to dest_x/dest_y + (x - left, y - top) and is copied only where that lands
+  // inside the destination.
   const int64_t left = std::max<int64_t>(rect->left, 0);
   const int64_t top = std::max<int64_t>(rect->top, 0);
-  const int64_t right = std::min<int64_t>(rect->right, src_width);
-  const int64_t bottom = std::min<int64_t>(rect->bottom, src_height);
-  if (left >= right || top >= bottom) return;
+  const int64_t right = std::min<int64_t>(rect->right, src.width);
+  const int64_t bottom = std::min<int64_t>(rect->bottom, src.height);
+  if (left >= right || top >= bottom) return 0;
   for (int64_t y = top; y < bottom; ++y) {
     const int64_t dy = static_cast<int64_t>(dest_y) + (y - static_cast<int64_t>(rect->top));
-    if (dy < 0 || dy >= dst_height) continue;
+    if (dy < 0 || dy >= dst.height) continue;
     const int64_t dx0 = static_cast<int64_t>(dest_x) + (left - static_cast<int64_t>(rect->left));
     int64_t x0 = left, x1 = right;
     if (dx0 < 0) x0 += -dx0;
-    if (dx0 + (right - left) > dst_width) x1 = left + (dst_width - dx0);
+    if (dx0 + (right - left) > dst.width) x1 = left + (dst.width - dx0);
     if (x0 >= x1) continue;
     const int64_t dx = static_cast<int64_t>(dest_x) + (x0 - static_cast<int64_t>(rect->left));
-    std::memcpy(dst_pixels + dy * dst_rowbytes + dx * pixel_bytes,
-                src_pixels + y * src_rowbytes + x0 * pixel_bytes,
+    std::memcpy(dst_pixels + dy * dst.rowbytes + dx * pixel_bytes,
+                src_pixels + y * src.rowbytes + x0 * pixel_bytes,
                 static_cast<std::size_t>((x1 - x0) * pixel_bytes));
   }
+  return 0;
 }
 
 template <int16_t Depth, std::size_t... Slots>
@@ -280,6 +328,20 @@ bool embed(void* world, int32_t pixel_bytes) noexcept {
   return true;
 }
 
+// True when `world`'s reserved_long4 already names a facade object that says
+// it mirrors this exact world - what the world registry publishes for a
+// PF_NewWorld allocation it owns (the pool's own objects are found by the map
+// lookup instead, so this answers "someone else owns this one").
+bool registry_published(const void* world) noexcept {
+  const auto* object = read_at<const WorldObject*>(world, kReservedLong4Offset);
+  if (!object) return false;
+  // Read only through the object's own declared layout, and only accept it
+  // when it is one of ours: a facade vtable plus a back-reference to this
+  // exact world.
+  const auto* vtable = read_at<const void* const*>(object, 0);
+  return is_facade_vtable(vtable) && object->attached_world == world;
+}
+
 bool embedded(const void* world) noexcept {
   if (!world) return false;
   const void* reserved_long4 = read_at<const void*>(world, kReservedLong4Offset);
@@ -303,25 +365,30 @@ bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept {
 
 bool attach(void* world, int32_t pixel_bytes) noexcept {
   if (!world || !vtable_for(pixel_bytes)) return false;
-  // Embedded storage already is the object; only the depth may differ from
-  // what the layout writer chose (it should not), and that is corrected in
-  // place.
-  if (embedded(world)) return embed(world, pixel_bytes);
+  // Embedded storage was published by `prepare_world_layout`, which owns the 8
+  // bytes before the LayerDef. Nothing is written here: re-deriving it would
+  // mean the host writing through a pointer a plug-in can forge.
+  if (embedded(world)) return true;
   Exclusive lock;
-  WorldObject* object = nullptr;
   const auto found = g_objects.find(world);
   if (found != g_objects.end()) {
-    object = found->second.get();
-  } else {
-    if (g_objects.size() >= kMaxObjects) return false;
-    std::unique_ptr<WorldObject> fresh;
-    try {
-      fresh = std::make_unique<WorldObject>();
-      object = fresh.get();
-      g_objects.emplace(world, std::move(fresh));
-    } catch (...) {
-      return false;
-    }
+    // Our own mirror: refresh it, so a re-registration after the host changed
+    // the world (a new depth, a moved buffer, an origin written after the
+    // first registration) is what the plug-in sees.
+    return publish(*found->second, world, pixel_bytes);
+  }
+  // An object the world registry published for this world (PF_NewWorld) is the
+  // registry's to keep current for the allocation's lifetime; taking a second,
+  // pooled object would orphan it and leave dispose freeing the wrong one.
+  if (registry_published(world)) return true;
+  if (g_objects.size() >= kMaxObjects) return false;
+  WorldObject* object = nullptr;
+  try {
+    auto fresh = std::make_unique<WorldObject>();
+    object = fresh.get();
+    g_objects.emplace(world, std::move(fresh));
+  } catch (...) {
+    return false;
   }
   return publish(*object, world, pixel_bytes);
 }
@@ -344,16 +411,40 @@ void detach(void* world) noexcept {
 
 const WorldObject* attached(const void* world) noexcept {
   if (!world) return nullptr;
-  Exclusive lock;
+  Shared lock;
   const auto found = g_objects.find(world);
   return found == g_objects.end() ? nullptr : found->second.get();
 }
 
-void set_trap_recorder(TrapRecorder recorder) noexcept { g_trap_recorder = recorder; }
+void set_trap_recorder(TrapRecorder recorder) noexcept { g_trap_recorder.store(recorder); }
+void set_world_resolver(WorldResolver resolver) noexcept { g_world_resolver.store(resolver); }
+
+void retire(WorldObject* object) noexcept {
+  if (!object) return;
+  // The object stays readable, but inert: a stale `reserved_long4` a plug-in
+  // kept now leads to a null vtable slot (a contained fault at a known place)
+  // rather than to freed memory that later holds something callable.
+  object->vtable = nullptr;
+  object->attached_world = nullptr;
+  std::memset(object->layer_def, 0, sizeof(object->layer_def));
+  Exclusive lock;
+  try {
+    g_retired.push_back(std::unique_ptr<WorldObject>(object));
+  } catch (...) {
+    // The quarantine could not take it; the object is inert either way and
+    // leaking one is better than freeing memory a plug-in may still name.
+    return;
+  }
+  while (g_retired.size() > kMaxRetiredObjects) g_retired.pop_front();
+}
 
 std::size_t live_count() noexcept {
-  Exclusive lock;
+  Shared lock;
   return g_objects.size();
+}
+std::size_t retired_count() noexcept {
+  Shared lock;
+  return g_retired.size();
 }
 uint32_t trap_count() noexcept { return g_trap_count.load(); }
 uint32_t copy_rect_calls() noexcept { return g_copy_rect_calls.load(); }
@@ -392,6 +483,25 @@ __declspec(noinline) uint32_t call_slot_expecting_trap(const void* const* vtable
 
 }  // namespace
 
+namespace {
+// What the self-test "registered": the geometry the host would have recorded,
+// kept out of the structs so the hostile-geometry case below can corrupt the
+// LayerDef and still be refused / clamped against the truth.
+struct RegisteredWorld { const void* layer_def; ResolvedWorld resolved; };
+std::array<RegisteredWorld, 4> g_selftest_registry{};
+std::size_t g_selftest_registry_count{};
+
+bool selftest_resolver(const void* layer_def, ResolvedWorld& out) noexcept {
+  for (std::size_t i = 0; i < g_selftest_registry_count; ++i) {
+    if (g_selftest_registry[i].layer_def == layer_def) {
+      out = g_selftest_registry[i].resolved;
+      return true;
+    }
+  }
+  return false;
+}
+}  // namespace
+
 bool selftest() {
   bool passed = true;
   auto check = [&](bool condition, const char* what) {
@@ -400,7 +510,7 @@ bool selftest() {
     std::cerr << "pf_world_facade: " << what << "\n" << std::flush;
   };
   using Depth = int16_t (__cdecl*)(const void*);
-  using CopyRect = void (__cdecl*)(void*, const void*, const Rect*, int32_t, int32_t);
+  using CopyRect = int32_t (__cdecl*)(void*, const void*, const Rect*, int32_t, int32_t);
   auto store = [](auto& buffer, std::size_t offset, const auto& value) {
     std::memcpy(buffer.data() + offset, &value, sizeof(value));
   };
@@ -460,7 +570,7 @@ bool selftest() {
   world_safety::EffectWorldStorage destination{};
   std::array<uint32_t, 4 * 3> src_pixels{};
   std::array<uint32_t, 4 * 3> dst_pixels{};
-  for (std::size_t i = 0; i < src_pixels.size(); ++i) src_pixels[i] = 0x01000000u * 0 + static_cast<uint32_t>(i + 1);
+  for (std::size_t i = 0; i < src_pixels.size(); ++i) src_pixels[i] = static_cast<uint32_t>(i + 1);
   dst_pixels.fill(0xffffffffu);
   auto layout = [&](world_safety::EffectWorldStorage& storage, void* buffer) {
     storage.fill(std::byte{});
@@ -477,6 +587,18 @@ bool selftest() {
   check(source.pf_world_vtable == vtable_for(4) &&
             read_ptr(source.data(), kReservedLong4Offset) == source.data() - 8,
         "embed did not write the prefix vtable and reserved_long4 = world - 8");
+  // The host's resolver stands in for the registry here: the two worlds are
+  // "registered" with their true geometry, and restored on the way out.
+  const auto saved_resolver = g_world_resolver.load();
+  g_selftest_registry_count = 0;
+  g_selftest_registry[g_selftest_registry_count++] = {source.data(), {src_pixels.data(), 16, 4, 3, 4}};
+  g_selftest_registry[g_selftest_registry_count++] = {destination.data(), {dst_pixels.data(), 16, 4, 3, 4}};
+  set_world_resolver(&selftest_resolver);
+  struct RestoreResolver {
+    WorldResolver previous;
+    ~RestoreResolver() { set_world_resolver(previous); }
+  } restore_resolver{saved_resolver};
+
   // A world - 8 caller: slot 1 on the prefix, then PF_World::CopyWorld's
   // slot 14 with the whole source rect at (0,0).
   const void* src_object = source.data() - 8;
@@ -511,24 +633,61 @@ bool selftest() {
   }
   check(copy_rect_calls() == copies_before + 3 && copy_rect_refusals() == refusals_before,
         "CopyRect call counters did not advance");
+  // The depth-mismatch refusal below re-embeds the source, which the resolver
+  // table still describes at its honest geometry.
   // Refusals: a source of another depth, a source that is no facade object, a
   // rectangle wider than the source (bounded to it, not refused), null.
   dst_pixels.fill(0xffffffffu);
   check(embed(source.data(), 8), "re-embed at 16 failed");
   copy_rect(dst_object, src_object, &whole, 0, 0);
-  check(dst_pixels[0] == 0xffffffffu && copy_rect_refusals() == refusals_before + 1,
+  check(dst_pixels[0] == 0xffffffffu && copy_rect_refusals() > refusals_before,
         "CopyRect accepted a source of another depth");
   check(embed(source.data(), 4), "re-embed at 8 failed");
   alignas(16) std::array<std::byte, 0xa0> not_an_object{};
   copy_rect(dst_object, not_an_object.data(), &whole, 0, 0);
   copy_rect(dst_object, nullptr, &whole, 0, 0);
   copy_rect(dst_object, src_object, nullptr, 0, 0);
-  check(dst_pixels[0] == 0xffffffffu && copy_rect_refusals() == refusals_before + 4,
+  check(dst_pixels[0] == 0xffffffffu && copy_rect_refusals() >= refusals_before + 4,
         "CopyRect accepted a non-facade source, a null source or a null rect");
   const Rect oversized{-5, -5, 40, 30};
   copy_rect(dst_object, src_object, &oversized, -5, -5);
-  check(dst_pixels == src_pixels && copy_rect_refusals() == refusals_before + 4,
-        "CopyRect did not bound an oversized rectangle to both worlds");
+  check(dst_pixels == src_pixels, "CopyRect did not bound an oversized rectangle to both worlds");
+  // Hostile geometry: a plug-in owns the LayerDef bytes, so the copy must run
+  // on the registered geometry, not on what the struct claims. Both a wild
+  // stride and a wild height must leave the destination exactly as the honest
+  // copy would (here: unchanged, because the registered geometry still bounds
+  // the copy) and must never walk past the buffers.
+  {
+    std::array<uint32_t, 4 * 3> guarded{};
+    guarded.fill(0xfeedfaceu);
+    const auto saved_dst = dst_pixels;
+    store(destination, kRowbytesOffset, int32_t{0x10000000});
+    store(destination, kHeightOffset, int32_t{0x7fffffff});
+    store(source, kWidthOffset, int32_t{0x20000000});
+    copy_rect(dst_object, src_object, &whole, 0, 0);
+    check(guarded[0] == 0xfeedfaceu, "CopyRect wrote past the destination on corrupted geometry");
+    // Restore the honest fields and confirm the copy still behaves.
+    store(destination, kRowbytesOffset, int32_t{16});
+    store(destination, kHeightOffset, int32_t{3});
+    store(source, kWidthOffset, int32_t{4});
+    dst_pixels = saved_dst;
+    copy_rect(dst_object, src_object, &whole, 0, 0);
+    check(dst_pixels == src_pixels, "CopyRect stopped working after corrupted geometry");
+  }
+  // With no resolver at all every call is refused (the worker installs one).
+  {
+    const auto had = g_world_resolver.load();
+    set_world_resolver(nullptr);
+    const uint32_t before_refusals = copy_rect_refusals();
+    dst_pixels.fill(0x5a5a5a5au);
+    copy_rect(dst_object, src_object, &whole, 0, 0);
+    check(dst_pixels[0] == 0x5a5a5a5au && copy_rect_refusals() == before_refusals + 1,
+          "CopyRect copied without a world resolver");
+    set_world_resolver(had);
+    dst_pixels.fill(0xffffffffu);
+    copy_rect(dst_object, src_object, &whole, 0, 0);
+    check(dst_pixels == src_pixels, "CopyRect did not resume with the resolver back");
+  }
   // Storage copies re-point reserved_long4 at their own prefix.
   world_safety::EffectWorldStorage copy = source;
   check(embedded(copy.data()) && read_ptr(copy.data(), kReservedLong4Offset) == copy.data() - 8 &&

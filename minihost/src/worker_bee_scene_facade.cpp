@@ -358,7 +358,14 @@ void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcep
 }
 
 const ItemObject& comp_item() noexcept { return objects().comp_item; }
-void* comp_item_handle() noexcept { return &objects().comp_item; }
+void* comp_item_handle() noexcept {
+  // Null until a hand-out published the graph: an unprepared item has a null
+  // vtable, and handing that out as an AEGP_CompH would turn a plug-in's
+  // virtual call into a null dereference instead of the facade's identifying
+  // trap.
+  Objects& graph = objects();
+  return graph.comp_item.vtable ? &graph.comp_item : nullptr;
+}
 const ItemObject& footage_item() noexcept { return objects().footage_item; }
 const ProjectObject& project() noexcept { return objects().project; }
 const void* const* layer_vtable() noexcept { return tables().layer.data(); }

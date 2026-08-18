@@ -63,6 +63,26 @@ inline constexpr std::size_t kLayerDefSize = 0x78;
 inline constexpr uint32_t kTrapExceptionBase = 0xE0428000u;
 inline constexpr uint32_t kTrapExceptionRange = 0x200u;
 
+// The geometry a copy is allowed to use: what the host registered for a world,
+// never what the struct currently declares. `CopyRect` (slot 14) resolves both
+// of its operands through this before touching a pixel, the way every other
+// copy callback in the host resolves its operands
+// (`world_registry::resolve_dispatch_world_format`); the fields a plug-in can
+// overwrite (data / rowbytes / width / height, and the whole mirror object)
+// are therefore not what drives the memcpy.
+struct ResolvedWorld {
+  void* data{};
+  int32_t rowbytes{};
+  int32_t width{};
+  int32_t height{};
+  int32_t pixel_bytes{};
+};
+// Installed by the worker (worker_entry_wiring) with the host's own resolver.
+// Without one, CopyRect refuses every call: an unresolvable operand is a
+// refusal, not an admission.
+using WorldResolver = bool (*)(const void* layer_def, ResolvedWorld& out) noexcept;
+void set_world_resolver(WorldResolver resolver) noexcept;
+
 // The object at `reserved_long4` of a world without embedded storage: AE's
 // PF_World shape (vtable, LayerDef at +8 pointing back at the object from
 // +0x58, the two trailing words PF_WorldX zeroes) plus host bookkeeping.
@@ -95,13 +115,15 @@ bool embed(void* world, int32_t pixel_bytes) noexcept;
 // and the prefix is a facade vtable).
 bool embedded(const void* world) noexcept;
 
-// Attaches (or refreshes) a facade to `world` for the given bytes per pixel:
-// an embedded world (see above) is left as it is; any other world gets a pool
-// object at reserved_long4 whose +8 region mirrors the world's current fields.
-// Keyed by the world struct's address, so re-preparing the same buffer
-// updates its object in place (copies a plug-in or the host made of the struct
-// keep pointing at it). Returns false, leaving reserved_long4 untouched, when
-// the pool of objects is exhausted or the arguments are invalid.
+// Attaches (or refreshes) a facade to `world` for the given bytes per pixel.
+// It never writes outside `world` itself: a world that already carries a
+// facade (embedded storage, or an object the world registry published) is left
+// exactly as it is, and any other world gets a pool object at reserved_long4
+// whose +8 region mirrors the world's current fields. Keyed by the world
+// struct's address, so re-registering the same buffer updates its object in
+// place (copies a plug-in or the host made of the struct keep pointing at it).
+// Returns false, leaving reserved_long4 untouched, when the pool of objects is
+// exhausted or the arguments are invalid.
 bool attach(void* world, int32_t pixel_bytes) noexcept;
 
 // The same publication into a caller-owned object (no pool): what
@@ -109,10 +131,20 @@ bool attach(void* world, int32_t pixel_bytes) noexcept;
 // disposes through it. Writes `world`'s reserved_long4 too.
 bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept;
 
-// Detaches the pool object of `world` (a world the host is done handing out).
-// The world's reserved_long4 is cleared when it still points at the object.
-// No-op for a world without one.
+// Detaches the pool object of `world` (a world the host is done handing out;
+// `DispatchWorldFormatScope` does this for everything it attached). The
+// world's reserved_long4 is cleared when it still points at the object. No-op
+// for a world without one.
 void detach(void* world) noexcept;
+
+// Retires an object the caller owns (the world registry's, when PF_DisposeWorld
+// frees the allocation): nulls the vtable and zeroes the mirror, then keeps the
+// object alive in a bounded quarantine instead of freeing it. A plug-in holding
+// a stale copy of the disposed struct still has `reserved_long4` pointing here,
+// and a stale call then faults on a null vtable slot inside contained dispatch
+// rather than jumping through whatever the freed heap block came to hold.
+// Beyond the quarantine bound the oldest retired object is released.
+void retire(WorldObject* object) noexcept;
 
 // The pool object attached to `world`, or null.
 const WorldObject* attached(const void* world) noexcept;
@@ -126,9 +158,10 @@ const WorldObject* attached(const void* world) noexcept;
 using TrapRecorder = void (*)(uint32_t slot) noexcept;
 void set_trap_recorder(TrapRecorder recorder) noexcept;
 
-// Number of live pool objects / trap slots taken / CopyRect calls so far (for
-// the report and the self-test).
+// Number of live pool objects / retired objects / trap slots taken / CopyRect
+// calls and refusals so far (the report and the self-test read these).
 std::size_t live_count() noexcept;
+std::size_t retired_count() noexcept;
 uint32_t trap_count() noexcept;
 uint32_t copy_rect_calls() noexcept;
 uint32_t copy_rect_refusals() noexcept;

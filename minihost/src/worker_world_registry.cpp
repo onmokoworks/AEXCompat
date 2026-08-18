@@ -236,7 +236,12 @@ int32_t __cdecl dispose_world(void*, void* world) {
     return 4;
   }
   ::operator delete(found->second.pixels);
-  delete found->second.companion;
+  // Not deleted: a plug-in may still hold a copy of the disposed struct whose
+  // reserved_long4 names this object (the registry resolves a dispose through
+  // any copy, by pixel pointer). Retiring it leaves that pointer aimed at an
+  // inert object with a null vtable instead of at freed memory that may later
+  // hold something callable (issue #1276 review).
+  aexcompat::worker_runtime::pf_world_facade::retire(found->second.companion);
   g_live_bytes -= found->second.size;
   g_worlds.erase(found);
   ++g_disposed;
