@@ -297,3 +297,19 @@ def test_pf_world_facade_is_behind_reserved_long4_on_all_workers() -> None:
     """
     for _ in _all_workers("--self-test-pf-world-facade", "pf_world_facade"):
         pass
+
+
+def test_argb32f_depth_conversion_round_trips_on_all_workers() -> None:
+    """The 8/16bpc <-> float32 ARGB conversion the Premiere GPU-filter route
+    (VR family, ``xGPUFilterEntry``) widens its input through and narrows its
+    output through when the session is not float32 (issue #1271: with the
+    route gated on float32 sessions, every VR effect answered 512 at depth 8
+    and 16). The route checks that every 8-bit and every 16-bit channel value
+    survives the round trip exactly, that out-of-range and non-finite floats
+    narrow to the depth's bounds, and that float32 passes through unchanged;
+    the verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-argb32f-depth-conversion", "argb32f_depth_conversion"
+    ):
+        pass

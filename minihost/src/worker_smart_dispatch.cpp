@@ -3,6 +3,7 @@
 #include "generated/aex_abi_contract.hpp"
 #include "gpu_memory_world_transport.hpp"
 #include "premiere_gpu_filter_abi.hpp"
+#include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
 #include "worker_active_plugin_context.hpp"
 #include "worker_parameter_runtime.hpp"
@@ -11,11 +12,13 @@
 #include "worker_world_registry.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <vector>
 #include <windows.h>
 
 namespace aexcompat::worker_runtime::smart_dispatch {
@@ -1361,7 +1364,76 @@ struct PrRenderCrash {
   void* address{};
   void* access{};
   bool crashed{};
+  // A C++ exception that escaped the plug-in call. Caught at a C++ boundary
+  // inside the SEH leaf (the selector dispatch's invoke_audited_effect_call_seh
+  // shape) so the exception object is destroyed and the trace tells a throw
+  // apart from a fault; either one declines the route.
+  bool cpp_exception{};
 };
+bool pr_faulted(const PrRenderCrash& crash) {
+  return crash.crashed || crash.cpp_exception;
+}
+void report_pr_fault(const char* phase, const PrRenderCrash& crash,
+                     HMODULE module) {
+  if (crash.cpp_exception) {
+    std::cerr << "stage:pr_gpu_crash phase=" << phase
+              << " kind=cpp_exception base=" << static_cast<void*>(module)
+              << "\n" << std::flush;
+    return;
+  }
+  std::cerr << "stage:pr_gpu_crash phase=" << phase << " kind=seh code="
+            << std::hex << crash.code << " addr=" << crash.address
+            << " access=" << crash.access << std::dec
+            << " base=" << static_cast<void*>(module) << "\n"
+            << std::flush;
+}
+abi::prSuiteError entry_cpp_boundary(abi::PrGPUFilterEntryFn entry,
+                                     abi::csSDK_uint32 version,
+                                     abi::csSDK_int32* index,
+                                     abi::prBool in_startup,
+                                     abi::piSuites* suites,
+                                     abi::PrGPUFilter* filter,
+                                     abi::PrGPUFilterInfo* info,
+                                     PrRenderCrash* crash) {
+  try {
+    return entry(version, index, in_startup, suites, filter, info);
+  } catch (...) {
+    crash->cpp_exception = true;
+    return -1;
+  }
+}
+abi::prSuiteError create_instance_cpp_boundary(abi::PrGPUFilter* filter,
+                                               abi::PrGPUFilterInstance* instance,
+                                               PrRenderCrash* crash) {
+  try {
+    return filter->CreateInstance(instance);
+  } catch (...) {
+    crash->cpp_exception = true;
+    return -1;
+  }
+}
+abi::prSuiteError dispose_instance_cpp_boundary(abi::PrGPUFilter* filter,
+                                                abi::PrGPUFilterInstance* instance,
+                                                PrRenderCrash* crash) {
+  try {
+    return filter->DisposeInstance(instance);
+  } catch (...) {
+    crash->cpp_exception = true;
+    return -1;
+  }
+}
+abi::prSuiteError render_cpp_boundary(
+    abi::PrGPUFilter* filter, abi::PrGPUFilterInstance* instance,
+    const abi::PrGPUFilterRenderParams* render_params,
+    const abi::PPixHand* in_frames, abi::PPixHand* out_frame,
+    PrRenderCrash* crash) {
+  try {
+    return filter->Render(instance, render_params, in_frames, 1, out_frame);
+  } catch (...) {
+    crash->cpp_exception = true;
+    return -1;
+  }
+}
 LONG pr_seh_filter(uint32_t code, _EXCEPTION_POINTERS* info, PrRenderCrash* crash) {
   crash->code = code;
   crash->address = info ? info->ExceptionRecord->ExceptionAddress : nullptr;
@@ -1372,11 +1444,38 @@ LONG pr_seh_filter(uint32_t code, _EXCEPTION_POINTERS* info, PrRenderCrash* cras
   crash->crashed = true;
   return EXCEPTION_EXECUTE_HANDLER;
 }
+// The plug-in's xGPUFilterEntry startup/shutdown runs plug-in code too (its
+// static filter registration and GF device lookups), so it gets the same
+// containment as CreateInstance / Render: a crash there declines the route
+// with its fault site on stderr instead of taking the worker down.
+abi::prSuiteError guarded_entry(abi::PrGPUFilterEntryFn entry,
+                                abi::csSDK_uint32 version, abi::csSDK_int32* index,
+                                abi::prBool in_startup,
+                                abi::piSuites* suites, abi::PrGPUFilter* filter,
+                                abi::PrGPUFilterInfo* info, PrRenderCrash* crash) {
+  __try {
+    return entry_cpp_boundary(entry, version, index, in_startup, suites, filter,
+                              info, crash);
+  } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
+                            crash)) {
+    return -1;
+  }
+}
 abi::prSuiteError guarded_create_instance(abi::PrGPUFilter* filter,
                                           abi::PrGPUFilterInstance* instance,
                                           PrRenderCrash* crash) {
   __try {
-    return filter->CreateInstance(instance);
+    return create_instance_cpp_boundary(filter, instance, crash);
+  } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
+                            crash)) {
+    return -1;
+  }
+}
+abi::prSuiteError guarded_dispose_instance(abi::PrGPUFilter* filter,
+                                           abi::PrGPUFilterInstance* instance,
+                                           PrRenderCrash* crash) {
+  __try {
+    return dispose_instance_cpp_boundary(filter, instance, crash);
   } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
                             crash)) {
     return -1;
@@ -1388,7 +1487,8 @@ abi::prSuiteError guarded_render(abi::PrGPUFilter* filter,
                                  const abi::PPixHand* in_frames,
                                  abi::PPixHand* out_frame, PrRenderCrash* crash) {
   __try {
-    return filter->Render(instance, render_params, in_frames, 1, out_frame);
+    return render_cpp_boundary(filter, instance, render_params, in_frames,
+                               out_frame, crash);
   } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
                             crash)) {
     return -1;
@@ -1450,19 +1550,42 @@ void force_gpu_acceleration_available(HMODULE module) {
 // this route existed).
 bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
                        smart_execution::Result& result) {
+  // Every exit from this function names itself on stderr as a stage pair the
+  // broker records without AEXCOMPAT_EXTENDED_DIAG (issue #1271 review). The
+  // lifecycle containment above turned faults that used to take the worker
+  // down - a loud record with a classification, an exit code and a minidump -
+  // into a quiet fall-through to the PF path, and a plug-in that lands in
+  // `rendered` with nothing saying the GPU route was tried and declined is the
+  // silent success this project does not allow. Each `reason` is a fixed
+  // lower-case identifier chosen here, which is the shape the broker's parser
+  // admits - that check is what keeps plug-in authored text out of a report,
+  // since the plug-in shares this stderr and can print `stage:` lines too.
+  const char* outcome = "entered";
+  std::cerr << "stage:pr_gpu_route_begin\n" << std::flush;
+  struct RouteOutcome {
+    const char** reason;
+    ~RouteOutcome() {
+      std::cerr << "stage:pr_gpu_route_end reason=" << *reason << "\n"
+                << std::flush;
+    }
+  } route_outcome{&outcome};
+  const auto decline = [&outcome](const char* reason) {
+    outcome = reason;
+    return false;
+  };
   const auto& plan = *request.plan;
   const int32_t width = plan.width;
   const int32_t height = plan.height;
-  if (width <= 0 || height <= 0) return false;
+  if (width <= 0 || height <= 0) return decline("bad_extent");
   const HMODULE module = active_plugin::effect_module;
-  if (!module) return false;
+  if (!module) return decline("no_module");
   const auto entry = reinterpret_cast<abi::PrGPUFilterEntryFn>(
       GetProcAddress(module, abi::kGPUFilterEntryExport));
   if (!entry) {
-    return false;
+    return decline("no_entry_export");
   }
   if (!frames.pr_gpu_ready()) {
-    return false;
+    return decline("gpu_unavailable");
   }
   ensure_suite_tables();
 
@@ -1473,7 +1596,7 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   namespace transport = gpu_runtime::memory_world_transport;
   if (!transport::begin_backend_context(/*framework=*/3, /*device_index=*/0,
                                         frames.cuda_context())) {
-    return false;
+    return decline("no_backend_context");
   }
 
   force_gpu_acceleration_available(module);
@@ -1500,36 +1623,111 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   abi::PrGPUFilter filter{};
   abi::PrGPUFilterInfo info{};
   int32_t startup_index = 0;
-  const abi::prSuiteError startup_error = entry(
-      abi::kPrSDKGPUFilterInterfaceVersion, &startup_index, /*inStartup=*/1,
-      &suites, &filter, &info);
-  if (!abi::suite_ok(startup_error) || !filter.CreateInstance || !filter.Render) {
-    return false;
+  PrRenderCrash crash;
+  const abi::prSuiteError startup_error = guarded_entry(
+      entry, abi::kPrSDKGPUFilterInterfaceVersion, &startup_index,
+      /*inStartup=*/1, &suites, &filter, &info, &crash);
+  if (pr_faulted(crash)) {
+    report_pr_fault("startup", crash, module);
+    return decline("startup_fault");
   }
+  std::cerr << "stage:pr_gpu_startup_end error=" << startup_error << "\n"
+            << std::flush;
+  if (!abi::suite_ok(startup_error)) return decline("startup_error");
+  bool shutdown_done = false;
   const auto shutdown = [&] {
+    if (shutdown_done) return;
+    shutdown_done = true;
     int32_t shutdown_index = 0;
-    entry(abi::kPrSDKGPUFilterInterfaceVersion, &shutdown_index, /*inStartup=*/0,
-          &suites, &filter, &info);
+    PrRenderCrash shutdown_crash;
+    guarded_entry(entry, abi::kPrSDKGPUFilterInterfaceVersion, &shutdown_index,
+                  /*inStartup=*/0, &suites, &filter, &info, &shutdown_crash);
+    if (pr_faulted(shutdown_crash))
+      report_pr_fault("shutdown", shutdown_crash, module);
   };
+  // Startup is balanced by shutdown on every exit. Each one below calls it
+  // explicitly - the success path has to shut the filter down before the
+  // readback, so the call cannot simply be deferred to scope exit - and this
+  // guard is the net for an exit that forgets to: with the lambda idempotent
+  // it fires only when nothing else did. It is a maintenance net, not a
+  // throw-safety property: no C++ handler exists above this frame, so MSVC
+  // terminates at the throw point without unwinding, and an allocation failure
+  // in the region below would take the worker rather than reach this
+  // destructor. Declared after `context_guard`, so it runs first and the
+  // filter shuts down while the GPU backend context is still current.
+  struct ShutdownGuard {
+    const decltype(shutdown)* run;
+    ~ShutdownGuard() { (*run)(); }
+  } shutdown_guard{&shutdown};
+  // Startup succeeded, so it is balanced by shutdown from here on, including
+  // when the filter table it filled in is unusable.
+  if (!filter.CreateInstance || !filter.Render) {
+    shutdown();
+    return decline("no_filter_table");
+  }
 
-  // Build the input GPU PPix and upload the host's float32 input pixels into it.
+  // Build the input GPU PPix and upload the host's input pixels into it as
+  // float32 ARGB. A float32 session's world uploads as-is; an 8/16bpc session
+  // (issue #1271: every VR effect was 512 at depth 8/16 because this route was
+  // float32-only and the PF CPU path is GPU-only) widens its world into a
+  // float32 staging copy first, so the plug-in sees the 32f frame it renders.
+  const int32_t session_pixel_bytes = plan.pixel_bytes;
+  if (session_pixel_bytes != 4 && session_pixel_bytes != 8 &&
+      session_pixel_bytes != 16) {
+    shutdown();
+    return decline("unsupported_depth");
+  }
+  void* input_pixels{};
+  std::memcpy(&input_pixels, request.input_world->data() + 24,
+              sizeof(input_pixels));
+  const int32_t input_rowbytes = read<int32_t>(*request.input_world, 32);
+  const int32_t float_rowbytes = width * 16;
+  // Fail closed on a stride that cannot hold the row (mirrors
+  // gpu_memcpy_frame's own check on the float32 side) rather than over-read.
+  // Checked before any GPU frame exists so nothing is left to dispose.
+  if (input_pixels &&
+      (input_rowbytes < 0 ||
+       static_cast<std::size_t>(input_rowbytes) <
+           static_cast<std::size_t>(width) * session_pixel_bytes)) {
+    shutdown();
+    return decline("bad_input_stride");
+  }
+  std::vector<float> input_float32;
+  const void* upload_pixels = input_pixels;
+  int32_t upload_rowbytes = input_rowbytes;
+  if (input_pixels && session_pixel_bytes != 16) {
+    try {
+      input_float32.resize(static_cast<std::size_t>(width) * height * 4);
+    } catch (const std::exception&) {
+      shutdown();
+      return decline("input_staging_alloc");
+    }
+    for (int32_t y = 0; y < height; ++y) {
+      const auto* row = static_cast<const unsigned char*>(input_pixels) +
+                        static_cast<std::size_t>(y) * input_rowbytes;
+      float* out_row = input_float32.data() + static_cast<std::size_t>(y) * width * 4;
+      for (int32_t x = 0; x < width; ++x)
+        render_pixel_transport::argb_to_argb32f(
+            out_row + static_cast<std::size_t>(x) * 4,
+            row + static_cast<std::size_t>(x) * session_pixel_bytes,
+            session_pixel_bytes);
+    }
+    upload_pixels = input_float32.data();
+    upload_rowbytes = float_rowbytes;
+  }
   auto input_record = std::make_unique<FrameRecord>();
   input_record->width = width;
   input_record->height = height;
   if (!frames.pr_make_gpu_ppix(input_record->world, input_record->live, width,
                                height)) {
     shutdown();
-    return false;
+    return decline("input_frame_alloc");
   }
-  void* input_pixels{};
-  std::memcpy(&input_pixels, request.input_world->data() + 24,
-              sizeof(input_pixels));
-  const int32_t input_rowbytes = read<int32_t>(*request.input_world, 32);
-  if (input_pixels &&
-      !frames.pr_upload(input_record->world, input_pixels, input_rowbytes, width,
-                        height)) {
+  if (upload_pixels &&
+      !frames.pr_upload(input_record->world, upload_pixels, upload_rowbytes,
+                        width, height)) {
     shutdown();
-    return false;
+    return decline("input_upload");
   }
   const abi::PPixHand input_ppix =
       reinterpret_cast<abi::PPixHand>(frames.pr_ppix(input_record->world));
@@ -1541,20 +1739,30 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   instance.inTimelineID = 1;
   instance.inNodeID = context.node_id;
   instance.ioPrivatePluginData = nullptr;
-  PrRenderCrash crash;
+  // DisposeInstance is plug-in code as well; a fault there is contained and
+  // recorded like the other three lifecycle calls, and never stops the shutdown
+  // that follows it.
+  const auto dispose_instance = [&] {
+    if (!filter.DisposeInstance) return;
+    PrRenderCrash dispose_crash;
+    guarded_dispose_instance(&filter, &instance, &dispose_crash);
+    if (pr_faulted(dispose_crash))
+      report_pr_fault("dispose_instance", dispose_crash, module);
+  };
   const abi::prSuiteError create_error =
       guarded_create_instance(&filter, &instance, &crash);
-  if (crash.crashed) {
-    std::cerr << "stage:pr_gpu_crash phase=create_instance code=" << std::hex
-              << crash.code << " addr=" << crash.address << std::dec
-              << " base=" << static_cast<void*>(module) << "\n"
-              << std::flush;
+  if (pr_faulted(crash)) {
+    report_pr_fault("create_instance", crash, module);
     shutdown();
-    return false;
+    return decline("create_instance_fault");
   }
   if (!abi::suite_ok(create_error)) {
+    // Deliberately not disposed: the plug-in reported that it did not create
+    // the instance, so handing it back for disposal would be a call it never
+    // agreed to take. Anything it allocated before deciding to fail is its own
+    // to release at shutdown.
     shutdown();
-    return false;
+    return decline("create_instance_error");
   }
 
   abi::PrGPUFilterRenderParams render_params{};
@@ -1576,9 +1784,9 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   output_record->height = height;
   if (!frames.pr_make_gpu_ppix(output_record->world, output_record->live, width,
                                height)) {
-    if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+    dispose_instance();
     shutdown();
-    return false;
+    return decline("output_frame_alloc");
   }
   abi::PPixHand host_output_ppix =
       reinterpret_cast<abi::PPixHand>(frames.pr_ppix(output_record->world));
@@ -1591,15 +1799,11 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
       &filter, &instance, &render_params, in_frames, &out_frame, &crash);
   std::cerr << "stage:pr_gpu_render_end error=" << render_error << "\n"
             << std::flush;
-  if (crash.crashed) {
-    std::cerr << "stage:pr_gpu_crash phase=render code=" << std::hex
-              << crash.code << " addr=" << crash.address
-              << " access=" << crash.access << std::dec
-              << " base=" << static_cast<void*>(module) << "\n"
-              << std::flush;
-    if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+  if (pr_faulted(crash)) {
+    report_pr_fault("render", crash, module);
+    dispose_instance();
     shutdown();
-    return false;
+    return decline("render_fault");
   }
 
   // Locate the rendered frame, in order of how reliably it names the output:
@@ -1648,7 +1852,7 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
       out_record = find_frame(host_output_ppix);
   }
 
-  if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+  dispose_instance();
   shutdown();
 
   // Read back the plug-in's own output extent, not the requested plan size. A
@@ -1666,22 +1870,78 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   int32_t out_frame_w = 0, out_frame_h = 0;
   if (out_record)
     frames.pr_world_dims(out_record->world, out_frame_w, out_frame_h);
+  if (!abi::suite_ok(render_error)) return decline("render_error");
   if (!out_record || out_frame_w <= 0 || out_frame_h <= 0)
-    return false;
+    return decline("no_output_frame");
 
-  const int32_t rowbytes = out_frame_w * 16;
+  // The plug-in's frame is float32 ARGB. A float32 session downloads it
+  // straight into the guarded output; an 8/16bpc session downloads into a
+  // float32 staging copy and narrows it into the guarded output at the session
+  // depth, so what leaves this route is a world of the depth the session
+  // registered (the finalize copy, the hash and the pixel validation all read
+  // it at `plan.pixel_bytes`). The output extent stays the plug-in's own.
+  const int32_t out_float_rowbytes = out_frame_w * 16;
+  const int32_t rowbytes = out_frame_w * session_pixel_bytes;
   if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * out_frame_h))
-    return false;
+    return decline("output_buffer_alloc");
   *request.destination = request.guarded->data();
-  if (!frames.pr_download(out_record->world, request.guarded->data(), rowbytes,
+  std::vector<float> output_float32;
+  void* download_pixels = request.guarded->data();
+  if (session_pixel_bytes != 16) {
+    // The extent is the plug-in's own; a staging copy the host cannot allocate
+    // is a refused frame, the same shape as `guarded->reset` failing above.
+    try {
+      output_float32.resize(static_cast<std::size_t>(out_frame_w) * out_frame_h * 4);
+    } catch (const std::exception&) {
+      return decline("output_staging_alloc");
+    }
+    download_pixels = output_float32.data();
+  }
+  if (!frames.pr_download(out_record->world, download_pixels, out_float_rowbytes,
                           out_frame_w, out_frame_h))
-    return false;
+    return decline("download_failed");
+  // The float32 session's finalize rejects a non-finite output
+  // (output_pixels_valid false, -6). Narrowing would silently turn NaN into 0
+  // and +-inf into the bounds, so the check is taken here on the float frame
+  // the plug-in produced, before the narrowing, and handed to finalize as
+  // `output_non_finite` so it lands in the same verdict: the depth a session
+  // renders at must not decide whether a broken output is a diagnostic.
+  // Held locally until the route commits: every field this function publishes
+  // into `result` is written on the success path below, because a declined
+  // route falls through to the ordinary PF render and must not colour its
+  // verdict with what the GPU frame contained. That applies to `result` only -
+  // the guarded buffer, `*request.destination` and the output world are
+  // rewritten before the last failure returns and are not restored. The PF
+  // path re-establishes all three before it renders, so the values a declined
+  // route leaves behind describe this session's own depth and the plug-in's
+  // extent rather than a foreign layout (before issue #1271 they described a
+  // 16-byte float32 pixel in an 8-bit session).
+  bool output_non_finite = false;
+  if (session_pixel_bytes != 16) {
+    output_non_finite =
+        !std::all_of(output_float32.begin(), output_float32.end(),
+                     [](float value) { return std::isfinite(value); });
+    if (output_non_finite)
+      std::cerr << "stage:pr_gpu_output_non_finite\n" << std::flush;
+    for (int32_t y = 0; y < out_frame_h; ++y) {
+      const float* row =
+          output_float32.data() + static_cast<std::size_t>(y) * out_frame_w * 4;
+      auto* out_row = request.guarded->data() + static_cast<std::size_t>(y) * rowbytes;
+      for (int32_t x = 0; x < out_frame_w; ++x)
+        render_pixel_transport::argb32f_to_argb(
+            out_row + static_cast<std::size_t>(x) * session_pixel_bytes,
+            row + static_cast<std::size_t>(x) * 4, session_pixel_bytes);
+    }
+  }
 
   // TEMP (#1058 correctness): dump the input and rendered output as raw float32
-  // ARGB so an AE-oracle comparison can settle the channel order. Env-gated.
+  // ARGB (the frames the plug-in saw and produced, before any session-depth
+  // narrowing) so an AE-oracle comparison can settle the channel order.
+  // Env-gated.
   if (const char* dump_path = std::getenv("AEXCOMPAT_PR_GPU_DUMP")) {
     const auto write_raw = [&](const std::string& path, const void* pixels,
                                int32_t w, int32_t h, int32_t src_rowbytes) {
+      if (!pixels) return;
       std::ofstream file(path, std::ios::binary);
       const int32_t header[2] = {w, h};
       file.write(reinterpret_cast<const char*>(header), sizeof(header));
@@ -1690,24 +1950,26 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
                        static_cast<std::size_t>(y) * src_rowbytes,
                    static_cast<std::size_t>(w) * 16);
     };
-    write_raw(std::string(dump_path) + ".in", input_pixels, width, height,
-              input_rowbytes);
-    write_raw(std::string(dump_path) + ".out", request.guarded->data(),
-              out_frame_w, out_frame_h, rowbytes);
+    write_raw(std::string(dump_path) + ".in", upload_pixels, width, height,
+              upload_rowbytes);
+    write_raw(std::string(dump_path) + ".out", download_pixels, out_frame_w,
+              out_frame_h, out_float_rowbytes);
   }
 
   if (!render::prepare_world_layout(
           *request.output_world,
-          {1, plan.pixel_bytes, out_frame_w, out_frame_h, rowbytes},
+          {session_pixel_bytes == 4 ? 0 : 1, session_pixel_bytes, out_frame_w,
+           out_frame_h, rowbytes},
           *request.destination) ||
       !request.formats->register_world(request.output_world->data(),
                                        request.dispatch_pixel_format))
-    return false;
+    return decline("world_publish_failed");
 
   result.gpu_setup_error = 0;
   result.pre_error = 0;
   result.selector_error = 0;
   result.render_error = 0;
+  result.output_non_finite = output_non_finite;
   result.rects_valid = true;
   result.empty_result_rect = false;
   result.result_rect = {0, 0, out_frame_w, out_frame_h};
@@ -1716,6 +1978,7 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   result.output_width = out_frame_w;
   result.output_height = out_frame_h;
   result.output_rowbytes = rowbytes;
+  outcome = output_non_finite ? "committed_non_finite" : "committed";
   return true;
 }
 
@@ -1780,6 +2043,12 @@ bool verify_selector_inputs() {
   return true;
 }
 
+bool pr_gpu_filter_route_available() {
+  return active_plugin::effect_module &&
+      GetProcAddress(active_plugin::effect_module,
+                     pr_gpu::kGPUFilterEntryExport) != nullptr;
+}
+
 bool dispatch(const Request& request, const Hooks& hooks,
               smart_execution::Result& result, State& dispatch_state) {
   if (!request.entry || !request.input || !request.output || !request.plan ||
@@ -1798,14 +2067,19 @@ bool dispatch(const Request& request, const Hooks& hooks,
   // Premiere GPU-filter route (issue #1058): the VR / Immersive effect family
   // exports xGPUFilterEntry and is GPU-only - its PF SmartFX CPU path only draws
   // a "requires GPU acceleration" warning and returns 512. Drive the Premiere
-  // GPU filter directly instead. Only float32 renders qualify (these effects are
-  // 32f GPU); any failure falls through to the ordinary PF path below, so a
-  // genuine GPU-only effect is never made worse than its pre-existing 512.
-  const bool pr_gpu_filter_export =
-      active_plugin::effect_module &&
-      GetProcAddress(active_plugin::effect_module,
-                     pr_gpu::kGPUFilterEntryExport) != nullptr;
-  if (plan.float32 && pr_gpu_filter_export) {
+  // GPU filter directly instead. The filter renders 32f frames: a float32
+  // session takes this route first, as before. An 8/16bpc session takes it
+  // only on the frame loop's retry after the PF CPU path answered 512 (issue
+  // #1271; the input is widened to 32f and the output narrowed back inside
+  // run_pr_gpu_filter). Not export-first at 8/16: other AE effects export
+  // xGPUFilterEntry with a working PF CPU path (Levels2, Box_Blur, Lumetri,
+  // DirectionalBlur, ...) and routing them here first at the default depth
+  // measured as crashes and changed pixels against their PF renders. Any
+  // failure falls through to the ordinary PF path below, so a genuine
+  // GPU-only effect is never made worse than its pre-existing 512.
+  if (pr_gpu_filter_route_available() &&
+      (plan.float32 || smart_setup::force_pr_gpu_retry_requested())) {
+    result.pr_gpu_route_attempted = true;
     VideoFrameCpuWorlds pr_filter_frames;
     if (pr_host::run_pr_gpu_filter(request, pr_filter_frames, result))
       return true;
@@ -2124,9 +2398,16 @@ bool dispatch(const Request& request, const Hooks& hooks,
     result.selector_dispatched = true;
     if (gpu_framework == 3 && result.gpu_render_dispatched)
       preload_staged_cuda_kernel();
+    // Snapshot around this one call so `selector_failure_substituted` names
+    // the Smart Render selector and nothing else in the frame (issue #1271).
+    const uint64_t substitutions_before =
+        selector_dispatch_telemetry().substituted_selector_failures;
     result.selector_error = hooks.guarded_call(request.entry, render_selector,
         request.input->data(), request.output->data(), params.data(), nullptr,
         smart_extra.data());
+    result.selector_failure_substituted =
+        selector_dispatch_telemetry().substituted_selector_failures !=
+        substitutions_before;
     // A plug-in may use PF_CHECKOUT_PARAM from SMART_RENDER as well as from
     // SMART_PRE_RENDER. Those selector-local values are host-owned and must be
     // checked back in when the selector returns, just like the pre-render set.

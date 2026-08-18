@@ -50,6 +50,28 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   ```
 - `--filter <substr>`: ファイル名部分一致で絞る。修正後の対象数本の再計測はこれで、
   full-corpus は回帰確認用に別途 1 回。
+- `--depth` (省略時 8) で経路が変わる効果がある。`xGPUFilterEntry` を export する
+  AEX (AE 2026 Effects folder では VR 12 本 + Bilateral / Box_Blur /
+  DirectionalBlur / FractalNoise / Levels2 / Lumetri / Transform / VideoLimiter
+  の 8 本、dumpbin /EXPORTS で列挙できる) は、depth 32 では pr-gpu 経路
+  (`worker_smart_dispatch.cpp` の `run_pr_gpu_filter`) が PF path より先に走り、
+  depth 8/16 では PF CPU path が 512 を返したときだけ frame loop の retry で
+  pr-gpu 経路に入る (#1271。trace では `smart_render_cpu_end error=512` →
+  `frame_setdown_*` → `frame_setup_*` → `pr_gpu_startup_end` →
+  `pr_gpu_render_begin` の順に見える。retry は session frame loop だけで、
+  one-shot `--smart-image*` は 8/16 では 512 のまま。512 が plug-in 自身の
+  戻り値でない frame (selector が SEH で落ちた / C++ 例外が抜けた / module
+  audit を通らなかった、いずれも host が 512 に置換する) や、#1072 の
+  14 → GPU transport retry を通った frame (plan が float32 になり pr-gpu を
+  先に試している) では retry しない)。VR 以外の
+  8 本の depth 32 の挙動は #1272。1 depth の結果だけで「render する / しない」を
+  判定しない。経路に入った frame があれば、その終わり方が各 record の
+  `worker.pr_gpu_route` に 1 つ入る (`committed` / `startup_fault` /
+  `no_output_frame` など。EXTENDED_DIAG 不要)。frame ごとには入らず、記録に
+  残った最後の 1 つで、stage event list は session 単位で上限があるため
+  多 frame session では早い frame の結果になりうる。containment により経路の fault は worker を落とさず PF path への
+  fall-through になるので、`rendered` でもこの key を見ないと「GPU 経路を試して
+  降りた」ことに気付けない。
 - `AEXCOMPAT_EXTENDED_DIAG=1`: worker の host-callback trace を stderr に出し、
   各 record の `stderr_tail` (末尾 64 KB) に worker の生 stderr が入る。fault site
   (`stage:selector_seh`) や拒否痕跡 (`stage:callback_denied`) はここで読める。

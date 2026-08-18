@@ -398,6 +398,7 @@ bool capture_delay_load_basename(EXCEPTION_POINTERS* information,
 }
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {
+  ++g_telemetry.substituted_selector_failures;
   minidump::classify_seh_exception(
       information, {g_telemetry.seh_code, g_telemetry.seh_address,
                     g_telemetry.seh_module});
@@ -413,13 +414,18 @@ int32_t audited_effect_call(EffectEntry entry, int32_t command, void* input,
                             void* output, void** params, void* world, void* extra,
                             bool* invocation_completed_normally,
                             int32_t* raw_return_code) {
-  if (!entry || !g_capture_audit || !g_audit_passed) return kAuditFailure;
+  if (!entry || !g_capture_audit || !g_audit_passed) {
+    ++g_telemetry.substituted_selector_failures;
+    return kAuditFailure;
+  }
   if (g_selector_trace) g_selector_trace(effect_selector_name(command));
   const int32_t error = entry(command, input, output, params, world, extra);
   if (invocation_completed_normally) *invocation_completed_normally = true;
   if (raw_return_code) *raw_return_code = error;
   g_capture_audit();
-  return g_audit_passed() ? error : kAuditFailure;
+  if (g_audit_passed()) return error;
+  ++g_telemetry.substituted_selector_failures;
+  return kAuditFailure;
 }
 
 // The buffer is a fixed-size C string the plug-in owns; it is read as bytes,
@@ -1269,8 +1275,10 @@ int32_t invoke_audited_effect_call_seh(
           entry, command, input, output, params, world, extra,
           invocation_completed_normally, raw_return_code);
     } catch (const std::exception&) {
+      ++g_telemetry.substituted_selector_failures;
       return kAuditFailure;
     } catch (...) {
+      ++g_telemetry.substituted_selector_failures;
       return kAuditFailure;
     }
   };
@@ -1290,7 +1298,10 @@ int32_t invoke_audited_effect_call_seh(
 int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
                          void* output, void** params, void* world, void* extra,
                          uint32_t* out_exception_code) {
-  if (!out_exception_code) return kAuditFailure;
+  if (!out_exception_code) {
+    ++g_telemetry.substituted_selector_failures;
+    return kAuditFailure;
+  }
   *out_exception_code = 0;
   g_telemetry.missing_dependency.clear();
   // The buffer is cleared before the selector runs. The `PF_OutData` lives for

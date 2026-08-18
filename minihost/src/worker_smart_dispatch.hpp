@@ -73,6 +73,13 @@ SelectorInputLayout selector_input_layout();
 /// channel mask, and bitdepth, and `pre_render_data` survives them intact.
 bool verify_selector_inputs();
 
+/// Whether the active plug-in exports the Premiere GPU-filter entry
+/// (`xGPUFilterEntry`), i.e. the dispatch has a Premiere GPU-filter route to
+/// offer it. The session frame loop uses this to decide whether a CPU
+/// SMART_RENDER 512 in an 8/16bpc session is worth one retry through that
+/// route (issue #1271).
+bool pr_gpu_filter_route_available();
+
 bool dispatch(const Request&, const Hooks&, smart_execution::Result&, State&);
 
 }  // namespace aexcompat::worker_runtime::smart_dispatch

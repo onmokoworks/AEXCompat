@@ -80,6 +80,27 @@ class ForceGpuRetryScope {
   ForceGpuRetryScope& operator=(const ForceGpuRetryScope&) = delete;
 };
 
+// Premiere GPU-filter fallback (issue #1271): a plug-in that exports
+// xGPUFilterEntry and answers PF_Err 512 from CPU SMART_RENDER in an 8/16bpc
+// session only implements the GPU path (the VR family; the CPU path just draws
+// a "requires GPU acceleration" notice). The export alone does not separate
+// those from effects whose PF CPU path works (Levels2, Box_Blur, Lumetri and
+// others export it too), so the runtime 512 is the signal. When the frame loop
+// sees it, it sets this flag and re-runs the frame, which lets the smart
+// dispatch take the Premiere GPU-filter route at the session depth. Float32
+// sessions take that route first and never need the flag. Thread-local like
+// the GPU retry flag above, with the same RAII holder shape.
+void set_force_pr_gpu_retry(bool);
+bool force_pr_gpu_retry_requested();
+
+class ForcePrGpuRetryScope {
+ public:
+  ForcePrGpuRetryScope() { set_force_pr_gpu_retry(true); }
+  ~ForcePrGpuRetryScope() { set_force_pr_gpu_retry(false); }
+  ForcePrGpuRetryScope(const ForcePrGpuRetryScope&) = delete;
+  ForcePrGpuRetryScope& operator=(const ForcePrGpuRetryScope&) = delete;
+};
+
 struct WorldBuffers {
   render_safety::InputPixelBuffer* source{};
   render_safety::OutputPixelBuffer* output{};
