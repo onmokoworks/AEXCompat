@@ -68,7 +68,8 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
       !result.output_non_finite;
   // A legally empty result promised no pixels; zero output bytes are the
   // correct fulfillment of that contract, not a validation failure.
-  result.output_pixels_valid = result.empty_result_rect
+  result.output_pixels_valid = (result.empty_result_rect &&
+                                !result.empty_result_passthrough)
       ? true
       : !logical_output.empty() && !untouched && finite;
   if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
@@ -77,7 +78,10 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
   // the stale full-frame extent would claim pixels that were never promised.
   std::memcpy(result.output_extent_hint.data(), r.output_world->data() + 44,
               sizeof(result.output_extent_hint));
-  if (result.empty_result_rect) result.output_extent_hint = {0, 0, 0, 0};
+  // The passthrough did size and fill an output world, so its extent is the
+  // one the world carries; only the promised-nothing frame reports empty.
+  if (result.empty_result_rect && !result.empty_result_passthrough)
+    result.output_extent_hint = {0, 0, 0, 0};
   result.guards_intact = r.guarded->sentinels_intact();
   return true;
 }

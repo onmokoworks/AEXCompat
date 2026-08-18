@@ -2222,12 +2222,73 @@ bool dispatch(const Request& request, const Hooks& hooks,
             << std::flush;
   hooks.automatic_checkin();
 
-  const render::SmartOutputBounds smart_bounds = render::prepare_smart_output_bounds(
+  render::SmartOutputBounds smart_bounds = render::prepare_smart_output_bounds(
       dispatch_state.pre_output.data(), dispatch_state.pre_output.size(), plan.pixel_bytes);
   result.result_rect = smart_bounds.result_rect;
   result.max_result_rect = smart_bounds.max_result_rect;
   result.rects_valid = result.pre_error == 0 && smart_bounds.valid;
   result.empty_result_rect = result.rects_valid && smart_bounds.empty_result;
+  // AE-equivalence for a SmartFX PreRender that promises nothing (issue #1285).
+  //
+  // An empty `result_rect` says the effect contributes no pixels to this
+  // frame. AE does not turn that into an empty frame: the frame that reaches
+  // the output is the effect's input, unchanged. Two AE 26.3x87 captures with
+  // verified loaded-module identity, on the same 256x144 solid input this
+  // sweep renders, both came back byte-identical to that input:
+  //
+  //  - Grow_Bounds.aex (`ADBE GROW BOUNDS`) advertises
+  //    PF_OutFlag2_SUPPORTS_SMART_RENDER and its only entry export
+  //    (`FilterMain`) has no case for PF_Cmd_SMART_PRE_RENDER (23) or
+  //    PF_Cmd_SMART_RENDER (24) at all -- both fall through its `default` and
+  //    return PF_Err_NONE without touching `extra`. Nothing the plug-in wrote
+  //    can explain AE's frame, and AE cannot have dispatched SMART_RENDER
+  //    either -- at least not consistently with anything observable here: the
+  //    plug-in writes no output world, so a dispatched render would have left
+  //    an unwritten buffer rather than the exact input. What that argument
+  //    cannot rule out is an AE that seeds the output world with the input
+  //    before the selector; the alternatives, and what would still separate
+  //    them, are in `docs/TAIL_COHORT_2026-08-18.md` section 3.
+  //  - Set_Channels.aex (`ADBE Set Channels`) sets `result_rect` empty
+  //    explicitly, with `max_result_rect` at the full frame.
+  //
+  // So the host keeps skipping the render selector (below) and emits the
+  // input in place of the promised-nothing frame. This is not a Classic
+  // fallback: no second route runs and no selector is re-dispatched. It is
+  // recorded on the frame (`empty_result_passthrough`) so a reader can never
+  // mistake it for pixels the plug-in produced.
+  //
+  // What the copy reads is the input world this dispatch built, so `plan` --
+  // host-owned, and not reachable from the plug-in -- is what describes it.
+  // `plan.missing_input` is the one dispatch shape with no such buffer; GPU
+  // negotiation is excluded because the pixels then live on the device rather
+  // than in this world. Note that a generator-shaped effect applied to a layer
+  // still has an input here (the layer), and emitting it is what AE does.
+  const unsigned char* passthrough_source =
+      request.input_world ? read<unsigned char*>(*request.input_world, 24) : nullptr;
+  // The emitted frame is exactly the rect AE asked for. Width/height/rowbytes
+  // and the world origin come off that rect the same way
+  // `prepare_smart_output_bounds` derives them for a rendered result, so one
+  // layout path serves both.
+  const std::array<int32_t, 4> passthrough_rect = expected_request;
+  const int32_t passthrough_width = passthrough_rect[2] - passthrough_rect[0];
+  const int32_t passthrough_height = passthrough_rect[3] - passthrough_rect[1];
+  const int32_t passthrough_rowbytes = plan.rowbytes;
+  result.empty_result_passthrough = result.empty_result_rect && !plan.missing_input &&
+      !plan.gpu_negotiation && passthrough_source &&
+      plan.rowbytes >= plan.width * plan.pixel_bytes &&
+      passthrough_width > 0 && passthrough_height > 0 &&
+      render::smart_rect_contained(passthrough_rect,
+                                   {0, 0, plan.width, plan.height});
+  if (result.empty_result_passthrough) {
+    smart_bounds.empty_result = false;
+    smart_bounds.result_rect = passthrough_rect;
+    smart_bounds.max_result_rect = passthrough_rect;
+    smart_bounds.width = passthrough_width;
+    smart_bounds.height = passthrough_height;
+    smart_bounds.rowbytes = passthrough_width * plan.pixel_bytes;
+    smart_bounds.origin_x = passthrough_rect[0];
+    smart_bounds.origin_y = passthrough_rect[1];
+  }
   result.returns_extra_pixels =
       (read<uint16_t>(dispatch_state.pre_output, 34) & 0x1u) != 0;
   // Without RETURNS_EXTRA_PIXELS the SDK does not admit result > request. The
@@ -2238,11 +2299,16 @@ bool dispatch(const Request& request, const Hooks& hooks,
       render::smart_rect_contained(smart_bounds.result_rect, expected_request);
   result.extra_pixels_contract_violation = result.rects_valid &&
       !result.returns_extra_pixels && !result.result_within_request;
-  if (result.rects_valid && !result.empty_result_rect) {
+  if (result.rects_valid &&
+      (!result.empty_result_rect || result.empty_result_passthrough)) {
     if (!request.guarded->reset(
             static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height)) {
       result.rects_valid = false;
       result.pre_error = -3;
+      // A nonzero pre_error skips the empty-result branch below entirely, so
+      // the passthrough's own correction never runs. Clear the flag here or
+      // the record claims a copy that no code path performed (issue #1285).
+      result.empty_result_passthrough = false;
     }
     *request.destination = request.guarded->data();
     if (!render::prepare_world_layout(
@@ -2266,6 +2332,13 @@ bool dispatch(const Request& request, const Hooks& hooks,
     result.output_width = smart_bounds.width;
     result.output_height = smart_bounds.height;
     result.output_rowbytes = smart_bounds.rowbytes;
+    // Where the emitted buffer sits in layer coordinates. For a rendered
+    // result this is the plug-in's own `result_rect` top-left, which is what
+    // the session already reported; for the empty-result passthrough it is the
+    // request rect, and the plug-in's rect is empty and says nothing about
+    // where the frame is (issue #1285).
+    result.output_origin_x = smart_bounds.origin_x;
+    result.output_origin_y = smart_bounds.origin_y;
     if (video_frame_adapter_ready && !plan.gpu_negotiation) {
       if (!video_frame_worlds.create_output(smart_bounds.width,
                                             smart_bounds.height,
@@ -2391,7 +2464,50 @@ bool dispatch(const Request& request, const Hooks& hooks,
             << "_begin\n" << std::flush;
   if (result.empty_result_rect && result.pre_error == 0) {
     // A legally empty result_rect renders nothing; the selector is skipped.
+    // What reaches the frame is the input, copied row by row into the output
+    // buffer sized above, when the passthrough conditions held (see the
+    // AE-equivalence note at `empty_result_passthrough`). Both worlds are the
+    // host's own guarded allocations at `plan.pixel_bytes`, and the rect was
+    // checked to lie inside the input, so each row copy stays in bounds.
     result.render_error = 0;
+    // The `_begin` / `_end` pair is the shape the broker turns into a stage
+    // event, so the copy is on the record of an ordinary sweep and not only in
+    // a close report. Every reason is a lower-case identifier, which is all the
+    // broker's stage parser admits. Emitted only where a copy was on the table:
+    // a frame the passthrough was never eligible for stays empty, which the
+    // bucket already says, and the session's event list is capped.
+    if (result.empty_result_passthrough) {
+      std::cerr << "stage:smart_empty_result_passthrough_begin\n" << std::flush;
+      const char* passthrough_reason = "input_copied";
+      if (!result.rects_valid || !*request.destination) {
+        // The output world was not laid out after all (a failed layout or
+        // world registration above). Put the frame back to the answer an
+        // empty result had before this passthrough existed rather than
+        // reporting a size for a buffer nothing filled.
+        result.empty_result_passthrough = false;
+        result.output_width = 0;
+        result.output_height = 0;
+        result.output_rowbytes = 0;
+        result.output_origin_x = 0;
+        result.output_origin_y = 0;
+        passthrough_reason = "output_world_unavailable";
+      } else {
+        const std::size_t row = static_cast<std::size_t>(smart_bounds.width) *
+            static_cast<std::size_t>(plan.pixel_bytes);
+        for (int32_t y = 0; y < smart_bounds.height; ++y) {
+          std::memcpy(*request.destination +
+                          static_cast<std::size_t>(y) * smart_bounds.rowbytes,
+                      passthrough_source +
+                          static_cast<std::size_t>(smart_bounds.origin_y + y) *
+                              passthrough_rowbytes +
+                          static_cast<std::size_t>(smart_bounds.origin_x) *
+                              plan.pixel_bytes,
+                      row);
+        }
+      }
+      std::cerr << "stage:smart_empty_result_passthrough_end reason="
+                << passthrough_reason << "\n" << std::flush;
+    }
   } else if (will_dispatch && transport_ready) {
     if (plan.gpu_negotiation) hooks.capture_module_audit();
     runtime.gpu_render_dispatched = result.gpu_render_dispatched;

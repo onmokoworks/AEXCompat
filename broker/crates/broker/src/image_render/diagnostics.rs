@@ -634,6 +634,13 @@ fn worker_diagnostics(
         // whose GPU route died on entry would land in `rendered` off the PF
         // path with nothing in the record saying the route was tried at all.
         "pr_gpu_route",
+        // Not a selector either: the host emitting the effect's input in place
+        // of a frame a SmartFX PreRender promised nothing for (an empty
+        // `result_rect`; issue #1285). The render selector is skipped, so
+        // without this a copied frame would land in `rendered` with nothing in
+        // the record saying the plug-in did not draw it. The `_end` carries a
+        // `reason`: `input_copied`, or why the host declined to copy.
+        "smart_empty_result_passthrough",
         // Not a selector: the worker's own refusal to run with a utility
         // callback table whose entries do not sit at the offsets the generated
         // contract names for them. It aborts immediately after, so without this

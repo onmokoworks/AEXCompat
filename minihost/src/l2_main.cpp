@@ -44,6 +44,7 @@
 #include <variant>
 #include <vector>
 
+#include "extended_inter_memory.hpp"
 #include "native_stdout_guard.hpp"
 #include "gpu_cuda_backend.hpp"
 #include "gpu_device_info_registry.hpp"

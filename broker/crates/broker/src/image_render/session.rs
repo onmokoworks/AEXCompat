@@ -1738,6 +1738,7 @@ pub(crate) fn build_interactive_image_report(
         ("output_world", "output_world"),
         ("suite_timeline", "suite_timeline"),
         ("empty_result_rect", "empty_result_rect"),
+        ("empty_result_passthrough", "empty_result_passthrough"),
         ("returns_extra_pixels", "returns_extra_pixels"),
         ("result_within_request", "result_within_request"),
         (

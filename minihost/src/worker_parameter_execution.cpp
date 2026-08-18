@@ -852,10 +852,19 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
   std::memcpy(bytes.data(), definition, bytes.size());
   const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
   const auto length = strnlen_s(name, kParamNameSize);
-  if (extended_diag_enabled())
+  if (extended_diag_enabled()) {
     std::cerr << "extended_diag:add_param index=" << index
               << " type=" << read<int32_t>(bytes, kParamType) << " name=\""
-              << std::string(name, length) << "\"\n" << std::flush;
+              << std::string(name, length) << "\"";
+    // A layer parameter carries its `PF_LayerDefault` in the `dephault` field
+    // that ends the `PF_LayerDef` sitting in the union (SDK AE_Effect.h:
+    // MYSELF = -1, NONE = 0). Which of the two a plug-in declared decides
+    // whether an unconnected slot is transparent or is the effect's own input,
+    // and the trace had no way to show it (issue #1285).
+    if (read<int32_t>(bytes, kParamType) == 0)
+      std::cerr << " layer_dephault=" << read<int32_t>(bytes, 56 + 116);
+    std::cerr << "\n" << std::flush;
+  }
   const int32_t host_index = index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index;
   if (host_index <= 0 || host_index > static_cast<int32_t>(kMaxParams) ||
       std::any_of(g_params.begin(), g_params.end(),

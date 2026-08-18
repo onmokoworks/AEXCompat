@@ -707,6 +707,8 @@ bool configure_component_suite_catalog() {
        &mask_suite_provider_available},
       {"AEGP Keyframe Suite", 4, &g_keyframe_suite4, nullptr, nullptr,
        &mask_keyframe_suite4_provider_available},
+      {"AEGP Keyframe Suite", 3, &g_keyframe_suite3, nullptr, nullptr,
+       &mask_keyframe_suite4_provider_available},
       {"AEGP Dynamic Stream Suite", 5, &g_dynamic_stream_suite,
        nullptr, nullptr, &mask_suite_provider_available},
       {"AEGP Mask Outline Suite", 5, &g_mask_outline_suite,

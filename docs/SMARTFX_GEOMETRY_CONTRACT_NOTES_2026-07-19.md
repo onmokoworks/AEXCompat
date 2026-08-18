@@ -454,3 +454,33 @@ sizing の追随変更 (result_rect 基準 + origin 設定) は issue #102 の
 `contract::IN_GLOBAL_DATA_OFFSET` (312) へ `contract::OUT_GLOBAL_DATA_OFFSET` (40) を
 書いている。`l2_main_support.inc` 側の未使用な重複定数 `kInGlobalData` だけを grep して
 実装を見落としていた。#705 は not planned でクローズ済み。
+
+## 2026-08-18 訂正: 空 `result_rect` の出力 (issue #1285)
+
+上の 2026-07-19 の項「空 `result_rect` は … render selector を dispatch せず
+`empty_result_rect: true` を報告し、0 byte 出力を正常 (output_pixels_valid=true)
+とする」のうち、**「0 byte 出力」の部分を訂正する**。selector を dispatch しない
+のはそのままで、正しい。
+
+AE 26.3x87 の実機観測 (`docs/TAIL_COHORT_2026-08-18.md` §2.3):
+空 `result_rect` を返す shipping AEX 2 本 (`Grow_Bounds.aex` /
+`Set_Channels.aex`) は、AE では **入力と byte 一致の非空フレーム**を出す。
+特に Grow_Bounds.aex は唯一の entry export の `switch (cmd)` に
+`PF_Cmd_SMART_PRE_RENDER` / `PF_Cmd_SMART_RENDER` の case が無く、`extra` に
+一切触れずに 0 を返すので、AE のあのフレームは plug-in 側では説明できない。
+つまり AE の契約は「空 `result_rect` = この effect はこのフレームに寄与しない」
+であって「フレームが空」ではない。
+
+host はこれに合わせ、空 result のとき effect の入力を output world に複製して
+出す (`worker_smart_dispatch.cpp` の `empty_result_passthrough`)。0 byte 出力が
+残るのは複製できないとき (入力の無い dispatch、GPU negotiation、output world が
+組めなかったとき) だけで、そのときは `empty_result_passthrough` が false のまま
+`output_pixels_valid=true` の空フレームとして報告される。
+
+`pf_smart_geometry_probe` の mode 3 (`EmptyResult`) の期待値もこれに合わせて
+更新した (`tests/test_pf_smart_geometry_probe.py`)。
+`analysis/SMARTFX_GEOMETRY_CONTRACT_RESULT_2026-07-19.json` は **この訂正の前の
+mode 3 を記録したまま**で、refresh には採取時の独立 SmartFX AEX
+(`target/ntsc-rs-ae.aex`) が要るため未更新
+(`tools/refresh-smartfx-geometry-evidence.ps1`、
+`docs/EVIDENCE_POLICY_2026-07-18.md` §5.2)。手で書き換えてはいけない。

@@ -69,6 +69,12 @@ struct Result {
   int32_t output_width{};
   int32_t output_height{};
   int32_t output_rowbytes{};
+  // Top-left of the emitted buffer in layer coordinates. Equals the plug-in's
+  // `result_rect` top-left for a rendered result; for the empty-result
+  // passthrough the plug-in's rect is empty and this is the request rect, so a
+  // reader of the emitted frame has somewhere to put it (issue #1285).
+  int32_t output_origin_x{};
+  int32_t output_origin_y{};
   // PF_RenderOutputFlag_RETURNS_EXTRA_PIXELS (pre_output flags bit 0x1): the
   // SDK admits result_rect > output_request.rect only when this is set. An
   // overrun without the flag is surfaced as a diagnostic, not a failure.
@@ -78,6 +84,13 @@ struct Result {
   // A legally empty result_rect skips the render selector instead of
   // dispatching into a zero-sized world.
   bool empty_result_rect{};
+  // ... and the frame that reached the output was the effect's input, copied
+  // by the host because the effect promised no pixels. Always false unless
+  // `empty_result_rect` is true. It is on the record so a nonempty frame from
+  // an effect that rendered nothing can never read as one the effect produced
+  // (issue #1285; the AE captures behind it are cited at the assignment site
+  // in worker_smart_dispatch.cpp).
+  bool empty_result_passthrough{};
   // True only when the Smart Render selector was actually invoked; a NOP
   // passthrough, an empty-result skip, and an invalid-geometry refusal all
   // leave it false so the report reflects the real dispatch decision.

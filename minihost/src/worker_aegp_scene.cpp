@@ -2607,6 +2607,7 @@ std::array<void*, 46> g_aegp_layer_suite5{};
 std::array<void*, 48> g_aegp_layer_suite7{};
 std::array<void*, 50> g_aegp_layer_suite8{};
 std::array<void*, 53> g_aegp_layer_suite9{};
+std::array<void*, 16> g_aegp_effect_suite1{};
 std::array<void*, 17> g_aegp_effect_suite2{};
 std::array<void*, 17> g_aegp_effect_suite3{};
 std::array<void*, 22> g_aegp_effect_suite4{};
@@ -2631,6 +2632,7 @@ static_assert(sizeof(g_aegp_layer_suite8) == 400);
 static_assert(sizeof(g_aegp_layer_suite9) == 424);
 static_assert(sizeof(g_aegp_effect_suite4) == 176);
 static_assert(sizeof(g_aegp_effect_suite2) == 136);
+static_assert(sizeof(g_aegp_effect_suite1) == 128);
 static_assert(sizeof(g_aegp_effect_suite3) == 136);
 static_assert(sizeof(g_aegp_stream_suite1) == 160);
 static_assert(sizeof(g_aegp_stream_suite2) == 176);
@@ -3041,6 +3043,37 @@ SceneSuiteAcquireResult scene_acquire_suite(
     g_aegp_effect_suite4[15] = reinterpret_cast<void*>(&aegp_get_effect_category);
     g_aegp_effect_suite4[16] = reinterpret_cast<void*>(&aegp_duplicate_effect);
     *suite = g_aegp_effect_suite4.data();
+    return SceneSuiteAcquireResult::acquired;
+  }
+  // `AEGP_EffectSuite1` (AE 5.5) is `AEGP_EffectSuite2` minus its trailing
+  // `AEGP_DuplicateEffect`: the SDK headers give both the same 16 leading
+  // members with identical signatures, so the v1 table is the v2 table
+  // truncated to 16 slots and nothing here is a guess about a slot AE fills
+  // differently. `AEGP_EffectCallGeneric` (slot 7) is the one member whose
+  // signature does move between versions -- v3 inserts a `PF_Cmd` -- and it
+  // stays a diagnosed unsupported stub in every version, so the split does not
+  // reach it. Boris FX MochaAE.aex acquires v1 during PRE_RENDER and returns a
+  // fatal -47 when the acquire fails (issue #1285).
+  if (named("AEGP Effect Suite") && version == 1) {
+    g_aegp_effect_suite1 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_effect_1, 16>();
+    g_aegp_effect_suite1[0] = reinterpret_cast<void*>(&aegp_get_layer_num_effects);
+    g_aegp_effect_suite1[1] = reinterpret_cast<void*>(&aegp_get_layer_effect_by_index);
+    g_aegp_effect_suite1[2] =
+        reinterpret_cast<void*>(&aegp_get_installed_key_from_layer_effect);
+    g_aegp_effect_suite1[3] = factory.effect_param_union;
+    g_aegp_effect_suite1[4] = reinterpret_cast<void*>(&aegp_get_effect_flags);
+    g_aegp_effect_suite1[5] = reinterpret_cast<void*>(&aegp_set_effect_flags);
+    g_aegp_effect_suite1[6] = reinterpret_cast<void*>(&aegp_reorder_effect);
+    g_aegp_effect_suite1[8] = reinterpret_cast<void*>(&aegp_dispose_effect);
+    g_aegp_effect_suite1[9] = reinterpret_cast<void*>(&aegp_apply_effect);
+    g_aegp_effect_suite1[10] = reinterpret_cast<void*>(&aegp_delete_layer_effect);
+    g_aegp_effect_suite1[11] = reinterpret_cast<void*>(&aegp_get_num_installed_effects);
+    g_aegp_effect_suite1[12] = reinterpret_cast<void*>(&aegp_get_next_installed_effect);
+    g_aegp_effect_suite1[13] = reinterpret_cast<void*>(&aegp_get_effect_name);
+    g_aegp_effect_suite1[14] = reinterpret_cast<void*>(&aegp_get_effect_match_name);
+    g_aegp_effect_suite1[15] = reinterpret_cast<void*>(&aegp_get_effect_category);
+    *suite = g_aegp_effect_suite1.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Effect Suite") && (version == 2 || version == 3)) {
