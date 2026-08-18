@@ -186,6 +186,9 @@ plug-in がある (#1272) ため、この 5 本が #1278 側で既に直って�
 - 再測定 (merge 済みブランチ、`--filter` 単位): Spill2 / Transform / Glow /
   Echo / CannedWarp は rendered、`pixel_sha256` は merge 前と同一。
   ColorAndContrast / Curl_Noise / ShapeBlur は 512 のまま (§5 の通り別軸)。
-- 新 main 単体 (`175c4844` を別 worktree でビルドして full-corpus sweep) の
-  値と、本ブランチの full-corpus sweep の差分は PR 側に記載する。
-  __BASELINE__
+- 新 main 単体 (`175c4844` を別 worktree で build して full-corpus sweep):
+  rendered 284 / 512 9 (CannedWarp, ColorAndContrast, Curl_Noise, Echo, Glow,
+  ShapeBlur, Spill2, Transform, VRSphereToPlane) / not_discovered 7 /
+  worker_invariant_failure 2 / rendered_empty 2。本ブランチは同じ引数で
+  rendered 289 / 512 4 で、plug-in 単位の差は上の 5 本だけ、他 299 本は
+  bucket も `pixel_sha256` も一致する。
