@@ -58,14 +58,20 @@ enum class Bootstrap {
 
 struct State {
   Bootstrap bootstrap = Bootstrap::none;
+  // Whether this process ran ae_sweetpea's own `SPInit`. Kept apart from
+  // `bootstrap` because the two layers stack: a member that maps U.dll after
+  // a direct start runs U's bootstrap on top, and the SPInit this process
+  // already did still has to be unwound. `SPInit` is reference-counted, so
+  // one `SPTerm` per successful `SPInit` is what balances it.
+  bool direct_started = false;
   // The U.dll mapping whose `U_SP_Birth` succeeded, so teardown runs
   // `U_SP_Death` on the mapping that was actually bootstrapped rather than
   // whatever is mapped at exit.
   HMODULE bootstrapped_u_module = nullptr;
   HMODULE attempted_u_module = nullptr;
-  // The direct attempt key. A null module is a real value here: it means
-  // "attempted while ae_sweetpea was not mapped", and a later member that
-  // maps it, or one admitted from a different directory, is asked again.
+  // The direct attempt key. A null module is a real value here: it means the
+  // attempt found ae_sweetpea neither mapped nor loadable, and a later member
+  // that maps it, or one admitted from a different directory, is asked again.
   HMODULE attempted_sweetpea_module = nullptr;
   std::wstring attempted_plugin_directory;
   bool direct_attempted = false;
@@ -93,9 +99,10 @@ enum class Decision {
   // it is not mapped. Record the attempt with `begin_direct_start` before
   // calling, for the same reason.
   StartDirectly,
-  // Nothing to do now. A different U.dll mapping, a newly mapped
-  // ae_sweetpea, or a member admitted from a different directory would still
-  // be asked.
+  // Nothing to do now. Once Sweet Pea is started, only a different U.dll
+  // mapping is still asked (to register the adapter a direct start left out);
+  // while it is not started, a newly mapped ae_sweetpea or a member admitted
+  // from a different directory is asked too.
   Nothing,
 };
 
@@ -131,37 +138,51 @@ inline void finish_u_sp_birth(State& state, HMODULE u_module,
   state.bootstrapped_u_module = u_module;
 }
 
-inline void begin_direct_start(State& state, HMODULE sweetpea_module,
-                               const std::wstring& plugin_directory) {
+// Two steps because the ae_sweetpea load itself runs foreign code (its
+// DllMain and its closure's) that can acquire a suite and re-enter: the
+// in-flight flag has to be up before the load, and the module it produces is
+// only known afterwards.
+inline void begin_direct_attempt(State& state,
+                                 const std::wstring& plugin_directory) {
   state.direct_attempted = true;
-  state.attempted_sweetpea_module = sweetpea_module;
   state.attempted_plugin_directory = plugin_directory;
   state.attempt_in_flight = true;
   ++state.direct_attempts;
 }
 
-inline void finish_direct_start(State& state, bool succeeded) noexcept {
-  state.attempt_in_flight = false;
-  if (succeeded) state.bootstrap = Bootstrap::direct;
+inline void note_direct_module(State& state,
+                               HMODULE sweetpea_module) noexcept {
+  state.attempted_sweetpea_module = sweetpea_module;
 }
 
-// Teardown has to unwind through the layer that started Sweet Pea, and only
-// that layer: `U_SP_Death` is U.dll's own SPShutdownPlugins + SPTerm pair, so
-// running it and the ae_sweetpea exports would shut the plug-in list down
-// twice, and running either one when this process never started Sweet Pea
-// would tear down a layer it does not own (ae_sweetpea can be mapped by a
-// closure without this host having started it).
+// `initialized` is ae_sweetpea's `SPInit` outcome and `started` the whole
+// SPInit+SPStartupPlugins one. They are separate because an SPInit that
+// succeeded has to be unwound even when SPStartupPlugins then failed.
+inline void finish_direct_start(State& state, bool initialized,
+                                bool started) noexcept {
+  state.attempt_in_flight = false;
+  if (initialized) state.direct_started = true;
+  if (started) state.bootstrap = Bootstrap::direct;
+}
+
+// Teardown unwinds each layer this process actually started, once per start,
+// and no layer it did not start (ae_sweetpea can be mapped by a closure
+// without this host having run its SPInit). `U_SP_Death` is U.dll's own
+// SPShutdownPlugins + SPTerm pair, so it is the U layer's unwind; a direct
+// start is unwound through ae_sweetpea's own exports. When both ran, both
+// unwind - `SPInit` is reference-counted, so one `SPTerm` per successful
+// `SPInit` is what balances it - U first, because U started last.
 //
 // `teardown_u_module` returns the U.dll mapping to run `U_SP_Death` on, or
-// null; `teardown_sweetpea_directly` says whether the ae_sweetpea exports are
-// the ones to run. Both answer "no" when Sweet Pea was never started.
+// null; `teardown_sweetpea_directly` says whether ae_sweetpea's exports are
+// owed a teardown.
 inline HMODULE teardown_u_module(const State& state) noexcept {
   return state.bootstrap == Bootstrap::u_sp_birth ? state.bootstrapped_u_module
                                                   : nullptr;
 }
 
 inline bool teardown_sweetpea_directly(const State& state) noexcept {
-  return state.bootstrap == Bootstrap::direct;
+  return state.direct_started;
 }
 
 }  // namespace aexcompat::worker_runtime::sweetpea_bootstrap

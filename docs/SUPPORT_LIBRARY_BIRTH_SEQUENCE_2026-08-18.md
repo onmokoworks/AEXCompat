@@ -137,10 +137,24 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   (ae_sweetpea は closure が map しているだけのことがあり、それを shutdown
   するのは所有していない層を畳むことになる)。実測では **one-shot 直叩きの時点で U.dll は
   既に unmap されている** (`extended_diag:pica_component stage=teardown
-  sweetpea=u_unmapped`)。記録した HMODULE をそのまま使うと解放済み image を
+  u=unmapped`)。記録した HMODULE をそのまま使うと解放済み image を
   GetProcAddress で読むことになるので、teardown 時に `GetModuleHandleW` で
   同じ mapping であることを確かめてから呼ぶ。結果として one-shot では
-  `U_SP_Death` は走らない。
+  `U_SP_Death` は走らない。unmap の出所は `WorkerSession::unload_module` の
+  `FreeLibrary` で、plug-in closure (U.dll を含む) は atexit より前に
+  解放される。U 経路では ae_sweetpea もホスト自身の参照を持たない
+  (U.dll の依存として入ってくるだけ) ので、両層とも unmap 済みになる。
+- **走らせようとした結果 (実測、採用せず)**: `GetModuleHandleExW(FLAG_PIN)` で
+  U.dll と ae_sweetpea を process 寿命まで pin すると `U_SP_Death` は実際に
+  走るようになるが、**3 本とも process 終了時に access violation**
+  (exit 0xC0000005) になった (pin 無しでは Particle_Playground exit 20 /
+  ProfileToProfile exit 0)。atexit 時点の SP/dvacore 状態では
+  `SPShutdownPlugins`+`SPTerm` は安全に呼べない、という観察。したがって
+  pin は入れず、U 経路では teardown が no-op になることを受け入れて記録に
+  留める。#362 の teardown が防いでいた dvacore shutdown fast-fail が
+  この経路で再発しないことは corpus 304 本の sweep で確認している
+  (session 分類に変化なし)。teardown を安全に走らせる場所 (session の
+  unload 境界など) の検討は #1282。
 - 呼び出し順は `initialize_u_dll_allocator()` (U_Birth、#362 / #1063) →
   `initialize_pin_support_libraries()` (この issue) →
   `initialize_pf_dll_host_layer()` (PF_Birth、#1212 / PR #1284) で、AE の

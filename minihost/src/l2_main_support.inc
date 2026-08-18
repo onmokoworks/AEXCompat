@@ -1499,8 +1499,9 @@ void initialize_pin_support_libraries() {
       // and stopping would deny the later libraries an initialization they
       // do not depend on the faulted one for. The one real dependency in
       // this table (VAL needs U) is satisfied by initialize_u_dll_allocator
-      // running first, not by an earlier entry here.
-      result = -1;
+      // running first, not by an earlier entry here. The result is not
+      // reported for a faulted entry: the trace says `status=faulted`, and a
+      // number there would look like the library answered.
       std::cerr << "stage:legacy_support_init library=" << library.name
                 << " entry=" << library.birth << " status=faulted\n"
                 << std::flush;

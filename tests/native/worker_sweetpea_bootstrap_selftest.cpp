@@ -83,8 +83,9 @@ void drive(State& state, HMODULE u_module, bool u_sp_birth_exported,
         sweetpea::finish_u_sp_birth(state, u_module, u_succeeds);
         break;
       case Decision::StartDirectly:
-        sweetpea::begin_direct_start(state, sweetpea_module, directory);
-        sweetpea::finish_direct_start(state, direct_succeeds);
+        sweetpea::begin_direct_attempt(state, directory);
+        sweetpea::note_direct_module(state, sweetpea_module);
+        sweetpea::finish_direct_start(state, direct_succeeds, direct_succeeds);
         break;
     }
   }
@@ -166,7 +167,9 @@ int main() {
     check("late_u_bootstrap_switches_teardown",
           static_cast<const void*>(first),
           static_cast<const void*>(sweetpea::teardown_u_module(state)));
-    check("late_u_bootstrap_stops_the_sweetpea_teardown", false,
+    // The SPInit this process ran is still owed its SPTerm: U starting on
+    // top does not unwind it.
+    check("late_u_bootstrap_keeps_the_sweetpea_teardown", true,
           sweetpea::teardown_sweetpea_directly(state));
   }
 
@@ -182,6 +185,33 @@ int main() {
     drive(state, nullptr, false, sweetpea_module, dir_a, true, false, 3);
     check("failed_direct_start_still_tears_down_nothing", false,
           sweetpea::teardown_sweetpea_directly(state));
+    // An SPInit that succeeded is owed its SPTerm even when the
+    // SPStartupPlugins after it failed.
+    State half;
+    sweetpea::begin_direct_attempt(half, dir_a);
+    sweetpea::note_direct_module(half, sweetpea_module);
+    sweetpea::finish_direct_start(half, /*initialized=*/true, /*started=*/false);
+    check("a_started_spinit_is_torn_down_even_if_startup_failed", true,
+          sweetpea::teardown_sweetpea_directly(half));
+    check("a_half_started_sweetpea_is_still_not_bootstrapped",
+          Decision::StartDirectly,
+          sweetpea::decide(half, nullptr, false, sweetpea_module, dir_b));
+  }
+
+  // The wiring decides on the mapping it can see (null when ae_sweetpea is not
+  // mapped yet) and records the handle the load produced. The key must settle
+  // on the recorded handle, not on the one the decision saw.
+  {
+    State state;
+    check("unmapped_sweetpea_is_asked", Decision::StartDirectly,
+          sweetpea::decide(state, nullptr, false, nullptr, dir_a));
+    sweetpea::begin_direct_attempt(state, dir_a);
+    sweetpea::note_direct_module(state, sweetpea_module);
+    sweetpea::finish_direct_start(state, false, false);
+    check("the_loaded_handle_becomes_the_key", Decision::Nothing,
+          sweetpea::decide(state, nullptr, false, sweetpea_module, dir_a));
+    check("another_directory_is_still_asked", Decision::StartDirectly,
+          sweetpea::decide(state, nullptr, false, sweetpea_module, dir_b));
   }
 
   // A U.dll mapping without the export never blocks the direct start.
@@ -254,14 +284,15 @@ int main() {
   // must not be answered with "start it again".
   {
     State state;
-    sweetpea::begin_direct_start(state, sweetpea_module, dir_a);
+    sweetpea::begin_direct_attempt(state, dir_a);
+    sweetpea::note_direct_module(state, sweetpea_module);
     check("reentrant_ask_during_the_direct_call", Decision::Nothing,
           sweetpea::decide(state, nullptr, false, sweetpea_module, dir_a));
     // Not even U's bootstrap, which would run SPInit underneath the one that
     // has not returned yet.
     check("reentrant_ask_during_the_direct_call_with_u", Decision::Nothing,
           sweetpea::decide(state, first, true, sweetpea_module, dir_a));
-    sweetpea::finish_direct_start(state, true);
+    sweetpea::finish_direct_start(state, true, true);
     check("u_bootstrap_resumes_after_the_direct_call", Decision::CallUSpBirth,
           sweetpea::decide(state, first, true, sweetpea_module, dir_a));
     check("direct_reentrancy_leaves_one_attempt", 1UL,

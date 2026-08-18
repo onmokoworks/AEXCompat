@@ -283,18 +283,36 @@ int bravo_init_seh_filter(EXCEPTION_POINTERS*);
 typedef int(__cdecl* SPInitFn)(void*, void*, int32_t);
 typedef int(__cdecl* SPStartupPluginsFn)();
 typedef int(__cdecl* USweetPeaLifecycleFn)();
-int sweetpea_init_guarded(SPInitFn sp_init, SPStartupPluginsFn sp_startup) {
+// `initialized` is reported separately from the overall result because an
+// `SPInit` that succeeded has to be unwound at exit even when the
+// `SPStartupPlugins` after it failed (issue #1279 review).
+struct SweetPeaStartOutcome {
+  bool initialized = false;
+  int result = -1;
+};
+
+SweetPeaStartOutcome sweetpea_init_guarded(SPInitFn sp_init,
+                                           SPStartupPluginsFn sp_startup) {
+  SweetPeaStartOutcome outcome;
   __try {
-    const int init_result = sp_init(nullptr, nullptr, 0);
-    if (init_result != 0) return init_result;
-    return sp_startup();
+    outcome.result = sp_init(nullptr, nullptr, 0);
+    if (outcome.result != 0) return outcome;
+    outcome.initialized = true;
+    outcome.result = sp_startup();
+    return outcome;
   } __except (bravo_init_seh_filter(GetExceptionInformation())) {
-    return -1;
+    outcome.result = -1;
+    return outcome;
   }
 }
 
 // `U_SP_Birth` reports SPAddSuite failures by throwing, so the guard has to
-// cover C++ exceptions as well as faults; both arrive here as SEH.
+// cover C++ exceptions as well as faults; both arrive here as SEH. Catching a
+// throw this way skips the destructors of the U.dll and ae_sweetpea frames it
+// unwinds, so the SP state the fallback direct start then runs on top of is
+// half-built. That is the crash-containment tradeoff this worker makes
+// everywhere, but a throw and a fault are not equally safe to continue from,
+// and the fallback is best-effort rather than a clean retry.
 int u_sweetpea_lifecycle_guarded(USweetPeaLifecycleFn entry) {
   __try {
     return entry();
@@ -381,23 +399,30 @@ void teardown_pica_components() {
     // it: ae_sweetpea can be mapped by a closure without this host having
     // run its SPInit, and shutting that down would tear down a layer this
     // process does not own.
+    // No object with a destructor may live across this `__try` (MSVC
+    // C2712), so the two outcomes are reported as separate plain fields.
     const sweetpea::State& sp_state = sweetpea_state();
-    const HMODULE bootstrapped_u = sweetpea::teardown_u_module(sp_state);
-    // Re-resolve before using it: the recorded handle is only safe to call
-    // through while that mapping is still the live U.dll. A module the loader
-    // has since dropped would make GetProcAddress read a freed image.
-    const HMODULE u_module =
-        (bootstrapped_u && bootstrapped_u == GetModuleHandleW(L"U.dll"))
-            ? bootstrapped_u : nullptr;
+    const char* u_teardown = "none";
     const char* sweetpea_teardown = "none";
-    if (u_module) {
-      const auto u_sp_death = reinterpret_cast<USweetPeaLifecycleFn>(
-          GetProcAddress(u_module, "?U_SP_Death@@YAHXZ"));
-      sweetpea_teardown = u_sp_death ? "u_sp_death" : "u_sp_death_missing";
+    // U first, because U's bootstrap is the one that ran last. Re-resolve the
+    // recorded mapping: calling through a handle the loader has since dropped
+    // would read a freed image, and by atexit it usually has (see the
+    // `u_unmapped` note in docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md).
+    if (const HMODULE bootstrapped_u = sweetpea::teardown_u_module(sp_state)) {
+      const HMODULE u_module =
+          bootstrapped_u == GetModuleHandleW(L"U.dll") ? bootstrapped_u
+                                                       : nullptr;
+      const auto u_sp_death = u_module
+          ? reinterpret_cast<USweetPeaLifecycleFn>(
+                GetProcAddress(u_module, "?U_SP_Death@@YAHXZ"))
+          : nullptr;
+      u_teardown = !u_module ? "unmapped"
+                             : (u_sp_death ? "u_sp_death" : "export_missing");
       if (u_sp_death) u_sp_death();
-    } else if (bootstrapped_u) {
-      sweetpea_teardown = "u_unmapped";
-    } else if (sweetpea::teardown_sweetpea_directly(sp_state)) {
+    }
+    // Then the direct start, if this process ran one: `SPInit` is
+    // reference-counted, so each successful one is owed its own `SPTerm`.
+    if (sweetpea::teardown_sweetpea_directly(sp_state)) {
       const HMODULE sweetpea_module = GetModuleHandleW(L"ae_sweetpea.dll");
       const auto sp_shutdown = sweetpea_module
           ? reinterpret_cast<int(__cdecl*)()>(GetProcAddress(
@@ -407,16 +432,17 @@ void teardown_pica_components() {
           ? reinterpret_cast<int(__cdecl*)()>(
                 GetProcAddress(sweetpea_module, "?SPTerm@ae_sweetpea@@YAHXZ"))
           : nullptr;
-      sweetpea_teardown =
-          (sp_shutdown && sp_term) ? "ae_sweetpea" : "ae_sweetpea_missing";
+      sweetpea_teardown = !sweetpea_module
+          ? "unmapped"
+          : ((sp_shutdown && sp_term) ? "sp_shutdown_term" : "export_missing");
       if (sp_shutdown) sp_shutdown();
       if (sp_term) sp_term();
     }
     // Which layer ran is otherwise unobservable, and "unwind through the
     // layer that started it" is the whole point of the branch above.
     if (aexcompat::l2_detail::extended_diag_enabled())
-      std::cerr << "extended_diag:pica_component stage=teardown sweetpea="
-                << sweetpea_teardown << "\n" << std::flush;
+      std::cerr << "extended_diag:pica_component stage=teardown u="
+                << u_teardown << " sweetpea=" << sweetpea_teardown << "\n" << std::flush;
     if (HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll")) {
       const auto terminate = reinterpret_cast<bool(__cdecl*)(bool)>(
           GetProcAddress(
@@ -477,8 +503,11 @@ void start_sweetpea_directly(HMODULE module) {
             GetProcAddress(module, "?SPStartupPlugins@ae_sweetpea@@YAHXZ"))
       : nullptr;
   const bool callable = sp_init && sp_startup;
-  const int result = callable ? sweetpea_init_guarded(sp_init, sp_startup) : -1;
-  sweetpea::finish_direct_start(sweetpea_state(), callable && result == 0);
+  const SweetPeaStartOutcome outcome =
+      callable ? sweetpea_init_guarded(sp_init, sp_startup)
+               : SweetPeaStartOutcome{};
+  sweetpea::finish_direct_start(sweetpea_state(), outcome.initialized,
+                                callable && outcome.result == 0);
   if (!aexcompat::l2_detail::extended_diag_enabled()) return;
   std::cerr << "extended_diag:pica_component dll=ae_sweetpea.dll status=";
   if (!module) {
@@ -486,7 +515,7 @@ void start_sweetpea_directly(HMODULE module) {
   } else if (!callable) {
     std::cerr << "no_export";
   } else {
-    std::cerr << "called result=" << result;
+    std::cerr << "called result=" << outcome.result;
   }
   std::cerr << "\n" << std::flush;
 }
@@ -521,10 +550,13 @@ void ensure_sweetpea_started() {
       return;
     case sweetpea::Decision::StartDirectly: {
       // No U.dll bootstrap available: start Sweet Pea the way closures that
-      // reach SP without going through U.dll need it started.
+      // reach SP without going through U.dll need it started. The attempt is
+      // opened before the load, because the load runs ae_sweetpea's DllMain
+      // and its closure's, which can acquire a suite and re-enter here.
+      sweetpea::begin_direct_attempt(state, directory);
       const HMODULE module =
           mapped_sweetpea ? mapped_sweetpea : load_sweetpea_module(directory);
-      sweetpea::begin_direct_start(state, module, directory);
+      sweetpea::note_direct_module(state, module);
       start_sweetpea_directly(module);
       return;
     }
@@ -546,11 +578,21 @@ void ensure_sweetpea_started() {
 // The lock is deliberately held across the foreign calls below
 // (LoadLibraryEx, InitBravoComponents, U_SP_Birth -> SPStartupPlugins) rather
 // than only around the state transitions. Those calls are exactly what the
-// latches are protecting: two plug-in threads reaching a suite acquire at the
-// same time must not both enter a bootstrap, and releasing the lock around
-// the call would put that race back. The cost is that a thread already
-// holding the loader lock and acquiring a suite would wait here; the
-// alternative accepted a real observed hazard to avoid a theoretical one.
+// latches protect: two plug-in threads reaching a suite acquire at the same
+// time must not both enter a bootstrap, and releasing the lock around the
+// call would put that race back.
+//
+// The cost is stated plainly: holding a lock across LoadLibraryEx orders this
+// mutex before the loader lock, so a *second* thread that reaches a suite
+// acquire from inside a DllMain (holding the loader lock, waiting for this
+// mutex) would deadlock against a thread holding this mutex and waiting for
+// the loader lock. Discovery has no deadline by policy, so that would be an
+// indefinite hang the Job Object has to end. It is accepted because the
+// re-entrancy actually observed here is same-thread (the recursive mutex and
+// the in-flight flags handle it) and nothing in this worker acquires a host
+// suite from a DllMain: the suite pointer does not exist that early. If that
+// ever changes, the fix is to run the two loads outside the mutex and
+// re-check the latch after reacquiring, not to drop the lock.
 void ensure_pica_components_initialized() {
   auto& state = bib_suite_state();
   std::lock_guard<std::recursive_mutex> component_lock(pica_component_mutex());
