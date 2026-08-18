@@ -230,6 +230,35 @@ extent 注記と同じ話)。単色入力なので「effect が何か描いた�
 素通りしたのか」は区別できていない — 4 本とも default param では AE 自身も
 入力と同じものを出す、というのがここで確かめたこと。
 
+## 2.8 計測 (full corpus)
+
+母集団: AE 2026 `Support Files\Plug-ins\Effects` を `render_sweep` の引数に
+渡した 304 AEX、`--depth` 既定 (8)、size/time/frames も既定。baseline は
+`origin/main` の `9804ae6f` (#1279 merge 後) を専用の worktree で同じ手順で
+build して測ったもの。sweep CLI は両者同一バイナリで、worker 3 exe だけが違う。
+
+| bucket | baseline (9804ae6f) | 変更後 |
+| --- | --- | --- |
+| rendered | 289 | **293** |
+| rendered_empty | 2 | **0** |
+| not_discovered:cluster_session_invalidated | 1 | **0** |
+| render_frame_failed:worker_invariant_failure | 2 | **1** |
+| frame_error:512 | 5 | 5 |
+| frame_error:4 | 1 | 1 |
+| not_discovered:exit_20_params_setup:13 | 2 | 2 |
+| not_discovered:exit_20_global_setup:2 | 1 | 1 |
+| not_discovered:exit_12 | 1 | 1 |
+
+bucket が動いたのは 4 本だけで、他の 300 本は baseline と同じ bucket
+(突き合わせの key は `plugin_relative_path`)。
+
+silent-wrong の確認として、両方の run で `detail.pixel_sha256` を持つ record を
+突き合わせた (baseline 291、変更後 293、baseline で hash を持つ record が変更後に
+落ちたものは 0)。hash が変わったのは Grow_Bounds と Set_Channels の 2 本だけで、
+どちらも `e3b0c442…b855` (空バイト列の SHA-256、= 0 byte 出力) から
+`8d030dce…4445` (入力の RGBA、= AE oracle と同一) への変化。残りの 289 本は
+hash 一致。
+
 ## 3. 残っている不確かさ
 
 - AE が `PF_PreRenderOutput` を selector 前に何で埋めているかは直接観測して
