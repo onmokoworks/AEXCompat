@@ -1554,6 +1554,11 @@ bool verify_pf_world_facade() {
   };
   using Depth = int16_t (__cdecl*)(const void*);
   check(facade::selftest(), "facade contract self-test failed");
+  // That self-test ends by filling the quarantine to its bound, so from here
+  // on every detach / dispose in this process frees the object it retires.
+  // Nothing below may read an object it has just taken out of service; the
+  // property that a retired object stays readable is asserted inside
+  // `facade::selftest()`, before its churn section.
   // The module self-test trapped slots 0, 10 and the last one; the worker's
   // recorder must have put them in the report under the pseudo-suite name.
   check(recorded(0) && recorded(10) &&

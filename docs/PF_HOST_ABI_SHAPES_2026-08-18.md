@@ -167,3 +167,25 @@ full-corpus (AE 2026 `Support Files\Plug-ins\Effects` 304 AEX、depth 8、
   AV する (観測)。原因は未特定で、除外で回避している。
 - AE の live な `effect_ref` / `reserved_long4` の中身を Frida で dump しては
   いない (実装は PF.dll / plug-in 側の逆アセンブルと AE 出力の一致による)。
+
+## 6. main (#1278 / VR depth) を取り込んだ後の再測定 (2026-08-18)
+
+作業中に main が進み (`175c4844`、PR #1278 = issue #1271)、VR family を depth
+8/16 でも Premiere GPU 経路に載せる変更と、8/16↔32f 変換、`xGPUFilterEntry` の
+SEH/C++ 例外封じ込めが入った。非VR でも `xGPUFilterEntry` を export する
+plug-in がある (#1272) ため、この 5 本が #1278 側で既に直っていないか、
+また逆に #1278 と衝突していないかを測り直した。
+
+- 取り込みは merge (`019e031b`)。conflict は 3 つとも「両側が同じ配列/リストに
+  要素を足した」だけで、両方を残して解決した (selftest route の
+  `std::array` は 39 + main 1 + 本ブランチ 2 = 42)。
+- merge 後に 3 exe を再ビルドし、mtime が編集より新しいことを確認してから
+  再測定した。main の新 route `--self-test-argb32f-depth-conversion` は
+  本ブランチの `EffectWorldStorage` (0x90 + vtable prefix) の上でも 3 worker
+  すべて pass する。
+- 再測定 (merge 済みブランチ、`--filter` 単位): Spill2 / Transform / Glow /
+  Echo / CannedWarp は rendered、`pixel_sha256` は merge 前と同一。
+  ColorAndContrast / Curl_Noise / ShapeBlur は 512 のまま (§5 の通り別軸)。
+- 新 main 単体 (`175c4844` を別 worktree でビルドして full-corpus sweep) の
+  値と、本ブランチの full-corpus sweep の差分は PR 側に記載する。
+  __BASELINE__

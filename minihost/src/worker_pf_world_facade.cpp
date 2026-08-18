@@ -861,8 +861,17 @@ bool selftest() {
   check(live_count() == live_before, "objects were not released");
   check(retired_count() == retired_before + 2, "the second detach did not retire its object");
   // The bound itself: attach/detach one struct past the quarantine's capacity
-  // and the deque must stop growing, evict, and say so exactly once. This is
-  // the only place the eviction branch runs.
+  // and the deque must stop growing and count an eviction. This is the only
+  // place the eviction branch runs, and it must stay the last section, because
+  // it leaves the quarantine full **for the rest of the process**: from here
+  // on every retirement evicts, so nothing that runs after this may read an
+  // object it has detached or disposed. The routes that call `selftest()` do
+  // no plug-in rendering, so no production object is in the deque to lose.
+  // Two things this cannot pin: that the eviction takes the *oldest* object
+  // (a `pop_back` regression would leave the same count and the same eviction
+  // tally while dropping containment for the most recently retired object,
+  // which is the one a stale world copy most likely names), and that the
+  // stderr line is latched to one - both are only observable from outside.
   {
     const uint32_t evictions_before = quarantine_evictions();
     alignas(16) std::array<std::byte, world_safety::kEffectWorldSize> churn{};
@@ -872,10 +881,13 @@ bool selftest() {
     store(churn, kRowbytesOffset, int32_t{16});
     store(churn, kWidthOffset, int32_t{4});
     store(churn, kHeightOffset, int32_t{1});
+    // `detach` clears `reserved_long4` on the way out, so each pass starts
+    // from a struct that carries no object again.
     for (std::size_t i = 0; i <= kMaxRetiredObjects; ++i) {
-      void* null = nullptr;
-      std::memcpy(churn.data() + kReservedLong4Offset, &null, sizeof(null));
-      if (!attach(churn.data(), 4)) { check(false, "churn attach failed"); break; }
+      if (!attach(churn.data(), 4)) {
+        check(false, "churn attach failed");
+        break;
+      }
       detach(churn.data());
     }
     check(retired_count() == kMaxRetiredObjects,
@@ -883,6 +895,8 @@ bool selftest() {
     check(quarantine_evictions() > evictions_before,
           "the quarantine did not report an eviction at the bound");
     check(live_count() == live_before, "the churn left pool objects behind");
+    check(read_ptr(churn.data(), kReservedLong4Offset) == nullptr,
+          "the churn left an object pointer in the struct");
   }
   detach(nullptr);
   return passed;
