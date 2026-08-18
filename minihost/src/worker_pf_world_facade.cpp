@@ -60,10 +60,14 @@ struct Shared {
   Shared& operator=(const Shared&) = delete;
 };
 std::unordered_map<const void*, std::unique_ptr<WorldObject>> g_objects;
-// Disposed world-registry objects, kept inert (see `retire`). Bounded: past
-// the bound the oldest is released, which is the point where a stale pointer
-// becomes a plain use-after-free again.
-constexpr std::size_t kMaxRetiredObjects = 256;
+// Disposed world-registry objects, kept inert (see `retire`). Bounded, because
+// a session disposes scratch worlds per frame and the quarantine must not grow
+// without limit; past the bound the oldest is released, which is the point
+// where a stale pointer to *that* object becomes a plain use-after-free again.
+// 4096 objects is 640 KB at 0xa0 bytes each - a whole interactive session's
+// worth of scratch worlds, and negligible beside the 256 MB the world registry
+// itself may hold.
+constexpr std::size_t kMaxRetiredObjects = 4096;
 std::deque<std::unique_ptr<WorldObject>> g_retired;
 std::atomic<uint32_t> g_trap_count{};
 std::atomic<uint32_t> g_copy_rect_calls{};
