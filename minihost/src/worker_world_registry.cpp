@@ -205,8 +205,14 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   try {
     g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
   } catch (...) {
+    // The struct was already filled in above, so it has to be cleared with the
+    // allocation: `g_worlds` is keyed by the pixel pointer, and a caller left
+    // holding a struct that names a freed buffer would resolve - once the
+    // allocator hands that address to the next world - to somebody else's live
+    // allocation, and could dispose it out from under its owner.
     ::operator delete(pixels);
     delete companion;
+    std::memset(world, 0, world_safety::kEffectWorldSize);
     return 1;
   }
   // Publishes the facade (vtable, LayerDef mirror) and writes reserved_long4.

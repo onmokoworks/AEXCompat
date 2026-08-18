@@ -69,7 +69,9 @@ std::unordered_map<const void*, std::unique_ptr<WorldObject>> g_objects;
 // proved the pointer is an object this module allocated does it read that
 // object's own back-reference.
 std::unordered_set<const void*> g_published_objects;
-// Disposed world-registry objects, kept inert (see `retire`). Bounded, because
+// Objects nobody may call again, kept inert (see `retire_locked`): the world
+// registry's companions when a world is disposed, and the pool's mirrors when
+// a scope detaches them. Bounded, because
 // a session disposes scratch worlds per frame and the quarantine must not grow
 // without limit; past the bound the oldest is released, which is the point
 // where a stale pointer to *that* object becomes a plain use-after-free again.
@@ -89,6 +91,8 @@ std::atomic<WorldResolver> g_world_resolver{};
 // per-frame path, so an unlatched line would stream. The reasons are host
 // classifications, not plug-in data.
 std::atomic<uint32_t> g_reported_refusals{};
+// Latch for the first quarantine eviction (see `retire_locked`).
+std::atomic<bool> g_reported_eviction{};
 
 void report_refusal(uint32_t bit, const char* reason) {
   if ((g_reported_refusals.fetch_or(bit) & bit) != 0) return;
@@ -513,7 +517,18 @@ void retire_locked(WorldObject* object) noexcept {
     // leaking one is better than freeing memory a plug-in may still name.
     return;
   }
-  while (g_retired.size() > kMaxRetiredObjects) g_retired.pop_front();
+  while (g_retired.size() > kMaxRetiredObjects) {
+    // The one moment where a stale reference to *that* object stops being
+    // contained, so it is said out loud once. Recording, not enforcement.
+    if (!g_reported_eviction.exchange(true)) {
+      try {
+        std::cerr << "stage:pf_world_facade_quarantine_evicted bound="
+                  << kMaxRetiredObjects << "\n" << std::flush;
+      } catch (...) {
+      }
+    }
+    g_retired.pop_front();
+  }
 }
 
 void retire(WorldObject* object) noexcept {
@@ -805,17 +820,37 @@ bool selftest() {
               caller.find(' ') == std::string::npos && caller.find('=') == std::string::npos,
           "trap caller classification is not <module>+0x<rva>");
   }
-  // 4. Detach clears the pointer it installed and frees the object; a struct
-  // the plug-in re-pointed elsewhere is left alone.
+  // 4. Detach takes the world off the object and retires the object: it stays
+  // allocated but inert, because a plug-in may hold a copy of the world that
+  // still names it. Reading the object after the detach is what asserts that -
+  // it was a use-after-free before the object started being quarantined, and
+  // it is the property that would notice a regression back to freeing.
+  const std::size_t retired_before = retired_count();
+  const auto* detached_object = attached(world.data());
+  check(detached_object != nullptr, "nothing attached to detach");
   detach(world.data());
   check(read_ptr(world.data(), kReservedLong4Offset) == nullptr && attached(world.data()) == nullptr,
         "detach did not clear reserved_long4 / the pool entry");
+  check(retired_count() == retired_before + 1, "detach did not retire the object");
+  if (detached_object) {
+    // A stale copy of the world would reach exactly this: a live object whose
+    // vtable slot is null (a contained fault at a known place) and whose
+    // mirror no longer describes anybody's pixels.
+    check(detached_object->vtable == nullptr, "a detached object kept its vtable");
+    check(detached_object->attached_world == nullptr,
+          "a detached object kept its back-reference");
+    bool mirror_zeroed = true;
+    for (const std::byte byte : detached_object->layer_def)
+      if (byte != std::byte{}) mirror_zeroed = false;
+    check(mirror_zeroed, "a detached object kept its LayerDef mirror");
+  }
   void* foreign = pixels.data();
   store(deep, kReservedLong4Offset, foreign);
   detach(deep.data());
   check(read_ptr(deep.data(), kReservedLong4Offset) == foreign && attached(deep.data()) == nullptr,
         "detach touched a reserved_long4 the plug-in re-pointed");
   check(live_count() == live_before, "objects were not released");
+  check(retired_count() == retired_before + 2, "the second detach did not retire its object");
   detach(nullptr);
   return passed;
 }

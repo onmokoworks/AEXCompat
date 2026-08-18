@@ -133,8 +133,10 @@ bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept;
 
 // Detaches the pool object of `world` (a world the host is done handing out;
 // `DispatchWorldFormatScope` does this for everything it attached). The
-// world's reserved_long4 is cleared when it still points at the object. No-op
-// for a world without one.
+// world's reserved_long4 is cleared when it still points at the object, and
+// the object itself is retired into the same bounded quarantine `retire` uses
+// rather than freed - a plug-in may hold a copy of the world that still names
+// it. No-op for a world without one.
 void detach(void* world) noexcept;
 
 // Retires an object the caller owns (the world registry's, when PF_DisposeWorld
@@ -159,7 +161,9 @@ using TrapRecorder = void (*)(uint32_t slot) noexcept;
 void set_trap_recorder(TrapRecorder recorder) noexcept;
 
 // Number of live pool objects / retired objects / trap slots taken / CopyRect
-// calls and refusals so far (the report and the self-test read these).
+// calls and refusals so far. The self-test reads these; `retired_count` is
+// also what says how close the quarantine is to its bound, and the first
+// eviction past it writes a `stage:pf_world_facade_quarantine_evicted` line.
 std::size_t live_count() noexcept;
 std::size_t retired_count() noexcept;
 uint32_t trap_count() noexcept;
