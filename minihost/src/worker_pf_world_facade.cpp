@@ -863,15 +863,17 @@ bool selftest() {
   // The bound itself: attach/detach one struct past the quarantine's capacity
   // and the deque must stop growing and count an eviction. This is the only
   // place the eviction branch runs, and it must stay the last section, because
-  // it leaves the quarantine full **for the rest of the process**: from here
-  // on every retirement evicts, so nothing that runs after this may read an
-  // object it has detached or disposed. The routes that call `selftest()` do
-  // no plug-in rendering, so no production object is in the deque to lose.
-  // Two things this cannot pin: that the eviction takes the *oldest* object
-  // (a `pop_back` regression would leave the same count and the same eviction
-  // tally while dropping containment for the most recently retired object,
-  // which is the one a stale world copy most likely names), and that the
-  // stderr line is latched to one - both are only observable from outside.
+  // it leaves the quarantine full **for the rest of the process**: every later
+  // retirement then evicts, and what it frees is the object that has been
+  // quarantined longest, so from here on an object's stay is bounded by 4096
+  // further retirements instead of by the session. The one route that reaches
+  // `selftest()` renders no plug-in, so there is no production object in the
+  // deque to lose.
+  // Two properties nothing here asserts: that the eviction takes the *oldest*
+  // object (a `pop_back` regression would leave the same count and the same
+  // eviction tally while dropping containment for the most recently retired
+  // object, which is the one a stale world copy most likely names), and that
+  // the stderr line stays latched to one.
   {
     const uint32_t evictions_before = quarantine_evictions();
     alignas(16) std::array<std::byte, world_safety::kEffectWorldSize> churn{};

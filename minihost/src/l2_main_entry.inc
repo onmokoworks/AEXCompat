@@ -1555,10 +1555,11 @@ bool verify_pf_world_facade() {
   using Depth = int16_t (__cdecl*)(const void*);
   check(facade::selftest(), "facade contract self-test failed");
   // That self-test ends by filling the quarantine to its bound, so from here
-  // on every detach / dispose in this process frees the object it retires.
-  // Nothing below may read an object it has just taken out of service; the
-  // property that a retired object stays readable is asserted inside
-  // `facade::selftest()`, before its churn section.
+  // on every detach / dispose in this process evicts - freeing whichever
+  // object has been quarantined longest, not the one it just retired. Nothing
+  // below reads an object it has taken out of service, and nothing added below
+  // should; the property that a retired object stays readable is asserted
+  // inside `facade::selftest()`, before its churn section.
   // The module self-test trapped slots 0, 10 and the last one; the worker's
   // recorder must have put them in the report under the pseudo-suite name.
   check(recorded(0) && recorded(10) &&
@@ -1570,9 +1571,13 @@ bool verify_pf_world_facade() {
   const struct { int32_t pixel_format; int16_t depth; } cases[] = {
       {kPixelFormatArgb32, 8}, {kPixelFormatArgb64, 16}, {kPixelFormatArgb128, 32}};
   for (const auto& entry : cases) {
-    aexcompat::world_safety::DispatchWorldFormatScope worlds;
     world_safety::EffectWorldStorage world{};
     std::array<std::byte, 16 * 4> pixels{};
+    std::array<std::byte, world_safety::kEffectWorldSize> bare{};
+    // Declared after every buffer it can register: the scope's destructor
+    // detaches what is still registered, and that must not run on storage
+    // whose lifetime has already ended.
+    aexcompat::world_safety::DispatchWorldFormatScope worlds;
     const int32_t pixel_bytes = entry.depth / 8 * 4;
     if (!aexcompat::render::prepare_world_layout(
             world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, 4, 1, 4 * pixel_bytes},
@@ -1598,7 +1603,7 @@ bool verify_pf_world_facade() {
     std::memcpy(&object_data, object + 0x20, sizeof(object_data));
     check(object_data == pixels.data(), "object +0x20 is not the LayerDef's data pointer");
     // A bare 120-byte struct registered the same way gets the mirror object.
-    std::array<std::byte, world_safety::kEffectWorldSize> bare = world.layer_def;
+    bare = world.layer_def;
     void* null = nullptr;
     std::memcpy(bare.data() + 0x50, &null, sizeof(null));
     check(worlds.register_world(bare.data(), entry.pixel_format), "bare world registration failed");

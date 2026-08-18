@@ -187,8 +187,8 @@ plug-in がある (#1272) ため、この 5 本が #1278 側で既に直って�
   `std::array` は 39 + main 1 + 本ブランチ 2 = 42)。
 - merge 後に 3 exe を再ビルドし、mtime が編集より新しいことを確認してから
   再測定した。main の新 route `--self-test-argb32f-depth-conversion` は
-  本ブランチの `EffectWorldStorage` (0x90 + vtable prefix) の上でも 3 worker
-  すべて pass する。
+  本ブランチの `EffectWorldStorage` (合計 0x90 で、先頭 8 byte が vtable
+  prefix、続く 120 byte が LayerDef) の上でも 3 worker すべて pass する。
 - 再測定 (merge 済みブランチ、`--filter` 単位): Spill2 / Transform / Glow /
   Echo / CannedWarp は rendered、`pixel_sha256` は merge 前と同一。
   ColorAndContrast / Curl_Noise / ShapeBlur は 512 のまま (§5 の通り別軸)。
@@ -196,5 +196,6 @@ plug-in がある (#1272) ため、この 5 本が #1278 側で既に直って�
   rendered 284 / 512 9 (CannedWarp, ColorAndContrast, Curl_Noise, Echo, Glow,
   ShapeBlur, Spill2, Transform, VRSphereToPlane) / not_discovered 7 /
   worker_invariant_failure 2 / rendered_empty 2。本ブランチは同じ引数で
-  rendered 289 / 512 4 で、plug-in 単位の差は上の 5 本だけ、他 299 本は
-  bucket も `pixel_sha256` も一致する。
+  rendered 289 / 512 4 (ColorAndContrast, Curl_Noise, ShapeBlur,
+  VRSphereToPlane — 最後の 1 本は VR 側の残りで #1084 の範囲) で、plug-in
+  単位の差は上の 5 本だけ、他 299 本は bucket も `pixel_sha256` も一致する。
