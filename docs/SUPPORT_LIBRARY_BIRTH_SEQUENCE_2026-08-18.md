@@ -253,7 +253,8 @@ origin/main `997d3b7d` を専用の worktree で同じ build 手順で測った�
 | rendered_empty | 2 | 2 |
 
 bucket が動いたのは 3 本だけで、他の 301 本は baseline と同じ bucket
-(plug-in 単位で突き合わせ済み):
+(突き合わせの key は `plugin_relative_path`。ファイル名だけで引くと
+`Threshold.aex` が別ディレクトリに 2 本あるため 1 本落ちる):
 
 - `PSL_Adjustments.aex`: `not_discovered:exit_20_global_setup:21249` → `frame_error:4`
 - `ProfileToProfile.aex`: `not_discovered:exit_20_global_setup:14` → `frame_error:512`
@@ -262,8 +263,9 @@ bucket が動いたのは 3 本だけで、他の 301 本は baseline と同じ 
 512 が増えたのは ProfileToProfile が render 段まで進んだ分で、baseline の 4 本
 (ColorAndContrast / Curl_Noise / ShapeBlur / VRSphereToPlane) は変わっていない。
 
-silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ 290 record
-すべてについて変更後の hash と突き合わせ、差分ゼロ・欠落ゼロを確認した。
+silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ 291 record
+すべてについて変更後の hash と突き合わせ、差分ゼロ・欠落ゼロを確認した
+(変更後も 291 record で同数)。
 
 計測に使った build fingerprint (report JSON の `build`):
 
