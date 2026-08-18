@@ -607,7 +607,13 @@ void ensure_pica_components_initialized() {
   static bool teardown_registered = false;
   HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll");
   if (!bravo && !load_attempted) {
+    // Latched and in-flight before the load, for the same reason as the
+    // ae_sweetpea one: LoadLibraryEx runs the DllMain of this module and its
+    // closure, and a suite acquire from inside that would otherwise re-enter
+    // with the load still running and drive the handshake on a
+    // half-initialized DLL.
     load_attempted = true;
+    bravo_init_in_flight = true;
     if (!g_plugin_file_path.empty()) {
       const std::filesystem::path sealed_bravo =
           std::filesystem::path(g_plugin_file_path).parent_path() /
@@ -622,7 +628,14 @@ void ensure_pica_components_initialized() {
       bravo = LoadLibraryExW(L"dvabravoinitializer.dll", nullptr,
                              LOAD_LIBRARY_SEARCH_USER_DIRS |
                                  LOAD_LIBRARY_SEARCH_SYSTEM32);
+    bravo_init_in_flight = false;
   }
+  // No Bravo initializer means no Sweet Pea bootstrap either: this early
+  // return is ahead of every ensure_sweetpea_started() call. That coupling
+  // predates issue #1279 (both are reached only through provide_bib_suite,
+  // which needs BIB.dll, and dvabravoinitializer ships beside it), but the
+  // U_SP_Birth path now depends on it, so it is written down rather than
+  // left implicit.
   if (!bravo) {
     if (aexcompat::l2_detail::extended_diag_enabled() && !absent_logged) {
       absent_logged = true;

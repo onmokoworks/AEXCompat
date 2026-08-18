@@ -14,18 +14,23 @@
 process 起動時に呼ぶ support library の birth が並んでいる。Ghidra で読み出した
 順と引数 (AE 2026):
 
-| step | 呼び出し |
-| --- | --- |
-| 3 | `BEZ_Birth()` |
-| 4 | `FILE_AddExtensionMap(...)` x9 → `FILE_Birth()` |
-| 5 | `M_Birth(3, 0)` |
-| 6 | `RND_Birth()` |
-| 7 | `PREF_Birth(flags>>1 & 1, false, "Adobe", "After Effects", "26.3", <path>, false)` |
-| 8 | `VAL_Birth()` |
-| 9 | `MC_Birth(mode != 0, 0xf118657, mode == 3)` |
-| 10 | `COR_Conception(flags & 1)` |
-| 12 | `COR_Birth(mode == 1 \|\| (flags>>3 & 1), flags & 1, mode == 3)` |
-| … | `PLUG_Birth` / `TDB_Birth` / `PF_Birth(0)` / `P_Birth` / `TXT_Birth` / `TDL_Birth` / `PREM_Birth` / `PIN_Birth` / `SND_Birth` / `OM_Birth` / `MSK_Birth` / `FLT_Birth` / `PR_Birth` / `BEE_Birth` / `MEE_Birth` / `FIM_Birth` / `FLO_Birth` / **`U_SP_Birth()`** / `MC_SP_Birth` / `PT_Birth` |
+| step | 呼び出し | export 元 (dumpbin /EXPORTS で確認) |
+| --- | --- | --- |
+| 3 | `BEZ_Birth()` | BEZ.dll |
+| 4 | `FILE_AddExtensionMap(...)` x9 → `FILE_Birth()` | FILE.dll |
+| 5 | `M_Birth(3, 0)` | **U.dll** |
+| 6 | `RND_Birth()` | **U.dll** |
+| 7 | `PREF_Birth(flags>>1 & 1, false, "Adobe", "After Effects", "26.3", <path>, false)` | PREF.dll |
+| 8 | `VAL_Birth()` | VAL.dll |
+| 9 | `MC_Birth(mode != 0, 0xf118657, mode == 3)` | MC.dll |
+| 10 | `COR_Conception(flags & 1)` | COR.dll |
+| 12 | `COR_Birth(mode == 1 \|\| (flags>>3 & 1), flags & 1, mode == 3)` | COR.dll |
+| … | `PLUG_Birth` / `TDB_Birth` / `PF_Birth(0)` / `P_Birth` / `TXT_Birth` / `TDL_Birth` / `PREM_Birth` / `PIN_Birth` / `SND_Birth` / `OM_Birth` / `MSK_Birth` / `FLT_Birth` / `PR_Birth` / `BEE_Birth` / `MEE_Birth` / `FIM_Birth` / `FLO_Birth` / **`U_SP_Birth()`** / `MC_SP_Birth` / `PT_Birth` | 同名の各 DLL |
+
+この表の「export 元」は各 DLL の `dumpbin /EXPORTS` で確認した (`M_Birth` と
+`RND_Birth` が U.dll から出ている点はこのホストの実装が依存しているので特に
+重要)。`PLUG_Birth` 以降の tail は同名の DLL (PLUG.dll、TXT.dll、BEE.dll …)
+から出ているが、この issue では触っていないので個別確認はしていない。
 
 この表は aelib.dll の step 3 以降で、`U_Birth` は含まれていない (より前段で
 別の経路から呼ばれる)。したがって「U を最初に birth する」根拠はこの表ではなく、
@@ -155,6 +160,11 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   この経路で再発しないことは corpus 304 本の sweep で確認している
   (session 分類に変化なし)。teardown を安全に走らせる場所 (session の
   unload 境界など) の検討は #1282。
+- Sweet Pea の起動は `dvabravoinitializer.dll` が解決できたときにしか走らない
+  (`ensure_pica_components_initialized` の early return がその前にある)。
+  この結合は #1279 より前からのもので、どちらも `provide_bib_suite` 経由
+  すなわち BIB.dll がある closure でしか到達しないため実害は観測していないが、
+  `U_SP_Birth` 経路がこれに依存するようになったので明記しておく。
 - 呼び出し順は `initialize_u_dll_allocator()` (U_Birth、#362 / #1063) →
   `initialize_pin_support_libraries()` (この issue) →
   `initialize_pf_dll_host_layer()` (PF_Birth、#1212 / PR #1284) で、AE の
