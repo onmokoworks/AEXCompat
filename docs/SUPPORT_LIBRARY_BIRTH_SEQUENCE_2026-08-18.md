@@ -182,6 +182,12 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   この結合は #1279 より前からのもので、どちらも `provide_bib_suite` 経由
   すなわち BIB.dll がある closure でしか到達しないため実害は観測していないが、
   `U_SP_Birth` 経路がこれに依存するようになったので明記しておく。
+  review では「Sweet Pea の起動を Bravo の early return より前に出す」案も
+  出たが、計測していない挙動変更になるので入れていない (記録のみ)。
+- `pica_component_mutex()` を LoadLibraryEx を跨いで保持しているため、loader
+  lock との AB/BA が理論上成立する。観測している再入は同一スレッドのみで、
+  DllMain から host suite を acquire する形は観測していないが、構造的に
+  排除されてはいない。受け入れて記録する扱いで、追跡は #1287。
 - 呼び出し順は `initialize_u_dll_allocator()` (U_Birth、#362 / #1063) →
   `initialize_pin_support_libraries()` (この issue) →
   `initialize_pf_dll_host_layer()` (PF_Birth、#1212 / PR #1284) で、AE の
