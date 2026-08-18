@@ -1408,10 +1408,12 @@ void initialize_u_dll_allocator() {
 //     the step that sets the BIB resolver the 21249 comes from. Whatever
 //     COR_Birth waits for is recorded as its own follow-up rather than worked
 //     around.
-//   * PLUG_Birth, TDB_Birth, TXT_Birth, BEE_Birth and the rest of the tail:
-//     not reached by any failure measured for issue #1279. `PF_Birth`, which
-//     sits in that tail, is run by initialize_pf_dll_host_layer below
-//     (issue #1212 / PR #1284) - after this step, matching AE's order.
+//   * TDB_Birth, TXT_Birth, BEE_Birth and the rest of the tail: not reached
+//     by any failure measured so far. `PF_Birth`, which sits in that tail, is
+//     run by initialize_pf_dll_host_layer below (issue #1212 / PR #1284) -
+//     after this step, matching AE's order. `PLUG_Birth`, also in that tail
+//     and ahead of PF_Birth in AE's order, is the last entry of the table
+//     below (issue #1280).
 //
 // VAL_Birth allocates through U (U_CopyString) and LIST, so U has to be
 // birthed first, which is why this runs after initialize_u_dll_allocator.
@@ -1430,6 +1432,11 @@ void initialize_process_support_libraries() {
     m_birth,
     // int (*)(bool), called with AE's non-quiet value
     cor_conception,
+    // int (*)(const boost::function<bool(const StdString16&)>&), called with
+    // a reference to an empty function object (see the PLUG.dll entry below).
+    // `?PLUG_Birth@@YAH...` mangles as `YAH` = `int __cdecl`, and `AEBV` = a
+    // reference, which on x86-64 arrives as a pointer in rcx.
+    plug_birth,
   };
   struct SupportLibrary {
     const wchar_t* module;
@@ -1453,6 +1460,58 @@ void initialize_process_support_libraries() {
        BirthShape::no_arguments_void},
       {L"COR.dll", "COR.dll", "?COR_Conception@@YAH_N@Z",
        BirthShape::cor_conception},
+      // PLUG.dll's static-routine registry (issue #1280). Its guard is two
+      // words that only PLUG_Birth writes: `PLUG_RegisterStaticRoutine`
+      // (PLUG.dll+0x1ca80) compares PLUG.dll+0x6df90 and +0x6e098 against
+      // 0x910ba1 and, when either differs, reports through
+      // `Up_ReportError(0x30002a, 0x10)` and throws the C++ integer 2 instead
+      // of registering. PLUG_Birth (PLUG.dll+0x19810) is what stores both
+      // words (`mov` at PLUG.dll+0x19940 and +0x1994a). Scanning the module
+      // for that immediate finds 26 sites: those two `mov`s and 24 `cmp`s,
+      // which reads as twelve guard pairs. What the scan establishes is that
+      // no other instruction writes the *immediate*; a computed or copied
+      // write would not show up in it, so both "only PLUG_Birth opens the
+      // gate" and "the twelve pairs are twelve separate entry points" are
+      // inferences from the scan plus the disassembly around each site.
+      // Particle_Playground's GLOBAL_SETUP registers each of its 14 particle
+      // action types through that entry, catches the throw and returns 2
+      // (observed under cdb: the throw stack is
+      // `PLUG!PLUG_RegisterStaticRoutine+0x211` <- Particle_Playground, and
+      // the catch block at Particle_Playground+0x2e50f then sets the
+      // selector result to 2).
+      //
+      // Two things this entry needs that the stateless births above do not:
+      //
+      //   * The latch is load-bearing, not an optimization. PLUG_Birth is not
+      //     idempotent: it replaces PLUG.dll+0x6df98 with a fresh
+      //     `U_AllocateHandleClear` handle and two new LIST objects and frees
+      //     none of the previous ones (only PLUG_Death does, which this host
+      //     does not call - see the teardown note in
+      //     docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md §3 and #1282).
+      //     Per-mapping latching is what keeps that to once.
+      //   * A non-zero `result=` here is not the harmless "the library
+      //     answered with a code" it is elsewhere. PLUG_Birth writes both
+      //     sentinels unconditionally, after the allocation step and without
+      //     touching eax again, so a failed allocation leaves the gate open
+      //     with a null scan cache and still reports its error. The host
+      //     records that and does not act on it; the trace line is the only
+      //     place it shows.
+      //
+      // Dependencies, from the disassembly: U.dll (`ALOG_Log`,
+      // `U_ZLookupLStrCache`, `U_AllocateHandleClear`) and LIST.dll
+      // (`LIST_New`), both of which PLUG.dll imports, so both are mapped
+      // whenever it is, and `initialize_u_dll_allocator` has already run. It
+      // also reads the exported data slot `?PLUG_G_zref@@...`
+      // (PLUG.dll+0x6b060), which this host never sets; that only affects the
+      // text of a PLUG error report. No file or registry I/O, no threads, no
+      // TLS, no atexit registration. PLUG_Birth is also the one PLUG entry
+      // that does not take the module's recursive mutex (PLUG.dll+0x6dfc8),
+      // which is safe here because this runs on the dispatch thread between
+      // LoadLibrary and GLOBAL_SETUP, with no other PLUG call in flight.
+      {L"PLUG.dll", "PLUG.dll",
+       "?PLUG_Birth@@YAHAEBV?$function@$$A6A_NAEBV?$basic_string@_WU?$char_"
+       "traits@_W@std@@U?$STLAllocator@_W@allocator@dvacore@@@std@@@Z@boost@@@Z",
+       BirthShape::plug_birth},
   };
   static legacy::State states[std::size(kLibraries)];
   // A mapped library whose birth export is missing is reported once per
@@ -1492,6 +1551,30 @@ void initialize_process_support_libraries() {
         case BirthShape::cor_conception:
           result = reinterpret_cast<int(__cdecl*)(bool)>(birth)(false);
           break;
+        case BirthShape::plug_birth: {
+          // AE hands PLUG_Birth a `boost::function<bool(const StdString16&)>`
+          // that decides which scanned plug-in files to skip. This host does
+          // not use PLUG's file scan at all - it needs only the registry the
+          // birth initializes - so it passes an empty function.
+          //
+          // Verified against AE 2026's PLUG.dll (PLUG_Birth at +0x19810): the
+          // first thing it reads is the function object's vtable pointer at
+          // offset 0, and the `test rax,rax / jz` at +0x19832 takes the empty
+          // path when that word is zero, leaving the remaining bytes unread.
+          // A zeroed buffer is safe because that early-out is taken, not
+          // because of its size: the non-empty paths either copy through
+          // offset 0x28 or call the vtable's own manager
+          // (`and rax,~1` / `call qword ptr [rax]` at +0x19864..+0x19870),
+          // and how much that reads is the caller's business, not PLUG's.
+          // The empty object is then installed as PLUG's global skip
+          // predicate (PLUG.dll+0x6e0a0), where its only consumer tests the
+          // same word and answers "skip nothing" - the right answer for a
+          // host that never scans.
+          static alignas(std::max_align_t) std::byte empty_skip_predicate[64]{};
+          result = reinterpret_cast<int(__cdecl*)(const void*)>(birth)(
+              empty_skip_predicate);
+          break;
+        }
       }
     } __except (u_birth_seh_filter(GetExceptionInformation())) {
       // COR_Conception reports failures by throwing, which arrives here as

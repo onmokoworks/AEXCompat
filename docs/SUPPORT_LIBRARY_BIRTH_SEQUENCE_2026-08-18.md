@@ -31,6 +31,8 @@ process 起動時に呼ぶ support library の birth が並んでいる。Ghidra
 `RND_Birth` が U.dll から出ている点はこのホストの実装が依存しているので特に
 重要)。`PLUG_Birth` 以降の tail は同名の DLL (PLUG.dll、TXT.dll、BEE.dll …)
 から出ているが、この issue では触っていないので個別確認はしていない。
+**追記 (2026-08-18、§6)**: そのうち `PLUG_Birth` は #1280 で確認・実装した
+(export 元は PLUG.dll、RVA 0x19810)。残りの tail は依然未確認。
 
 この表は aelib.dll の step 3 以降で、`U_Birth` は含まれていない (より前段で
 別の経路から呼ばれる)。したがって「U を最初に birth する」根拠はこの表ではなく、
@@ -294,6 +296,8 @@ report JSON の SHA-256: baseline
   Particle_Playground は `ext_alloc(out, 0x101b)` のように **resource id で
   string table を取得**しており、ホストはその id を無視して 1 group だけを
   返している。ここが次の境界 (観察)。→ #1280
+  **訂正 (2026-08-18、§6)**: この当たりは否定された。2 の出所は
+  `PLUG_RegisterStaticRoutine` の throw で、string table とは無関係。
 - PSL_Adjustments (`frame_error:4`) と ProfileToProfile (`frame_error:512`) の
   render 段。→ #1281
 - PSL_Adjustments を `aex_l2_worker.exe --l2-params-only` で直接叩くと、
@@ -309,6 +313,173 @@ report JSON の SHA-256: baseline
 - Sweet Pea の teardown を安全に走らせられる場所。現状は U 経路で no-op で、
   atexit で無理に走らせると落ちる (§3 の pin 実験)。→ #1282
 - 3D Camera Tracker / Stabilizer の `PF AE Private Effect Suite` v3/v5。→ #1283
+
+## 6. 追記 (2026-08-18、issue #1280 の作業)
+
+### 訂正: Particle_Playground の `global_setup:2` は string table ではなく PLUG が未 birth
+
+§5 の 1 項目め (と #1280 本文) が立てた「`ext_alloc` の resource id を無視して
+1 group しか返していないのが 2 の原因」という当たりは **否定**。実測は次のとおり。
+
+観察 (cdb、`aex_l2_worker.exe --l2-params-only Particle_Playground.aex` を
+子プロセス無しで直接 debug、`sxe eh` で first-chance C++ throw の stack):
+
+```
+C++ EH exception - code e06d7363 (first chance)
+  KERNELBASE!RaiseException
+  VCRUNTIME140!_CxxThrowException
+  PLUG!PLUG_RegisterStaticRoutine+0x211
+  Particle_Playground!PluginDataEntryFunction+0x14448
+  Particle_Playground+0x16d6c
+  Particle_Playground+0xe9ed
+```
+
+同じ run で `Particle_Playground+0x2e3e4` (最初の登録前の照会) は `eax=0` で
+通っており、throw の直後に `+0x2e50f` の FH4 catch が `[rsp+0x40]` から 2 を
+読み、`+0x2e7be` が `esi` = 2 をそのまま返している (いずれも breakpoint で実測)。
+
+- `?PLUG_RegisterStaticRoutine@@...` (PLUG.dll+0x1ca80) は
+  `PLUG.dll+0x6df90` と `PLUG.dll+0x6e098` の 2 語がどちらも `0x910ba1` の
+  ときだけ登録し、そうでなければ `Up_ReportError(0x30002a, 0x10)` して
+  **C++ の整数 2 を throw** する。この 2 語に `0x910ba1` を書く命令は
+  `?PLUG_Birth@@YAHAEBV?$function@...@Z@boost@@@Z` (PLUG.dll+0x19810) の中の
+  2 つの `mov` だけ (下の即値 scan の項を参照)。
+- Particle_Playground の GLOBAL_SETUP は `FUN_180016a10` の中で 14 個の
+  particle action type (`ADBE AllMask` … `ADBE Wall`) を
+  `FUN_18002e3a0` → `PLUG_RegisterStaticRoutine` で登録する。1 本目
+  (`ADBE AllMask`) の throw を FH4 catch が受けて選択子の戻り値 2 になる。
+- lookup が返す文字列は関係なかった: `id=22 -> "AllMask"` は正しく引けており、
+  `id=23` が空文字列なのは `$$$/AE/Playground/LStr/0023=` が実際に空値だから
+  (AEX のバイト列で確認)。`id=234..335` が空なのは事実だが 2 の原因ではない
+  (→ #1289 に観察として引き継ぎ)。
+
+ホスト側の実装: `initialize_process_support_libraries()` の表に
+PLUG.dll の birth を追加した。AE の列では `COR_Conception`/`COR_Birth` の後、
+`PF_Birth` の前なので、表の末尾 (= `initialize_pf_dll_host_layer` の前) が
+AE と同じ相対順になる。引数は
+`const boost::function<bool(const StdString16&)>&` (AE がスキャン対象の
+plug-in ファイルを絞るための述語) で、このホストは PLUG のファイルスキャンを
+使わないので**空の function** を渡す。`PLUG_Birth` が最初に読むのは function
+object の vtable ポインタ (offset 0) で、`+0x19832` の `test rax,rax / jz` が
+0 のとき empty 経路に落ち、それ以降のバイトを読まない。渡すのはゼロ埋めした
+64 バイトの静的バッファだが、**安全なのはこの早期脱出が取られるからであって
+バッファサイズによるものではない**: 非空側は offset 0x28 までコピーするか、
+vtable 自身の manager (`+0x19864` の `and rax,~1` → `+0x19870` の
+`call qword ptr [rax]`) を呼ぶかで、後者がどれだけ読むかは呼び出し側の
+manager が決める。空の object は PLUG の global skip predicate
+(`PLUG.dll+0x6e0a0`) に install され、その唯一の consumer は同じ word を
+テストして「何もスキップしない」と答える。
+
+`0x910ba1` という即値は PLUG.dll 中に 26 箇所あり (観察)、`mov` は `+0x19940`
+(`→ +0x6e098`) と `+0x1994a` (`→ +0x6df90`) の 2 箇所だけで、残り 24 は
+`cmp`、つまり 12 対の guard。この scan が示すのは「その**即値**を書く命令が
+他に無い」ことまでで、計算結果やコピーによる書き込みは scan に現れない。
+「gate を開けるのは `PLUG_Birth` だけ」「12 対がそれぞれ別の entry point に
+ある」はこの scan と各 site 周辺の逆アセンブルからの推論 (実測の範囲では
+反例なし)。いずれにせよ gate は `PLUG_RegisterStaticRoutine` 固有ではなく
+module 全体にかかっている。
+`PLUG_Birth` は sentinel を**無条件に**書く (確保に失敗しても書く) ので、
+`result=` が非 0 の場合は「gate は開いているが scan cache が NULL」という
+状態になる。ホストは記録するだけで判断には使わない。実測は
+`stage:legacy_support_init library=PLUG.dll entry=?PLUG_Birth@@... status=called
+result=0`。
+
+`PLUG_Birth` は冪等ではない (2 回目は handle 1 個と LIST 2 本を作り直し、
+前のものを解放しない。解放するのは `PLUG_Death` だけで、このホストは呼ばない
+= §3 の teardown 方針どおり) ので、mapping 単位の latch は最適化ではなく
+必須。依存は U.dll (`ALOG_Log` / `U_ZLookupLStrCache` /
+`U_AllocateHandleClear`) と LIST.dll (`LIST_New`) だけで、どちらも PLUG.dll が
+import しているので PLUG.dll が map されていれば map 済み。file / registry I/O、
+thread 生成、TLS、独自の atexit は無い。
+
+### `PF_InfoDrawText` / `PF_InfoDrawText3` の `Z0` 引数
+
+PLUG_Birth を入れると Particle_Playground は discovery を通り (126 params、
+名前も AE の UI と一致)、render 段で `frame_error:4:PF_Err_OUT_OF_MEMORY` に
+なった。trace の末尾は
+`acquire_suite name="PF AE Adv App Suite" version=1 -> 0` →
+`lookup id=222 -> "Number of particles: %d"` → `classic_render_end error=4` で、
+host 側の拒否痕跡は出ていなかった。
+
+`extended_diag:info_draw_text` の行を足して測ると
+`slot=PF_InfoDrawText args=22,null -> 0` (修正後) / 修正前は 4 で、
+**第 2 引数が null** だった。`AE_AdvEffectSuites.h` の
+`PF_AdvAppSuite1/2::PF_InfoDrawText(const A_char *line1Z0, const A_char *line2Z0)`
+は両引数とも `Z0` = 省略可能なので、null を 4 で撥ねていたホストが誤り
+(#1055 が `PF_InfoDrawText3Plus` に適用したのと同じ読み)。`PF_InfoDrawText3` の
+3 引数も同じ。長さ 256 以上の (= 終端が見つからない) 文字列は引き続き 4 で
+撥ねる。
+
+`extended_diag:info_draw_text` の行自体にも 2 つ規則を入れた:
+
+- 引数は左から順に分類し、**終端が見つからない引数で止める**。その後ろは
+  検査も join も trace も読まない (`args=...,unread`)。従来の `||` 連鎖が
+  短絡でそうなっていたので、trace がそれを崩すと「診断を付けたときだけ
+  wild pointer を読んで落ちる」ことになる。**これは新しい pytest
+  `test_info_text_trace_stops_at_the_first_unterminated_argument` が固定して
+  いる**: self-test 側が拒否より後ろの引数に `PAGE_NOACCESS` の page を渡す
+  ので、読めば process ごと落ちる。
+- 1 呼び出し 1 行で、受理と拒否を別々に 64 行で打ち切る
+  (`status=suppressed`)。broker が持ち出す stderr は末尾固定長なので、
+  毎フレーム info 行を描く effect があると fault site が押し出される。
+  **こちらは regression test が無い**: self-test route が出す info-text 呼び出しは
+  受理 10 件 / 拒否 9 件程度で上限 64 に届かず、`status=suppressed` の分岐に
+  入らない。上限そのものは定数の読みと上の算術 (`fetch_add` の戻り値だけで
+  判定するので suppressed 行はちょうど 1 回) による。
+
+この 2 つを入れると Particle_Playground は
+`not_discovered:exit_20_global_setup:2` → `frame_error:516` に移り、次の境界は
+`transform_world` の `source_world_unresolved` (→ #1289)。
+
+### 計測 (full corpus、#1280 の変更)
+
+母集団: AE 2026 `Support Files\Plug-ins\Effects` を `render_sweep` の引数に
+渡した 304 AEX、`--depth` 既定 (8)、size/time/frames も既定。baseline は
+origin/main `9804ae6f`。sweep CLI は両者同一バイナリで、worker 3 exe だけが
+違う。
+
+| bucket | baseline (9804ae6f) | 変更後 |
+| --- | --- | --- |
+| rendered | 289 | 289 |
+| frame_error:512 | 5 | 5 |
+| frame_error:4 | 1 | 1 |
+| frame_error:516 | 0 | 1 |
+| not_discovered:exit_20_params_setup:13 | 2 | 2 |
+| not_discovered:exit_20_global_setup:2 | 1 | 0 |
+| not_discovered:exit_12 | 1 | 1 |
+| not_discovered:cluster_session_invalidated | 1 | 1 |
+| render_frame_failed:worker_invariant_failure | 2 | 2 |
+| rendered_empty | 2 | 2 |
+
+bucket が動いたのは 1 本だけで、他の 303 本は baseline と同じ bucket
+(突き合わせの key は `plugin_relative_path`):
+
+- `Particle_Playground.aex`: `not_discovered:exit_20_global_setup:2` →
+  `frame_error:516:PF_Err_BAD_CALLBACK_PARAM`
+
+silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ 291 record
+すべてについて変更後の hash と突き合わせ、差分ゼロ・欠落ゼロを確認した
+(変更後も 291 record で同数)。
+
+計測に使った build fingerprint (report JSON の `build`) と report の SHA-256:
+
+| | baseline (9804ae6f) | 変更後 |
+| --- | --- | --- |
+| l2_worker | `c04d476d…` | `cfa98ebc…` |
+| classic_worker | `83c014da…` | `4f18b869…` |
+| smart_worker | `aaa714fd…` | `05c50fad…` |
+| cli | `d5d12042…` | `d5d12042…` (同一) |
+
+report JSON の SHA-256: baseline `2A2B1AE7EC13528BFC2E2E541BBA63BCD3B4A40B7913CAEE982A25C4C67B5B20`、変更後 `543DAAECA068A5CD8943B29B73F59C4D10F4EE8717C137925A472A3AD6FB4CED`。
+
+birth 列の trace は変更後の build でこう出る (Particle_Playground の
+one-shot):
+
+```
+stage:legacy_support_init library=COR.dll entry=?COR_Conception@@YAH_N@Z status=called result=0
+stage:legacy_support_init library=PLUG.dll entry=?PLUG_Birth@@YAHAEBV?$function@$$A6A_NAEBV?$basic_string@_WU?$char_traits@_W@std@@U?$STLAllocator@_W@allocator@dvacore@@@std@@@Z@boost@@@Z status=called result=0
+stage:pf_host_layer_init status=called result=0
+```
 
 ---
 

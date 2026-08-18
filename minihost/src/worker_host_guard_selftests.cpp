@@ -75,6 +75,61 @@ bool verify_pf_adv_app_suite_versions() {
         reinterpret_cast<InfoDrawText>(slots1[6])("suite1-line1", "suite1-line2") == 0 &&
         reinterpret_cast<InfoDrawText3>(slots1[8])(
             "suite1-line1", "suite1-line2", "suite1-line3") == 0;
+    // slots 6 and 8 take the same `...Z0` arguments slot 9 does, so an absent
+    // line is a null, not a bad parameter (issue #1280: Particle_Playground
+    // ends its RENDER with PF_InfoDrawText("Number of particles: N", NULL) and
+    // returned the rejection as PF_Err_OUT_OF_MEMORY for the whole frame).
+    // Over-long strings stay rejected on every argument, which is what keeps
+    // an unterminated one from being read past its end.
+    //
+    // The cases below go through v1 only: the catalog gives v1 and v2 the same
+    // three info-text pointers, which is asserted here rather than assumed, so
+    // running each case through both versions would run the same code twice.
+    // The `slots2[9]` call above predates that assertion and is left alone.
+    ok = ok && slots1[6] == slots2[6] && slots1[8] == slots2[8] &&
+        slots1[9] == slots2[9] &&
+        reinterpret_cast<InfoDrawText>(slots1[6])("suite1-line1", nullptr) == 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])(nullptr, "suite1-line2") == 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])(nullptr, nullptr) == 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])(over_long.c_str(), nullptr) != 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])(nullptr, over_long.c_str()) != 0 &&
+        reinterpret_cast<InfoDrawText3>(slots1[8])("l1", nullptr, nullptr) == 0 &&
+        reinterpret_cast<InfoDrawText3>(slots1[8])(nullptr, nullptr, nullptr) == 0 &&
+        reinterpret_cast<InfoDrawText3>(slots1[8])(
+            nullptr, over_long.c_str(), nullptr) != 0;
+
+    // The bounds check stops at the first argument with no terminator in
+    // reach, and nothing after it is read - not by the check and not by the
+    // trace the same change added. A caller that got one pointer wrong may
+    // have got the rest wrong too, and a diagnostic that dereferences them
+    // would fault exactly where the plain build returns a clean 4. The later
+    // arguments here point at a page with no access, so reading one at all
+    // ends the process instead of reporting a failure.
+    // Not an early return on failure: the two suites acquired above are
+    // released below, and leaving without that would unbalance the leases for
+    // the rest of the process.
+    void* const no_access =
+        VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    ok = no_access != nullptr && ok;
+    if (no_access) {
+      const auto* unreadable = static_cast<const char*>(no_access);
+      ok = reinterpret_cast<InfoDrawText>(slots1[6])(over_long.c_str(),
+                                                     unreadable) == 4 && ok;
+      ok = reinterpret_cast<InfoDrawText3>(slots1[8])(
+               over_long.c_str(), unreadable, unreadable) == 4 && ok;
+      ok = reinterpret_cast<InfoDrawText3Plus>(slots1[9])(
+               over_long.c_str(), unreadable, unreadable, unreadable,
+               unreadable) == 4 && ok;
+      // Rejection in the middle of the list, not at its head: this is the case
+      // that distinguishes stopping at the first bad argument from merely
+      // skipping it, and the three above all pass either way.
+      ok = reinterpret_cast<InfoDrawText3>(slots1[8])("ok", over_long.c_str(),
+                                                      unreadable) == 4 && ok;
+      ok = reinterpret_cast<InfoDrawText3Plus>(slots1[9])(
+               "ok", nullptr, over_long.c_str(), unreadable,
+               unreadable) == 4 && ok;
+      ok = VirtualFree(no_access, 0, MEM_RELEASE) != 0 && ok;
+    }
   }
   ok = g_hooks.release_suite("PF AE Adv App Suite", 2) == 0 &&
       g_hooks.release_suite("PF AE Adv App Suite", 1) == 0 && ok;
