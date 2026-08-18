@@ -699,11 +699,14 @@ report JSON の SHA-256: baseline `454BAC68FFAE4C7B6385CADE7F1A289C93F8340BCB627
 
 ### 残件
 
-- 3D Camera Tracker / Stabilizer の render 段 (`frame_error:4`)。
-  `PF AE Private Effect Suite` slot 3 (`HostZStringToUTF16String`) の診断付き
-  stub と、未実装の `Analysis Host Suite` v2。→ #1295
-- suite の残り slot (0/1/3/4/5/6/7) の prototype、slot 5/6 の曖昧性、
+- ~~3D Camera Tracker / Stabilizer の render 段 (`frame_error:4`)~~ →
+  slot 3 (`HostZStringToUTF16String`) を実装して両方 `rendered` になった
+  (#1295)。`Analysis Host Suite` v2 は未実装のままだが、両 plug-in はその
+  acquire 失敗を受け取ったうえで render を完了しており、「次はそこで止まる」
+  という当時の推論は外れだった。
+- suite の残り slot (0/1/4/5/6/7) の prototype、slot 5/6 の曖昧性、
   非英語 parity のための `LoadDVADictionaries`。→ #1291
+  (slot 3 は #1295 で契約を確定して実装した)
 - VR family の CPU path が非有限行列を作る件そのもの
   (`AE VR Effects Video Attributes Suite` 未実装)。fallback で `rendered` には
   なるが、CPU path は依然 render できていない。→ #1271

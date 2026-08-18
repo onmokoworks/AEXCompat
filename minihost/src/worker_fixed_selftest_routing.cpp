@@ -327,12 +327,15 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",
        hooks.simple.aefx_ace_suite1},
-      // AE's `PF AE Private Effect Suite` (issue #1283): the one implemented
-      // slot's conversion and bounds, and the diagnosed refusal on every
-      // other slot of the published table.
+      // AE's `PF AE Private Effect Suite` (issues #1283, #1295): the
+      // implemented slots' conversions and bounds - slot 2's UTF-16 to narrow
+      // and slot 3's ZString to UTF-16, including the ZString split
+      // `dvacore::GetNonLocalizedString` performs - and the diagnosed refusal
+      // on every other slot of the published table.
       {L"--self-test-pf-private-effect-suite", "pf_private_effect_suite",
        hooks.simple.pf_private_effect_suite, 1,
-       ",\"versions\":[3,5,6],\"published_slots\":32,\"host_table_slots\":10"},
+       ",\"versions\":[3,5,6],\"published_slots\":32,\"host_table_slots\":10"
+       ",\"implemented_slots\":[2,3]"},
       {L"--self-test-aegp-persistent-data-suite3",
        "aegp_persistent_data_suite3",
        hooks.simple.aegp_persistent_data_suite3},

@@ -94,6 +94,10 @@ static_assert(offsetof(AegpColorSettingsSuite6, get_working_colorspace_id) == 19
 struct Statistics {
   std::uint32_t profiles_created{};
   std::uint32_t profiles_disposed{};
+  // Outstanding hand-outs - what the plug-in is holding - and not the number of
+  // records behind them. With a real `COR_ACE_Profile*` several hand-outs share
+  // one record (issue #1300), so counting records would under-report exactly
+  // what this number is for.
   std::size_t profiles_live{};
   std::uint32_t invalid_operations{};
   std::uint32_t xform_calls{};

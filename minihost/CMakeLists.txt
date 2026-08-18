@@ -288,6 +288,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_dynamic_suite_registry.cpp
     src/worker_companion_manifest.cpp
     src/worker_companion_runtime.cpp
+    src/worker_cor_ace_profile.cpp
     src/worker_pf_suites.cpp
     src/worker_pf_sampling_runtime.cpp
     src/worker_pf_effect_sequence_selftests.cpp
@@ -524,6 +525,18 @@ target_compile_features(worker_pf_sampling_wiring_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_pf_sampling_wiring_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_pf_sampling_wiring_selftest PRIVATE src)
+
+add_executable(worker_cross_thread_dispatch_world_selftest
+  ../tests/native/worker_cross_thread_dispatch_world_selftest.cpp
+  src/worker_world_safety.cpp
+  # world_safety's register_world gives each handed-out world AE's PF_World
+  # shape behind reserved_long4 (#1276).
+  src/worker_pf_world_facade.cpp
+)
+target_compile_features(worker_cross_thread_dispatch_world_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_cross_thread_dispatch_world_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_cross_thread_dispatch_world_selftest PRIVATE src)
 
 add_executable(worker_pf_bad_callback_param_selftest
   ../tests/native/worker_pf_bad_callback_param_selftest.cpp
