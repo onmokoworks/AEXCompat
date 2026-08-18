@@ -125,7 +125,8 @@ SDK は `PF_ProgPtr` を opaque と書き、abort/progress は `in_data->inter`
   abort / progress callback に forward。plug-in bootstrap ごとに再 publish
   (Echo が書き換えるため)。
 - host が渡す world storage を `world_safety::EffectWorldStorage`
-  (8 byte の vtable prefix + 120 byte の LayerDef) にし、`prepare_world_layout`
+  (8 byte の vtable prefix + 120 byte の LayerDef + 0x10 の tail = 0x90、
+  tail は AE の `PF_WorldX` が +0x88 まで書くぶん) にし、`prepare_world_layout`
   が prefix に depth 別 vtable を書いて `reserved_long4` をそこに向ける
   (= `world - 8` が PF_World)。bare な 120 byte struct (PF_NewWorld の
   呼び出し側 struct、selftest) には mirror object を付ける。slot 1 = depth、
@@ -187,8 +188,9 @@ plug-in がある (#1272) ため、この 5 本が #1278 側で既に直って�
   `std::array` は 39 + main 1 + 本ブランチ 2 = 42)。
 - merge 後に 3 exe を再ビルドし、mtime が編集より新しいことを確認してから
   再測定した。main の新 route `--self-test-argb32f-depth-conversion` は
-  本ブランチの `EffectWorldStorage` (合計 0x90 で、先頭 8 byte が vtable
-  prefix、続く 120 byte が LayerDef) の上でも 3 worker すべて pass する。
+  本ブランチの `EffectWorldStorage` (合計 0x90 = 先頭 8 byte の vtable prefix
+  + 120 byte の LayerDef + 末尾 0x10 の tail。tail は AE の `PF_WorldX` が
+  +0x88 まで書くぶんの余白) の上でも 3 worker すべて pass する。
 - 再測定 (merge 済みブランチ、`--filter` 単位): Spill2 / Transform / Glow /
   Echo / CannedWarp は rendered、`pixel_sha256` は merge 前と同一。
   ColorAndContrast / Curl_Noise / ShapeBlur は 512 のまま (§5 の通り別軸)。

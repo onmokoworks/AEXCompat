@@ -1555,8 +1555,9 @@ bool verify_pf_world_facade() {
   using Depth = int16_t (__cdecl*)(const void*);
   check(facade::selftest(), "facade contract self-test failed");
   // That self-test ends by filling the quarantine to its bound, so from here
-  // on every detach / dispose in this process evicts - freeing whichever
-  // object has been quarantined longest, not the one it just retired. Nothing
+  // on every detach / dispose that actually retires an object evicts - freeing
+  // whichever object has been quarantined longest, not the one it just
+  // retired (a detach of something the pool never held retires nothing). Nothing
   // below reads an object it has taken out of service, and nothing added below
   // should; the property that a retired object stays readable is asserted
   // inside `facade::selftest()`, before its churn section.
@@ -1575,8 +1576,9 @@ bool verify_pf_world_facade() {
     std::array<std::byte, 16 * 4> pixels{};
     std::array<std::byte, world_safety::kEffectWorldSize> bare{};
     // Declared after every buffer it can register: the scope's destructor
-    // detaches what is still registered, and that must not run on storage
-    // whose lifetime has already ended.
+    // detaches the worlds it gave a pool object to (an embedded world never
+    // enters that list), and that must not run on storage whose lifetime has
+    // already ended.
     aexcompat::world_safety::DispatchWorldFormatScope worlds;
     const int32_t pixel_bytes = entry.depth / 8 * 4;
     if (!aexcompat::render::prepare_world_layout(
