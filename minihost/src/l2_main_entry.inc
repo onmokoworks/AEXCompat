@@ -144,10 +144,21 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
     bool& user_changed_ok, bool& conditional_ui_ok) {
   std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
   std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
-  std::array<std::byte, 120> lifecycle_world{};
+  aexcompat::world_safety::EffectWorldStorage lifecycle_world{};
   write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
   write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
   write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
+  // The one world the host builds without render::prepare_world_layout, so it
+  // needs the PF_World shape put on it here: the discovery path hands it to
+  // FRAME_SETUP / FRAME_SETDOWN, and an effect that reads `world + 0x50` and
+  // calls slot 1 without a null check (the Glow shape, issue #1276) would
+  // otherwise dereference null right here. This covers the world handed over
+  // directly; the copy inside `lifecycle_definitions[0]` carries the same
+  // `reserved_long4`, but `world - 8` on *that* copy is ParamDef bytes rather
+  // than a prefix, so a Spill2/Curl_Noise-shape effect computing it during
+  // discovery still finds no vtable there (as it does for every ParamDef
+  // world; see copy_world_into_param_def in the render runtimes).
+  (void)aexcompat::worker_runtime::pf_world_facade::embed(lifecycle_world.data(), 4);
   std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
   for (std::size_t i = 0; i < g_params.size(); ++i) {
     lifecycle_definitions[i + 1] = g_params[i].raw;
@@ -1416,11 +1427,228 @@ bool verify_bee_scene_facade() {
                 comp.duration.value == duration.value &&
                 comp.duration.scale == duration.scale,
             "comp item duration differs from the AEGP item suite");
+      // The effect layer's parent comp handle (AEGP Layer Suite
+      // AEGP_GetLayerParentComp) is the same comp item object the layer's
+      // +0x260 names, so a caller that reads its AEGP_CompH as a BEE_CompItem*
+      // (ShapeBlur, issue #1264) lands on the facade; the comp accessors
+      // resolve it as this worker's composition, and the project it names
+      // carries an empty shared_ptr<PF_ColorSettings> at +0xe8/+0xf0 (what
+      // BEE_CompItem::GetColorSettings copies out).
+      void* parent_comp = nullptr;
+      check(aegp_get_layer_parent_comp(layer, &parent_comp) == 0 &&
+                parent_comp == bee::comp_item_handle() &&
+                parent_comp == object->parent_comp_item,
+            "AEGP_GetLayerParentComp did not hand out the facade comp item");
+      check(scene_handle_is_composition(parent_comp),
+            "the facade comp item does not resolve as the composition");
+      void* item_from_comp = nullptr;
+      int32_t item_width = 0, item_height = 0;
+      check(aegp_get_item_from_comp(parent_comp, &item_from_comp) == 0 &&
+                item_from_comp != nullptr &&
+                aegp_get_item_dimensions(item_from_comp, &item_width, &item_height) == 0 &&
+                item_width == kFacadeContextWidth && item_height == kFacadeContextHeight,
+            "AEGP_GetItemFromComp did not resolve the facade comp handle to the comp item");
+      double parent_fps = 0.0;
+      check(aegp_get_comp_framerate(parent_comp, &parent_fps) == 0 && parent_fps == fps,
+            "AEGP_GetCompFramerate did not resolve the facade comp handle");
+      const auto* project_bytes = reinterpret_cast<const std::byte*>(&bee::project());
+      void* color_settings = nullptr;
+      void* color_settings_control = nullptr;
+      std::memcpy(&color_settings, project_bytes + 0xe8, sizeof(color_settings));
+      std::memcpy(&color_settings_control, project_bytes + 0xf0, sizeof(color_settings_control));
+      check(comp.parent_project == &bee::project() && color_settings == nullptr &&
+                color_settings_control == nullptr,
+            "project colour settings shared_ptr is not the empty one");
     }
     check(release_suite("AEGP PF Interface Suite", 1) == 0,
           "AEGP PF Interface Suite v1 did not release");
   }
   check(suite_leases_balanced(), "suite leases did not balance");
+  return passed;
+}
+
+// The PF_ProgressInfo-shaped effect ref (issue #1275): the object the
+// production bootstrap installs at in_data->effect_ref (`g_effect`) carries
+// the published layout, and both function slots, read at their raw offsets
+// the way PF.dll's PF_TransferRect body and CannedWarp's RENDER read them,
+// forward to the host's abort / progress callbacks (the ones the inter table
+// carries). Then the module's own contract (republish after a plug-in edit).
+bool verify_pf_progress_info() {
+  namespace info = aexcompat::worker_runtime::pf_progress_info;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "pf_progress_info: " << what << "\n" << std::flush;
+  };
+  publish_effect_ref_object();
+  check(info::published(g_effect), "the production effect ref is not published");
+  // Through the installed in_data: the bootstrap writes &g_effect at
+  // IN_EFFECT_REF_OFFSET, and the inter table's abort / progress are the host
+  // callbacks the slots must forward to.
+  aexcompat::worker_runtime::effect_bootstrap::State state{};
+  aexcompat::worker_runtime::effect_bootstrap::install_callback_tables(
+      state, ::make_bootstrap_abi_hooks());
+  void* effect_ref = nullptr;
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET,
+              sizeof(effect_ref));
+  check(effect_ref == &g_effect, "in_data->effect_ref is not the host effect ref");
+  if (!effect_ref) return false;
+  const auto* bytes = static_cast<const std::byte*>(effect_ref);
+  void* refcon = nullptr;
+  info::AbortFn abort_fn = nullptr;
+  info::ProgressFn progress_fn = nullptr;
+  std::memcpy(&refcon, bytes + 0x00, sizeof(refcon));
+  std::memcpy(&abort_fn, bytes + 0x08, sizeof(abort_fn));
+  std::memcpy(&progress_fn, bytes + 0x10, sizeof(progress_fn));
+  check(refcon == effect_ref, "effect_ref[0] (refcon) is not the effect ref itself");
+  check(abort_fn != nullptr && progress_fn != nullptr, "a function slot is null");
+  if (!abort_fn || !progress_fn) return false;
+  const auto& telemetry = aexcompat::worker_runtime::classic::host_callback_telemetry();
+  const uint32_t aborts = telemetry.abort_calls;
+  const uint32_t progresses = telemetry.progress_calls;
+  const uint32_t abort_slot = info::abort_slot_calls();
+  const uint32_t progress_slot = info::progress_slot_calls();
+  check(progress_fn(refcon, 7, 20) == 0, "progress slot did not answer 0");
+  check(abort_fn(refcon) == 0, "abort slot did not answer 0");
+  check(telemetry.abort_calls == aborts + 1 && telemetry.progress_calls == progresses + 1 &&
+            telemetry.last_progress_current == 7 && telemetry.last_progress_total == 20,
+        "slots did not forward to the host abort / progress callbacks");
+  check(info::abort_slot_calls() == abort_slot + 1 &&
+            info::progress_slot_calls() == progress_slot + 1,
+        "slot call counters did not advance");
+  // Echo's substitution: it writes effect_ref[2] = effect_ref[1] for its
+  // PF_TransferRect loop; PF.dll then calls that slot with the progress
+  // arguments. A republish (the next plug-in bootstrap) restores the layout.
+  std::memcpy(static_cast<std::byte*>(effect_ref) + 0x10, &abort_fn, sizeof(abort_fn));
+  info::ProgressFn substituted = nullptr;
+  std::memcpy(&substituted, bytes + 0x10, sizeof(substituted));
+  check(substituted(refcon, 3, 9) == 0 && telemetry.abort_calls == aborts + 2,
+        "the substituted slot did not act as the abort poll");
+  check(!info::published(g_effect), "an edited effect ref still reads as published");
+  publish_effect_ref_object();
+  check(info::published(g_effect), "republish did not restore the layout");
+  check(info::selftest(), "module contract self-test failed");
+  return passed;
+}
+
+// The PF_World facade behind reserved_long4 (issue #1276): a world registered
+// for dispatch the way the render paths register theirs carries the object,
+// PF_NewWorld's world carries one too and loses it on dispose, slot 1 answers
+// the registered depth, and a sampled unobserved slot traps into the report.
+bool verify_pf_world_facade() {
+  namespace facade = aexcompat::worker_runtime::pf_world_facade;
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "pf_world_facade: " << what << "\n" << std::flush;
+  };
+  const auto recorded = [](uint32_t slot) {
+    std::ostringstream needle;
+    needle << "{\"name\":\"PF_World vtable\",\"version\":1,\"slot\":" << slot << ",";
+    return aexcompat::worker_runtime::suite_registry()
+               .unsupported_suite_calls_report_json()
+               .find(needle.str()) != std::string::npos;
+  };
+  using Depth = int16_t (__cdecl*)(const void*);
+  check(facade::selftest(), "facade contract self-test failed");
+  // That self-test ends by filling the quarantine to its bound, so from here
+  // on every detach / dispose that actually retires an object evicts - freeing
+  // whichever object has been quarantined longest, not the one it just
+  // retired (a detach of something the pool never held retires nothing). Nothing
+  // below reads an object it has taken out of service, and nothing added below
+  // should; the property that a retired object stays readable is asserted
+  // inside `facade::selftest()`, before its churn section.
+  // The module self-test trapped slots 0, 10 and the last one; the worker's
+  // recorder must have put them in the report under the pseudo-suite name.
+  check(recorded(0) && recorded(10) &&
+            recorded(static_cast<uint32_t>(facade::kVtableSlots - 1)),
+        "trapped slots are not in the unsupported_suite_calls report");
+  // A world prepared and registered the way the classic / smart paths do it
+  // (EffectWorldStorage through prepare_world_layout, then register_world), at
+  // each depth: AE's embedded shape, vtable at world - 8, no pool object.
+  const struct { int32_t pixel_format; int16_t depth; } cases[] = {
+      {kPixelFormatArgb32, 8}, {kPixelFormatArgb64, 16}, {kPixelFormatArgb128, 32}};
+  for (const auto& entry : cases) {
+    world_safety::EffectWorldStorage world{};
+    std::array<std::byte, 16 * 4> pixels{};
+    std::array<std::byte, world_safety::kEffectWorldSize> bare{};
+    // Declared after every buffer it can register: the scope's destructor
+    // detaches the worlds it gave a pool object to (an embedded world never
+    // enters that list), and that must not run on storage whose lifetime has
+    // already ended.
+    aexcompat::world_safety::DispatchWorldFormatScope worlds;
+    const int32_t pixel_bytes = entry.depth / 8 * 4;
+    if (!aexcompat::render::prepare_world_layout(
+            world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, 4, 1, 4 * pixel_bytes},
+            pixels.data())) {
+      check(false, "world layout preparation failed");
+      continue;
+    }
+    check(worlds.register_world(world.data(), entry.pixel_format), "world registration failed");
+    void* reserved_long4 = nullptr;
+    std::memcpy(&reserved_long4, world.data() + 0x50, sizeof(reserved_long4));
+    check(reserved_long4 == world.data() - 8 && facade::embedded(world.data()) &&
+              facade::attached(world.data()) == nullptr,
+          "prepared world is not the embedded PF_World shape");
+    if (!reserved_long4) continue;
+    const void* const* vtable = *static_cast<const void* const* const*>(reserved_long4);
+    check(vtable == world.pf_world_vtable && vtable == facade::vtable_for(pixel_bytes) &&
+              reinterpret_cast<Depth>(vtable[facade::kSlotDepth])(reserved_long4) == entry.depth,
+          "slot 1 did not answer the registered depth");
+    // The LayerDef the plug-in sees is the object's own +8 (no mirror): its
+    // data pointer, and a write through the object reaches the LayerDef.
+    const auto* object = static_cast<const std::byte*>(reserved_long4);
+    void* object_data = nullptr;
+    std::memcpy(&object_data, object + 0x20, sizeof(object_data));
+    check(object_data == pixels.data(), "object +0x20 is not the LayerDef's data pointer");
+    // A bare 120-byte struct registered the same way gets the mirror object.
+    bare = world.layer_def;
+    void* null = nullptr;
+    std::memcpy(bare.data() + 0x50, &null, sizeof(null));
+    check(worlds.register_world(bare.data(), entry.pixel_format), "bare world registration failed");
+    std::memcpy(&reserved_long4, bare.data() + 0x50, sizeof(reserved_long4));
+    check(reserved_long4 != nullptr && reserved_long4 == facade::attached(bare.data()) &&
+              !facade::embedded(bare.data()),
+          "bare registered world did not get a mirror object");
+    if (reserved_long4) {
+      const void* const* bare_vtable = *static_cast<const void* const* const*>(reserved_long4);
+      check(reinterpret_cast<Depth>(bare_vtable[facade::kSlotDepth])(reserved_long4) == entry.depth,
+            "mirror object slot 1 did not answer the registered depth");
+      facade::detach(bare.data());
+    }
+  }
+  // PF_NewWorld: the world the World Suite fills carries the facade for the
+  // allocation's lifetime; dispose clears the struct with it.
+  {
+    std::array<std::byte, world_safety::kEffectWorldSize> world{};
+    check(aexcompat::world_registry::new_world(&g_effect, 3, 2, 1, kPixelFormatArgb64,
+                                               world.data()) == 0,
+          "PF_NewWorld failed");
+    void* reserved_long4 = nullptr;
+    std::memcpy(&reserved_long4, world.data() + 0x50, sizeof(reserved_long4));
+    check(reserved_long4 != nullptr, "PF_NewWorld left reserved_long4 null");
+    if (reserved_long4) {
+      const void* const* vtable = *static_cast<const void* const* const*>(reserved_long4);
+      check(vtable && reinterpret_cast<Depth>(vtable[facade::kSlotDepth])(reserved_long4) == 16,
+            "PF_NewWorld facade slot 1 did not answer 16");
+      // Channel Blur's write lands in the mirror's origin, not in host memory
+      // (issue #1090): the LayerDef itself keeps its origin.
+      auto* mirror = static_cast<std::byte*>(reserved_long4);
+      const int32_t origin_x = 5, origin_y = -6;
+      std::memcpy(mirror + 0x70, &origin_x, sizeof(origin_x));
+      std::memcpy(mirror + 0x74, &origin_y, sizeof(origin_y));
+      int32_t world_origin_x = 1;
+      std::memcpy(&world_origin_x, world.data() + 0x68, sizeof(world_origin_x));
+      check(world_origin_x == 0, "a mirror write reached the LayerDef");
+    }
+    check(aexcompat::world_registry::dispose_world(&g_effect, world.data()) == 0,
+          "PF_DisposeWorld failed");
+    std::memcpy(&reserved_long4, world.data() + 0x50, sizeof(reserved_long4));
+    check(reserved_long4 == nullptr, "dispose left reserved_long4 set");
+  }
   return passed;
 }
 }  // namespace aexcompat::l2_detail
@@ -1586,6 +1814,7 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   // effects) get their init once per U.dll mapping, asked again for every
   // member so a first member without U.dll decides nothing (#362, #1063).
   initialize_legacy_support_libraries();
+  publish_effect_ref_object();
   // GLOBAL_SETUP / PARAMS_SETUP through the launch bootstrap on fresh
   // buffers and fresh host records (ABOUT stays whatever the launch did).
   reset_cluster_effect_state();
@@ -1958,6 +2187,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
         activate_plugin_string_table(current_module, aex_string_table);
         // U.dll init for PIN-era closures, once per mapping (#362, #1063).
         initialize_legacy_support_libraries();
+        publish_effect_ref_object();
         inspect_column();
       } else {
         current_global_error = -1;
@@ -2365,6 +2595,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   load_aex_string_table(module, aex_string_table);
   // U.dll init for PIN-era closures, once per mapping (#362, #1063).
   initialize_legacy_support_libraries();
+  publish_effect_ref_object();
   const char* string_table_status =
       aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid
           ? "valid"

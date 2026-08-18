@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include "worker_pf_progress_info.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
@@ -2013,7 +2014,7 @@ int32_t __cdecl delete_mask_outline_feather(void* outline, int32_t index) {
 // the effect/layer identities stay in l2_main.
 namespace aexcompat::l2_detail {
 
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 extern aexcompat::worker_runtime::bee_facade::LayerObject g_layer;
 using aexcompat::world_safety::bounded_typed_world;
 

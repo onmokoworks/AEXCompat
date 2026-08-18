@@ -91,16 +91,27 @@ inline constexpr uint32_t kTrapExceptionProjectRange = 0x180u;  // + slot (0..7)
 struct ProjectObject;
 struct ItemObject;
 
-// BEE_Project: only the time display block is read (BEE_GetProjectSettings
-// through BEE_Project::GetTimeDisplay).
+// BEE_Project: the time display block (BEE_GetProjectSettings through
+// BEE_Project::GetTimeDisplay) and the project colour settings
+// (`BEE_CompItem::GetColorSettings` copies the `shared_ptr<PF_ColorSettings>`
+// at project+0xe8 / +0xf0 out of `BEE_Item::GetParentProject()`; ShapeBlur
+// (Camera Lens Blur) reads it through the effect layer's parent comp, issue
+// #1264). The host publishes no colour settings, so both words stay null and
+// the copy is an empty shared_ptr, which the observed caller handles (it takes
+// its no-linear-blending-tables path).
 struct alignas(16) ProjectObject {
   const void* const* vtable{};                 // 0x000
   std::byte reserved_008[0x84 - 0x08]{};
   TimeDisplayFormat time_display{};            // 0x084 BEE_Project::GetTimeDisplay
-  std::byte reserved_094[0x0a0 - 0x94]{};
+  std::byte reserved_094[0x0e8 - 0x94]{};
+  void* color_settings{};                      // 0x0e8 shared_ptr<PF_ColorSettings>::ptr
+  void* color_settings_control{};              // 0x0f0 shared_ptr control block (refcount at +8)
+  std::byte reserved_0f8[0x100 - 0xf8]{};
 };
 static_assert(offsetof(ProjectObject, time_display) == 0x84);
-static_assert(sizeof(ProjectObject) == 0xa0);
+static_assert(offsetof(ProjectObject, color_settings) == 0xe8);
+static_assert(offsetof(ProjectObject, color_settings_control) == 0xf0);
+static_assert(sizeof(ProjectObject) == 0x100);
 
 // BEE_Item with the BEE_CompItem fields BEE_GetCompSettings reads. The same
 // object type serves the footage item (type 7); its comp fields are
@@ -178,6 +189,11 @@ void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcep
 
 // The objects `prepare_effect_layer` links to `layer`.
 const ItemObject& comp_item() noexcept;
+// The comp item as a handle: what AEGP_GetLayerParentComp answers for the
+// effect layer (worker_aegp_scene), so a caller that reads its AEGP_CompH as
+// a `BEE_CompItem*` (ShapeBlur, issue #1264) finds the same object the layer's
+// +0x260 names. Only meaningful after a prepare_effect_layer.
+void* comp_item_handle() noexcept;
 const ItemObject& footage_item() noexcept;
 const ProjectObject& project() noexcept;
 const void* const* layer_vtable() noexcept;

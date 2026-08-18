@@ -209,7 +209,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 40> simple_commands{{
+  const std::array<selftest::SimpleCommand, 42> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -309,6 +309,20 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       {L"--self-test-bee-scene-facade", "bee_scene_facade",
        hooks.simple.bee_scene_facade, 1,
        ",\"reached_via_aegp_pf_interface_suite\":true"},
+      // The PF_ProgressInfo-shaped object behind in_data->effect_ref (issue
+      // #1275): the production hand-out publishes {refcon, abort, progress}
+      // and both slots, read the way PF.dll / CannedWarp read them, forward to
+      // the host's abort / progress callbacks.
+      {L"--self-test-pf-progress-info", "pf_progress_info",
+       hooks.simple.pf_progress_info, 1,
+       ",\"reached_via_in_data_effect_ref\":true"},
+      // The PF_World-shaped object behind every registered world's
+      // reserved_long4 (issue #1276): vtable slot 1 answers the world's depth,
+      // the LayerDef mirror follows the hand-out, every other slot traps by
+      // index, and PF_NewWorld's world carries the same object.
+      {L"--self-test-pf-world-facade", "pf_world_facade",
+       hooks.simple.pf_world_facade, 1,
+       ",\"reached_via_reserved_long4\":true"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",

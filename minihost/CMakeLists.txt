@@ -220,6 +220,8 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_param_suites.cpp
     src/worker_aegp_pf_interface_suite.cpp
     src/worker_bee_scene_facade.cpp
+    src/worker_pf_progress_info.cpp
+    src/worker_pf_world_facade.cpp
     src/worker_aegp_command_suites.cpp
     src/worker_mask_suite_tables.cpp
     src/worker_l2_render_abi.cpp
@@ -513,6 +515,8 @@ add_executable(worker_pf_sampling_wiring_selftest
   # DispatchWorldFormatScope. Without both TUs the target fails to link (#892).
   src/worker_pf_world_transform_runtime.cpp
   src/worker_world_safety.cpp
+  # world_safety's register_world attaches the PF_World facade (#1276).
+  src/worker_pf_world_facade.cpp
   src/worker_effect_bootstrap.cpp
 )
 target_compile_features(worker_pf_sampling_wiring_selftest PRIVATE cxx_std_17)
@@ -524,6 +528,7 @@ add_executable(worker_pf_bad_callback_param_selftest
   ../tests/native/worker_pf_bad_callback_param_selftest.cpp
   src/worker_pf_world_transform_runtime.cpp
   src/worker_world_safety.cpp
+  src/worker_pf_world_facade.cpp
 )
 target_compile_features(worker_pf_bad_callback_param_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_pf_bad_callback_param_selftest PRIVATE
@@ -543,6 +548,8 @@ add_executable(host_audio_runtime_selftest
   ../tests/native/host_audio_runtime_selftest.cpp
   src/host_audio_runtime.cpp
   src/render_subsystem.cpp
+  # render_subsystem's prepare_world_layout embeds the PF_World facade (#1276).
+  src/worker_pf_world_facade.cpp
   src/worker_effect_bootstrap.cpp
 )
 target_compile_features(host_audio_runtime_selftest PRIVATE cxx_std_17)
@@ -563,6 +570,7 @@ add_executable(worker_render_lifecycle_selftest
   ../tests/native/worker_render_lifecycle_selftest.cpp
   src/render_lifecycle.cpp
   src/render_subsystem.cpp
+  src/worker_pf_world_facade.cpp
 )
 target_compile_features(worker_render_lifecycle_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_render_lifecycle_selftest PRIVATE

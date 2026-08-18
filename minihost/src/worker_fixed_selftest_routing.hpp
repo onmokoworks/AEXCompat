@@ -54,6 +54,8 @@ struct SimpleHooks {
   bool (*checkout_param_beyond_table)(){};
   bool (*pf_private_callbacks)(){};
   bool (*bee_scene_facade)(){};
+  bool (*pf_progress_info)(){};
+  bool (*pf_world_facade)(){};
   bool (*flt_blur_suite1)(){};
   bool (*aefx_ace_suite1)(){};
   bool (*aegp_persistent_data_suite3)(){};

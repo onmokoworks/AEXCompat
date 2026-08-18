@@ -1,4 +1,5 @@
 #include "worker_drawbot_runtime.hpp"
+#include "worker_pf_progress_info.hpp"
 
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_pf_helper_runtime.hpp"
@@ -319,7 +320,7 @@ int32_t __cdecl adv_app_info_text3_plus(const char*, const char*, const char*,
 }
 using CustomUiRegistration =
     aexcompat::worker_runtime::ui_event_execution::CustomUiRegistration;
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 namespace {
 auto& g_custom_ui_registration = g_custom_ui_telemetry.registration;
 auto& g_invalid_custom_ui_registrations = g_custom_ui_telemetry.invalid_custom_ui_registrations;
