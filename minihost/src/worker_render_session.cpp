@@ -1390,27 +1390,44 @@ SmartRenderSessionOutcome run_smart_render_session(
               time_scale, pixel_bytes, &retry_frame);
         }
         // Premiere GPU-filter fallback (#1271): an effect exporting
-        // xGPUFilterEntry whose SMART_RENDER selector answered PF_Err 512 only
+        // xGPUFilterEntry whose SMART_RENDER selector refused the frame only
         // implements the GPU path (the VR family draws a "requires GPU
-        // acceleration" notice and returns 512). The export alone does not
+        // acceleration" notice and gives up). The export alone does not
         // separate those from exporters whose PF CPU path works, so the
-        // selector's 512 is the signal (the selector, not a FRAME_SETUP /
-        // SETDOWN 512 folded into render_error), and only the plug-in's own
-        // 512: the host substitutes the same code whenever it stands in for
-        // the plug-in's return (a caught fault, an escaped C++ exception, a
-        // failed module audit), and a plug-in that just faulted is not
-        // re-entered on a GPU route. A dispatch that
+        // selector's own refusal is the signal (the selector, not a
+        // FRAME_SETUP / SETDOWN error folded into render_error), and only the
+        // plug-in's own: the host substitutes 512 - never 516 - whenever it
+        // stands in for the plug-in's return (a caught fault, an escaped C++
+        // exception, a failed module audit), and a plug-in that just faulted
+        // is not re-entered on a GPU route. That guard therefore covers the
+        // 512 half only; what bounds the 516 half is the `xGPUFilterEntry`
+        // export test below, and the `stage:pr_gpu_route_begin reason=cpu_*`
+        // line the route now carries, which keeps a papered-over host refusal
+        // visible in the record. A dispatch that
         // already offered the route (a float32 session, a gpu_*_float32 case,
         // or the #1072 retry above, whose plan is float32) is not retried: the
         // route declined once and would again. Re-run the frame once with the
-        // route enabled; if it declines, the PF path answers 512 again.
+        // route enabled; if it declines, the PF path answers the same again.
+        //
+        // Both 512 and 516 count (issue #1283). The VR family's CPU path
+        // answered 512 only because it gave up before reaching a host
+        // callback; once `dvacore::config::Localizer` is installed the same
+        // effects get one step further, ask the host to transform a world
+        // with a matrix they had no field of view to build (the
+        // `AE VR Effects Video Attributes Suite` they want is not
+        // implemented), and pass the host's PF_Err_BAD_CALLBACK_PARAM out as
+        // their own. Which of the two codes a GPU-only effect reaches the end
+        // of its CPU path with is incidental; that it could not serve the
+        // frame is the property this retry is for.
         if (frame_result.selector_dispatched &&
-            frame_result.selector_error == 512 &&
+            (frame_result.selector_error == 512 ||
+             frame_result.selector_error == 516) &&
             !frame_result.selector_failure_substituted &&
             !frame_result.pr_gpu_route_attempted &&
             worker_runtime::smart_dispatch::pr_gpu_filter_route_available() &&
             !worker_runtime::smart_setup::force_pr_gpu_retry_requested()) {
-          const worker_runtime::smart_setup::ForcePrGpuRetryScope force_pr_gpu;
+          const worker_runtime::smart_setup::ForcePrGpuRetryScope force_pr_gpu(
+              frame_result.selector_error);
           captured.clear();
           retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
           verdict = &retry_frame;

@@ -1561,7 +1561,24 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   // admits - that check is what keeps plug-in authored text out of a report,
   // since the plug-in shares this stderr and can print `stage:` lines too.
   const char* outcome = "entered";
-  std::cerr << "stage:pr_gpu_route_begin\n" << std::flush;
+  // The `_begin` line names why the route was entered when the PF CPU path
+  // was turned away first (issue #1283). Without it a `rendered` record whose
+  // `_end` says `committed` cannot be told from one whose CPU path worked and
+  // never needed the route, so a host callback refusal that the GPU route then
+  // papered over would leave no trace in the sweep record a corpus comparison
+  // reads - which needs no `AEXCOMPAT_EXTENDED_DIAG`, so this cannot be a
+  // trace-only line. `render_sweep` lifts it to `worker.pr_gpu_route_entered_from`.
+  // Same lower-case identifier shape as the `_end` reason, for the same parser.
+  const char* const retry_cause = [] {
+    switch (smart_setup::pr_gpu_retry_cause()) {
+      case 512: return "cpu_internal_struct_damaged";
+      case 516: return "cpu_bad_callback_param";
+      default: return static_cast<const char*>(nullptr);
+    }
+  }();
+  std::cerr << "stage:pr_gpu_route_begin";
+  if (retry_cause) std::cerr << " reason=" << retry_cause;
+  std::cerr << "\n" << std::flush;
   struct RouteOutcome {
     const char** reason;
     ~RouteOutcome() {

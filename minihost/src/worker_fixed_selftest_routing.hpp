@@ -58,6 +58,7 @@ struct SimpleHooks {
   bool (*pf_world_facade)(){};
   bool (*flt_blur_suite1)(){};
   bool (*aefx_ace_suite1)(){};
+  bool (*pf_private_effect_suite)(){};
   bool (*aegp_persistent_data_suite3)(){};
   bool (*native_stdout_routing)(){};
   bool (*aegp_persistent_data_suite4)(){};

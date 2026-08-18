@@ -209,7 +209,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 42> simple_commands{{
+  const std::array<selftest::SimpleCommand, 43> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -327,6 +327,12 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",
        hooks.simple.aefx_ace_suite1},
+      // AE's `PF AE Private Effect Suite` (issue #1283): the one implemented
+      // slot's conversion and bounds, and the diagnosed refusal on every
+      // other slot of the published table.
+      {L"--self-test-pf-private-effect-suite", "pf_private_effect_suite",
+       hooks.simple.pf_private_effect_suite, 1,
+       ",\"versions\":[3,5,6],\"published_slots\":32,\"host_table_slots\":10"},
       {L"--self-test-aegp-persistent-data-suite3",
        "aegp_persistent_data_suite3",
        hooks.simple.aegp_persistent_data_suite3},

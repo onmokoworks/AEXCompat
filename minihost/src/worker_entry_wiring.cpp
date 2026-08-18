@@ -59,6 +59,7 @@
 #include "worker_pf_color_selftests.hpp"
 #include "worker_parameter_execution.hpp"
 #include "worker_aefx_ace_suite.hpp"
+#include "worker_pf_private_effect_suite.hpp"
 #include "worker_aegp_persistent_data_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
 #include "worker_pf_private_callbacks.hpp"
@@ -681,6 +682,7 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &verify_pf_progress_info,
         &verify_pf_world_facade,
         &aexcompat::flt_blur::selftest, &aexcompat::aefx_ace::selftest,
+        &aexcompat::pf_private_effect::selftest,
         &aexcompat::worker_runtime::persistent_data::selftest,
         &aexcompat::worker_runtime::selftest_native_stdout_routing,
         &aexcompat::worker_runtime::persistent_data::selftest4,

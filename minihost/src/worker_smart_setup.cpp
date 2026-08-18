@@ -28,12 +28,17 @@ T read(const parameter_execution::BufferOut& bytes, std::size_t offset) {
 }
 thread_local bool g_force_gpu_retry = false;
 thread_local bool g_force_pr_gpu_retry = false;
+thread_local int32_t g_pr_gpu_retry_cause = 0;
 }  // namespace
 
 void set_force_gpu_retry(bool value) { g_force_gpu_retry = value; }
 bool force_gpu_retry_requested() { return g_force_gpu_retry; }
-void set_force_pr_gpu_retry(bool value) { g_force_pr_gpu_retry = value; }
+void set_force_pr_gpu_retry(bool value, int32_t cause) {
+  g_force_pr_gpu_retry = value;
+  g_pr_gpu_retry_cause = value ? cause : 0;
+}
 bool force_pr_gpu_retry_requested() { return g_force_pr_gpu_retry; }
+int32_t pr_gpu_retry_cause() { return g_pr_gpu_retry_cause; }
 
 Plan prepare(const Context& context, const Request& request) {
   Plan plan;

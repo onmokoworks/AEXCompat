@@ -90,13 +90,23 @@ class ForceGpuRetryScope {
 // dispatch take the Premiere GPU-filter route at the session depth. Float32
 // sessions take that route first and never need the flag. Thread-local like
 // the GPU retry flag above, with the same RAII holder shape.
-void set_force_pr_gpu_retry(bool);
+void set_force_pr_gpu_retry(bool, int32_t cause);
 bool force_pr_gpu_retry_requested();
+// The PF CPU path's own refusal that sent this frame to the GPU route, or 0
+// when the route was offered for another reason (a float32 plan, a
+// gpu_*_float32 case). It rides on the route's `stage:pr_gpu_route_begin`
+// line so a `rendered` verdict still names the refusal it replaced: the
+// route's own `_end reason=committed` says the frame came from the GPU, and
+// nothing else in a default report would say the CPU path had been turned
+// away (issue #1283).
+int32_t pr_gpu_retry_cause();
 
 class ForcePrGpuRetryScope {
  public:
-  ForcePrGpuRetryScope() { set_force_pr_gpu_retry(true); }
-  ~ForcePrGpuRetryScope() { set_force_pr_gpu_retry(false); }
+  explicit ForcePrGpuRetryScope(int32_t cause) {
+    set_force_pr_gpu_retry(true, cause);
+  }
+  ~ForcePrGpuRetryScope() { set_force_pr_gpu_retry(false, 0); }
   ForcePrGpuRetryScope(const ForcePrGpuRetryScope&) = delete;
   ForcePrGpuRetryScope& operator=(const ForcePrGpuRetryScope&) = delete;
 };
