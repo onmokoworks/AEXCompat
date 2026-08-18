@@ -71,7 +71,9 @@ struct Failures {
 // arrive; the counters in State say how many attempts they produced.
 void drive(State& state, HMODULE u_module, bool u_sp_birth_exported,
            HMODULE sweetpea_module, const std::wstring& directory,
-           bool u_succeeds, bool direct_succeeds, int asks) {
+           bool u_succeeds, bool direct_succeeds, int asks,
+           bool initialized_override = false) {
+  const bool initialized = direct_succeeds || initialized_override;
   for (int index = 0; index < asks; ++index) {
     switch (sweetpea::decide(state, u_module, u_sp_birth_exported,
                              sweetpea_module, directory)) {
@@ -85,7 +87,9 @@ void drive(State& state, HMODULE u_module, bool u_sp_birth_exported,
       case Decision::StartDirectly:
         sweetpea::begin_direct_attempt(state, directory);
         sweetpea::note_direct_module(state, sweetpea_module);
-        sweetpea::finish_direct_start(state, direct_succeeds, direct_succeeds);
+        // The wiring passes the SPInit outcome and the overall one
+        // separately; `initialized` is what the teardown debt keys on.
+        sweetpea::finish_direct_start(state, initialized, direct_succeeds);
         break;
     }
   }
@@ -193,9 +197,19 @@ int main() {
     sweetpea::finish_direct_start(half, /*initialized=*/true, /*started=*/false);
     check("a_started_spinit_is_torn_down_even_if_startup_failed", true,
           sweetpea::teardown_sweetpea_directly(half));
-    check("a_half_started_sweetpea_is_still_not_bootstrapped",
-          Decision::StartDirectly,
+    // ...but it must not be started a second time: `SPInit` is
+    // reference-counted, and a second one would make the number of
+    // `SPTerm` calls owed at teardown uncountable.
+    check("a_half_started_sweetpea_is_not_started_again",
+          Decision::Nothing,
           sweetpea::decide(half, nullptr, false, sweetpea_module, dir_b));
+    drive(half, nullptr, false, sweetpea_module, dir_b, true, false, 5);
+    check("a_half_started_sweetpea_runs_no_second_spinit", 1UL,
+          static_cast<unsigned long>(half.direct_attempts));
+    // U's bootstrap on top is still wanted: it is what registers the
+    // adapter, and it does not run a second SPInit of its own.
+    check("a_half_started_sweetpea_still_takes_u", Decision::CallUSpBirth,
+          sweetpea::decide(half, first, true, sweetpea_module, dir_b));
   }
 
   // The wiring decides on the mapping it can see (null when ae_sweetpea is not
@@ -246,6 +260,8 @@ int main() {
   // that directory), is a different key and is asked.
   {
     State state;
+    // The load never found ae_sweetpea, so no SPInit ran and the retry
+    // on a new key is still open.
     drive(state, nullptr, false, nullptr, dir_a, true, false, 10);
     check("failed_direct_start_is_attempted_once_per_key", 1UL,
           static_cast<unsigned long>(state.direct_attempts));

@@ -69,6 +69,15 @@ entry point だけ) ので、呼ぶ責任はホストにある。
 - `?U_SP_Death@@YAHXZ` は `SPShutdownPlugins()` + `SPTerm()`。teardown は
   起動した層と同じ層で行う (両方呼ぶと二重 shutdown)。
 
+- U の Sweet Pea gate を越えたあと、Particle_Playground は GLOBAL_SETUP の
+  途中で VAL.dll 内の null read で落ちる (実測:
+  `stage:selector_seh selector=GLOBAL_SETUP code=0xc0000005
+  site=other_module module=VAL.dll access=read fault=null`)。`VAL_Birth` を
+  呼ぶようにすると落ちなくなる。落ちていたのが VAL の値型テーブルだという
+  読みは `VAL_Birth` の逆アセンブル (`LIST_New` でリストを作り、32 種の
+  値型を `LIST_Insert` する) によるもので、trace が直接示しているわけでは
+  ない (推論)。
+
 ### ProfileToProfile — `global_setup:14`
 
 - GLOBAL_SETUP は BIB/ACE の解決を通ったあと ACE を使う段で 14 を返していた
@@ -142,7 +151,7 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   (ae_sweetpea は closure が map しているだけのことがあり、それを shutdown
   するのは所有していない層を畳むことになる)。実測では **one-shot 直叩きの時点で U.dll は
   既に unmap されている** (`extended_diag:pica_component stage=teardown
-  u=unmapped`)。記録した HMODULE をそのまま使うと解放済み image を
+  u=remapped_or_unmapped`)。記録した HMODULE をそのまま使うと解放済み image を
   GetProcAddress で読むことになるので、teardown 時に `GetModuleHandleW` で
   同じ mapping であることを確かめてから呼ぶ。結果として one-shot では
   `U_SP_Death` は走らない。unmap の出所は `WorkerSession::unload_module` の
@@ -160,6 +169,14 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   この経路で再発しないことは corpus 304 本の sweep で確認している
   (session 分類に変化なし)。teardown を安全に走らせる場所 (session の
   unload 境界など) の検討は #1282。
+- Sweet Pea の `SPInit` はこの process では最大 1 回しか走らせない
+  (`decide` が `direct_started` で止める)。`SPInit` は refcount なので、
+  2 回目を走らせると必要な `SPTerm` の回数が数えられなくなるため。
+  既知の穴 (未解決、記録のみ): `U_SP_Birth` が内部の `SPInit` を終えたあとで
+  throw / fault した場合、その init は host からは観測できないので teardown
+  の債務として記録されない。teardown 自体が U 経路では no-op なので現状の
+  実害は無いが、teardown を走らせるようにするなら一緒に解く必要がある
+  (→ #1282)。
 - Sweet Pea の起動は `dvabravoinitializer.dll` が解決できたときにしか走らない
   (`ensure_pica_components_initialized` の early return がその前にある)。
   この結合は #1279 より前からのもので、どちらも `provide_bib_suite` 経由
@@ -266,6 +283,8 @@ report JSON の SHA-256: baseline `6FA292BB…`、変更後 `E63B2013…`。
   `frame_error:4` = discovery 成功で、`worker failed` 系の分類にはならない
   (どちらも実測)。→ #1282
 - `COR_Birth` がこの worker で返らない件。→ #1282
+- Sweet Pea の teardown を安全に走らせられる場所。現状は U 経路で no-op で、
+  atexit で無理に走らせると落ちる (§3 の pin 実験)。→ #1282
 - 3D Camera Tracker / Stabilizer の `PF AE Private Effect Suite` v3/v5。→ #1283
 
 ---

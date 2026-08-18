@@ -109,12 +109,23 @@ enum class Decision {
 inline Decision decide(const State& state, HMODULE u_module,
                        bool u_sp_birth_exported, HMODULE sweetpea_module,
                        const std::wstring& plugin_directory) {
+  // A different U.dll image would need its own adapter registration - the
+  // `SPBasicSuite*` latch is a per-image global - but this answers "done" for
+  // any mapping once one bootstrap succeeded, and `bootstrapped_u_module` is
+  // a single slot that a second birth would overwrite. Two U.dll images
+  // mapped at once is not a state this worker reaches (`GetModuleHandleW`
+  // sees one), so the asymmetry is recorded rather than handled.
   if (state.bootstrap == Bootstrap::u_sp_birth)
     return Decision::AlreadyBootstrappedThroughU;
   if (state.attempt_in_flight) return Decision::Nothing;
   if (u_module && u_module != state.attempted_u_module && u_sp_birth_exported)
     return Decision::CallUSpBirth;
   if (state.bootstrap != Bootstrap::none) return Decision::Nothing;
+  // Never a second `SPInit`. The retry below exists for an attempt that never
+  // got that far (ae_sweetpea not mapped and not loadable from that member's
+  // directory); once one succeeded, this process owes exactly one `SPTerm`
+  // and a second init would make that debt uncountable.
+  if (state.direct_started) return Decision::Nothing;
   if (!state.direct_attempted ||
       sweetpea_module != state.attempted_sweetpea_module ||
       plugin_directory != state.attempted_plugin_directory)

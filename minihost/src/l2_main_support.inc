@@ -1371,9 +1371,13 @@ void initialize_u_dll_allocator() {
 // imports only their working entry points, never the birth. Two of the
 // discovery failures in that issue are exactly this gap:
 //
-//   * Particle_Playground reaches VAL's tables during GLOBAL_SETUP once it is
-//     past U's Sweet Pea gate and faults on a null read inside VAL.dll,
-//     because VAL's global value-type list only exists after VAL_Birth.
+//   * Particle_Playground, once past U's Sweet Pea gate, faults during
+//     GLOBAL_SETUP on a null read inside VAL.dll (observed:
+//     `stage:selector_seh selector=GLOBAL_SETUP code=0xc0000005
+//     site=other_module module=VAL.dll access=read fault=null`), and it
+//     stops faulting once VAL_Birth runs. That VAL's global value-type
+//     list is what was missing is the reading of VAL_Birth's
+//     disassembly, not something the trace shows directly.
 //   * PSL_Adjustments returns 21249 from GLOBAL_SETUP. That is COR.dll's
 //     0x5301, returned by `COR_GetBIBAddressProc` ("BIB is uninitialized.")
 //     when COR's cached BIB resolver is null - and that global is set by
@@ -1416,7 +1420,7 @@ void initialize_u_dll_allocator() {
 // Same latch shape as U_Birth: keyed on the mapping, so a session whose first
 // member maps none of these still births them for a later member that does,
 // and a failed attempt is not retried on the same mapping.
-void initialize_pin_support_libraries() {
+void initialize_process_support_libraries() {
   namespace legacy = aexcompat::worker_runtime::legacy_support;
   enum class BirthShape {
     // int (*)()
@@ -1507,9 +1511,13 @@ void initialize_pin_support_libraries() {
                 << std::flush;
       continue;
     }
+    // A void birth has no result: printing one would be
+    // indistinguishable from a library that answered with that value.
     std::cerr << "stage:legacy_support_init library=" << library.name
-              << " entry=" << library.birth << " status=called result="
-              << result << "\n" << std::flush;
+              << " entry=" << library.birth << " status=called";
+    if (library.shape != BirthShape::no_arguments_void)
+      std::cerr << " result=" << result;
+    std::cerr << "\n" << std::flush;
   }
 }
 
@@ -1563,7 +1571,7 @@ void initialize_pf_dll_host_layer() {
 
 void initialize_legacy_support_libraries() {
   initialize_u_dll_allocator();
-  initialize_pin_support_libraries();
+  initialize_process_support_libraries();
   initialize_pf_dll_host_layer();
 }
 

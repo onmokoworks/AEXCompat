@@ -416,8 +416,15 @@ void teardown_pica_components() {
           ? reinterpret_cast<USweetPeaLifecycleFn>(
                 GetProcAddress(u_module, "?U_SP_Death@@YAHXZ"))
           : nullptr;
-      u_teardown = !u_module ? "unmapped"
+      u_teardown = !u_module ? "remapped_or_unmapped"
                              : (u_sp_death ? "u_sp_death" : "export_missing");
+      // Emitted before the calls as well as after: if `U_SP_Death` faults,
+      // the `__except` below swallows it and the post-call line never runs,
+      // and this trace is the only view of what teardown decided (it is what
+      // the pin experiment turned on).
+      if (aexcompat::l2_detail::extended_diag_enabled())
+        std::cerr << "extended_diag:pica_component stage=teardown_begin u="
+                  << u_teardown << "\n" << std::flush;
       if (u_sp_death) u_sp_death();
     }
     // Then the direct start, if this process ran one: `SPInit` is
@@ -432,9 +439,14 @@ void teardown_pica_components() {
           ? reinterpret_cast<int(__cdecl*)()>(
                 GetProcAddress(sweetpea_module, "?SPTerm@ae_sweetpea@@YAHXZ"))
           : nullptr;
-      sweetpea_teardown = !sweetpea_module
-          ? "unmapped"
-          : ((sp_shutdown && sp_term) ? "sp_shutdown_term" : "export_missing");
+      sweetpea_teardown = !sweetpea_module ? "unmapped"
+          : ((sp_shutdown && sp_term)
+                 ? "sp_shutdown_term"
+                 : (sp_shutdown ? "sp_shutdown_only"
+                                : (sp_term ? "sp_term_only" : "no_export")));
+      if (aexcompat::l2_detail::extended_diag_enabled())
+        std::cerr << "extended_diag:pica_component stage=teardown_begin"
+                     " sweetpea=" << sweetpea_teardown << "\n" << std::flush;
       if (sp_shutdown) sp_shutdown();
       if (sp_term) sp_term();
     }
@@ -587,12 +599,16 @@ void ensure_sweetpea_started() {
 // acquire from inside a DllMain (holding the loader lock, waiting for this
 // mutex) would deadlock against a thread holding this mutex and waiting for
 // the loader lock. Discovery has no deadline by policy, so that would be an
-// indefinite hang the Job Object has to end. It is accepted because the
-// re-entrancy actually observed here is same-thread (the recursive mutex and
-// the in-flight flags handle it) and nothing in this worker acquires a host
-// suite from a DllMain: the suite pointer does not exist that early. If that
-// ever changes, the fix is to run the two loads outside the mutex and
-// re-check the latch after reacquiring, not to drop the lock.
+// indefinite hang the Job Object has to end. It is accepted, not
+// excluded: the re-entrancy actually observed here is same-thread, which the
+// recursive mutex and the in-flight flags handle, and a *second* thread
+// reaching a suite acquire from inside a DllMain has not been observed. It is
+// not structurally impossible either - these loads run from inside
+// `provide_bib_suite`, so a suite pointer does exist by then, which is
+// exactly why the in-flight flags are there. The exposure is recorded rather
+// than argued away (issue #1287). The fix, if it shows up, is to run the two
+// loads outside the mutex and re-check the latch after reacquiring, not to
+// drop the lock.
 void ensure_pica_components_initialized() {
   auto& state = bib_suite_state();
   std::lock_guard<std::recursive_mutex> component_lock(pica_component_mutex());
