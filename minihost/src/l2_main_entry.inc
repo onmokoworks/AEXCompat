@@ -148,6 +148,12 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
   write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
   write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
   write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
+  // The one world the host builds without render::prepare_world_layout, so it
+  // needs the PF_World shape put on it here: the discovery path hands it to
+  // FRAME_SETUP / FRAME_SETDOWN, and an effect that reads `world + 0x50` and
+  // calls slot 1 without a null check (the Glow shape, issue #1276) would
+  // otherwise dereference null right here.
+  (void)aexcompat::worker_runtime::pf_world_facade::embed(lifecycle_world.data(), 4);
   std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
   for (std::size_t i = 0; i < g_params.size(); ++i) {
     lifecycle_definitions[i + 1] = g_params[i].raw;

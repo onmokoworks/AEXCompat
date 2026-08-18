@@ -312,7 +312,12 @@ bool prefix_carries_facade_vtable(const void* prefix) noexcept {
   const void* vtable = nullptr;
   __try {
     std::memcpy(&vtable, prefix, sizeof(vtable));
-  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH) {
+    // Only an unmapped prefix is answered with "not embedded". Anything else
+    // (a stack overflow, say) keeps unwinding rather than being swallowed here
+    // with the guard page left unreset.
     return false;
   }
   return is_facade_vtable(vtable);
@@ -347,17 +352,6 @@ bool embed(void* world, int32_t pixel_bytes) noexcept {
   const void* const* vtable = vtable_for(pixel_bytes);
   if (!world || !vtable) return false;
   void* prefix = prefix_of(world);
-  {
-    // Recorded so `embedded` can recognise this prefix later without reading
-    // through a pointer the plug-in can overwrite. The set holds one entry per
-    // distinct world storage, and the host's storages recur frame after frame.
-    Exclusive lock;
-    try {
-      g_published_objects.insert(prefix);
-    } catch (...) {
-      return false;
-    }
-  }
   std::memcpy(prefix, &vtable, sizeof(vtable));
   std::memcpy(static_cast<std::byte*>(world) + kReservedLong4Offset, &prefix, sizeof(prefix));
   return true;
@@ -367,18 +361,13 @@ bool embedded(const void* world) noexcept {
   if (!world) return false;
   // The pointer this reads through is never the plug-in's own value: it is
   // accepted only when it equals `world - 8`, so the read is at most the 8
-  // bytes in front of a buffer the host handed out. A storage the host
-  // embedded is recognised by membership without any read at all; a *copy* of
-  // such a storage (the checkout views the host makes) carries the vtable in
-  // its own prefix but was never embedded, so it is recognised by the vtable
-  // itself, under a fault guard in case a plug-in forged `world - 8` on a
-  // struct whose preceding bytes are not mapped.
+  // bytes in front of a buffer the host handed out - and the same read
+  // recognises a *copy* of an embedded storage (the checkout views the host
+  // makes), whose prefix carries the vtable although `embed` never ran on it.
+  // The fault guard is for a plug-in that forges `world - 8` on a struct whose
+  // preceding bytes are not mapped.
   const void* reserved_long4 = read_at<const void*>(world, kReservedLong4Offset);
   if (reserved_long4 != static_cast<const std::byte*>(world) - kObjectLayerDef) return false;
-  {
-    Shared lock;
-    if (g_published_objects.count(reserved_long4) != 0) return true;
-  }
   return prefix_carries_facade_vtable(reserved_long4);
 }
 
@@ -400,14 +389,14 @@ bool publish_locked(WorldObject& object, void* world, int32_t pixel_bytes) noexc
 }
 
 bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept {
-  if (!world || !vtable_for(pixel_bytes)) return false;
   Exclusive lock;
+  if (!publish_locked(object, world, pixel_bytes)) return false;
   try {
     g_published_objects.insert(&object);
   } catch (...) {
     return false;
   }
-  return publish_locked(object, world, pixel_bytes);
+  return true;
 }
 
 bool attach(void* world, int32_t pixel_bytes) noexcept {
@@ -427,10 +416,16 @@ bool attach(void* world, int32_t pixel_bytes) noexcept {
   // An object this module already published (the world registry's, for a
   // PF_NewWorld allocation it owns) stays that object's owner's business;
   // taking a second, pooled object would orphan it and leave dispose freeing
-  // the wrong one. Pointer comparison only - nothing is read through
-  // `reserved_long4`, which the plug-in can overwrite with anything.
-  if (g_published_objects.count(read_at<const void*>(world, kReservedLong4Offset)) != 0)
-    return true;
+  // the wrong one. The set answers by pointer, so nothing is read through
+  // `reserved_long4` until membership has proved the pointer is an object this
+  // module allocated - and only then is its back-reference read, so a plug-in
+  // that aims one host world at another's object does not keep this world from
+  // getting its own.
+  {
+    const auto* candidate = read_at<const WorldObject*>(world, kReservedLong4Offset);
+    if (g_published_objects.count(candidate) != 0 && candidate->attached_world == world)
+      return true;
+  }
   if (g_objects.size() >= kMaxObjects) return false;
   WorldObject* object = nullptr;
   try {
@@ -440,13 +435,17 @@ bool attach(void* world, int32_t pixel_bytes) noexcept {
   } catch (...) {
     return false;
   }
+  if (!publish_locked(*object, world, pixel_bytes)) {
+    g_objects.erase(world);
+    return false;
+  }
   try {
     g_published_objects.insert(object);
   } catch (...) {
     g_objects.erase(world);
     return false;
   }
-  return publish_locked(*object, world, pixel_bytes);
+  return true;
 }
 
 void detach(void* world) noexcept {
@@ -478,17 +477,14 @@ void set_world_resolver(WorldResolver resolver) noexcept { g_world_resolver.stor
 
 void retire(WorldObject* object) noexcept {
   if (!object) return;
-  {
-    Exclusive lock;
-    g_published_objects.erase(object);
-  }
+  Exclusive lock;
+  g_published_objects.erase(object);
   // The object stays readable, but inert: a stale `reserved_long4` a plug-in
   // kept now leads to a null vtable slot (a contained fault at a known place)
   // rather than to freed memory that later holds something callable.
   object->vtable = nullptr;
   object->attached_world = nullptr;
   std::memset(object->layer_def, 0, sizeof(object->layer_def));
-  Exclusive lock;
   try {
     g_retired.push_back(std::unique_ptr<WorldObject>(object));
   } catch (...) {
