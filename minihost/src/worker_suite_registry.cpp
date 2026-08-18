@@ -141,6 +141,10 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::pf_batch_sampling_1:
       return {"PF Batch Sampling Suite", 1};
     case UnsupportedSuiteId::aefx_ace_1: return {"AEFX ACE Suite", 1};
+    // Versions 3, 5 and 6 share one table, so this names the lowest rather
+    // than the version the caller asked for (issue #1283).
+    case UnsupportedSuiteId::pf_ae_private_effect:
+      return {"PF AE Private Effect Suite", 3};
     case UnsupportedSuiteId::ae_timecode_helper_1:
       return {"AE Timecode Helper Suite", 1};
     case UnsupportedSuiteId::bee_av_layer_vtable:

@@ -4,6 +4,7 @@
 #include "worker_extended_diag.hpp"
 #include "worker_dynamic_suite_registry.hpp"
 #include "worker_aefx_ace_suite.hpp"
+#include "worker_pf_private_effect_suite.hpp"
 #include "worker_aegp_persistent_data_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
 #include "worker_suite_call_slot_probe.hpp"
@@ -845,6 +846,27 @@ const void* provide_aefx_ace1(void*) {
     return probe;
   return aexcompat::aefx_ace::suite1();
 }
+// Same shape for AE's `PF AE Private Effect Suite` (issue #1283). One table
+// answers versions 3, 5 and 6 because `VideoFilterHost.dll`'s
+// `RegisterPrivateEffectSuite` (0x1800443d0) registers one table pointer
+// under all three, and the slot probe still takes precedence when armed.
+const void* provide_private_effect3(void*) {
+  if (const void* probe = aexcompat::worker_runtime::suite_call_slot_probe::
+          provide_private_effect_probe3(nullptr))
+    return probe;
+  return aexcompat::pf_private_effect::suite();
+}
+const void* provide_private_effect5(void*) {
+  if (const void* probe = aexcompat::worker_runtime::suite_call_slot_probe::
+          provide_private_effect_probe5(nullptr))
+    return probe;
+  return aexcompat::pf_private_effect::suite();
+}
+// No probe target exists for version 6: the environment variable names
+// only @3 and @5, so this version always answers with the implementation.
+const void* provide_private_effect6(void*) {
+  return aexcompat::pf_private_effect::suite();
+}
 // Versions 3, 4 and 6 of "PF Color Settings Suite" are frozen prefixes of the
 // v7 table, so all four are served from it (issue #362: the OCIO family acquires
 // exactly v6; issue #716: `Unmult.aex` acquires v4; issue #891: DeepGlow2
@@ -1043,26 +1065,15 @@ bool configure_component_suite_catalog() {
       {"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1},
       {"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2},
       {"AE Timecode Helper Suite", 1, nullptr, &provide_ae_timecode_helper1},
-      {aexcompat::worker_runtime::suite_call_slot_probe::
-           kPrivateEffectSuiteName,
-       aexcompat::worker_runtime::suite_call_slot_probe::
-           kPrivateEffectSuiteVersion3,
-       nullptr,
-       &aexcompat::worker_runtime::suite_call_slot_probe::
-           provide_private_effect_probe3,
-       nullptr,
-       &aexcompat::worker_runtime::suite_call_slot_probe::
-           private_effect_probe3_available},
-      {aexcompat::worker_runtime::suite_call_slot_probe::
-           kPrivateEffectSuiteName,
-       aexcompat::worker_runtime::suite_call_slot_probe::
-           kPrivateEffectSuiteVersion5,
-       nullptr,
-       &aexcompat::worker_runtime::suite_call_slot_probe::
-           provide_private_effect_probe5,
-       nullptr,
-       &aexcompat::worker_runtime::suite_call_slot_probe::
-           private_effect_probe5_available},
+      {aexcompat::pf_private_effect::kSuiteName,
+       aexcompat::pf_private_effect::kSuiteVersion3, nullptr,
+       &provide_private_effect3},
+      {aexcompat::pf_private_effect::kSuiteName,
+       aexcompat::pf_private_effect::kSuiteVersion5, nullptr,
+       &provide_private_effect5},
+      {aexcompat::pf_private_effect::kSuiteName,
+       aexcompat::pf_private_effect::kSuiteVersion6, nullptr,
+       &provide_private_effect6},
       {aexcompat::worker_runtime::compute_cache::kSuiteName,
        aexcompat::worker_runtime::compute_cache::kSuiteVersion1,
        nullptr,

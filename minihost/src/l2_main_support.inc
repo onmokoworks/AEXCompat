@@ -1654,7 +1654,115 @@ void initialize_pf_dll_host_layer() {
             << (faulted ? " faulted=1" : "") << "\n" << std::flush;
 }
 
+// dvacore's localization singleton (issue #1283). AE installs one at process
+// start as part of its dvacore configuration; nothing in a plug-in closure
+// does. Without it `dvacore.dll!?Get@Localizer@config@dvacore@@SAPEAV123@XZ`
+// (dvacore+0x105640) throws
+// "dvacore::config::Localizer not initialized. Check dvacore/config" the
+// moment a plug-in asks for a localized string, which is what stopped
+// `3D Camera Tracker.aex` and `Stabilizer.aex`: both build every parameter
+// name from a `$$$/apd/analysis/parameter/name/...` ZString, so PARAMS_SETUP
+// throws on the first one and comes back as 13 (observed under cdb: the throw
+// stack is `dvacore!Localizer::Get+0x61` under the plug-in's own selector
+// dispatcher).
+//
+// `Get` tests one global, `Localizer::S_localizerP`, and `Initialized()`
+// exports the same test. The installed object is dvacore's own
+// `DummyLocalizerImpl`, whose `GetLocalizedString` returns the default text
+// embedded in the ZString key ("$$$/path=Default" -> "Default"), i.e. what an
+// English AE shows. Loading real `.dat` dictionaries is a separate, larger
+// step and is not needed for discovery.
+//
+// The object is a single vtable pointer (its constructor, dvacore+0xd8bb0,
+// runs the base constructor and stores the vptr and nothing else), so a
+// static, suitably aligned buffer holds it. It is never destroyed: this host
+// does not tear the localizer down, exactly as it does not run any of the
+// other libraries' `*_Death` entries, and nothing in dvacore deletes what
+// `Set` was given - `Set` is the only writer of `Localizer::S_localizerP` and
+// it stores unconditionally without releasing the previous value.
+//
+// This is also what Adobe's own non-UI hosts do: `AfterFXLib.dll` constructs
+// a `DummyLocalizerImpl` on a static (0x1823c63e8, under a magic-static
+// guard) and calls `Set(thatStatic, nullptr)` at +0x9e9ff4 with `xor edx,edx`.
+//
+// The latch keys on the dvacore.dll mapping, which carries the assumption
+// worker_legacy_support_init.hpp states for U.dll: the worker retires plug-in
+// images rather than freeing them (#474), so a mapping does not come back at
+// the same base with its statics re-zeroed. If that ever stopped holding for
+// dvacore, `S_localizerP` would be zero again while the latch still said
+// AlreadyInitialized, and 13 would come back silently. `Initialized()` is
+// re-checked inside the call for the same reason.
+void initialize_dvacore_localizer() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  static bool no_export_logged = false;
+  static bool absent_logged = false;
+  const HMODULE dvacore = GetModuleHandleW(L"dvacore.dll");
+  using ConstructDummy = void*(__cdecl*)(void*);
+  using SetLocalizer = void(__cdecl*)(void*, const void*);
+  using LocalizerInitialized = bool(__cdecl*)();
+  const auto construct = dvacore
+      ? reinterpret_cast<ConstructDummy>(GetProcAddress(
+            dvacore, "??0DummyLocalizerImpl@config@dvacore@@QEAA@XZ"))
+      : nullptr;
+  const auto set = dvacore
+      ? reinterpret_cast<SetLocalizer>(GetProcAddress(
+            dvacore,
+            "?Set@Localizer@config@dvacore@@SAXPEAV123@PEBVDir@filesupport@3@@Z"))
+      : nullptr;
+  const auto initialized = dvacore
+      ? reinterpret_cast<LocalizerInitialized>(GetProcAddress(
+            dvacore, "?Initialized@Localizer@config@dvacore@@SA_NXZ"))
+      : nullptr;
+  switch (legacy::decide(state, dvacore,
+                         construct && set && initialized)) {
+    case legacy::Decision::Absent:
+      // Logged once per process like initialize_u_dll_allocator's, so a
+      // closure without dvacore is distinguishable from one this never ran
+      // for. The decision is still re-asked for every member.
+      if (!absent_logged) {
+        absent_logged = true;
+        std::cerr << "stage:dvacore_localizer_init status=absent\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      if (!no_export_logged) {
+        no_export_logged = true;
+        std::cerr << "stage:dvacore_localizer_init status=no_export\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::Call:
+      break;
+  }
+  legacy::note_called(state, dvacore);
+  const char* status = "called";
+  __try {
+    if (initialized()) {
+      // Something in this process already installed one - AE's own dvacore
+      // configuration, were this host ever hosted inside it. Replacing it
+      // would take a working localizer away.
+      status = "already_initialized";
+    } else {
+      // The `Dir*` is AE's dictionary directory; `Set` handles a null by
+      // constructing a default one, which is the "no dictionaries" case this
+      // host wants.
+      static alignas(std::max_align_t) std::byte storage[64]{};
+      set(construct(storage), nullptr);
+      status = initialized() ? "called" : "call_had_no_effect";
+    }
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    status = "faulted";
+  }
+  std::cerr << "stage:dvacore_localizer_init status=" << status << "\n"
+            << std::flush;
+}
+
 void initialize_legacy_support_libraries() {
+  initialize_dvacore_localizer();
   initialize_u_dll_allocator();
   initialize_process_support_libraries();
   initialize_pf_dll_host_layer();

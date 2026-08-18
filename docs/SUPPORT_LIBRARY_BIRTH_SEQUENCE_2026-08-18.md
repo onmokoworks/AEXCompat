@@ -132,6 +132,9 @@ entry point だけ) ので、呼ぶ責任はホストにある。
   (`FUN_180016140` / `FUN_180015e00`)。AE 同梱 effect が共有する
   「suite が取れなかった」コードと思われる (推論)。
 - ここは本 issue では閉じていない。
+  **訂正 (2026-08-18、§7)**: 「slot が呼ばれないまま AV になるので suite は
+  データとしても読まれている」という推論は **否定**。throw は slot 呼び出しの
+  前に `Localizer::Get()` で起きており、AV は catch handler 側の二次 fault。
 
 ## 3. ホスト側の実装 (この issue で入れたもの)
 
@@ -313,6 +316,10 @@ report JSON の SHA-256: baseline
 - Sweet Pea の teardown を安全に走らせられる場所。現状は U 経路で no-op で、
   atexit で無理に走らせると落ちる (§3 の pin 実験)。→ #1282
 - 3D Camera Tracker / Stabilizer の `PF AE Private Effect Suite` v3/v5。→ #1283
+  **訂正 (2026-08-18、§7)**: suite と Localizer の**両方**が要る。suite が
+  無いうちは acquire の失敗そのものが 13 の出所で、suite を publish して
+  初めて Localizer の throw が表に出る (その状態だと 13 は AV に変わる)。
+  「suite だけ入れれば通る」でも「Localizer だけ入れれば通る」でもない。
 
 ## 6. 追記 (2026-08-18、issue #1280 の作業)
 
@@ -481,6 +488,224 @@ stage:legacy_support_init library=PLUG.dll entry=?PLUG_Birth@@YAHAEBV?$function@
 stage:pf_host_layer_init status=called result=0
 ```
 
+## 7. 追記 (2026-08-18、issue #1283 の作業)
+
+### 訂正: `params_setup:13` は suite 単独では説明できない (Localizer と両方が要る)
+
+§2 の 4 項目め (と #1283 本文) は「`PF AE Private Effect Suite` が未実装なので
+13 になる」「32 slot の trampoline を渡すと slot が 1 つも呼ばれないまま AV に
+なるので、この suite は関数表としてだけでなくデータとしても読まれている
+可能性が高い」と書いた。前者は必要条件としては正しいが**十分条件ではなく**、
+後者は **否定**。
+
+`3D Camera Tracker.aex` / `Stabilizer.aex` は parameter 名を毎回
+
+```
+Localizer::Get()->GetLocalizedString(&wstr, "$$$/apd/analysis/parameter/name/...")
+```
+
+で作り、その UTF-16 を suite の slot 2 に渡す。**throw は slot 呼び出しの前**に
+起きる。`dvacore.dll` の
+`?Get@Localizer@config@dvacore@@SAPEAV123@XZ` (dvacore+0x105640) は
+`Localizer::S_localizerP` が 0 なら
+`"dvacore::config::Localizer not initialized. Check dvacore/config"` を throw
+する。条件はこの global 1 個だけ。
+
+観察 (cdb `sxe eh`、3D Camera Tracker):
+
+```
+KERNELBASE!RaiseException
+VCRUNTIME140!_CxxThrowException
+dvacore!dvacore::config::Localizer::Get+0x61
+3D_Camera_Tracker + 0xd10755     (call [Localizer::Get] の戻り)
+3D_Camera_Tracker + 0xc14460
+3D_Camera_Tracker + 0xd211ae
+3D_Camera_Tracker + 0xc1f118
+3D_Camera_Tracker + 0xaf0580     (selector dispatcher、try/catch を持つ)
+```
+
+`+0xc1cef8` の null read (#1283 本文の AV) は **catch handler 側の二次 fault**。
+`Tracker3dEffect` の vtable slot 0x1a0 (index 52) が
+`out_data->sequence_data`(= `[this+0x18]+0x38`) を deref しており、AV 時の実測で
+そこは 0。PARAMS_SETUP で `sequence_data` が NULL なのは AE でも正常なので、
+これは Localizer の throw が起きて初めて到達する plug-in 側の潜在バグで、
+host の契約違反ではない。throw を無くせば到達しない (実測: 到達しない)。
+
+### 観察: `PF AE Private Effect Suite` の実体
+
+register するのは `VideoFilterHost.dll` の `RegisterPrivateEffectSuite()`
+(`0x1800443d0`)。**v3 / v5 / v6 が同一の 10 entry 関数ポインタ表 `0x1801aa030` を
+共有**する (v4 は無い)。data member は無い。`AfterFXLib.dll` は consumer (v3 を
+acquire するだけ)。表の直後 `0x1801aa080` から `.rdata` の文字列プールが始まり、
+10 個の `__FUNCTION__` 文字列が順に並ぶ:
+
+| slot | offset | 名前 | impl |
+| --- | --- | --- | --- |
+| 0 | +0x00 | `RegisterForIdleEvents` | 0x180042640 (0x203 stub) |
+| 1 | +0x08 | `UnRegisterForIdleEvents` | 0x180042660 |
+| 2 | +0x10 | `HostUTF16ToMultibyteString` | 0x180042680 |
+| 3 | +0x18 | `HostZStringToUTF16String` | 0x180042860 |
+| 4 | +0x20 | `PushSingleIdleEvent` | 0x180042b40 |
+| 5 | +0x28 | `GetEffectName` | 0x180042da0 (0x203 stub) |
+| 6 | +0x30 | `PF_GetCurrentState_Async` | 0x180042a10 |
+| 7 | +0x38 | `SetSequenceDataNeedsSerialization` | 0x180042dc0 |
+| 8 | +0x40 | `GetEffectNodeID` | 0x180042e00 |
+| 9 | +0x48 | `GetEffectRef` | 0x180043200 |
+
+slot 8 / 9 は実装が自分の名前文字列を `lea` するので位置に依らず確定
+(`0x180042e39 -> 0x1801aa210`、`0x180043234 -> 0x1801aa2e0`)。slot 2 は caller 側で
+確定 (両 plug-in が `[suite+0x10]` を `(const wchar_t*, 0x100, char*)` で呼ぶ)。
+slot 5 と 6 だけは文字列順による位置決めのみで、実装アドレスが文字列順と
+単調でない唯一の組 (→ #1291)。
+
+PARAMS_SETUP 全体 (suite timeline 86 entry) で実際に呼ばれる slot は **2 だけ**
+(v3 / v5 とも)。この host の実装後も `unsupported_suite_calls` は空のまま
+(実測)。
+
+### ホスト側の実装
+
+1. `initialize_dvacore_localizer()` (`minihost/src/l2_main_support.inc`)。
+   dvacore の `DummyLocalizerImpl` を ctor
+   (`??0DummyLocalizerImpl@config@dvacore@@QEAA@XZ`) で静的バッファ上に構築し、
+   `?Set@Localizer@config@dvacore@@SAXPEAV123@PEBVDir@filesupport@3@@Z` に
+   null `Dir*` で渡す。`Initialized()` が既に true なら触らない。
+   `DummyLocalizerImpl::GetLocalizedString` は ZString key に埋め込まれた
+   default 文字列 (`"$$$/path=Default"` → `"Default"`) を返すので、英語 AE の
+   表示と一致する。実 `.dat` 辞書の読み込み (`LoadDVADictionaries`) は別。
+   AE は dvacore の設定として process 起動時に install するので、この host も
+   birth 列の先頭 (U_Birth より前) で行う。
+2. `minihost/src/worker_pf_private_effect_suite.{hpp,cpp}`: v3 / v5 / v6 に
+   同一の表を publish する。実体があるのは **slot 2 だけ**で、残りは
+   `record_unsupported_suite_call` の診断付き stub
+   (`UnsupportedSuiteId::pf_ae_private_effect`)。VideoFilterHost 自身も slot 0 と
+   5 は `0x203` を返す stub なので、「表として存在すること」が要件。
+   publish する slot 数は AE の 10 ではなく 32 (slot probe と同数) で、10 を
+   越えて読んだ caller が `.rdata` の続きではなく診断付き stub に当たるように
+   してある。
+   AE の slot 2 (`VideoFilterHost.dll+0x42680`) は `wcslen` で長さを取り、
+   `MediaFoundation.dll!MF::UTF16ToCodePageMultiByte` (= platform の code page)
+   で変換し、`destination_bytes - 1` に**切り詰めて**コピーし、終端して 0 を
+   返す。この host の意図的な相違は 2 点で、どちらも AE oracle 作業から見える
+   ように記録する:
+   - 変換先が **UTF-8**。どちらの encoding も worker の JSON report には届かない
+     (`worker_report.cpp` の `bounded_diagnostic_text` が 0x20..0x7e 以外の
+     byte を落とす) ので report 上は観測できない。効くのは plug-in が
+     その後使う buffer で、UTF-8 はどの名前も無損失に表せるのに対し code page は
+     持たない文字を置換する。観測した caller は ASCII しか渡さない。
+   - `destination_bytes` の上限 (`kMaxDestinationBytes`) を設けている。AE は
+     どんな値でも受ける。caller の自己申告以外に手掛かりが無いので、これは
+     「申告が出鱈目なときの 1 回の書き込み量を縛る」だけで、嘘をつく caller を
+     安全にはしない。
+   切り詰めについては AE に合わせた: 拒否しても安全にはならず (どちらも
+   caller の申告範囲内にしか書かない)、AE なら短く表示されるだけの名前を
+   PARAMS_SETUP の失敗に変えるだけだった。
+   なお AE の表は 0 / `0x203` (未実装。slot 0 と 5 がこれ) / `0x200` (失敗) を
+   返す。この host の診断付き stub は house convention の 4 を返すので、
+   #1295 の境界が `frame_error:4` として出る。
+3. `worker_render_session.cpp` の Premiere GPU-filter fallback (#1271) の判定を
+   512 だけから **512 と 516** に広げた。理由は下記。併せて、fallback で
+   route に入ったときは `stage:pr_gpu_route_begin` に
+   `reason=cpu_internal_struct_damaged` / `reason=cpu_bad_callback_param` を
+   載せるようにした。これが無いと `rendered` になった record から
+   「CPU path が host に断られたのを GPU route が肩代わりした」ことが読めず、
+   host の拒否を隠す方向の変更になる。broker 既存の parser がそのまま
+   拾うので Rust 側の変更は無い (実測: `pr_gpu_route` の `begin` event に
+   `reason: cpu_bad_callback_param` が入る)。
+   なお `render_sweep` が record の `worker.pr_gpu_route` に持ち上げるのは
+   `_end` の reason だけなので、`begin` の reason は stage event
+   (`--close-report`) にはあるが top-level には出ない。
+
+### 副作用: VR family の CPU path が一歩進む
+
+Localizer を入れると、`xGPUFilterEntry` を export する VR 12 本の
+**PF CPU path の戻り値が 512 から 516 に変わる** (実測)。#1271 の fallback は
+「selector 自身の 512」だけを合図にしていたので、この 11 本が
+`rendered` → `frame_error:516` に落ちた (localizer だけを外した A/B で確認)。
+
+trace の差分 (VRSharpen、`AEXCOMPAT_EXTENDED_DIAG=1`):
+
+```
+-stage:smart_render_cpu_end error=512        ← localizer 無し。ここで pr-gpu retry に入る
+-stage:pr_gpu_route_begin … stage:pr_gpu_route_end reason=committed
++extended_diag:new_world -> 0
++extended_diag:fill -> 0
++stage:callback_denied callback=transform_world reason=matrix_not_finite
++extended_diag:transform_world -> 516 (callback_error)
++stage:smart_render_cpu_end error=516
+```
+
+つまり **VR family はもともと PF CPU path では render できておらず**、512 を
+合図に pr-gpu 経路へ落ちて `rendered` になっていた。Localizer が入ると CPU path が
+一歩進んで、`AE VR Effects Video Attributes Suite` (未実装) から取れなかった
+field of view で行列を組み、非有限の行列を host に渡して 516 を受け取り、それを
+自分の戻り値として返す。どちらの code で諦めるかは付随的で、fallback が見たい
+性質は「CPU path がこのフレームを出せなかった」こと。判定を 512/516 に広げると
+11 本は `rendered` に戻り、`pr_gpu_route` は `committed` のまま、
+`detail.pixel_sha256` も一致する (実測)。
+
+`VRSphereToPlane.aex` だけは元から失敗しており (`pr_gpu_route=render_fault`)、
+報告される code が 512 → 516 に変わる。GPU 経路の fault は変わっていない。
+
+### 計測 (full corpus、#1283 の変更)
+
+母集団: AE 2026 `Support Files\Plug-ins\Effects` を `render_sweep` の引数に
+渡した 304 AEX、`--depth` 既定 (8)、size/time/frames も既定。baseline は
+main `6ad36c04` (= #1280 マージ後) を別 worktree で同じ手順で build し、
+**同一の sweep CLI バイナリ**で測ったもの (worker 3 exe だけが違う)。
+
+| bucket | baseline (6ad36c04) | 変更後 |
+| --- | --- | --- |
+| rendered | 289 | 291 |
+| frame_error:512 | 5 | 2 |
+| frame_error:4 | 1 | 3 |
+| frame_error:516 | 1 | 2 |
+| not_discovered:exit_20_params_setup:13 | 2 | 0 |
+| not_discovered:exit_12 | 1 | 1 |
+| not_discovered:cluster_session_invalidated | 1 | 1 |
+| render_frame_failed:worker_invariant_failure | 2 | 2 |
+| rendered_empty | 2 | 2 |
+
+bucket が動いたのは 5 本だけで、他の 299 本は baseline と同じ bucket
+(突き合わせの key は `plugin_relative_path`):
+
+- `3D Camera Tracker.aex`: `not_discovered:exit_20_params_setup:13` → `frame_error:4`
+- `Stabilizer.aex`: `not_discovered:exit_20_params_setup:13` → `frame_error:4`
+- `ColorAndContrast.aex`: `frame_error:512` → **`rendered`**
+- `Curl_Noise.aex`: `frame_error:512` → **`rendered`**
+  (この 2 本が動いたのは **Localizer** の効果。この commit の変更は 3 つ
+  独立にあるので 3 つとも潰した: fallback 判定の変更は `xGPUFilterEntry` を
+  export しない 2 本には届かず (`worker.pr_gpu_route` も記録されていない)、
+  `PF AE Private Effect Suite` は `AEXCOMPAT_EXTENDED_DIAG=1` の trace で
+  どちらも 1 度も acquire していない (`"PF AE Private Effect Suite"` の出現
+  0 件)。残るのは Localizer だけ — いずれも観察)
+- `VRSphereToPlane.aex`: `frame_error:512` → `frame_error:516` (元から失敗、上記参照)
+
+silent-wrong の確認として、baseline で `detail.pixel_sha256` を持つ 291 record
+すべてについて変更後の hash と突き合わせ、差分ゼロ・欠落ゼロを確認した
+(変更後は新たに render できた 2 本が増えて 293 record)。`rendered` に留まった
+VR 11 本は `worker.pr_gpu_route` が `committed` のままで、pixel hash も一致。
+
+計測に使った build fingerprint (report JSON の `build`) と report の SHA-256:
+
+| | baseline (6ad36c04) | 変更後 |
+| --- | --- | --- |
+| l2_worker | `495a0c77…` | `011d8923…` |
+| classic_worker | `f8b36313…` | `05c910a4…` |
+| smart_worker | `687bf5c2…` | `ad340e97…` |
+| cli | `77b55673…` | `77b55673…` (同一) |
+
+report JSON の SHA-256: baseline `8DEE7AECC7EA8D6C04A72F13B9425305253CEC375DEE023D72FE05551CF355C9`、変更後 `EF29AB31F1A8FD757A2BCBF0D18164EBAC0C5DACD9BA70E710B53E7B2946F3C9`。
+
+### 残件
+
+- 3D Camera Tracker / Stabilizer の render 段 (`frame_error:4`)。
+  `PF AE Private Effect Suite` slot 3 (`HostZStringToUTF16String`) の診断付き
+  stub と、未実装の `Analysis Host Suite` v2。→ #1295
+- suite の残り slot (0/1/3/4/5/6/7) の prototype、slot 5/6 の曖昧性、
+  非英語 parity のための `LoadDVADictionaries`。→ #1291
+- VR family の CPU path が非有限行列を作る件そのもの
+  (`AE VR Effects Video Attributes Suite` 未実装)。fallback で `rendered` には
+  なるが、CPU path は依然 render できていない。→ #1271
 ---
 
 方針の正本は `CLAUDE.md`。計測手順は

@@ -1183,6 +1183,29 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
     {
         worker.insert("pr_gpu_route".to_owned(), reason.clone());
     }
+    // How the route was entered, when it was the PF CPU path's own refusal that
+    // sent the frame there (issue #1283). Without this a `rendered` record
+    // whose route committed cannot be told from one whose CPU path worked, so a
+    // host callback refusal the GPU route then stood in for would be invisible
+    // in the default record - and the default record is what a corpus
+    // comparison reads. The worker only puts a reason on the `begin` line when
+    // the retry is what entered the route, so its absence is the ordinary case.
+    if let Some(reason) = diagnostics
+        .and_then(|value| value.get("stage_events"))
+        .and_then(|events| events.as_array())
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.get("stage").and_then(Value::as_str) == Some("pr_gpu_route")
+                        && event.get("state").and_then(Value::as_str) == Some("begin")
+                })
+                .and_then(|event| event.pointer("/errors/reason"))
+        })
+    {
+        worker.insert("pr_gpu_route_entered_from".to_owned(), reason.clone());
+    }
     outcome.detail.insert("worker".to_owned(), worker.into());
     outcome
         .detail
