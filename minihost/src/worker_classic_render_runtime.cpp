@@ -712,7 +712,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         !dispatch_worlds.register_world(map_world.world.data(), kPixelFormatArgb32)) return -3;
     aexcompat::worker_runtime::classic::ParameterDefinition checkout_definition{};
     write<int32_t>(checkout_definition, 12, 0);
-    std::memcpy(checkout_definition.data() + 56, map_world.world.data(), map_world.world.size());
+    copy_world_into_param_def(checkout_definition, map_world.world);
     classic_context->set_fallback_definition(g_secondary_layer_slot,
                                              checkout_definition);
   }
@@ -765,10 +765,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         !dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return -3;
     if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
             external_current_time, external_time_scale))
-      std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
+      copy_world_into_param_def(definitions[layer.slot], world);
     std::array<std::byte, kParamSize> checkout{};
     write<int32_t>(checkout, 12, 0);
-    std::memcpy(checkout.data() + 56, world.data(), world.size());
+    copy_world_into_param_def(checkout, world);
     if (layer.timed) {
       if (!classic_context->add_timed_layer(
               {layer.slot, layer.time, layer.time_scale, checkout})) return -3;

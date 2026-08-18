@@ -278,7 +278,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       const bool same_time = static_cast<int64_t>(layer.time) * requested_scale ==
           static_cast<int64_t>(requested_time) * layer.time_scale;
       if (!layer.timed || same_time)
-        std::memcpy(definitions[layer.slot].data() + 56, world.data(), world.size());
+        copy_world_into_param_def(definitions[layer.slot], world);
       smart_state.hosted_layers.push_back({layer.slot, layer.time, layer.time_scale,
           layer.timed, layer.width, layer.height, -1, world.data(),
           view_world.data(), {-1, -1, -1, -1}});
@@ -382,8 +382,7 @@ bool verify_animation_extent_wiring_for_test() {
                               world_registry::kPixelFormatArgb32))
     return false;
   ParameterState prepared(runtime.records.size() + 1, 0);
-  std::memcpy(prepared.definitions[0].data() + 56, input_world.data(),
-              input_world.size());
+  copy_world_into_param_def(prepared.definitions[0], input_world);
   parameter_execution::initialize_parameter_definitions(
       prepared.definitions, plan.width, plan.height);
   const std::string case_id = "request";

@@ -85,8 +85,23 @@ DispatchWorldFormatScope::~DispatchWorldFormatScope() {
   // registration: past the scope the world's pixels may be gone, and a mirror
   // that outlived them would still name them. Embedded worlds are not in this
   // list (nothing was attached for them).
+  //
+  // A world an *enclosing* scope also registered keeps its facade: scopes
+  // nest (a callback's scope inside a dispatch's), and taking the facade away
+  // while the outer registration is still live would leave that registration
+  // handing the plug-in a world whose reserved_long4 the host just cleared.
+  const auto registered_by_an_outer_scope = [](const void* world) {
+    for (std::size_t depth = 0; depth + 1 < g_dispatch_world_formats.size(); ++depth) {
+      const auto& entries = g_dispatch_world_formats[depth];
+      if (std::any_of(entries.begin(), entries.end(),
+                      [&](const DispatchWorldFormat& entry) { return entry.world == world; }))
+        return true;
+    }
+    return false;
+  };
   for (void* world : g_attached_facades.back())
-    aexcompat::worker_runtime::pf_world_facade::detach(world);
+    if (!registered_by_an_outer_scope(world))
+      aexcompat::worker_runtime::pf_world_facade::detach(world);
   g_attached_facades.pop_back();
   g_dispatch_world_formats.pop_back();
 }
