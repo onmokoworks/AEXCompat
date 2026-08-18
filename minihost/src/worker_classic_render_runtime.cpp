@@ -176,13 +176,17 @@ template <typename T, std::size_t N>
 void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
-// A world handed to a plug-in inside a PF_ParamDef: the LayerDef bytes with a
-// cleared reserved_long4 (see the call sites).
+// A world handed to a plug-in inside a PF_ParamDef. The copy keeps the
+// `reserved_long4` it inherits, which points at the *live* world's PF_World
+// object (the storage prefix): that is AE's own shape - a ParamDef's world
+// names AE's PF_World for that layer - and it is the only facade such a world
+// can have, because `world - 8` inside a ParamDef is the ParamDef's own bytes.
+// A plug-in that writes through it (the issue #1090 origin shape) therefore
+// writes the live world's fields, exactly as it would in AE; the host reads its
+// own geometry from the render plan, not from those fields.
 template <typename ParamDef, typename World>
 void copy_world_into_param_def(ParamDef& definition, const World& world) {
   std::memcpy(definition.data() + 56, world.data(), world.size());
-  void* inert = nullptr;
-  std::memcpy(definition.data() + 56 + 0x50, &inert, sizeof(inert));
 }
 
 // The same accessors on a world storage (the LayerDef part).
@@ -724,13 +728,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     hosted_pixels.resize(external_layers->size());
     hosted_worlds.resize(external_layers->size());
   }
-// The world a PF_ParamDef carries is a plain 120-byte copy, so it is not the
-// PF_World shape (`world - 8` inside a ParamDef is the ParamDef's own bytes)
-// and its copied reserved_long4 would alias the *live* world's object - a
-// plug-in writing an origin through the copy (the issue #1090 shape) would
-// then move the host's own world. Clearing it in the copy keeps that write
-// inert, and a plug-in reading depth from the copy falls back to world_flags,
-// which is what it got before the facade existed.
   copy_world_into_param_def(definitions[0], input_world);
   // POINT/POINT_3D defaults are percentages of the layer size (SDK
   // PF_PointDef); the input world's extent is what turns them into pixels.
@@ -1162,13 +1159,6 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   aexcompat::worker_runtime::smart_setup::ParameterState parameter_state(
       g_params.size() + 1, external_layers ? external_layers->size() : 0);
   auto& definitions = parameter_state.definitions;
-// The world a PF_ParamDef carries is a plain 120-byte copy, so it is not the
-// PF_World shape (`world - 8` inside a ParamDef is the ParamDef's own bytes)
-// and its copied reserved_long4 would alias the *live* world's object - a
-// plug-in writing an origin through the copy (the issue #1090 shape) would
-// then move the host's own world. Clearing it in the copy keeps that write
-// inert, and a plug-in reading depth from the copy falls back to world_flags,
-// which is what it got before the facade existed.
   copy_world_into_param_def(definitions[0], input_world);
   initialize_parameter_definitions(
       definitions,

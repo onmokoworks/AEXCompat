@@ -148,14 +148,7 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
   write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
   write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
   write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
-  // The ParamDef's copy carries no PF_World identity (see the runtimes'
-  // copy_world_into_param_def): clear the inherited reserved_long4 so it cannot
-  // alias the live world's object.
   std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
-  {
-    void* inert = nullptr;
-    std::memcpy(lifecycle_definitions[0].data() + 56 + 0x50, &inert, sizeof(inert));
-  }
   for (std::size_t i = 0; i < g_params.size(); ++i) {
     lifecycle_definitions[i + 1] = g_params[i].raw;
     if (g_params[i].type == 1 || g_params[i].type == 7)

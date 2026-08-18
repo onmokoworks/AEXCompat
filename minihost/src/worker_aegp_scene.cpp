@@ -397,7 +397,11 @@ bool resolve_scene_item(void* handle, ObjectSnapshot& output,
 // the facade's layer object: both name this worker's composition / effect
 // layer, so they resolve as the legacy handles they stand for.
 void* canonical_comp_handle(void* handle) noexcept {
-  return handle == aexcompat::worker_runtime::bee_facade::comp_item_handle()
+  // `comp_item_handle()` answers null before the facade is published, and a
+  // null handle must stay null here: mapping it to the composition would let a
+  // plug-in pass NULL as an AEGP_CompH and have every comp accessor accept it.
+  void* const facade_comp = aexcompat::worker_runtime::bee_facade::comp_item_handle();
+  return facade_comp && handle == facade_comp
       ? aexcompat::scene_runtime::composition_handle() : handle;
 }
 

@@ -17,6 +17,7 @@
 #include <sstream>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace aexcompat::worker_runtime::pf_world_facade {
@@ -60,6 +61,11 @@ struct Shared {
   Shared& operator=(const Shared&) = delete;
 };
 std::unordered_map<const void*, std::unique_ptr<WorldObject>> g_objects;
+// Every object this module has published, by address. `attach` consults this
+// by pointer comparison only: `reserved_long4` is plug-in-writable, so reading
+// through it to ask "is this one of ours" would let a forged value fault the
+// host (outside the plug-in's SEH) or read past a neighbouring object.
+std::unordered_set<const void*> g_published_objects;
 // Disposed world-registry objects, kept inert (see `retire`). Bounded, because
 // a session disposes scratch worlds per frame and the quarantine must not grow
 // without limit; past the bound the oldest is released, which is the point
@@ -298,6 +304,20 @@ void* prefix_of(void* world) noexcept {
   return static_cast<std::byte*>(world) - kObjectLayerDef;
 }
 
+// Reads the first word of a candidate PF_World prefix and says whether it is
+// one of this module's vtables. Guarded: the only caller reaches here with
+// `world - 8`, and a plug-in may point a world at an address whose preceding
+// page is not mapped.
+bool prefix_carries_facade_vtable(const void* prefix) noexcept {
+  const void* vtable = nullptr;
+  __try {
+    std::memcpy(&vtable, prefix, sizeof(vtable));
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+  return is_facade_vtable(vtable);
+}
+
 }  // namespace
 
 const void* const* vtable_for(int32_t pixel_bytes) noexcept {
@@ -327,33 +347,45 @@ bool embed(void* world, int32_t pixel_bytes) noexcept {
   const void* const* vtable = vtable_for(pixel_bytes);
   if (!world || !vtable) return false;
   void* prefix = prefix_of(world);
+  {
+    // Recorded so `embedded` can recognise this prefix later without reading
+    // through a pointer the plug-in can overwrite. The set holds one entry per
+    // distinct world storage, and the host's storages recur frame after frame.
+    Exclusive lock;
+    try {
+      g_published_objects.insert(prefix);
+    } catch (...) {
+      return false;
+    }
+  }
   std::memcpy(prefix, &vtable, sizeof(vtable));
   std::memcpy(static_cast<std::byte*>(world) + kReservedLong4Offset, &prefix, sizeof(prefix));
   return true;
 }
 
-// True when `world`'s reserved_long4 already names a facade object that says
-// it mirrors this exact world - what the world registry publishes for a
-// PF_NewWorld allocation it owns (the pool's own objects are found by the map
-// lookup instead, so this answers "someone else owns this one").
-bool registry_published(const void* world) noexcept {
-  const auto* object = read_at<const WorldObject*>(world, kReservedLong4Offset);
-  if (!object) return false;
-  // Read only through the object's own declared layout, and only accept it
-  // when it is one of ours: a facade vtable plus a back-reference to this
-  // exact world.
-  const auto* vtable = read_at<const void* const*>(object, 0);
-  return is_facade_vtable(vtable) && object->attached_world == world;
-}
-
 bool embedded(const void* world) noexcept {
   if (!world) return false;
+  // The pointer this reads through is never the plug-in's own value: it is
+  // accepted only when it equals `world - 8`, so the read is at most the 8
+  // bytes in front of a buffer the host handed out. A storage the host
+  // embedded is recognised by membership without any read at all; a *copy* of
+  // such a storage (the checkout views the host makes) carries the vtable in
+  // its own prefix but was never embedded, so it is recognised by the vtable
+  // itself, under a fault guard in case a plug-in forged `world - 8` on a
+  // struct whose preceding bytes are not mapped.
   const void* reserved_long4 = read_at<const void*>(world, kReservedLong4Offset);
   if (reserved_long4 != static_cast<const std::byte*>(world) - kObjectLayerDef) return false;
-  return is_facade_vtable(read_at<const void*>(reserved_long4, 0));
+  {
+    Shared lock;
+    if (g_published_objects.count(reserved_long4) != 0) return true;
+  }
+  return prefix_carries_facade_vtable(reserved_long4);
 }
 
-bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept {
+// The publication itself. The caller owns the lock (SRW locks do not recurse,
+// and `attach` publishes while holding it) and owns recording the object in
+// `g_published_objects`.
+bool publish_locked(WorldObject& object, void* world, int32_t pixel_bytes) noexcept {
   const void* const* vtable = vtable_for(pixel_bytes);
   if (!world || !vtable) return false;
   object.vtable = vtable;
@@ -365,6 +397,17 @@ bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept {
   std::memcpy(static_cast<std::byte*>(world) + kReservedLong4Offset, &self, sizeof(self));
   mirror(object, world);
   return true;
+}
+
+bool publish(WorldObject& object, void* world, int32_t pixel_bytes) noexcept {
+  if (!world || !vtable_for(pixel_bytes)) return false;
+  Exclusive lock;
+  try {
+    g_published_objects.insert(&object);
+  } catch (...) {
+    return false;
+  }
+  return publish_locked(object, world, pixel_bytes);
 }
 
 bool attach(void* world, int32_t pixel_bytes) noexcept {
@@ -379,12 +422,15 @@ bool attach(void* world, int32_t pixel_bytes) noexcept {
     // Our own mirror: refresh it, so a re-registration after the host changed
     // the world (a new depth, a moved buffer, an origin written after the
     // first registration) is what the plug-in sees.
-    return publish(*found->second, world, pixel_bytes);
+    return publish_locked(*found->second, world, pixel_bytes);
   }
-  // An object the world registry published for this world (PF_NewWorld) is the
-  // registry's to keep current for the allocation's lifetime; taking a second,
-  // pooled object would orphan it and leave dispose freeing the wrong one.
-  if (registry_published(world)) return true;
+  // An object this module already published (the world registry's, for a
+  // PF_NewWorld allocation it owns) stays that object's owner's business;
+  // taking a second, pooled object would orphan it and leave dispose freeing
+  // the wrong one. Pointer comparison only - nothing is read through
+  // `reserved_long4`, which the plug-in can overwrite with anything.
+  if (g_published_objects.count(read_at<const void*>(world, kReservedLong4Offset)) != 0)
+    return true;
   if (g_objects.size() >= kMaxObjects) return false;
   WorldObject* object = nullptr;
   try {
@@ -394,7 +440,13 @@ bool attach(void* world, int32_t pixel_bytes) noexcept {
   } catch (...) {
     return false;
   }
-  return publish(*object, world, pixel_bytes);
+  try {
+    g_published_objects.insert(object);
+  } catch (...) {
+    g_objects.erase(world);
+    return false;
+  }
+  return publish_locked(*object, world, pixel_bytes);
 }
 
 void detach(void* world) noexcept {
@@ -410,6 +462,7 @@ void detach(void* world) noexcept {
     std::memcpy(static_cast<std::byte*>(world) + kReservedLong4Offset, &null,
                 sizeof(null));
   }
+  g_published_objects.erase(found->second.get());
   g_objects.erase(found);
 }
 
@@ -425,6 +478,10 @@ void set_world_resolver(WorldResolver resolver) noexcept { g_world_resolver.stor
 
 void retire(WorldObject* object) noexcept {
   if (!object) return;
+  {
+    Exclusive lock;
+    g_published_objects.erase(object);
+  }
   // The object stays readable, but inert: a stale `reserved_long4` a plug-in
   // kept now leads to a null vtable slot (a contained fault at a known place)
   // rather than to freed memory that later holds something callable.
