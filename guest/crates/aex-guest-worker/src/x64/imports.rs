@@ -97,6 +97,10 @@ enum LegacyWin64Import {
     InitializeSListHead,
     DisableThreadLibraryCalls,
     ProcessPrng,
+    GetProcessHeap,
+    HeapAlloc,
+    HeapFree,
+    HeapReAlloc,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -296,6 +300,13 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("bcryptprimitives.dll", "ProcessPrng") => LegacyWin64Import::ProcessPrng,
         (_, "ProcessPrng") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetProcessHeap") => LegacyWin64Import::GetProcessHeap,
+        ("kernel32.dll", "HeapAlloc") => LegacyWin64Import::HeapAlloc,
+        ("kernel32.dll", "HeapFree") => LegacyWin64Import::HeapFree,
+        ("kernel32.dll", "HeapReAlloc") => LegacyWin64Import::HeapReAlloc,
+        (_, "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("kernel32.dll", "InitializeCriticalSection") => {
             LegacyWin64Import::InitializeCriticalSection
         }
@@ -1175,6 +1186,23 @@ fn install_win64_import(
                     "install ProcessPrng import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_process_prng(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetProcessHeap => {
+                uc(
+                    "install deterministic GetProcessHeap import",
+                    unicorn.mem_write(stub, &deterministic_u64_stub(PROCESS_HEAP_HANDLE)),
+                )?;
+            }
+            LegacyWin64Import::HeapAlloc
+            | LegacyWin64Import::HeapFree
+            | LegacyWin64Import::HeapReAlloc => {
+                uc("write process heap return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install process heap import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_process_heap(unicorn, implementation);
                     }),
                 )?;
             }
@@ -2168,6 +2196,279 @@ fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         }
     }
+}
+
+fn fail_process_heap(unicorn: &mut Unicorn<'_, GuestState>, error: String) {
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    let _ = unicorn.emu_stop();
+}
+
+fn require_process_heap_handle(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: &str,
+) -> Result<(), String> {
+    let handle = read_win64_import_argument(unicorn, 0)?;
+    if handle != PROCESS_HEAP_HANDLE {
+        return Err(format!(
+            "{operation} rejected unknown heap handle {handle:#x}"
+        ));
+    }
+    Ok(())
+}
+
+fn read_process_heap_flags(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: &str,
+    allowed: u32,
+) -> Result<u32, String> {
+    let flags = u32::try_from(read_win64_import_argument(unicorn, 1)?)
+        .map_err(|_| format!("{operation} flags exceed DWORD"))?;
+    let unsupported = flags & !allowed;
+    if unsupported != 0 {
+        let generate = flags & HEAP_GENERATE_EXCEPTIONS != 0;
+        return Err(format!(
+            "{operation} flags {flags:#x} include unsupported bits {unsupported:#x}{}",
+            if generate {
+                " (HEAP_GENERATE_EXCEPTIONS is not modeled)"
+            } else {
+                ""
+            }
+        ));
+    }
+    Ok(flags)
+}
+
+fn emulate_process_heap(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    match operation {
+        LegacyWin64Import::HeapAlloc => emulate_heap_alloc(unicorn),
+        LegacyWin64Import::HeapFree => emulate_heap_free(unicorn),
+        LegacyWin64Import::HeapReAlloc => emulate_heap_realloc(unicorn),
+        _ => fail_process_heap(unicorn, "invalid process heap operation".into()),
+    }
+}
+
+fn allocate_process_heap_region(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    size: u64,
+) -> Result<u64, CrtHeapError> {
+    let allocation = unicorn
+        .get_data()
+        .crt_heap
+        .prepare_process_heap_allocation(size)?;
+    let pointer = unicorn
+        .get_data()
+        .crt_heap
+        .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
+    unicorn
+        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
+        .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
+    if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
+        let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
+        return Err(error);
+    }
+    Ok(pointer)
+}
+
+fn free_process_heap_region(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    pointer: u64,
+) -> Result<(), String> {
+    let allocation = unicorn
+        .get_data_mut()
+        .crt_heap
+        .remove_process_heap(pointer)
+        .map_err(|error| error.to_string())?;
+    unicorn
+        .mem_unmap(pointer, allocation.backing_size)
+        .map_err(|error| format!("unmap process heap allocation {pointer:#x}: {error}"))
+}
+
+fn emulate_heap_alloc(unicorn: &mut Unicorn<'_, GuestState>) {
+    let arguments = (|| -> Result<(u32, u64), String> {
+        require_process_heap_handle(unicorn, "HeapAlloc")?;
+        let flags = read_process_heap_flags(unicorn, "HeapAlloc", HEAP_ALLOC_ALLOWED_FLAGS)?;
+        let size = read_win64_import_argument(unicorn, 2)?;
+        Ok((flags, size))
+    })();
+    let (flags, size) = match arguments {
+        Ok(arguments) => arguments,
+        Err(error) => return fail_process_heap(unicorn, error),
+    };
+
+    let pointer = match allocate_process_heap_region(unicorn, size) {
+        Ok(pointer) => pointer,
+        Err(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            return;
+        }
+    };
+    if flags & HEAP_ZERO_MEMORY != 0 {
+        let length = size.max(1) as usize;
+        if let Err(error) = unicorn.mem_write(pointer, &vec![0; length]) {
+            let _ = free_process_heap_region(unicorn, pointer);
+            return fail_process_heap(unicorn, format!("HeapAlloc zero-fill failed: {error}"));
+        }
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+}
+
+fn emulate_heap_free(unicorn: &mut Unicorn<'_, GuestState>) {
+    let pointer = match (|| -> Result<u64, String> {
+        require_process_heap_handle(unicorn, "HeapFree")?;
+        let _ = read_process_heap_flags(unicorn, "HeapFree", HEAP_NO_SERIALIZE)?;
+        read_win64_import_argument(unicorn, 2)
+    })() {
+        Ok(pointer) => pointer,
+        Err(error) => return fail_process_heap(unicorn, error),
+    };
+    if pointer == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+        return;
+    }
+    match free_process_heap_region(unicorn, pointer) {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+        }
+        Err(error) => fail_process_heap(unicorn, format!("HeapFree failed: {error}")),
+    }
+}
+
+fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
+    let arguments = (|| -> Result<(u32, u64, u64), String> {
+        require_process_heap_handle(unicorn, "HeapReAlloc")?;
+        let flags =
+            read_process_heap_flags(unicorn, "HeapReAlloc", HEAP_REALLOC_ALLOWED_FLAGS)?;
+        let pointer = read_win64_import_argument(unicorn, 2)?;
+        let size = read_win64_import_argument(unicorn, 3)?;
+        if pointer == 0 {
+            return Err("HeapReAlloc pointer is null".into());
+        }
+        Ok((flags, pointer, size))
+    })();
+    let (flags, pointer, size) = match arguments {
+        Ok(arguments) => arguments,
+        Err(error) => return fail_process_heap(unicorn, error),
+    };
+
+    let old = match unicorn.get_data().crt_heap.process_heap_allocation(pointer) {
+        Ok(allocation) => allocation,
+        Err(error) => return fail_process_heap(unicorn, format!("HeapReAlloc failed: {error}")),
+    };
+    let in_place = match unicorn
+        .get_data()
+        .crt_heap
+        .prepare_process_heap_in_place_reallocation(pointer, size)
+    {
+        Ok(replacement) => replacement,
+        Err(CrtHeapError::ForeignOrFreedPointer | CrtHeapError::AllocatorMismatch) => {
+            return fail_process_heap(unicorn, "HeapReAlloc rejected foreign allocation".into());
+        }
+        Err(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            return;
+        }
+    };
+    if let Some(replacement) = in_place {
+        if flags & HEAP_ZERO_MEMORY != 0 && replacement.requested_size > old.requested_size {
+            let extra = (replacement.requested_size - old.requested_size) as usize;
+            if let Err(error) = unicorn.mem_write(pointer + old.requested_size, &vec![0; extra]) {
+                return fail_process_heap(
+                    unicorn,
+                    format!("HeapReAlloc zero-extend failed: {error}"),
+                );
+            }
+        }
+        if let Err(error) = unicorn
+            .get_data_mut()
+            .crt_heap
+            .commit_process_heap_reallocation(pointer, pointer, replacement)
+        {
+            return fail_process_heap(unicorn, format!("HeapReAlloc commit failed: {error}"));
+        }
+        let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+        return;
+    }
+    if flags & HEAP_REALLOC_IN_PLACE_ONLY != 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+
+    let replacement = match unicorn
+        .get_data()
+        .crt_heap
+        .prepare_process_heap_reallocation(pointer, size)
+    {
+        Ok(allocation) => allocation,
+        Err(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            return;
+        }
+    };
+    let new_pointer = match unicorn.get_data().crt_heap.first_fit(
+        CRT_HEAP_BASE,
+        CRT_HEAP_END,
+        replacement,
+    ) {
+        Ok(pointer) => pointer,
+        Err(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            return;
+        }
+    };
+    if unicorn
+        .mem_map(
+            new_pointer,
+            replacement.backing_size,
+            Prot::READ | Prot::WRITE,
+        )
+        .is_err()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    let copy_length = old.requested_size.min(replacement.requested_size) as usize;
+    let move_result = (|| -> Result<(), String> {
+        if copy_length > 0 {
+            let bytes = unicorn
+                .mem_read_as_vec(pointer, copy_length)
+                .map_err(|error| format!("HeapReAlloc read old block failed: {error}"))?;
+            unicorn
+                .mem_write(new_pointer, &bytes)
+                .map_err(|error| format!("HeapReAlloc write new block failed: {error}"))?;
+        }
+        if flags & HEAP_ZERO_MEMORY != 0 && replacement.requested_size > old.requested_size {
+            let extra = (replacement.requested_size - old.requested_size) as usize;
+            unicorn
+                .mem_write(new_pointer + old.requested_size, &vec![0; extra])
+                .map_err(|error| format!("HeapReAlloc zero-extend failed: {error}"))?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = move_result {
+        let _ = unicorn.mem_unmap(new_pointer, replacement.backing_size);
+        return fail_process_heap(unicorn, error);
+    }
+    let removed = match unicorn
+        .get_data_mut()
+        .crt_heap
+        .commit_process_heap_reallocation(
+        pointer,
+        new_pointer,
+        replacement,
+    ) {
+        Ok(allocation) => allocation,
+        Err(error) => {
+            let _ = unicorn.mem_unmap(new_pointer, replacement.backing_size);
+            return fail_process_heap(unicorn, format!("HeapReAlloc commit failed: {error}"));
+        }
+    };
+    if let Err(error) = unicorn.mem_unmap(pointer, removed.backing_size) {
+        return fail_process_heap(unicorn, format!("HeapReAlloc unmap old block failed: {error}"));
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, new_pointer);
 }
 
 fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
