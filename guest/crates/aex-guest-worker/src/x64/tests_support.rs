@@ -3399,6 +3399,21 @@ fn win64_import_dispatch_is_library_aware_and_case_normalized() {
         dispatch_win64_import("kernel32.dll", "ProcessPrng"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
+    for (symbol, implementation) in [
+        ("GetProcessHeap", LegacyWin64Import::GetProcessHeap),
+        ("HeapAlloc", LegacyWin64Import::HeapAlloc),
+        ("HeapFree", LegacyWin64Import::HeapFree),
+        ("HeapReAlloc", LegacyWin64Import::HeapReAlloc),
+    ] {
+        assert_eq!(
+            dispatch_win64_import("KERNEL32.DLL", symbol),
+            Win64ImportDispatch::LegacyImplemented(implementation)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
     assert_eq!(
         canonical_import_trace_label(r"C:\Windows\System32\OPENCL.DLL", "clCreateKernel"),
         "opencl.dll!clCreateKernel"
@@ -3476,6 +3491,165 @@ fn process_prng_fills_a_reproducible_process_local_stream() {
             .as_deref()
             .is_some_and(|error| error.contains("exceeds"))
     );
+}
+
+#[test]
+fn process_heap_alloc_free_uses_an_opaque_handle_and_separate_ownership() {
+    const GET_PROCESS_HEAP: u64 = STUB_BASE + 0x600;
+    const HEAP_ALLOC: u64 = STUB_BASE + 0x610;
+    const HEAP_FREE: u64 = STUB_BASE + 0x620;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_PROCESS_HEAP,
+        "kernel32.dll",
+        "GetProcessHeap",
+    )
+    .unwrap();
+    install_win64_import(&mut engine.unicorn, HEAP_ALLOC, "kernel32.dll", "HeapAlloc").unwrap();
+    install_win64_import(&mut engine.unicorn, HEAP_FREE, "kernel32.dll", "HeapFree").unwrap();
+
+    let heap = engine.call_win64(GET_PROCESS_HEAP, [0; 6]).unwrap();
+    assert_eq!(heap, PROCESS_HEAP_HANDLE);
+    let pointer = engine
+        .call_win64(HEAP_ALLOC, [heap, u64::from(HEAP_ZERO_MEMORY), 32, 0, 0, 0])
+        .unwrap();
+    assert_ne!(pointer, 0);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(pointer, 32).unwrap(),
+        vec![0; 32]
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .process_heap_allocation(pointer)
+            .is_ok()
+    );
+    assert_eq!(
+        engine.unicorn.get_data_mut().crt_heap.remove(pointer),
+        Err(CrtHeapError::AllocatorMismatch),
+        "CRT free must not own a process-heap allocation"
+    );
+    assert_eq!(
+        engine
+            .call_win64(HEAP_FREE, [heap, 0, pointer, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.call_win64(HEAP_FREE, [heap, 0, 0, 0, 0, 0]).unwrap(),
+        1,
+        "HeapFree accepts a null pointer"
+    );
+    assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+
+    let crt_pointer = allocate_crt_region(&mut engine.unicorn, 8).unwrap();
+    let error = engine
+        .call_win64(HEAP_FREE, [heap, 0, crt_pointer, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("CRT free API does not own"));
+}
+
+#[test]
+fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() {
+    const HEAP_ALLOC: u64 = STUB_BASE + 0x630;
+    const HEAP_REALLOC: u64 = STUB_BASE + 0x640;
+    const HEAP_FREE: u64 = STUB_BASE + 0x650;
+    let mut engine = test_engine(&[0xc3]);
+    for (address, symbol) in [
+        (HEAP_ALLOC, "HeapAlloc"),
+        (HEAP_REALLOC, "HeapReAlloc"),
+        (HEAP_FREE, "HeapFree"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+
+    let first = engine
+        .call_win64(HEAP_ALLOC, [PROCESS_HEAP_HANDLE, 0, 8, 0, 0, 0])
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(first, &[1, 2, 3, 4, 5, 6, 7, 8])
+        .unwrap();
+    let in_place = engine
+        .call_win64(
+            HEAP_REALLOC,
+            [
+                PROCESS_HEAP_HANDLE,
+                u64::from(HEAP_ZERO_MEMORY),
+                first,
+                16,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+    assert_eq!(in_place, first);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(in_place, 16).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+
+    let moved = engine
+        .call_win64(HEAP_REALLOC, [PROCESS_HEAP_HANDLE, 0, in_place, 8192, 0, 0])
+        .unwrap();
+    assert_ne!(moved, 0);
+    assert_ne!(moved, in_place);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(moved, 16).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+
+    let refused = engine
+        .call_win64(
+            HEAP_REALLOC,
+            [
+                PROCESS_HEAP_HANDLE,
+                u64::from(HEAP_REALLOC_IN_PLACE_ONLY),
+                moved,
+                16_384,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+    assert_eq!(refused, 0);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .process_heap_allocation(moved)
+            .is_ok()
+    );
+
+    let oversized = engine
+        .call_win64(
+            HEAP_REALLOC,
+            [
+                PROCESS_HEAP_HANDLE,
+                0,
+                moved,
+                crate::crt_heap::MAX_CRT_ALLOCATION_BYTES + 1,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+    assert_eq!(oversized, 0);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(moved, 8).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    assert_eq!(
+        engine
+            .call_win64(HEAP_FREE, [PROCESS_HEAP_HANDLE, 0, moved, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
 }
 
 #[test]

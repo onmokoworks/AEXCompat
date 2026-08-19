@@ -375,6 +375,14 @@ fn deterministic_i32_stub(value: i32) -> [u8; 6] {
     [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
 }
 
+fn deterministic_u64_stub(value: u64) -> [u8; 11] {
+    let bytes = value.to_le_bytes();
+    [
+        0x48, 0xb8, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        0xc3,
+    ]
+}
+
 pub(super) fn msvc_udt_by_value_return_import(symbol: &str) -> bool {
     // These MSVC decorations identify a class/struct returned by value. Win64
     // passes hidden return storage for nontrivial objects, so the scalar-zero
