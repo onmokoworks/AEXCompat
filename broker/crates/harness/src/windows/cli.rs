@@ -237,16 +237,13 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
             return path;
         }
     }
-    repository_root_from_runtime_paths(
-        std::env::current_dir().ok(),
-        std::env::current_exe().ok(),
-    )
-    .unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .canonicalize()
-            .unwrap()
-    })
+    repository_root_from_runtime_paths(std::env::current_dir().ok(), std::env::current_exe().ok())
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../..")
+                .canonicalize()
+                .unwrap()
+        })
 }
 
 fn repository_root_from_runtime_paths(

@@ -20,7 +20,10 @@ mod tests {
 
         let cwd = root.join("broker/crates/harness");
         let separated_exe = fixture.join("target/debug/aexcompat-harness.exe");
-        assert_eq!(repository_root_from_runtime_paths(Some(cwd), Some(separated_exe)), Some(root));
+        assert_eq!(
+            repository_root_from_runtime_paths(Some(cwd), Some(separated_exe)),
+            Some(root)
+        );
         std::fs::remove_dir_all(fixture).unwrap();
     }
 
