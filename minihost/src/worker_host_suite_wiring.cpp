@@ -7,6 +7,7 @@
 #include "worker_pf_private_effect_suite.hpp"
 #include "worker_aegp_persistent_data_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
+#include "worker_pica_component_lock.hpp"
 #include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
 #include "worker_sweetpea_bootstrap.hpp"
@@ -556,9 +557,10 @@ void start_sweetpea_directly(HMODULE module) {
 // here, so each attempt is recorded before it is made: the re-entrant
 // decision then answers "nothing to do" instead of starting a second
 // bootstrap. `pica_component_mutex()` is held by
-// `ensure_pica_components_initialized` across this call; this function
-// assumes it is held.
-void ensure_sweetpea_started() {
+// `ensure_pica_components_initialized` across the state transitions and
+// startup calls. The ae_sweetpea LoadLibraryEx itself temporarily releases it.
+void ensure_sweetpea_started(
+    std::unique_lock<std::recursive_mutex>& component_lock) {
   sweetpea::State& state = sweetpea_state();
   const HMODULE u_module = GetModuleHandleW(L"U.dll");
   const auto u_sp_birth = u_module
@@ -580,8 +582,14 @@ void ensure_sweetpea_started() {
       // opened before the load, because the load runs ae_sweetpea's DllMain
       // and its closure's, which can acquire a suite and re-enter here.
       sweetpea::begin_direct_attempt(state, directory);
-      const HMODULE module =
-          mapped_sweetpea ? mapped_sweetpea : load_sweetpea_module(directory);
+      const HMODULE loaded = mapped_sweetpea
+          ? mapped_sweetpea
+          : aexcompat::worker_runtime::pica_component_lock::
+                load_outside_component_lock(component_lock, [&] {
+                  return load_sweetpea_module(directory);
+                }, [] { return GetModuleHandleW(L"ae_sweetpea.dll"); },
+                [](HMODULE) {});
+      const HMODULE module = loaded;
       sweetpea::note_direct_module(state, module);
       start_sweetpea_directly(module);
       return;
@@ -598,34 +606,18 @@ void ensure_sweetpea_started() {
   // A failed U_SP_Birth leaves Sweet Pea unstarted; ask again now that this
   // mapping is recorded, which yields the direct start (or Nothing when a
   // direct start already happened).
-  if (result != 0) ensure_sweetpea_started();
+  if (result != 0) ensure_sweetpea_started(component_lock);
 }
 
-// The lock is deliberately held across the foreign calls below
-// (LoadLibraryEx, InitBravoComponents, U_SP_Birth -> SPStartupPlugins) rather
-// than only around the state transitions. Those calls are exactly what the
-// latches protect: two plug-in threads reaching a suite acquire at the same
-// time must not both enter a bootstrap, and releasing the lock around the
-// call would put that race back.
-//
-// The cost is stated plainly: holding a lock across LoadLibraryEx orders this
-// mutex before the loader lock, so a *second* thread that reaches a suite
-// acquire from inside a DllMain (holding the loader lock, waiting for this
-// mutex) would deadlock against a thread holding this mutex and waiting for
-// the loader lock. Discovery has no deadline by policy, so that would be an
-// indefinite hang the Job Object has to end. It is accepted, not
-// excluded: the re-entrancy actually observed here is same-thread, which the
-// recursive mutex and the in-flight flags handle, and a *second* thread
-// reaching a suite acquire from inside a DllMain has not been observed. It is
-// not structurally impossible either - these loads run from inside
-// `provide_bib_suite`, so a suite pointer does exist by then, which is
-// exactly why the in-flight flags are there. The exposure is recorded rather
-// than argued away (issue #1287). The fix, if it shows up, is to run the two
-// loads outside the mutex and re-check the latch after reacquiring, not to
-// drop the lock.
+// State transitions and foreign initialization calls stay serialized. The two
+// LoadLibraryEx paths temporarily release the component mutex after recording
+// their in-flight latch, then re-check the process mapping after reacquiring.
+// This avoids ordering the component mutex before the loader lock while still
+// preventing a re-entrant or concurrent caller from starting a second
+// bootstrap (issue #1287).
 void ensure_pica_components_initialized() {
   auto& state = bib_suite_state();
-  std::lock_guard<std::recursive_mutex> component_lock(pica_component_mutex());
+  std::unique_lock<std::recursive_mutex> component_lock(pica_component_mutex());
   // The initialization is keyed on the mapping: a later member of an in-place
   // cluster session that maps dvabravoinitializer.dll itself is still
   // initialized, instead of the first member's answer deciding for everyone
@@ -635,35 +627,55 @@ void ensure_pica_components_initialized() {
   // does not import it keeps the first member's answer. Nothing measured
   // needs that, and admission puts every member's directory in USER_DIRS up
   // front, so the first attempt already searches all of them.
-  static bool load_attempted = false;
+  static aexcompat::worker_runtime::pica_component_lock::LoadState load_state;
   static bool absent_logged = false;
   static HMODULE initialized_bravo = nullptr;
   static bool bravo_init_in_flight = false;
   static bool teardown_registered = false;
   HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll");
-  if (!bravo && !load_attempted) {
+  using aexcompat::worker_runtime::pica_component_lock::LoadDecision;
+  switch (aexcompat::worker_runtime::pica_component_lock::decide(
+      load_state, bravo != nullptr)) {
+  case LoadDecision::StartLoad: {
     // Latched and in-flight before the load, for the same reason as the
     // ae_sweetpea one: LoadLibraryEx runs the DllMain of this module and its
     // closure, and a suite acquire from inside that would otherwise re-enter
     // with the load still running and drive the handshake on a
     // half-initialized DLL.
-    load_attempted = true;
+    aexcompat::worker_runtime::pica_component_lock::begin_load(load_state);
     bravo_init_in_flight = true;
-    if (!g_plugin_file_path.empty()) {
-      const std::filesystem::path sealed_bravo =
-          std::filesystem::path(g_plugin_file_path).parent_path() /
-          L"dvabravoinitializer.dll";
-      bravo = load_library_guarded(sealed_bravo.c_str(),
-                                   LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                                       LOAD_LIBRARY_SEARCH_SYSTEM32);
-    }
-    // In-place loads (issue #751): same admitted USER_DIRS name resolution as
-    // the BIB fallback above.
-    if (!bravo)
-      bravo = load_library_guarded(L"dvabravoinitializer.dll",
-                                   LOAD_LIBRARY_SEARCH_USER_DIRS |
-                                       LOAD_LIBRARY_SEARCH_SYSTEM32);
-    bravo_init_in_flight = false;
+    bravo = aexcompat::worker_runtime::pica_component_lock::
+        load_outside_component_lock(component_lock, [] {
+          HMODULE loaded = nullptr;
+          if (!g_plugin_file_path.empty()) {
+            const std::filesystem::path sealed_bravo =
+                std::filesystem::path(g_plugin_file_path).parent_path() /
+                L"dvabravoinitializer.dll";
+            loaded = load_library_guarded(
+                sealed_bravo.c_str(), LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                           LOAD_LIBRARY_SEARCH_SYSTEM32);
+          }
+          // In-place loads (issue #751): same admitted USER_DIRS name
+          // resolution as the BIB fallback above.
+          if (!loaded)
+            loaded = load_library_guarded(
+                L"dvabravoinitializer.dll", LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                                   LOAD_LIBRARY_SEARCH_SYSTEM32);
+          return loaded;
+        }, [] { return GetModuleHandleW(L"dvabravoinitializer.dll"); },
+        [&](HMODULE) {
+          aexcompat::worker_runtime::pica_component_lock::finish_load(load_state);
+          bravo_init_in_flight = false;
+        });
+    break;
+  }
+  case LoadDecision::UseMapped:
+    break;
+  case LoadDecision::InFlight:
+    return;
+  case LoadDecision::Absent:
+    bravo = nullptr;
+    break;
   }
   // No Bravo initializer means no Sweet Pea bootstrap either: this early
   // return is ahead of every ensure_sweetpea_started() call. That coupling
@@ -690,7 +702,7 @@ void ensure_pica_components_initialized() {
   // order this host already deviates from AE on is documented, not widened.
   if (bravo_init_in_flight) return;
   if (bravo == initialized_bravo) {
-    ensure_sweetpea_started();
+    ensure_sweetpea_started(component_lock);
     return;
   }
   // Latched before the calls, so a faulted handshake is not retried on the
@@ -720,7 +732,7 @@ void ensure_pica_components_initialized() {
     std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=called result="
               << result << " resolver=" << reinterpret_cast<const void*>(current)
               << "\n" << std::flush;
-  ensure_sweetpea_started();
+  ensure_sweetpea_started(component_lock);
   if (!teardown_registered) {
     teardown_registered = true;
     std::atexit(&teardown_pica_components);
