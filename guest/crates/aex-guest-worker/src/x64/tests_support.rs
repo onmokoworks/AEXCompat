@@ -2989,6 +2989,198 @@ fn initialize_critical_section_ex_reinit_capacity_and_session_state_are_bounded(
 }
 
 #[test]
+fn srw_exclusive_zero_initializes_acquires_releases_and_is_session_local() {
+    const ACQUIRE: u64 = STUB_BASE + 0x410;
+    const RELEASE: u64 = STUB_BASE + 0x420;
+    const LOCK: u64 = DATA_BASE + 0x900;
+    let prepare = || {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            ACQUIRE,
+            "kernel32.dll",
+            "AcquireSRWLockExclusive",
+        )
+        .unwrap();
+        install_win64_import(
+            &mut engine.unicorn,
+            RELEASE,
+            "kernel32.dll",
+            "ReleaseSRWLockExclusive",
+        )
+        .unwrap();
+        engine
+    };
+    let mut first = prepare();
+    first.write(LOCK, &[0; 8]).unwrap();
+    assert_eq!(first.call_win64(ACQUIRE, [LOCK, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(first.unicorn.get_data().windows_srw_locks[&LOCK].owner, Some(1));
+    assert_eq!(first.call_win64(RELEASE, [LOCK, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(first.unicorn.get_data().windows_srw_locks[&LOCK].owner, None);
+    assert_eq!(first.unicorn.mem_read_as_vec(LOCK, 8).unwrap(), vec![0; 8]);
+
+    let mut second = prepare();
+    second.write(LOCK, &[0; 8]).unwrap();
+    assert!(!second.unicorn.get_data().windows_srw_locks.contains_key(&LOCK));
+    assert_eq!(second.call_win64(ACQUIRE, [LOCK, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(second.unicorn.get_data().windows_srw_locks[&LOCK].owner, Some(1));
+}
+
+#[test]
+fn srw_exclusive_rejects_storage_recursive_and_unbalanced_misuse() {
+    const ACQUIRE: u64 = STUB_BASE + 0x430;
+    const RELEASE: u64 = STUB_BASE + 0x440;
+    let prepare = || {
+        let mut engine = test_engine(&[0xc3]);
+        for (address, symbol) in [
+            (ACQUIRE, "AcquireSRWLockExclusive"),
+            (RELEASE, "ReleaseSRWLockExclusive"),
+        ] {
+            install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+        }
+        engine
+    };
+    let mut wrong_library = prepare();
+    install_win64_import(
+        &mut wrong_library.unicorn,
+        STUB_BASE + 0x450,
+        "fixture.dll",
+        "AcquireSRWLockExclusive",
+    )
+    .unwrap();
+    assert!(wrong_library
+        .call_win64(STUB_BASE + 0x450, [DATA_BASE + 0x908, 0, 0, 0, 0, 0])
+        .unwrap_err()
+        .to_string()
+        .contains("unsupported"));
+
+    let mut null = prepare();
+    assert!(null.call_win64(ACQUIRE, [0; 6]).unwrap_err().to_string().contains("not readable"));
+
+    let lock = DATA_BASE + 0x908;
+    let mut nonzero = prepare();
+    nonzero.write(lock, &2u64.to_le_bytes()).unwrap();
+    assert!(nonzero
+        .call_win64(ACQUIRE, [lock, 0, 0, 0, 0, 0])
+        .unwrap_err()
+        .to_string()
+        .contains("not initialized by zero"));
+
+    let mut recursive = prepare();
+    recursive.write(lock, &[0; 8]).unwrap();
+    recursive.call_win64(ACQUIRE, [lock, 0, 0, 0, 0, 0]).unwrap();
+    assert!(recursive
+        .call_win64(ACQUIRE, [lock, 0, 0, 0, 0, 0])
+        .unwrap_err()
+        .to_string()
+        .contains("recursive"));
+
+    let mut unbalanced = prepare();
+    unbalanced.write(lock, &[0; 8]).unwrap();
+    assert!(unbalanced
+        .call_win64(RELEASE, [lock, 0, 0, 0, 0, 0])
+        .unwrap_err()
+        .to_string()
+        .contains("does not own"));
+}
+
+#[test]
+fn srw_exclusive_cross_thread_contention_never_false_succeeds() {
+    const ACQUIRE: u64 = STUB_BASE + 0x460;
+    const LOCK: u64 = DATA_BASE + 0x918;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        ACQUIRE,
+        "kernel32.dll",
+        "AcquireSRWLockExclusive",
+    )
+    .unwrap();
+    engine.write(LOCK, &[0; 8]).unwrap();
+    engine.call_win64(ACQUIRE, [LOCK, 0, 0, 0, 0, 0]).unwrap();
+    engine.unicorn.get_data_mut().current_windows_thread_id = 2;
+    let error = engine
+        .call_win64(ACQUIRE, [LOCK, 0, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("SRW lock deadlock"));
+    assert_eq!(engine.unicorn.get_data().windows_srw_locks[&LOCK].owner, Some(1));
+    assert_eq!(
+        engine.unicorn.get_data().windows_srw_locks[&LOCK]
+            .waiters
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+}
+
+#[test]
+fn srw_exclusive_scheduler_parks_transfers_and_resumes_a_guest_waiter() {
+    const CREATE: u64 = STUB_BASE + 0x470;
+    const SWITCH: u64 = STUB_BASE + 0x480;
+    const ACQUIRE: u64 = STUB_BASE + 0x490;
+    const RELEASE: u64 = STUB_BASE + 0x4a0;
+    const CHILD_OFFSET: usize = 0x180;
+    const LOCK: u64 = DATA_BASE + 0x920;
+    const OUTPUT: u64 = DATA_BASE + 0x930;
+
+    let mut code = vec![0x48, 0x83, 0xec, 0x38]; // sub rsp, 38h
+    push_mov_imm64(&mut code, [0x48, 0xb9], LOCK);
+    push_mov_imm64(&mut code, [0x48, 0xb8], ACQUIRE);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    // CreateThread(NULL, 0, child, OUTPUT, 0, NULL).
+    code.extend_from_slice(&[0x31, 0xc9, 0x31, 0xd2]);
+    push_mov_imm64(&mut code, [0x49, 0xb8], TEST_CODE + CHILD_OFFSET as u64);
+    push_mov_imm64(&mut code, [0x49, 0xb9], OUTPUT);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], CREATE);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x89, 0xc3]); // call; mov rbx,rax
+    push_mov_imm64(&mut code, [0x48, 0xb9], LOCK);
+    push_mov_imm64(&mut code, [0x48, 0xb8], RELEASE);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x89, 0xd8, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+
+    code.resize(CHILD_OFFSET, 0x90);
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+    push_mov_imm64(&mut code, [0x48, 0xb9], LOCK);
+    push_mov_imm64(&mut code, [0x48, 0xb8], ACQUIRE);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], OUTPUT);
+    code.extend_from_slice(&[0x48, 0xc7, 0x00, 1, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb9], LOCK);
+    push_mov_imm64(&mut code, [0x48, 0xb8], RELEASE);
+    code.extend_from_slice(&[0xff, 0xd0, 0xb8, 42, 0, 0, 0, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (address, symbol) in [
+        (CREATE, "CreateThread"),
+        (SWITCH, "SwitchToThread"),
+        (ACQUIRE, "AcquireSRWLockExclusive"),
+        (RELEASE, "ReleaseSRWLockExclusive"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    engine.write(LOCK, &[0; 8]).unwrap();
+    let handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
+    assert_eq!(engine.unicorn.mem_read_as_vec(OUTPUT, 4).unwrap(), 1u32.to_le_bytes());
+    let child = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+    assert!(child.completed);
+    assert_eq!(child.exit_code, 42);
+    assert_eq!(engine.unicorn.get_data().windows_srw_locks[&LOCK].owner, None);
+    assert!(engine.unicorn.get_data().windows_srw_locks[&LOCK].waiters.is_empty());
+    assert!(engine.scheduled_windows_threads.is_empty());
+    assert!(engine.scheduler_ready.is_empty());
+    assert!(engine.unicorn.get_data().scheduler_woken_threads.is_empty());
+    assert_eq!(engine.unicorn.get_data().current_windows_thread_id, 1);
+}
+
+#[test]
 fn dynamic_condition_variables_are_bounded_and_blocking_fails_closed() {
     const GET_MODULE: u64 = STUB_BASE + 0x3f0;
     const GET_PROC: u64 = STUB_BASE + 0x400;

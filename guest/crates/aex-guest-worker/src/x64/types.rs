@@ -107,6 +107,7 @@ struct GuestState {
     crt_onexit_tables: HashMap<u64, Vec<u64>>,
     crt_terminate_handler: u64,
     windows_critical_sections: HashMap<u64, u32>,
+    windows_srw_locks: BTreeMap<u64, WindowsSrwLock>,
     windows_condition_variables: HashSet<u64>,
     windows_address_waiters: BTreeMap<u64, BTreeSet<u32>>,
     windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
@@ -182,6 +183,12 @@ struct VcompDynamicLoop {
 struct MsvcpMutex {
     mutex_type: u32,
     lock_count: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct WindowsSrwLock {
+    owner: Option<u32>,
+    waiters: VecDeque<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -347,6 +354,7 @@ struct ParkedWindowsThread {
 enum SchedulerYieldReason {
     Voluntary,
     AddressWait,
+    SrwLock,
 }
 
 #[derive(Clone, Copy, Debug)]

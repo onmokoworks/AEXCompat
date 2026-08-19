@@ -2030,6 +2030,11 @@ impl GuestEngine<'static> {
                                 .into(),
                         ));
                     }
+                } else if yield_reason == SchedulerYieldReason::SrwLock {
+                    return Err(GuestError::Callback(
+                        "SRW lock deadlock: no runnable guest thread can release the exclusive owner"
+                            .into(),
+                    ));
                 } else {
                     // Windows permits SwitchToThread to find no runnable peer.
                     // The hook has already completed the call and returned FALSE/TRUE
