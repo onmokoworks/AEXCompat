@@ -88,6 +88,10 @@ enum LegacyWin64Import {
     FlsGetValue,
     FlsSetValue,
     FlsFree,
+    TlsAlloc,
+    TlsGetValue,
+    TlsSetValue,
+    TlsFree,
     ExplicitMsvcRuntimeZero,
     CrtInitterm,
     CrtInittermE,
@@ -319,6 +323,13 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
         ("kernel32.dll", "FlsSetValue") => LegacyWin64Import::FlsSetValue,
         ("kernel32.dll", "FlsFree") => LegacyWin64Import::FlsFree,
+        ("kernel32.dll", "TlsAlloc") => LegacyWin64Import::TlsAlloc,
+        ("kernel32.dll", "TlsGetValue") => LegacyWin64Import::TlsGetValue,
+        ("kernel32.dll", "TlsSetValue") => LegacyWin64Import::TlsSetValue,
+        ("kernel32.dll", "TlsFree") => LegacyWin64Import::TlsFree,
+        (_, "TlsAlloc" | "TlsGetValue" | "TlsSetValue" | "TlsFree") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("kernel32.dll", "InitializeSListHead") => LegacyWin64Import::InitializeSListHead,
         ("kernel32.dll", "DisableThreadLibraryCalls") => {
             LegacyWin64Import::DisableThreadLibraryCalls
@@ -1108,6 +1119,18 @@ fn install_win64_import(
                     "install FlsFree import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_fls_free(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::TlsAlloc
+            | LegacyWin64Import::TlsGetValue
+            | LegacyWin64Import::TlsSetValue
+            | LegacyWin64Import::TlsFree => {
+                uc("write TLS import return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install TLS import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_tls(unicorn, implementation);
                     }),
                 )?;
             }
@@ -3050,6 +3073,65 @@ fn set_fls_error(unicorn: &mut Unicorn<'_, GuestState>, error: String, returned:
     if unicorn.get_data().callback_error.is_none() {
         unicorn.get_data_mut().callback_error = Some(error);
     }
+    let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+}
+
+fn emulate_tls(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    const TLS_OUT_OF_INDEXES: u64 = u32::MAX as u64;
+    const ERROR_SUCCESS: u32 = 0;
+    const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+    let returned = match operation {
+        LegacyWin64Import::TlsAlloc => {
+            if let Some(index) = (0..MAX_WINDOWS_TLS_SLOTS)
+                .find(|index| !unicorn.get_data().windows_tls_slots.contains_key(index))
+            {
+                unicorn
+                    .get_data_mut()
+                    .windows_tls_slots
+                    .insert(index, 0);
+                u64::from(index)
+            } else {
+                unicorn.get_data_mut().windows_last_error = ERROR_NOT_ENOUGH_MEMORY;
+                TLS_OUT_OF_INDEXES
+            }
+        }
+        LegacyWin64Import::TlsGetValue => {
+            let index = read_win64_import_argument(unicorn, 0).unwrap_or(u64::MAX) as u32;
+            if let Some(value) = unicorn.get_data().windows_tls_slots.get(&index).copied() {
+                unicorn.get_data_mut().windows_last_error = ERROR_SUCCESS;
+                value
+            } else {
+                unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+                0
+            }
+        }
+        LegacyWin64Import::TlsSetValue => {
+            let index = read_win64_import_argument(unicorn, 0).unwrap_or(u64::MAX) as u32;
+            let value = read_win64_import_argument(unicorn, 1).unwrap_or_default();
+            if let Some(slot) = unicorn.get_data_mut().windows_tls_slots.get_mut(&index) {
+                *slot = value;
+                1
+            } else {
+                unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+                0
+            }
+        }
+        LegacyWin64Import::TlsFree => {
+            let index = read_win64_import_argument(unicorn, 0).unwrap_or(u64::MAX) as u32;
+            if unicorn
+                .get_data_mut()
+                .windows_tls_slots
+                .remove(&index)
+                .is_some()
+            {
+                1
+            } else {
+                unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+                0
+            }
+        }
+        _ => 0,
+    };
     let _ = unicorn.reg_write(RegisterX86::RAX, returned);
 }
 
