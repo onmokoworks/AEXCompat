@@ -76,7 +76,19 @@ struct PlatformWorldEntry {
   std::shared_ptr<PlatformWorldBacking> backing;
 };
 
-std::mutex g_mutex;
+// The PF_World facade's resolver callback is noexcept and reaches this
+// registry before the dispatch-world registry. std::mutex::lock may throw a
+// system_error, which would turn that callback contract into std::terminate.
+// SRW acquisition does not throw; keep the previous single exclusive lock
+// semantics for every registry operation.
+SRWLOCK g_registry_lock = SRWLOCK_INIT;
+class RegistryLock {
+ public:
+  RegistryLock() noexcept { AcquireSRWLockExclusive(&g_registry_lock); }
+  ~RegistryLock() noexcept { ReleaseSRWLockExclusive(&g_registry_lock); }
+  RegistryLock(const RegistryLock&) = delete;
+  RegistryLock& operator=(const RegistryLock&) = delete;
+};
 // Keyed by the pixel buffer, not by the `PF_EffectWorld` the caller happened to
 // pass. `PF_NewWorld` fills a caller-owned value struct and AE never treats that
 // struct's address as the world's identity, so a plug-in may allocate twice
@@ -132,7 +144,7 @@ world_safety::OwnedWorldResolution resolve_owned_world(
     const void* world, void* data, int32_t rowbytes, int32_t width,
     int32_t height, world_safety::DispatchWorldFormat& result) {
   using world_safety::OwnedWorldResolution;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   // The pixel buffer is the identity, so a struct copy resolves exactly like the
   // struct `PF_NewWorld` filled; the geometry the caller read out of that struct
   // still has to describe the allocation.
@@ -156,7 +168,7 @@ bool resolve_dispatch_world_format(
 int32_t __cdecl new_world(void*, int32_t width, int32_t height,
                           int32_t clear_pixels, int32_t pixel_format,
                           void* world) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const int32_t pixel_bytes = bytes_per_pixel(pixel_format);
   // No check on the destination struct: reusing one local for a second
   // allocation is legal, and rejecting it made a plug-in that builds a pyramid
@@ -245,7 +257,7 @@ int32_t __cdecl legacy_new_world(void* effect_ref, int32_t width,
 }
 
 int32_t __cdecl dispose_world(void*, void* world) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   // Resolved through the pixel pointer the struct carries, so a copy of the
   // struct disposes the same allocation. Fail-closed is unchanged: a cleared
   // struct carries a null pointer, a second dispose finds nothing, and a world
@@ -282,7 +294,7 @@ int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
   };
   if (!world || !pixel_format) return finish(4, 0);
   {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    RegistryLock lock;
     const auto found = g_worlds.find(world_pixels(world));
     if (found != g_worlds.end()) {
       *pixel_format = found->second.pixel_format;
@@ -296,7 +308,7 @@ int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
 }
 
 bool owns_world(void* world) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   return world && g_worlds.count(world_pixels(world)) != 0;
 }
 
@@ -314,7 +326,7 @@ bool owns_world(void* world) {
 bool hosts_world_pixels(void* world) {
   void* pixels = world_pixels(world);
   if (!pixels) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   if (g_worlds.count(pixels) != 0) return true;
   for (const auto& [handle, entry] : g_platform_worlds) {
     (void)handle;
@@ -329,7 +341,7 @@ bool hosts_world_pixels(void* world) {
 }
 
 bool owned_world_matches(void* world, int32_t pixel_format) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_worlds.find(world_pixels(world));
   return found != g_worlds.end() && found->second.pixel_format == pixel_format;
 }
@@ -385,7 +397,7 @@ std::shared_ptr<PlatformWorldBacking> allocate_platform_backing(
 bool snapshot_aegp_view(void** handle, AegpWorldView& view,
                         world_safety::LocalEffectWorld& world) {
   if (!handle) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_aegp_views.find(handle);
   if (found == g_aegp_views.end() || !found->second.pf_world) return false;
   if (!found->second.borrowed &&
@@ -426,7 +438,7 @@ bool snapshot_aegp_view(void** handle, AegpWorldView& view,
 bool snapshot_owned_world(void* world, OwnedWorldSnapshot& snapshot) {
   snapshot = {};
   if (!world) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_worlds.find(world_pixels(world));
   if (found == g_worlds.end() || !found->second.pixels) return false;
   world_safety::LocalEffectWorld descriptor{};
@@ -459,7 +471,7 @@ bool register_borrowed_view(void** handle, void* pf_world,
                             int32_t pixel_format, bool borrowed) {
   if (!handle || !pf_world || !aegp_world_type_from_format(pixel_format))
     return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   try {
     return g_aegp_views.emplace(handle, AegpWorldView{
         pf_world, pixel_format, borrowed}).second;
@@ -470,7 +482,7 @@ bool register_borrowed_view(void** handle, void* pf_world,
 
 UnregisterBorrowedViewResult unregister_borrowed_view(void** handle) {
   if (!handle) return UnregisterBorrowedViewResult::already_absent;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_aegp_views.find(handle);
   if (found == g_aegp_views.end())
     return UnregisterBorrowedViewResult::already_absent;
@@ -494,7 +506,7 @@ bool snapshot_platform_world(
     void* handle, std::shared_ptr<PlatformWorldBacking>& backing) {
   backing.reset();
   if (!handle) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_platform_worlds.find(handle);
   if (found == g_platform_worlds.end() || !found->second.backing) return false;
   backing = found->second.backing;
@@ -505,7 +517,7 @@ bool adopt_platform_world(
     void* handle, std::shared_ptr<PlatformWorldBacking>& backing) {
   backing.reset();
   if (!handle) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_platform_worlds.find(handle);
   if (found == g_platform_worlds.end() || !found->second.backing) return false;
   backing = found->second.backing;
@@ -515,7 +527,7 @@ bool adopt_platform_world(
 }
 
 AegpStatistics aegp_statistics() {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   return {g_platform_worlds_created, g_platform_worlds_disposed,
           g_platform_worlds_adopted, g_platform_references_created,
           g_platform_references_disposed, g_owned_aegp_worlds_created,
@@ -554,7 +566,7 @@ int32_t __cdecl aegp_world_new_owned(int32_t plugin_id, int32_t type,
   if (!claim_opaque_generation(g_owned_aegp_world_generation, generation)) return 4;
   auto* handle = reinterpret_cast<void**>(
       static_cast<uintptr_t>((generation << 3) | 5));
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   if (g_live_owned_aegp_worlds >= kMaxOwnedAegpWorlds ||
       g_live_owned_aegp_backings.load() >= kMaxOwnedAegpWorlds ||
       g_platform_world_bytes.load() > kMaxPlatformWorldBytes - size) return 4;
@@ -576,7 +588,7 @@ int32_t __cdecl aegp_world_new_owned(int32_t plugin_id, int32_t type,
 
 int32_t __cdecl aegp_world_dispose(void** handle) {
   if (!handle) return finish_aegp_world_call("dispose", 4);
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_aegp_views.find(handle);
   if (found == g_aegp_views.end() || !found->second.disposable)
     return finish_aegp_world_call("dispose", 4);
@@ -785,7 +797,7 @@ int32_t __cdecl aegp_world_new_platform(int32_t plugin_id, int32_t type,
   if (!claim_opaque_generation(g_platform_world_generation, generation)) return 4;
   auto* handle = reinterpret_cast<void*>(
       static_cast<uintptr_t>((generation << 3) | 2));
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   if (g_platform_worlds.size() >= kMaxPlatformWorlds ||
       g_platform_world_bytes.load() > kMaxPlatformWorldBytes - size) return 4;
   auto backing = allocate_platform_backing(
@@ -804,7 +816,7 @@ int32_t __cdecl aegp_world_new_platform(int32_t plugin_id, int32_t type,
 
 int32_t __cdecl aegp_world_dispose_platform(void* handle) {
   if (!handle) return 4;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_platform_worlds.find(handle);
   if (found == g_platform_worlds.end()) return 4;
   g_platform_worlds.erase(found);
@@ -822,7 +834,7 @@ int32_t __cdecl aegp_world_reference_platform(int32_t plugin_id,
     return 4;
   auto* handle = reinterpret_cast<void**>(
       static_cast<uintptr_t>((generation << 3) | 7));
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_platform_worlds.find(platform);
   if (!platform || found == g_platform_worlds.end() ||
       g_live_platform_references >= kMaxPlatformReferences) return 4;
@@ -841,12 +853,12 @@ int32_t __cdecl aegp_world_reference_platform(int32_t plugin_id,
 }
 
 bool lifetimes_balanced() {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   return g_worlds.empty() && g_created == g_disposed && g_live_bytes == 0;
 }
 
 Statistics statistics() {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   return {g_created, g_disposed, g_invalid_operations, g_worlds.size(),
           g_live_bytes};
 }
