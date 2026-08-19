@@ -2482,10 +2482,7 @@ mod tests {
             0,
             9,
         );
-        assert_eq!(
-            ui_teardown["first_failure_stage"],
-            "classic_ui_teardown"
-        );
+        assert_eq!(ui_teardown["first_failure_stage"], "classic_ui_teardown");
         assert_eq!(ui_teardown["failure_stage"], "classic_ui_teardown");
 
         let selector_then_suppressed_close = worker_diagnostics(
