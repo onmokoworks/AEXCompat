@@ -32,6 +32,7 @@ const MAX_SUITE_CALL_SLOT_PROBE_TARGETS: usize = 8;
 const MAX_SUITE_NAME_LEN: usize = 64;
 const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
 const MAX_SELECTOR_INVOCATIONS: usize = 64;
+const MAX_SELECTOR_UNWIND_FRAMES: usize = 12;
 const MAX_HOST_CALLBACK_TIMELINE_RECORDS: usize = 128;
 const MAX_COMPUTE_CACHE_TIMELINE_RECORDS: usize = 128;
 const MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS: usize = 128;
@@ -1871,6 +1872,62 @@ fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value
                 continue;
             }
         };
+        let (unwind_stop, unwind_frames) =
+            match (record.get("unwind_stop"), record.get("unwind_frames")) {
+                (Some(Value::Null), Some(Value::Null)) => (Value::Null, Value::Null),
+                (Some(Value::String(stop)), Some(Value::Array(frames)))
+                    if seh_caught
+                        && matches!(
+                            stop.as_str(),
+                            "end_of_chain"
+                                | "chain_lost"
+                                | "frame_cap"
+                                | "no_unwind_entry"
+                                | "return_slot_unreadable"
+                                | "walk_faulted"
+                                | "low_stack"
+                        )
+                        && frames.len() <= MAX_SELECTOR_UNWIND_FRAMES =>
+                {
+                    let mut normalized = Vec::with_capacity(frames.len());
+                    let mut valid = true;
+                    for frame in frames {
+                        let Some(frame) = frame.as_object().filter(|frame| frame.len() == 2) else {
+                            valid = false;
+                            break;
+                        };
+                        let Some(from_return_slot) =
+                            frame.get("from_return_slot").and_then(Value::as_bool)
+                        else {
+                            valid = false;
+                            break;
+                        };
+                        let Some(site) = frame
+                            .get("site")
+                            .and_then(Value::as_object)
+                            .filter(|site| site.len() == 4)
+                            .map(|_| frame.get("site").unwrap())
+                            .and_then(safe_pointer_classification)
+                        else {
+                            valid = false;
+                            break;
+                        };
+                        normalized.push(json!({
+                            "from_return_slot": from_return_slot,
+                            "site": site,
+                        }));
+                    }
+                    if !valid {
+                        truncated = true;
+                        continue;
+                    }
+                    (json!(stop), Value::Array(normalized))
+                }
+                _ => {
+                    truncated = true;
+                    continue;
+                }
+            };
         let Some(global_data_handoff) = record
             .get("global_data_handoff")
             .and_then(safe_global_data_handoff)
@@ -1913,6 +1970,8 @@ fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value
             "fault_address": fault_address,
             "registers": registers,
             "stack_pointer_values": stack_pointer_values,
+            "unwind_stop": unwind_stop,
+            "unwind_frames": unwind_frames,
             "global_data_handoff": global_data_handoff,
             "effect_ref_at_entry": effect_ref_at_entry,
             "appl_id_at_entry": appl_id_at_entry,
