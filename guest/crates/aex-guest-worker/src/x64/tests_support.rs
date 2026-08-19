@@ -5803,6 +5803,208 @@ fn get_file_type_rejects_foreign_handles_without_host_descriptor_access() {
     assert_eq!(second.unicorn.reg_read(RegisterX86::RAX).unwrap(), 3);
 }
 
+fn write_test_wide_path(engine: &mut GuestEngine<'static>, path: &str) -> u64 {
+    let units = path.encode_utf16().chain(std::iter::once(0));
+    let bytes = units
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let pointer = engine.allocate(bytes.len(), 2).unwrap();
+    engine.write(pointer, &bytes).unwrap();
+    pointer
+}
+
+#[test]
+fn create_file_w_is_kernel32_scoped_and_returns_no_host_handle() {
+    const CREATE_FILE: u64 = STUB_BASE + 0x1c4;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            CREATE_FILE,
+            "KERNEL32.DLL",
+            "CreateFileW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CreateFileW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "CreateFileW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let path = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\model.bin");
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    let result = engine
+        .call_win64_with_timeout(
+            CREATE_FILE,
+            &[path, 0x8000_0000, 1, 0, 3, 0x80, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_eq!(result, u64::MAX);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_FILE_NOT_FOUND);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn create_file_w_denies_traversal_device_unc_and_write_paths() {
+    let mut engine = test_engine(&[0xc3]);
+    for (path, access, disposition) in [
+        (r"C:\AEXCompat\assets\..\..\secret.txt", 0x8000_0000, 3),
+        (r"\\server\share\secret.txt", 0x8000_0000, 3),
+        (r"\\.\PhysicalDrive0", 0x8000_0000, 3),
+        (r"C:\AEXCompat\assets\output.bin", 0x4000_0000, 3),
+        (r"C:\AEXCompat\assets\output.bin", 0x8000_0000, 2),
+    ] {
+        let pointer = write_test_wide_path(&mut engine, path);
+        engine.unicorn.reg_write(RegisterX86::RCX, pointer).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, access).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, 1).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R9, 0).unwrap();
+        let rsp = STACK_BASE + STACK_SIZE - 0x108 | 8;
+        engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+        for (index, value) in [disposition as u64, 0x80, 0]
+            .into_iter()
+            .enumerate()
+        {
+            engine
+                .write(rsp + 0x28 + (index as u64 * 8), &value.to_le_bytes())
+                .unwrap();
+        }
+        emulate_create_file_w(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX, "{path}");
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_ACCESS_DENIED, "{path}");
+    }
+}
+
+#[test]
+fn create_file_w_validates_disposition_and_share() {
+    let mut engine = test_engine(&[0xc3]);
+    let pointer = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\model.bin");
+    for args in [
+        [pointer, 0x8000_0000, 8, 0, 3, 0x80, 0],
+    ] {
+        engine.unicorn.reg_write(RegisterX86::RCX, args[0]).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, args[1]).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, args[2]).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R9, args[3]).unwrap();
+        let rsp = STACK_BASE + STACK_SIZE - 0x108 | 8;
+        engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+        for (index, value) in args[4..].iter().copied().enumerate() {
+            engine
+                .write(rsp + 0x28 + index as u64 * 8, &value.to_le_bytes())
+                .unwrap();
+        }
+        emulate_create_file_w(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    }
+}
+
+#[test]
+fn create_file_w_ignores_legal_optional_arguments_for_missing_open_existing_path() {
+    const CREATE_FILE: u64 = STUB_BASE + 0x1c4;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CREATE_FILE,
+        "kernel32.dll",
+        "CreateFileW",
+    )
+    .unwrap();
+    let pointer = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\missing.bin");
+    for (security_attributes, template_file) in [(0xdead_beef, 0), (0, 0xdead_beef), (1, 2)] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    CREATE_FILE,
+                    &[
+                        pointer,
+                        0x8000_0000,
+                        1,
+                        security_attributes,
+                        3,
+                        0x80,
+                        template_file,
+                    ],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_FILE_NOT_FOUND);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+}
+
+#[test]
+fn create_file_w_treats_null_as_api_failure_but_aborts_on_unreadable_non_null_path() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_create_file_w(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_PATH_NOT_FOUND);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    engine.unicorn.reg_write(RegisterX86::RCX, 0xdead_beef).unwrap();
+    emulate_create_file_w(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+    assert!(engine
+        .unicorn
+        .get_data()
+        .callback_error
+        .as_deref()
+        .is_some_and(|error| error.contains("not fully readable")));
+}
+
+#[test]
+fn create_file_w_distinguishes_maximum_and_over_limit_readable_paths() {
+    const CREATE_FILE: u64 = STUB_BASE + 0x1c4;
+    const MAX_PATH_UNITS: usize = 32_767;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CREATE_FILE,
+        "kernel32.dll",
+        "CreateFileW",
+    )
+    .unwrap();
+    engine
+        .unicorn
+        .mem_map(
+            DATA_BASE + PAGE_SIZE,
+            0x1_0000,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
+    let path = DATA_BASE + 0x800;
+
+    for (non_nul_units, expected_error) in [
+        (MAX_PATH_UNITS, ERROR_FILE_NOT_FOUND),
+        (MAX_PATH_UNITS + 1, ERROR_FILENAME_EXCED_RANGE),
+    ] {
+        let mut bytes = Vec::with_capacity((non_nul_units + 1) * 2);
+        for _ in 0..non_nul_units {
+            bytes.extend_from_slice(&u16::from(b'a').to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        engine.write(path, &bytes).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    CREATE_FILE,
+                    &[path, 0x8000_0000, 1, 0, 3, 0x80, 0],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, expected_error);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+}
+
 #[test]
 fn get_command_line_a_returns_stable_writable_guest_owned_storage() {
     const GET_COMMAND_LINE: u64 = STUB_BASE + 0x1c8;
