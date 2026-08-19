@@ -1566,8 +1566,7 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
         if !matches!(code_page, CP_ACP | CP_OEMCP | CP_UTF8)
             || (code_page == CP_UTF8 && flags & !WC_ERR_INVALID_CHARS != 0)
             || (code_page != CP_UTF8 && flags != 0)
-            || (code_page == CP_UTF8
-                && (default_character != 0 || used_default_character != 0))
+            || (code_page == CP_UTF8 && (default_character != 0 || used_default_character != 0))
             || source == 0
             || source_length == 0
             || source_length < -1
@@ -1604,7 +1603,11 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
             let bytes = unicorn
                 .mem_read_as_vec(source, byte_length as usize)
                 .map_err(|error| format!("WideCharToMultiByte source read failed: {error}"))?;
-            units.extend(bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])));
+            units.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+            );
         } else {
             return Err("WideCharToMultiByte received invalid source length".into());
         }
@@ -1613,7 +1616,9 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
         for character in char::decode_utf16(units) {
             match character {
                 Ok(character) => unicode.push(character),
-                Err(_) if flags & WC_ERR_INVALID_CHARS == 0 => unicode.push(char::REPLACEMENT_CHARACTER),
+                Err(_) if flags & WC_ERR_INVALID_CHARS == 0 => {
+                    unicode.push(char::REPLACEMENT_CHARACTER)
+                }
                 Err(_) => return Ok((0, Some(ERROR_NO_UNICODE_TRANSLATION))),
             }
         }
@@ -1623,11 +1628,15 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
             let default = if default_character == 0 {
                 b'?'
             } else {
-                let byte = unicorn.mem_read_as_vec(default_character, 1).map_err(|error| {
-                    format!("WideCharToMultiByte default character read failed: {error}")
-                })?[0];
+                let byte = unicorn
+                    .mem_read_as_vec(default_character, 1)
+                    .map_err(|error| {
+                        format!("WideCharToMultiByte default character read failed: {error}")
+                    })?[0];
                 if byte >= 0x80 {
-                    return Err("WideCharToMultiByte only supports a single-byte default character".into());
+                    return Err(
+                        "WideCharToMultiByte only supports a single-byte default character".into(),
+                    );
                 }
                 byte
             };

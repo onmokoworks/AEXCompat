@@ -3327,21 +3327,12 @@ fn wide_char_to_multi_byte_substitutes_default_and_rejects_negative_output_size(
     invalid.write(source, &[b'A', 0]).unwrap();
     assert_eq!(
         invalid
-        .call_win64_with_timeout(
-            CONVERT,
-            &[
-                CP_OEMCP,
-                0,
-                source,
-                1,
-                output,
-                u32::MAX as u64,
-                0,
-                0,
-            ],
-            TIMEOUT_MICROSECONDS,
-        )
-        .unwrap(),
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, 1, output, u32::MAX as u64, 0, 0,],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
         0
     );
     assert_eq!(
