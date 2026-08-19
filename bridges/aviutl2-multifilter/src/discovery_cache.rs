@@ -2976,6 +2976,23 @@ fn keep_best(
                 ..old.clone()
             })
         }
+        Some(old) if !old.ok && !discovered.ok && old.mtime == mtime && old.len == len => {
+            // A read failure returns the bare negative entry before dependency
+            // roots can be recorded. Its empty closure deliberately schedules
+            // another pass, but replacing an older negative with `attempts: 0`
+            // here made that pass recur on every launch forever (issue #658).
+            // Count the same bytes under the same host build just like a failed
+            // re-verification of a working entry. Keep the newest failure data;
+            // only the retry ledger belongs to the sequence of attempts.
+            Some(CacheEntry {
+                attempts: if old.checked == discovered.build {
+                    old.attempts.saturating_add(1)
+                } else {
+                    1
+                },
+                ..discovered
+            })
+        }
         _ => Some(discovered),
     }
 }
