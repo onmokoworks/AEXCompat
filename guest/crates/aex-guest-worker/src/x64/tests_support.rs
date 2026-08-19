@@ -3454,6 +3454,135 @@ fn get_environment_variable_a_rejects_invalid_names_and_outputs() {
 }
 
 #[test]
+fn get_environment_variable_w_matches_size_write_and_not_found_contracts() {
+    const GET_ENVIRONMENT: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_ENVIRONMENT,
+            "kernel32.dll",
+            "GetEnvironmentVariableW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetEnvironmentVariableW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetEnvironmentVariableW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let name = DATA_BASE + 0xc00;
+    let output = DATA_BASE + 0xd00;
+    let mut encoded_name = Vec::new();
+    for unit in "OpenCv_For_Threads_Num"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
+        encoded_name.extend_from_slice(&unit.to_le_bytes());
+    }
+    engine.write(name, &encoded_name).unwrap();
+    engine.write(output, &[0xa5; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_ENVIRONMENT, [name, 0, 0, 0, 0, 0])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine
+            .call_win64(GET_ENVIRONMENT, [name, output, 1, 0, 0, 0])
+            .unwrap(),
+        2
+    );
+    let mut unchanged = [0; 8];
+    engine.read(output, &mut unchanged).unwrap();
+    assert_eq!(unchanged, [0xa5; 8]);
+    assert_eq!(
+        engine
+            .call_win64(GET_ENVIRONMENT, [name, output, 2, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    let mut written = [0; 4];
+    engine.read(output, &mut written).unwrap();
+    assert_eq!(written, [b'1', 0, 0, 0]);
+
+    let mut missing = Vec::new();
+    for unit in "HOME".encode_utf16().chain(std::iter::once(0)) {
+        missing.extend_from_slice(&unit.to_le_bytes());
+    }
+    engine.write(name, &missing).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_ENVIRONMENT, [name, output, 2, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_ENVVAR_NOT_FOUND
+    );
+}
+
+#[test]
+fn get_environment_variable_w_rejects_invalid_guest_pointers() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_get_environment_variable_w(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("GetEnvironmentVariableW name pointer is null")
+    );
+
+    let name = DATA_BASE + 0xc00;
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.write(name, &vec![b'A'; 512]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, name).unwrap();
+    emulate_get_environment_variable_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("name exceeds 255 UTF-16 units"))
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.write(name, &[0x00, 0xd8, 0, 0]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, name).unwrap();
+    emulate_get_environment_variable_w(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("GetEnvironmentVariableW name is invalid UTF-16")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    let mut allowed = Vec::new();
+    for unit in "OPENCV_FOR_THREADS_NUM".encode_utf16().chain(std::iter::once(0)) {
+        allowed.extend_from_slice(&unit.to_le_bytes());
+    }
+    engine.write(name, &allowed).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, name).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, 0xdead_beef)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::R8, 2).unwrap();
+    emulate_get_environment_variable_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("output 0xdeadbeef is not writable"))
+    );
+}
+
+#[test]
 fn windows_last_error_is_session_local_and_tracks_missing_environment() {
     const GET_ENVIRONMENT: u64 = STUB_BASE + 0x540;
     const GET_LAST_ERROR: u64 = STUB_BASE + 0x550;

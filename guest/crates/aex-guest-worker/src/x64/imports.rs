@@ -75,6 +75,7 @@ enum LegacyWin64Import {
     QueryPerformanceCounter,
     QueryPerformanceFrequency,
     GetEnvironmentVariableA,
+    GetEnvironmentVariableW,
     WideCharToMultiByte,
     GetLastError,
     SetLastError,
@@ -293,6 +294,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::QueryPerformanceFrequency
         }
         ("kernel32.dll", "GetEnvironmentVariableA") => LegacyWin64Import::GetEnvironmentVariableA,
+        ("kernel32.dll", "GetEnvironmentVariableW") => LegacyWin64Import::GetEnvironmentVariableW,
+        (_, "GetEnvironmentVariableW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "WideCharToMultiByte") => LegacyWin64Import::WideCharToMultiByte,
         (_, "WideCharToMultiByte") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
@@ -980,6 +983,18 @@ fn install_win64_import(
                     "install GetEnvironmentVariableA import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_environment_variable_a(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetEnvironmentVariableW => {
+                uc(
+                    "write GetEnvironmentVariableW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetEnvironmentVariableW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_environment_variable_w(unicorn);
                     }),
                 )?;
             }
@@ -1741,6 +1756,71 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
         terminated.push(0);
         unicorn.mem_write(buffer, &terminated).map_err(|error| {
             format!("GetEnvironmentVariableA output {buffer:#x} is not writable: {error}")
+        })?;
+        Ok(value.len() as u64)
+    })();
+    match result {
+        Ok(returned) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_get_environment_variable_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let name_pointer = read_win64_import_argument(unicorn, 0)?;
+        let buffer = read_win64_import_argument(unicorn, 1)?;
+        let size = read_win64_import_argument(unicorn, 2)? as u32;
+        if name_pointer == 0 {
+            return Err("GetEnvironmentVariableW name pointer is null".into());
+        }
+        let mut units = Vec::new();
+        for index in 0..=MAX_WINDOWS_ENVIRONMENT_NAME_BYTES {
+            let address = name_pointer
+                .checked_add((index as u64) * 2)
+                .ok_or_else(|| "GetEnvironmentVariableW name address overflow".to_string())?;
+            let bytes = unicorn
+                .mem_read_as_vec(address, 2)
+                .map_err(|error| format!("GetEnvironmentVariableW name read failed: {error}"))?;
+            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if unit == 0 {
+                break;
+            }
+            if index == MAX_WINDOWS_ENVIRONMENT_NAME_BYTES {
+                return Err(format!(
+                    "GetEnvironmentVariableW name exceeds {MAX_WINDOWS_ENVIRONMENT_NAME_BYTES} UTF-16 units"
+                ));
+            }
+            units.push(unit);
+        }
+        let name = String::from_utf16(&units)
+            .map_err(|_| "GetEnvironmentVariableW name is invalid UTF-16".to_string())?;
+        let Some(value) = deterministic_guest_environment_value(name.as_bytes()) else {
+            unicorn.get_data_mut().windows_last_error = ERROR_ENVVAR_NOT_FOUND;
+            return Ok(0);
+        };
+        let value: Vec<u16> = value.iter().map(|byte| u16::from(*byte)).collect();
+        let required = u32::try_from(value.len() + 1)
+            .map_err(|_| "GetEnvironmentVariableW value length exceeds DWORD".to_string())?;
+        if size < required {
+            return Ok(u64::from(required));
+        }
+        if buffer == 0 {
+            return Err("GetEnvironmentVariableW output pointer is null".into());
+        }
+        let mut terminated = Vec::with_capacity((value.len() + 1) * 2);
+        for unit in value.iter().copied().chain(std::iter::once(0)) {
+            terminated.extend_from_slice(&unit.to_le_bytes());
+        }
+        unicorn.mem_write(buffer, &terminated).map_err(|error| {
+            format!("GetEnvironmentVariableW output {buffer:#x} is not writable: {error}")
         })?;
         Ok(value.len() as u64)
     })();
