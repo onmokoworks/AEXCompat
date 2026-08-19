@@ -4,12 +4,16 @@
 #include "worker_host_suite_catalog.hpp"
 #include "worker_pf_pixel_format_registry.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_ui_event_execution.hpp"
 #include "worker_world_registry.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <windows.h>
 
@@ -97,6 +101,61 @@ bool verify_pf_adv_app_suite_versions() {
         reinterpret_cast<InfoDrawText3>(slots1[8])(nullptr, nullptr, nullptr) == 0 &&
         reinterpret_cast<InfoDrawText3>(slots1[8])(
             nullptr, over_long.c_str(), nullptr) != 0;
+
+    // Exercise the real suite callback from plug-in-owned threads. The
+    // telemetry count must not lose increments, and its captured string must
+    // always be one complete value from a caller rather than a torn write.
+    constexpr std::size_t kThreads = 12;
+    constexpr std::size_t kCallsPerThread = 200;
+    const auto before = aexcompat::worker_runtime::ui_event_execution::
+        snapshot_info_text_telemetry();
+    std::array<std::string, kThreads> messages;
+    std::atomic<bool> start{false};
+    std::atomic<uint32_t> callback_failures{0};
+    std::atomic<std::size_t> finished{0};
+    std::atomic<uint32_t> snapshot_failures{0};
+    std::vector<std::thread> callers;
+    callers.reserve(kThreads);
+    for (std::size_t index = 0; index < kThreads; ++index) {
+      messages[index] = "concurrent-info-text-" + std::to_string(index);
+      callers.emplace_back([&, index] {
+        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (std::size_t call = 0; call < kCallsPerThread; ++call) {
+          if (reinterpret_cast<InfoDrawText>(slots1[6])(
+                  messages[index].c_str(), nullptr) != 0)
+            callback_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+        finished.fetch_add(1, std::memory_order_release);
+      });
+    }
+    std::thread reporter([&] {
+      while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+      uint32_t previous_calls = before.calls;
+      while (finished.load(std::memory_order_acquire) != kThreads) {
+        const auto snapshot = aexcompat::worker_runtime::ui_event_execution::
+            snapshot_info_text_telemetry();
+        const bool text_is_complete = snapshot.calls == before.calls
+            ? snapshot.last_text == before.last_text
+            : std::find(messages.begin(), messages.end(), snapshot.last_text) !=
+                messages.end();
+        if (snapshot.calls < previous_calls ||
+            snapshot.calls > before.calls + kThreads * kCallsPerThread ||
+            !text_is_complete)
+          snapshot_failures.fetch_add(1, std::memory_order_relaxed);
+        previous_calls = snapshot.calls;
+        std::this_thread::yield();
+      }
+    });
+    start.store(true, std::memory_order_release);
+    for (auto& caller : callers) caller.join();
+    reporter.join();
+    const auto after = aexcompat::worker_runtime::ui_event_execution::
+        snapshot_info_text_telemetry();
+    ok = callback_failures.load(std::memory_order_relaxed) == 0 &&
+        snapshot_failures.load(std::memory_order_relaxed) == 0 &&
+        after.calls == before.calls + kThreads * kCallsPerThread &&
+        std::find(messages.begin(), messages.end(), after.last_text) !=
+            messages.end() && ok;
 
     // The bounds check stops at the first argument with no terminator in
     // reach, and nothing after it is read - not by the check and not by the
