@@ -77,6 +77,7 @@ enum LegacyWin64Import {
     GetFileType,
     CreateFileW,
     CreateThread,
+    NtWriteFile,
     WaitForSingleObject,
     WaitForSingleObjectEx,
     CloseHandle,
@@ -332,6 +333,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "CreateFileW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "CreateThread") => LegacyWin64Import::CreateThread,
         (_, "CreateThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ntdll.dll", "NtWriteFile") => LegacyWin64Import::NtWriteFile,
+        (_, "NtWriteFile") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "WaitForSingleObject") => LegacyWin64Import::WaitForSingleObject,
         ("kernel32.dll", "WaitForSingleObjectEx") => LegacyWin64Import::WaitForSingleObjectEx,
         ("kernel32.dll", "CloseHandle") => LegacyWin64Import::CloseHandle,
@@ -1089,6 +1092,15 @@ fn install_win64_import(
                     "install bounded CreateThread import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_create_thread(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::NtWriteFile => {
+                uc("write NtWriteFile return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install bounded NtWriteFile import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_nt_write_file(unicorn);
                     }),
                 )?;
             }
@@ -4087,6 +4099,131 @@ fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
         FILE_TYPE_UNKNOWN
     };
     let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+}
+
+fn guest_range_has_permission(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    length: u64,
+    permission: Prot,
+) -> Result<bool, String> {
+    if length == 0 {
+        return Ok(true);
+    }
+    let Some(end) = address.checked_add(length - 1) else {
+        return Ok(false);
+    };
+    let regions = unicorn
+        .mem_regions()
+        .map_err(|error| format!("guest memory-map query failed: {error}"))?;
+    let mut cursor = address;
+    while cursor <= end {
+        let Some(region) = regions.iter().find(|region| {
+            region.begin <= cursor
+                && cursor <= region.end
+                && region.perms & permission.0 == permission.0
+        }) else {
+            return Ok(false);
+        };
+        if region.end >= end {
+            return Ok(true);
+        }
+        let Some(next) = region.end.checked_add(1) else {
+            return Ok(false);
+        };
+        cursor = next;
+    }
+    Ok(true)
+}
+
+fn emulate_nt_write_file(unicorn: &mut Unicorn<'_, GuestState>) {
+    const STATUS_SUCCESS: u32 = 0x0000_0000;
+    const STATUS_ACCESS_VIOLATION: u32 = 0xc000_0005;
+    const STATUS_INVALID_HANDLE: u32 = 0xc000_0008;
+    const STATUS_INVALID_PARAMETER: u32 = 0xc000_000d;
+    const IO_STATUS_BLOCK_SIZE: u64 = 16;
+    const MAX_DIAGNOSTIC_WRITE_BYTES: u32 = 1024 * 1024;
+
+    let result = (|| -> Result<u32, String> {
+        let file_handle = read_win64_import_argument(unicorn, 0)?;
+        let event = read_win64_import_argument(unicorn, 1)?;
+        let apc_routine = read_win64_import_argument(unicorn, 2)?;
+        let apc_context = read_win64_import_argument(unicorn, 3)?;
+        let io_status_block = read_win64_import_argument(unicorn, 4)?;
+        let buffer = read_win64_import_argument(unicorn, 5)?;
+        // Length is an ULONG.  The upper half of its Win64 argument register or
+        // stack slot is unspecified and is non-zero in the observed Rust AEXes.
+        let length = read_win64_import_argument(unicorn, 6)? as u32;
+        let byte_offset = read_win64_import_argument(unicorn, 7)?;
+        let key = read_win64_import_argument(unicorn, 8)?;
+
+        if !matches!(
+            file_handle,
+            WINDOWS_STANDARD_OUTPUT_TOKEN | WINDOWS_STANDARD_ERROR_TOKEN
+        ) {
+            return Ok(STATUS_INVALID_HANDLE);
+        }
+        // The synthetic streams are synchronous diagnostic sinks.  They have
+        // no host object capable of signaling events or dispatching APCs, and
+        // do not model seekable offsets or keyed file operations.
+        if event != 0
+            || apc_routine != 0
+            || apc_context != 0
+            || byte_offset != 0
+            || key != 0
+            || length > MAX_DIAGNOSTIC_WRITE_BYTES
+        {
+            return Ok(STATUS_INVALID_PARAMETER);
+        }
+        if io_status_block == 0
+            || !guest_range_has_permission(
+                unicorn,
+                io_status_block,
+                IO_STATUS_BLOCK_SIZE,
+                Prot::WRITE,
+            )?
+        {
+            return Ok(STATUS_ACCESS_VIOLATION);
+        }
+        if length != 0
+            && (buffer == 0
+                || !guest_range_has_permission(
+                    unicorn,
+                    buffer,
+                    u64::from(length),
+                    Prot::READ,
+                )?)
+        {
+            return Ok(STATUS_ACCESS_VIOLATION);
+        }
+
+        // Read only after every pointer and policy check has passed.  This is
+        // bounded above and intentionally discarded: guest diagnostics must
+        // never reach host descriptors, terminals, or files.
+        if length != 0 {
+            unicorn
+                .mem_read_as_vec(buffer, length as usize)
+                .map_err(|error| format!("NtWriteFile payload read failed: {error}"))?;
+        }
+        let mut io_status = [0u8; IO_STATUS_BLOCK_SIZE as usize];
+        io_status[..4].copy_from_slice(&STATUS_SUCCESS.to_le_bytes());
+        io_status[8..].copy_from_slice(&u64::from(length).to_le_bytes());
+        unicorn
+            .mem_write(io_status_block, &io_status)
+            .map_err(|error| format!("NtWriteFile IO_STATUS_BLOCK write failed: {error}"))?;
+        Ok(STATUS_SUCCESS)
+    })();
+
+    let status = match result {
+        Ok(status) => status,
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            STATUS_ACCESS_VIOLATION
+        }
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(status));
 }
 
 fn emulate_create_file_w(unicorn: &mut Unicorn<'_, GuestState>) {

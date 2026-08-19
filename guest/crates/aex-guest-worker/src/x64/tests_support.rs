@@ -5816,6 +5816,150 @@ fn get_file_type_rejects_foreign_handles_without_host_descriptor_access() {
     assert_eq!(second.unicorn.reg_read(RegisterX86::RAX).unwrap(), 3);
 }
 
+fn call_test_nt_write_file(
+    engine: &mut GuestEngine<'static>,
+    stub: u64,
+    arguments: [u64; 9],
+) -> u64 {
+    engine
+        .call_win64_with_timeout(stub, &arguments, TIMEOUT_MICROSECONDS)
+        .unwrap()
+}
+
+#[test]
+fn nt_write_file_is_ntdll_scoped_and_sinks_stdout_and_stderr_synchronously() {
+    const NT_WRITE_FILE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(&mut engine.unicorn, NT_WRITE_FILE, "NTDLL.DLL", "NtWriteFile")
+            .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::NtWriteFile)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "NtWriteFile"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let payload = engine.allocate(5, 1).unwrap();
+    engine.write(payload, b"hello").unwrap();
+    let io_status = engine.allocate(16, 8).unwrap();
+    for handle in [WINDOWS_STANDARD_OUTPUT_TOKEN, WINDOWS_STANDARD_ERROR_TOKEN] {
+        engine.write(io_status, &[0xa5; 16]).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+        assert_eq!(
+            call_test_nt_write_file(
+                &mut engine,
+                NT_WRITE_FILE,
+                [handle, 0, 0, 0, io_status, payload, 0x1_0000_0005, 0, 0],
+            ),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(),
+            [0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+}
+
+#[test]
+fn nt_write_file_accepts_zero_length_null_buffer() {
+    const NT_WRITE_FILE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, NT_WRITE_FILE, "ntdll.dll", "NtWriteFile")
+        .unwrap();
+    let io_status = engine.allocate(16, 8).unwrap();
+    engine.write(io_status, &[0xa5; 16]).unwrap();
+    assert_eq!(
+        call_test_nt_write_file(
+            &mut engine,
+            NT_WRITE_FILE,
+            [WINDOWS_STANDARD_ERROR_TOKEN, 0, 0, 0, io_status, 0, 0, 0, 0],
+        ),
+        0
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(), [0; 16]);
+}
+
+#[test]
+fn nt_write_file_rejects_handles_and_unsupported_modes_atomically() {
+    const NT_WRITE_FILE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, NT_WRITE_FILE, "ntdll.dll", "NtWriteFile")
+        .unwrap();
+    let payload = engine.allocate(1, 1).unwrap();
+    engine.write(payload, b"x").unwrap();
+    let io_status = engine.allocate(16, 8).unwrap();
+    let sentinel = [0x5a; 16];
+    for handle in [WINDOWS_STANDARD_INPUT_TOKEN, 0xdead_beef] {
+        engine.write(io_status, &sentinel).unwrap();
+        assert_eq!(
+            call_test_nt_write_file(
+                &mut engine,
+                NT_WRITE_FILE,
+                [handle, 0, 0, 0, io_status, payload, 1, 0, 0],
+            ),
+            0xc000_0008
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(), sentinel);
+    }
+    for arguments in [
+        [WINDOWS_STANDARD_ERROR_TOKEN, 1, 0, 0, io_status, payload, 1, 0, 0],
+        [WINDOWS_STANDARD_ERROR_TOKEN, 0, 1, 0, io_status, payload, 1, 0, 0],
+        [WINDOWS_STANDARD_ERROR_TOKEN, 0, 0, 1, io_status, payload, 1, 0, 0],
+        [WINDOWS_STANDARD_ERROR_TOKEN, 0, 0, 0, io_status, payload, 1, 1, 0],
+        [WINDOWS_STANDARD_ERROR_TOKEN, 0, 0, 0, io_status, payload, 1, 0, 1],
+        [WINDOWS_STANDARD_ERROR_TOKEN, 0, 0, 0, io_status, payload, 1024 * 1024 + 1, 0, 0],
+    ] {
+        engine.write(io_status, &sentinel).unwrap();
+        assert_eq!(
+            call_test_nt_write_file(&mut engine, NT_WRITE_FILE, arguments),
+            0xc000_000d
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(), sentinel);
+    }
+}
+
+#[test]
+fn nt_write_file_preflights_payload_and_io_status_ranges_atomically() {
+    const NT_WRITE_FILE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, NT_WRITE_FILE, "ntdll.dll", "NtWriteFile")
+        .unwrap();
+    let payload = engine.allocate(8, 1).unwrap();
+    engine.write(payload, b"payload!").unwrap();
+    let io_status = engine.allocate(16, 8).unwrap();
+    let sentinel = [0x7c; 16];
+    for bad_buffer in [0, 0xdead_beef, DATA_BASE + PAGE_SIZE - 4, u64::MAX] {
+        engine.write(io_status, &sentinel).unwrap();
+        assert_eq!(
+            call_test_nt_write_file(
+                &mut engine,
+                NT_WRITE_FILE,
+                [WINDOWS_STANDARD_ERROR_TOKEN, 0, 0, 0, io_status, bad_buffer, 8, 0, 0],
+            ),
+            0xc000_0005
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(), sentinel);
+    }
+    for bad_output in [
+        0,
+        0xdead_beef,
+        DATA_BASE + PAGE_SIZE - 8,
+        u64::MAX - 7,
+    ] {
+        assert_eq!(
+            call_test_nt_write_file(
+                &mut engine,
+                NT_WRITE_FILE,
+                [WINDOWS_STANDARD_ERROR_TOKEN, 0, 0, 0, bad_output, payload, 8, 0, 0],
+            ),
+            0xc000_0005
+        );
+    }
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
 fn write_test_wide_path(engine: &mut GuestEngine<'static>, path: &str) -> u64 {
     let units = path.encode_utf16().chain(std::iter::once(0));
     let bytes = units
