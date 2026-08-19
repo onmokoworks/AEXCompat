@@ -4767,11 +4767,20 @@ fn tls_lifecycle_is_bounded_stateful_and_library_scoped() {
     assert_eq!(engine.call_win64(FREE, [index, 0, 0, 0, 0, 0]).unwrap(), 1);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x9abc);
     assert_eq!(engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
     assert_eq!(engine.call_win64(SET, [index, 1, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
     assert_eq!(engine.call_win64(FREE, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
     assert!(engine.unicorn.get_data().callback_error.is_none());
 }
 
@@ -4786,7 +4795,10 @@ fn tls_allocation_reuses_indices_enforces_capacity_and_is_session_local() {
         );
     }
     emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsAlloc);
-    assert_eq!(first.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::from(u32::MAX));
+    assert_eq!(
+        first.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        u64::from(u32::MAX)
+    );
     assert_eq!(first.unicorn.get_data().windows_last_error, 8);
 
     first.unicorn.reg_write(RegisterX86::RCX, 5).unwrap();

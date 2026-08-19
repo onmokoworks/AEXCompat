@@ -3105,10 +3105,7 @@ fn emulate_tls(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Impo
             if let Some(index) = (0..MAX_WINDOWS_TLS_SLOTS)
                 .find(|index| !unicorn.get_data().windows_tls_slots.contains_key(index))
             {
-                unicorn
-                    .get_data_mut()
-                    .windows_tls_slots
-                    .insert(index, 0);
+                unicorn.get_data_mut().windows_tls_slots.insert(index, 0);
                 u64::from(index)
             } else {
                 unicorn.get_data_mut().windows_last_error = ERROR_NOT_ENOUGH_MEMORY;
