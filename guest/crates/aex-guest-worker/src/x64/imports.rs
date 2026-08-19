@@ -1139,7 +1139,13 @@ fn install_win64_import(
                 uc("install current-thread pseudo handle", unicorn.mem_write(stub, &deterministic_u64_stub(u64::MAX - 1)))?;
             }
             LegacyWin64Import::SwitchToThread => {
-                uc("install deterministic SwitchToThread", unicorn.mem_write(stub, &deterministic_i32_stub(0)))?;
+                uc("write cooperative SwitchToThread return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install cooperative SwitchToThread",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_switch_to_thread(unicorn);
+                    }),
+                )?;
             }
             LegacyWin64Import::ResumeThread => {
                 uc("write ResumeThread callback tail jump", unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]))?;
@@ -4757,6 +4763,7 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
 }
 
 fn fail_windows_thread_callback(unicorn: &mut Unicorn<'_, GuestState>, error: String) {
+    unicorn.get_data_mut().scheduler_parent_context = None;
     if let Some(pending) = unicorn.get_data_mut().pending_windows_thread.take() {
         let stack = unicorn
             .get_data()
@@ -4925,7 +4932,20 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
             .map_err(|error| format!("CreateThread return target write failed: {error}"))?;
         unicorn
             .reg_write(RegisterX86::RAX, pending.completion_return)
-            .map_err(|error| format!("CreateThread return value write failed: {error}"))
+            .map_err(|error| format!("CreateThread return value write failed: {error}"))?;
+        if unicorn.get_data().scheduler_resume_active {
+            unicorn.get_data_mut().scheduler_resume_active = false;
+            unicorn.get_data_mut().scheduler_child_completed = true;
+            unicorn
+                .reg_write(RegisterX86::RIP, pending.return_address)
+                .map_err(|error| format!("CreateThread completed scheduler target failed: {error}"))?;
+            unicorn
+                .emu_stop()
+                .map_err(|error| format!("CreateThread scheduler stop failed: {error}"))?;
+        } else {
+            unicorn.get_data_mut().scheduler_parent_context = None;
+        }
+        Ok(())
     })();
     if let Err(error) = result {
         fail_windows_thread_callback(unicorn, error);
@@ -4942,6 +4962,18 @@ fn dispatch_windows_thread(
     if unicorn.get_data().pending_windows_thread.is_some() {
         return Err("nested CreateThread execution is unsupported".into());
     }
+    let mut caller_context = unicorn
+        .context_init()
+        .map_err(|error| format!("CreateThread caller context save failed: {error}"))?;
+    caller_context
+        .reg_write(RegisterX86::RIP, return_address)
+        .map_err(|error| format!("CreateThread caller context target failed: {error}"))?;
+    caller_context
+        .reg_write(RegisterX86::RSP, continuation_rsp)
+        .map_err(|error| format!("CreateThread caller context stack failed: {error}"))?;
+    caller_context
+        .reg_write(RegisterX86::RAX, completion_return)
+        .map_err(|error| format!("CreateThread caller context result failed: {error}"))?;
     let (id, start, parameter, stack_base, stack_size) = unicorn
         .get_data()
         .windows_threads
@@ -4986,6 +5018,7 @@ fn dispatch_windows_thread(
         fls_processed: BTreeSet::new(),
     };
     unicorn.get_data_mut().pending_windows_thread = Some(pending);
+    unicorn.get_data_mut().scheduler_parent_context = Some(caller_context);
     for value in unicorn.get_data_mut().windows_tls_slots.values_mut() {
         *value = 0;
     }
@@ -5016,10 +5049,37 @@ fn dispatch_windows_thread(
     Ok(())
 }
 
+fn emulate_switch_to_thread(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("SwitchToThread stack read failed: {error}"))?;
+        let return_address = read_vcomp_u64(unicorn, rsp)?;
+        unicorn
+            .reg_write(RegisterX86::RSP, rsp + 8)
+            .map_err(|error| format!("SwitchToThread stack advance failed: {error}"))?;
+        unicorn
+            .reg_write(RegisterX86::RIP, return_address)
+            .map_err(|error| format!("SwitchToThread return target failed: {error}"))?;
+        let yielded = unicorn.get_data().pending_windows_thread.is_some()
+            || unicorn.get_data().scheduler_ready_hint;
+        unicorn
+            .reg_write(RegisterX86::RAX, u64::from(yielded))
+            .map_err(|error| format!("SwitchToThread return value failed: {error}"))?;
+        unicorn.get_data_mut().scheduler_yield_reason = Some(SchedulerYieldReason::Voluntary);
+        unicorn.get_data_mut().scheduler_resume_rip = return_address;
+        unicorn
+            .emu_stop()
+            .map_err(|error| format!("SwitchToThread scheduler stop failed: {error}"))
+    })();
+    if let Err(error) = result {
+        fail_windows_thread_callback(unicorn, error);
+    }
+}
+
 fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
     const CREATE_SUSPENDED: u32 = 0x0000_0004;
     const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
-    const MAX_WINDOWS_THREADS: usize = 32;
     const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
     let result = (|| -> Result<(), String> {
         let security_attributes = read_win64_import_argument(unicorn, 0)?;
