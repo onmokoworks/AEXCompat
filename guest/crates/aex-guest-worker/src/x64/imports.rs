@@ -72,6 +72,7 @@ enum LegacyWin64Import {
     GetSystemTimeAsFileTime,
     GetSystemInfo,
     GetStartupInfoW,
+    GetStdHandle,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -301,6 +302,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetStartupInfoW") => LegacyWin64Import::GetStartupInfoW,
         (_, "GetStartupInfoW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetStdHandle") => LegacyWin64Import::GetStdHandle,
+        (_, "GetStdHandle") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -987,6 +990,15 @@ fn install_win64_import(
                     "install GetStartupInfoW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_startup_info_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetStdHandle => {
+                uc("write GetStdHandle return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install GetStdHandle import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_std_handle(unicorn);
                     }),
                 )?;
             }
@@ -2775,6 +2787,24 @@ fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         let _ = unicorn.emu_stop();
     }
+}
+
+fn emulate_get_std_handle(unicorn: &mut Unicorn<'_, GuestState>) {
+    const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+    const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+    const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
+    const INVALID_HANDLE_VALUE: u64 = u64::MAX;
+    let selector = read_win64_import_argument(unicorn, 0).unwrap_or_default() as u32;
+    let returned = match selector {
+        STD_INPUT_HANDLE => WINDOWS_STANDARD_INPUT_TOKEN,
+        STD_OUTPUT_HANDLE => WINDOWS_STANDARD_OUTPUT_TOKEN,
+        STD_ERROR_HANDLE => WINDOWS_STANDARD_ERROR_TOKEN,
+        _ => {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+            INVALID_HANDLE_VALUE
+        }
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, returned);
 }
 
 fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {
