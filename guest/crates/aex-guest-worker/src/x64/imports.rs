@@ -91,6 +91,7 @@ enum LegacyWin64Import {
     GetACP,
     GetCPInfo,
     IsDebuggerPresent,
+    OutputDebugStringA,
     GetCurrentThreadId,
     GetCurrentProcessId,
     QueryPerformanceCounter,
@@ -358,6 +359,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetCPInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "OutputDebugStringA") => LegacyWin64Import::OutputDebugStringA,
+        (_, "OutputDebugStringA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
         ("kernel32.dll", "GetCurrentProcessId") => LegacyWin64Import::GetCurrentProcessId,
         ("kernel32.dll", "QueryPerformanceCounter") => LegacyWin64Import::QueryPerformanceCounter,
@@ -1572,6 +1575,18 @@ fn install_win64_import(
                 uc(
                     "install deterministic GetProcessHeap import",
                     unicorn.mem_write(stub, &deterministic_u64_stub(PROCESS_HEAP_HANDLE)),
+                )?;
+            }
+            LegacyWin64Import::OutputDebugStringA => {
+                uc(
+                    "write OutputDebugStringA return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install OutputDebugStringA import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_output_debug_string_a(unicorn);
+                    }),
                 )?;
             }
             LegacyWin64Import::HeapAlloc
@@ -4169,6 +4184,68 @@ fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
         FILE_TYPE_UNKNOWN
     };
     let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+}
+
+fn emulate_output_debug_string_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        // With no debugger attached, Windows exposes no observable output to
+        // the process.  Keep NULL and the empty string as harmless no-ops, and
+        // validate every non-empty guest string without forwarding its bytes
+        // to a host debugger, console, log, or file.
+        if pointer == 0 {
+            return Ok(());
+        }
+
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|error| format!("OutputDebugStringA memory-map query failed: {error}"))?;
+        let mut cursor = pointer;
+        let mut remaining = MAX_CRT_STRING_BYTES
+            .checked_add(1)
+            .expect("debug string scan bound fits u64");
+        while remaining != 0 {
+            let region = regions
+                .iter()
+                .find(|region| {
+                    region.begin <= cursor
+                        && cursor <= region.end
+                        && region.perms & Prot::READ.0 == Prot::READ.0
+                })
+                .ok_or_else(|| {
+                    format!("OutputDebugStringA string at {cursor:#x} is unreadable")
+                })?;
+            let available = region
+                .end
+                .checked_sub(cursor)
+                .and_then(|length| length.checked_add(1))
+                .ok_or_else(|| "OutputDebugStringA readable range overflow".to_string())?;
+            let chunk_length = available.min(remaining);
+            let chunk_length_usize = usize::try_from(chunk_length)
+                .map_err(|_| "OutputDebugStringA chunk length does not fit usize".to_string())?;
+            let chunk = unicorn
+                .mem_read_as_vec(cursor, chunk_length_usize)
+                .map_err(|error| {
+                    format!("OutputDebugStringA string at {cursor:#x} is unreadable: {error}")
+                })?;
+            if chunk.contains(&0) {
+                return Ok(());
+            }
+            remaining -= chunk_length;
+            cursor = cursor
+                .checked_add(chunk_length)
+                .ok_or_else(|| "OutputDebugStringA string address overflow".to_string())?;
+        }
+        Err(format!(
+            "OutputDebugStringA string exceeds {MAX_CRT_STRING_BYTES} bytes without a terminator"
+        ))
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
 }
 
 fn guest_range_has_permission(
