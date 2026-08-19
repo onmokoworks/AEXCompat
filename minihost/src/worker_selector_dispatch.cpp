@@ -368,6 +368,16 @@ std::size_t capture_unwind_frames(const CONTEXT& fault_context, uintptr_t* out,
           *out_stop = SelectorUnwindStop::return_slot_unreadable;
           break;
         }
+        // A null here is not the thread's frame chain ending: it is a null
+        // read out of the one slot this branch had already decided it could
+        // not trust to unwind-table quality. Letting it reach the shared
+        // null-Rip test below would report end_of_chain, the single stop
+        // reason that licenses reading the outermost frame as the top of the
+        // stack, on the evidence that a stack qword happened to be zero.
+        if (return_address == 0) {
+          *out_stop = SelectorUnwindStop::chain_lost;
+          break;
+        }
         walk.Rip = return_address;
         walk.Rsp += sizeof(return_address);
         next_from_return_slot = true;
@@ -378,11 +388,12 @@ std::size_t capture_unwind_frames(const CONTEXT& fault_context, uintptr_t* out,
                          function_entry, &walk, &handler_data,
                          &establisher_frame, nullptr);
       }
-      // A null instruction pointer is where a Windows thread's frame chain
-      // ends. A stack that did not move toward its base is a different
-      // answer - the chain was lost, and the outermost frame recorded is not
-      // the top of the stack - so the two do not share a stop reason even
-      // though both have to end the walk before it loops.
+      // A null instruction pointer out of RtlVirtualUnwind is where a Windows
+      // thread's frame chain ends (the return slot's own null is handled
+      // above, and never arrives here). A stack that did not move toward its
+      // base is a different answer - the chain was lost, and the outermost
+      // frame recorded is not the top of the stack - so the two do not share a
+      // stop reason even though both have to end the walk before it loops.
       if (walk.Rip == 0) {
         *out_stop = SelectorUnwindStop::end_of_chain;
         break;

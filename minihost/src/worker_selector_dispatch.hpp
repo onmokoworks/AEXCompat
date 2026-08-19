@@ -157,17 +157,19 @@ enum class SelectorUnwindStop : uint8_t {
   /// Reached the outermost frame: the unwind produced a null instruction
   /// pointer, which is where a Windows thread's frame chain ends.
   end_of_chain,
-  /// The unwind stopped moving toward the stack base, so the chain was lost
-  /// part-way. A malformed plug-in's unwind data lands here, and the outermost
-  /// frame printed is NOT the top of the stack - which is why this does not
-  /// share a name with end_of_chain.
+  /// The walk stopped making table-backed progress, so the chain was lost
+  /// part-way: either the unwind stopped moving toward the stack base, or the
+  /// fault site's return slot held null. A malformed plug-in's unwind data and
+  /// a smashed return slot both land here, and the outermost frame printed is
+  /// NOT the top of the stack - which is why this does not share a name with
+  /// end_of_chain.
   chain_lost,
   /// Stopped at kMaxSelectorUnwindFrames with frames left above.
   frame_cap,
   /// A frame behind the fault site had no unwind entry, so the chain was lost.
   no_unwind_entry,
   /// The fault site had no unwind entry and the return address it pushed could
-  /// not be read back.
+  /// not be read back at all (a null that reads back fine is chain_lost).
   return_slot_unreadable,
   /// Reading the stack faulted; the frames recorded before that still stand.
   walk_faulted,

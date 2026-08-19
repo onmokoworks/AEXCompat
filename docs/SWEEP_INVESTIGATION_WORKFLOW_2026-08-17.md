@@ -88,12 +88,14 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
       thread の frame chain の端。
     - `frame_cap`: 12 frame の上限で切れた。**plug-in の奥で fault したときは
       これが普通**で、外側はまだ続いている。
-    - `chain_lost`: unwind が stack base の方向に進まなくなった (壊れた stack、
-      壊れた unwind data)。外側の frame は頂上ではない。
+    - `chain_lost`: table 由来の前進が止まった — unwind が stack base の方向に
+      進まなくなった (壊れた stack / 壊れた unwind data)、または fault site の
+      戻り番地スロットが null だった。外側の frame は頂上ではない。
     - `no_unwind_entry`: fault site 以外の frame に unwind entry が無く、
       そこで chain が切れた。
     - `return_slot_unreadable`: fault site に unwind entry が無く、push された
-      戻り番地も読めなかった (frame 0 だけ)。
+      戻り番地がそもそも読めなかった (frame 0 だけ。読めて中身が null なら
+      `chain_lost`)。
     - `walk_faulted`: 走査中に stack が読めなくなった。それまでの frame は有効。
     - `low_stack`: stack limit に近すぎて走査していない。
   - worker は `AEXCOMPAT_EXTENDED_DIAG` なしでもこの行を出すが、sweep の record で
