@@ -1970,8 +1970,7 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
             || file_handle != 0
             || flags & !VALID_FLAGS != 0
             || flags & NON_EXECUTABLE_RESOURCE_FLAGS != 0
-            || flags & LOAD_WITH_ALTERED_SEARCH_PATH != 0
-                && flags & LOAD_LIBRARY_SEARCH_FLAGS != 0
+            || flags & LOAD_WITH_ALTERED_SEARCH_PATH != 0 && flags & LOAD_LIBRARY_SEARCH_FLAGS != 0
         {
             unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
             return Ok(None);
@@ -2020,7 +2019,11 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
             return Ok(None);
         }
-        let Some(module) = path.rsplit(['\\', '/']).next().filter(|name| !name.is_empty()) else {
+        let Some(module) = path
+            .rsplit(['\\', '/'])
+            .next()
+            .filter(|name| !name.is_empty())
+        else {
             unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
             return Ok(None);
         };
