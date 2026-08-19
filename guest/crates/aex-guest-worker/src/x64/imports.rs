@@ -134,6 +134,7 @@ enum LegacyWin64Import {
     DeleteCriticalSection,
     GetModuleHandleW,
     GetModuleHandleExA,
+    GetModuleHandleExW,
     GetModuleFileNameW,
     GetProcAddress,
     InitializeSListHead,
@@ -433,6 +434,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
         ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
         ("kernel32.dll", "GetModuleHandleExA") => LegacyWin64Import::GetModuleHandleExA,
+        ("kernel32.dll", "GetModuleHandleExW") => LegacyWin64Import::GetModuleHandleExW,
         ("kernel32.dll", "GetModuleFileNameW") => LegacyWin64Import::GetModuleFileNameW,
         ("kernel32.dll", "GetProcAddress") => LegacyWin64Import::GetProcAddress,
         (
@@ -1557,6 +1559,18 @@ fn install_win64_import(
                     "install GetModuleHandleExA import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_module_handle_ex_a(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetModuleHandleExW => {
+                uc(
+                    "write GetModuleHandleExW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetModuleHandleExW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_module_handle_ex_w(unicorn);
                     }),
                 )?;
             }
@@ -3692,6 +3706,85 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
     // Guest images and synthetic system modules live for the worker lifetime,
     // so default, PIN, and UNCHANGED_REFCOUNT all preserve the same stable
     // handle while retaining their documented lookup behavior.
+    let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+}
+
+fn emulate_get_module_handle_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    const PIN: u32 = 0x1;
+    const UNCHANGED_REFCOUNT: u32 = 0x2;
+    const FROM_ADDRESS: u32 = 0x4;
+    const VALID_FLAGS: u32 = PIN | UNCHANGED_REFCOUNT | FROM_ADDRESS;
+
+    let flags = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
+    let name_or_address = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    };
+
+    if flags & !VALID_FLAGS != 0
+        || flags & PIN != 0 && flags & UNCHANGED_REFCOUNT != 0
+        || output == 0
+    {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false) {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+
+    let module = if flags & FROM_ADDRESS != 0 {
+        unicorn
+            .get_data()
+            .image_region
+            .filter(|(start, end)| (*start..*end).contains(&name_or_address))
+            .map(|(start, _)| start)
+    } else if name_or_address == 0 {
+        unicorn.get_data().image_region.map(|(start, _)| start)
+    } else {
+        let mut units = Vec::new();
+        let mut terminated = false;
+        for index in 0..128u64 {
+            let Some(address) = name_or_address.checked_add(index.saturating_mul(2)) else {
+                break;
+            };
+            if !guest_range_has_permission(unicorn, address, 2, Prot::READ).unwrap_or(false) {
+                break;
+            }
+            let Ok(bytes) = unicorn.mem_read_as_vec(address, 2) else {
+                break;
+            };
+            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if unit == 0 {
+                terminated = true;
+                break;
+            }
+            units.push(unit);
+        }
+        if !terminated {
+            None
+        } else if String::from_utf16(&units)
+            .is_ok_and(|name| name.eq_ignore_ascii_case("kernel32.dll"))
+        {
+            Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+        } else {
+            None
+        }
+    };
+
+    let Some(module) = module else {
+        fail(unicorn, ERROR_MOD_NOT_FOUND);
+        return;
+    };
+    if unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    // Both modeled modules have worker-lifetime storage. The default lookup's
+    // increment, PIN, and UNCHANGED_REFCOUNT therefore differ only in lifetime
+    // policy, not in the stable handle observable by this guest.
     let _ = unicorn.reg_write(RegisterX86::RAX, 1);
 }
 
