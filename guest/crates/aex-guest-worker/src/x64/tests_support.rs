@@ -4073,7 +4073,10 @@ fn get_system_info_writes_the_deterministic_win64_layout() {
     assert_eq!(u16::from_le_bytes(info[0..2].try_into().unwrap()), 9);
     assert_eq!(u16::from_le_bytes(info[2..4].try_into().unwrap()), 0);
     assert_eq!(u32::from_le_bytes(info[4..8].try_into().unwrap()), 4096);
-    assert_eq!(u64::from_le_bytes(info[8..16].try_into().unwrap()), 0x1_0000);
+    assert_eq!(
+        u64::from_le_bytes(info[8..16].try_into().unwrap()),
+        0x1_0000
+    );
     assert_eq!(
         u64::from_le_bytes(info[16..24].try_into().unwrap()),
         0x0000_7fff_fffe_ffff
