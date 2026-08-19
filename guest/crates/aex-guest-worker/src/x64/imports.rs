@@ -87,6 +87,7 @@ enum LegacyWin64Import {
     GetEnvironmentVariableA,
     GetEnvironmentVariableW,
     WideCharToMultiByte,
+    MultiByteToWideChar,
     GetLastError,
     SetLastError,
     SetThreadErrorMode,
@@ -335,6 +336,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetEnvironmentVariableW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "WideCharToMultiByte") => LegacyWin64Import::WideCharToMultiByte,
         (_, "WideCharToMultiByte") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "MultiByteToWideChar") => LegacyWin64Import::MultiByteToWideChar,
+        (_, "MultiByteToWideChar") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
         ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
         ("kernel32.dll", "SetThreadErrorMode") => LegacyWin64Import::SetThreadErrorMode,
@@ -1147,6 +1150,18 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::MultiByteToWideChar => {
+                uc(
+                    "write MultiByteToWideChar return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install MultiByteToWideChar import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_multi_byte_to_wide_char(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::GetLastError | LegacyWin64Import::SetLastError => {
                 uc(
                     "write last-error import return",
@@ -1873,6 +1888,172 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         unicorn.mem_write(destination, &bytes).map_err(|error| {
             format!("WideCharToMultiByte output {destination:#x} is not writable: {error}")
+        })?;
+        Ok((u64::from(required), None))
+    })();
+
+    match result {
+        Ok((returned, error)) => {
+            if let Some(error) = error {
+                unicorn.get_data_mut().windows_last_error = error;
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
+    use unicode_normalization::UnicodeNormalization;
+    const CP_ACP: u32 = 0;
+    const CP_SHIFT_JIS: u32 = 932;
+    const CP_UTF8: u32 = 65_001;
+    const MB_PRECOMPOSED: u32 = 0x01;
+    const MB_COMPOSITE: u32 = 0x02;
+    const MB_USEGLYPHCHARS: u32 = 0x04;
+    const MB_ERR_INVALID_CHARS: u32 = 0x08;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    const ERROR_NO_UNICODE_TRANSLATION: u32 = 1113;
+
+    let result = (|| -> Result<(u64, Option<u32>), String> {
+        let code_page = read_win64_import_argument(unicorn, 0)? as u32;
+        let flags = read_win64_import_argument(unicorn, 1)? as u32;
+        let source = read_win64_import_argument(unicorn, 2)?;
+        let source_length = read_win64_import_argument(unicorn, 3)? as u32 as i32;
+        let destination = read_win64_import_argument(unicorn, 4)?;
+        let destination_length = read_win64_import_argument(unicorn, 5)? as u32 as i32;
+
+        let valid_flags = if code_page == CP_UTF8 {
+            flags == 0 || flags == MB_ERR_INVALID_CHARS
+        } else {
+            flags & !(MB_PRECOMPOSED | MB_COMPOSITE | MB_USEGLYPHCHARS | MB_ERR_INVALID_CHARS)
+                == 0
+                && flags & (MB_PRECOMPOSED | MB_COMPOSITE)
+                    != (MB_PRECOMPOSED | MB_COMPOSITE)
+        };
+        if !matches!(code_page, CP_ACP | CP_SHIFT_JIS | CP_UTF8)
+            || !valid_flags
+            || source == 0
+            || source_length == 0
+            || source_length < -1
+            || destination_length < 0
+            || (destination_length > 0 && destination == 0)
+            || (destination_length > 0 && destination == source)
+        {
+            return Ok((0, Some(ERROR_INVALID_PARAMETER)));
+        }
+
+        let include_terminator = source_length == -1;
+        let bytes = if include_terminator {
+            let mut bytes = Vec::new();
+            for index in 0..=MAX_CRT_STRING_BYTES {
+                let address = source
+                    .checked_add(index)
+                    .ok_or_else(|| "MultiByteToWideChar source address overflow".to_string())?;
+                let byte = unicorn.mem_read_as_vec(address, 1).map_err(|error| {
+                    format!("MultiByteToWideChar source read failed: {error}")
+                })?[0];
+                if byte == 0 {
+                    break;
+                }
+                if index == MAX_CRT_STRING_BYTES {
+                    return Err("MultiByteToWideChar source is unterminated".into());
+                }
+                bytes.push(byte);
+            }
+            bytes
+        } else {
+            let length = usize::try_from(source_length)
+                .ok()
+                .filter(|length| *length as u64 <= MAX_CRT_STRING_BYTES)
+                .ok_or_else(|| "MultiByteToWideChar source is too large".to_string())?;
+            unicorn.mem_read_as_vec(source, length).map_err(|error| {
+                format!("MultiByteToWideChar source read failed: {error}")
+            })?
+        };
+
+        let (unicode, malformed) = if code_page == CP_UTF8 {
+            match std::str::from_utf8(&bytes) {
+                Ok(text) => (text.to_owned(), false),
+                Err(_) if flags & MB_ERR_INVALID_CHARS != 0 => {
+                    return Ok((0, Some(ERROR_NO_UNICODE_TRANSLATION)));
+                }
+                Err(_) => (String::from_utf8_lossy(&bytes).into_owned(), true),
+            }
+        } else {
+            let (decoded, malformed) = encoding_rs::SHIFT_JIS.decode_without_bom_handling(&bytes);
+            if malformed && flags & MB_ERR_INVALID_CHARS != 0 {
+                return Ok((0, Some(ERROR_NO_UNICODE_TRANSLATION)));
+            }
+            (decoded.into_owned(), malformed)
+        };
+        // With MB_ERR_INVALID_CHARS clear, Windows replaces malformed input.
+        // `encoding_rs` and `from_utf8_lossy` deterministically use U+FFFD.
+        let _ = malformed;
+        let mut units = if flags & MB_COMPOSITE != 0 {
+            unicode.nfd().collect::<String>().encode_utf16().collect::<Vec<_>>()
+        } else {
+            unicode.encode_utf16().collect::<Vec<_>>()
+        };
+        if include_terminator {
+            units.push(0);
+        }
+        let required = u32::try_from(units.len())
+            .map_err(|_| "MultiByteToWideChar output length exceeds DWORD".to_string())?;
+        if destination_length == 0 {
+            return Ok((u64::from(required), None));
+        }
+        if destination_length < required as i32 {
+            return Ok((0, Some(ERROR_INSUFFICIENT_BUFFER)));
+        }
+
+        let output_size = units
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| "MultiByteToWideChar output byte length overflows".to_string())?;
+        if output_size != 0 {
+            let output_end = destination
+                .checked_add(output_size as u64 - 1)
+                .ok_or_else(|| "MultiByteToWideChar output range overflows".to_string())?;
+            let regions = unicorn.mem_regions().map_err(|error| {
+                format!("MultiByteToWideChar memory-map query failed: {error}")
+            })?;
+            let mut cursor = destination;
+            while cursor <= output_end {
+                let region = regions
+                    .iter()
+                    .find(|region| {
+                        region.begin <= cursor
+                            && cursor <= region.end
+                            && region.perms & Prot::WRITE.0 != 0
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "MultiByteToWideChar output {destination:#x}..={output_end:#x} is not fully writable"
+                        )
+                    })?;
+                if region.end >= output_end {
+                    break;
+                }
+                cursor = region
+                    .end
+                    .checked_add(1)
+                    .ok_or_else(|| "MultiByteToWideChar writable region overflows".to_string())?;
+            }
+        }
+        let output = units
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        unicorn.mem_write(destination, &output).map_err(|error| {
+            format!("MultiByteToWideChar output {destination:#x} is not writable: {error}")
         })?;
         Ok((u64::from(required), None))
     })();

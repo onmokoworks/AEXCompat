@@ -3407,6 +3407,185 @@ fn wide_char_to_multi_byte_substitutes_default_and_rejects_negative_output_size(
 }
 
 #[test]
+fn multi_byte_to_wide_char_converts_cp932_and_utf8_with_win32_lengths() {
+    const CONVERT: u64 = STUB_BASE + 0x4f8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            CONVERT,
+            "KERNEL32.DLL",
+            "MultiByteToWideChar",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::MultiByteToWideChar)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "MultiByteToWideChar"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let source = DATA_BASE + 0xd40;
+    let output = DATA_BASE + 0xd80;
+    engine.write(source, &[b'A', 0x93, 0xfa, 0x96, 0x7b, 0]).unwrap();
+    engine.write(output, &[0xaa; 20]).unwrap();
+
+    let required = engine
+        .call_win64(CONVERT, [0, 0, source, u32::MAX as u64, 0, 0])
+        .unwrap();
+    assert_eq!(required, 4);
+    engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [932, 0, source, u32::MAX as u64, output, required])
+            .unwrap(),
+        required
+    );
+    let expected = "A日本"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), expected);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+
+    engine.write(source, "A😀Z".as_bytes()).unwrap();
+    engine.write(output, &[0xaa; 20]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [65_001, 0x08, source, 6, output, 8])
+            .unwrap(),
+        4
+    );
+    let expected = "A😀Z"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), expected);
+}
+
+#[test]
+fn multi_byte_to_wide_char_reports_validation_and_malformed_input_failures() {
+    const CONVERT: u64 = STUB_BASE + 0x4f8;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "MultiByteToWideChar",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xdc0;
+    let output = DATA_BASE + 0xde0;
+    engine.write(source, &[0xff, 0]).unwrap();
+    engine.write(output, &[0xaa; 8]).unwrap();
+
+    assert_eq!(
+        engine.call_win64(CONVERT, [65_001, 0x08, source, 1, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1113);
+    assert_eq!(
+        engine.call_win64(CONVERT, [65_001, 0, source, 1, output, 2]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        0xfffdu16.to_le_bytes()
+    );
+
+    engine.write(source, &[0x81]).unwrap();
+    assert_eq!(
+        engine.call_win64(CONVERT, [932, 0x08, source, 1, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1113);
+    assert_eq!(
+        engine.call_win64(CONVERT, [932, 0, source, 1, output, 2]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        0xfffdu16.to_le_bytes()
+    );
+    engine.write(source, &[0x82, 0xa0]).unwrap();
+    assert_eq!(
+        engine.call_win64(CONVERT, [932, 1, source, 2, output, 1]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        0x3042u16.to_le_bytes()
+    );
+    engine.write(source, &[0x82, 0xaa, 0x07]).unwrap();
+    assert_eq!(
+        engine.call_win64(CONVERT, [932, 2, source, 2, output, 2]).unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x4b, 0x30, 0x99, 0x30]
+    );
+    // CP932 is an ANSI code page and has no OEM glyph table, so
+    // MB_USEGLYPHCHARS leaves its C0 control mapping unchanged.
+    assert_eq!(
+        engine.call_win64(CONVERT, [932, 4, source + 2, 1, output, 1]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        0x0007u16.to_le_bytes()
+    );
+
+    for arguments in [
+        [1_250, 0, source, 1, 0, 0],
+        [932, 3, source, 1, 0, 0],
+        [65_001, 1, source, 1, 0, 0],
+        [932, 0, 0, 1, 0, 0],
+        [932, 0, source, 0, 0, 0],
+        [932, 0, source, u32::MAX as u64 - 1, 0, 0],
+        [932, 0, source, 1, output, u32::MAX as u64],
+        [932, 0, source, 1, 0, 1],
+        [932, 0, source, 1, source, 1],
+    ] {
+        assert_eq!(engine.call_win64(CONVERT, arguments).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+    engine.write(source, b"AB").unwrap();
+    engine.write(output, &[0xaa; 8]).unwrap();
+    assert_eq!(
+        engine.call_win64(CONVERT, [932, 0, source, 2, output, 1]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 122);
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), [0xaa; 8]);
+}
+
+#[test]
+fn multi_byte_to_wide_char_preflights_the_entire_output_before_writing() {
+    const CONVERT: u64 = STUB_BASE + 0x4f8;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "MultiByteToWideChar",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xe20;
+    let crossing = DATA_BASE + PAGE_SIZE - 2;
+    engine.write(source, b"AB").unwrap();
+    engine.write(crossing, &[0x5a; 2]).unwrap();
+    let error = engine
+        .call_win64(CONVERT, [932, 0, source, 2, crossing, 2])
+        .unwrap_err();
+    assert!(error.to_string().contains("not fully writable"), "{error}");
+    assert_eq!(engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(), [0x5a; 2]);
+}
+
+#[test]
 fn get_environment_variable_a_rejects_invalid_names_and_outputs() {
     let mut engine = test_engine(&[0xc3]);
     engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
