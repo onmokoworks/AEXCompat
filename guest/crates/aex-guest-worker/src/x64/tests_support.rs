@@ -3711,12 +3711,7 @@ fn set_thread_error_mode_is_stateful_validated_and_session_local() {
     );
     assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x8001);
 
-    assert_eq!(
-        engine
-            .call_win64(SET_MODE, [0, 0, 0, 0, 0, 0])
-            .unwrap(),
-        1
-    );
+    assert_eq!(engine.call_win64(SET_MODE, [0, 0, 0, 0, 0, 0]).unwrap(), 1);
     assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0);
     let other = test_engine(&[0xc3]);
     assert_eq!(other.unicorn.get_data().windows_thread_error_mode, 0);
