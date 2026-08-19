@@ -19,6 +19,7 @@ enum CrtAllocationKind {
     Regular,
     Aligned,
     ProcessHeap,
+    EnvironmentStrings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +87,13 @@ impl CrtHeap {
         requested_size: u64,
     ) -> Result<CrtAllocation, CrtHeapError> {
         self.prepare_allocation_kind(requested_size, CrtAllocationKind::ProcessHeap)
+    }
+
+    pub(crate) fn prepare_environment_strings_allocation(
+        &self,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.prepare_allocation_kind(requested_size, CrtAllocationKind::EnvironmentStrings)
     }
 
     fn prepare_allocation_kind(
@@ -254,6 +262,13 @@ impl CrtHeap {
         pointer: u64,
     ) -> Result<CrtAllocation, CrtHeapError> {
         self.remove_kind(pointer, CrtAllocationKind::ProcessHeap)
+    }
+
+    pub(crate) fn remove_environment_strings(
+        &mut self,
+        pointer: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.remove_kind(pointer, CrtAllocationKind::EnvironmentStrings)
     }
 
     fn remove_kind(

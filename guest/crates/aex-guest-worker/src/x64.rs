@@ -6,6 +6,7 @@ use iced_x86::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
@@ -185,6 +186,10 @@ const WORLD_DATA_BASE: u64 = PF_HANDLE_DATA_END;
 const WORLD_DATA_END: u64 = WORLD_DATA_BASE + 0x2_0000_0000;
 const CRT_HEAP_BASE: u64 = 0x0000_0010_0000_0000;
 const CRT_HEAP_END: u64 = CRT_HEAP_BASE + MAX_CRT_HEAP_BYTES;
+const ENVIRONMENT_STRINGS_BASE: u64 = 0x0000_0020_0000_0000;
+const ENVIRONMENT_STRINGS_NAMESPACE_SIZE: u64 = MAX_CRT_HEAP_BYTES;
+const ENVIRONMENT_STRINGS_END: u64 = 0x0000_7fff_0000_0000;
+static NEXT_ENVIRONMENT_STRINGS_NAMESPACE: AtomicU64 = AtomicU64::new(0);
 const MAX_WORLD_SIZE: u64 = 128 * 1024 * 1024;
 const MAX_WORLD_COUNT: usize = 256;
 const MAX_WORLD_DIMENSION: i32 = 32_768;

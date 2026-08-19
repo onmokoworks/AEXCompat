@@ -4438,6 +4438,209 @@ fn get_environment_variable_w_rejects_invalid_guest_pointers() {
 }
 
 #[test]
+fn environment_strings_w_is_kernel32_scoped_sorted_writable_and_double_nul_terminated() {
+    const GET_STRINGS: u64 = STUB_BASE + 0x510;
+    const FREE_STRINGS: u64 = STUB_BASE + 0x520;
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, symbol, implementation) in [
+        (
+            GET_STRINGS,
+            "GetEnvironmentStringsW",
+            LegacyWin64Import::GetEnvironmentStringsW,
+        ),
+        (
+            FREE_STRINGS,
+            "FreeEnvironmentStringsW",
+            LegacyWin64Import::FreeEnvironmentStringsW,
+        ),
+    ] {
+        assert_eq!(
+            install_win64_import(&mut engine.unicorn, stub, "KERNEL32.DLL", symbol).unwrap(),
+            Win64ImportDispatch::LegacyImplemented(implementation)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+
+    engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
+    let pointer = engine
+        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert_ne!(pointer, 0);
+    let expected = "OPENCV_FOR_THREADS_NUM=1\0\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(pointer, expected.len())
+            .unwrap(),
+        expected
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+
+    // Windows returns caller-owned writable blocks, not a shared host buffer.
+    engine.unicorn.mem_write(pointer, &[b'X', 0]).unwrap();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(pointer, 2).unwrap(),
+        [b'X', 0]
+    );
+    assert_eq!(
+        engine
+            .call_win64(FREE_STRINGS, [pointer, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+    assert!(engine.unicorn.mem_read_as_vec(pointer, 2).is_err());
+}
+
+#[test]
+fn environment_strings_w_allocations_are_independent_owned_and_reject_invalid_free() {
+    const GET_STRINGS: u64 = STUB_BASE + 0x510;
+    const FREE_STRINGS: u64 = STUB_BASE + 0x520;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_STRINGS,
+        "kernel32.dll",
+        "GetEnvironmentStringsW",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        FREE_STRINGS,
+        "kernel32.dll",
+        "FreeEnvironmentStringsW",
+    )
+    .unwrap();
+
+    let first = engine
+        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
+        .unwrap();
+    let second = engine
+        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert_ne!(first, second);
+    engine.unicorn.mem_write(first, &[b'X', 0]).unwrap();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(second, 2).unwrap(),
+        [b'O', 0]
+    );
+
+    assert_eq!(
+        engine
+            .call_win64(FREE_STRINGS, [first, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    for invalid in [first, DATA_BASE, 0] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64(FREE_STRINGS, [invalid, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+    assert_eq!(
+        engine
+            .call_win64(FREE_STRINGS, [second, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn environment_strings_w_ownership_does_not_cross_guest_sessions() {
+    const GET_STRINGS: u64 = STUB_BASE + 0x510;
+    const FREE_STRINGS: u64 = STUB_BASE + 0x520;
+    let mut first = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut first.unicorn,
+        GET_STRINGS,
+        "kernel32.dll",
+        "GetEnvironmentStringsW",
+    )
+    .unwrap();
+    let mut second = test_engine(&[0xc3]);
+    for (stub, symbol) in [
+        (GET_STRINGS, "GetEnvironmentStringsW"),
+        (FREE_STRINGS, "FreeEnvironmentStringsW"),
+    ] {
+        install_win64_import(&mut second.unicorn, stub, "kernel32.dll", symbol).unwrap();
+    }
+    let stale = first
+        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
+        .unwrap();
+    let live = second
+        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert_ne!(stale, live, "sessions must not reuse environment tokens");
+    assert_eq!(
+        second
+            .call_win64(FREE_STRINGS, [stale, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        second.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        second.unicorn.mem_read_as_vec(live, 2).unwrap(),
+        [b'O', 0],
+        "rejecting another session's token must preserve this session's allocation"
+    );
+    assert_eq!(
+        second
+            .call_win64(FREE_STRINGS, [live, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn environment_strings_w_respects_shared_guest_allocation_budget() {
+    const GET_STRINGS: u64 = STUB_BASE + 0x510;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_STRINGS,
+        "kernel32.dll",
+        "GetEnvironmentStringsW",
+    )
+    .unwrap();
+    // Two maximum-size allocations consume the allocator's 128 MiB aggregate
+    // budget without depending on the host process environment or allocator.
+    let _first = allocate_crt_region(
+        &mut engine.unicorn,
+        crate::crt_heap::MAX_CRT_ALLOCATION_BYTES,
+    )
+    .unwrap();
+    let _second = allocate_crt_region(
+        &mut engine.unicorn,
+        crate::crt_heap::MAX_CRT_ALLOCATION_BYTES,
+    )
+    .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    assert_eq!(
+        engine
+            .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 8);
+}
+
+#[test]
 fn windows_last_error_is_session_local_and_tracks_missing_environment() {
     const GET_ENVIRONMENT: u64 = STUB_BASE + 0x540;
     const GET_LAST_ERROR: u64 = STUB_BASE + 0x550;
