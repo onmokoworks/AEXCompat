@@ -3636,6 +3636,309 @@ fn get_proc_address_rejects_foreign_modules_names_ordinals_and_unsafe_pointers()
 }
 
 #[test]
+fn get_module_handle_w_resolves_current_kernel32_and_ntdll_basename_capabilities() {
+    const GET_MODULE: u64 = STUB_BASE + 0x408;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        dispatch_win64_import("kernel32.dll", "GetModuleHandleW"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetModuleHandleW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetModuleHandleW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_MODULE,
+        "kernel32.dll",
+        "GetModuleHandleW",
+    )
+    .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(GET_MODULE, [0, 0, 0, 0, 0, 0])
+            .unwrap(),
+        TEST_CODE
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+    let name = DATA_BASE + 0xa00;
+    for (value, expected) in [
+        ("KeRnEl32.DlL", WINDOWS_KERNEL32_MODULE_TOKEN),
+        ("ntdll.dll", WINDOWS_NTDLL_MODULE_TOKEN),
+        (r"C:\Windows\System32\NTDLL.DLL", WINDOWS_NTDLL_MODULE_TOKEN),
+    ] {
+        let mut units = value.encode_utf16().collect::<Vec<_>>();
+        units.push(0);
+        engine
+            .write(
+                name,
+                &units
+                    .iter()
+                    .flat_map(|unit| unit.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x5678;
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            expected
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x5678);
+    }
+    assert_ne!(WINDOWS_NTDLL_MODULE_TOKEN, WINDOWS_KERNEL32_MODULE_TOKEN);
+    assert_ne!(WINDOWS_NTDLL_MODULE_TOKEN, TEST_CODE);
+    assert!(![
+        WINDOWS_STANDARD_INPUT_TOKEN,
+        WINDOWS_STANDARD_OUTPUT_TOKEN,
+        WINDOWS_STANDARD_ERROR_TOKEN,
+        WINDOWS_THREAD_HANDLE_BASE,
+    ]
+    .contains(&WINDOWS_NTDLL_MODULE_TOKEN));
+
+    let mut second = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut second.unicorn,
+        GET_MODULE,
+        "kernel32.dll",
+        "GetModuleHandleW",
+    )
+    .unwrap();
+    let second_name = DATA_BASE + 0xa00;
+    let mut units = "NTDLL.DLL".encode_utf16().collect::<Vec<_>>();
+    units.push(0);
+    second
+        .write(
+            second_name,
+            &units
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        second
+            .call_win64(GET_MODULE, [second_name, 0, 0, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_NTDLL_MODULE_TOKEN
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+    assert!(second.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn get_module_handle_w_bounds_utf16_and_reports_missing_modules_without_stopping() {
+    const GET_MODULE: u64 = STUB_BASE + 0x408;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_MODULE,
+        "kernel32.dll",
+        "GetModuleHandleW",
+    )
+    .unwrap();
+    let name = DATA_BASE + 0xa00;
+
+    let exact = format!("{}\\ntdll.dll", "A".repeat(117));
+    assert_eq!(exact.encode_utf16().count(), 127);
+    let mut units = exact.encode_utf16().collect::<Vec<_>>();
+    units.push(0);
+    engine
+        .write(
+            name,
+            &units
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_MODULE, [name, 0, 0, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_NTDLL_MODULE_TOKEN
+    );
+
+    for units in [
+        "missing.dll"
+            .encode_utf16()
+            .chain([0])
+            .collect::<Vec<_>>(),
+        r"C:\Windows\System32\"
+            .encode_utf16()
+            .chain([0])
+            .collect::<Vec<_>>(),
+        vec![0xd800, 0],
+        vec![u16::from(b'A'); 128],
+    ] {
+        engine
+            .write(
+                name,
+                &units
+                    .iter()
+                    .flat_map(|unit| unit.to_le_bytes())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE, [name, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+    for pointer in [u64::MAX, 0xdead_beef, DATA_BASE + PAGE_SIZE - 1] {
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE, [pointer, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+
+    let mut inaccessible = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut inaccessible.unicorn,
+        GET_MODULE,
+        "kernel32.dll",
+        "GetModuleHandleW",
+    )
+    .unwrap();
+    let mut units = "ntdll.dll".encode_utf16().collect::<Vec<_>>();
+    units.push(0);
+    inaccessible
+        .write(
+            name,
+            &units
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    inaccessible
+        .unicorn
+        .mem_protect(DATA_BASE, PAGE_SIZE, Prot::WRITE)
+        .unwrap();
+    assert_eq!(
+        inaccessible
+            .call_win64(GET_MODULE, [name, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        inaccessible.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+    assert!(inaccessible.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn ntdll_module_token_isolated_across_filename_and_proc_consumers() {
+    const GET_FILE_NAME: u64 = STUB_BASE + 0x418;
+    const GET_PROC: u64 = STUB_BASE + 0x428;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_FILE_NAME,
+        "kernel32.dll",
+        "GetModuleFileNameW",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_PROC,
+        "kernel32.dll",
+        "GetProcAddress",
+    )
+    .unwrap();
+    let output = DATA_BASE + 0xb00;
+    let expected = r"C:\Windows\System32\ntdll.dll";
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(
+                GET_FILE_NAME,
+                [WINDOWS_NTDLL_MODULE_TOKEN, output, 64, 0, 0, 0],
+            )
+            .unwrap(),
+        expected.encode_utf16().count() as u64
+    );
+    let mut bytes = vec![0; (expected.encode_utf16().count() + 1) * 2];
+    engine.read(output, &mut bytes).unwrap();
+    let units = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .take_while(|unit| *unit != 0)
+        .collect::<Vec<_>>();
+    assert_eq!(String::from_utf16(&units).unwrap(), expected);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+    let name = DATA_BASE + 0xc00;
+    engine.write(name, b"NtCreateFile\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(
+                GET_PROC,
+                [WINDOWS_NTDLL_MODULE_TOKEN, name, 0, 0, 0, 0],
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_PROC_NOT_FOUND);
+
+    assert_eq!(
+        engine
+            .call_win64(
+                GET_FILE_NAME,
+                [WINDOWS_STANDARD_INPUT_TOKEN, output, 64, 0, 0, 0],
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    assert_eq!(
+        engine
+            .call_win64(
+                GET_PROC,
+                [WINDOWS_STANDARD_INPUT_TOKEN, name, 0, 0, 0, 0],
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+
+    engine.write(name, b"FlsAlloc\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(
+                GET_PROC,
+                [WINDOWS_NTDLL_MODULE_TOKEN, name, 0, 0, 0, 0],
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_PROC_NOT_FOUND);
+    assert_ne!(
+        engine
+            .call_win64(
+                GET_PROC,
+                [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0],
+            )
+            .unwrap(),
+        0
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
 fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
     const GET_MODULE_EX: u64 = STUB_BASE + 0x410;
     const PIN: u64 = 0x1;
