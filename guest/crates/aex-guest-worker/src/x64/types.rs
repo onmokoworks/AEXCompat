@@ -108,6 +108,7 @@ struct GuestState {
     crt_terminate_handler: u64,
     windows_critical_sections: HashMap<u64, u32>,
     windows_condition_variables: HashSet<u64>,
+    windows_address_waiters: BTreeMap<u64, BTreeSet<u32>>,
     windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
     windows_tls_slots: BTreeMap<u32, u64>,
     pending_fls_free: Option<PendingFlsFree>,
