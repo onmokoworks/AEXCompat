@@ -49,10 +49,14 @@ enum LegacyWin64Import {
     CxxThrowException,
     Cos,
     CosF,
+    Ceil,
     CeilF,
     ExpF,
+    Floor,
     FloorF,
     LRound,
+    Round,
+    RoundF,
     PowF,
     Pow,
     Sin,
@@ -361,10 +365,18 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
         (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceil") => LegacyWin64Import::Ceil,
+        (_, "ceil") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceilf") => LegacyWin64Import::CeilF,
         (_, "ceilf") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "floor") => LegacyWin64Import::Floor,
+        (_, "floor") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lround") => LegacyWin64Import::LRound,
         (_, "lround") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "round") => LegacyWin64Import::Round,
+        (_, "round") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "roundf") => LegacyWin64Import::RoundF,
+        (_, "roundf") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "sin") => LegacyWin64Import::Sin,
         (_, "sin") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-runtime-l1-1-0.dll", "_initterm") => LegacyWin64Import::CrtInitterm,
@@ -780,17 +792,29 @@ fn install_win64_import(
             LegacyWin64Import::CosF => {
                 install_float_import(unicorn, stub, "cosf", f32::cos)?;
             }
+            LegacyWin64Import::Ceil => {
+                install_double_import(unicorn, stub, "ceil", f64::ceil)?;
+            }
             LegacyWin64Import::CeilF => {
                 install_float_import(unicorn, stub, "ceilf", f32::ceil)?;
             }
             LegacyWin64Import::ExpF => {
                 install_float_import(unicorn, stub, "expf", f32::exp)?;
             }
+            LegacyWin64Import::Floor => {
+                install_double_import(unicorn, stub, "floor", f64::floor)?;
+            }
             LegacyWin64Import::FloorF => {
                 install_float_import(unicorn, stub, "floorf", f32::floor)?;
             }
             LegacyWin64Import::LRound => {
                 install_lround_import(unicorn, stub)?;
+            }
+            LegacyWin64Import::Round => {
+                install_double_import(unicorn, stub, "round", f64::round)?;
+            }
+            LegacyWin64Import::RoundF => {
+                install_float_import(unicorn, stub, "roundf", f32::round)?;
             }
             LegacyWin64Import::PowF => {
                 install_float_binary_import(unicorn, stub, "powf", f32::powf)?;

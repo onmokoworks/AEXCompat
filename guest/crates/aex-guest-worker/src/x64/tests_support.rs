@@ -4243,6 +4243,70 @@ fn win64_crt_lround_uses_xmm0_f64_and_returns_a_windows_long_in_eax() {
 }
 
 #[test]
+fn win64_crt_round_floor_ceil_family_uses_xmm0_and_preserves_edges() {
+    const ROUND: u64 = STUB_BASE + 0x1a0;
+    const FLOOR: u64 = STUB_BASE + 0x1b0;
+    const CEIL: u64 = STUB_BASE + 0x1c0;
+    const ROUNDF: u64 = STUB_BASE + 0x1d0;
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, symbol, expected) in [
+        (ROUND, "round", LegacyWin64Import::Round),
+        (FLOOR, "floor", LegacyWin64Import::Floor),
+        (CEIL, "ceil", LegacyWin64Import::Ceil),
+        (ROUNDF, "roundf", LegacyWin64Import::RoundF),
+    ] {
+        engine.unicorn.mem_write(stub, &[0xc3]).unwrap();
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                stub,
+                "api-ms-win-crt-math-l1-1-0.dll",
+                symbol,
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(expected)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+
+    let call_f64 = |engine: &mut GuestEngine<'static>, stub, value: f64| {
+        let mut xmm0 = [0xa5; 16];
+        xmm0[..8].copy_from_slice(&value.to_le_bytes());
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm0)
+            .unwrap();
+        engine.call_win64(stub, [0; 6]).unwrap();
+        let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        assert_eq!(&result[8..], &[0xa5; 8]);
+        f64::from_le_bytes(result[..8].try_into().unwrap())
+    };
+    assert_eq!(call_f64(&mut engine, ROUND, 1.5), 2.0);
+    assert_eq!(call_f64(&mut engine, ROUND, -1.5), -2.0);
+    assert_eq!(call_f64(&mut engine, FLOOR, -1.25), -2.0);
+    assert_eq!(call_f64(&mut engine, CEIL, -1.25), -1.0);
+    assert_eq!(
+        call_f64(&mut engine, ROUND, -0.0).to_bits(),
+        (-0.0f64).to_bits()
+    );
+    assert!(call_f64(&mut engine, ROUND, f64::NAN).is_nan());
+    assert_eq!(call_f64(&mut engine, FLOOR, f64::INFINITY), f64::INFINITY);
+
+    let mut xmm0 = [0x5a; 16];
+    xmm0[..4].copy_from_slice(&(-2.5f32).to_le_bytes());
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::XMM0, &xmm0)
+        .unwrap();
+    engine.call_win64(ROUNDF, [0; 6]).unwrap();
+    let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+    assert_eq!(f32::from_le_bytes(result[..4].try_into().unwrap()), -3.0);
+}
+
+#[test]
 fn win64_crt_ceilf_uses_xmm0_f32_abi_and_preserves_special_values() {
     const CEILF_IMPORT: u64 = STUB_BASE + 0x1a0;
 
