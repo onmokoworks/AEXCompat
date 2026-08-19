@@ -7790,6 +7790,97 @@ fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
         dispatch_win64_import("OpenCL.DLL", "cosf"),
         Win64ImportDispatch::UnsupportedGpuLibrary(GpuImportLibrary::OpenCl)
     );
+    assert_eq!(
+        dispatch_win64_import(crt_math, "fmodf"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::FmodF)
+    );
+    assert_eq!(
+        dispatch_win64_import("ucrtbase.dll", "fmodf"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "fmodf"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn win64_crt_fmodf_uses_scalar_xmm_abi_and_deterministic_c_edges() {
+    const FMODF_IMPORT: u64 = STUB_BASE + 0x1f0;
+    const XMM0_UPPER: [u8; 12] = [0xa5; 12];
+    const XMM1_UPPER: [u8; 12] = [0x5a; 12];
+
+    fn call_fmodf(engine: &mut GuestEngine<'static>, left: f32, right: f32) -> u32 {
+        let mut xmm0 = [0u8; 16];
+        xmm0[..4].copy_from_slice(&left.to_le_bytes());
+        xmm0[4..].copy_from_slice(&XMM0_UPPER);
+        let mut xmm1 = [0u8; 16];
+        xmm1[..4].copy_from_slice(&right.to_le_bytes());
+        xmm1[4..].copy_from_slice(&XMM1_UPPER);
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm0)
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM1, &xmm1)
+            .unwrap();
+        engine.call_win64(FMODF_IMPORT, [0; 6]).unwrap();
+        let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        assert_eq!(&result[4..], &XMM0_UPPER);
+        assert_eq!(
+            engine.unicorn.reg_read_long(RegisterX86::XMM1).unwrap().as_ref(),
+            &xmm1
+        );
+        u32::from_le_bytes(result[..4].try_into().unwrap())
+    }
+
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.mem_write(FMODF_IMPORT, &[0xc3]).unwrap();
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            FMODF_IMPORT,
+            "api-ms-win-crt-math-l1-1-0.dll",
+            "fmodf",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::FmodF)
+    );
+
+    assert_eq!(call_fmodf(&mut engine, 5.5, 2.0), 1.5f32.to_bits());
+    assert_eq!(
+        call_fmodf(
+            &mut engine,
+            f32::from_bits(0x3e66_3922),
+            f32::from_bits(0x42fc_0000),
+        ),
+        0x3e66_3922
+    );
+    assert_eq!(call_fmodf(&mut engine, -5.5, 2.0), (-1.5f32).to_bits());
+    assert_eq!(call_fmodf(&mut engine, 5.5, -2.0), 1.5f32.to_bits());
+    assert_eq!(call_fmodf(&mut engine, -4.0, 2.0), (-0.0f32).to_bits());
+    assert_eq!(call_fmodf(&mut engine, -0.0, 3.0), (-0.0f32).to_bits());
+    assert_eq!(call_fmodf(&mut engine, 3.0, f32::INFINITY), 3.0f32.to_bits());
+    assert_eq!(call_fmodf(&mut engine, f32::INFINITY, 3.0), 0x7fc0_0000);
+    assert_eq!(call_fmodf(&mut engine, 3.0, 0.0), 0x7fc0_0000);
+
+    let signaling_nan = f32::from_bits(0xff81_2345);
+    assert_eq!(call_fmodf(&mut engine, signaling_nan, 2.0), 0xffc1_2345);
+    assert_eq!(
+        call_fmodf(&mut engine, 2.0, f32::from_bits(0x7f81_5678)),
+        0x7fc1_5678
+    );
+    assert_eq!(
+        call_fmodf(&mut engine, f32::from_bits(3), f32::from_bits(2)),
+        1
+    );
+    assert!(engine
+        .unicorn
+        .get_data()
+        .math_calls
+        .iter()
+        .any(|call| call.starts_with("fmodf(")));
 }
 
 #[test]
