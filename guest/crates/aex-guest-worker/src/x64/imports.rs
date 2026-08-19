@@ -96,6 +96,7 @@ enum LegacyWin64Import {
     GetProcAddress,
     InitializeSListHead,
     DisableThreadLibraryCalls,
+    ProcessPrng,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -293,6 +294,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "DisableThreadLibraryCalls") => {
             LegacyWin64Import::DisableThreadLibraryCalls
         }
+        ("bcryptprimitives.dll", "ProcessPrng") => LegacyWin64Import::ProcessPrng,
+        (_, "ProcessPrng") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "InitializeCriticalSection") => {
             LegacyWin64Import::InitializeCriticalSection
         }
@@ -1164,6 +1167,15 @@ fn install_win64_import(
                 uc(
                     "install deterministic DisableThreadLibraryCalls import",
                     unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                )?;
+            }
+            LegacyWin64Import::ProcessPrng => {
+                uc("write ProcessPrng return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install ProcessPrng import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_process_prng(unicorn);
+                    }),
                 )?;
             }
         },
@@ -2110,6 +2122,51 @@ fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
     });
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
+    }
+}
+
+fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {
+    // ProcessPrng fills a guest buffer with process-scoped random bytes.
+    // Use a deterministic process-local stream so calls receive distinct bytes
+    // while render results remain reproducible across hosts.
+    let result = (|| -> Result<(), String> {
+        let buffer = read_win64_import_argument(unicorn, 0)?;
+        let length = read_win64_import_argument(unicorn, 1)?;
+        if length == 0 {
+            return Ok(());
+        }
+        if buffer == 0 {
+            return Err("ProcessPrng buffer pointer is null".to_string());
+        }
+        if length > MAX_PROCESS_PRNG_BYTES {
+            return Err(format!(
+                "ProcessPrng length {length} exceeds {MAX_PROCESS_PRNG_BYTES}"
+            ));
+        }
+        let mut bytes = vec![0u8; length as usize];
+        let state = &mut unicorn.get_data_mut().process_prng_state;
+        for chunk in bytes.chunks_mut(8) {
+            // SplitMix64 is compact, deterministic, and adequate for emulating
+            // the independent seeds expected by CRT and container internals.
+            *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut value = *state;
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^= value >> 31;
+            chunk.copy_from_slice(&value.to_le_bytes()[..chunk.len()]);
+        }
+        unicorn
+            .mem_write(buffer, &bytes)
+            .map_err(|error| format!("ProcessPrng buffer {buffer:#x} is not writable: {error}"))
+    })();
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().callback_error = Some(error);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
     }
 }
 
