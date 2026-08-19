@@ -6035,6 +6035,108 @@ fn load_library_ex_w_rejects_invalid_or_unterminated_utf16_without_host_loading(
 }
 
 #[test]
+fn raise_exception_reports_bounded_msvc_record_without_host_dispatch() {
+    const RAISE: u64 = STUB_BASE + 0x198;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(&mut engine.unicorn, RAISE, "KERNEL32.DLL", "RaiseException")
+            .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::RaiseException)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "RaiseException"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let arguments = DATA_BASE + 0xa00;
+    let values = [0x1993_0520, DATA_BASE + 0x800, TEST_CODE + 0x950, TEST_CODE];
+    engine
+        .write(
+            arguments,
+            &values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let error = engine
+        .call_win64(
+            RAISE,
+            [0xe06d_7363, 1, values.len() as u64, arguments, 0, 0],
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "unhandled guest RaiseException code=0xe06d7363 flags=0x1 parameters=[0x19930520,0x40000800,0x10000950,0x10000000]; x64 SEH dispatch is not modeled"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn raise_exception_validates_flags_count_and_complete_parameter_array() {
+    let cases = [
+        (0x2, 0, 0, "RaiseException flags 0x2 are invalid"),
+        (
+            0,
+            16,
+            DATA_BASE,
+            "RaiseException parameter count 16 exceeds 15",
+        ),
+        (
+            0,
+            1,
+            0,
+            "RaiseException parameter array 0x0 is not fully readable for 1 entries",
+        ),
+        (
+            0,
+            2,
+            DATA_BASE + DATA_SIZE - 8,
+            "is not fully readable for 2 entries",
+        ),
+        (
+            0,
+            1,
+            u64::MAX - 3,
+            "is not fully readable for 1 entries",
+        ),
+    ];
+    for (flags, count, arguments, expected) in cases {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.reg_write(RegisterX86::RCX, 0x1234).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, flags).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, count).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R9, arguments).unwrap();
+        emulate_raise_exception(&mut engine.unicorn);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .callback_error
+                .as_deref()
+                .is_some_and(|error| error.contains(expected))
+        );
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    }
+}
+
+#[test]
+fn raise_exception_allows_zero_parameters_without_reading_the_pointer() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0x1234).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R8, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R9, u64::MAX).unwrap();
+    emulate_raise_exception(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some(
+            "unhandled guest RaiseException code=0x1234 flags=0x0 parameters=[]; x64 SEH dispatch is not modeled"
+        )
+    );
+}
+
+#[test]
 fn rtl_pc_to_file_header_resolves_only_modeled_guest_modules() {
     const RTL_PC: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);
