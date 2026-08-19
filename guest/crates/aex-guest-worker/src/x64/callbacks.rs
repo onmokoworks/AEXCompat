@@ -378,8 +378,8 @@ fn deterministic_i32_stub(value: i32) -> [u8; 6] {
 fn deterministic_u64_stub(value: u64) -> [u8; 11] {
     let bytes = value.to_le_bytes();
     [
-        0x48, 0xb8, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-        bytes[7], 0xc3,
+        0x48, 0xb8, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        0xc3,
     ]
 }
 
