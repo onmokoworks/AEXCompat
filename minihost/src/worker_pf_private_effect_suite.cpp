@@ -55,14 +55,12 @@ int32_t refuse(const char* callback, const char* reason) {
   return kRefused;
 }
 
-// The broker's denial parser caps a callback name at 32 bytes
-// (`worker_denial_identifier` in `image_render/diagnostics.rs`) and drops the
-// whole line - flagging `callback_denials_truncated` - when it is longer. The
-// slot 2 name this refactor inherited was `private_effect_utf16_to_multibyte`,
-// 33 bytes, so every slot 2 refusal had been dropped since #1283 and reached
-// the report as an unexplained 4. Both names carry the shorter prefix now, and
-// both fit (29 and 27). See #1303 for the remaining audit of names this host
-// builds through a helper rather than as a literal.
+// The broker's denial parser admits worker-owned callback identifiers through
+// 64 bytes while keeping the reason vocabulary capped at 32. The slot 2 name
+// this refactor inherited was `private_effect_utf16_to_multibyte` (33 bytes),
+// which the old shared 32-byte parser bound dropped completely. Both names
+// retain their shorter prefixes (29 and 27 bytes), but the callback-specific
+// bound now also preserves any valid 33-64 byte worker identifier.
 int32_t refuse_utf16_to_multibyte(const char* reason) {
   return refuse("pf_private_utf16_to_multibyte", reason);
 }
