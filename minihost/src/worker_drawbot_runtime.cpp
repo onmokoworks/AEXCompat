@@ -680,6 +680,14 @@ bool dispatch_render_draw(EffectEntry entry, std::array<std::byte, kInSize>& inp
       drawbot_objects_empty() && g_drawbot_invalid_operations == 0;
 }
 
+bool render_draw_dispatch_enabled() {
+  return g_render_draw_enabled;
+}
+
+bool render_ui_context_active() {
+  return g_render_ui_context_active;
+}
+
 bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& input,
                              std::array<std::byte, kOutSize>& output,
                              std::vector<std::array<std::byte, kParamSize>>& definitions) {
