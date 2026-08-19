@@ -1770,6 +1770,391 @@ fn stdio_vsnprintf_s_truncates_with_nul_and_negative_one() {
 }
 
 #[test]
+fn fopen_s_is_stdio_library_scoped_and_returns_secure_guest_only_failure() {
+    const FOPEN_S: u64 = STUB_BASE + 0x230;
+    assert_eq!(
+        dispatch_win64_import("api-ms-win-crt-stdio-l1-1-0.dll", "fopen_s"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::FopenS)
+    );
+    assert_eq!(
+        dispatch_win64_import("UCRTBASE.DLL", "fopen_s"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::FopenS)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "fopen_s"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        FOPEN_S,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "fopen_s",
+    )
+    .unwrap();
+    let result_pointer = DATA_BASE + 0x100;
+    let filename = DATA_BASE + 0x200;
+    let mode = DATA_BASE + 0x300;
+    engine
+        .unicorn
+        .mem_write(result_pointer, &0xdead_beef_cafe_babeu64.to_le_bytes())
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(filename, b"C:\\Temp\\esc_gpu.log\0")
+        .unwrap();
+    engine.unicorn.mem_write(mode, b"a\0").unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                FOPEN_S,
+                &[result_pointer, filename, mode, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(result_pointer, 8).unwrap(),
+        0u64.to_le_bytes()
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 2);
+}
+
+#[test]
+fn fopen_s_validates_arguments_modes_and_result_atomicity() {
+    const FOPEN_S: u64 = STUB_BASE + 0x240;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        FOPEN_S,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "fopen_s",
+    )
+    .unwrap();
+    let result_pointer = DATA_BASE + 0x100;
+    let filename = DATA_BASE + 0x200;
+    let mode = DATA_BASE + 0x300;
+    engine.unicorn.mem_write(filename, b"diagnostic.log\0").unwrap();
+
+    for valid in [
+        b"r".as_slice(),
+        b"wb+",
+        b"a+t",
+        b"w+x",
+        b"w+cNSTD",
+        b"r+nRT",
+        b"rD+",
+        b" r D + ",
+        b"wxxNN",
+        b"r,D",
+        b"w, ccs=UTF-16LE",
+        b"rt+, ccs=UTF-8",
+        b"a,ccs=UNICODE",
+        b" rt + , ccs = utf-8   ",
+        b"w+,DN ccs=UTF-8",
+    ] {
+        engine.unicorn.mem_write(mode, valid).unwrap();
+        engine
+            .unicorn
+            .mem_write(mode + valid.len() as u64, &[0])
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    FOPEN_S,
+                    &[result_pointer, filename, mode, 0],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            2,
+            "valid mode {:?}",
+            String::from_utf8_lossy(valid)
+        );
+    }
+
+    for invalid in [
+        b"".as_slice(),
+        b"q",
+        b"tr",
+        b"br",
+        b"r++",
+        b"rbt",
+        b"rbb",
+        b"rcc",
+        b"rcn",
+        b"rSR",
+        b"rSS",
+        b"rTT",
+        b"rDD",
+        b"rx",
+        b"ax",
+        b"r,,D",
+        b"r,+",
+        b"r,b",
+        b"r,D,D",
+        b"r,Dccs=UTF-8",
+        b"r,D ccs=bogus",
+        b"r,ccs=UTF-8D",
+        b"r,CCS=UTF-8",
+        b"\tr",
+        b"r\tD",
+        b"r,\tccs=UTF-8",
+        b"r,ccs\t=UTF-8",
+    ] {
+        engine.unicorn.mem_write(mode, invalid).unwrap();
+        engine
+            .unicorn
+            .mem_write(mode + invalid.len() as u64, &[0])
+            .unwrap();
+        engine
+            .unicorn
+            .mem_write(result_pointer, &u64::MAX.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    FOPEN_S,
+                    &[result_pointer, filename, mode, 0],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            22
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(result_pointer, 8).unwrap(),
+            0u64.to_le_bytes()
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+    }
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(FOPEN_S, &[0, filename, mode, 0], TIMEOUT_MICROSECONDS)
+            .unwrap(),
+        22
+    );
+    for arguments in [[result_pointer, 0, mode, 0], [result_pointer, filename, 0, 0]] {
+        engine
+            .unicorn
+            .mem_write(result_pointer, &u64::MAX.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(FOPEN_S, &arguments, TIMEOUT_MICROSECONDS)
+                .unwrap(),
+            22
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(result_pointer, 8).unwrap(),
+            u64::MAX.to_le_bytes()
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+    }
+
+    let other = test_engine(&[0xc3]);
+    assert_eq!(other.unicorn.get_data().crt_errno, 0);
+}
+
+#[test]
+fn fopen_s_errno_is_thread_local_and_preserves_win32_last_error() {
+    use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+
+    const CREATE: u64 = STUB_BASE + 0x260;
+    const FOPEN_S: u64 = STUB_BASE + 0x270;
+    let result_pointer = DATA_BASE + 0x100;
+    let filename = DATA_BASE + 0x200;
+    let mode = DATA_BASE + 0x300;
+    let mut code = Vec::new();
+    push_mov_imm64(&mut code, [0x48, 0xb9], result_pointer); // mov rcx, FILE **
+    push_mov_imm64(&mut code, [0x48, 0xba], filename); // mov rdx, filename
+    push_mov_imm64(&mut code, [0x49, 0xb8], mode); // mov r8, mode
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]); // sub rsp, 40
+    push_mov_imm64(&mut code, [0x48, 0xb8], FOPEN_S); // mov rax, fopen_s
+    code.extend_from_slice(&[0xff, 0xd0]); // call rax
+    let after_fopen = TEST_CODE + code.len() as u64;
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xc3]); // add rsp, 40; ret
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let mut caller_teb_stack = [0u8; 16];
+    caller_teb_stack[0..8].copy_from_slice(&(STACK_BASE + STACK_SIZE).to_le_bytes());
+    caller_teb_stack[8..16].copy_from_slice(&STACK_BASE.to_le_bytes());
+    engine.unicorn.mem_write(0x08, &caller_teb_stack).unwrap();
+    install_win64_import(&mut engine.unicorn, CREATE, "kernel32.dll", "CreateThread").unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        FOPEN_S,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "fopen_s",
+    )
+    .unwrap();
+    engine
+        .unicorn
+        .mem_write(result_pointer, &u64::MAX.to_le_bytes())
+        .unwrap();
+    engine.unicorn.mem_write(filename, b"C:\\Temp\\esc_gpu.log\0").unwrap();
+    engine.unicorn.mem_write(mode, b"a\0").unwrap();
+
+    let child_entry_errno = Arc::new(AtomicU32::new(u32::MAX));
+    let observed = Arc::clone(&child_entry_errno);
+    engine
+        .unicorn
+        .add_code_hook(TEST_CODE, TEST_CODE, move |unicorn, _, _| {
+            observed.store(unicorn.get_data().crt_errno, Ordering::SeqCst);
+        })
+        .unwrap();
+    let child_after_errno = Arc::new(AtomicU32::new(u32::MAX));
+    let observed = Arc::clone(&child_after_errno);
+    engine
+        .unicorn
+        .add_code_hook(after_fopen, after_fopen, move |unicorn, _, _| {
+            observed.store(unicorn.get_data().crt_errno, Ordering::SeqCst);
+        })
+        .unwrap();
+
+    engine.unicorn.get_data_mut().crt_errno = 77;
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    let handle = engine
+        .call_win64_with_timeout(
+            CREATE,
+            &[0, STACK_SIZE, TEST_CODE, 0, 0x1_0000, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_ne!(handle, 0);
+    assert_eq!(child_entry_errno.load(Ordering::SeqCst), 0);
+    assert_eq!(child_after_errno.load(Ordering::SeqCst), 2);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 77);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(result_pointer, 8).unwrap(),
+        0u64.to_le_bytes()
+    );
+}
+
+#[test]
+fn fopen_s_fails_closed_on_unmapped_or_unterminated_guest_memory() {
+    const FOPEN_S: u64 = STUB_BASE + 0x250;
+    const SENTINEL: u64 = 0x0102_0304_0506_0708;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        FOPEN_S,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "fopen_s",
+    )
+    .unwrap();
+    let result_pointer = DATA_BASE + 0x100;
+    let mode = DATA_BASE + 0x300;
+    engine.unicorn.mem_write(mode, b"a\0").unwrap();
+    engine
+        .unicorn
+        .mem_write(result_pointer, &SENTINEL.to_le_bytes())
+        .unwrap();
+
+    let error = engine
+        .call_win64_with_timeout(
+            FOPEN_S,
+            &[result_pointer, DATA_BASE + PAGE_SIZE, mode, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("fopen_s filename read"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(result_pointer, 8).unwrap(),
+        SENTINEL.to_le_bytes()
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        FOPEN_S,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "fopen_s",
+    )
+    .unwrap();
+    engine.unicorn.mem_write(mode, b"a\0").unwrap();
+    let error = engine
+        .call_win64_with_timeout(
+            FOPEN_S,
+            &[DATA_BASE + PAGE_SIZE, DATA_BASE + 0x200, mode, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("is not writable"), "{error}");
+
+    const LARGE_STRING: u64 = 0x3000_0000;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        FOPEN_S,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "fopen_s",
+    )
+    .unwrap();
+    engine
+        .unicorn
+        .mem_map(
+            LARGE_STRING,
+            MAX_CRT_STRING_BYTES + PAGE_SIZE,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(
+            LARGE_STRING,
+            &vec![b'X'; MAX_CRT_STRING_BYTES as usize],
+        )
+        .unwrap();
+    engine.unicorn.mem_write(mode, b"a\0").unwrap();
+    engine
+        .unicorn
+        .mem_write(result_pointer, &SENTINEL.to_le_bytes())
+        .unwrap();
+    let error = engine
+        .call_win64_with_timeout(
+            FOPEN_S,
+            &[result_pointer, LARGE_STRING, mode, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("fopen_s filename exceeds 1048576 bytes"),
+        "{error}"
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(result_pointer, 8).unwrap(),
+        SENTINEL.to_le_bytes()
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        FOPEN_S,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "fopen_s",
+    )
+    .unwrap();
+    let error = engine
+        .call_win64_with_timeout(
+            FOPEN_S,
+            &[u64::MAX, DATA_BASE + 0x200, DATA_BASE + 0x300, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("is not writable"), "{error}");
+}
+
+#[test]
 fn stdio_vsnprintf_s_is_library_qualified_bounded_and_fail_closed() {
     assert_eq!(
         dispatch_win64_import("fixture.dll", "__stdio_common_vsnprintf_s"),
