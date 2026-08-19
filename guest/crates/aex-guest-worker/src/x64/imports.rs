@@ -75,6 +75,7 @@ enum LegacyWin64Import {
     GetStdHandle,
     GetConsoleMode,
     GetFileType,
+    GetCommandLineA,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -310,6 +311,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetConsoleMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetFileType") => LegacyWin64Import::GetFileType,
         (_, "GetFileType") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetCommandLineA") => LegacyWin64Import::GetCommandLineA,
+        (_, "GetCommandLineA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -1023,6 +1026,15 @@ fn install_win64_import(
                     "install GetFileType import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_file_type(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetCommandLineA => {
+                uc("write GetCommandLineA return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install GetCommandLineA import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_command_line_a(unicorn);
                     }),
                 )?;
             }
@@ -2858,6 +2870,20 @@ fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
         FILE_TYPE_UNKNOWN
     };
     let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+}
+
+fn emulate_get_command_line_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let pointer = unicorn.get_data().windows_command_line_a;
+    if pointer == 0 {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error =
+                Some("GetCommandLineA process string is not initialized".into());
+        }
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        let _ = unicorn.emu_stop();
+        return;
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
 }
 
 fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {

@@ -113,6 +113,7 @@ struct GuestState {
     pending_fls_free: Option<PendingFlsFree>,
     windows_last_error: u32,
     windows_thread_error_mode: u32,
+    windows_command_line_a: u64,
     process_prng_state: u64,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
