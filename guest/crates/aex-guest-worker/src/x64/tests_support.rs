@@ -3552,7 +3552,10 @@ fn get_environment_variable_w_rejects_invalid_guest_pointers() {
 
     engine.unicorn.get_data_mut().callback_error = None;
     let mut allowed = Vec::new();
-    for unit in "OPENCV_FOR_THREADS_NUM".encode_utf16().chain(std::iter::once(0)) {
+    for unit in "OPENCV_FOR_THREADS_NUM"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
         allowed.extend_from_slice(&unit.to_le_bytes());
     }
     engine.write(name, &allowed).unwrap();
