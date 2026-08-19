@@ -82,6 +82,7 @@ enum LegacyWin64Import {
     GetLastError,
     SetLastError,
     SetThreadErrorMode,
+    LoadLibraryA,
     LoadLibraryExW,
     FlsAlloc,
     FlsGetValue,
@@ -310,6 +311,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
         ("kernel32.dll", "SetThreadErrorMode") => LegacyWin64Import::SetThreadErrorMode,
         (_, "SetThreadErrorMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "LoadLibraryA") => LegacyWin64Import::LoadLibraryA,
+        (_, "LoadLibraryA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "LoadLibraryExW") => LegacyWin64Import::LoadLibraryExW,
         (_, "LoadLibraryExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
@@ -1073,6 +1076,15 @@ fn install_win64_import(
                     "install LoadLibraryExW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_load_library_ex_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::LoadLibraryA => {
+                uc("write LoadLibraryA return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install LoadLibraryA import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_load_library_a(unicorn);
                     }),
                 )?;
             }
@@ -2020,6 +2032,60 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
             return Ok(None);
         };
         if module.eq_ignore_ascii_case("kernel32.dll") {
+            Ok(Some(WINDOWS_KERNEL32_MODULE_TOKEN))
+        } else {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+            Ok(None)
+        }
+    })();
+    match result {
+        Ok(module) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, module.unwrap_or_default());
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<Option<u64>, String> {
+        let path_pointer = read_win64_import_argument(unicorn, 0)?;
+        if path_pointer == 0 {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+            return Ok(None);
+        }
+        let mut path = Vec::new();
+        let mut terminated = false;
+        for index in 0..260u64 {
+            let address = path_pointer
+                .checked_add(index)
+                .ok_or_else(|| "LoadLibraryA path address overflow".to_string())?;
+            let byte = unicorn
+                .mem_read_as_vec(address, 1)
+                .map_err(|error| format!("LoadLibraryA path read failed: {error}"))?[0];
+            if byte == 0 {
+                terminated = true;
+                break;
+            }
+            path.push(byte);
+        }
+        if !terminated {
+            return Err("LoadLibraryA path exceeds 259 bytes".into());
+        }
+        let Some(module) = path
+            .rsplit(|byte| matches!(byte, b'\\' | b'/'))
+            .next()
+            .filter(|name| !name.is_empty())
+        else {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+            return Ok(None);
+        };
+        if module.eq_ignore_ascii_case(b"kernel32.dll") {
             Ok(Some(WINDOWS_KERNEL32_MODULE_TOKEN))
         } else {
             unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
