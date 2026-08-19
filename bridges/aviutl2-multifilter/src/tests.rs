@@ -1651,7 +1651,12 @@ mod tests {
         };
         let key = other.to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
-        prune_cache(&mut cache, &scan.seen, &[root.to_path_buf()], scan.limits.authoritative());
+        prune_cache(
+            &mut cache,
+            &scan.seen,
+            &[root.to_path_buf()],
+            scan.limits.authoritative(),
+        );
         assert!(
             cache.contains_key(&key),
             "the file is still there, so is its entry"
@@ -3287,10 +3292,18 @@ mod tests {
         fill_entry_from_inspect_report(&mut entry, &rejected);
         assert!(!entry.ok);
         assert!(entry.params.is_empty());
-        assert!(entry.failure_classification.is_none(), "unclassified: retried");
-        let diagnostics = entry.failure_diagnostics.expect("an unusable report is recorded");
+        assert!(
+            entry.failure_classification.is_none(),
+            "unclassified: retried"
+        );
+        let diagnostics = entry
+            .failure_diagnostics
+            .expect("an unusable report is recorded");
         assert_eq!(diagnostics["classification"], serde_json::Value::Null);
-        assert_eq!(diagnostics["cluster_error_kind"], "inspected_report_unusable");
+        assert_eq!(
+            diagnostics["cluster_error_kind"],
+            "inspected_report_unusable"
+        );
         assert_eq!(diagnostics["reason"], "params_setup_rejected");
         assert_eq!(diagnostics["params_setup_error"], 25);
         assert_eq!(diagnostics["inspection_status"], "selector_error");
@@ -3302,7 +3315,10 @@ mod tests {
         fill_entry_from_inspect_report(&mut entry, &unreadable);
         assert!(!entry.ok);
         let diagnostics = entry.failure_diagnostics.expect("recorded");
-        assert_eq!(diagnostics["cluster_error_kind"], "inspected_report_unusable");
+        assert_eq!(
+            diagnostics["cluster_error_kind"],
+            "inspected_report_unusable"
+        );
         assert_eq!(diagnostics["reason"], "inspection report has no parameters");
     }
 
