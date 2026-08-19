@@ -1,7 +1,7 @@
 from _native_selftest import run
 
 
-def test_sweetpea_bootstrap_and_pica_load_locking():
+def test_sweetpea_bootstrap_prefers_u_dll_and_keys_on_the_mapping():
     """Issue #1279: Sweet Pea is bootstrapped through U.dll's own U_SP_Birth
     whenever U.dll is mapped, because only that path registers the host
     plug-in whose Startup message makes U_SP_GetSPBasicSuite stop answering
