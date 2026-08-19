@@ -3907,6 +3907,106 @@ fn load_library_ex_w_rejects_invalid_or_unterminated_utf16_without_host_loading(
 }
 
 #[test]
+fn load_library_a_is_allowlisted_bounded_and_library_scoped() {
+    const LOAD_LIBRARY: u64 = STUB_BASE + 0x1a8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            LOAD_LIBRARY,
+            "KERNEL32.DLL",
+            "LoadLibraryA",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LoadLibraryA)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "LoadLibraryA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let path = DATA_BASE + 0xd00;
+    let write_path = |engine: &mut GuestEngine<'static>, value: &[u8]| {
+        let mut bytes = value.to_vec();
+        bytes.push(0);
+        engine.write(path, &bytes).unwrap();
+    };
+    write_path(&mut engine, br"C:\Windows\System32\KERNEL32.DLL");
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_KERNEL32_MODULE_TOKEN
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    write_path(&mut engine, b"dxgi.dll");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    for ordinary_missing in [b"".as_slice(), br"C:\Windows\System32\".as_slice()] {
+        write_path(&mut engine, ordinary_missing);
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_MOD_NOT_FOUND
+        );
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+    assert_eq!(
+        engine.call_win64(LOAD_LIBRARY, [0, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+}
+
+#[test]
+fn load_library_a_rejects_unmapped_or_unterminated_paths_without_host_loading() {
+    let mut engine = test_engine(&[0xc3]);
+    let path = DATA_BASE + 0xc00;
+    engine.write(path, &vec![b'A'; 260]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, path).unwrap();
+    emulate_load_library_a(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("LoadLibraryA path exceeds 259 bytes")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_load_library_a(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("LoadLibraryA path read failed"))
+    );
+}
+
+#[test]
 fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
     let mut engine = test_engine(&[0xc3]);
     engine
