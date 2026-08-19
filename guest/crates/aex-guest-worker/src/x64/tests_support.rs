@@ -6035,6 +6035,79 @@ fn load_library_ex_w_rejects_invalid_or_unterminated_utf16_without_host_loading(
 }
 
 #[test]
+fn rtl_pc_to_file_header_resolves_only_modeled_guest_modules() {
+    const RTL_PC: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            RTL_PC,
+            "KERNEL32.DLL",
+            "RtlPcToFileHeader",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::RtlPcToFileHeader)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "RtlPcToFileHeader"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = DATA_BASE + 0xb00;
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    for (pc, expected) in [
+        (TEST_CODE, TEST_CODE),
+        (TEST_CODE + PAGE_SIZE - 1, TEST_CODE),
+        (WINDOWS_KERNEL32_MODULE_TOKEN, WINDOWS_KERNEL32_MODULE_TOKEN),
+        (DATA_BASE, 0),
+        (0, 0),
+    ] {
+        engine.write(output, &[0x5a; 8]).unwrap();
+        assert_eq!(
+            engine.call_win64(RTL_PC, [pc, output, 0, 0, 0, 0]).unwrap(),
+            expected
+        );
+        let mut returned = [0; 8];
+        engine.read(output, &mut returned).unwrap();
+        assert_eq!(u64::from_le_bytes(returned), expected);
+    }
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(
+        engine
+            .call_win64(RTL_PC, [TEST_CODE, 0, 0, 0, 0, 0])
+            .unwrap(),
+        TEST_CODE
+    );
+}
+
+#[test]
+fn rtl_pc_to_file_header_rejects_invalid_outputs_without_mutation() {
+    const RTL_PC: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        RTL_PC,
+        "kernel32.dll",
+        "RtlPcToFileHeader",
+    )
+    .unwrap();
+    let readonly = TEST_CODE;
+    engine
+        .unicorn
+        .mem_protect(readonly, PAGE_SIZE, Prot::READ | Prot::EXEC)
+        .unwrap();
+    let before = engine.unicorn.mem_read_as_vec(readonly, 8).unwrap();
+    for output in [readonly, DATA_BASE + DATA_SIZE - 7, u64::MAX - 3] {
+        assert_eq!(
+            engine
+                .call_win64(RTL_PC, [TEST_CODE, output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(engine.unicorn.mem_read_as_vec(readonly, 8).unwrap(), before);
+}
+
+#[test]
 fn wsa_startup_ordinal_writes_deterministic_x64_wsadata() {
     const STARTUP: u64 = STUB_BASE + 0x1a8;
     let mut engine = test_engine(&[0xc3]);
