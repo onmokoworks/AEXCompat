@@ -779,6 +779,28 @@ int main() {
       selector_telemetry.invocations[1].has_register_snapshot &&
       selector_telemetry.invocations[1].registers.size() == 5 &&
       selector_telemetry.invocations[1].stack_values.size() == 6 &&
+      // The faulting-context unwind (issue #1312) on the other shape the
+      // capture sees: a fault at a valid instruction pointer, rather than the
+      // call-through-null that --self-test-selector-fault-unwind injects. The
+      // walk must name the fault site itself as frame 0 and still reach the
+      // caller. Frame 0 is never the return-address read: that read only ever
+      // produces the frame behind the fault site.
+      selector_telemetry.invocations[1].unwind_frame_count >= 2 &&
+      !selector_telemetry.invocations[1].unwind_frames[0].from_return_slot &&
+      selector_telemetry.invocations[1].unwind_frames[0].site.classification ==
+          "plugin" &&
+      selector_telemetry.invocations[1].unwind_frames[0].site
+          .has_relative_offset &&
+      selector_telemetry.invocations[1].unwind_frames[0].site.relative_offset ==
+          selector_telemetry.invocations[1].plugin_rva &&
+      selector_telemetry.invocations[1].unwind_frames[1].site.classification ==
+          "plugin" &&
+      selector_telemetry.invocations[1].unwind_frames[1].site
+          .has_relative_offset &&
+      selector_telemetry.invocations[1].unwind_stop ==
+          SelectorUnwindStop::end_of_chain &&
+      selector_telemetry.invocations[0].unwind_stop ==
+          SelectorUnwindStop::not_attempted &&
       selector_telemetry.invocations[2].access_type == "read" &&
       selector_telemetry.invocations[2].fault_address.classification ==
           "low" &&
@@ -812,6 +834,17 @@ int main() {
           std::string::npos &&
       selector_report.find("\"stack_pointer_values\":[") !=
           std::string::npos &&
+      selector_report.find("\"unwind_frames\":[{\"from_return_slot\":false,"
+                           "\"site\":{\"classification\":") !=
+          std::string::npos &&
+      selector_report.find("\"unwind_frames\":null") != std::string::npos &&
+      // The stop reason has to travel with the list it qualifies, or a capped
+      // or lost chain reads like a complete one. end_of_chain is the only
+      // value that licenses reading the outermost frame as the top of stack,
+      // and it is what a fault on this worker's own thread produces.
+      selector_report.find("\"unwind_stop\":\"end_of_chain\"") !=
+          std::string::npos &&
+      selector_report.find("\"unwind_stop\":null") != std::string::npos &&
       registry.acquire("Known Suite", 1, &suite, &resolve_known,
                                  nullptr, nullptr) == 0 &&
       suite == reinterpret_cast<const void*>(0x1234) &&

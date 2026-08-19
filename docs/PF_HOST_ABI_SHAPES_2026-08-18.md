@@ -124,8 +124,110 @@ SDK は `PF_ProgPtr` を opaque と書き、abort/progress は `in_data->inter`
   (`selector_seh ... module=BEE.dll ... stack0=module:BEE.dll+0x3bcefc`
   = `GetColorSettings` 内の call の戻り番地)。
 - 修正後 (effect layer の parent comp = BEE facade の comp item、project に
-  空 shared_ptr): この AV は解消し、より深い BEE.dll 内の null vtable call
-  (`stack0=module:BEE.dll+0xc55a00`) に進んだ。残りは #1264。
+  空 shared_ptr): この AV は解消し、より深い BEE.dll 内の null 呼び出し
+  (`stack0=module:BEE.dll+0xc55a00`) に進んだ。
+
+### 2.4.1 その先 (2026-08-19、#1264 / #1312)
+
+上の「null vtable call」の呼び出し元は 2026-08-18 の記録では `stack0` /
+`stack4` の 2 値から推測されていた。`stack4=module:BEE.dll+0xc8d146` は
+**呼び出し元ではなく既に return した関数の残骸**で、call chain として読める形を
+していただけである (#1312。同 issue で `stage:selector_seh` に unwind data から
+辿った `unwind=` を出すようにした)。
+
+unwind で取れた chain。host が出した行そのままで、ここで省略はしていないが、
+**`unwind_stop=frame_cap` = 12 frame の上限で切れている**: 一番外側に出ている
+`trusted-worker.exe` の frame は stack の頂上ではなく、host の smart dispatch より
+外側は記録されていない (main `890abdb5` + #1312 の unwind を入れた worker、
+`AEXCOMPAT_EXTENDED_DIAG=1` で `stderr_tail` を取り、`--filter ShapeBlur`、
+AE 2026 `Support Files\Plug-ins\Effects` 304 AEX、depth 8):
+
+```
+stage:selector_seh selector=SMART_RENDER code=0xc0000005 site=unknown access=execute fault=null unwind=null,?module:BEE.dll+0xc55a00,module:BEE.dll+0xc5718b,module:BEE.dll+0x4c4daa,module:BEE.dll+0x4c5438,plugin:ShapeBlur.aex+0x954c,plugin:ShapeBlur.aex+0x15667,module:trusted-worker.exe+0x60ec0,module:trusted-worker.exe+0x62cab,module:trusted-worker.exe+0x635e5,module:trusted-worker.exe+0x62c32,module:trusted-worker.exe+0xbc1ef unwind_stop=frame_cap stack0=module:BEE.dll+0xc55a00 stack4=module:BEE.dll+0xc8d146
+```
+
+RVA → 関数の対応は **Ghidra による静的解析の帰属**であって、host の出力には
+含まれない (host は module + RVA しか出さない)。frame 1 の `?` は unwind table
+由来でない frame の印 (fault site に unwind entry が無いので RSP から読んだ
+戻り番地)。
+
+| frame | host の出力 | Ghidra での帰属 |
+| --- | --- | --- |
+| 0 | `null` | fault site (rip = 0) |
+| 1 | `?module:BEE.dll+0xc55a00` | `BIB_T_MT::CBIBError::CBIBError` (`FUN_180c559b0`) 内の `call [DAT_1816a1530]` の戻り番地 |
+| 2 | `module:BEE.dll+0xc5718b` | `FUN_180c57160` = `CBIBError("Missing Interface")` を作って `_CxxThrowException` する 4 命令 |
+| 3 | `module:BEE.dll+0x4c4daa` | `ShapeKernel::ShapeKernel` (`0x4c4b30`) |
+| 4 | `module:BEE.dll+0x4c5438` | `ShapeKernelArray::ShapeKernelArray` (`0x4c52f0`) |
+| 5 | `plugin:ShapeBlur.aex+0x954c` | `FUN_180008fb0` (ShapeKernelArray を作る 12 本のうちの 1 本) |
+| 6 | `plugin:ShapeBlur.aex+0x15667` | `FUN_180015280` = legacy dispatcher の SMART_RENDER handler |
+| 7..11 | `module:trusted-worker.exe+…` | host の smart dispatch (ここで 12 frame の上限。これより外側は未記録) |
+
+`trusted-worker.exe` の RVA は worker を build し直すと動く (この表は 2026-08-19 の
+build のもの)。BEE.dll / ShapeBlur.aex 側の RVA は AE 2026 26.3 の同梱バイナリ固定。
+
+観測 (静的 + cdb):
+
+- ShapeBlur は BEE.dll から 4 本だけ import する: `AE_BetaFeature_IsNewCLBEnabled`、
+  `ShapeKernel::ShapeKernel`、`ShapeKernelArray::ShapeKernelArray`、
+  `BEE_CompItem::GetColorSettings`。
+- `EffectMainExtra` は先頭で `AE_BetaFeature_IsNewCLBEnabled()`
+  (= `dvaappsupport::feature::IsFeatureEnabled("AE.CameraLensBlurFix")`) を呼び、
+  **false なら legacy dispatcher `FUN_180010a20` に丸ごと委譲する**。この host が
+  false を受け取ることは cdb で 3 回観測したが、その 3 回は
+  GLOBAL_SETUP / PARAMS_SETUP / GLOBAL_SETDOWN のもので、SMART_RENDER の回は
+  cdb に届いていない (後述)。render の回も legacy 枝だったことは cdb ではなく
+  **unwind の frame 6 (`ShapeBlur.aex+0x15667` = legacy 側 SMART_RENDER handler
+  `FUN_180015280` の中)** が示している。なお new 枝の SMART_RENDER
+  (`FUN_180014e30`) も `ShapeKernel` を使うので、どちらの枝でも同じ場所に来る
+  (静的観測)。
+- `ShapeKernel::ShapeKernel` は `BEE_VectorArt::CreatePolyStar` で iris の
+  poly-star bezier path を作り、それを **BIB 経由で解決した
+  `ARE_BezierPathRasterPainterInterface`** (`NewFill` = `BEE.dll+0x16a52f0`,
+  `NewStroke` = `+0x16a52f8`) でラスタライズする。解決は `FUN_180c8d0c0` →
+  `FUN_180c56f10(descs, 2, "ARE_BezierPathRasterPainterInterface", &slots)`。
+- `FUN_180c56f10` は BEE 自身の BIB proc-address resolver `DAT_1816a13e0`
+  (`BEE.dll+0x16a13e0`) が null なら 1 本も引かずに 0 を返す。ShapeKernel は
+  その 0 を見て `FUN_180c57160` に入る。この関数は
+  `CBIBError("Missing Interface")` を組み立てて `_CxxThrowException` する 4 命令で、
+  組み立てが `BIBNewErrorProc` (`BEE.dll+0x16a1530`) を呼ぶ。**これも null なので
+  `call 0` で AV**。
+- つまり BIB の error interface だけ立てても結果は変わらない: AV が
+  `Missing Interface` の C++ 例外になり、host の containment が同じ 512 に
+  畳むだけになる。ShapeBlur が render するには
+  `ARE_BezierPathRasterPainterInterface` が **実際に解決できる**必要がある。
+- cdb 実測 (fault 時の同プロセス): `+0x16a13e0` = 0、`+0x16a1530` (NewError) = 0、
+  `+0x16a52f0/f8` (bezier painter) = 0、`+0x16a12a8` (BIB unregister count) = 0。
+
+**host 内で閉じない、と考えている**。
+
+- 観測: `DAT_1816a13e0` は fault 時に 0 (cdb)。BEE.dll の逆アセンブル上、ここに
+  書く関数は `FUN_180c568a0` の 1 つだけで、それを参照するのは `BEE_Birth` だけ
+  (Ghidra の callers 検索)。BEE.dll は BIB resolver を渡す export を持たない
+  (dumpbin /EXPORTS)。host は `BEE_Birth` を呼んでいない。
+- 留保: callers 検索は直接参照しか見ていないので、関数テーブル経由の間接的な
+  書き込みまでは否定できていない。
+- 共通要因 (観測): `PSL_Adjustments` の `frame_error:14` も、同じ
+  `DAT_1816a13e0` が null で BEE 側の interface が 1 本も解決できない状態から出て
+  いる (`docs/PSL_PARTICLE_COHORT_2026-08-19.md` §3.1)。ただし「だから
+  `frame_error:14` になる」は同 §3.2 が明記しているとおり**推論**で、resolver を
+  立てて 14 が消えることの反証は取られていない。ShapeBlur 側も同じ立場にある。
+- `BEE_Birth` の規模の見積もりは同 §3.2。推測で `BEE_Birth` の引数 (MSVC
+  `std::map` の内部表現) を組み立てて呼ぶことはしていない。
+
+併せて観測 (未検証、次のセッション向け): 仮に BEE 側の resolver が立っても、
+`ARE_BezierPathRasterPainterInterface` を BIB registry に登録するのは
+`ARE.dll` である (AE の Support Files でこの文字列を持つのは ARE / AfterFXLib /
+BEE / COR / MSK / SelectionFoundation / TXT)。ARE.dll の export は
+`ARE_GetVersion` / `ARE_Initialize` / `ARE_Terminate` の 3 本だけで、
+`ARE_Initialize` は引数 1 本の plain C。その引数が BIB address proc かどうかは
+未確認。
+
+cdb についての注意: `cdb -o` で `render_sweep` を子ごと debug すると、
+render worker (`trusted-worker.exe`) 側で ShapeBlur の `EffectMainExtra` に
+張った breakpoint が GLOBAL_SETUP / PARAMS_SETUP / GLOBAL_SETDOWN でしか当たらず、
+SMART_PRE_RENDER / SMART_RENDER と上記 AV がどちらも debugger に届かない
+(4 回再現)。原因は未特定。上の chain は cdb ではなく host 側の unwind trace
+(#1312) で取った。
 
 ## 3. host 側の実装 (要旨)
 
@@ -170,7 +272,8 @@ full-corpus (AE 2026 `Support Files\Plug-ins\Effects` 304 AEX、depth 8、
   `$$$/AE/Curl_Noise/GPUWarning=Curl Noise Requires Mercury GPU Acceleration`
   の文字列を作って 0x200 (512) を返す = **plug-in 自身の戻り値**で、host の
   SEH 代替ではない。GPU 経路 (#1072 / #1157 の err14-retry gate) の軸。
-- **ShapeBlur**: §2.4 の通り BEE.dll のより深い場所へ進んだだけ (#1264)。
+- **ShapeBlur**: §2.4.1 の通り、BEE.dll の BIB resolver が `BEE_Birth`
+  未呼び出しで null であることに行き着いた。host 内では閉じない (#1264 に記録)。
 - PF_World facade の未観測 slot はすべて識別 trap。full-corpus では 1 件も
   取られていない (取られれば `unsupported_suite_calls` に `PF_World vtable`
   slot N として出る)。
