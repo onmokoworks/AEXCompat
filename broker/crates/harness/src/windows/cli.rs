@@ -237,21 +237,36 @@ fn repository_root(args: &[std::ffi::OsString]) -> PathBuf {
             return path;
         }
     }
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.parent()?
-                .parent()?
-                .parent()?
-                .parent()
-                .map(Path::to_path_buf)
-        })
+    repository_root_from_runtime_paths(std::env::current_dir().ok(), std::env::current_exe().ok())
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../..")
                 .canonicalize()
                 .unwrap()
         })
+}
+
+fn repository_root_from_runtime_paths(
+    current_dir: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let starts = current_dir
+        .into_iter()
+        .chain(current_exe.and_then(|path| path.parent().map(Path::to_path_buf)));
+    repository_root_from_starts(starts)
+}
+
+fn repository_root_from_starts(starts: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    for start in starts {
+        for ancestor in start.ancestors() {
+            if ancestor.join("guest/Cargo.toml").is_file()
+                && ancestor.join("broker/Cargo.toml").is_file()
+            {
+                return Some(ancestor.to_path_buf());
+            }
+        }
+    }
+    None
 }
 
 fn cli_contract() -> serde_json::Value {
