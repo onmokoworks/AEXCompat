@@ -436,6 +436,7 @@ void apply_session_ui_action(const SessionUiAction* action) {
   const auto registration = telemetry.registration;
   const auto invalid_registrations = telemetry.invalid_custom_ui_registrations;
   telemetry = ui::CustomUiTelemetry{};
+  ui::reset_info_text_telemetry();
   telemetry.register_ui_calls = register_ui_calls;
   telemetry.registration = registration;
   telemetry.invalid_custom_ui_registrations = invalid_registrations;

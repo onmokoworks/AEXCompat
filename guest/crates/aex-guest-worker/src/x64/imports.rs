@@ -1213,7 +1213,10 @@ fn install_win64_import(
             LegacyWin64Import::HeapAlloc
             | LegacyWin64Import::HeapFree
             | LegacyWin64Import::HeapReAlloc => {
-                uc("write process heap return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write process heap return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install process heap import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
@@ -1563,8 +1566,7 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
         if !matches!(code_page, CP_ACP | CP_OEMCP | CP_UTF8)
             || (code_page == CP_UTF8 && flags & !WC_ERR_INVALID_CHARS != 0)
             || (code_page != CP_UTF8 && flags != 0)
-            || (code_page == CP_UTF8
-                && (default_character != 0 || used_default_character != 0))
+            || (code_page == CP_UTF8 && (default_character != 0 || used_default_character != 0))
             || source == 0
             || source_length == 0
             || source_length < -1
@@ -1601,7 +1603,11 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
             let bytes = unicorn
                 .mem_read_as_vec(source, byte_length as usize)
                 .map_err(|error| format!("WideCharToMultiByte source read failed: {error}"))?;
-            units.extend(bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])));
+            units.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+            );
         } else {
             return Err("WideCharToMultiByte received invalid source length".into());
         }
@@ -1610,7 +1616,9 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
         for character in char::decode_utf16(units) {
             match character {
                 Ok(character) => unicode.push(character),
-                Err(_) if flags & WC_ERR_INVALID_CHARS == 0 => unicode.push(char::REPLACEMENT_CHARACTER),
+                Err(_) if flags & WC_ERR_INVALID_CHARS == 0 => {
+                    unicode.push(char::REPLACEMENT_CHARACTER)
+                }
                 Err(_) => return Ok((0, Some(ERROR_NO_UNICODE_TRANSLATION))),
             }
         }
@@ -1620,11 +1628,15 @@ fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
             let default = if default_character == 0 {
                 b'?'
             } else {
-                let byte = unicorn.mem_read_as_vec(default_character, 1).map_err(|error| {
-                    format!("WideCharToMultiByte default character read failed: {error}")
-                })?[0];
+                let byte = unicorn
+                    .mem_read_as_vec(default_character, 1)
+                    .map_err(|error| {
+                        format!("WideCharToMultiByte default character read failed: {error}")
+                    })?[0];
                 if byte >= 0x80 {
-                    return Err("WideCharToMultiByte only supports a single-byte default character".into());
+                    return Err(
+                        "WideCharToMultiByte only supports a single-byte default character".into(),
+                    );
                 }
                 byte
             };
@@ -2506,8 +2518,7 @@ fn emulate_heap_free(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let arguments = (|| -> Result<(u32, u64, u64), String> {
         require_process_heap_handle(unicorn, "HeapReAlloc")?;
-        let flags =
-            read_process_heap_flags(unicorn, "HeapReAlloc", HEAP_REALLOC_ALLOWED_FLAGS)?;
+        let flags = read_process_heap_flags(unicorn, "HeapReAlloc", HEAP_REALLOC_ALLOWED_FLAGS)?;
         let pointer = read_win64_import_argument(unicorn, 2)?;
         let size = read_win64_import_argument(unicorn, 3)?;
         if pointer == 0 {
@@ -2574,17 +2585,18 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
             return;
         }
     };
-    let new_pointer = match unicorn.get_data().crt_heap.first_fit(
-        CRT_HEAP_BASE,
-        CRT_HEAP_END,
-        replacement,
-    ) {
-        Ok(pointer) => pointer,
-        Err(_) => {
-            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
-            return;
-        }
-    };
+    let new_pointer =
+        match unicorn
+            .get_data()
+            .crt_heap
+            .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, replacement)
+        {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+                return;
+            }
+        };
     if unicorn
         .mem_map(
             new_pointer,
@@ -2621,11 +2633,8 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let removed = match unicorn
         .get_data_mut()
         .crt_heap
-        .commit_process_heap_reallocation(
-        pointer,
-        new_pointer,
-        replacement,
-    ) {
+        .commit_process_heap_reallocation(pointer, new_pointer, replacement)
+    {
         Ok(allocation) => allocation,
         Err(error) => {
             let _ = unicorn.mem_unmap(new_pointer, replacement.backing_size);
@@ -2633,7 +2642,10 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
         }
     };
     if let Err(error) = unicorn.mem_unmap(pointer, removed.backing_size) {
-        return fail_process_heap(unicorn, format!("HeapReAlloc unmap old block failed: {error}"));
+        return fail_process_heap(
+            unicorn,
+            format!("HeapReAlloc unmap old block failed: {error}"),
+        );
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, new_pointer);
 }

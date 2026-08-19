@@ -1,6 +1,3 @@
-import hashlib
-import json
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,7 +15,10 @@ INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 
 
-@pytest.mark.xfail(strict=True, reason="the host serves AEGP Render Options Suite v4 as an all-null table (#932)")
+@pytest.mark.xfail(
+    strict=True,
+    reason="RenderAndCheckoutLayerFrame rejects an unmodeled PF effect instance (#1334)",
+)
 def test_real_probe_exercises_render_suite5_metadata_and_lifecycle(tmp_path):
     assert WORKER.is_file()
     assert PROBE.is_file()
