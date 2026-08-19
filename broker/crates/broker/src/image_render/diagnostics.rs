@@ -24,6 +24,7 @@ pub(crate) const MAX_RGBA_TRANSPORT_BYTES: u64 = MAX_PIXELS * 4;
 const MAX_PARAMETERS: u32 = 1024;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 const MAX_STAGE_EVENTS: usize = 32;
+const MAX_ACTIVE_STAGES: usize = MAX_STAGE_EVENTS;
 const MAX_MISSING_SUITES: usize = 16;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 32;
 const MAX_SUITE_CALL_SLOT_PROBE_SLOTS: u64 = 32;
@@ -31,6 +32,7 @@ const MAX_SUITE_CALL_SLOT_PROBE_TARGETS: usize = 8;
 const MAX_SUITE_NAME_LEN: usize = 64;
 const MAX_SUITE_TIMELINE_EVENTS: usize = 512;
 const MAX_SELECTOR_INVOCATIONS: usize = 64;
+const MAX_SELECTOR_UNWIND_FRAMES: usize = 12;
 const MAX_HOST_CALLBACK_TIMELINE_RECORDS: usize = 128;
 const MAX_COMPUTE_CACHE_TIMELINE_RECORDS: usize = 128;
 const MAX_EXTENDED_LOOKUP_TIMELINE_RECORDS: usize = 128;
@@ -480,17 +482,30 @@ pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::Dynami
 /// How much of the worker's stderr the extended trace carries out. The tail
 /// rather than the head: the interesting end of a failing selector is the last
 /// thing it did, and the head is the same start-up lines every run.
-const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
+///
+/// Visible to the crate because `windows_process::STDERR_CAPTURE_LIMIT` has to
+/// stay above it: the capture is what this cuts from, so two equal limits
+/// leave nothing to cut and this function silently becomes a no-op over the
+/// head of the stream (issue #1290).
+pub(crate) const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
 
 /// The tail of the worker's stderr, or `None` unless `AEXCOMPAT_EXTENDED_DIAG`
-/// is set. Cut on a line boundary so the first line is whole, and truncated
-/// from the front with a marker rather than silently.
+/// is set.
 fn extended_diagnostics_stderr_tail(stderr: &str) -> Option<String> {
     if std::env::var_os("AEXCOMPAT_EXTENDED_DIAG").is_none() {
         return None;
     }
+    Some(stderr_tail(stderr))
+}
+
+/// The cut itself, without the environment gate: on a line boundary so the
+/// first line is whole, and truncated from the front with a marker rather than
+/// silently. Separate from the gate so the composition with the capture's own
+/// retention is testable (issue #1290) - the two were individually right while
+/// the pair handed the report the head of the stream.
+pub(crate) fn stderr_tail(stderr: &str) -> String {
     if stderr.len() <= MAX_STDERR_TAIL_BYTES {
-        return Some(stderr.to_owned());
+        return stderr.to_owned();
     }
     // Cut forward to the next line rather than at the byte: the index lands on
     // a char boundary (it follows a newline) and on something a reader can
@@ -502,10 +517,10 @@ fn extended_diagnostics_stderr_tail(stderr: &str) -> Option<String> {
         .iter()
         .position(|byte| *byte == b'\n')
         .map_or(stderr.len(), |newline| cut + newline + 1);
-    Some(format!(
+    format!(
         "[truncated to the last {MAX_STDERR_TAIL_BYTES} bytes]\n{}",
         &stderr[start..]
-    ))
+    )
 }
 
 /// Diagnostics for a dispatched worker run, including the kill evidence from
@@ -722,6 +737,9 @@ fn worker_diagnostics(
             .map(|(name, value)| (name.to_owned(), value))
             .collect::<serde_json::Map<_, _>>();
         if state == "begin" {
+            if active_stages.len() == MAX_ACTIVE_STAGES {
+                active_stages.remove(0);
+            }
             active_stages.push(stage.to_owned());
         } else {
             if let Some(index) = active_stages.iter().rposition(|active| active == stage) {
@@ -915,12 +933,21 @@ fn callback_addr_denials(stderr: &str) -> (Vec<Value>, bool) {
     (denials, truncated)
 }
 
-/// Bound and identifier shape shared by `callback_denials`. Both fields are
-/// worker-owned vocabulary: a lower-case identifier the emitting call site
-/// chose, never plug-in text.
+/// Bounds and identifier shapes for `callback_denials`. Both fields are
+/// worker-owned vocabulary, never plug-in text. Callback names share the
+/// 64-byte schema bound used by the structured callback timeline; refusal
+/// reasons remain the smaller 32-byte vocabulary.
 const MAX_CALLBACK_DENIALS: usize = 32;
 
-fn worker_denial_identifier(value: &str) -> bool {
+fn worker_denial_callback(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn worker_denial_reason(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 32
         && value
@@ -950,7 +977,7 @@ fn callback_denials(stderr: &str) -> (Vec<Value>, bool) {
         let parsed = (|| {
             let callback = fields.next()?.strip_prefix("callback=")?;
             let reason = fields.next()?.strip_prefix("reason=")?;
-            if !worker_denial_identifier(callback) || !worker_denial_identifier(reason) {
+            if !worker_denial_callback(callback) || !worker_denial_reason(reason) {
                 return None;
             }
             // Where one scalar is the whole story - which transfer mode, how
@@ -1854,6 +1881,62 @@ fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value
                 continue;
             }
         };
+        let (unwind_stop, unwind_frames) =
+            match (record.get("unwind_stop"), record.get("unwind_frames")) {
+                (Some(Value::Null), Some(Value::Null)) => (Value::Null, Value::Null),
+                (Some(Value::String(stop)), Some(Value::Array(frames)))
+                    if seh_caught
+                        && matches!(
+                            stop.as_str(),
+                            "end_of_chain"
+                                | "chain_lost"
+                                | "frame_cap"
+                                | "no_unwind_entry"
+                                | "return_slot_unreadable"
+                                | "walk_faulted"
+                                | "low_stack"
+                        )
+                        && frames.len() <= MAX_SELECTOR_UNWIND_FRAMES =>
+                {
+                    let mut normalized = Vec::with_capacity(frames.len());
+                    let mut valid = true;
+                    for frame in frames {
+                        let Some(frame) = frame.as_object().filter(|frame| frame.len() == 2) else {
+                            valid = false;
+                            break;
+                        };
+                        let Some(from_return_slot) =
+                            frame.get("from_return_slot").and_then(Value::as_bool)
+                        else {
+                            valid = false;
+                            break;
+                        };
+                        let Some(site) = frame
+                            .get("site")
+                            .and_then(Value::as_object)
+                            .filter(|site| site.len() == 4)
+                            .map(|_| frame.get("site").unwrap())
+                            .and_then(safe_pointer_classification)
+                        else {
+                            valid = false;
+                            break;
+                        };
+                        normalized.push(json!({
+                            "from_return_slot": from_return_slot,
+                            "site": site,
+                        }));
+                    }
+                    if !valid {
+                        truncated = true;
+                        continue;
+                    }
+                    (json!(stop), Value::Array(normalized))
+                }
+                _ => {
+                    truncated = true;
+                    continue;
+                }
+            };
         let Some(global_data_handoff) = record
             .get("global_data_handoff")
             .and_then(safe_global_data_handoff)
@@ -1896,6 +1979,8 @@ fn propagate_selector_invocations(diagnostics: &mut Value, worker_report: &Value
             "fault_address": fault_address,
             "registers": registers,
             "stack_pointer_values": stack_pointer_values,
+            "unwind_stop": unwind_stop,
+            "unwind_frames": unwind_frames,
             "global_data_handoff": global_data_handoff,
             "effect_ref_at_entry": effect_ref_at_entry,
             "appl_id_at_entry": appl_id_at_entry,

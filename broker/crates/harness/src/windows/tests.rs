@@ -3,6 +3,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn repository_root_prefers_worktree_cwd_to_a_separated_binary_location() {
+        let fixture = std::env::temp_dir().join(format!(
+            "aexcompat-harness-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = fixture.join("worktree");
+        std::fs::create_dir_all(root.join("guest")).unwrap();
+        std::fs::create_dir_all(root.join("broker/crates/harness")).unwrap();
+        std::fs::write(root.join("guest/Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(root.join("broker/Cargo.toml"), "[workspace]\n").unwrap();
+
+        let cwd = root.join("broker/crates/harness");
+        let separated_exe = fixture.join("target/debug/aexcompat-harness.exe");
+        assert_eq!(
+            repository_root_from_runtime_paths(Some(cwd), Some(separated_exe)),
+            Some(root)
+        );
+        std::fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
     fn aegp_roundtrip_gui_exposes_and_routes_each_shipping_action() {
         let ui_kit = AexUiKit::default();
         for expected in AegpRoundtripAction::ALL {

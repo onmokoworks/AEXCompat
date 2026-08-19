@@ -1321,6 +1321,8 @@ mod tests {
                         "fault_address": null,
                         "registers": null,
                         "stack_pointer_values": null,
+                        "unwind_stop": null,
+                        "unwind_frames": null,
                         "global_data_handoff": {
                             "input_at_entry": {
                                 "state": "null",
@@ -1411,6 +1413,27 @@ mod tests {
                             {"offset_bytes": 32, "value": null},
                             {"offset_bytes": 40, "value": null}
                         ],
+                        "unwind_stop": "end_of_chain",
+                        "unwind_frames": [
+                            {
+                                "from_return_slot": false,
+                                "site": {
+                                    "classification": "plugin",
+                                    "module": "synthetic.aex",
+                                    "relative_offset": "0x0000000000001234",
+                                    "token": null
+                                }
+                            },
+                            {
+                                "from_return_slot": true,
+                                "site": {
+                                    "classification": "module",
+                                    "module": "kernel32.dll",
+                                    "relative_offset": "0x0000000000005678",
+                                    "token": null
+                                }
+                            }
+                        ],
                         "global_data_handoff": {
                             "input_at_entry": {
                                 "state": "non_null",
@@ -1474,6 +1497,15 @@ mod tests {
             records[1]["stack_pointer_values"].as_array().unwrap().len(),
             6
         );
+        assert_eq!(records[0]["unwind_stop"], Value::Null);
+        assert_eq!(records[0]["unwind_frames"], Value::Null);
+        assert_eq!(records[1]["unwind_stop"], "end_of_chain");
+        assert_eq!(records[1]["unwind_frames"].as_array().unwrap().len(), 2);
+        assert_eq!(records[1]["unwind_frames"][0]["from_return_slot"], false);
+        assert_eq!(
+            records[1]["unwind_frames"][1]["site"]["relative_offset"],
+            "0x0000000000005678"
+        );
         assert_eq!(
             records[0]["global_data_handoff"]["output_after_return"]["process_local_token"],
             "ptr-0123456789abcdef"
@@ -1512,6 +1544,52 @@ mod tests {
                 .to_string()
                 .contains("raw_pointer")
         );
+
+        let fault_record = report["selector_invocations"]["records"][1].clone();
+        let mut mutations = Vec::new();
+        let mut unknown_stop = fault_record.clone();
+        unknown_stop["unwind_stop"] = json!("worker_supplied_unknown");
+        mutations.push(unknown_stop);
+        let mut too_many_frames = fault_record.clone();
+        too_many_frames["unwind_frames"] =
+            Value::Array(vec![fault_record["unwind_frames"][0].clone(); 13]);
+        mutations.push(too_many_frames);
+        let mut extra_frame_key = fault_record.clone();
+        extra_frame_key["unwind_frames"][0]["worker_private"] = json!(true);
+        mutations.push(extra_frame_key);
+        let mut extra_site_key = fault_record.clone();
+        extra_site_key["unwind_frames"][0]["site"]["worker_private"] = json!("x".repeat(4096));
+        mutations.push(extra_site_key);
+        let mut unwind_without_seh = fault_record;
+        unwind_without_seh["seh_caught"] = json!(false);
+        unwind_without_seh["seh_code"] = Value::Null;
+        unwind_without_seh["fault_module_class"] = Value::Null;
+        unwind_without_seh["fault_module"] = Value::Null;
+        unwind_without_seh["plugin_rva"] = Value::Null;
+        mutations.push(unwind_without_seh);
+
+        for mutated in mutations {
+            let mutated_report = json!({
+                "selector_invocations": {
+                    "maximum_records": 64,
+                    "records": [mutated],
+                    "truncated": false
+                }
+            });
+            let mut mutated_diagnostics = json!({});
+            propagate_selector_invocations(&mut mutated_diagnostics, &mutated_report);
+            assert!(
+                mutated_diagnostics["selector_invocations"]["records"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "malformed unwind record must be dropped: {mutated_report}"
+            );
+            assert_eq!(
+                mutated_diagnostics["selector_invocations"]["truncated"],
+                true
+            );
+        }
     }
 
     #[test]
@@ -2256,13 +2334,8 @@ mod tests {
 
         // A worker that died inside the route leaves the begin unmatched, which
         // is what names the route as the active stage.
-        let died_inside = worker_diagnostics(
-            "stage:pr_gpu_route_begin\n",
-            false,
-            "crash",
-            0xC0000005,
-            5,
-        );
+        let died_inside =
+            worker_diagnostics("stage:pr_gpu_route_begin\n", false, "crash", 0xC0000005, 5);
         assert_eq!(died_inside["active_stage"], "pr_gpu_route");
 
         // The reason is dropped rather than truncated when it is not the fixed
@@ -2440,6 +2513,17 @@ mod tests {
     }
 
     #[test]
+    fn active_stage_tracking_is_bounded_but_keeps_the_latest_stage() {
+        let mut trace = "stage:classic_render_begin\nstage:classic_render_end error=0\n"
+            .repeat(MAX_ACTIVE_STAGES + 20);
+        trace.push_str(&"stage:classic_render_begin\n".repeat(MAX_ACTIVE_STAGES + 20));
+        trace.push_str("stage:smart_render_begin\n");
+        let diagnostics = worker_diagnostics(&trace, true, "timeout", 1, 5_000);
+        assert_eq!(diagnostics["active_stage"], "smart_render");
+        assert_eq!(diagnostics["failure_stage"], "smart_render");
+    }
+
+    #[test]
     fn load_failure_marker_accepts_only_path_free_worker_owned_stage_and_error() {
         let diagnostics = worker_diagnostics(
             "untrusted C:\\private\\plugin.aex\n\
@@ -2572,6 +2656,9 @@ mod tests {
              stage:callback_denied callback=transform_world reason=ok value=oops\n\
              stage:callback_denied callback=transform_world reason=ok value=99999999999\n\
              stage:callback_denied callback=transform_world reason=ok value=1 extra=1\n\
+             stage:callback_denied callback=private_effect_utf16_to_multibyte reason=null_argument\n\
+             stage:callback_denied callback=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb reason=boundary\n\
+             stage:callback_denied callback=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa reason=too_long\n\
              stage:callback_denied callback=transform_world\n";
         let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
         let denials = diagnostics["callback_denials"].as_array().unwrap();
@@ -2582,10 +2669,12 @@ mod tests {
                 json!({"callback": "transform_world", "reason": "transfer_mode", "value": -3}),
                 json!({"callback": "transform_world", "reason": "transfer_mode"}),
                 json!({"callback": "transform_world", "reason": "extent_over_4096"}),
+                json!({"callback": "private_effect_utf16_to_multibyte", "reason": "null_argument"}),
+                json!({"callback": "b".repeat(64), "reason": "boundary"}),
             ]
         );
         assert_eq!(diagnostics["callback_denials_truncated"], true);
-        assert!(!diagnostics.to_string().contains("private"));
+        assert!(!diagnostics.to_string().contains(&"a".repeat(65)));
         assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
         assert_eq!(diagnostics["failure_stage"], Value::Null);
     }

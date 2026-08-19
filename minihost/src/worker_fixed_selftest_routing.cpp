@@ -177,12 +177,30 @@ int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+int selftest_selector_fault_unwind(int, wchar_t**) {
+  const SelectorFaultUnwindProbe probe = verify_selector_fault_unwind();
+  std::cout << "{\"selector_fault_unwind\":\""
+            << (probe.passed ? "passed" : "failed")
+            << "\",\"frames\":" << probe.frame_count
+            << ",\"fault_site_is_null\":"
+            << (probe.fault_site_is_null ? "true" : "false")
+            << ",\"call_site_frame_identified\":"
+            << (probe.call_site_frame_identified ? "true" : "false")
+            << ",\"caller_frame_identified\":"
+            << (probe.caller_frame_identified ? "true" : "false")
+            << ",\"reference_identities_resolved\":"
+            << (probe.reference_identities_resolved ? "true" : "false")
+            << "}\n";
+  return probe.passed ? 0 : 1;
+}
+
 }  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 12> host_commands{{
+  const std::array<selftest::HostCommand, 13> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
+      {L"--self-test-selector-fault-unwind", 2, &selftest_selector_fault_unwind},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
       {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},

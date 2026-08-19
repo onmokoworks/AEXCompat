@@ -69,6 +69,10 @@ struct Result {
   int32_t output_width{};
   int32_t output_height{};
   int32_t output_rowbytes{};
+  // The requested guarded allocation was not acquired. The previous
+  // allocation remains owned internally, but none of its world geometry may
+  // be exposed by finalization or reporting.
+  bool output_allocation_failed{};
   // Top-left of the emitted buffer in layer coordinates. Equals the plug-in's
   // `result_rect` top-left for a rendered result; for the empty-result
   // passthrough the plug-in's rect is empty and this is the request rect, so a

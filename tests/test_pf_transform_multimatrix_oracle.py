@@ -5,7 +5,27 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools/build-pf-transform-multimatrix-oracle.ps1"
-PROBE = ROOT / "target/pf-transform-multimatrix-oracle-build/Release/pf_transform_multimatrix_oracle.aex"
+
+
+def _build_probe(build_directory):
+    subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(SCRIPT),
+            "-BuildDirectory",
+            str(build_directory),
+        ],
+        cwd=ROOT,
+        check=True,
+        timeout=180,
+    )
+    probe = build_directory / "Release/pf_transform_multimatrix_oracle.aex"
+    assert probe.is_file()
+    return probe
 
 
 def _pe_sections(data):
@@ -96,31 +116,21 @@ def _parse_pipl(payload):
     return version, reserved, properties, offset
 
 
-def test_multimatrix_oracle_probe_builds_with_two_motion_samples():
-    subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT)],
-        cwd=ROOT,
-        check=True,
-        timeout=180,
-    )
-    assert PROBE.is_file()
+def test_multimatrix_oracle_probe_builds_with_two_motion_samples(tmp_path):
+    _build_probe(tmp_path / "build")
 
 
-def test_oracle_build_is_reproducible_for_hash_pinned_bundle():
-    first = PROBE.read_bytes()
-    subprocess.run(
-        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT)],
-        cwd=ROOT,
-        check=True,
-        timeout=180,
-    )
-    assert PROBE.read_bytes() == first
+def test_oracle_build_is_reproducible_for_hash_pinned_bundle(tmp_path):
+    build_directory = tmp_path / "build"
+    probe = _build_probe(build_directory)
+    first = probe.read_bytes()
+    assert _build_probe(build_directory).read_bytes() == first
 
 
 
 
-def test_generated_oracle_has_well_formed_pipl_and_effect_main_export():
-    payload, exports = _pipl_payload_and_exports(PROBE)
+def test_generated_oracle_has_well_formed_pipl_and_effect_main_export(tmp_path):
+    payload, exports = _pipl_payload_and_exports(_build_probe(tmp_path / "build"))
     version, reserved, properties, final_offset = _parse_pipl(payload)
 
     assert "EffectMain" in exports
