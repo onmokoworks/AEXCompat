@@ -2256,13 +2256,8 @@ mod tests {
 
         // A worker that died inside the route leaves the begin unmatched, which
         // is what names the route as the active stage.
-        let died_inside = worker_diagnostics(
-            "stage:pr_gpu_route_begin\n",
-            false,
-            "crash",
-            0xC0000005,
-            5,
-        );
+        let died_inside =
+            worker_diagnostics("stage:pr_gpu_route_begin\n", false, "crash", 0xC0000005, 5);
         assert_eq!(died_inside["active_stage"], "pr_gpu_route");
 
         // The reason is dropped rather than truncated when it is not the fixed
@@ -2441,9 +2436,8 @@ mod tests {
 
     #[test]
     fn active_stage_tracking_is_bounded_but_keeps_the_latest_stage() {
-        let mut trace =
-            "stage:classic_render_begin\nstage:classic_render_end error=0\n"
-                .repeat(MAX_ACTIVE_STAGES + 20);
+        let mut trace = "stage:classic_render_begin\nstage:classic_render_end error=0\n"
+            .repeat(MAX_ACTIVE_STAGES + 20);
         trace.push_str(&"stage:classic_render_begin\n".repeat(MAX_ACTIVE_STAGES + 20));
         trace.push_str("stage:smart_render_begin\n");
         let diagnostics = worker_diagnostics(&trace, true, "timeout", 1, 5_000);
