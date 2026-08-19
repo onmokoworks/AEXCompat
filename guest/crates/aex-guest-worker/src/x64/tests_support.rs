@@ -6142,9 +6142,7 @@ fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
 
     engine
         .write(
-            layer_definition
-                + abi::PARAM_U_OFFSET as u64
-                + abi::LAYER_WORLD_FLAGS_OFFSET as u64,
+            layer_definition + abi::PARAM_U_OFFSET as u64 + abi::LAYER_WORLD_FLAGS_OFFSET as u64,
             &1i32.to_le_bytes(),
         )
         .unwrap();
