@@ -710,6 +710,24 @@ report JSON の SHA-256: baseline `454BAC68FFAE4C7B6385CADE7F1A289C93F8340BCB627
 - VR family の CPU path が非有限行列を作る件そのもの
   (`AE VR Effects Video Attributes Suite` 未実装)。fallback で `rendered` には
   なるが、CPU path は依然 render できていない。→ #1271
+
+## 8. 追記 (2026-08-19、issue #1302 の作業)
+
+birth 列の tail のうち **`BEE_Birth`** を呼んでいないことが
+`PSL_Adjustments.aex` の render 段 `frame_error:14` の原因**と考えられる**。
+BEE.dll は自分の BIB resolver を `BEE_Birth` の中でしか立てず
+(`COR_GetBIBAddressProc` → 非 export の内部 setter)、それが null だと BEE 側の
+`ACEInterface2` 表 (169 本) が 1 本も引けず、
+`PSLWorldAdapter<PF_Pixel8>::MakeEmptyPSLImageWH` が
+`BRVException("couldn't init CACE")` を投げる。ここまでは cdb と逆アセンブルの
+観測で、**14 になる最後の一段 (dvacore の top-level handler の写し) と、
+resolver を立てれば 14 が消えることは未検証** (この unit では `BEE_Birth` を
+呼んでいないため反証していない)。詳細となぜこの枝がこの unit で閉じないかは
+`docs/PSL_PARTICLE_COHORT_2026-08-19.md` §3。
+
+同じ run で `PREF_Birth` (step 7、未実装) 起因と思われる first-chance throw も
+AdobePIE の PSL 初期化中に出ているが、14 の直接原因ではない (同 §3.3)。
+
 ---
 
 方針の正本は `CLAUDE.md`。計測手順は
