@@ -71,6 +71,7 @@ enum LegacyWin64Import {
     VcompNoOp,
     GetSystemTimeAsFileTime,
     GetSystemInfo,
+    GetStartupInfoW,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -298,6 +299,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "GetSystemTimeAsFileTime") => LegacyWin64Import::GetSystemTimeAsFileTime,
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetStartupInfoW") => LegacyWin64Import::GetStartupInfoW,
+        (_, "GetStartupInfoW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -975,6 +978,15 @@ fn install_win64_import(
                     "install GetSystemInfo import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_system_info(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetStartupInfoW => {
+                uc("write GetStartupInfoW return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install GetStartupInfoW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_startup_info_w(unicorn);
                     }),
                 )?;
             }
@@ -2714,6 +2726,54 @@ fn emulate_get_system_info(unicorn: &mut Unicorn<'_, GuestState>) {
     });
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
+    }
+}
+
+fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    const STARTUP_INFO_W_SIZE: usize = 104;
+    let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
+        if output == 0 {
+            return Err("GetStartupInfoW output pointer is null".into());
+        }
+        let output_end = output
+            .checked_add(STARTUP_INFO_W_SIZE as u64 - 1)
+            .ok_or_else(|| "GetStartupInfoW output range overflows".to_string())?;
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|error| format!("GetStartupInfoW memory-map query failed: {error}"))?;
+        let mut cursor = output;
+        while cursor <= output_end {
+            let region = regions
+                .iter()
+                .find(|region| {
+                    region.begin <= cursor
+                        && cursor <= region.end
+                        && region.perms & Prot::WRITE.0 != 0
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "GetStartupInfoW output {output:#x}..={output_end:#x} is not fully writable"
+                    )
+                })?;
+            if region.end >= output_end {
+                break;
+            }
+            cursor = region
+                .end
+                .checked_add(1)
+                .ok_or_else(|| "GetStartupInfoW writable region overflows".to_string())?;
+        }
+        let mut startup_info = [0u8; STARTUP_INFO_W_SIZE];
+        startup_info[..4].copy_from_slice(&(STARTUP_INFO_W_SIZE as u32).to_le_bytes());
+        unicorn.mem_write(output, &startup_info).map_err(|error| {
+            format!("GetStartupInfoW output {output:#x} is not writable: {error}")
+        })
+    });
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
     }
 }
 
