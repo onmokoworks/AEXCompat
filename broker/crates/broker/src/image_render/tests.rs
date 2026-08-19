@@ -2643,6 +2643,40 @@ mod tests {
         assert_eq!(diagnostics["failure_stage"], Value::Null);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn worker_callback_addr_denial_round_trips_through_broker_diagnostics() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        if !worker.exists() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must build aex_l2_worker.exe before broker tests"
+            );
+            return;
+        }
+
+        let output = std::process::Command::new(&worker)
+            .arg("--self-test-pf-private-callbacks")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostics = worker_diagnostics(&stderr, false, "ok", 0, 1);
+        assert_eq!(
+            diagnostics["callback_addr_denials"],
+            json!([{"id": -3, "quality": 1, "mode": 0}])
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
+    }
+
     #[test]
     fn callback_denials_are_unique_and_identifier_shape_checked() {
         let trace = "stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\
