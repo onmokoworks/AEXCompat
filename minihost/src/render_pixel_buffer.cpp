@@ -3,10 +3,26 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 namespace aexcompat::render_safety {
+namespace {
+bool fail_this_output_reset_for_self_test() {
+  wchar_t value[16]{};
+  const DWORD length = GetEnvironmentVariableW(
+      L"AEXCOMPAT_TEST_FAIL_OUTPUT_RESET_CALL", value,
+      static_cast<DWORD>(sizeof(value) / sizeof(value[0])));
+  if (!length || length >= sizeof(value) / sizeof(value[0])) return false;
+  wchar_t* end = nullptr;
+  const unsigned long requested = std::wcstoul(value, &end, 10);
+  if (!requested || !end || *end != L'\0') return false;
+  static std::atomic<unsigned long> calls{};
+  return calls.fetch_add(1, std::memory_order_relaxed) + 1 == requested;
+}
+}  // namespace
 
 InputPixelBuffer::InputPixelBuffer(std::size_t size)
     : size_(size), data_(static_cast<unsigned char*>(VirtualAlloc(
@@ -31,6 +47,11 @@ OutputPixelBuffer::OutputPixelBuffer(std::size_t size) { reset(size); }
 OutputPixelBuffer::~OutputPixelBuffer() { release(); }
 
 bool OutputPixelBuffer::reset(std::size_t size) {
+  // Test-only failure injection. The variable is inherited by the real worker
+  // process so built-artifact tests exercise dispatch and finalization rather
+  // than a helper-shaped surrogate. Failure remains fail-closed if the name is
+  // accidentally present outside a test.
+  if (fail_this_output_reset_for_self_test()) return false;
   SYSTEM_INFO info{};
   GetSystemInfo(&info);
   const std::size_t page_size = info.dwPageSize;
