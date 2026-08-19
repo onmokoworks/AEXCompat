@@ -39,7 +39,23 @@ use windows_sys::Win32::System::Threading::{
 // can occupy more than 16 MiB after escaping 96-byte safely copied names.
 // Keep enough for the worker contract while retaining a hard memory bound.
 pub const STDOUT_CAPTURE_LIMIT: usize = 24 * 1024 * 1024;
-const STDERR_CAPTURE_LIMIT: usize = 64 * 1024;
+// Worker stderr is a trace, not a document: what matters is the last thing a
+// failing selector did, so the reader keeps the tail (issue #1290). Written as
+// a multiple of what the report's `stderr_tail` carries, because it has to
+// stay strictly above it: equal limits cancel out and the diagnostics side's
+// line-boundary cut and its `[truncated to the last N bytes]` marker never
+// fire - which is the half of the bug this constant owns.
+//
+// Kept to twice that rather than raised generously: unlike stdout, stderr is a
+// channel the plug-in itself can write (`native_stdout_guard` routes the
+// plug-in's own stdout here under `AEXCOMPAT_EXTENDED_DIAG`), and
+// `redact_windows_paths` is superlinear in the capture on adversarial input,
+// so this bound is also a bound on that work.
+pub const STDERR_CAPTURE_LIMIT: usize = 2 * crate::image_render::MAX_STDERR_TAIL_BYTES;
+// Stated rather than left to the multiplication above, because the whole bug
+// is the two limits being equal: written this way, a later edit that makes them
+// equal again fails to compile instead of quietly reinstating it.
+const _: () = assert!(STDERR_CAPTURE_LIMIT > crate::image_render::MAX_STDERR_TAIL_BYTES);
 const PROCESS_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
 // Resident render sessions carry the plug-in, its inference/runtime closure,
 // and one or more frame worlds at the same time. Keep that path bounded while
@@ -536,14 +552,170 @@ fn child_environment(
     block
 }
 
+/// Which end of an over-long stream the capture keeps.
+///
+/// stdout is one bounded JSON report: dropping its tail leaves a document a
+/// parser can still recognize as truncated, while dropping its head would
+/// leave nothing parseable at all. stderr is an append-only trace where the
+/// interesting end is the last thing the worker did before it failed, and the
+/// head is the same start-up lines every run (issue #1290).
+///
+/// The flip is a trade, not a free win, and what it costs is on the head side:
+/// above the bound, `plugin_kind:*` (emitted once at load), `first_failure_stage`
+/// (the *first* `stage:*_end` carrying an error), `active_stage` (whose
+/// `stage:*_begin` lines are now the ones dropped) and `stage_events` (filled
+/// front-first, so it now shows the start of the window rather than of the run)
+/// describe the retained window rather than the run. `failure_stage` lands on
+/// both sides: it is a gain when a `stage:*_end` carries the error, and a loss
+/// on its `active_stage` fallback, which a dropped `*_begin` leaves empty.
+/// What it buys is `failure_stage` on that first path, `last_completed_stage`
+/// and the callback-denial markers, which are what a failing selector leaves
+/// behind and which the head retention was dropping instead. Only a stream
+/// past the bound is affected, and `stderr_truncated` says when that happened.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureRetention {
+    Head,
+    Tail,
+}
+
+/// What a capture holds, and whether it is still waiting for a line to start.
+///
+/// The flag is the sticky half of the redaction invariant below. A drop that
+/// finds no line boundary left throws the whole buffer away mid-line, so what
+/// the next read appends begins mid-line too - and if the rest of the stream
+/// fits inside the bound, no later drop would ever realign it. The flag is
+/// what carries that debt to the end of the read loop.
+#[derive(Default)]
+struct Capture {
+    bytes: Vec<u8>,
+    awaiting_line_start: bool,
+}
+
+/// Drops the front of a tail capture down to `capture_limit` bytes and then on
+/// to the next line boundary, so what is left begins where a line begins.
+/// Answers whether anything was dropped.
+///
+/// The line alignment is a redaction invariant, not cosmetics.
+/// `redact_windows_paths` recognizes a path only at its `X:\\` prefix, so a
+/// front drop that lands inside one deletes the drive letter and the remainder
+/// - a private absolute path - survives redaction verbatim into a report that
+/// is not gated on `AEXCOMPAT_EXTENDED_DIAG`. A Windows path cannot contain a
+/// newline, so a capture that begins at a line boundary can only contain whole
+/// paths. Two functions here drop from the front - this one and
+/// [`resume_at_line_start`] - and each of them leaves the capture at a line
+/// start or sets `awaiting_line_start`; [`finish_capture`] is the single
+/// settlement point that runs before the capture leaves `reader`, so a debt
+/// cannot outlive the read loop.
+///
+/// A cut that already follows a newline keeps the whole line after it; only a
+/// cut inside a line gives up the rest of that line. A cut with no newline
+/// after it gives up everything and sets `awaiting_line_start`, because what
+/// remains cannot be shown to hold only whole paths - the same answer
+/// `extended_diagnostics_stderr_tail` already gives a single enormous line.
+fn drop_front_to_bound(capture: &mut Capture, capture_limit: usize) -> bool {
+    if capture.bytes.len() <= capture_limit {
+        return false;
+    }
+    // At least 1, because the length is strictly greater than the bound, so
+    // the byte before the cut is always there to look at.
+    let mut cut = capture.bytes.len() - capture_limit;
+    let mut awaiting = false;
+    if capture.bytes[cut - 1] != b'\n' {
+        match capture.bytes[cut..].iter().position(|byte| *byte == b'\n') {
+            Some(offset) => cut += offset + 1,
+            None => {
+                cut = capture.bytes.len();
+                awaiting = true;
+            }
+        }
+    }
+    capture.bytes.drain(..cut);
+    capture.awaiting_line_start = awaiting;
+    true
+}
+
+/// Pays off the debt a drop-everything left: discards up to and including the
+/// next newline, so the capture begins at a line start again. Answers whether
+/// anything was dropped.
+fn resume_at_line_start(capture: &mut Capture) -> bool {
+    if !capture.awaiting_line_start || capture.bytes.is_empty() {
+        return false;
+    }
+    match capture.bytes.iter().position(|byte| *byte == b'\n') {
+        Some(newline) => {
+            capture.bytes.drain(..=newline);
+            capture.awaiting_line_start = false;
+        }
+        // Still mid-line, so still owing: the stream never offered a boundary.
+        None => capture.bytes.clear(),
+    }
+    true
+}
+
+/// Adds one read's worth of bytes to the capture, returning whether anything
+/// had to be dropped to stay inside `capture_limit`.
+///
+/// Tail retention appends first and drops from the front only once the buffer
+/// has grown past twice the bound, so a front drop copies at most
+/// `capture_limit` bytes per `capture_limit` bytes read rather than once per
+/// 4 KiB read. The line scan the drop adds is bounded by the same window and
+/// needs the same amount of new input, so it is amortized the same way.
+///
+/// That bounds the `Vec`'s *length* at twice the limit plus one read, not the
+/// memory: capacity doubling overshoots and `drain` never returns it, and
+/// `redact_windows_paths` then holds a `Vec<char>` over the same text (4 bytes
+/// per ASCII byte) plus its own output. The real transient peak for one worker
+/// is therefore several times the limit, which is part of why
+/// `STDERR_CAPTURE_LIMIT` stays modest.
+fn absorb(
+    capture: &mut Capture,
+    chunk: &[u8],
+    capture_limit: usize,
+    retention: CaptureRetention,
+) -> bool {
+    match retention {
+        CaptureRetention::Head => {
+            let available = capture_limit.saturating_sub(capture.bytes.len());
+            let take = available.min(chunk.len());
+            capture.bytes.extend_from_slice(&chunk[..take]);
+            take < chunk.len()
+        }
+        CaptureRetention::Tail => {
+            capture.bytes.extend_from_slice(chunk);
+            if capture.bytes.len() > capture_limit.saturating_mul(2) {
+                return drop_front_to_bound(capture, capture_limit);
+            }
+            false
+        }
+    }
+}
+
+/// Trims a tail-retained capture down to the bound once reading is over, since
+/// [`absorb`] only drains when the buffer passes twice it, and pays off any
+/// outstanding line-start debt first - which the bound alone would not, because
+/// a stream that ends inside the bound never triggers another drop. Returns
+/// whether anything was dropped.
+fn finish_capture(
+    capture: &mut Capture,
+    capture_limit: usize,
+    retention: CaptureRetention,
+) -> bool {
+    if retention != CaptureRetention::Tail {
+        return false;
+    }
+    let resumed = resume_at_line_start(capture);
+    drop_front_to_bound(capture, capture_limit) || resumed
+}
+
 fn reader(
     handle_value: usize,
     capture_limit: usize,
+    retention: CaptureRetention,
 ) -> thread::JoinHandle<io::Result<(String, bool)>> {
     thread::spawn(move || {
         let handle = handle_value as HANDLE;
         let handle = OwnedHandle::new(handle)?;
-        let mut collected = Vec::new();
+        let mut collected = Capture::default();
         let mut truncated = false;
         loop {
             let mut buffer = [0u8; 4096];
@@ -560,15 +732,66 @@ fn reader(
             if ok == 0 || read == 0 {
                 break;
             }
-            let available = capture_limit.saturating_sub(collected.len());
-            let take = available.min(read as usize);
-            collected.extend_from_slice(&buffer[..take]);
-            truncated |= take < read as usize;
+            truncated |= absorb(
+                &mut collected,
+                &buffer[..read as usize],
+                capture_limit,
+                retention,
+            );
         }
-        let text = String::from_utf8_lossy(&collected);
-        let (redacted, redaction_truncated) = redact_windows_paths(&text, capture_limit);
+        truncated |= finish_capture(&mut collected, capture_limit, retention);
+        // Any orphaned UTF-8 bytes left inside the kept region become
+        // replacement characters rather than failing the conversion, the same
+        // treatment a worker writing invalid UTF-8 already gets.
+        let text = String::from_utf8_lossy(&collected.bytes);
+        let (redacted, redaction_truncated) = redact_capture(&text, capture_limit, retention);
         Ok((redacted, truncated || redaction_truncated))
     })
+}
+
+/// Redacts a capture and brings it back inside the bound from the end the
+/// retention keeps.
+///
+/// `redact_windows_paths` keeps the front and truncates the tail, which is
+/// right for a head retention and wrong for a tail one - and its truncation is
+/// reachable even though
+/// `finish_capture` already bounded the bytes, because both steps before it can
+/// grow the text: `String::from_utf8_lossy` turns each invalid byte into a
+/// 3-byte replacement character, and a redaction replaces `C:\` with a longer
+/// marker. A tail-retained capture of binary noise would otherwise come back as
+/// its own first third - #1290's failure mode one layer down, on exactly the
+/// channel where a plug-in can emit non-UTF-8. So the redaction runs unbounded
+/// and the trim happens here, at the right end.
+///
+/// Unbounded here is still bounded by the capture: the lossy expansion is at
+/// most 3x by bytes, and its loop iterates over `char`s, of which there is at
+/// most one per captured byte - so the redaction walks at most `capture_limit`
+/// positions over at most `3 * capture_limit` bytes. That bounds the *input*,
+/// not the work: the redaction is superlinear on adversarial input (issue
+/// #1306), so doubling the capture quadruples its worst case. It is a constant
+/// factor rather than an unbounded one, which is what the note on
+/// `STDERR_CAPTURE_LIMIT` relies on, and the padding adds nothing to the
+/// superlinear term itself: U+FFFD is neither the backslash of the
+/// quote-escape rescan nor the drive letter of the marker validation.
+fn redact_capture(text: &str, capture_limit: usize, retention: CaptureRetention) -> (String, bool) {
+    if retention == CaptureRetention::Head {
+        return redact_windows_paths(text, capture_limit);
+    }
+    let (redacted, over_limit) = redact_windows_paths(text, usize::MAX);
+    // Always false at `usize::MAX`; asserted so that changing that argument
+    // cannot silently drop a real truncation signal.
+    debug_assert!(!over_limit, "an unbounded redaction cannot truncate");
+    if redacted.len() <= capture_limit {
+        return (redacted, false);
+    }
+    // Forward to the next boundary rather than back: back would keep more than
+    // the bound, which is the one thing this must not do. A cut here can split
+    // a `<redacted-path>` marker, which is what the truncation flag is for.
+    let mut start = redacted.len() - capture_limit;
+    while !redacted.is_char_boundary(start) {
+        start += 1;
+    }
+    (redacted[start..].to_owned(), true)
 }
 
 /// Job Object accounting survives worker exit for as long as the job handle
@@ -1252,8 +1475,16 @@ fn launch_isolated_impl(
     if let Some(minidump_file) = minidump_file.as_mut() {
         minidump_file.close_worker_handles();
     }
-    let stdout_reader = reader(stdout_read.take() as usize, STDOUT_CAPTURE_LIMIT);
-    let stderr_reader = reader(stderr_read.take() as usize, STDERR_CAPTURE_LIMIT);
+    let stdout_reader = reader(
+        stdout_read.take() as usize,
+        STDOUT_CAPTURE_LIMIT,
+        CaptureRetention::Head,
+    );
+    let stderr_reader = reader(
+        stderr_read.take() as usize,
+        STDERR_CAPTURE_LIMIT,
+        CaptureRetention::Tail,
+    );
     // Only the desktop the broker created is swept. `None` here means the
     // caller asked for its own desktop (the GUI harness path), where closing a
     // window would be closing the user's. The desktop is shared, but the sweep
@@ -1314,6 +1545,239 @@ impl Drop for SuspendedProcessCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Feeds a capture one chunk at a time the way `reader` does, so the
+    /// retention arithmetic is exercisable without a pipe handle.
+    fn capture(chunks: &[&[u8]], limit: usize, retention: CaptureRetention) -> (Vec<u8>, bool) {
+        let mut collected = Capture::default();
+        let mut truncated = false;
+        for chunk in chunks {
+            truncated |= absorb(&mut collected, chunk, limit, retention);
+        }
+        truncated |= finish_capture(&mut collected, limit, retention);
+        (collected.bytes, truncated)
+    }
+
+    /// A stream inside the bound is kept whole and reports no truncation,
+    /// whichever end the capture favours.
+    #[test]
+    fn a_capture_under_the_bound_is_untruncated() {
+        for retention in [CaptureRetention::Head, CaptureRetention::Tail] {
+            let (collected, truncated) = capture(&[b"abc\n", b"def\n"], 16, retention);
+            assert_eq!(collected, b"abc\ndef\n", "{retention:?}");
+            assert!(!truncated, "{retention:?}");
+        }
+    }
+
+    /// The whole point of issue #1290: worker stderr is a trace, so an
+    /// over-long one must leave the *end* behind, not the beginning. The
+    /// overshoot here stays under twice the bound, which is the case only the
+    /// post-read trim catches, and the bound falls inside a line, so the answer
+    /// is the whole lines after it rather than the exact byte count.
+    #[test]
+    fn tail_retention_keeps_the_end_when_the_overshoot_is_small() {
+        let (collected, truncated) = capture(
+            &[b"one\ntwo\n", b"three\nfour\n"],
+            12,
+            CaptureRetention::Tail,
+        );
+        assert_eq!(collected, b"three\nfour\n".to_vec());
+        assert!(truncated);
+    }
+
+    /// A bound that lands exactly on a line boundary keeps the line that starts
+    /// there: the alignment gives up the rest of a *split* line, nothing more.
+    #[test]
+    fn tail_retention_keeps_a_line_the_bound_starts_on() {
+        let (collected, truncated) =
+            capture(&[b"one\ntwo\n", b"three\n"], 6, CaptureRetention::Tail);
+        assert_eq!(collected, b"three\n".to_vec());
+        assert!(truncated);
+    }
+
+    /// Past twice the bound the in-loop drain runs, and it must keep running
+    /// as more arrives rather than letting the buffer grow without limit.
+    #[test]
+    fn tail_retention_drains_repeatedly_and_still_ends_at_the_bound() {
+        let chunks: Vec<Vec<u8>> = (0u32..40)
+            .map(|index| format!("line {index}\n").into_bytes())
+            .collect();
+        let borrowed: Vec<&[u8]> = chunks.iter().map(|chunk| chunk.as_slice()).collect();
+        let (collected, truncated) = capture(&borrowed, 24, CaptureRetention::Tail);
+        assert!(truncated);
+        assert!(collected.len() <= 24);
+        let stream: Vec<u8> = chunks.concat();
+        assert!(
+            stream.ends_with(&collected),
+            "the drain has to keep walking as more arrives"
+        );
+        assert_eq!(
+            collected.first().copied(),
+            Some(b'l'),
+            "and leave a whole line behind: {:?}",
+            String::from_utf8_lossy(&collected)
+        );
+    }
+
+    /// stdout is one bounded JSON document, so its capture still keeps the
+    /// front and reports the loss.
+    #[test]
+    fn head_retention_keeps_the_start() {
+        let (collected, truncated) = capture(&[b"0123456789"], 4, CaptureRetention::Head);
+        assert_eq!(collected, b"0123");
+        assert!(truncated);
+    }
+
+    /// Head retention never realigns: a JSON report has no lines to align to,
+    /// and its front is exactly what a parser needs.
+    #[test]
+    fn head_retention_does_not_realign() {
+        let (collected, _) = capture(&[b"C:\\one\ntwo\n"], 6, CaptureRetention::Head);
+        assert_eq!(collected, b"C:\\one");
+    }
+
+    /// A zero bound is degenerate rather than a panic: the subtraction inside
+    /// the drain is what would underflow if the threshold were not derived
+    /// from the same limit.
+    #[test]
+    fn a_zero_bound_collects_nothing_and_reports_the_loss() {
+        for retention in [CaptureRetention::Head, CaptureRetention::Tail] {
+            let (collected, truncated) = capture(&[b"abc"], 0, retention);
+            assert!(collected.is_empty(), "{retention:?}");
+            assert!(truncated, "{retention:?}");
+        }
+    }
+
+    /// What issue #1290 is actually about, end to end: a stderr stream past the
+    /// capture bound has to reach the report as the *end* of the stream, cut on
+    /// a line boundary and marked as truncated. This composes the two halves -
+    /// the reader's retention and the report's tail cut - because each was
+    /// correct on its own while the pair silently handed over the head.
+    #[test]
+    fn an_over_long_stderr_reaches_the_report_as_its_own_end() {
+        let mut stream = String::new();
+        let mut line = 0;
+        while stream.len() <= STDERR_CAPTURE_LIMIT * 2 {
+            line += 1;
+            stream.push_str(&format!("stage:line {line}\n"));
+        }
+        let chunks: Vec<&[u8]> = stream.as_bytes().chunks(4096).collect();
+        let (collected, truncated) = capture(&chunks, STDERR_CAPTURE_LIMIT, CaptureRetention::Tail);
+        assert!(truncated, "a stream past the bound is a truncated capture");
+        let text = String::from_utf8_lossy(&collected);
+        let (captured, _) = redact_capture(&text, STDERR_CAPTURE_LIMIT, CaptureRetention::Tail);
+        let tail = crate::image_render::stderr_tail(&captured);
+        assert!(
+            tail.ends_with(&format!("stage:line {line}\n")),
+            "the report has to end where the stream ended"
+        );
+        assert!(
+            tail.starts_with("[truncated to the last "),
+            "and has to say that it is a tail: {:?}",
+            &tail[..tail.len().min(64)]
+        );
+        assert!(
+            !tail.contains("stage:line 1\n"),
+            "the head is what was dropped"
+        );
+    }
+
+    /// A front drop that lands inside a path would leave the remainder without
+    /// its drive letter, and `redact_windows_paths` only recognizes a path at
+    /// that prefix - so the private path would reach the report verbatim. The
+    /// capture is moved to the next line boundary first, and a path cannot
+    /// contain a newline.
+    #[test]
+    fn a_path_straddling_the_front_drop_does_not_survive_redaction() {
+        let first = b"padding padding padding padding padding\n";
+        let second = b"opened C:\\private\\secret\\file.bin here\n";
+        // Keep everything from just past the drive letter, so the drop lands
+        // inside the path rather than before it.
+        let limit = second.len() - b"opened C:\\".len();
+        let mut collected = Vec::new();
+        collected.extend_from_slice(first);
+        collected.extend_from_slice(second);
+        // The precondition, stated rather than hoped for: without the
+        // alignment the bound alone would leave the capture starting inside the
+        // path, and this test would prove nothing.
+        assert_eq!(
+            &collected[collected.len() - limit..][..7],
+            b"private",
+            "the bound has to land inside the path"
+        );
+        let (collected, truncated) = capture(&[&collected], limit, CaptureRetention::Tail);
+        assert!(truncated);
+        let text = String::from_utf8_lossy(&collected);
+        let (redacted, _) = redact_capture(&text, limit, CaptureRetention::Tail);
+        assert!(
+            !redacted.contains("private"),
+            "an unredacted path fragment reached the report: {redacted:?}"
+        );
+    }
+
+    /// A drop that finds no line boundary throws the buffer away mid-line, so
+    /// whatever the next read appends begins mid-line too. If the rest of the
+    /// stream fits inside the bound no further drop ever runs, and without the
+    /// debt being carried the capture would reach the report starting inside a
+    /// path - with the drive letter on the dropped side, which is exactly what
+    /// `redact_windows_paths` needs to see (issue #1290, found in review).
+    #[test]
+    fn a_line_past_the_bound_does_not_leave_the_rest_starting_mid_line() {
+        let limit = 64;
+        let mut lead = vec![b'L'; 200];
+        lead.extend_from_slice(b"C:\\private");
+        let tail = b"\\secret\\file.bin trailing text\nstage:done\n";
+        let (collected, truncated) = capture(&[&lead, tail], limit, CaptureRetention::Tail);
+        assert!(truncated);
+        let text = String::from_utf8_lossy(&collected);
+        let (redacted, _) = redact_capture(&text, limit, CaptureRetention::Tail);
+        assert!(
+            !redacted.contains("secret"),
+            "an unredacted path fragment reached the report: {redacted:?}"
+        );
+        assert!(redacted.ends_with("stage:done\n"), "{redacted:?}");
+    }
+
+    /// A capture with no line boundary past the bound cannot be shown to hold
+    /// only whole paths, so nothing of it is kept.
+    #[test]
+    fn a_tail_capture_with_no_line_boundary_is_dropped() {
+        let (collected, truncated) = capture(
+            &[b"C:\\private\\one-enormous-line-with-no-newline"],
+            8,
+            CaptureRetention::Tail,
+        );
+        assert!(truncated);
+        assert!(collected.is_empty());
+    }
+
+    /// A tail capture of bytes the lossy conversion expands must still come
+    /// back as its own end. Each invalid byte becomes a 3-byte replacement
+    /// character, so a capture already inside the bound can hand the redaction
+    /// a text well past it - and the redaction trims from the front, which
+    /// would return the oldest third (issue #1290, found in review).
+    #[test]
+    fn a_tail_capture_of_invalid_utf8_is_trimmed_from_the_front() {
+        let limit = 1024;
+        let mut stream = vec![b'x'; 2 * limit];
+        stream.push(b'\n');
+        stream.extend_from_slice(&vec![0xFFu8; limit - 400]);
+        stream.push(b'\n');
+        stream.extend_from_slice(b"the end\n");
+        let (collected, truncated) = capture(&[&stream], limit, CaptureRetention::Tail);
+        assert!(truncated);
+        assert!(collected.len() <= limit);
+        let text = String::from_utf8_lossy(&collected);
+        assert!(
+            text.len() > limit,
+            "the lossy conversion has to expand past the bound here: {} vs {limit}",
+            text.len()
+        );
+        let (redacted, redaction_truncated) = redact_capture(&text, limit, CaptureRetention::Tail);
+        assert!(redaction_truncated);
+        assert!(redacted.len() <= limit);
+        assert!(redacted.ends_with("the end\n"), "kept the wrong end");
+    }
 
     /// Racing first launches must converge on one desktop (issue #1194): the
     /// desktop count must not scale with worker count, and a losing racer's
