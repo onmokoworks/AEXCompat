@@ -2060,6 +2060,28 @@ bool verify_selector_inputs() {
   return true;
 }
 
+namespace {
+bool reset_smart_output(render_safety::OutputPixelBuffer& guarded,
+                        std::size_t requested_size,
+                        unsigned char*& destination,
+                        smart_execution::Result& result) {
+  if (guarded.reset(requested_size)) {
+    destination = guarded.data();
+    return true;
+  }
+  result.rects_valid = false;
+  result.pre_error = -3;
+  result.output_allocation_failed = true;
+  result.empty_result_passthrough = false;
+  result.output_width = 0;
+  result.output_height = 0;
+  result.output_rowbytes = 0;
+  result.output_origin_x = 0;
+  result.output_origin_y = 0;
+  return false;
+}
+}  // namespace
+
 bool pr_gpu_filter_route_available() {
   return active_plugin::effect_module &&
       GetProcAddress(active_plugin::effect_module,
@@ -2346,78 +2368,61 @@ bool dispatch(const Request& request, const Hooks& hooks,
       !result.returns_extra_pixels && !result.result_within_request;
   if (result.rects_valid &&
       (!result.empty_result_rect || result.empty_result_passthrough)) {
-    if (!request.guarded->reset(
-            static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height)) {
-      result.rects_valid = false;
-      result.pre_error = -3;
-      // A nonzero pre_error skips the empty-result branch below entirely, so
-      // the passthrough's own correction never runs. Clear the flag here or the
-      // record claims a copy no code path performed (issue #1285).
-      //
-      // The emitted geometry is deliberately left alone. Zeroing it here would
-      // be dead: this block falls through and reassigns all of it from
-      // `smart_bounds` below. It also would not be a passthrough fix, since
-      // this branch is shared with every other dispatch. That a failed `reset`
-      // leaves the previous allocation (`OutputPixelBuffer::reset` releases
-      // only after a successful VirtualAlloc) while the report keeps the new
-      // dimensions is a real hole, and it predates the passthrough: it is
-      // reachable through a grown `result_rect`, and through a declined
-      // `run_pr_gpu_filter`, which resets `guarded` down to the plug-in's own
-      // (possibly smaller) extent and documents that it does not restore it.
-      // Filed as #1292 and not touched here. What the passthrough does not do
-      // is widen it: its rect is required to lie inside the input world, so it
-      // never asks for more than the construction size, which is the bound the
-      // other two vectors break. It does reach the reset more often, though --
-      // before it, an empty result skipped this block entirely and no reset ran
-      // at all -- so a passthrough behind a declined GPU route is a new way to
-      // arrive at the shrunken buffer, which #1292 records.
-      result.empty_result_passthrough = false;
-    }
-    *request.destination = request.guarded->data();
-    if (!render::prepare_world_layout(
+    const bool output_reset = reset_smart_output(
+        *request.guarded,
+        static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height,
+        *request.destination, result);
+    // `OutputPixelBuffer::reset` preserves the previous allocation on
+    // failure. The helper clears its report geometry; only a successful reset
+    // may republish the destination or lay out an output world around it.
+    if (output_reset) {
+      if (!render::prepare_world_layout(
             *request.output_world,
             {(plan.deep16 || plan.float32) ? 1 : 0, plan.pixel_bytes,
              smart_bounds.width, smart_bounds.height, smart_bounds.rowbytes},
             *request.destination) ||
-        !request.formats->register_world(request.output_world->data(),
-                                         request.dispatch_pixel_format))
-      result.rects_valid = false;
-    // AE 25.3 observation (issue #102): the output world carries the
-    // result_rect top-left as PF_LayerDef::origin_x/origin_y (offset 104/108),
-    // and in_data.output_origin (276/280) is the position of the layer origin
-    // inside that buffer, i.e. the negated result_rect top-left.
-    write<int32_t>(*request.output_world, 104, smart_bounds.origin_x);
-    write<int32_t>(*request.output_world, 108, smart_bounds.origin_y);
-    write<int32_t>(*request.input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET,
-                   -smart_bounds.result_rect[0]);
-    write<int32_t>(*request.input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET,
-                   -smart_bounds.result_rect[1]);
-    result.output_width = smart_bounds.width;
-    result.output_height = smart_bounds.height;
-    result.output_rowbytes = smart_bounds.rowbytes;
-    // Where the emitted buffer sits in layer coordinates. For a rendered
-    // result this is the plug-in's own `result_rect` top-left, which is what
-    // the session already reported; for the empty-result passthrough it is the
-    // request rect, and the plug-in's rect is empty and says nothing about
-    // where the frame is (issue #1285).
-    result.output_origin_x = smart_bounds.origin_x;
-    result.output_origin_y = smart_bounds.origin_y;
-    if (video_frame_adapter_ready && !plan.gpu_negotiation) {
-      if (!video_frame_worlds.create_output(smart_bounds.width,
-                                            smart_bounds.height,
-                                            plan.gpu_negotiation,
-                                            gpu_framework) ||
-          !(plan.gpu_negotiation
-                ? request.formats->register_gpu_world(
-                      video_frame_worlds.output().data(),
-                      world_registry::kPixelFormatGpuBgra128)
-                : request.formats->register_world(
-                      video_frame_worlds.output().data(),
-                      world_registry::kPixelFormatArgb128))) {
+          !request.formats->register_world(request.output_world->data(),
+                                           request.dispatch_pixel_format))
         result.rects_valid = false;
-      } else {
-        write<int32_t>(video_frame_worlds.output(), 104, smart_bounds.origin_x);
-        write<int32_t>(video_frame_worlds.output(), 108, smart_bounds.origin_y);
+      // AE 25.3 observation (issue #102): the output world carries the
+      // result_rect top-left as PF_LayerDef::origin_x/origin_y (offset 104/108),
+      // and in_data.output_origin (276/280) is the position of the layer origin
+      // inside that buffer, i.e. the negated result_rect top-left.
+      write<int32_t>(*request.output_world, 104, smart_bounds.origin_x);
+      write<int32_t>(*request.output_world, 108, smart_bounds.origin_y);
+      write<int32_t>(*request.input,
+                     aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET,
+                     -smart_bounds.result_rect[0]);
+      write<int32_t>(*request.input,
+                     aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET,
+                     -smart_bounds.result_rect[1]);
+      result.output_width = smart_bounds.width;
+      result.output_height = smart_bounds.height;
+      result.output_rowbytes = smart_bounds.rowbytes;
+      // Where the emitted buffer sits in layer coordinates. For a rendered
+      // result this is the plug-in's own `result_rect` top-left, which is what
+      // the session already reported; for the empty-result passthrough it is the
+      // request rect, and the plug-in's rect is empty and says nothing about
+      // where the frame is (issue #1285).
+      result.output_origin_x = smart_bounds.origin_x;
+      result.output_origin_y = smart_bounds.origin_y;
+      if (video_frame_adapter_ready && !plan.gpu_negotiation) {
+        if (!video_frame_worlds.create_output(smart_bounds.width,
+                                              smart_bounds.height,
+                                              plan.gpu_negotiation,
+                                              gpu_framework) ||
+            !(plan.gpu_negotiation
+                  ? request.formats->register_gpu_world(
+                        video_frame_worlds.output().data(),
+                        world_registry::kPixelFormatGpuBgra128)
+                  : request.formats->register_world(
+                        video_frame_worlds.output().data(),
+                        world_registry::kPixelFormatArgb128))) {
+          result.rects_valid = false;
+        } else {
+          write<int32_t>(video_frame_worlds.output(), 104, smart_bounds.origin_x);
+          write<int32_t>(video_frame_worlds.output(), 108, smart_bounds.origin_y);
+        }
       }
     }
   }
