@@ -34,6 +34,7 @@ enum LegacyWin64Import {
     StdioVsnprintfS,
     StdioVsprintf,
     FopenS,
+    StrncpyS,
     MsvcpMutexInit,
     MsvcpMutexLock,
     MsvcpMutexUnlock,
@@ -515,6 +516,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::FopenS
         }
         (_, "fopen_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strncpy_s") => {
+            LegacyWin64Import::StrncpyS
+        }
+        (_, "strncpy_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "_strdup") => {
             LegacyWin64Import::CrtStrdup
         }
@@ -1600,6 +1605,15 @@ fn install_win64_import(
                     "install fopen_s import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_fopen_s(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::StrncpyS => {
+                uc("write strncpy_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install strncpy_s import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_strncpy_s(unicorn);
                     }),
                 )?;
             }
@@ -4327,6 +4341,153 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn emulate_strncpy_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    const EINVAL: u32 = 22;
+    const ERANGE: u32 = 34;
+    const STRUNCATE: u32 = 80;
+    const TRUNCATE: u64 = u64::MAX;
+    const RSIZE_MAX: u64 = u64::MAX >> 1;
+
+    let result = (|| -> Result<(u32, bool), String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let destination_size = read_win64_import_argument(unicorn, 1)?;
+        let source = read_win64_import_argument(unicorn, 2)?;
+        let count = read_win64_import_argument(unicorn, 3)?;
+
+        if destination == 0 || destination_size == 0 {
+            return Ok((EINVAL, true));
+        }
+        if destination_size > RSIZE_MAX {
+            return Ok((EINVAL, true));
+        }
+        if destination_size > MAX_CRT_STRING_BYTES {
+            return Err(format!(
+                "strncpy_s destination size {destination_size} exceeds bounded {MAX_CRT_STRING_BYTES} bytes"
+            ));
+        }
+        if !guest_range_has_permission(unicorn, destination, destination_size, Prot::WRITE)? {
+            return Err(format!(
+                "strncpy_s destination range {destination:#x}+{destination_size} is not fully writable"
+            ));
+        }
+        if count != TRUNCATE && count > RSIZE_MAX {
+            unicorn
+                .mem_write(destination, &[0])
+                .map_err(|error| format!("strncpy_s destination reset failed: {error}"))?;
+            return Ok((EINVAL, true));
+        }
+        if source == 0 {
+            unicorn
+                .mem_write(destination, &[0])
+                .map_err(|error| format!("strncpy_s destination reset failed: {error}"))?;
+            return Ok((EINVAL, true));
+        }
+
+        let read_limit = if count == TRUNCATE {
+            destination_size
+        } else {
+            count.min(destination_size)
+        };
+        let source_bytes = read_strncpy_s_source(unicorn, source, read_limit)?;
+        let terminator = source_bytes.iter().position(|byte| *byte == 0);
+        let source_span = terminator.map_or(read_limit, |index| index as u64 + 1);
+        if source_span != 0 {
+            let destination_end = destination
+                .checked_add(destination_size)
+                .ok_or_else(|| "strncpy_s destination range overflow".to_string())?;
+            let source_end = source
+                .checked_add(source_span)
+                .ok_or_else(|| "strncpy_s source range overflow".to_string())?;
+            if destination < source_end && source < destination_end {
+                unicorn
+                    .mem_write(destination, &[0])
+                    .map_err(|error| format!("strncpy_s destination reset failed: {error}"))?;
+                return Ok((EINVAL, true));
+            }
+        }
+
+        let (mut output, errno, set_errno) = if let Some(terminator) = terminator {
+            (source_bytes[..terminator].to_vec(), 0, false)
+        } else if count == TRUNCATE {
+            let copied = destination_size.saturating_sub(1) as usize;
+            (source_bytes[..copied].to_vec(), STRUNCATE, false)
+        } else if count < destination_size {
+            (source_bytes, 0, false)
+        } else {
+            unicorn
+                .mem_write(destination, &[0])
+                .map_err(|error| format!("strncpy_s destination reset failed: {error}"))?;
+            return Ok((ERANGE, true));
+        };
+        output.push(0);
+        unicorn
+            .mem_write(destination, &output)
+            .map_err(|error| format!("strncpy_s destination write failed: {error}"))?;
+        Ok((errno, set_errno))
+    })();
+
+    match result {
+        Ok((errno, set_errno)) => {
+            if set_errno {
+                unicorn.get_data_mut().crt_errno = errno;
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(errno));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn read_strncpy_s_source(
+    unicorn: &Unicorn<'_, GuestState>,
+    source: u64,
+    limit: u64,
+) -> Result<Vec<u8>, String> {
+    let regions = unicorn
+        .mem_regions()
+        .map_err(|error| format!("strncpy_s memory-map query failed: {error}"))?;
+    let mut bytes = Vec::new();
+    let mut cursor = source;
+    let mut remaining = limit;
+    while remaining != 0 {
+        let region = regions
+            .iter()
+            .find(|region| {
+                region.begin <= cursor
+                    && cursor <= region.end
+                    && region.perms & Prot::READ.0 == Prot::READ.0
+            })
+            .ok_or_else(|| format!("strncpy_s source at {cursor:#x} is not readable"))?;
+        let available = region
+            .end
+            .checked_sub(cursor)
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| "strncpy_s source range overflow".to_string())?;
+        let chunk_length = available.min(remaining);
+        let chunk = unicorn
+            .mem_read_as_vec(
+                cursor,
+                usize::try_from(chunk_length)
+                    .map_err(|_| "strncpy_s source length does not fit usize".to_string())?,
+            )
+            .map_err(|error| format!("strncpy_s source read failed: {error}"))?;
+        if let Some(terminator) = chunk.iter().position(|byte| *byte == 0) {
+            bytes.extend_from_slice(&chunk[..=terminator]);
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+        remaining -= chunk_length;
+        cursor = cursor
+            .checked_add(chunk_length)
+            .ok_or_else(|| "strncpy_s source range overflow".to_string())?;
+    }
+    Ok(bytes)
 }
 
 fn trim_leading_crt_mode_spaces(mut value: &[u8]) -> &[u8] {
