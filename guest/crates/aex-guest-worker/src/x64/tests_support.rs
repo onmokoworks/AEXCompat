@@ -4065,6 +4065,71 @@ fn system_time_import_writes_a_deterministic_validated_filetime() {
 }
 
 #[test]
+fn get_system_info_writes_the_deterministic_win64_layout() {
+    const GET_SYSTEM_INFO: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_SYSTEM_INFO,
+            "kernel32.dll",
+            "GetSystemInfo",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetSystemInfo)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetSystemInfo"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = engine.allocate(48, 8).unwrap();
+    engine
+        .call_win64(GET_SYSTEM_INFO, [output, 0, 0, 0, 0, 0])
+        .unwrap();
+    let info = engine.unicorn.mem_read_as_vec(output, 48).unwrap();
+    assert_eq!(u16::from_le_bytes(info[0..2].try_into().unwrap()), 9);
+    assert_eq!(u16::from_le_bytes(info[2..4].try_into().unwrap()), 0);
+    assert_eq!(u32::from_le_bytes(info[4..8].try_into().unwrap()), 4096);
+    assert_eq!(u64::from_le_bytes(info[8..16].try_into().unwrap()), 0x1_0000);
+    assert_eq!(
+        u64::from_le_bytes(info[16..24].try_into().unwrap()),
+        0x0000_7fff_fffe_ffff
+    );
+    assert_eq!(u64::from_le_bytes(info[24..32].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(info[32..36].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(info[36..40].try_into().unwrap()), 8664);
+    assert_eq!(u32::from_le_bytes(info[40..44].try_into().unwrap()), 65_536);
+    assert_eq!(u16::from_le_bytes(info[44..46].try_into().unwrap()), 6);
+    assert_eq!(u16::from_le_bytes(info[46..48].try_into().unwrap()), 0);
+}
+
+#[test]
+fn get_system_info_rejects_null_and_unwritable_outputs() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_get_system_info(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("GetSystemInfo output pointer is null")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_get_system_info(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("output 0xdeadbeef is not writable"))
+    );
+}
+
+#[test]
 fn bounded_windows_runtime_imports_write_outputs_and_remain_library_scoped() {
     for (symbol, implementation) in [
         ("GetCurrentThreadId", LegacyWin64Import::GetCurrentThreadId),
