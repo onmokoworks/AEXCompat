@@ -6088,12 +6088,7 @@ fn emulate_wsa_startup(unicorn: &mut Unicorn<'_, GuestState>) {
             return Ok(WINDOWS_WSAVERNOTSUPPORTED);
         }
         if output == 0
-            || !guest_range_has_permission(
-                unicorn,
-                output,
-                WINDOWS_WSADATA_X64_SIZE,
-                Prot::WRITE,
-            )?
+            || !guest_range_has_permission(unicorn, output, WINDOWS_WSADATA_X64_SIZE, Prot::WRITE)?
         {
             return Ok(WINDOWS_WSAEFAULT);
         }

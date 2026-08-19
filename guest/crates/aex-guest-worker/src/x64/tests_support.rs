@@ -6112,8 +6112,7 @@ fn wsa_startup_ordinal_writes_deterministic_x64_wsadata() {
     const STARTUP: u64 = STUB_BASE + 0x1a8;
     let mut engine = test_engine(&[0xc3]);
     assert_eq!(
-        install_win64_import(&mut engine.unicorn, STARTUP, "WS2_32.DLL", "ORDINAL 115")
-            .unwrap(),
+        install_win64_import(&mut engine.unicorn, STARTUP, "WS2_32.DLL", "ORDINAL 115").unwrap(),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WsaStartup)
     );
     assert_eq!(
@@ -6189,7 +6188,10 @@ fn wsa_startup_rejects_versions_and_invalid_outputs_atomically() {
             .unwrap(),
         u64::from(WINDOWS_WSAEFAULT)
     );
-    assert_eq!(engine.unicorn.mem_read_as_vec(readonly, 408).unwrap(), before);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(readonly, 408).unwrap(),
+        before
+    );
     assert_eq!(engine.unicorn.get_data().windows_socket_startups, count);
 }
 
@@ -6218,7 +6220,10 @@ fn wsa_startup_cleanup_balance_and_session_state_are_bounded() {
         engine.call_win64(CLEANUP, [0; 6]).unwrap(),
         u64::from(u32::MAX)
     );
-    assert_eq!(engine.unicorn.get_data().windows_last_error, WINDOWS_WSANOTINITIALISED);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        WINDOWS_WSANOTINITIALISED
+    );
     engine.unicorn.get_data_mut().windows_socket_startups = MAX_WINDOWS_SOCKET_STARTUPS;
     assert_eq!(
         engine
