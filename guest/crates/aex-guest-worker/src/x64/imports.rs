@@ -70,6 +70,7 @@ enum LegacyWin64Import {
     VcompForStaticSimpleInit,
     VcompNoOp,
     GetSystemTimeAsFileTime,
+    GetSystemInfo,
     GetCurrentThreadId,
     GetCurrentProcessId,
     QueryPerformanceCounter,
@@ -287,6 +288,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
     }
     let legacy = match (normalized_library.as_str(), symbol) {
         ("kernel32.dll", "GetSystemTimeAsFileTime") => LegacyWin64Import::GetSystemTimeAsFileTime,
+        ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
+        (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
         ("kernel32.dll", "GetCurrentProcessId") => LegacyWin64Import::GetCurrentProcessId,
         ("kernel32.dll", "QueryPerformanceCounter") => LegacyWin64Import::QueryPerformanceCounter,
@@ -937,6 +940,18 @@ fn install_win64_import(
                     "install GetSystemTimeAsFileTime import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_system_time_as_file_time(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetSystemInfo => {
+                uc(
+                    "write GetSystemInfo return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetSystemInfo import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_system_info(unicorn);
                     }),
                 )?;
             }
@@ -2430,6 +2445,33 @@ fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
             .map_err(|error| {
                 format!("GetSystemTimeAsFileTime output {output:#x} is not writable: {error}")
             })
+    });
+    if let Err(error) = result {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
+}
+
+fn emulate_get_system_info(unicorn: &mut Unicorn<'_, GuestState>) {
+    const PROCESSOR_ARCHITECTURE_AMD64: u16 = 9;
+    const PROCESSOR_AMD_X8664: u32 = 8664;
+    const WINDOWS_MAXIMUM_APPLICATION_ADDRESS: u64 = 0x0000_7fff_fffe_ffff;
+    let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
+        if output == 0 {
+            return Err("GetSystemInfo output pointer is null".to_string());
+        }
+        let mut info = [0u8; 48];
+        info[0..2].copy_from_slice(&PROCESSOR_ARCHITECTURE_AMD64.to_le_bytes());
+        info[4..8].copy_from_slice(&(PAGE_SIZE as u32).to_le_bytes());
+        info[8..16].copy_from_slice(&0x1_0000u64.to_le_bytes());
+        info[16..24].copy_from_slice(&WINDOWS_MAXIMUM_APPLICATION_ADDRESS.to_le_bytes());
+        info[24..32].copy_from_slice(&1u64.to_le_bytes());
+        info[32..36].copy_from_slice(&1u32.to_le_bytes());
+        info[36..40].copy_from_slice(&PROCESSOR_AMD_X8664.to_le_bytes());
+        info[40..44].copy_from_slice(&0x1_0000u32.to_le_bytes());
+        info[44..46].copy_from_slice(&6u16.to_le_bytes());
+        unicorn
+            .mem_write(output, &info)
+            .map_err(|error| format!("GetSystemInfo output {output:#x} is not writable: {error}"))
     });
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
