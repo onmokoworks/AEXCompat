@@ -2279,7 +2279,7 @@ int32_t& g_aegp_active_camera_layer_index =
 // layer/effect/collection/stream/keyframe callbacks are compiled in
 // worker_aegp_scene.cpp.
 bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
-  return plugin_id == 1 && item == &g_aegp_comp_item;
+  return plugin_id == 1 && valid_scene_item_handle(item);
 }
 bool __cdecl initialize_layer_render_options(
     int32_t plugin_id, void* source, AegpLayerEffectBoundary boundary,
