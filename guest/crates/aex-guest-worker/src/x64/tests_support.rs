@@ -1861,6 +1861,7 @@ fn msvcp_mutex_lifecycle_is_recursive_serial_and_session_local() {
         engine.unicorn.get_data().msvcp_mutexes.get(&object),
         Some(&MsvcpMutex {
             mutex_type: OBSERVED_MSVCP_MUTEX_TYPE,
+            owner_thread_id: Some(1),
             lock_count: 2,
         })
     );
@@ -1982,6 +1983,7 @@ fn msvcp_mutex_is_library_qualified_and_bounded() {
             0x1000 + index as u64,
             MsvcpMutex {
                 mutex_type: OBSERVED_MSVCP_MUTEX_TYPE,
+                owner_thread_id: None,
                 lock_count: 0,
             },
         );
@@ -1997,6 +1999,7 @@ fn msvcp_mutex_is_library_qualified_and_bounded() {
         object,
         MsvcpMutex {
             mutex_type: OBSERVED_MSVCP_MUTEX_TYPE,
+            owner_thread_id: Some(1),
             lock_count: MAX_MSVCP_MUTEX_RECURSION,
         },
     );
@@ -2004,6 +2007,109 @@ fn msvcp_mutex_is_library_qualified_and_bounded() {
         .call_win64(LOCK, [object, 0, 0, 0, 0, 0])
         .unwrap_err();
     assert!(error.to_string().contains("recursion"), "{error}");
+}
+
+#[test]
+fn msvcp_try_mutex_type_two_is_nonrecursive_and_guest_thread_owned() {
+    const INIT: u64 = STUB_BASE + 0x2c0;
+    const LOCK: u64 = STUB_BASE + 0x2d0;
+    const UNLOCK: u64 = STUB_BASE + 0x2e0;
+    const DESTROY: u64 = STUB_BASE + 0x2f0;
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, symbol) in [
+        (INIT, "_Mtx_init_in_situ"),
+        (LOCK, "_Mtx_lock"),
+        (UNLOCK, "_Mtx_unlock"),
+        (DESTROY, "_Mtx_destroy_in_situ"),
+    ] {
+        install_win64_import(&mut engine.unicorn, stub, "msvcp140.dll", symbol).unwrap();
+    }
+    let object = DATA_BASE + 0xd00;
+
+    assert_eq!(
+        engine
+            .call_win64(INIT, [object, MSVCP_MUTEX_TRY as u64, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.call_win64(LOCK, [object, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.call_win64(LOCK, [object, 0, 0, 0, 0, 0]).unwrap(),
+        MSVCP_THRD_BUSY as u64
+    );
+    assert_eq!(
+        engine.unicorn.get_data().msvcp_mutexes.get(&object),
+        Some(&MsvcpMutex {
+            mutex_type: MSVCP_MUTEX_TRY,
+            owner_thread_id: Some(1),
+            lock_count: 1,
+        })
+    );
+
+    engine.unicorn.get_data_mut().current_windows_thread_id = 2;
+    let error = engine
+        .call_win64(LOCK, [object, 0, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("would block"), "{error}");
+    engine.unicorn.get_data_mut().callback_error = None;
+    let error = engine
+        .call_win64(UNLOCK, [object, 0, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("not owned"), "{error}");
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.unicorn.get_data_mut().current_windows_thread_id = 1;
+    assert_eq!(engine.call_win64(UNLOCK, [object, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.call_win64(DESTROY, [object, 0, 0, 0, 0, 0]).unwrap(), 0);
+    let error = engine
+        .call_win64(LOCK, [object, 0, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("not initialized"), "{error}");
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    assert_eq!(
+        engine
+            .call_win64(INIT, [object, MSVCP_MUTEX_TRY as u64, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.call_win64(DESTROY, [object, 0, 0, 0, 0, 0]).unwrap(), 0);
+}
+
+#[test]
+fn msvcp_mutex_requires_a_complete_writable_guest_object_before_state_changes() {
+    const INIT: u64 = STUB_BASE + 0x300;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        INIT,
+        "msvcp140.dll",
+        "_Mtx_init_in_situ",
+    )
+    .unwrap();
+    let boundary = DATA_BASE + PAGE_SIZE - (MSVCP_MUTEX_BYTES as u64 - 1);
+    let error = engine
+        .call_win64(INIT, [boundary, MSVCP_MUTEX_TRY as u64, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("not fully writable"), "{error}");
+    assert!(engine.unicorn.get_data().msvcp_mutexes.is_empty());
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    let object = DATA_BASE + 0xe00;
+    let error = engine
+        .call_win64(INIT, [object, MSVCP_MUTEX_TRY as u64, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("not fully writable"), "{error}");
+    assert!(engine.unicorn.get_data().msvcp_mutexes.is_empty());
+
+    assert!(test_engine(&[0xc3])
+        .unicorn
+        .get_data()
+        .msvcp_mutexes
+        .is_empty());
 }
 
 #[test]
