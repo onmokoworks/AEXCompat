@@ -438,7 +438,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "HeapReAlloc") => LegacyWin64Import::HeapReAlloc,
         ("kernel32.dll", "HeapCreate") => LegacyWin64Import::HeapCreate,
         ("kernel32.dll", "HeapDestroy") => LegacyWin64Import::HeapDestroy,
-        (_, "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc" | "HeapCreate" | "HeapDestroy") => {
+        (
+            _,
+            "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc" | "HeapCreate"
+            | "HeapDestroy",
+        ) => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("ws2_32.dll", "WSAStartup" | "ORDINAL 115") => LegacyWin64Import::WsaStartup,
@@ -1717,7 +1721,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::HeapCreate | LegacyWin64Import::HeapDestroy => {
-                uc("write private heap return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write private heap return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install private heap import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
@@ -1756,7 +1763,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::RaiseException => {
-                uc("write RaiseException trap", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write RaiseException trap",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install RaiseException import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -4969,7 +4979,10 @@ fn require_process_heap_handle(
 ) -> Result<u64, String> {
     let handle = read_win64_import_argument(unicorn, 0)?;
     if handle != PROCESS_HEAP_HANDLE
-        && !unicorn.get_data().windows_private_heaps.contains_key(&handle)
+        && !unicorn
+            .get_data()
+            .windows_private_heaps
+            .contains_key(&handle)
     {
         return Err(format!(
             "{operation} rejected unknown heap handle {handle:#x}"
@@ -5124,7 +5137,11 @@ fn allocate_process_heap_region(
         return Err(error);
     }
     if handle != PROCESS_HEAP_HANDLE {
-        let Some(allocations) = unicorn.get_data_mut().windows_private_heaps.get_mut(&handle) else {
+        let Some(allocations) = unicorn
+            .get_data_mut()
+            .windows_private_heaps
+            .get_mut(&handle)
+        else {
             let _ = unicorn.get_data_mut().crt_heap.remove_process_heap(pointer);
             let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
             return Err(CrtHeapError::AllocatorMismatch);
@@ -5148,7 +5165,11 @@ fn free_process_heap_region(
         .mem_unmap(pointer, allocation.backing_size)
         .map_err(|error| format!("unmap process heap allocation {pointer:#x}: {error}"))?;
     if handle != PROCESS_HEAP_HANDLE {
-        if let Some(allocations) = unicorn.get_data_mut().windows_private_heaps.get_mut(&handle) {
+        if let Some(allocations) = unicorn
+            .get_data_mut()
+            .windows_private_heaps
+            .get_mut(&handle)
+        {
             allocations.remove(&pointer);
         }
     }
@@ -5343,7 +5364,11 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
         );
     }
     if handle != PROCESS_HEAP_HANDLE {
-        let Some(allocations) = unicorn.get_data_mut().windows_private_heaps.get_mut(&handle) else {
+        let Some(allocations) = unicorn
+            .get_data_mut()
+            .windows_private_heaps
+            .get_mut(&handle)
+        else {
             return fail_process_heap(unicorn, "HeapReAlloc lost private heap ownership".into());
         };
         allocations.remove(&pointer);
@@ -6335,9 +6360,9 @@ fn emulate_raise_exception(unicorn: &mut Unicorn<'_, GuestState>) {
         let mut values = Vec::with_capacity(count as usize);
         for index in 0..count {
             let address = arguments + u64::from(index) * 8;
-            let bytes = unicorn
-                .mem_read_as_vec(address, 8)
-                .map_err(|error| format!("RaiseException parameter {index} read failed: {error}"))?;
+            let bytes = unicorn.mem_read_as_vec(address, 8).map_err(|error| {
+                format!("RaiseException parameter {index} read failed: {error}")
+            })?;
             values.push(u64::from_le_bytes(bytes.try_into().map_err(|_| {
                 format!("RaiseException parameter {index} has the wrong size")
             })?));
