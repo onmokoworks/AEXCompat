@@ -2938,6 +2938,370 @@ fn issue1398_address_waiter_state_is_bounded_and_session_local() {
 }
 
 #[test]
+fn issue1402_wait_on_address_sizes_timeouts_pointers_and_scope() {
+    const WAIT_API: u64 = STUB_BASE + 0x428;
+    const WAIT_KERNEL: u64 = STUB_BASE + 0x430;
+    let api_set = "api-ms-win-core-synch-l1-2-0.dll";
+    for library in [api_set, "kernel32.dll"] {
+        assert_eq!(
+            dispatch_win64_import(library, "WaitOnAddress"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WaitOnAddress)
+        );
+    }
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "WaitOnAddress"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, WAIT_API, api_set, "WaitOnAddress").unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        WAIT_KERNEL,
+        "kernel32.dll",
+        "WaitOnAddress",
+    )
+    .unwrap();
+    let address = DATA_BASE + 0xd00;
+    let compare = DATA_BASE + 0xd20;
+    for size in [1_u64, 2, 4, 8] {
+        let current = 0x8877_6655_4433_2211_u64.to_le_bytes();
+        let mut different = current;
+        different[(size - 1) as usize] ^= 0xff;
+        engine.write(address, &current).unwrap();
+        engine.write(compare, &different).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+        assert_eq!(
+            engine
+                .call_win64(
+                    WAIT_API,
+                    [address, compare, size, u64::from(u32::MAX), 0, 0],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+        engine.write(compare, &current).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(WAIT_KERNEL, [address, compare, size, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 1460);
+    }
+    assert_eq!(
+        engine
+            .call_win64(WAIT_API, [address, compare, 8, 17, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1460);
+    assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
+    for args in [
+        [address, compare, 0, 0, 0, 0],
+        [address, compare, 3, 0, 0, 0],
+        [0, compare, 4, 0, 0, 0],
+        [address, 0, 4, 0, 0, 0],
+        [DATA_BASE + DATA_SIZE - 3, compare, 4, 0, 0, 0],
+        [address, DATA_BASE + DATA_SIZE - 3, 4, 0, 0, 0],
+    ] {
+        assert_eq!(engine.call_win64(WAIT_API, args).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+        assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
+    }
+}
+
+fn issue1402_wait_scheduler_fixture(timeout: u32, wake: bool) -> (GuestEngine<'static>, u64) {
+    const CREATE: u64 = STUB_BASE + 0x450;
+    const WAIT: u64 = STUB_BASE + 0x460;
+    const WAKE: u64 = STUB_BASE + 0x470;
+    const GET_LAST_ERROR: u64 = STUB_BASE + 0x480;
+    const CHILD_OFFSET: usize = 0x180;
+    let address = DATA_BASE + 0xd80;
+    let compare = DATA_BASE + 0xda0;
+    let mut code = vec![0x48, 0x83, 0xec, 0x38];
+    code.extend_from_slice(&[0x31, 0xc9, 0x31, 0xd2]);
+    push_mov_imm64(&mut code, [0x49, 0xb8], TEST_CODE + CHILD_OFFSET as u64);
+    code.extend_from_slice(&[0x45, 0x31, 0xc9]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], CREATE);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x89, 0xc3]);
+    if wake {
+        push_mov_imm64(&mut code, [0x48, 0xb8], address);
+        code.extend_from_slice(&[0xc7, 0x00, 1, 0, 0, 0]);
+        push_mov_imm64(&mut code, [0x48, 0xb8], WAKE);
+        push_mov_imm64(&mut code, [0x48, 0xb9], address);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    }
+    code.extend_from_slice(&[0x48, 0x89, 0xd8, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    code.resize(CHILD_OFFSET, 0x90);
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+    push_mov_imm64(&mut code, [0x48, 0xb9], address);
+    push_mov_imm64(&mut code, [0x48, 0xba], compare);
+    code.extend_from_slice(&[0x49, 0xc7, 0xc0, 4, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x49, 0xb9], u64::from(timeout));
+    push_mov_imm64(&mut code, [0x48, 0xb8], WAIT);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    if timeout != u32::MAX && !wake {
+        push_mov_imm64(&mut code, [0x48, 0xb8], GET_LAST_ERROR);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    }
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.write(address, &[0; 8]).unwrap();
+    engine.write(compare, &[0; 8]).unwrap();
+    for (stub, symbol) in [
+        (CREATE, "CreateThread"),
+        (WAIT, "WaitOnAddress"),
+        (WAKE, "WakeByAddressAll"),
+        (GET_LAST_ERROR, "GetLastError"),
+    ] {
+        install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", symbol).unwrap();
+    }
+    let handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
+    (engine, handle)
+}
+
+#[test]
+fn issue1402_infinite_and_finite_waiters_run_peer_before_wake_or_timeout() {
+    for timeout in [u32::MAX, 25] {
+        let (engine, handle) = issue1402_wait_scheduler_fixture(timeout, true);
+        let thread = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+        assert!(thread.completed);
+        assert_eq!(thread.exit_code, 1);
+        assert!(engine.scheduled_windows_threads.is_empty());
+        assert!(engine.scheduler_ready.is_empty());
+        assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
+    }
+    let (engine, handle) = issue1402_wait_scheduler_fixture(25, false);
+    let thread = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+    assert!(thread.completed);
+    assert_eq!(thread.exit_code, 1460);
+    assert!(engine.scheduled_windows_threads.is_empty());
+    assert!(engine.scheduler_ready.is_empty());
+    assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
+
+    // A detached/background child may legitimately remain parked after the
+    // main call returns; this is not a main-thread deadlock and remains bounded
+    // for a later exact wake in the same guest session.
+    let (engine, handle) = issue1402_wait_scheduler_fixture(u32::MAX, false);
+    assert!(!engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .unwrap()
+        .completed);
+    assert_eq!(engine.scheduled_windows_threads.len(), 1);
+    assert_eq!(engine.unicorn.get_data().windows_address_waiters.len(), 1);
+}
+
+#[test]
+fn issue1402_wake_single_is_exact_and_infinite_deadlock_fails_closed() {
+    const WAKE_SINGLE: u64 = STUB_BASE + 0x490;
+    const WAIT: u64 = STUB_BASE + 0x4a0;
+    assert_eq!(
+        dispatch_win64_import(
+            "api-ms-win-core-synch-l1-2-0.dll",
+            "WakeByAddressSingle"
+        ),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WakeByAddressSingle)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "WakeByAddressSingle"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        WAKE_SINGLE,
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "WakeByAddressSingle",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        WAIT,
+        "api-ms-win-core-synch-l1-2-0.dll",
+        "WaitOnAddress",
+    )
+    .unwrap();
+    let first = DATA_BASE + 0xdc0;
+    let second = DATA_BASE + 0xde0;
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), first, 3).unwrap();
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), first, 2).unwrap();
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), second, 4).unwrap();
+    let marker = 0x8877_6655_4433_2211;
+    engine.unicorn.reg_write(RegisterX86::RAX, marker).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(WAKE_SINGLE, [first, 0, 0, 0, 0, 0])
+            .unwrap(),
+        marker
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_address_waiters.get(&first),
+        Some(&BTreeSet::from([3]))
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_address_waiters.get(&second),
+        Some(&BTreeSet::from([4]))
+    );
+
+    engine.write(first, &[0; 8]).unwrap();
+    engine.write(second, &[0; 8]).unwrap();
+    let error = engine
+        .call_win64(
+            WAIT,
+            [first, second, 8, u64::from(u32::MAX), 0, 0],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("WaitOnAddress deadlock"), "{error}");
+    assert!(engine
+        .unicorn
+        .get_data()
+        .windows_address_waiters
+        .values()
+        .all(|waiters| !waiters.contains(&1)));
+}
+
+#[test]
+fn issue1402_finite_main_wait_runs_ready_peer_then_times_out_without_starvation() {
+    const CREATE: u64 = STUB_BASE + 0x4b0;
+    const SWITCH: u64 = STUB_BASE + 0x4c0;
+    const WAIT: u64 = STUB_BASE + 0x4d0;
+    const GET_LAST_ERROR: u64 = STUB_BASE + 0x4e0;
+    const CHILD_OFFSET: usize = 0x180;
+    let address = DATA_BASE + 0xe20;
+    let compare = DATA_BASE + 0xe40;
+    let mut code = vec![0x48, 0x83, 0xec, 0x38];
+    code.extend_from_slice(&[0x31, 0xc9, 0x31, 0xd2]);
+    push_mov_imm64(&mut code, [0x49, 0xb8], TEST_CODE + CHILD_OFFSET as u64);
+    code.extend_from_slice(&[0x45, 0x31, 0xc9]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], CREATE);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xb9], address);
+    push_mov_imm64(&mut code, [0x48, 0xba], compare);
+    code.extend_from_slice(&[0x49, 0xc7, 0xc0, 4, 0, 0, 0]);
+    code.extend_from_slice(&[0x49, 0xc7, 0xc1, 0xe8, 0x03, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], WAIT);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], GET_LAST_ERROR);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    code.resize(CHILD_OFFSET, 0x90);
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+    code.extend_from_slice(&[0xbb, 0x2c, 0x01, 0, 0]); // mov ebx, 300
+    let yield_loop = code.len();
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0, 0xff, 0xcb, 0x75, 0]);
+    let after_branch = code.len();
+    code[after_branch - 1] = (yield_loop as isize - after_branch as isize) as i8 as u8;
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xb8, 7, 0, 0, 0, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.write(address, &[0; 8]).unwrap();
+    engine.write(compare, &[0; 8]).unwrap();
+    for (stub, symbol) in [
+        (CREATE, "CreateThread"),
+        (SWITCH, "SwitchToThread"),
+        (WAIT, "WaitOnAddress"),
+        (GET_LAST_ERROR, "GetLastError"),
+    ] {
+        install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", symbol).unwrap();
+    }
+    assert_eq!(engine.call_win64(TEST_CODE, [0; 6]).unwrap(), 1460);
+    assert!(engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .values()
+        .any(|thread| !thread.completed));
+    assert!(engine.scheduler_ready.is_empty());
+    assert_eq!(engine.scheduled_windows_threads.len(), 1);
+    assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
+}
+
+#[test]
+fn issue1402_finite_main_wait_survives_multiple_peer_slices_until_exact_wake() {
+    const CREATE: u64 = STUB_BASE + 0x4f0;
+    const SWITCH: u64 = STUB_BASE + 0x500;
+    const WAIT: u64 = STUB_BASE + 0x510;
+    const WAKE: u64 = STUB_BASE + 0x520;
+    const CHILD_OFFSET: usize = 0x180;
+    let address = DATA_BASE + 0xe60;
+    let compare = DATA_BASE + 0xe80;
+    let mut code = vec![0x48, 0x83, 0xec, 0x38];
+    code.extend_from_slice(&[0x31, 0xc9, 0x31, 0xd2]);
+    push_mov_imm64(&mut code, [0x49, 0xb8], TEST_CODE + CHILD_OFFSET as u64);
+    code.extend_from_slice(&[0x45, 0x31, 0xc9]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], CREATE);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xb9], address);
+    push_mov_imm64(&mut code, [0x48, 0xba], compare);
+    code.extend_from_slice(&[0x49, 0xc7, 0xc0, 4, 0, 0, 0]);
+    code.extend_from_slice(&[0x49, 0xc7, 0xc1, 25, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], WAIT);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    code.resize(CHILD_OFFSET, 0x90);
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+    for _ in 0..2 {
+        push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    }
+    push_mov_imm64(&mut code, [0x48, 0xb9], address);
+    push_mov_imm64(&mut code, [0x48, 0xb8], WAKE);
+    code.extend_from_slice(&[
+        0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0xb8, 7, 0, 0, 0, 0xc3,
+    ]);
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.write(address, &[0; 8]).unwrap();
+    engine.write(compare, &[0; 8]).unwrap();
+    for (stub, symbol) in [
+        (CREATE, "CreateThread"),
+        (SWITCH, "SwitchToThread"),
+        (WAIT, "WaitOnAddress"),
+        (WAKE, "WakeByAddressSingle"),
+    ] {
+        install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", symbol).unwrap();
+    }
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(engine.call_win64(TEST_CODE, [0; 6]).unwrap(), 1);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert!(engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .values()
+        .any(|thread| thread.completed && thread.exit_code == 7));
+    assert!(engine.scheduler_ready.is_empty());
+    assert!(engine.scheduled_windows_threads.is_empty());
+    assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
+}
+
+#[test]
 fn get_proc_address_resolves_fls_alloc_to_a_stable_callable_guest_address() {
     const GET_PROC: u64 = STUB_BASE + 0x408;
     let name = DATA_BASE + 0xb00;
