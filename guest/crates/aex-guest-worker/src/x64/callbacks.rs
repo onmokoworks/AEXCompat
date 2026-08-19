@@ -378,8 +378,8 @@ fn deterministic_i32_stub(value: i32) -> [u8; 6] {
 fn deterministic_u64_stub(value: u64) -> [u8; 11] {
     let bytes = value.to_le_bytes();
     [
-        0x48, 0xb8, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-        bytes[7], 0xc3,
+        0x48, 0xb8, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        0xc3,
     ]
 }
 
@@ -1190,7 +1190,9 @@ fn read_crt_stdio_c_string(
             .checked_add(offset)
             .ok_or_else(|| format!("stdio {label} range overflow"))?;
         if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
-            return Err(format!("stdio {label} address {address:#x} is not readable"));
+            return Err(format!(
+                "stdio {label} address {address:#x} is not readable"
+            ));
         }
         let mut byte = [0u8; 1];
         unicorn
@@ -1384,7 +1386,9 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
     })();
     match result {
         Ok((destination, output, return_value)) => {
-            if !output.is_empty() && let Err(error) = unicorn.mem_write(destination, &output) {
+            if !output.is_empty()
+                && let Err(error) = unicorn.mem_write(destination, &output)
+            {
                 if unicorn.get_data().callback_error.is_none() {
                     unicorn.get_data_mut().callback_error =
                         Some(format!("stdio destination write: {error}"));

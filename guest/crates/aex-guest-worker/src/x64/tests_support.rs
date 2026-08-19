@@ -1746,12 +1746,12 @@ fn stdio_vsprintf_formats_observed_olm_parameter_name_with_size_max() {
     engine.unicorn.mem_write(output, &[0xa5; 16]).unwrap();
     assert_eq!(
         engine
-        .call_win64_with_timeout(
-            VSPRINTF,
-            &[0x25, output, 8, format, 0, va_list],
-            TIMEOUT_MICROSECONDS,
-        )
-        .unwrap(),
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 8, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
         u32::MAX as u64
     );
     assert_eq!(
@@ -1789,13 +1789,13 @@ fn stdio_finite_vsprintf_formats_bang_path_and_validates_complete_guest_ranges()
     let va_list = DATA_BASE + 0x280;
     let output = DATA_BASE + 0x400;
     engine.unicorn.mem_write(format, b"%s\\%s\0").unwrap();
-    engine.unicorn.mem_write(root, b"C:\\ProgramData\0").unwrap();
     engine
         .unicorn
-        .mem_write(
-            suffix,
-            b"\\Red Giant\\Common\\Libraries\\RGBranding.dll\0",
-        )
+        .mem_write(root, b"C:\\ProgramData\0")
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(suffix, b"\\Red Giant\\Common\\Libraries\\RGBranding.dll\0")
         .unwrap();
     engine
         .unicorn
