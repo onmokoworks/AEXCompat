@@ -2335,7 +2335,7 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
                     .find(|region| {
                         region.begin <= cursor
                             && cursor <= region.end
-                            && region.perms & Prot::WRITE.0 != 0
+                            && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
                     })
                     .ok_or_else(|| {
                         format!(
@@ -2450,7 +2450,7 @@ fn emulate_get_string_type_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && region.perms & Prot::WRITE.0 != 0
+                        && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
                 })
                 .ok_or_else(|| {
                     format!(
@@ -2636,7 +2636,7 @@ fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
                     .find(|region| {
                         region.begin <= cursor
                             && cursor <= region.end
-                            && region.perms & Prot::WRITE.0 != 0
+                            && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
                     })
                     .ok_or_else(|| {
                         format!(
@@ -4383,7 +4383,7 @@ fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && region.perms & Prot::WRITE.0 != 0
+                        && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
                 })
                 .ok_or_else(|| {
                     format!(
@@ -4442,7 +4442,7 @@ fn emulate_get_cp_info(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && region.perms & Prot::WRITE.0 != 0
+                        && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
                 })
                 .ok_or_else(|| {
                     format!(
@@ -4545,7 +4545,7 @@ fn guest_range_has_permission(
         let Some(region) = regions.iter().find(|region| {
             region.begin <= cursor
                 && cursor <= region.end
-                && region.perms & permission.0 == permission.0
+                && (region.perms as u32) & (permission.0 as u32) == permission.0 as u32
         }) else {
             return Ok(false);
         };
