@@ -67,6 +67,7 @@ bool verify_world_transform_convolve();
 bool verify_bad_callback_param_contract();
 bool verify_copy_world_clipping();
 bool verify_copy_foreign_world_gate();
+bool verify_transform_world_foreign_operand(bool admitted);
 bool verify_world_transform_affine();
 bool verify_world_transform_transfer_mask();
 int32_t __cdecl composite_rect8(void*, LegacyRect*, int32_t, void*, int32_t,

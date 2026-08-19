@@ -151,6 +151,68 @@ fn pipe_holding_descendant_does_not_block_capture() {
     assert!(started.elapsed() < Duration::from_secs(20));
 }
 
+/// The wiring half of issue #1290: worker stderr has to reach the broker as
+/// the *end* of the stream, and the bytes that are dropped have to leave whole
+/// lines behind. Every unit test around the capture names its own retention and
+/// bound, so only this can catch the two `reader` arguments being swapped back,
+/// or the post-read step going missing - which is the bug itself, not a
+/// refactor of it.
+#[cfg(windows)]
+#[test]
+fn production_stderr_capture_keeps_the_end_of_an_over_long_trace() {
+    use aexcompat_broker::windows_process::{STDERR_CAPTURE_LIMIT, run_isolated};
+    use std::path::Path;
+    use std::time::Duration;
+
+    let result = run_isolated(
+        Path::new(env!("CARGO_BIN_EXE_dummy_large_stderr")),
+        &[
+            (STDERR_CAPTURE_LIMIT * 2).to_string(),
+            STDERR_CAPTURE_LIMIT.to_string(),
+        ],
+        Some(Duration::from_secs(30)),
+    )
+    .expect("run large-stderr worker");
+    assert_eq!(result.classification.as_str(), "ok");
+    assert!(result.stderr_truncated, "the stream ran past the bound");
+    assert!(result.stderr.len() <= STDERR_CAPTURE_LIMIT);
+    assert!(
+        result.stderr.ends_with("stage:the_last_thing_it_did\n"),
+        "the last thing the worker did is what the capture is for"
+    );
+    assert!(
+        !result.stderr.contains("stage:the_first_thing_it_did"),
+        "the head is what a trace can afford to lose"
+    );
+    // The worker reports on stdout where it put the path it arranged to
+    // straddle the capture boundary. Assert that arrangement before the
+    // conclusion that rests on it: a boundary that happened to fall on a line
+    // break would make the next assertion pass for the wrong reason.
+    let arrangement: Vec<usize> = result
+        .stdout
+        .split_whitespace()
+        .map(|value| value.parse().expect("the worker reports three counts"))
+        .collect();
+    let (total, straddling_at, straddling_len) = (arrangement[0], arrangement[1], arrangement[2]);
+    let boundary = total - STDERR_CAPTURE_LIMIT;
+    assert!(
+        boundary > straddling_at && boundary < straddling_at + straddling_len,
+        "the boundary has to fall inside the path line: {boundary} vs {straddling_at}..{}",
+        straddling_at + straddling_len
+    );
+    // So the drive letter is on the dropped side, and `redact_windows_paths`
+    // recognizes a path only there. Realigning the capture to a line boundary
+    // is the only thing stopping the rest of that path from reaching the report
+    // verbatim.
+    assert!(
+        !result.stderr.contains("private"),
+        "an unredacted path fragment survived the capture"
+    );
+    // Whole paths inside the kept region are still redacted, so the alignment
+    // did not simply throw the redaction's work away.
+    assert!(result.stderr.contains("<redacted-path>"));
+}
+
 #[cfg(windows)]
 #[test]
 fn production_stdout_capture_preserves_large_bounded_worker_reports() {

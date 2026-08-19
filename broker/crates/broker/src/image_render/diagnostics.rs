@@ -480,17 +480,30 @@ pub fn decode_bounded_image(path: &Path, role: &str) -> io::Result<image::Dynami
 /// How much of the worker's stderr the extended trace carries out. The tail
 /// rather than the head: the interesting end of a failing selector is the last
 /// thing it did, and the head is the same start-up lines every run.
-const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
+///
+/// Visible to the crate because `windows_process::STDERR_CAPTURE_LIMIT` has to
+/// stay above it: the capture is what this cuts from, so two equal limits
+/// leave nothing to cut and this function silently becomes a no-op over the
+/// head of the stream (issue #1290).
+pub(crate) const MAX_STDERR_TAIL_BYTES: usize = 64 * 1024;
 
 /// The tail of the worker's stderr, or `None` unless `AEXCOMPAT_EXTENDED_DIAG`
-/// is set. Cut on a line boundary so the first line is whole, and truncated
-/// from the front with a marker rather than silently.
+/// is set.
 fn extended_diagnostics_stderr_tail(stderr: &str) -> Option<String> {
     if std::env::var_os("AEXCOMPAT_EXTENDED_DIAG").is_none() {
         return None;
     }
+    Some(stderr_tail(stderr))
+}
+
+/// The cut itself, without the environment gate: on a line boundary so the
+/// first line is whole, and truncated from the front with a marker rather than
+/// silently. Separate from the gate so the composition with the capture's own
+/// retention is testable (issue #1290) - the two were individually right while
+/// the pair handed the report the head of the stream.
+pub(crate) fn stderr_tail(stderr: &str) -> String {
     if stderr.len() <= MAX_STDERR_TAIL_BYTES {
-        return Some(stderr.to_owned());
+        return stderr.to_owned();
     }
     // Cut forward to the next line rather than at the byte: the index lands on
     // a char boundary (it follows a newline) and on something a reader can
@@ -502,10 +515,10 @@ fn extended_diagnostics_stderr_tail(stderr: &str) -> Option<String> {
         .iter()
         .position(|byte| *byte == b'\n')
         .map_or(stderr.len(), |newline| cut + newline + 1);
-    Some(format!(
+    format!(
         "[truncated to the last {MAX_STDERR_TAIL_BYTES} bytes]\n{}",
         &stderr[start..]
-    ))
+    )
 }
 
 /// Diagnostics for a dispatched worker run, including the kill evidence from
