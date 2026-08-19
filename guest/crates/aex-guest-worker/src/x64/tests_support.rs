@@ -3327,21 +3327,12 @@ fn wide_char_to_multi_byte_substitutes_default_and_rejects_negative_output_size(
     invalid.write(source, &[b'A', 0]).unwrap();
     assert_eq!(
         invalid
-        .call_win64_with_timeout(
-            CONVERT,
-            &[
-                CP_OEMCP,
-                0,
-                source,
-                1,
-                output,
-                u32::MAX as u64,
-                0,
-                0,
-            ],
-            TIMEOUT_MICROSECONDS,
-        )
-        .unwrap(),
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, 1, output, u32::MAX as u64, 0, 0,],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
         0
     );
     assert_eq!(
@@ -3561,7 +3552,10 @@ fn get_environment_variable_w_rejects_invalid_guest_pointers() {
 
     engine.unicorn.get_data_mut().callback_error = None;
     let mut allowed = Vec::new();
-    for unit in "OPENCV_FOR_THREADS_NUM".encode_utf16().chain(std::iter::once(0)) {
+    for unit in "OPENCV_FOR_THREADS_NUM"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
         allowed.extend_from_slice(&unit.to_le_bytes());
     }
     engine.write(name, &allowed).unwrap();
@@ -3717,12 +3711,7 @@ fn set_thread_error_mode_is_stateful_validated_and_session_local() {
     );
     assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x8001);
 
-    assert_eq!(
-        engine
-            .call_win64(SET_MODE, [0, 0, 0, 0, 0, 0])
-            .unwrap(),
-        1
-    );
+    assert_eq!(engine.call_win64(SET_MODE, [0, 0, 0, 0, 0, 0]).unwrap(), 1);
     assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0);
     let other = test_engine(&[0xc3]);
     assert_eq!(other.unicorn.get_data().windows_thread_error_mode, 0);
@@ -3792,7 +3781,10 @@ fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
             .unwrap(),
         0
     );
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
 
     engine.unicorn.get_data_mut().windows_last_error = 0;
     assert_eq!(
@@ -3832,6 +3824,19 @@ fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
             .unwrap(),
         WINDOWS_KERNEL32_MODULE_TOKEN
     );
+    for non_executable_flag in [0x0002, 0x0020, 0x0040, 0x0062] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, non_executable_flag, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
     for malformed_absolute in [r"1:\kernel32.dll", r"\\kernel32.dll"] {
         write_path(&mut engine, malformed_absolute);
         assert_eq!(
@@ -3860,7 +3865,10 @@ fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
             .unwrap(),
         0
     );
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
     assert!(engine.unicorn.get_data().callback_error.is_none());
     write_path(&mut engine, r"C:\Windows\System32\");
     assert_eq!(
@@ -3869,7 +3877,10 @@ fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
             .unwrap(),
         0
     );
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
 }
 
 #[test]
@@ -4122,40 +4133,27 @@ fn process_heap_alloc_free_uses_an_opaque_handle_and_separate_ownership() {
         "GetProcessHeap",
     )
     .unwrap();
-    install_win64_import(
-        &mut engine.unicorn,
-        HEAP_ALLOC,
-        "kernel32.dll",
-        "HeapAlloc",
-    )
-    .unwrap();
-    install_win64_import(
-        &mut engine.unicorn,
-        HEAP_FREE,
-        "kernel32.dll",
-        "HeapFree",
-    )
-    .unwrap();
+    install_win64_import(&mut engine.unicorn, HEAP_ALLOC, "kernel32.dll", "HeapAlloc").unwrap();
+    install_win64_import(&mut engine.unicorn, HEAP_FREE, "kernel32.dll", "HeapFree").unwrap();
 
     let heap = engine.call_win64(GET_PROCESS_HEAP, [0; 6]).unwrap();
     assert_eq!(heap, PROCESS_HEAP_HANDLE);
     let pointer = engine
-        .call_win64(
-            HEAP_ALLOC,
-            [heap, u64::from(HEAP_ZERO_MEMORY), 32, 0, 0, 0],
-        )
+        .call_win64(HEAP_ALLOC, [heap, u64::from(HEAP_ZERO_MEMORY), 32, 0, 0, 0])
         .unwrap();
     assert_ne!(pointer, 0);
     assert_eq!(
         engine.unicorn.mem_read_as_vec(pointer, 32).unwrap(),
         vec![0; 32]
     );
-    assert!(engine
-        .unicorn
-        .get_data()
-        .crt_heap
-        .process_heap_allocation(pointer)
-        .is_ok());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .process_heap_allocation(pointer)
+            .is_ok()
+    );
     assert_eq!(
         engine.unicorn.get_data_mut().crt_heap.remove(pointer),
         Err(CrtHeapError::AllocatorMismatch),
@@ -4222,10 +4220,7 @@ fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() 
     );
 
     let moved = engine
-        .call_win64(
-            HEAP_REALLOC,
-            [PROCESS_HEAP_HANDLE, 0, in_place, 8192, 0, 0],
-        )
+        .call_win64(HEAP_REALLOC, [PROCESS_HEAP_HANDLE, 0, in_place, 8192, 0, 0])
         .unwrap();
     assert_ne!(moved, 0);
     assert_ne!(moved, in_place);
@@ -4248,12 +4243,14 @@ fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() 
         )
         .unwrap();
     assert_eq!(refused, 0);
-    assert!(engine
-        .unicorn
-        .get_data()
-        .crt_heap
-        .process_heap_allocation(moved)
-        .is_ok());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .process_heap_allocation(moved)
+            .is_ok()
+    );
 
     let oversized = engine
         .call_win64(
@@ -4269,7 +4266,10 @@ fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() 
         )
         .unwrap();
     assert_eq!(oversized, 0);
-    assert_eq!(engine.unicorn.mem_read_as_vec(moved, 8).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(moved, 8).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
+    );
     assert_eq!(
         engine
             .call_win64(HEAP_FREE, [PROCESS_HEAP_HANDLE, 0, moved, 0, 0, 0])
@@ -4329,7 +4329,10 @@ fn get_system_info_writes_the_deterministic_win64_layout() {
     assert_eq!(u16::from_le_bytes(info[0..2].try_into().unwrap()), 9);
     assert_eq!(u16::from_le_bytes(info[2..4].try_into().unwrap()), 0);
     assert_eq!(u32::from_le_bytes(info[4..8].try_into().unwrap()), 4096);
-    assert_eq!(u64::from_le_bytes(info[8..16].try_into().unwrap()), 0x1_0000);
+    assert_eq!(
+        u64::from_le_bytes(info[8..16].try_into().unwrap()),
+        0x1_0000
+    );
     assert_eq!(
         u64::from_le_bytes(info[16..24].try_into().unwrap()),
         0x0000_7fff_fffe_ffff
@@ -6686,9 +6689,7 @@ fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
 
     engine
         .write(
-            layer_definition
-                + abi::PARAM_U_OFFSET as u64
-                + abi::LAYER_WORLD_FLAGS_OFFSET as u64,
+            layer_definition + abi::PARAM_U_OFFSET as u64 + abi::LAYER_WORLD_FLAGS_OFFSET as u64,
             &1i32.to_le_bytes(),
         )
         .unwrap();
