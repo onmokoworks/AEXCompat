@@ -71,6 +71,7 @@ enum LegacyWin64Import {
     QueryPerformanceCounter,
     QueryPerformanceFrequency,
     GetEnvironmentVariableA,
+    WideCharToMultiByte,
     GetLastError,
     SetLastError,
     FlsAlloc,
@@ -288,6 +289,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::QueryPerformanceFrequency
         }
         ("kernel32.dll", "GetEnvironmentVariableA") => LegacyWin64Import::GetEnvironmentVariableA,
+        ("kernel32.dll", "WideCharToMultiByte") => LegacyWin64Import::WideCharToMultiByte,
+        (_, "WideCharToMultiByte") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
         ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
@@ -956,6 +959,18 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::WideCharToMultiByte => {
+                uc(
+                    "write WideCharToMultiByte return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install WideCharToMultiByte import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_wide_char_to_multi_byte(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::GetLastError | LegacyWin64Import::SetLastError => {
                 uc(
                     "write last-error import return",
@@ -1528,6 +1543,167 @@ fn deterministic_guest_environment_value(name: &[u8]) -> Option<&'static [u8]> {
     } else {
         None
     }
+}
+
+fn emulate_wide_char_to_multi_byte(unicorn: &mut Unicorn<'_, GuestState>) {
+    const CP_ACP: u32 = 0;
+    const CP_OEMCP: u32 = 1;
+    const CP_UTF8: u32 = 65_001;
+    const WC_ERR_INVALID_CHARS: u32 = 0x80;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    const ERROR_NO_UNICODE_TRANSLATION: u32 = 1113;
+
+    let result = (|| -> Result<(u64, Option<u32>), String> {
+        let code_page = read_win64_import_argument(unicorn, 0)? as u32;
+        let flags = read_win64_import_argument(unicorn, 1)? as u32;
+        let source = read_win64_import_argument(unicorn, 2)?;
+        let source_length = read_win64_import_argument(unicorn, 3)? as u32 as i32;
+        let destination = read_win64_import_argument(unicorn, 4)?;
+        let destination_length = read_win64_import_argument(unicorn, 5)? as u32 as i32;
+        let default_character = read_win64_import_argument(unicorn, 6)?;
+        let used_default_character = read_win64_import_argument(unicorn, 7)?;
+
+        if !matches!(code_page, CP_ACP | CP_OEMCP | CP_UTF8)
+            || (code_page == CP_UTF8 && flags & !WC_ERR_INVALID_CHARS != 0)
+            || (code_page != CP_UTF8 && flags != 0)
+            || (code_page == CP_UTF8 && (default_character != 0 || used_default_character != 0))
+            || source == 0
+            || source_length == 0
+            || source_length < -1
+            || destination_length < 0
+        {
+            return Ok((0, Some(ERROR_INVALID_PARAMETER)));
+        }
+
+        let include_terminator = source_length == -1;
+        let mut units = Vec::new();
+        if include_terminator {
+            for index in 0..=(MAX_CRT_STRING_BYTES / 2) {
+                let address = source
+                    .checked_add(index * 2)
+                    .ok_or_else(|| "WideCharToMultiByte source address overflow".to_string())?;
+                let bytes = unicorn
+                    .mem_read_as_vec(address, 2)
+                    .map_err(|error| format!("WideCharToMultiByte source read failed: {error}"))?;
+                let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+                if unit == 0 {
+                    break;
+                }
+                if index == MAX_CRT_STRING_BYTES / 2 {
+                    return Err("WideCharToMultiByte source is unterminated".into());
+                }
+                units.push(unit);
+            }
+        } else if source_length > 0 {
+            let byte_length = u64::try_from(source_length)
+                .ok()
+                .and_then(|length| length.checked_mul(2))
+                .filter(|length| *length <= MAX_CRT_STRING_BYTES)
+                .ok_or_else(|| "WideCharToMultiByte source is too large".to_string())?;
+            let bytes = unicorn
+                .mem_read_as_vec(source, byte_length as usize)
+                .map_err(|error| format!("WideCharToMultiByte source read failed: {error}"))?;
+            units.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+            );
+        } else {
+            return Err("WideCharToMultiByte received invalid source length".into());
+        }
+
+        let mut unicode = String::new();
+        for character in char::decode_utf16(units) {
+            match character {
+                Ok(character) => unicode.push(character),
+                Err(_) if flags & WC_ERR_INVALID_CHARS == 0 => {
+                    unicode.push(char::REPLACEMENT_CHARACTER)
+                }
+                Err(_) => return Ok((0, Some(ERROR_NO_UNICODE_TRANSLATION))),
+            }
+        }
+        let (mut bytes, used_default) = if code_page == CP_UTF8 {
+            (unicode.into_bytes(), false)
+        } else {
+            let default = if default_character == 0 {
+                b'?'
+            } else {
+                let byte = unicorn
+                    .mem_read_as_vec(default_character, 1)
+                    .map_err(|error| {
+                        format!("WideCharToMultiByte default character read failed: {error}")
+                    })?[0];
+                if byte >= 0x80 {
+                    return Err(
+                        "WideCharToMultiByte only supports a single-byte default character".into(),
+                    );
+                }
+                byte
+            };
+            encode_shift_jis_with_default(&unicode, default)
+        };
+        if include_terminator {
+            bytes.push(0);
+        }
+        let required = u32::try_from(bytes.len())
+            .map_err(|_| "WideCharToMultiByte output length exceeds DWORD".to_string())?;
+        if used_default_character != 0 {
+            unicorn
+                .mem_write(used_default_character, &[u8::from(used_default)])
+                .map_err(|error| {
+                    format!(
+                        "WideCharToMultiByte used-default output {used_default_character:#x} is not writable: {error}"
+                    )
+                })?;
+        }
+        if destination_length == 0 {
+            return Ok((u64::from(required), None));
+        }
+        if destination == 0 || destination_length < required as i32 {
+            return Ok((0, Some(ERROR_INSUFFICIENT_BUFFER)));
+        }
+        unicorn.mem_write(destination, &bytes).map_err(|error| {
+            format!("WideCharToMultiByte output {destination:#x} is not writable: {error}")
+        })?;
+        Ok((u64::from(required), None))
+    })();
+
+    match result {
+        Ok((returned, error)) => {
+            if let Some(error) = error {
+                unicorn.get_data_mut().windows_last_error = error;
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn encode_shift_jis_with_default(input: &str, default: u8) -> (Vec<u8>, bool) {
+    let mut output = Vec::with_capacity(input.len());
+    let mut used_default = false;
+    for character in input.chars() {
+        let mut utf8 = [0; 4];
+        let source = character.encode_utf8(&mut utf8);
+        let mut encoded = [0; 8];
+        let (result, read, written) = encoding_rs::SHIFT_JIS
+            .new_encoder()
+            .encode_from_utf8_without_replacement(source, &mut encoded, true);
+        if result == encoding_rs::EncoderResult::InputEmpty && read == source.len() {
+            output.extend_from_slice(&encoded[..written]);
+        } else {
+            output.push(default);
+            used_default = true;
+        }
+    }
+    (output, used_default)
 }
 
 fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
