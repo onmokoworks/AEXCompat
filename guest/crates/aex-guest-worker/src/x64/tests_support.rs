@@ -4372,6 +4372,33 @@ fn get_system_info_rejects_null_and_unwritable_outputs() {
 }
 
 #[test]
+fn is_debugger_present_is_false_deterministic_and_library_scoped() {
+    const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            IS_DEBUGGER_PRESENT,
+            "kernel32.dll",
+            "IsDebuggerPresent",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::IsDebuggerPresent)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "IsDebuggerPresent"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        engine
+            .call_win64(IS_DEBUGGER_PRESENT, [u64::MAX; 6])
+            .unwrap(),
+        0
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
 fn bounded_windows_runtime_imports_write_outputs_and_remain_library_scoped() {
     for (symbol, implementation) in [
         ("GetCurrentThreadId", LegacyWin64Import::GetCurrentThreadId),
