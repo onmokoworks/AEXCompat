@@ -328,8 +328,6 @@ namespace {
 auto& g_custom_ui_registration = g_custom_ui_telemetry.registration;
 auto& g_invalid_custom_ui_registrations = g_custom_ui_telemetry.invalid_custom_ui_registrations;
 auto& g_register_ui_calls = g_custom_ui_telemetry.register_ui_calls;
-auto& g_adv_app_info_text_calls = g_custom_ui_telemetry.adv_app_info_text_calls;
-auto& g_last_adv_app_info_text = g_custom_ui_telemetry.last_adv_app_info_text;
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
   T value{};
@@ -438,18 +436,17 @@ InfoTextArguments classify_info_text(const std::array<const char*, N>& arguments
 // Bounded, and accepted and rejected calls are bounded separately: the
 // broker's extended trace keeps a fixed tail, so an effect that draws its info
 // line every frame would otherwise push the fault site out of it, and it is
-// the rejections that name a fault site. `g_adv_app_info_text_calls` in the
-// report carries the accepted total whatever this drops.
+// the rejections that name a fault site. The info-text telemetry snapshot in
+// the report carries the accepted total whatever this drops.
 // The counters are `std::atomic` because the surrounding suite is reachable
 // from whatever thread the plug-in calls it on, and unsynchronized access
 // would be a data race whatever the hardware does with a 32-bit word. The
 // decision is taken from `fetch_add`'s own previous value, so exactly one
 // `status=suppressed` line is printed however many threads arrive at once.
 //
-// This is the diagnostic's own bookkeeping only. The telemetry the same
-// functions write next to it (`g_last_adv_app_info_text`,
-// `g_adv_app_info_text_calls`) is unsynchronized and predates this change;
-// that is issue #1293, not something to half-fix here.
+// This is the diagnostic's own bookkeeping only. The report telemetry the
+// same functions write is synchronized separately by ui_event_execution so
+// plug-in-owned threads cannot race each other or the report (issue #1293).
 constexpr uint32_t kMaxInfoTextTraces = 64;
 std::atomic<uint32_t> g_info_text_traces_accepted{};
 std::atomic<uint32_t> g_info_text_traces_rejected{};
@@ -533,8 +530,8 @@ int32_t serve_info_text(const char* slot,
     trace_info_text(slot, classified, 4);
     return 4;
   }
-  g_last_adv_app_info_text = join_info_text(arguments);
-  ++g_adv_app_info_text_calls;
+  aexcompat::worker_runtime::ui_event_execution::record_info_text(
+      join_info_text(arguments));
   trace_info_text(slot, classified, 0);
   return 0;
 }
