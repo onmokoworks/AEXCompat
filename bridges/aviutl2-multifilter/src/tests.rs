@@ -553,6 +553,57 @@ mod tests {
         );
     }
 
+    /// A plug-in whose metadata is readable but whose contents cannot be read
+    /// produces a bare negative entry with no recorded closure. That mismatch
+    /// is a retry trigger, so the negative-to-negative merge must retain the
+    /// attempt ledger instead of resetting it on every launch (issue #658).
+    #[test]
+    fn an_unreadable_negative_entry_converges_after_the_retry_budget() {
+        let root = temp_root("unreadable-negative-budget");
+        let plugin = root.join("locked.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let meta = file_meta(&plugin).expect("fixture metadata");
+        let roots = search_roots_for(&plugin, &[]);
+        let mut entry = negative_entry(&plugin, build(1));
+        assert!(needs_closure_recheck(&entry, build(1), &roots));
+
+        for attempt in 1..=RETRY_BUDGET {
+            let unreadable = negative_entry(&plugin, build(1));
+            entry = keep_best(Some(&entry), unreadable, Some(meta)).unwrap();
+            assert_eq!(entry.attempts, attempt);
+            assert_eq!(
+                needs_closure_recheck(&entry, build(1), &roots),
+                attempt < RETRY_BUDGET
+            );
+        }
+
+        let replacement_meta = (meta.0, meta.1 + 1);
+        let replacement = keep_best(
+            Some(&entry),
+            negative_entry(&plugin, build(1)),
+            Some(replacement_meta),
+        )
+        .unwrap();
+        assert_eq!(replacement.attempts, 0, "new bytes get a fresh ledger");
+        assert!(
+            needs_closure_recheck(&replacement, build(1), &roots),
+            "replacement bytes remain eligible for discovery"
+        );
+
+        assert!(
+            needs_closure_recheck(&entry, build(2), &roots),
+            "a different host build gets a fresh retry budget"
+        );
+        entry = keep_best(
+            Some(&entry),
+            negative_entry(&plugin, build(2)),
+            Some(meta),
+        )
+        .unwrap();
+        assert_eq!(entry.checked, build(2));
+        assert_eq!(entry.attempts, 1, "the new host starts its own ledger");
+    }
+
     /// A replaced AEX is a different plug-in, so its old parameters are
     /// meaningless and the negative result must win.
     #[test]
