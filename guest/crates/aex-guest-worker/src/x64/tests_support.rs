@@ -4600,6 +4600,97 @@ fn get_std_handle_rejects_invalid_selector_without_host_handle_leakage() {
 }
 
 #[test]
+fn get_console_mode_models_synthetic_standard_handles_as_redirected() {
+    const GET_CONSOLE_MODE: u64 = STUB_BASE + 0x1b8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_CONSOLE_MODE,
+            "KERNEL32.DLL",
+            "GetConsoleMode",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetConsoleMode)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetConsoleMode"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = DATA_BASE + 0xb00;
+    let sentinel = 0x1234_5678u32.to_le_bytes();
+    engine.write(output, &sentinel).unwrap();
+    for handle in [
+        WINDOWS_STANDARD_INPUT_TOKEN,
+        WINDOWS_STANDARD_OUTPUT_TOKEN,
+        WINDOWS_STANDARD_ERROR_TOKEN,
+    ] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64(GET_CONSOLE_MODE, [handle, output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_HANDLE);
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), sentinel);
+    }
+}
+
+#[test]
+fn get_console_mode_rejects_foreign_handles_without_touching_guest_memory() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0xdead_beef).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0xdead_beef).unwrap();
+    emulate_get_console_mode(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    for mode_output in [0, 0xdead_beef] {
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, WINDOWS_STANDARD_OUTPUT_TOKEN)
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RDX, mode_output)
+            .unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        emulate_get_console_mode(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_HANDLE
+        );
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+
+    let boundary = DATA_BASE + PAGE_SIZE - 2;
+    let sentinel = [0x5a, 0xa5];
+    engine.write(boundary, &sentinel).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, WINDOWS_STANDARD_ERROR_TOKEN)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, boundary).unwrap();
+    emulate_get_console_mode(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 2).unwrap(),
+        sentinel
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
 fn is_debugger_present_is_false_deterministic_and_library_scoped() {
     const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);
