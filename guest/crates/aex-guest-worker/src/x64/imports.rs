@@ -1198,7 +1198,10 @@ fn install_win64_import(
             LegacyWin64Import::HeapAlloc
             | LegacyWin64Import::HeapFree
             | LegacyWin64Import::HeapReAlloc => {
-                uc("write process heap return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write process heap return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install process heap import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
@@ -2339,8 +2342,7 @@ fn emulate_heap_free(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let arguments = (|| -> Result<(u32, u64, u64), String> {
         require_process_heap_handle(unicorn, "HeapReAlloc")?;
-        let flags =
-            read_process_heap_flags(unicorn, "HeapReAlloc", HEAP_REALLOC_ALLOWED_FLAGS)?;
+        let flags = read_process_heap_flags(unicorn, "HeapReAlloc", HEAP_REALLOC_ALLOWED_FLAGS)?;
         let pointer = read_win64_import_argument(unicorn, 2)?;
         let size = read_win64_import_argument(unicorn, 3)?;
         if pointer == 0 {
@@ -2407,17 +2409,18 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
             return;
         }
     };
-    let new_pointer = match unicorn.get_data().crt_heap.first_fit(
-        CRT_HEAP_BASE,
-        CRT_HEAP_END,
-        replacement,
-    ) {
-        Ok(pointer) => pointer,
-        Err(_) => {
-            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
-            return;
-        }
-    };
+    let new_pointer =
+        match unicorn
+            .get_data()
+            .crt_heap
+            .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, replacement)
+        {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+                return;
+            }
+        };
     if unicorn
         .mem_map(
             new_pointer,
@@ -2454,11 +2457,8 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let removed = match unicorn
         .get_data_mut()
         .crt_heap
-        .commit_process_heap_reallocation(
-        pointer,
-        new_pointer,
-        replacement,
-    ) {
+        .commit_process_heap_reallocation(pointer, new_pointer, replacement)
+    {
         Ok(allocation) => allocation,
         Err(error) => {
             let _ = unicorn.mem_unmap(new_pointer, replacement.backing_size);
@@ -2466,7 +2466,10 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
         }
     };
     if let Err(error) = unicorn.mem_unmap(pointer, removed.backing_size) {
-        return fail_process_heap(unicorn, format!("HeapReAlloc unmap old block failed: {error}"));
+        return fail_process_heap(
+            unicorn,
+            format!("HeapReAlloc unmap old block failed: {error}"),
+        );
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, new_pointer);
 }
