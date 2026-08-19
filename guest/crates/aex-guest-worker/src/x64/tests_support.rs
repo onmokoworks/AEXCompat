@@ -3327,21 +3327,12 @@ fn wide_char_to_multi_byte_substitutes_default_and_rejects_negative_output_size(
     invalid.write(source, &[b'A', 0]).unwrap();
     assert_eq!(
         invalid
-        .call_win64_with_timeout(
-            CONVERT,
-            &[
-                CP_OEMCP,
-                0,
-                source,
-                1,
-                output,
-                u32::MAX as u64,
-                0,
-                0,
-            ],
-            TIMEOUT_MICROSECONDS,
-        )
-        .unwrap(),
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, 1, output, u32::MAX as u64, 0, 0,],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
         0
     );
     assert_eq!(
@@ -3883,40 +3874,27 @@ fn process_heap_alloc_free_uses_an_opaque_handle_and_separate_ownership() {
         "GetProcessHeap",
     )
     .unwrap();
-    install_win64_import(
-        &mut engine.unicorn,
-        HEAP_ALLOC,
-        "kernel32.dll",
-        "HeapAlloc",
-    )
-    .unwrap();
-    install_win64_import(
-        &mut engine.unicorn,
-        HEAP_FREE,
-        "kernel32.dll",
-        "HeapFree",
-    )
-    .unwrap();
+    install_win64_import(&mut engine.unicorn, HEAP_ALLOC, "kernel32.dll", "HeapAlloc").unwrap();
+    install_win64_import(&mut engine.unicorn, HEAP_FREE, "kernel32.dll", "HeapFree").unwrap();
 
     let heap = engine.call_win64(GET_PROCESS_HEAP, [0; 6]).unwrap();
     assert_eq!(heap, PROCESS_HEAP_HANDLE);
     let pointer = engine
-        .call_win64(
-            HEAP_ALLOC,
-            [heap, u64::from(HEAP_ZERO_MEMORY), 32, 0, 0, 0],
-        )
+        .call_win64(HEAP_ALLOC, [heap, u64::from(HEAP_ZERO_MEMORY), 32, 0, 0, 0])
         .unwrap();
     assert_ne!(pointer, 0);
     assert_eq!(
         engine.unicorn.mem_read_as_vec(pointer, 32).unwrap(),
         vec![0; 32]
     );
-    assert!(engine
-        .unicorn
-        .get_data()
-        .crt_heap
-        .process_heap_allocation(pointer)
-        .is_ok());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .process_heap_allocation(pointer)
+            .is_ok()
+    );
     assert_eq!(
         engine.unicorn.get_data_mut().crt_heap.remove(pointer),
         Err(CrtHeapError::AllocatorMismatch),
@@ -3983,10 +3961,7 @@ fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() 
     );
 
     let moved = engine
-        .call_win64(
-            HEAP_REALLOC,
-            [PROCESS_HEAP_HANDLE, 0, in_place, 8192, 0, 0],
-        )
+        .call_win64(HEAP_REALLOC, [PROCESS_HEAP_HANDLE, 0, in_place, 8192, 0, 0])
         .unwrap();
     assert_ne!(moved, 0);
     assert_ne!(moved, in_place);
@@ -4009,12 +3984,14 @@ fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() 
         )
         .unwrap();
     assert_eq!(refused, 0);
-    assert!(engine
-        .unicorn
-        .get_data()
-        .crt_heap
-        .process_heap_allocation(moved)
-        .is_ok());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .process_heap_allocation(moved)
+            .is_ok()
+    );
 
     let oversized = engine
         .call_win64(
@@ -4030,7 +4007,10 @@ fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() 
         )
         .unwrap();
     assert_eq!(oversized, 0);
-    assert_eq!(engine.unicorn.mem_read_as_vec(moved, 8).unwrap(), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(moved, 8).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
+    );
     assert_eq!(
         engine
             .call_win64(HEAP_FREE, [PROCESS_HEAP_HANDLE, 0, moved, 0, 0, 0])
@@ -6355,9 +6335,7 @@ fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
 
     engine
         .write(
-            layer_definition
-                + abi::PARAM_U_OFFSET as u64
-                + abi::LAYER_WORLD_FLAGS_OFFSET as u64,
+            layer_definition + abi::PARAM_U_OFFSET as u64 + abi::LAYER_WORLD_FLAGS_OFFSET as u64,
             &1i32.to_le_bytes(),
         )
         .unwrap();
