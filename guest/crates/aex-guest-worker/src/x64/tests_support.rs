@@ -6116,6 +6116,63 @@ fn smart_checkout_resolves_declared_secondary_layer_definition_and_owns_token() 
 }
 
 #[test]
+fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
+    let mut engine = test_engine(&[0xc3]);
+    let input_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let output_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let input_definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+    let layer_definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+    let input_pixels = engine.allocate(4 * 3 * 4, 8).unwrap();
+    let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+    world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+        .copy_from_slice(&input_pixels.to_le_bytes());
+    world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+        .copy_from_slice(&16i32.to_le_bytes());
+    world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+        .copy_from_slice(&4i32.to_le_bytes());
+    world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+        .copy_from_slice(&3i32.to_le_bytes());
+    engine.write(input_world, &world).unwrap();
+    engine
+        .write(layer_definition, &vec![0; abi::PF_PARAM_DEF_SIZE])
+        .unwrap();
+    engine.unicorn.get_data_mut().params.push(GuestParam {
+        index: 1,
+        param_type: 0,
+        name: "Optional Map".into(),
+        bytes: vec![0; abi::PF_PARAM_DEF_SIZE],
+    });
+    engine
+        .configure_parameter_definitions(input_definition, vec![layer_definition])
+        .unwrap();
+    engine.configure_smart_render(
+        input_world,
+        output_world,
+        4,
+        3,
+        crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+        0,
+        1,
+    );
+
+    assert_eq!(
+        smart_checkout_world(&engine.unicorn, 1).unwrap(),
+        (input_world, 4, 3)
+    );
+
+    engine
+        .write(
+            layer_definition
+                + abi::PARAM_U_OFFSET as u64
+                + abi::LAYER_WORLD_FLAGS_OFFSET as u64,
+            &1i32.to_le_bytes(),
+        )
+        .unwrap();
+    let error = smart_checkout_world(&engine.unicorn, 1).unwrap_err();
+    assert!(error.contains("invalid smart checkout world"), "{error}");
+}
+
+#[test]
 fn smart_checkout_rejects_non_layer_secondary_parameter() {
     let mut engine = test_engine(&[0xc3]);
     let input_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
