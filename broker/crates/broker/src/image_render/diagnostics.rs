@@ -933,12 +933,21 @@ fn callback_addr_denials(stderr: &str) -> (Vec<Value>, bool) {
     (denials, truncated)
 }
 
-/// Bound and identifier shape shared by `callback_denials`. Both fields are
-/// worker-owned vocabulary: a lower-case identifier the emitting call site
-/// chose, never plug-in text.
+/// Bounds and identifier shapes for `callback_denials`. Both fields are
+/// worker-owned vocabulary, never plug-in text. Callback names share the
+/// 64-byte schema bound used by the structured callback timeline; refusal
+/// reasons remain the smaller 32-byte vocabulary.
 const MAX_CALLBACK_DENIALS: usize = 32;
 
-fn worker_denial_identifier(value: &str) -> bool {
+fn worker_denial_callback(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn worker_denial_reason(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 32
         && value
@@ -968,7 +977,7 @@ fn callback_denials(stderr: &str) -> (Vec<Value>, bool) {
         let parsed = (|| {
             let callback = fields.next()?.strip_prefix("callback=")?;
             let reason = fields.next()?.strip_prefix("reason=")?;
-            if !worker_denial_identifier(callback) || !worker_denial_identifier(reason) {
+            if !worker_denial_callback(callback) || !worker_denial_reason(reason) {
                 return None;
             }
             // Where one scalar is the whole story - which transfer mode, how

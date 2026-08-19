@@ -2656,6 +2656,9 @@ mod tests {
              stage:callback_denied callback=transform_world reason=ok value=oops\n\
              stage:callback_denied callback=transform_world reason=ok value=99999999999\n\
              stage:callback_denied callback=transform_world reason=ok value=1 extra=1\n\
+             stage:callback_denied callback=private_effect_utf16_to_multibyte reason=null_argument\n\
+             stage:callback_denied callback=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb reason=boundary\n\
+             stage:callback_denied callback=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa reason=too_long\n\
              stage:callback_denied callback=transform_world\n";
         let diagnostics = worker_diagnostics(trace, false, "nonzero_exit", 1, 2);
         let denials = diagnostics["callback_denials"].as_array().unwrap();
@@ -2666,10 +2669,12 @@ mod tests {
                 json!({"callback": "transform_world", "reason": "transfer_mode", "value": -3}),
                 json!({"callback": "transform_world", "reason": "transfer_mode"}),
                 json!({"callback": "transform_world", "reason": "extent_over_4096"}),
+                json!({"callback": "private_effect_utf16_to_multibyte", "reason": "null_argument"}),
+                json!({"callback": "b".repeat(64), "reason": "boundary"}),
             ]
         );
         assert_eq!(diagnostics["callback_denials_truncated"], true);
-        assert!(!diagnostics.to_string().contains("private"));
+        assert!(!diagnostics.to_string().contains(&"a".repeat(65)));
         assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
         assert_eq!(diagnostics["failure_stage"], Value::Null);
     }
