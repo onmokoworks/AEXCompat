@@ -330,6 +330,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     install_pf_ansi_suite_v2(&mut unicorn).unwrap();
     install_gpu_device_suite(&mut unicorn).unwrap();
     install_windows_condition_variable_callbacks(&mut unicorn).unwrap();
+    install_dynamic_windows_import_callbacks(&mut unicorn).unwrap();
     unicorn
         .mem_write(
             HOST_COLOR_PARAM_SUITE,
@@ -2804,6 +2805,121 @@ fn dynamic_condition_variables_are_bounded_and_blocking_fails_closed() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("blocking"), "{error}");
+}
+
+#[test]
+fn get_proc_address_resolves_fls_alloc_to_a_stable_callable_guest_address() {
+    const GET_PROC: u64 = STUB_BASE + 0x408;
+    let name = DATA_BASE + 0xb00;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_PROC,
+        "kernel32.dll",
+        "GetProcAddress",
+    )
+    .unwrap();
+    engine.write(name, b"FlsAlloc\0").unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+
+    let first = engine
+        .call_win64(GET_PROC, [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0])
+        .unwrap();
+    let repeated = engine
+        .call_win64(GET_PROC, [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(first, HOST_DYNAMIC_FLS_ALLOC);
+    assert_ne!(first, HOST_INITIALIZE_CONDITION_VARIABLE);
+    assert_eq!(repeated, first);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(engine.call_win64(first, [0; 6]).unwrap(), 0);
+    assert_eq!(engine.call_win64(first, [0; 6]).unwrap(), 1);
+
+    let mut other = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut other.unicorn,
+        GET_PROC,
+        "kernel32.dll",
+        "GetProcAddress",
+    )
+    .unwrap();
+    other.write(name, b"FlsAlloc\0").unwrap();
+    let other_pointer = other
+        .call_win64(GET_PROC, [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(other_pointer, first);
+    assert_eq!(other.call_win64(other_pointer, [0; 6]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_fls_slots.len(), 2);
+    assert_eq!(other.unicorn.get_data().windows_fls_slots.len(), 1);
+}
+
+#[test]
+fn get_proc_address_rejects_foreign_modules_names_ordinals_and_unsafe_pointers() {
+    const GET_PROC: u64 = STUB_BASE + 0x408;
+    let name = DATA_BASE + 0xb00;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_PROC,
+        "kernel32.dll",
+        "GetProcAddress",
+    )
+    .unwrap();
+    engine.write(name, b"FlsAlloc\0").unwrap();
+
+    assert_eq!(
+        engine.call_win64(GET_PROC, [0x1234, name, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+
+    for symbol in [b"FlsGetValue\0".as_slice(), b"flsalloc\0".as_slice()] {
+        engine.write(name, symbol).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(GET_PROC, [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_PROC_NOT_FOUND
+        );
+    }
+
+    for pointer in [1, 0xffff, 0xdead_beef] {
+        assert_eq!(
+            engine
+                .call_win64(
+                    GET_PROC,
+                    [WINDOWS_KERNEL32_MODULE_TOKEN, pointer, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_PROC_NOT_FOUND
+        );
+    }
+
+    let unterminated = DATA_BASE + PAGE_SIZE - 128;
+    engine.write(unterminated, &[b'A'; 128]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(
+                GET_PROC,
+                [WINDOWS_KERNEL32_MODULE_TOKEN, unterminated, 0, 0, 0, 0],
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_PROC_NOT_FOUND
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+    assert!(engine.unicorn.get_data().windows_fls_slots.is_empty());
 }
 
 #[test]

@@ -292,6 +292,7 @@ impl GuestEngine<'static> {
             ),
         )?;
         install_windows_condition_variable_callbacks(&mut unicorn)?;
+        install_dynamic_windows_import_callbacks(&mut unicorn)?;
         uc(
             "write add_param callback",
             unicorn.mem_write(HOST_ADD_PARAM, &[0xc3]),
@@ -851,6 +852,7 @@ impl GuestEngine<'static> {
                 HOST_WAKE_ALL_CONDITION_VARIABLE,
                 "wake_all_condition_variable",
             ),
+            (HOST_DYNAMIC_FLS_ALLOC, "dynamic_fls_alloc"),
             (HOST_GPU_GET_DEVICE_COUNT, "gpu_get_device_count"),
             (HOST_GPU_GET_DEVICE_INFO, "gpu_get_device_info"),
             (HOST_GPU_ACQUIRE_EXCLUSIVE, "gpu_acquire_exclusive"),
