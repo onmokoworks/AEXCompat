@@ -61,22 +61,25 @@ fn resolve_directory(repository: &Path, requested: &Path) -> io::Result<Minidump
     reject_dot_components(requested)?;
     let repository_root = fs::canonicalize(repository)?;
     let target_root = repository_root.join("target");
-    let resolved = if requested.is_absolute() {
+    fs::create_dir_all(&target_root)?;
+    reject_reparse(&target_root)?;
+    let canonical_target = fs::canonicalize(&target_root)?;
+    let requested = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
         repository_root.join(requested)
     };
-    if !resolved.starts_with(&target_root) {
+    let (resolved, existing_requested) = canonicalize_with_missing_tail(&requested)?;
+    if !resolved.starts_with(&canonical_target) {
         return Err(invalid(
             "minidump directory must stay under repository target",
         ));
     }
-    fs::create_dir_all(&target_root)?;
-    reject_reparse(&target_root)?;
+    reject_reparse_chain_to_target(&existing_requested, &canonical_target)?;
     let relative_requested = resolved
-        .strip_prefix(&target_root)
+        .strip_prefix(&canonical_target)
         .map_err(|_| invalid("minidump directory root mismatch"))?;
-    let mut existing = target_root.clone();
+    let mut existing = canonical_target.clone();
     for component in relative_requested.components() {
         let Component::Normal(name) = component else {
             return Err(invalid("minidump directory has an invalid component"));
@@ -90,7 +93,6 @@ fn resolve_directory(repository: &Path, requested: &Path) -> io::Result<Minidump
     }
     fs::create_dir_all(&resolved)?;
     let canonical = fs::canonicalize(&resolved)?;
-    let canonical_target = fs::canonicalize(&target_root)?;
     reject_reparse(&canonical_target)?;
     if !canonical.starts_with(&canonical_target) {
         return Err(invalid(
@@ -558,6 +560,38 @@ fn strip_extended_prefix(path: &Path) -> PathBuf {
         PathBuf::from(rest)
     } else {
         path.to_path_buf()
+    }
+}
+
+fn canonicalize_with_missing_tail(path: &Path) -> io::Result<(PathBuf, PathBuf)> {
+    let mut existing = path.to_path_buf();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let name = existing
+            .file_name()
+            .ok_or_else(|| invalid("minidump directory has no existing ancestor"))?;
+        missing.push(name.to_os_string());
+        if !existing.pop() {
+            return Err(invalid("minidump directory has no existing ancestor"));
+        }
+    }
+    let mut canonical = fs::canonicalize(&existing)?;
+    for name in missing.into_iter().rev() {
+        canonical.push(name);
+    }
+    Ok((canonical, existing))
+}
+
+fn reject_reparse_chain_to_target(path: &Path, canonical_target: &Path) -> io::Result<()> {
+    let mut current = path.to_path_buf();
+    loop {
+        reject_reparse(&current)?;
+        if fs::canonicalize(&current)? == canonical_target {
+            return Ok(());
+        }
+        if !current.pop() {
+            return Err(invalid("minidump directory root mismatch"));
+        }
     }
 }
 
@@ -1210,6 +1244,50 @@ mod tests {
         }
         assert!(resolve_directory(&repository, Path::new("../outside")).is_err());
         assert!(resolve_directory(&repository, Path::new("target/../outside")).is_err());
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn plain_absolute_directory_under_target_is_accepted() {
+        let repository = test_repository();
+        let requested = repository.join("target/absolute-crash-dumps");
+        let differently_cased = PathBuf::from(requested.to_string_lossy().to_uppercase());
+        let resolved = resolve_directory(&repository, &differently_cased)
+            .expect("plain absolute directory under target should resolve");
+        assert_eq!(
+            strip_extended_prefix(&resolved.path),
+            strip_extended_prefix(&fs::canonicalize(&requested).expect("canonical dump directory"))
+        );
+        assert!(resolve_directory(&repository, &repository.join("outside")).is_err());
+        drop(resolved);
+        let _ = fs::remove_dir_all(repository);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn absolute_directory_rejects_an_in_target_reparse_component() {
+        use std::os::windows::fs::symlink_dir;
+
+        let repository = test_repository();
+        let real = repository.join("target/real");
+        let link = repository.join("target/link");
+        let target_alias = repository.join("target-alias");
+        fs::create_dir_all(&real).expect("create real directory");
+        match symlink_dir(&real, &link) {
+            Ok(()) => {}
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                let _ = fs::remove_dir_all(repository);
+                return;
+            }
+            Err(error) => panic!("create directory symlink: {error}"),
+        }
+        assert!(resolve_directory(&repository, &link.join("new")).is_err());
+        symlink_dir(repository.join("target"), &target_alias)
+            .expect("create target directory alias");
+        assert!(resolve_directory(&repository, &target_alias.join("new")).is_err());
+        fs::remove_dir(&target_alias).expect("remove target directory alias");
+        fs::remove_dir(&link).expect("remove directory symlink");
         let _ = fs::remove_dir_all(repository);
     }
 
