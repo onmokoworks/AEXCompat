@@ -3427,6 +3427,12 @@ fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
         };
         if module.eq_ignore_ascii_case(b"kernel32.dll") {
             Ok(Some(WINDOWS_KERNEL32_MODULE_TOKEN))
+        } else if module.eq_ignore_ascii_case(b"rgbranding.dll") {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+            Err(
+                "external guest dependency unavailable: RGBranding.dll (LoadLibraryA does not host-load DLLs)"
+                    .into(),
+            )
         } else {
             unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
             Ok(None)
