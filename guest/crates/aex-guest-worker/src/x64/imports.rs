@@ -129,6 +129,7 @@ enum LegacyWin64Import {
     CrtGetenv,
     InitializeCriticalSection,
     InitializeCriticalSectionAndSpinCount,
+    InitializeCriticalSectionEx,
     EnterCriticalSection,
     LeaveCriticalSection,
     DeleteCriticalSection,
@@ -429,6 +430,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "InitializeCriticalSectionAndSpinCount") => {
             LegacyWin64Import::InitializeCriticalSectionAndSpinCount
         }
+        ("kernel32.dll", "InitializeCriticalSectionEx") => {
+            LegacyWin64Import::InitializeCriticalSectionEx
+        }
         ("kernel32.dll", "EnterCriticalSection") => LegacyWin64Import::EnterCriticalSection,
         ("kernel32.dll", "LeaveCriticalSection") => LegacyWin64Import::LeaveCriticalSection,
         ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
@@ -441,6 +445,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             _,
             "InitializeCriticalSection"
             | "InitializeCriticalSectionAndSpinCount"
+            | "InitializeCriticalSectionEx"
             | "EnterCriticalSection"
             | "LeaveCriticalSection"
             | "DeleteCriticalSection",
@@ -1524,6 +1529,7 @@ fn install_win64_import(
             }
             LegacyWin64Import::InitializeCriticalSection
             | LegacyWin64Import::InitializeCriticalSectionAndSpinCount
+            | LegacyWin64Import::InitializeCriticalSectionEx
             | LegacyWin64Import::EnterCriticalSection
             | LegacyWin64Import::LeaveCriticalSection
             | LegacyWin64Import::DeleteCriticalSection => {
@@ -3482,6 +3488,10 @@ fn emulate_windows_critical_section(
     let result = (|| -> Result<u64, String> {
         let address = read_win64_import_argument(unicorn, 0)?;
         if address == 0 {
+            if matches!(operation, LegacyWin64Import::InitializeCriticalSectionEx) {
+                unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+                return Ok(0);
+            }
             return Err("Windows critical-section pointer is null".into());
         }
         match operation {
@@ -3518,6 +3528,52 @@ fn emulate_windows_critical_section(
                     operation,
                     LegacyWin64Import::InitializeCriticalSectionAndSpinCount
                 )))
+            }
+            LegacyWin64Import::InitializeCriticalSectionEx => {
+                const CRITICAL_SECTION_NO_DEBUG_INFO: u32 = 0x0100_0000;
+                const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+                let _spin_count = read_win64_import_argument(unicorn, 1)? as u32;
+                let flags = read_win64_import_argument(unicorn, 2)? as u32;
+                let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+                    unicorn.get_data_mut().windows_last_error = error;
+                    Ok(0)
+                };
+                if flags & !CRITICAL_SECTION_NO_DEBUG_INFO != 0 {
+                    return fail(unicorn, ERROR_INVALID_PARAMETER);
+                }
+                if unicorn
+                    .get_data()
+                    .windows_critical_sections
+                    .contains_key(&address)
+                {
+                    return fail(unicorn, ERROR_INVALID_PARAMETER);
+                }
+                if unicorn.get_data().windows_critical_sections.len()
+                    >= MAX_WINDOWS_CRITICAL_SECTIONS
+                {
+                    return fail(unicorn, ERROR_NOT_ENOUGH_MEMORY);
+                }
+                if !guest_range_has_permission(
+                    unicorn,
+                    address,
+                    WINDOWS_CRITICAL_SECTION_BYTES as u64,
+                    Prot::WRITE,
+                )
+                .unwrap_or(false)
+                {
+                    return fail(unicorn, ERROR_INVALID_PARAMETER);
+                }
+                if unicorn
+                    .mem_write(address, &[0; WINDOWS_CRITICAL_SECTION_BYTES])
+                    .is_err()
+                {
+                    return fail(unicorn, ERROR_INVALID_PARAMETER);
+                }
+                unicorn
+                    .get_data_mut()
+                    .windows_critical_sections
+                    .insert(address, 0);
+                Ok(1)
             }
             LegacyWin64Import::EnterCriticalSection => {
                 let lock_count = unicorn

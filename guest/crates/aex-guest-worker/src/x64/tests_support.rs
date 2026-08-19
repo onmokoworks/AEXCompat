@@ -2746,6 +2746,225 @@ fn windows_critical_section_is_recursive_bounded_and_library_qualified() {
 }
 
 #[test]
+fn initialize_critical_section_ex_accepts_observed_spin_and_shares_recursive_lifecycle() {
+    const INIT_EX: u64 = STUB_BASE + 0x3a0;
+    const ENTER: u64 = STUB_BASE + 0x3b0;
+    const LEAVE: u64 = STUB_BASE + 0x3c0;
+    const DELETE: u64 = STUB_BASE + 0x3d0;
+    const NO_DEBUG_INFO: u64 = 0x0100_0000;
+    assert_eq!(
+        dispatch_win64_import("kernel32.dll", "InitializeCriticalSectionEx"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::InitializeCriticalSectionEx)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "InitializeCriticalSectionEx"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let operations = [
+        (INIT_EX, "InitializeCriticalSectionEx"),
+        (ENTER, "EnterCriticalSection"),
+        (LEAVE, "LeaveCriticalSection"),
+        (DELETE, "DeleteCriticalSection"),
+    ];
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, symbol) in operations {
+        install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", symbol).unwrap();
+    }
+    let object = DATA_BASE + 0x900;
+    engine
+        .write(object, &[0x5a; WINDOWS_CRITICAL_SECTION_BYTES])
+        .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(INIT_EX, [object, 4000, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    let mut initialized = [0xff; WINDOWS_CRITICAL_SECTION_BYTES];
+    engine.read(object, &mut initialized).unwrap();
+    assert_eq!(initialized, [0; WINDOWS_CRITICAL_SECTION_BYTES]);
+    assert_eq!(
+        engine.unicorn.get_data().windows_critical_sections.get(&object),
+        Some(&0)
+    );
+
+    for _ in 0..2 {
+        assert_eq!(
+            engine
+                .call_win64(ENTER, [object, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            engine
+                .call_win64(LEAVE, [object, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(
+        engine
+            .call_win64(DELETE, [object, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert!(!engine
+        .unicorn
+        .get_data()
+        .windows_critical_sections
+        .contains_key(&object));
+
+    engine.write(object, &[0xa5; WINDOWS_CRITICAL_SECTION_BYTES]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(
+                INIT_EX,
+                [object, u64::from(u32::MAX), NO_DEBUG_INFO, 0, 0, 0],
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_critical_sections.get(&object),
+        Some(&0)
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn initialize_critical_section_ex_rejects_invalid_inputs_without_partial_initialization() {
+    const INIT_EX: u64 = STUB_BASE + 0x3a0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        INIT_EX,
+        "kernel32.dll",
+        "InitializeCriticalSectionEx",
+    )
+    .unwrap();
+    let object = DATA_BASE + 0xa00;
+    let sentinel = [0x5a; WINDOWS_CRITICAL_SECTION_BYTES];
+
+    for (pointer, flags) in [
+        (0, 0),
+        (0xdead_beef, 0),
+        (DATA_BASE + PAGE_SIZE - 20, 0),
+        (object, 1),
+        (object, 0x0200_0000),
+    ] {
+        engine.write(object, &sentinel).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x9999;
+        assert_eq!(
+            engine
+                .call_win64(INIT_EX, [pointer, 4000, flags, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+        let mut actual = [0; WINDOWS_CRITICAL_SECTION_BYTES];
+        engine.read(object, &mut actual).unwrap();
+        assert_eq!(actual, sentinel);
+        assert!(!engine
+            .unicorn
+            .get_data()
+            .windows_critical_sections
+            .contains_key(&pointer));
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+
+    engine
+        .unicorn
+        .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(INIT_EX, [object, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    let mut actual = [0; WINDOWS_CRITICAL_SECTION_BYTES];
+    engine.read(object, &mut actual).unwrap();
+    assert_eq!(actual, sentinel);
+}
+
+#[test]
+fn initialize_critical_section_ex_reinit_capacity_and_session_state_are_bounded() {
+    const INIT_EX: u64 = STUB_BASE + 0x3a0;
+    const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+    let object = DATA_BASE + 0xb00;
+    let mut first = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut first.unicorn,
+        INIT_EX,
+        "kernel32.dll",
+        "InitializeCriticalSectionEx",
+    )
+    .unwrap();
+    assert_eq!(
+        first
+            .call_win64(INIT_EX, [object, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        first
+            .call_win64(INIT_EX, [object, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(first.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    assert_eq!(
+        first.unicorn.get_data().windows_critical_sections.get(&object),
+        Some(&0)
+    );
+
+    first.unicorn.get_data_mut().windows_critical_sections.clear();
+    for index in 0..MAX_WINDOWS_CRITICAL_SECTIONS {
+        first
+            .unicorn
+            .get_data_mut()
+            .windows_critical_sections
+            .insert(0x2000_0000 + index as u64 * 0x40, 0);
+    }
+    first.write(object, &[0xa5; WINDOWS_CRITICAL_SECTION_BYTES]).unwrap();
+    assert_eq!(
+        first
+            .call_win64(INIT_EX, [object, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(first.unicorn.get_data().windows_last_error, ERROR_NOT_ENOUGH_MEMORY);
+    let mut actual = [0; WINDOWS_CRITICAL_SECTION_BYTES];
+    first.read(object, &mut actual).unwrap();
+    assert_eq!(actual, [0xa5; WINDOWS_CRITICAL_SECTION_BYTES]);
+
+    let mut second = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut second.unicorn,
+        INIT_EX,
+        "kernel32.dll",
+        "InitializeCriticalSectionEx",
+    )
+    .unwrap();
+    assert_eq!(
+        second
+            .call_win64(INIT_EX, [object, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        second.unicorn.get_data().windows_critical_sections.get(&object),
+        Some(&0)
+    );
+    assert!(second.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
 fn dynamic_condition_variables_are_bounded_and_blocking_fails_closed() {
     const GET_MODULE: u64 = STUB_BASE + 0x3f0;
     const GET_PROC: u64 = STUB_BASE + 0x400;
