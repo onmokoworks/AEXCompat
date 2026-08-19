@@ -1960,6 +1960,7 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
     const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
     const LOAD_LIBRARY_SEARCH_FLAGS: u32 = 0x0000_1f00;
+    const NON_EXECUTABLE_RESOURCE_FLAGS: u32 = 0x0000_0062;
     const VALID_FLAGS: u32 = 0x0000_3ffb;
     let result = (|| -> Result<Option<u64>, String> {
         let path_pointer = read_win64_import_argument(unicorn, 0)?;
@@ -1968,6 +1969,7 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
         if path_pointer == 0
             || file_handle != 0
             || flags & !VALID_FLAGS != 0
+            || flags & NON_EXECUTABLE_RESOURCE_FLAGS != 0
             || flags & LOAD_WITH_ALTERED_SEARCH_PATH != 0
                 && flags & LOAD_LIBRARY_SEARCH_FLAGS != 0
         {

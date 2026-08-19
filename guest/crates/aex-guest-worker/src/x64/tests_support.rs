@@ -3821,6 +3821,19 @@ fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
             .unwrap(),
         WINDOWS_KERNEL32_MODULE_TOKEN
     );
+    for non_executable_flag in [0x0002, 0x0020, 0x0040, 0x0062] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, non_executable_flag, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
     for malformed_absolute in [r"1:\kernel32.dll", r"\\kernel32.dll"] {
         write_path(&mut engine, malformed_absolute);
         assert_eq!(
