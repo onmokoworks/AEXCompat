@@ -71,6 +71,7 @@ enum LegacyWin64Import {
     VcompNoOp,
     GetSystemTimeAsFileTime,
     GetSystemInfo,
+    IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
     QueryPerformanceCounter,
@@ -292,6 +293,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "GetSystemTimeAsFileTime") => LegacyWin64Import::GetSystemTimeAsFileTime,
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
+        (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
         ("kernel32.dll", "GetCurrentProcessId") => LegacyWin64Import::GetCurrentProcessId,
         ("kernel32.dll", "QueryPerformanceCounter") => LegacyWin64Import::QueryPerformanceCounter,
@@ -959,6 +962,12 @@ fn install_win64_import(
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_system_info(unicorn);
                     }),
+                )?;
+            }
+            LegacyWin64Import::IsDebuggerPresent => {
+                uc(
+                    "install deterministic IsDebuggerPresent import",
+                    unicorn.mem_write(stub, &deterministic_i32_stub(0)),
                 )?;
             }
             LegacyWin64Import::GetCurrentThreadId | LegacyWin64Import::GetCurrentProcessId => {
