@@ -3948,7 +3948,10 @@ fn load_library_a_is_allowlisted_bounded_and_library_scoped() {
             .unwrap(),
         0
     );
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
     assert!(engine.unicorn.get_data().callback_error.is_none());
 
     for ordinary_missing in [b"".as_slice(), br"C:\Windows\System32\".as_slice()] {
@@ -3959,16 +3962,20 @@ fn load_library_a_is_allowlisted_bounded_and_library_scoped() {
                 .unwrap(),
             0
         );
-        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_MOD_NOT_FOUND
+        );
         assert!(engine.unicorn.get_data().callback_error.is_none());
     }
     assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [0, 0, 0, 0, 0, 0])
-            .unwrap(),
+        engine.call_win64(LOAD_LIBRARY, [0, 0, 0, 0, 0, 0]).unwrap(),
         0
     );
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
 }
 
 #[test]
