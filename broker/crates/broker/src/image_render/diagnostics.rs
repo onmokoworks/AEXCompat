@@ -24,6 +24,7 @@ pub(crate) const MAX_RGBA_TRANSPORT_BYTES: u64 = MAX_PIXELS * 4;
 const MAX_PARAMETERS: u32 = 1024;
 pub(crate) const INTERACTIVE_RENDER_TIMEOUT_MS: u64 = 30_000;
 const MAX_STAGE_EVENTS: usize = 32;
+const MAX_ACTIVE_STAGES: usize = MAX_STAGE_EVENTS;
 const MAX_MISSING_SUITES: usize = 16;
 const MAX_UNSUPPORTED_SUITE_CALLS: usize = 32;
 const MAX_SUITE_CALL_SLOT_PROBE_SLOTS: u64 = 32;
@@ -735,6 +736,9 @@ fn worker_diagnostics(
             .map(|(name, value)| (name.to_owned(), value))
             .collect::<serde_json::Map<_, _>>();
         if state == "begin" {
+            if active_stages.len() == MAX_ACTIVE_STAGES {
+                active_stages.remove(0);
+            }
             active_stages.push(stage.to_owned());
         } else {
             if let Some(index) = active_stages.iter().rposition(|active| active == stage) {
