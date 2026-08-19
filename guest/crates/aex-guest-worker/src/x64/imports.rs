@@ -982,7 +982,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetStartupInfoW => {
-                uc("write GetStartupInfoW return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write GetStartupInfoW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install GetStartupInfoW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -2785,9 +2788,9 @@ fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         let mut startup_info = [0u8; STARTUP_INFO_W_SIZE];
         startup_info[..4].copy_from_slice(&(STARTUP_INFO_W_SIZE as u32).to_le_bytes());
-        unicorn.mem_write(output, &startup_info).map_err(|error| {
-            format!("GetStartupInfoW output {output:#x} is not writable: {error}")
-        })
+        unicorn
+            .mem_write(output, &startup_info)
+            .map_err(|error| format!("GetStartupInfoW output {output:#x} is not writable: {error}"))
     });
     if let Err(error) = result {
         if unicorn.get_data().callback_error.is_none() {

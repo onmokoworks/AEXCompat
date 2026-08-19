@@ -4497,7 +4497,10 @@ fn get_startup_info_w_writes_the_deterministic_win64_layout() {
         .unwrap();
     assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0x1234);
     let startup_info = engine.unicorn.mem_read_as_vec(output, 104).unwrap();
-    assert_eq!(u32::from_le_bytes(startup_info[..4].try_into().unwrap()), 104);
+    assert_eq!(
+        u32::from_le_bytes(startup_info[..4].try_into().unwrap()),
+        104
+    );
     assert!(startup_info[4..].iter().all(|byte| *byte == 0));
 }
 
@@ -4532,7 +4535,10 @@ fn get_startup_info_w_rejects_null_and_unwritable_outputs() {
     let sentinel = [0x5a; 52];
     engine.write(boundary, &sentinel).unwrap();
     engine.unicorn.get_data_mut().callback_error = None;
-    engine.unicorn.reg_write(RegisterX86::RCX, boundary).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, boundary)
+        .unwrap();
     emulate_get_startup_info_w(&mut engine.unicorn);
     assert!(
         engine
