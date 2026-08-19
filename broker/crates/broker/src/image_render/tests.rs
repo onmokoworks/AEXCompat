@@ -2440,6 +2440,18 @@ mod tests {
     }
 
     #[test]
+    fn active_stage_tracking_is_bounded_but_keeps_the_latest_stage() {
+        let mut trace =
+            "stage:classic_render_begin\nstage:classic_render_end error=0\n"
+                .repeat(MAX_ACTIVE_STAGES + 20);
+        trace.push_str(&"stage:classic_render_begin\n".repeat(MAX_ACTIVE_STAGES + 20));
+        trace.push_str("stage:smart_render_begin\n");
+        let diagnostics = worker_diagnostics(&trace, true, "timeout", 1, 5_000);
+        assert_eq!(diagnostics["active_stage"], "smart_render");
+        assert_eq!(diagnostics["failure_stage"], "smart_render");
+    }
+
+    #[test]
     fn load_failure_marker_accepts_only_path_free_worker_owned_stage_and_error() {
         let diagnostics = worker_diagnostics(
             "untrusted C:\\private\\plugin.aex\n\

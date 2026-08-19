@@ -91,6 +91,11 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
     let mut output = String::new();
     let mut index = 0;
     let mut inside_json_string = false;
+    // Marker-shaped suffix validation shares one capture-sized inspection
+    // budget. Valid compact envelopes consume only their own JSON span, while
+    // repeated unterminated objects cannot each rescan the remaining capture
+    // (issue #1306).
+    let mut structured_marker_budget = chars.len();
     while index < chars.len() {
         let starts_path = index + 2 < chars.len()
             && chars[index].is_ascii_alphabetic()
@@ -108,10 +113,6 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
                 },
             );
             index += 3;
-            // Validate at most one marker-shaped suffix per path. This keeps
-            // hostile punctuation-heavy diagnostics linear in the capture
-            // bound while still preserving the broker's compact envelope.
-            let mut structured_marker_checked = false;
             while index < chars.len() {
                 if inside_json_string && chars[index] == '"' {
                     let preceding_backslashes = chars[..index]
@@ -126,7 +127,7 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
                     if chars[index].is_whitespace() || chars[index] == '"' {
                         break;
                     }
-                    if !structured_marker_checked && chars[index] == ',' {
+                    if structured_marker_budget > 0 && chars[index] == ',' {
                         let marker_shaped = [",diagnostics=", ",report="].iter().any(|marker| {
                             let mut actual = chars[index..].iter();
                             marker
@@ -134,8 +135,14 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
                                 .all(|expected| actual.next() == Some(&expected))
                         });
                         if marker_shaped {
-                            structured_marker_checked = true;
-                            if validated_structured_marker(&chars, index) {
+                            let (valid, inspected) = validated_structured_marker(
+                                &chars,
+                                index,
+                                structured_marker_budget,
+                            );
+                            structured_marker_budget =
+                                structured_marker_budget.saturating_sub(inspected);
+                            if valid {
                                 break;
                             }
                         }
@@ -169,28 +176,63 @@ pub fn redact_windows_paths(text: &str, limit: usize) -> (String, bool) {
     (output, truncated || redaction_truncated)
 }
 
-fn validated_structured_marker(chars: &[char], index: usize) -> bool {
+fn validated_structured_marker(
+    chars: &[char],
+    index: usize,
+    inspection_budget: usize,
+) -> (bool, usize) {
     if chars.get(index) != Some(&',') {
-        return false;
+        return (false, 0);
     }
     for marker in [",diagnostics=", ",report="] {
         let marker = marker.chars().collect::<Vec<_>>();
         if !chars[index..].starts_with(&marker) {
             continue;
         }
-        if chars.get(index + marker.len()) != Some(&'{') {
-            return false;
+        let json_start = index + marker.len();
+        if chars.get(json_start) != Some(&'{') {
+            return (false, 0);
         }
-        let json = chars[index + marker.len()..].iter().collect::<String>();
-        if serde_json::Deserializer::from_str(&json)
-            .into_iter::<serde_json::Value>()
-            .next()
-            .is_some_and(|result| result.is_ok())
-        {
-            return true;
+        let mut depth = 0usize;
+        let mut inside_string = false;
+        let mut escaped = false;
+        let mut inspected = 0usize;
+        for (offset, character) in chars[json_start..].iter().enumerate() {
+            if inspected == inspection_budget {
+                break;
+            }
+            inspected += 1;
+            if inside_string {
+                if escaped {
+                    escaped = false;
+                } else if *character == '\\' {
+                    escaped = true;
+                } else if *character == '"' {
+                    inside_string = false;
+                }
+                continue;
+            }
+            match character {
+                '"' => inside_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let json = chars[json_start..=json_start + offset]
+                            .iter()
+                            .collect::<String>();
+                        return (
+                            serde_json::from_str::<serde_json::Value>(&json).is_ok(),
+                            inspected,
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
+        return (false, inspected);
     }
-    false
+    (false, 0)
 }
 
 #[cfg(test)]
@@ -267,5 +309,24 @@ mod tests {
         assert!(!truncated);
         assert_eq!(redacted, "worker failed at <redacted-path>");
         assert!(!redacted.contains("secret"));
+    }
+
+    #[test]
+    fn repeated_marker_shaped_paths_do_not_revalidate_capture_suffixes() {
+        let mut input = r#"worker failed at C:\private\first,report={}"#.to_owned();
+        input.push_str(&r#" C:\private\later,report={}"#.repeat(4_096));
+        let (redacted, truncated) = redact_windows_paths(&input, input.len());
+        assert!(!truncated);
+        assert_eq!(redacted.matches(",report={}").count(), 4_097);
+        assert!(!redacted.contains("private"));
+        assert!(!redacted.contains("later"));
+    }
+
+    #[test]
+    fn unterminated_marker_json_shares_one_capture_inspection_budget() {
+        let input = r#"C:\one,report={ C:\two,report={ C:\three,report={"#;
+        let (redacted, truncated) = redact_windows_paths(input, input.len());
+        assert!(!truncated);
+        assert_eq!(redacted, "<redacted-path> <redacted-path> <redacted-path>");
     }
 }
