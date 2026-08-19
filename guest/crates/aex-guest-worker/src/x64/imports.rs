@@ -1170,10 +1170,7 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::ProcessPrng => {
-                uc(
-                    "write ProcessPrng return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
+                uc("write ProcessPrng return", unicorn.mem_write(stub, &[0xc3]))?;
                 uc(
                     "install ProcessPrng import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -2158,9 +2155,9 @@ fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {
             value ^= value >> 31;
             chunk.copy_from_slice(&value.to_le_bytes()[..chunk.len()]);
         }
-        unicorn.mem_write(buffer, &bytes).map_err(|error| {
-            format!("ProcessPrng buffer {buffer:#x} is not writable: {error}")
-        })
+        unicorn
+            .mem_write(buffer, &bytes)
+            .map_err(|error| format!("ProcessPrng buffer {buffer:#x} is not writable: {error}"))
     })();
     match result {
         Ok(()) => {
