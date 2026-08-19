@@ -3384,8 +3384,97 @@ fn win64_import_dispatch_is_library_aware_and_case_normalized() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
     assert_eq!(
+        dispatch_win64_import("bcryptprimitives.dll", "ProcessPrng"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::ProcessPrng)
+    );
+    assert_eq!(
+        dispatch_win64_import("BCRYPTPRIMITIVES.DLL", "ProcessPrng"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::ProcessPrng)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "ProcessPrng"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        dispatch_win64_import("kernel32.dll", "ProcessPrng"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
         canonical_import_trace_label(r"C:\Windows\System32\OPENCL.DLL", "clCreateKernel"),
         "opencl.dll!clCreateKernel"
+    );
+}
+
+#[test]
+fn process_prng_fills_a_reproducible_process_local_stream() {
+    let mut engine = test_engine(&[0xc3]);
+    let output = engine.allocate(32, 8).unwrap();
+    engine.unicorn.mem_write(output, &[0x11; 32]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 16).unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+    let first = engine.unicorn.mem_read_as_vec(output, 16).unwrap();
+    assert_ne!(first, vec![0x11; 16]);
+
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, output + 16)
+        .unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    let second = engine.unicorn.mem_read_as_vec(output + 16, 16).unwrap();
+    assert_ne!(second, first, "successive calls must advance the stream");
+
+    let mut replay = test_engine(&[0xc3]);
+    let replay_output = replay.allocate(16, 8).unwrap();
+    replay
+        .unicorn
+        .reg_write(RegisterX86::RCX, replay_output)
+        .unwrap();
+    replay.unicorn.reg_write(RegisterX86::RDX, 16).unwrap();
+    emulate_process_prng(&mut replay.unicorn);
+    assert_eq!(
+        replay.unicorn.mem_read_as_vec(replay_output, 16).unwrap(),
+        first,
+        "fresh guest processes must replay the deterministic stream"
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 8).unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error == "ProcessPrng buffer pointer is null")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, MAX_PROCESS_PRNG_BYTES + 1)
+        .unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("exceeds"))
     );
 }
 
