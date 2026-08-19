@@ -4721,6 +4721,99 @@ fn fls_allocation_rejects_nonexecutable_callbacks_and_capacity_overflow() {
 }
 
 #[test]
+fn tls_lifecycle_is_bounded_stateful_and_library_scoped() {
+    const ALLOC: u64 = STUB_BASE + 0x540;
+    const GET: u64 = STUB_BASE + 0x550;
+    const SET: u64 = STUB_BASE + 0x560;
+    const FREE: u64 = STUB_BASE + 0x570;
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, symbol) in [
+        (ALLOC, "TlsAlloc"),
+        (GET, "TlsGetValue"),
+        (SET, "TlsSetValue"),
+        (FREE, "TlsFree"),
+    ] {
+        assert!(matches!(
+            install_win64_import(&mut engine.unicorn, stub, "KERNEL32.DLL", symbol).unwrap(),
+            Win64ImportDispatch::LegacyImplemented(_)
+        ));
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    let index = engine.call_win64(ALLOC, [0; 6]).unwrap();
+    assert_eq!(index, 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0);
+
+    let value = 0x1234_5678_9abc_def0;
+    engine.unicorn.get_data_mut().windows_last_error = 0x5678;
+    assert_eq!(
+        engine.call_win64(SET, [index, value, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x5678);
+    assert_eq!(
+        engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(),
+        value
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0);
+
+    engine.unicorn.get_data_mut().windows_last_error = 0x9abc;
+    assert_eq!(engine.call_win64(FREE, [index, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x9abc);
+    assert_eq!(engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(engine.call_win64(SET, [index, 1, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(engine.call_win64(FREE, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn tls_allocation_reuses_indices_enforces_capacity_and_is_session_local() {
+    let mut first = test_engine(&[0xc3]);
+    for expected in 0..MAX_WINDOWS_TLS_SLOTS {
+        emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsAlloc);
+        assert_eq!(
+            first.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            u64::from(expected)
+        );
+    }
+    emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsAlloc);
+    assert_eq!(
+        first.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(first.unicorn.get_data().windows_last_error, 8);
+
+    first.unicorn.reg_write(RegisterX86::RCX, 5).unwrap();
+    emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsFree);
+    assert_eq!(first.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+    emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsAlloc);
+    assert_eq!(first.unicorn.reg_read(RegisterX86::RAX).unwrap(), 5);
+
+    let mut second = test_engine(&[0xc3]);
+    emulate_tls(&mut second.unicorn, LegacyWin64Import::TlsAlloc);
+    assert_eq!(second.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(second.unicorn.get_data().windows_tls_slots.len(), 1);
+}
+
+#[test]
 fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
     let crt_math = "api-ms-win-crt-math-l1-1-0.dll";
     assert_eq!(
