@@ -594,12 +594,7 @@ mod tests {
             needs_closure_recheck(&entry, build(2), &roots),
             "a different host build gets a fresh retry budget"
         );
-        entry = keep_best(
-            Some(&entry),
-            negative_entry(&plugin, build(2)),
-            Some(meta),
-        )
-        .unwrap();
+        entry = keep_best(Some(&entry), negative_entry(&plugin, build(2)), Some(meta)).unwrap();
         assert_eq!(entry.checked, build(2));
         assert_eq!(entry.attempts, 1, "the new host starts its own ledger");
     }
