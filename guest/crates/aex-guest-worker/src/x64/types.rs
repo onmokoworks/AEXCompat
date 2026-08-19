@@ -111,6 +111,7 @@ struct GuestState {
     windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
     pending_fls_free: Option<PendingFlsFree>,
     windows_last_error: u32,
+    windows_thread_error_mode: u32,
     process_prng_state: u64,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,

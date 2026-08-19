@@ -80,6 +80,7 @@ enum LegacyWin64Import {
     WideCharToMultiByte,
     GetLastError,
     SetLastError,
+    SetThreadErrorMode,
     FlsAlloc,
     FlsGetValue,
     FlsSetValue,
@@ -303,6 +304,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "WideCharToMultiByte") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
         ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
+        ("kernel32.dll", "SetThreadErrorMode") => LegacyWin64Import::SetThreadErrorMode,
+        (_, "SetThreadErrorMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
         ("kernel32.dll", "FlsSetValue") => LegacyWin64Import::FlsSetValue,
@@ -1034,6 +1037,18 @@ fn install_win64_import(
                     "install last-error import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                         emulate_windows_last_error(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::SetThreadErrorMode => {
+                uc(
+                    "write SetThreadErrorMode return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install SetThreadErrorMode import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_set_thread_error_mode(unicorn);
                     }),
                 )?;
             }
@@ -1873,6 +1888,42 @@ fn emulate_windows_last_error(unicorn: &mut Unicorn<'_, GuestState>, operation: 
             if unicorn.get_data().callback_error.is_none() {
                 unicorn.get_data_mut().callback_error = Some(error);
             }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_set_thread_error_mode(unicorn: &mut Unicorn<'_, GuestState>) {
+    const VALID_ERROR_MODE_FLAGS: u32 = 0x0000_8003;
+    let result = (|| -> Result<bool, String> {
+        let new_mode = read_win64_import_argument(unicorn, 0)? as u32;
+        let old_mode_output = read_win64_import_argument(unicorn, 1)?;
+        if new_mode & !VALID_ERROR_MODE_FLAGS != 0 {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            return Ok(false);
+        }
+        let old_mode = unicorn.get_data().windows_thread_error_mode;
+        if old_mode_output != 0 {
+            unicorn
+                .mem_write(old_mode_output, &old_mode.to_le_bytes())
+                .map_err(|error| {
+                    format!(
+                        "SetThreadErrorMode old-mode output {old_mode_output:#x} is not writable: {error}"
+                    )
+                })?;
+        }
+        unicorn.get_data_mut().windows_thread_error_mode = new_mode;
+        Ok(true)
+    })();
+    match result {
+        Ok(success) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(success));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
             let _ = unicorn.emu_stop();
         }
     }
