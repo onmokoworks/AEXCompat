@@ -111,6 +111,10 @@ struct GuestState {
     windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
     windows_tls_slots: BTreeMap<u32, u64>,
     pending_fls_free: Option<PendingFlsFree>,
+    windows_threads: BTreeMap<u64, WindowsThread>,
+    next_windows_thread_id: u32,
+    current_windows_thread_id: u32,
+    pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
     windows_thread_error_mode: u32,
     windows_command_line_a: u64,
@@ -179,6 +183,38 @@ struct PendingCrtInitterm {
     return_address: u64,
     continuation_rsp: u64,
     stop_on_error: bool,
+}
+
+#[derive(Clone, Debug)]
+struct WindowsThread {
+    id: u32,
+    start: u64,
+    parameter: u64,
+    suspended: bool,
+    completed: bool,
+    exit_code: u32,
+    handle_open: bool,
+    stack_base: u64,
+    stack_size: u64,
+    stack_mapped: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingWindowsThread {
+    handle: u64,
+    return_address: u64,
+    continuation_rsp: u64,
+    callback_return_rsp: u64,
+    caller_tls_values: BTreeMap<u32, u64>,
+    caller_fls_values: BTreeMap<u32, u64>,
+    caller_last_error: u32,
+    caller_thread_error_mode: u32,
+    caller_thread_id: u32,
+    completion_return: u64,
+    caller_teb_stack: [u8; 16],
+    exit_code: Option<u32>,
+    fls_pass: u32,
+    fls_processed: BTreeSet<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -169,6 +169,8 @@ impl GuestEngine<'static> {
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
         unicorn.get_data_mut().next_aegp_memory_handle = AEGP_MEMORY_HANDLE_BASE;
         unicorn.get_data_mut().next_pf_handle_data = PF_HANDLE_DATA_BASE;
+        unicorn.get_data_mut().next_windows_thread_id = 2;
+        unicorn.get_data_mut().current_windows_thread_id = 1;
         let image_size =
             u64::try_from(image.mapped_bytes().len()).map_err(|_| GuestError::ImageAlignment)?;
         unicorn.get_data_mut().image_region = Some((
@@ -217,10 +219,10 @@ impl GuestEngine<'static> {
             "map minimal TEB page",
             unicorn.mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE),
         )?;
-        uc(
-            "write TEB stack limit",
-            unicorn.mem_write(0x10, &STACK_BASE.to_le_bytes()),
-        )?;
+        let mut teb_stack = [0u8; 16];
+        teb_stack[0..8].copy_from_slice(&(STACK_BASE + STACK_SIZE).to_le_bytes());
+        teb_stack[8..16].copy_from_slice(&STACK_BASE.to_le_bytes());
+        uc("write TEB stack bounds", unicorn.mem_write(0x08, &teb_stack))?;
         uc(
             "map guest data",
             unicorn.mem_map(DATA_BASE, DATA_SIZE, Prot::READ | Prot::WRITE),
@@ -289,6 +291,18 @@ impl GuestEngine<'static> {
                 HOST_FLS_FREE_CONTINUE,
                 HOST_FLS_FREE_CONTINUE,
                 continue_fls_free,
+            ),
+        )?;
+        uc(
+            "write CreateThread continuation",
+            unicorn.mem_write(HOST_CREATE_THREAD_CONTINUE, &[0x41, 0xff, 0xe3]),
+        )?;
+        uc(
+            "install CreateThread continuation",
+            unicorn.add_code_hook(
+                HOST_CREATE_THREAD_CONTINUE,
+                HOST_CREATE_THREAD_CONTINUE,
+                continue_windows_thread,
             ),
         )?;
         install_windows_condition_variable_callbacks(&mut unicorn)?;
