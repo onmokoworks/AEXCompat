@@ -81,6 +81,7 @@ enum LegacyWin64Import {
     GetLastError,
     SetLastError,
     SetThreadErrorMode,
+    LoadLibraryExW,
     FlsAlloc,
     FlsGetValue,
     FlsSetValue,
@@ -306,6 +307,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
         ("kernel32.dll", "SetThreadErrorMode") => LegacyWin64Import::SetThreadErrorMode,
         (_, "SetThreadErrorMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "LoadLibraryExW") => LegacyWin64Import::LoadLibraryExW,
+        (_, "LoadLibraryExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
         ("kernel32.dll", "FlsSetValue") => LegacyWin64Import::FlsSetValue,
@@ -1049,6 +1052,18 @@ fn install_win64_import(
                     "install SetThreadErrorMode import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_set_thread_error_mode(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::LoadLibraryExW => {
+                uc(
+                    "write LoadLibraryExW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install LoadLibraryExW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_load_library_ex_w(unicorn);
                     }),
                 )?;
             }
@@ -1930,6 +1945,98 @@ fn emulate_set_thread_error_mode(unicorn: &mut Unicorn<'_, GuestState>) {
     match result {
         Ok(success) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(success));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
+    const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
+    const LOAD_LIBRARY_SEARCH_FLAGS: u32 = 0x0000_1f00;
+    const NON_EXECUTABLE_RESOURCE_FLAGS: u32 = 0x0000_0062;
+    const VALID_FLAGS: u32 = 0x0000_3ffb;
+    let result = (|| -> Result<Option<u64>, String> {
+        let path_pointer = read_win64_import_argument(unicorn, 0)?;
+        let file_handle = read_win64_import_argument(unicorn, 1)?;
+        let flags = read_win64_import_argument(unicorn, 2)? as u32;
+        if path_pointer == 0
+            || file_handle != 0
+            || flags & !VALID_FLAGS != 0
+            || flags & NON_EXECUTABLE_RESOURCE_FLAGS != 0
+            || flags & LOAD_WITH_ALTERED_SEARCH_PATH != 0 && flags & LOAD_LIBRARY_SEARCH_FLAGS != 0
+        {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            return Ok(None);
+        }
+        let mut units = Vec::new();
+        let mut terminated = false;
+        for index in 0..260u64 {
+            let address = path_pointer
+                .checked_add(index * 2)
+                .ok_or_else(|| "LoadLibraryExW path address overflow".to_string())?;
+            let bytes = unicorn
+                .mem_read_as_vec(address, 2)
+                .map_err(|error| format!("LoadLibraryExW path read failed: {error}"))?;
+            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if unit == 0 {
+                terminated = true;
+                break;
+            }
+            units.push(unit);
+        }
+        if !terminated {
+            return Err("LoadLibraryExW path exceeds 259 UTF-16 code units".into());
+        }
+        let path = String::from_utf16(&units)
+            .map_err(|_| "LoadLibraryExW path is not valid UTF-16".to_string())?;
+        let path_bytes = path.as_bytes();
+        let drive_absolute = path_bytes.len() >= 4
+            && path_bytes[0].is_ascii_alphabetic()
+            && path_bytes[1] == b':'
+            && matches!(path_bytes[2], b'\\' | b'/');
+        let unc_absolute = path_bytes.len() >= 2
+            && matches!(path_bytes[0], b'\\' | b'/')
+            && path_bytes[1] == path_bytes[0]
+            && path[2..]
+                .split(['\\', '/'])
+                .take(3)
+                .collect::<Vec<_>>()
+                .as_slice()
+                .iter()
+                .all(|component| !component.is_empty())
+            && path[2..].split(['\\', '/']).count() >= 3;
+        let absolute = drive_absolute || unc_absolute;
+        if flags & (LOAD_WITH_ALTERED_SEARCH_PATH | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR) != 0
+            && !absolute
+        {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            return Ok(None);
+        }
+        let Some(module) = path
+            .rsplit(['\\', '/'])
+            .next()
+            .filter(|name| !name.is_empty())
+        else {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+            return Ok(None);
+        };
+        if module.eq_ignore_ascii_case("kernel32.dll") {
+            Ok(Some(WINDOWS_KERNEL32_MODULE_TOKEN))
+        } else {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+            Ok(None)
+        }
+    })();
+    match result {
+        Ok(module) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, module.unwrap_or_default());
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
