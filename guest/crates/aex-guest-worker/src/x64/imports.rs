@@ -57,6 +57,7 @@ enum LegacyWin64Import {
     Floor,
     FloorF,
     LRound,
+    LRoundF,
     Round,
     RoundF,
     PowF,
@@ -475,6 +476,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "floor") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lround") => LegacyWin64Import::LRound,
         (_, "lround") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lroundf") => {
+            LegacyWin64Import::LRoundF
+        }
+        (_, "lroundf") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "round") => LegacyWin64Import::Round,
         (_, "round") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "roundf") => LegacyWin64Import::RoundF,
@@ -919,6 +924,9 @@ fn install_win64_import(
             }
             LegacyWin64Import::LRound => {
                 install_lround_import(unicorn, stub)?;
+            }
+            LegacyWin64Import::LRoundF => {
+                install_lroundf_import(unicorn, stub)?;
             }
             LegacyWin64Import::Round => {
                 install_double_import(unicorn, stub, "round", f64::round)?;
