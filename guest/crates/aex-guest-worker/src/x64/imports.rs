@@ -6139,7 +6139,8 @@ fn emulate_wsa_cleanup(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_rtl_pc_to_file_header(unicorn: &mut Unicorn<'_, GuestState>) {
     let pc = read_win64_import_argument(unicorn, 0).unwrap_or_default();
     let output = read_win64_import_argument(unicorn, 1).unwrap_or_default();
-    if output != 0 && !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false) {
+    if output != 0 && !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false)
+    {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
