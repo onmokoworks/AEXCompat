@@ -12,11 +12,14 @@
 // This covers the pure decision only; the glue in
 // worker_host_suite_wiring.cpp that feeds it GetModuleHandleW/GetProcAddress
 // and calls U_SP_Birth is exercised by the real worker.
+#include "worker_pica_component_lock.hpp"
 #include "worker_sweetpea_bootstrap.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -313,6 +316,85 @@ int main() {
     check("u_bootstrap_resumes_after_the_direct_call", Decision::CallUSpBirth,
           sweetpea::decide(state, first, true, sweetpea_module, dir_a));
     check("direct_reentrancy_leaves_one_attempt", 1UL,
+          static_cast<unsigned long>(state.direct_attempts));
+  }
+
+  // Bravo load coordination: the first caller opens the in-flight attempt and
+  // blocks in its loader while a second caller enters through the released
+  // component mutex. The second caller must observe InFlight (not Absent or a
+  // second load), and the first must prefer the mapping observed after it
+  // reacquires the lock over its loader's stale answer.
+  {
+    namespace pica = aexcompat::worker_runtime::pica_component_lock;
+    std::recursive_mutex mutex;
+    std::unique_lock<std::recursive_mutex> lock(mutex);
+    pica::LoadState state;
+    check("bravo_first_caller_starts_load", true,
+          pica::decide(state, false) == pica::LoadDecision::StartLoad);
+    pica::begin_load(state);
+    std::atomic<bool> second_saw_in_flight{false};
+    const HMODULE loaded = pica::load_outside_component_lock(
+        lock,
+        [&] {
+          std::thread reentrant([&] {
+            std::lock_guard<std::recursive_mutex> other_thread_lock(mutex);
+            second_saw_in_flight.store(
+                pica::decide(state, true) == pica::LoadDecision::InFlight,
+                std::memory_order_release);
+          });
+          reentrant.join();
+          return first;
+        },
+        [&] { return second; },
+        [&](HMODULE) { pica::finish_load(state); });
+    check("bravo_second_caller_saw_in_flight", true,
+          second_saw_in_flight.load(std::memory_order_acquire));
+    check("bravo_reobserves_mapping_after_load", static_cast<const void*>(second),
+          static_cast<const void*>(loaded));
+    check("bravo_load_is_attempted_once", 1UL,
+          static_cast<unsigned long>(state.attempts));
+    check("bravo_failed_key_becomes_absent_not_retry", true,
+          pica::decide(state, false) == pica::LoadDecision::Absent);
+    check("bravo_initiator_reacquires_after_load", true, lock.owns_lock());
+  }
+
+  // The same coordinator drives ae_sweetpea, with Sweet Pea's mapping-and-
+  // directory keyed state. Its re-entrant caller must see Nothing while the
+  // load is in flight, then exactly one direct start consumes the re-observed
+  // mapping.
+  {
+    namespace pica = aexcompat::worker_runtime::pica_component_lock;
+    std::recursive_mutex mutex;
+    std::unique_lock<std::recursive_mutex> lock(mutex);
+    State state;
+    sweetpea::begin_direct_attempt(state, dir_a);
+    std::atomic<bool> second_saw_nothing{false};
+    const HMODULE loaded = pica::load_outside_component_lock(
+        lock,
+        [&] {
+          std::thread reentrant([&] {
+            std::lock_guard<std::recursive_mutex> other_thread_lock(mutex);
+            second_saw_nothing.store(
+                sweetpea::decide(state, nullptr, false, nullptr, dir_a) ==
+                    Decision::Nothing,
+                std::memory_order_release);
+          });
+          reentrant.join();
+          return first;
+        },
+        [&] { return sweetpea_module; },
+        [](HMODULE) {});
+    sweetpea::note_direct_module(state, loaded);
+    sweetpea::finish_direct_start(state, true, true);
+    check("sweetpea_second_caller_saw_nothing", true,
+          second_saw_nothing.load(std::memory_order_acquire));
+    check("sweetpea_reobserves_mapping_after_load",
+          static_cast<const void*>(sweetpea_module),
+          static_cast<const void*>(loaded));
+    check("sweetpea_records_reobserved_mapping",
+          static_cast<const void*>(sweetpea_module),
+          static_cast<const void*>(state.attempted_sweetpea_module));
+    check("sweetpea_load_and_start_are_attempted_once", 1UL,
           static_cast<unsigned long>(state.direct_attempts));
   }
 
