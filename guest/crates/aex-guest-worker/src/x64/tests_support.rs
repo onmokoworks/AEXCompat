@@ -3159,6 +3159,254 @@ fn get_environment_variable_a_matches_win32_size_and_allowlist_contract() {
 }
 
 #[test]
+fn wide_char_to_multi_byte_converts_utf16_and_matches_size_query_contract() {
+    const CONVERT: u64 = STUB_BASE + 0x4e0;
+    const CP_OEMCP: u64 = 1;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            CONVERT,
+            "KERNEL32.DLL",
+            "WideCharToMultiByte",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WideCharToMultiByte)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "WideCharToMultiByte"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let source = DATA_BASE + 0xc40;
+    let output = DATA_BASE + 0xc80;
+    let utf16: Vec<u8> = "A日本"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    engine.write(source, &utf16).unwrap();
+    engine.write(output, &[0xaa; 16]).unwrap();
+
+    let required = engine
+        .call_win64_with_timeout(
+            CONVERT,
+            &[CP_OEMCP, 0, source, u32::MAX as u64, 0, 0, 0, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_eq!(required, 6);
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, u32::MAX as u64, output, required, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        required
+    );
+    let expected = vec![b'A', 0x93, 0xfa, 0x96, 0x7b, 0];
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(output, expected.len())
+            .unwrap(),
+        expected
+    );
+
+    engine.write(output, &[0xaa; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, 2, output, 16, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [b'A', 0x93, 0xfa, 0xaa]
+    );
+
+    engine.write(output, &[0xaa; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[65_001, 0x80, source, u32::MAX as u64, output, 16, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        8
+    );
+    let mut utf8 = "A日本".as_bytes().to_vec();
+    utf8.push(0);
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), utf8);
+}
+
+#[test]
+fn wide_char_to_multi_byte_substitutes_default_and_rejects_negative_output_size() {
+    const CONVERT: u64 = STUB_BASE + 0x4f0;
+    const CP_OEMCP: u64 = 1;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "WideCharToMultiByte",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xcc0;
+    let default = DATA_BASE + 0xce0;
+    let used_default = DATA_BASE + 0xcf0;
+    let output = DATA_BASE + 0xd00;
+    let utf16: Vec<u8> = "😀"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    engine.write(source, &utf16).unwrap();
+    engine.write(default, b"*").unwrap();
+    engine.write(used_default, &[0xaa]).unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[
+                    CP_OEMCP,
+                    0,
+                    source,
+                    u32::MAX as u64,
+                    0,
+                    0,
+                    default,
+                    used_default,
+                ],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(used_default, 1).unwrap(),
+        [1]
+    );
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[
+                    CP_OEMCP,
+                    0,
+                    source,
+                    u32::MAX as u64,
+                    output,
+                    2,
+                    default,
+                    used_default,
+                ],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 2).unwrap(), b"*\0");
+
+    let mut invalid = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut invalid.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "WideCharToMultiByte",
+    )
+    .unwrap();
+    invalid.write(source, &[b'A', 0]).unwrap();
+    assert_eq!(
+        invalid
+        .call_win64_with_timeout(
+            CONVERT,
+            &[
+                CP_OEMCP,
+                0,
+                source,
+                1,
+                output,
+                u32::MAX as u64,
+                0,
+                0,
+            ],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        invalid.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, u32::MAX as u64 - 1, 0, 0, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        invalid.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+
+    invalid.write(source, &[b'A', 0, b'B', 0]).unwrap();
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, 2, output, 1, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(invalid.unicorn.get_data().windows_last_error, 122);
+
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[65_001, 0, source, 1, output, 1, default, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        invalid.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+
+    invalid.write(source, &[0x00, 0xd8]).unwrap();
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[65_001, 0x80, source, 1, 0, 0, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(invalid.unicorn.get_data().windows_last_error, 1113);
+}
+
+#[test]
 fn get_environment_variable_a_rejects_invalid_names_and_outputs() {
     let mut engine = test_engine(&[0xc3]);
     engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
