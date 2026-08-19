@@ -3751,6 +3751,151 @@ fn set_thread_error_mode_does_not_commit_after_an_unwritable_old_mode_output() {
 }
 
 #[test]
+fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
+    const LOAD_LIBRARY: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            LOAD_LIBRARY,
+            "kernel32.dll",
+            "LoadLibraryExW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LoadLibraryExW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "LoadLibraryExW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let path = DATA_BASE + 0xe00;
+    let write_path = |engine: &mut GuestEngine<'static>, value: &str| {
+        let mut bytes = Vec::new();
+        for unit in value.encode_utf16().chain(std::iter::once(0)) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        engine.write(path, &bytes).unwrap();
+    };
+    write_path(&mut engine, r"C:\Windows\System32\KERNEL32.DLL");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x0800, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_KERNEL32_MODULE_TOKEN
+    );
+
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    write_path(&mut engine, "dxgi.dll");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x1000, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x8000_0000, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x0808, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    write_path(&mut engine, "kernel32.dll");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x0100, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x2000, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_KERNEL32_MODULE_TOKEN
+    );
+    for malformed_absolute in [r"1:\kernel32.dll", r"\\kernel32.dll"] {
+        write_path(&mut engine, malformed_absolute);
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0x0100, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 1, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+
+    write_path(&mut engine, "");
+    engine.unicorn.get_data_mut().callback_error = None;
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+    write_path(&mut engine, r"C:\Windows\System32\");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+}
+
+#[test]
+fn load_library_ex_w_rejects_invalid_or_unterminated_utf16_without_host_loading() {
+    let mut engine = test_engine(&[0xc3]);
+    let path = DATA_BASE + 0xc00;
+    engine.write(path, &[0x00, 0xd8, 0, 0]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, path).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R8, 0).unwrap();
+    emulate_load_library_ex_w(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("LoadLibraryExW path is not valid UTF-16")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.write(path, &vec![b'A'; 520]).unwrap();
+    emulate_load_library_ex_w(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("LoadLibraryExW path exceeds 259 UTF-16 code units")
+    );
+}
+
+#[test]
 fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
     let mut engine = test_engine(&[0xc3]);
     engine
