@@ -3651,6 +3651,95 @@ fn windows_last_error_is_session_local_and_tracks_missing_environment() {
 }
 
 #[test]
+fn set_thread_error_mode_is_stateful_validated_and_session_local() {
+    const SET_MODE: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            SET_MODE,
+            "kernel32.dll",
+            "SetThreadErrorMode",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::SetThreadErrorMode)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "SetThreadErrorMode"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let old_mode = DATA_BASE + 0xe00;
+    engine.write(old_mode, &[0xa5; 4]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(SET_MODE, [0x0003, old_mode, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(old_mode, 4).unwrap(),
+        0u32.to_le_bytes()
+    );
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x0003);
+
+    assert_eq!(
+        engine
+            .call_win64(SET_MODE, [0x8001, old_mode, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(old_mode, 4).unwrap(),
+        0x0003u32.to_le_bytes()
+    );
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x8001);
+
+    engine.write(old_mode, &[0x5a; 4]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(SET_MODE, [0x0004, old_mode, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(old_mode, 4).unwrap(),
+        vec![0x5a; 4]
+    );
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x8001);
+
+    assert_eq!(engine.call_win64(SET_MODE, [0, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0);
+    let other = test_engine(&[0xc3]);
+    assert_eq!(other.unicorn.get_data().windows_thread_error_mode, 0);
+}
+
+#[test]
+fn set_thread_error_mode_does_not_commit_after_an_unwritable_old_mode_output() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.get_data_mut().windows_thread_error_mode = 0x0001;
+    engine.unicorn.reg_write(RegisterX86::RCX, 0x0002).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, 0xdead_beef)
+        .unwrap();
+    emulate_set_thread_error_mode(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x0001);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("old-mode output 0xdeadbeef is not writable"))
+    );
+}
+
+#[test]
 fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
     let mut engine = test_engine(&[0xc3]);
     engine
