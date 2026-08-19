@@ -2289,8 +2289,11 @@ bool __cdecl initialize_layer_render_options(
   initialized.owner_plugin_id = plugin_id;
   initialized.effect_boundary = boundary;
   if (boundary == AegpLayerEffectBoundary::all) {
-    if (aegp_layer_index(source) < 0) return false;
-    initialized.layer = source;
+    const int32_t layer_index = aegp_layer_index(source);
+    if (layer_index < 0) return false;
+    initialized.layer = static_cast<std::size_t>(layer_index) < g_aegp_layers.size()
+        ? &g_aegp_layers[static_cast<std::size_t>(layer_index)]
+        : source;
   } else {
     const auto* instance = resolve_effect_instance(source, plugin_id);
     if (!instance) return false;
