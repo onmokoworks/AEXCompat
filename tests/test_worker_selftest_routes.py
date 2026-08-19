@@ -265,6 +265,26 @@ def test_bee_scene_facade_is_published_behind_the_effect_layer_on_all_workers() 
         pass
 
 
+def test_selector_fault_unwind_recovers_the_caller_of_a_null_call() -> None:
+    """The faulting-context unwind behind ``stage:selector_seh unwind=``
+    (issue #1312). A plug-in that calls through an uninitialised Adobe-library
+    dispatch slot faults at instruction pointer 0, where no unwind entry
+    exists, so the caller is only recoverable by reading the return address the
+    CALL pushed. The route raises exactly that shape behind the production SEH
+    capture and identifies the two frames behind the fault by their unwind-table
+    entry, not merely by module, so a frame the walk invented or shifted by one
+    fails instead of passing.
+    """
+    for name, report in _all_workers(
+        "--self-test-selector-fault-unwind", "selector_fault_unwind"
+    ):
+        assert report["reference_identities_resolved"] is True, name
+        assert report["fault_site_is_null"] is True, name
+        assert report["call_site_frame_identified"] is True, name
+        assert report["caller_frame_identified"] is True, name
+        assert report["frames"] >= 3, name
+
+
 def test_pf_progress_info_is_installed_behind_effect_ref_on_all_workers() -> None:
     """The PF_ProgressInfo-shaped object behind ``in_data->effect_ref``
     (issue #1275). Adobe-bundled effects and PF.dll read the effect ref as

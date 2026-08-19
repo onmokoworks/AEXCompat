@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <delayimp.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <array>
@@ -104,6 +105,10 @@ struct RawAccessViolationContext {
   std::array<uintptr_t, kRegisterNames.size()> registers{};
   std::array<uintptr_t, kMaxSelectorStackValues> stack_values{};
   std::array<bool, kMaxSelectorStackValues> stack_readable{};
+  std::array<uintptr_t, kMaxSelectorUnwindFrames> unwind_rips{};
+  std::array<bool, kMaxSelectorUnwindFrames> unwind_from_return_slot{};
+  std::size_t unwind_frame_count{};
+  SelectorUnwindStop unwind_stop{SelectorUnwindStop::not_attempted};
 };
 
 thread_local RawAccessViolationContext g_current_access_violation{};
@@ -279,6 +284,123 @@ CapturedSpecVersion capture_spec_version(const void* buffer) {
   return captured;
 }
 
+#if defined(_M_X64)
+// Headroom below the faulting frame that the walk needs. The walk itself costs
+// a CONTEXT copy plus RtlVirtualUnwind's own frames, and a plug-in that
+// swallowed a stack overflow without _resetstkoflw faults again as a plain
+// access violation with the guard page already gone - a second overflow inside
+// an exception filter is not containable by the __except in the walk.
+constexpr uintptr_t kUnwindStackHeadroomBytes = 16 * 1024;
+
+// Walk the faulting context with the x64 unwind data and record one instruction
+// pointer per frame, innermost first (frame 0 is the fault site itself).
+//
+// The stack-slot classification below (`stack0=`/`stack4=`) is a heuristic: it
+// prints whichever of the first few qwords at RSP happen to resolve inside a
+// module, and a slot that is stale shadow space or an argument reads exactly
+// like a return address. Issue #1264's ShapeBlur fault is the worked example -
+// `stack0` did name the real caller, `stack4` named a function that had already
+// returned, and the two together were read as a call chain that does not
+// exist. RtlVirtualUnwind answers the same question from the unwind tables
+// instead of from the shape of the values.
+//
+// A fault at a null or garbage call target has no unwind entry, so
+// RtlLookupFunctionEntry answers null for frame 0; the CALL still pushed its
+// return address, so the leaf branch reads it back off RSP. That is what makes
+// the caller of a call-through-a-null-slot recoverable at all.
+//
+// The whole walk is inside SEH: it reads a stack that a malformed plug-in may
+// have corrupted, and turning a contained fault into a worker crash while
+// describing it would be worse than describing it badly.
+std::size_t capture_unwind_frames(const CONTEXT& fault_context, uintptr_t* out,
+                                  bool* out_from_return_slot,
+                                  SelectorUnwindStop* out_stop,
+                                  std::size_t capacity) noexcept {
+  // volatile because it is written inside __try and read after __except:
+  // MSVC only guarantees the value there for variables it keeps in memory.
+  volatile std::size_t count = 0;
+  if (!out || !out_from_return_slot || !out_stop || capacity == 0) return 0;
+  ULONG_PTR stack_low = 0;
+  ULONG_PTR stack_high = 0;
+  GetCurrentThreadStackLimits(&stack_low, &stack_high);
+  if (stack_low != 0 &&
+      static_cast<ULONG_PTR>(fault_context.Rsp) <
+          stack_low + kUnwindStackHeadroomBytes) {
+    *out_stop = SelectorUnwindStop::low_stack;
+    return 0;
+  }
+  // Written through the pointer before the walk so a fault mid-walk leaves this
+  // reason standing; every ordinary exit below overwrites it.
+  *out_stop = SelectorUnwindStop::walk_faulted;
+  __try {
+    CONTEXT walk = fault_context;
+    bool next_from_return_slot = false;
+    while (count < capacity) {
+      const std::size_t index = count;
+      out[index] = static_cast<uintptr_t>(walk.Rip);
+      out_from_return_slot[index] = next_from_return_slot;
+      count = index + 1;
+      next_from_return_slot = false;
+      DWORD64 image_base = 0;
+      PRUNTIME_FUNCTION function_entry =
+          RtlLookupFunctionEntry(walk.Rip, &image_base, nullptr);
+      const DWORD64 previous_rsp = walk.Rsp;
+      if (!function_entry) {
+        // Only the fault site may legitimately lack an unwind entry. A return
+        // address always points into a function that made a call, and on x64
+        // only a leaf - a function that calls nothing - may omit .pdata, so a
+        // miss at any deeper frame means the chain is already lost. Reading
+        // RSP there would turn whatever the caller happens to keep in that
+        // slot into a frame indistinguishable from a table-derived one, which
+        // is the failure mode this instrument exists to remove.
+        if (index != 0) {
+          *out_stop = SelectorUnwindStop::no_unwind_entry;
+          break;
+        }
+        DWORD64 return_address = 0;
+        SIZE_T bytes_read = 0;
+        if (walk.Rsp == 0 ||
+            !ReadProcessMemory(GetCurrentProcess(),
+                               reinterpret_cast<const void*>(walk.Rsp),
+                               &return_address, sizeof(return_address),
+                               &bytes_read) ||
+            bytes_read != sizeof(return_address)) {
+          *out_stop = SelectorUnwindStop::return_slot_unreadable;
+          break;
+        }
+        walk.Rip = return_address;
+        walk.Rsp += sizeof(return_address);
+        next_from_return_slot = true;
+      } else {
+        PVOID handler_data = nullptr;
+        DWORD64 establisher_frame = 0;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, image_base, walk.Rip,
+                         function_entry, &walk, &handler_data,
+                         &establisher_frame, nullptr);
+      }
+      // A null instruction pointer is where a Windows thread's frame chain
+      // ends. A stack that did not move toward its base is a different
+      // answer - the chain was lost, and the outermost frame recorded is not
+      // the top of the stack - so the two do not share a stop reason even
+      // though both have to end the walk before it loops.
+      if (walk.Rip == 0) {
+        *out_stop = SelectorUnwindStop::end_of_chain;
+        break;
+      }
+      if (walk.Rsp <= previous_rsp) {
+        *out_stop = SelectorUnwindStop::chain_lost;
+        break;
+      }
+      if (count >= capacity) *out_stop = SelectorUnwindStop::frame_cap;
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    // Keep whatever frames were recorded before the stack stopped being
+    // readable; *out_stop already says walk_faulted.
+  }
+  return count;
+}
+#endif
+
 void capture_access_violation_context(
     EXCEPTION_POINTERS* information) noexcept {
   g_current_access_violation = {};
@@ -326,6 +448,11 @@ void capture_access_violation_context(
       g_current_access_violation.stack_readable[index] = true;
     }
   }
+  g_current_access_violation.unwind_frame_count = capture_unwind_frames(
+      context, g_current_access_violation.unwind_rips.data(),
+      g_current_access_violation.unwind_from_return_slot.data(),
+      &g_current_access_violation.unwind_stop,
+      g_current_access_violation.unwind_rips.size());
 #endif
 }
 
@@ -507,6 +634,17 @@ void record_selector_invocation(const char* selector,
             diagnostic.stack_values[index].value = classify_pointer(
                 g_current_access_violation.stack_values[index]);
         }
+        diagnostic.unwind_stop = g_current_access_violation.unwind_stop;
+        diagnostic.unwind_frame_count = std::min(
+            g_current_access_violation.unwind_frame_count,
+            diagnostic.unwind_frames.size());
+        for (std::size_t index = 0; index < diagnostic.unwind_frame_count;
+             ++index) {
+          diagnostic.unwind_frames[index].site =
+              classify_pointer(g_current_access_violation.unwind_rips[index]);
+          diagnostic.unwind_frames[index].from_return_slot =
+              g_current_access_violation.unwind_from_return_slot[index];
+        }
       }
     }
   }
@@ -524,8 +662,10 @@ void record_selector_invocation(const char* selector,
     // extra tokens on this one line.
     const auto safe = [](const std::string& value) {
       std::string result = value;
+      // ',' joins the `unwind=` frames, so a module basename holding one would
+      // forge frames the same way a space or '=' forges tokens on this line.
       for (char& ch : result)
-        if (ch == ' ' || ch == '=') ch = '_';
+        if (ch == ' ' || ch == '=' || ch == ',') ch = '_';
       return result;
     };
     std::ostringstream trace;
@@ -548,6 +688,34 @@ void record_selector_invocation(const char* selector,
           trace << "+0x" << std::hex
                 << diagnostic.fault_address.relative_offset << std::dec;
       }
+    }
+    if (diagnostic.has_register_snapshot) {
+      // The unwound frames, innermost first, are the actual call chain (see
+      // capture_unwind_frames). They subsume the `stackN=` heuristic below,
+      // which is kept because it is the only thing that survives when the
+      // unwind stops early on a corrupted stack.
+      if (diagnostic.unwind_frame_count > 0) trace << " unwind=";
+      for (std::size_t index = 0; index < diagnostic.unwind_frame_count;
+           ++index) {
+        const UnwindFrameDiagnostic& frame = diagnostic.unwind_frames[index];
+        if (index > 0) trace << ',';
+        // '?' marks the one frame that is not table-derived: the return
+        // address read off RSP because the fault site had no unwind entry. It
+        // names a caller only if the fault really was a call.
+        if (frame.from_return_slot) trace << '?';
+        trace << frame.site.classification;
+        if (!frame.site.module.empty()) {
+          trace << ':' << safe(frame.site.module);
+          if (frame.site.has_relative_offset)
+            trace << "+0x" << std::hex << frame.site.relative_offset
+                  << std::dec;
+        }
+      }
+      // Why the walk ended. Without it a capped list - the ordinary outcome
+      // for a fault deep inside a plug-in - reads like a complete chain, which
+      // is the same misreading the unwind exists to remove.
+      trace << " unwind_stop="
+            << selector_unwind_stop_name(diagnostic.unwind_stop);
     }
     if (diagnostic.has_register_snapshot) {
       // The classified stack values are the closest thing to a caller for a
@@ -742,7 +910,138 @@ void record_extended_allocation_boundary(
   }
 }
 
+#if defined(_M_X64)
+// Fault injection for the unwind self-test: an indirect call through a slot
+// that is null, which is the shape the ShapeBlur fault of issue #1264 takes
+// (`access=execute fault=null`, no unwind entry for the fault site).
+//
+// This depends on the call reaching address 0 as an ordinary indirect call.
+// Under Control Flow Guard the same call becomes a __fastfail that no SEH frame
+// can contain, and this route would take all three workers down instead of
+// exercising the capture, so the dependency is checked rather than commented.
+#if defined(_CONTROL_FLOW_GUARD)
+#error \
+    "the selector fault unwind self-test injects a call through a null slot, which /guard:cf turns into an uncontainable __fastfail; give the probe a CFG-safe fault shape before enabling it"
+#endif
+volatile uintptr_t g_selector_fault_unwind_target{};
+volatile bool g_selector_fault_unwind_returned{};
+
+// Identity of the function a captured frame lies in, as its unwind-table
+// entry's start address. Comparing that against the entry for a known function
+// says "this frame is inside that function", which the module basename alone
+// cannot: every function in this self-test lives in the same module.
+uint64_t unwind_function_identity(uintptr_t address) noexcept {
+  if (address == 0) return 0;
+  DWORD64 image_base = 0;
+  PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(
+      static_cast<DWORD64>(address), &image_base, nullptr);
+  if (!entry) return 0;
+  return image_base + entry->BeginAddress;
+}
+
+// Identity of the *calling* function, taken from a program counter inside it.
+// Taking `&function` instead would resolve to an incremental-link thunk in a
+// non-Release link, which has no unwind entry, and the comparison would fail as
+// if the walk were wrong rather than as if the reference were.
+__declspec(noinline) uint64_t calling_function_identity() noexcept {
+  return unwind_function_identity(
+      reinterpret_cast<uintptr_t>(_ReturnAddress()));
+}
+
+uint64_t g_selector_fault_unwind_call_site_identity{};
+uint64_t g_selector_fault_unwind_probe_identity{};
+
+// noinline plus a store after the call so the compiler emits a real CALL that
+// this function must survive to complete: a tail `jmp` or an inline would put
+// a different function in frame 1 and the identity check would fail, which is
+// the point - the self-test has to notice that, not paper over it.
+__declspec(noinline) void selector_fault_unwind_call_site() noexcept {
+  g_selector_fault_unwind_call_site_identity = calling_function_identity();
+  const auto target =
+      reinterpret_cast<void (*)()>(
+          static_cast<uintptr_t>(g_selector_fault_unwind_target));
+  target();
+  g_selector_fault_unwind_returned = true;
+}
+
+// Raises the fault behind the same capture the selector dispatch installs.
+// Kept in its own function because MSVC allows neither `__try` in a function
+// that needs C++ object unwinding nor `try` and `__try` in the same function,
+// so the comparisons have to live next door.
+__declspec(noinline) bool raise_selector_fault_unwind_probe() noexcept {
+  volatile bool faulted = false;
+  g_selector_fault_unwind_probe_identity = calling_function_identity();
+  __try {
+    selector_fault_unwind_call_site();
+  } __except (capture_access_violation_context(GetExceptionInformation()),
+              EXCEPTION_EXECUTE_HANDLER) {
+    faulted = true;
+  }
+  return faulted;
+}
+
+// Checked after the guarded fault, outside the SEH frame, so the comparisons
+// may use objects with destructors.
+SelectorFaultUnwindProbe selector_fault_unwind_capture_result() {
+  SelectorFaultUnwindProbe probe;
+  if (!g_current_access_violation.access_violation) return probe;
+  probe.frame_count = g_current_access_violation.unwind_frame_count;
+  probe.fault_site_is_null = probe.frame_count >= 1 &&
+      g_current_access_violation.unwind_rips[0] == 0;
+  probe.reference_identities_resolved =
+      g_selector_fault_unwind_call_site_identity != 0 &&
+      g_selector_fault_unwind_probe_identity != 0;
+  if (probe.reference_identities_resolved && probe.frame_count >= 2) {
+    probe.call_site_frame_identified =
+        g_current_access_violation.unwind_from_return_slot[1] &&
+        unwind_function_identity(g_current_access_violation.unwind_rips[1]) ==
+            g_selector_fault_unwind_call_site_identity;
+  }
+  if (probe.reference_identities_resolved && probe.frame_count >= 3) {
+    probe.caller_frame_identified =
+        !g_current_access_violation.unwind_from_return_slot[2] &&
+        unwind_function_identity(g_current_access_violation.unwind_rips[2]) ==
+            g_selector_fault_unwind_probe_identity;
+  }
+  probe.passed =
+      // 3 == execute (access_type_name).
+      g_current_access_violation.access_type == 3 &&
+      probe.fault_site_is_null && probe.reference_identities_resolved &&
+      probe.call_site_frame_identified && probe.caller_frame_identified;
+  return probe;
+}
+#endif
+
 }  // namespace
+
+const char* selector_unwind_stop_name(SelectorUnwindStop stop) noexcept {
+  switch (stop) {
+    case SelectorUnwindStop::end_of_chain: return "end_of_chain";
+    case SelectorUnwindStop::chain_lost: return "chain_lost";
+    case SelectorUnwindStop::frame_cap: return "frame_cap";
+    case SelectorUnwindStop::no_unwind_entry: return "no_unwind_entry";
+    case SelectorUnwindStop::return_slot_unreadable:
+      return "return_slot_unreadable";
+    case SelectorUnwindStop::walk_faulted: return "walk_faulted";
+    case SelectorUnwindStop::low_stack: return "low_stack";
+    case SelectorUnwindStop::not_attempted: break;
+  }
+  return "not_attempted";
+}
+
+SelectorFaultUnwindProbe verify_selector_fault_unwind() noexcept {
+  SelectorFaultUnwindProbe probe;
+#if defined(_M_X64)
+  if (!raise_selector_fault_unwind_probe()) return probe;
+  try {
+    probe = selector_fault_unwind_capture_result();
+  } catch (...) {
+    probe = SelectorFaultUnwindProbe{};
+  }
+  g_current_access_violation = {};
+#endif
+  return probe;
+}
 
 void configure_selector_dispatch_audit(AuditCapture capture,
                                        AuditPassed passed) noexcept {
@@ -1058,6 +1357,29 @@ std::string selector_invocations_report_json() {
           pointer_classification_json(output, stack_value.value);
         else
           output << "null";
+        output << '}';
+      }
+      output << ']';
+    }
+    output << ",\"unwind_stop\":";
+    if (!diagnostic.has_register_snapshot)
+      output << "null";
+    else
+      json_string(output, selector_unwind_stop_name(diagnostic.unwind_stop), 32);
+    output << ",\"unwind_frames\":";
+    if (!diagnostic.has_register_snapshot) {
+      output << "null";
+    } else {
+      output << '[';
+      for (std::size_t frame_index = 0;
+           frame_index < diagnostic.unwind_frame_count; ++frame_index) {
+        if (frame_index) output << ',';
+        const UnwindFrameDiagnostic& frame =
+            diagnostic.unwind_frames[frame_index];
+        output << "{\"from_return_slot\":"
+               << (frame.from_return_slot ? "true" : "false")
+               << ",\"site\":";
+        pointer_classification_json(output, frame.site);
         output << '}';
       }
       output << ']';

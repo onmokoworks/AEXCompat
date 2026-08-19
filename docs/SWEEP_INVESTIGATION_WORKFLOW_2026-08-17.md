@@ -72,6 +72,39 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   多 frame session では早い frame の結果になりうる。containment により経路の fault は worker を落とさず PF path への
   fall-through になるので、`rendered` でもこの key を見ないと「GPU 経路を試して
   降りた」ことに気付けない。
+- `stage:selector_seh` の `unwind=` は fault した `CONTEXT` を x64 unwind data で
+  辿った call chain (innermost first、frame 0 は fault site 自身。最大 12 frame、
+  #1312)。同じ行の `stackN=` は RSP 先頭の数 qword を module 解決しただけの
+  **ヒューリスティック**で、既に return した関数の残骸が呼び出し元と同じ形で出る
+  ことがある (実例: ShapeBlur の `stack4=module:BEE.dll+0xc8d146` は呼び出し元では
+  ない)。両方あるときは `unwind=` を読む。
+  - `?` が付いた frame だけは unwind table 由来ではない: fault site 自身に unwind
+    entry が無いとき (null slot への call、あるいは .pdata を持たない leaf) に
+    RSP から読んだ戻り番地で、fault が本当に call だった場合にのみ呼び出し元を
+    指す。付くのは frame 1 だけ。
+  - **`unwind_stop=` を必ず見る**。一番外側に出ている frame が stack の頂上だと
+    言えるのは `end_of_chain` のときだけ:
+    - `end_of_chain`: unwind が null の instruction pointer に行き着いた =
+      thread の frame chain の端。
+    - `frame_cap`: 12 frame の上限で切れた。**plug-in の奥で fault したときは
+      これが普通**で、外側はまだ続いている。
+    - `chain_lost`: unwind が stack base の方向に進まなくなった (壊れた stack、
+      壊れた unwind data)。外側の frame は頂上ではない。
+    - `no_unwind_entry`: fault site 以外の frame に unwind entry が無く、
+      そこで chain が切れた。
+    - `return_slot_unreadable`: fault site に unwind entry が無く、push された
+      戻り番地も読めなかった (frame 0 だけ)。
+    - `walk_faulted`: 走査中に stack が読めなくなった。それまでの frame は有効。
+    - `low_stack`: stack limit に近すぎて走査していない。
+  - worker は `AEXCOMPAT_EXTENDED_DIAG` なしでもこの行を出すが、sweep の record で
+    読むには `stderr_tail` が要る = `AEXCOMPAT_EXTENDED_DIAG=1` が要る。
+  - l2 worker の report には
+    `worker_report.selector_invocations.records[].unwind_frames` /
+    `.unwind_stop` として入る。ただし broker の `propagate_selector_invocations`
+    は key allowlist で record を組み直すので、`inspect` や render session の
+    diagnostics には伝わらない (worker report をそのまま埋め込む `broker l2`
+    route だけが持ち、そこは登録済み observation profile 専用)。任意の AEX の
+    fault を読むときは stderr の行が唯一の経路 (#1314)。
 - `AEXCOMPAT_EXTENDED_DIAG=1`: worker の host-callback trace を stderr に出し、
   各 record の `stderr_tail` (末尾 64 KB) に worker の生 stderr が入る。fault site
   (`stage:selector_seh`) や拒否痕跡 (`stage:callback_denied`) はここで読める。
