@@ -342,7 +342,16 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "SetThreadStackGuarantee") => LegacyWin64Import::SetThreadStackGuarantee,
         ("kernel32.dll", "SwitchToThread") => LegacyWin64Import::SwitchToThread,
         ("kernel32.dll", "ResumeThread") => LegacyWin64Import::ResumeThread,
-        (_, "WaitForSingleObject" | "WaitForSingleObjectEx" | "CloseHandle" | "GetCurrentThread" | "SetThreadStackGuarantee" | "SwitchToThread" | "ResumeThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (
+            _,
+            "WaitForSingleObject"
+            | "WaitForSingleObjectEx"
+            | "CloseHandle"
+            | "GetCurrentThread"
+            | "SetThreadStackGuarantee"
+            | "SwitchToThread"
+            | "ResumeThread",
+        ) => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCommandLineA") => LegacyWin64Import::GetCommandLineA,
         (_, "GetCommandLineA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCommandLineW") => LegacyWin64Import::GetCommandLineW,
@@ -1108,7 +1117,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::CreateThread => {
-                uc("write CreateThread callback tail jump", unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]))?;
+                uc(
+                    "write CreateThread callback tail jump",
+                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                )?;
                 uc(
                     "install bounded CreateThread import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -1120,7 +1132,10 @@ fn install_win64_import(
             | LegacyWin64Import::WaitForSingleObjectEx
             | LegacyWin64Import::CloseHandle
             | LegacyWin64Import::SetThreadStackGuarantee => {
-                uc("write Windows thread lifecycle return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write Windows thread lifecycle return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install Windows thread lifecycle import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
@@ -1129,13 +1144,22 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetCurrentThread => {
-                uc("install current-thread pseudo handle", unicorn.mem_write(stub, &deterministic_u64_stub(u64::MAX - 1)))?;
+                uc(
+                    "install current-thread pseudo handle",
+                    unicorn.mem_write(stub, &deterministic_u64_stub(u64::MAX - 1)),
+                )?;
             }
             LegacyWin64Import::SwitchToThread => {
-                uc("install deterministic SwitchToThread", unicorn.mem_write(stub, &deterministic_i32_stub(0)))?;
+                uc(
+                    "install deterministic SwitchToThread",
+                    unicorn.mem_write(stub, &deterministic_i32_stub(0)),
+                )?;
             }
             LegacyWin64Import::ResumeThread => {
-                uc("write ResumeThread callback tail jump", unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]))?;
+                uc(
+                    "write ResumeThread callback tail jump",
+                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                )?;
                 uc(
                     "install bounded ResumeThread import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -1189,7 +1213,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetCurrentThreadId => {
-                uc("write GetCurrentThreadId return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write GetCurrentThreadId return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install deterministic guest thread identity",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -4842,10 +4869,7 @@ fn fail_windows_thread_callback(unicorn: &mut Unicorn<'_, GuestState>, error: St
     let _ = unicorn.emu_stop();
 }
 
-fn restore_windows_thread_context(
-    state: &mut GuestState,
-    pending: &PendingWindowsThread,
-) {
+fn restore_windows_thread_context(state: &mut GuestState, pending: &PendingWindowsThread) {
     for (index, value) in &pending.caller_tls_values {
         if let Some(slot) = state.windows_tls_slots.get_mut(index) {
             *slot = *value;
@@ -4886,12 +4910,10 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
             ));
         }
         if pending.exit_code.is_none() {
-            pending.exit_code = Some(
-                unicorn
-                    .reg_read(RegisterX86::RAX)
-                    .map_err(|error| format!("CreateThread callback exit code read failed: {error}"))?
-                    as u32,
-            );
+            pending.exit_code =
+                Some(unicorn.reg_read(RegisterX86::RAX).map_err(|error| {
+                    format!("CreateThread callback exit code read failed: {error}")
+                })? as u32);
         }
         const MAX_FLS_DESTRUCTOR_PASSES: u32 = 4;
         loop {
@@ -4900,9 +4922,7 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
                 .windows_fls_slots
                 .iter()
                 .find(|(index, slot)| {
-                    slot.callback != 0
-                        && slot.value != 0
-                        && !pending.fls_processed.contains(index)
+                    slot.callback != 0 && slot.value != 0 && !pending.fls_processed.contains(index)
                 })
                 .map(|(index, slot)| (*index, slot.callback, slot.value));
             if let Some((index, callback, value)) = candidate {
@@ -4916,7 +4936,9 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
                 let callback_rsp = pending.callback_return_rsp - 8;
                 unicorn
                     .mem_write(callback_rsp, &HOST_CREATE_THREAD_CONTINUE.to_le_bytes())
-                    .map_err(|error| format!("FLS destructor continuation write failed: {error}"))?;
+                    .map_err(|error| {
+                        format!("FLS destructor continuation write failed: {error}")
+                    })?;
                 unicorn
                     .reg_write(RegisterX86::RSP, callback_rsp)
                     .map_err(|error| format!("FLS destructor stack write failed: {error}"))?;
@@ -4972,7 +4994,10 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
         let remove_closed = !thread.handle_open;
         restore_windows_thread_context(unicorn.get_data_mut(), &pending);
         if remove_closed {
-            unicorn.get_data_mut().windows_threads.remove(&pending.handle);
+            unicorn
+                .get_data_mut()
+                .windows_threads
+                .remove(&pending.handle);
         }
         unicorn.get_data_mut().pending_windows_thread = None;
         unicorn
@@ -5102,6 +5127,49 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
                 "CreateThread start routine {start:#x} is outside the executable image"
             ));
         }
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("CreateThread stack read failed: {error}"))?;
+        let return_address = read_vcomp_u64(unicorn, rsp)
+            .map_err(|error| format!("CreateThread return address read failed: {error}"))?;
+        if flags & CREATE_SUSPENDED == 0
+            && return_address != RETURN_ADDRESS
+            && !image_executable_address(unicorn.get_data(), return_address)
+        {
+            return Err(format!(
+                "CreateThread caller return {return_address:#x} is outside the executable image"
+            ));
+        }
+        if thread_id_output != 0 {
+            let output_end = thread_id_output
+                .checked_add(3)
+                .ok_or_else(|| "CreateThread thread-id output range overflows".to_string())?;
+            let regions = unicorn
+                .mem_regions()
+                .map_err(|error| format!("CreateThread memory-map query failed: {error}"))?;
+            let mut cursor = thread_id_output;
+            while cursor <= output_end {
+                let region = regions
+                    .iter()
+                    .find(|region| {
+                        region.begin <= cursor
+                            && cursor <= region.end
+                            && region.perms & Prot::WRITE.0 as u32 != 0
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "CreateThread thread-id output {thread_id_output:#x}..={output_end:#x} is not fully writable"
+                        )
+                    })?;
+                if region.end >= output_end {
+                    break;
+                }
+                cursor = region
+                    .end
+                    .checked_add(1)
+                    .ok_or_else(|| "CreateThread writable region overflows".to_string())?;
+            }
+        }
         if unicorn.get_data().windows_threads.len() >= MAX_WINDOWS_THREADS {
             unicorn.get_data_mut().windows_last_error = ERROR_NOT_ENOUGH_MEMORY;
             unicorn
@@ -5113,14 +5181,7 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
         let handle = WINDOWS_THREAD_HANDLE_BASE
             .checked_add(u64::from(id) * 0x10)
             .ok_or_else(|| "CreateThread handle overflow".to_string())?;
-        if thread_id_output != 0 {
-            unicorn
-                .mem_write(thread_id_output, &id.to_le_bytes())
-                .map_err(|error| {
-                    format!("CreateThread thread-id output {thread_id_output:#x} is not writable: {error}")
-                })?;
-        }
-        unicorn.get_data_mut().next_windows_thread_id = id
+        let next_id = id
             .checked_add(1)
             .ok_or_else(|| "CreateThread id space exhausted".to_string())?;
         let suspended = flags & CREATE_SUSPENDED != 0;
@@ -5154,6 +5215,14 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
                 Prot::READ | Prot::WRITE,
             )
             .map_err(|error| format!("CreateThread stack map failed: {error}"))?;
+        if thread_id_output != 0 {
+            if let Err(error) = unicorn.mem_write(thread_id_output, &id.to_le_bytes()) {
+                let _ = unicorn.mem_unmap(thread_stack_base, mapped_stack_size);
+                return Err(format!(
+                    "CreateThread thread-id output {thread_id_output:#x} is not writable: {error}"
+                ));
+            }
+        }
         unicorn.get_data_mut().windows_threads.insert(
             handle,
             WindowsThread {
@@ -5169,12 +5238,8 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
                 stack_mapped: true,
             },
         );
+        unicorn.get_data_mut().next_windows_thread_id = next_id;
         if suspended {
-            let rsp = unicorn
-                .reg_read(RegisterX86::RSP)
-                .map_err(|error| format!("CreateThread stack read failed: {error}"))?;
-            let return_address = read_vcomp_u64(unicorn, rsp)
-                .map_err(|error| format!("CreateThread return address read failed: {error}"))?;
             unicorn
                 .reg_write(RegisterX86::RAX, handle)
                 .map_err(|error| format!("CreateThread suspended return failed: {error}"))?;
@@ -5185,18 +5250,6 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
                 .reg_write(RegisterX86::R11, return_address)
                 .map_err(|error| format!("CreateThread suspended return target failed: {error}"))?;
             return Ok(());
-        }
-        let rsp = unicorn
-            .reg_read(RegisterX86::RSP)
-            .map_err(|error| format!("CreateThread stack read failed: {error}"))?;
-        let return_address = read_vcomp_u64(unicorn, rsp)
-            .map_err(|error| format!("CreateThread return address read failed: {error}"))?;
-        if return_address != RETURN_ADDRESS
-            && !image_executable_address(unicorn.get_data(), return_address)
-        {
-            return Err(format!(
-                "CreateThread caller return {return_address:#x} is outside the executable image"
-            ));
         }
         dispatch_windows_thread(unicorn, handle, return_address, rsp + 8, handle)
     })();
@@ -5218,26 +5271,44 @@ fn emulate_resume_thread(unicorn: &mut Unicorn<'_, GuestState>) {
         {
             Some(thread) if thread.suspended && !thread.completed => {}
             Some(_) => {
-                unicorn
-                    .reg_write(RegisterX86::RAX, 0)
-                    .map_err(|error| format!("ResumeThread already-running return failed: {error}"))?;
-                let rsp = unicorn.reg_read(RegisterX86::RSP).map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
+                unicorn.reg_write(RegisterX86::RAX, 0).map_err(|error| {
+                    format!("ResumeThread already-running return failed: {error}")
+                })?;
+                let rsp = unicorn
+                    .reg_read(RegisterX86::RSP)
+                    .map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
                 let return_address = read_vcomp_u64(unicorn, rsp)?;
-                unicorn.reg_write(RegisterX86::RSP, rsp + 8).map_err(|error| format!("ResumeThread stack advance failed: {error}"))?;
-                unicorn.reg_write(RegisterX86::R11, return_address).map_err(|error| format!("ResumeThread return target failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::RSP, rsp + 8)
+                    .map_err(|error| format!("ResumeThread stack advance failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::R11, return_address)
+                    .map_err(|error| format!("ResumeThread return target failed: {error}"))?;
                 return Ok(());
             }
             None => {
                 unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
-                unicorn.reg_write(RegisterX86::RAX, THREAD_ERROR).map_err(|error| format!("ResumeThread invalid-handle return failed: {error}"))?;
-                let rsp = unicorn.reg_read(RegisterX86::RSP).map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::RAX, THREAD_ERROR)
+                    .map_err(|error| {
+                        format!("ResumeThread invalid-handle return failed: {error}")
+                    })?;
+                let rsp = unicorn
+                    .reg_read(RegisterX86::RSP)
+                    .map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
                 let return_address = read_vcomp_u64(unicorn, rsp)?;
-                unicorn.reg_write(RegisterX86::RSP, rsp + 8).map_err(|error| format!("ResumeThread stack advance failed: {error}"))?;
-                unicorn.reg_write(RegisterX86::R11, return_address).map_err(|error| format!("ResumeThread return target failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::RSP, rsp + 8)
+                    .map_err(|error| format!("ResumeThread stack advance failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::R11, return_address)
+                    .map_err(|error| format!("ResumeThread return target failed: {error}"))?;
                 return Ok(());
             }
         }
-        let rsp = unicorn.reg_read(RegisterX86::RSP).map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
         let return_address = read_vcomp_u64(unicorn, rsp)?;
         dispatch_windows_thread(unicorn, handle, return_address, rsp + 8, 1)
     })();
