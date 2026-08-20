@@ -289,20 +289,30 @@ scheduleでWindows runner上を走り、SDKを取得できるかで検証範囲�
 
 - 全runで`cargo build --workspace --locked`、Cargo workspace/bridgeのtest、
   minihost workerのNinja build、`uv run python -m pytest -q`を行う。
-- fork PRなどprivate releaseへアクセスできない実行ではSDK依存stepをskipし、
+- fork PRなどSDK配布元へアクセスできない実行ではSDK依存stepをskipし、
   上記のsource-only範囲を検証する。
-- 同一repositoryのPR、main push、scheduleではprivate release `ci-sdk-ae25.2`から
-  hash-pinnedな`AfterEffectsSDK-ae25.2-win.zip`を取得する。取得成功時だけ
-  probe AEXとSDK fixtureを追加buildし、pytestへ`--run-sdk-tests`と
-  `--run-built-artifact-tests`を追加する。SDK/成果物不足によるskipが残れば
-  workflowをfailさせ、silent successを防ぐ。
-- SDK世代を更新するときはrelease assetとworkflow内の`SDK_RELEASE_TAG`、
-  `SDK_ASSET`、`SDK_SHA256`を同時に更新する。
+- 同一repositoryのPR、main push、scheduleでは非公開のR2バケット
+  `aexcompat-ci` からhash-pinnedな `sdk/AfterEffectsSDK-ae25.2-win.zip` を
+  取得する (#1445)。取得成功時だけprobe AEXとSDK fixtureを追加buildし、
+  pytestへ`--run-sdk-tests`と`--run-built-artifact-tests`を追加する。
+  SDK/成果物不足によるskipが残ればworkflowをfailさせ、silent successを防ぐ。
+- 取得は `tools/fetch-r2-object.ps1` が行う。バケットは非公開のままで、
+  read-onlyのR2 APIトークンで署名 (AWS SigV4) したGetObjectを投げる。
+  資格情報はrepository secretsの `R2_SDK_ENDPOINT` /
+  `R2_SDK_ACCESS_KEY_ID` / `R2_SDK_SECRET_ACCESS_KEY` から渡す。fork PRは
+  secretsを受け取れないので、以前のprivate release時代と同じアクセス境界に
+  なる。hashが `SDK_SHA256` と一致しない限り出力ファイルは作られない。
+- SDK世代を更新するときは、新しいzipをバケットへ置いてからworkflow内の
+  `SDK_OBJECT_KEY`、`SDK_ASSET`、`SDK_SHA256` を同時に更新する。書き込みは
+  CIのread-onlyトークンではできないので、write権限のあるトークンを持った手元
+  から行う (例: rcloneのR2 remoteで
+  `rclone copyto <zip> r2:aexcompat-ci/sdk/<name>.zip`)。
 
 local artifact テスト (`--run-local-artifact-tests`、machine-bound evidence
 照合)、prebuilt テスト、AE 実機 oracle、GPU runtime 検証は CI の対象外で、
-従来どおりローカル gate で実行する。SDK asset は private repo の collaborator 限定 asset であり、SDK の
-公開再配布ではない (リポジトリへ SDK を複製しない方針は維持)。
+従来どおりローカル gate で実行する。SDK zip を置いたバケットは非公開で、資格情報を
+持つ経路からしか読めない。SDK の公開再配布ではない (リポジトリへ SDK を複製しない
+方針、およびバケットをpublic accessにしない方針は維持)。
 
 Python は CI・ローカルとも `.python-version` (3.12) に従い uv が解決する
 (OpenEXR の win_amd64 wheel が 3.14 に無く、ソースビルドで約 2.5 分かかる
@@ -401,14 +411,15 @@ Per-component prerequisites on Windows x64:
   override parameter, so that fixture needs VS 2022 Build Tools with v143 at
   that default location.
 - **CI**: one conditional Windows workflow, `windows-clean-clone.yml`, runs
-  for main pushes, pull requests, and schedules. Fork PRs without access to
-  the private SDK release still build/test the Cargo workspaces and bridges,
-  build the minihost workers, and run source-only pytest. Runs with
-  private-release access additionally fetch the hash-pinned AE 25.2 SDK,
-  build the probe AEX and SDK fixtures, and add `--run-sdk-tests` and
-  `--run-built-artifact-tests` to pytest; missing-SDK or missing-artifact
-  skips then fail the workflow. Local-artifact (machine-bound evidence),
-  prebuilt, AE oracle, and GPU gates stay local-only.
+  for main pushes, pull requests, and schedules. Fork PRs, which receive no
+  repository secrets and therefore cannot reach the SDK, still build/test the
+  Cargo workspaces and bridges, build the minihost workers, and run
+  source-only pytest. Runs that do get the secrets additionally fetch the
+  hash-pinned AE 25.2 SDK from the private R2 bucket via
+  `tools/fetch-r2-object.ps1`, build the probe AEX and SDK fixtures, and add
+  `--run-sdk-tests` and `--run-built-artifact-tests` to pytest; missing-SDK or
+  missing-artifact skips then fail the workflow. Local-artifact (machine-bound
+  evidence), prebuilt, AE oracle, and GPU gates stay local-only.
 - **Optional**: a matching GPU runtime for GPU render checks, and After
   Effects 25.2 itself for oracle capture only. Building the GPU SDK fixtures
   (`tools/build-sdk-invert-*.ps1`) additionally needs build-time inputs

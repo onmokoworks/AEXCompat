@@ -30,7 +30,10 @@ jobs:
       # 内容ハッシュで吸収する (#664)。
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
-      SDK_RELEASE_TAG: ci-sdk-ae25.2
+      # SDK zip は private な R2 バケットから取る (#1445)。公開バケットにしない
+      # 理由は tools/fetch-r2-object.ps1 の冒頭にある。
+      SDK_BUCKET: aexcompat-ci
+      SDK_OBJECT_KEY: sdk/AfterEffectsSDK-ae25.2-win.zip
       SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
       SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
     steps:
@@ -87,20 +90,23 @@ jobs:
       - name: Restore source timestamps from git
         run: uv run python tools/restore-mtime.py
 
-      # SDK asset は collaborator 限定なので、public repository と fork PR は
-      # ここから下の SDK 依存ステップに到達してはならない。job ごと落とすのでは
-      # なく個々のステップを条件付けし、source-only の検証は fork でも走らせる。
+      # SDK zip を置いた R2 バケットは非公開で、資格情報は secrets にしかない。
+      # fork PR は secrets を受け取れないので、public repository と fork PR は
+      # 今までどおりここから下の SDK 依存ステップに到達してはならない。job ごと
+      # 落とすのではなく個々のステップを条件付けし、source-only の検証は fork でも
+      # 走らせる。
       - name: Fetch After Effects SDK
         id: sdk
         if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         shell: pwsh
         env:
-          GH_TOKEN: ${{ github.token }}
+          R2_S3_ENDPOINT: ${{ secrets.R2_SDK_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_SDK_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SDK_SECRET_ACCESS_KEY }}
         run: |
           $zip = Join-Path $env:RUNNER_TEMP $env:SDK_ASSET
-          gh release download $env:SDK_RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern $env:SDK_ASSET --output $zip
-          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash
-          if ($hash -ne $env:SDK_SHA256) { throw "SDK asset hash mismatch: expected $env:SDK_SHA256, got $hash" }
+          # hash 照合はスクリプト側で行い、一致しない限り $zip は作られない。
+          & .\tools\fetch-r2-object.ps1 -Bucket $env:SDK_BUCKET -Key $env:SDK_OBJECT_KEY -OutFile $zip -ExpectedSha256 $env:SDK_SHA256
           $dest = Join-Path $env:RUNNER_TEMP 'aesdk'
           Expand-Archive -Path $zip -DestinationPath $dest -Force
           $root = Join-Path $dest 'AfterEffectsSDK'
