@@ -7246,6 +7246,52 @@ fn issue1404_yielding_child_parks_then_parent_resumes_and_runs_child_to_completi
 }
 
 #[test]
+fn issue1404_repeated_yields_share_one_total_timeout() {
+    const SWITCH: u64 = STUB_BASE + 0x2b8;
+    const SLOW: u64 = STUB_BASE + 0x2c8;
+    const TIMEOUT_US: u64 = 12_000;
+    let mut code = vec![0x48, 0x83, 0xec, 0x28];
+    for _ in 0..3 {
+        push_mov_imm64(&mut code, [0x48, 0xb8], SLOW);
+        code.extend_from_slice(&[0xff, 0xd0]);
+        push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    }
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    install_win64_import(
+        &mut engine.unicorn,
+        SWITCH,
+        "kernel32.dll",
+        "SwitchToThread",
+    )
+    .unwrap();
+    engine.unicorn.mem_write(SLOW, &[0xc3]).unwrap();
+    engine
+        .unicorn
+        .add_code_hook(SLOW, SLOW, |_, _, _| {
+            std::thread::sleep(Duration::from_millis(8));
+        })
+        .unwrap();
+
+    let started = Instant::now();
+    let error = engine
+        .call_win64_with_timeout(TEST_CODE, &[0; 6], TIMEOUT_US)
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    let error = error.to_string();
+    assert!(
+        error.contains("total timeout") || error.contains("before the guest returned"),
+        "unexpected error after {elapsed:?}: {error}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "repeated yields exceeded the bounded total timeout: {elapsed:?}"
+    );
+}
+
+#[test]
 fn issue1404_two_children_queue_fifo_and_complete_once() {
     const CREATE: u64 = STUB_BASE + 0x2c0;
     const SWITCH: u64 = STUB_BASE + 0x2d0;

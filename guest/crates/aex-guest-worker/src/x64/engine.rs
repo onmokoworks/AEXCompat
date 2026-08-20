@@ -1596,12 +1596,23 @@ impl GuestEngine<'static> {
             )?;
         }
         const MAX_SCHEDULER_SWITCHES: usize = 256;
+        let timeout = Duration::from_micros(timeout_microseconds);
+        let started = Instant::now();
         let mut begin = address;
         for scheduler_switch in 0..=MAX_SCHEDULER_SWITCHES {
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(self.execution_crash(format!(
+                    "execution exceeded the total timeout of {timeout_microseconds} microseconds"
+                )));
+            }
+            let remaining_timeout_microseconds = u64::try_from((timeout - elapsed).as_micros())
+                .unwrap_or(u64::MAX)
+                .max(1);
             if let Err(error) = self.unicorn.emu_start(
                 begin,
                 RETURN_ADDRESS,
-                timeout_microseconds,
+                remaining_timeout_microseconds,
                 MAX_INSTRUCTIONS,
             ) {
                 return Err(self.execution_crash(format!("emulation error: {error}")));
