@@ -90,6 +90,7 @@ enum LegacyWin64Import {
     WideCharToMultiByte,
     MultiByteToWideChar,
     GetStringTypeW,
+    LCMapStringW,
     GetLastError,
     SetLastError,
     SetThreadErrorMode,
@@ -344,6 +345,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "MultiByteToWideChar") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetStringTypeW") => LegacyWin64Import::GetStringTypeW,
         (_, "GetStringTypeW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "LCMapStringW") => LegacyWin64Import::LCMapStringW,
+        (_, "LCMapStringW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
         ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
         ("kernel32.dll", "SetThreadErrorMode") => LegacyWin64Import::SetThreadErrorMode,
@@ -1204,6 +1207,18 @@ fn install_win64_import(
                     "install GetStringTypeW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_string_type_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::LCMapStringW => {
+                uc(
+                    "write LCMapStringW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install LCMapStringW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_lc_map_string_w(unicorn);
                     }),
                 )?;
             }
@@ -2268,6 +2283,325 @@ fn emulate_get_string_type_w(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    const LCMAP_LOWERCASE: u32 = 0x0000_0100;
+    const LCMAP_UPPERCASE: u32 = 0x0000_0200;
+    const LCMAP_SORTKEY: u32 = 0x0000_0400;
+    const LCMAP_LINGUISTIC_CASING: u32 = 0x0100_0000;
+    const NORM_IGNORECASE: u32 = 0x0000_0001;
+    const NORM_IGNOREKANATYPE: u32 = 0x0001_0000;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+    const ERROR_INVALID_FLAGS: u32 = 1004;
+
+    let result = (|| -> Result<(u64, Option<u32>), String> {
+        let locale = read_win64_import_argument(unicorn, 0)? as u32;
+        let flags = read_win64_import_argument(unicorn, 1)? as u32;
+        let source = read_win64_import_argument(unicorn, 2)?;
+        let source_length = read_win64_import_argument(unicorn, 3)? as u32 as i32;
+        let destination = read_win64_import_argument(unicorn, 4)?;
+        let destination_length = read_win64_import_argument(unicorn, 5)? as u32 as i32;
+
+        // Keep the locale contract intentionally small and deterministic. The
+        // pseudo-default LCIDs use the same invariant Unicode policy as 0x007f;
+        // 0x0411 is admitted for the worker's CP932/Japanese execution path.
+        if !matches!(locale, 0 | 0x0400 | 0x0800 | 0x007f | 0x0409 | 0x0411)
+            || source == 0
+            || source_length == 0
+            || destination_length < 0
+            || (destination_length != 0 && destination == 0)
+        {
+            return Ok((0, Some(ERROR_INVALID_PARAMETER)));
+        }
+
+        let case_flags = flags & (LCMAP_LOWERCASE | LCMAP_UPPERCASE);
+        let is_sort_key = flags & LCMAP_SORTKEY != 0;
+        let valid_flags = if is_sort_key {
+            LCMAP_SORTKEY | NORM_IGNORECASE | NORM_IGNOREKANATYPE
+        } else {
+            LCMAP_LOWERCASE | LCMAP_UPPERCASE | LCMAP_LINGUISTIC_CASING
+        };
+        if flags == 0
+            || flags & !valid_flags != 0
+            || (!is_sort_key && !matches!(case_flags, LCMAP_LOWERCASE | LCMAP_UPPERCASE))
+            || (is_sort_key && case_flags != 0)
+        {
+            return Ok((0, Some(ERROR_INVALID_FLAGS)));
+        }
+
+        let mut source_units = Vec::new();
+        if source_length < 0 {
+            for index in 0..=(MAX_CRT_STRING_BYTES / 2) {
+                let address = source
+                    .checked_add(index * 2)
+                    .ok_or_else(|| "LCMapStringW source address overflow".to_string())?;
+                let bytes = unicorn
+                    .mem_read_as_vec(address, 2)
+                    .map_err(|error| format!("LCMapStringW source read failed: {error}"))?;
+                let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+                source_units.push(unit);
+                if unit == 0 {
+                    break;
+                }
+                if index == MAX_CRT_STRING_BYTES / 2 {
+                    return Err("LCMapStringW source is unterminated".into());
+                }
+            }
+        } else {
+            let byte_length = u64::try_from(source_length)
+                .ok()
+                .and_then(|length| length.checked_mul(2))
+                .filter(|length| *length <= MAX_CRT_STRING_BYTES)
+                .ok_or_else(|| "LCMapStringW source is too large".to_string())?;
+            let bytes = unicorn
+                .mem_read_as_vec(source, byte_length as usize)
+                .map_err(|error| format!("LCMapStringW source read failed: {error}"))?;
+            source_units.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+            );
+        }
+
+        let mapping_source = if is_sort_key && source_length < 0 {
+            &source_units[..source_units.len().saturating_sub(1)]
+        } else {
+            &source_units
+        };
+        let output = if is_sort_key {
+            let mut key = make_lcmap_sort_key(locale, flags, mapping_source)?;
+            // LCMapStringW's LCMAP_SORTKEY result is an opaque byte sequence
+            // terminated by one NUL byte; cchDest and the return are byte counts.
+            key.push(0);
+            key
+        } else {
+            map_utf16_case_units(
+                mapping_source,
+                case_flags,
+                flags & LCMAP_LINGUISTIC_CASING != 0,
+                locale,
+            )
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+        };
+        let required = if is_sort_key {
+            output.len()
+        } else {
+            output.len() / 2
+        };
+        let required = u32::try_from(required)
+            .map_err(|_| "LCMapStringW output length exceeds INT".to_string())?;
+        if destination_length == 0 {
+            return Ok((u64::from(required), None));
+        }
+        if (destination_length as u32) < required {
+            return Ok((0, Some(ERROR_INSUFFICIENT_BUFFER)));
+        }
+
+        let source_bytes = source_units
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| "LCMapStringW source range overflows".to_string())?;
+        if !output.is_empty() {
+            let source_end = source
+                .checked_add(source_bytes as u64 - 1)
+                .ok_or_else(|| "LCMapStringW source range overflows".to_string())?;
+            let output_end = destination
+                .checked_add(output.len() as u64 - 1)
+                .ok_or_else(|| "LCMapStringW output range overflows".to_string())?;
+            let overlaps = source <= output_end && destination <= source_end;
+            let exact_in_place_case_map = !is_sort_key && source == destination;
+            if overlaps && !exact_in_place_case_map {
+                return Ok((0, Some(ERROR_INVALID_FLAGS)));
+            }
+            let regions = unicorn
+                .mem_regions()
+                .map_err(|error| format!("LCMapStringW memory-map query failed: {error}"))?;
+            let mut cursor = destination;
+            while cursor <= output_end {
+                let region = regions
+                    .iter()
+                    .find(|region| {
+                        region.begin <= cursor
+                            && cursor <= region.end
+                            && region.perms & Prot::WRITE.0 as u32 != 0
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "LCMapStringW output {destination:#x}..={output_end:#x} is not fully writable"
+                        )
+                    })?;
+                if region.end >= output_end {
+                    break;
+                }
+                cursor = region
+                    .end
+                    .checked_add(1)
+                    .ok_or_else(|| "LCMapStringW writable region overflows".to_string())?;
+            }
+        }
+        unicorn.mem_write(destination, &output).map_err(|error| {
+            format!("LCMapStringW output {destination:#x} is not writable: {error}")
+        })?;
+        Ok((u64::from(required), None))
+    })();
+
+    match result {
+        Ok((returned, error)) => {
+            if let Some(error) = error {
+                unicorn.get_data_mut().windows_last_error = error;
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn make_lcmap_sort_key(locale: u32, flags: u32, units: &[u16]) -> Result<Vec<u8>, String> {
+    use icu_collator::{
+        Collator,
+        options::{CollatorOptions, Strength},
+    };
+
+    const NORM_IGNORECASE: u32 = 0x0000_0001;
+    const NORM_IGNOREKANATYPE: u32 = 0x0001_0000;
+    let preferences = match locale {
+        0x0409 => icu_locale_core::locale!("en-US").into(),
+        0x0411 => icu_locale_core::locale!("ja-JP").into(),
+        _ => icu_locale_core::locale!("und").into(),
+    };
+    let mut options = CollatorOptions::default();
+    // Identical strength preserves case, kana type, and width by default.
+    // Ignore flags are implemented as isolated input transformations below so
+    // asking to ignore one distinction cannot erase the others.
+    options.strength = Some(Strength::Identical);
+    let collator = Collator::try_new(preferences, options)
+        .map_err(|error| format!("LCMapStringW could not load pinned collation data: {error}"))?;
+    let mut key = Vec::new();
+    let mut key_units = if flags & NORM_IGNORECASE != 0 {
+        fold_utf16_case_preserving_surrogates(units)
+    } else {
+        units.to_vec()
+    };
+    if flags & NORM_IGNOREKANATYPE != 0 {
+        key_units = ignore_fullwidth_katakana_type(&key_units);
+    }
+    collator
+        .write_sort_key_utf16_to(&key_units, &mut key)
+        .map_err(|error| format!("LCMapStringW could not construct sort key: {error:?}"))?;
+    // ICU compares every ill-formed UTF-16 unit as U+FFFD. At Identical
+    // strength WinNLS still needs distinct malformed code-unit sequences, so
+    // retain a deterministic tie-break suffix only when such units occur.
+    let has_malformed = char::decode_utf16(key_units.iter().copied()).any(|unit| unit.is_err());
+    if has_malformed {
+        key.push(0xff);
+        // Encode the full transformed unit sequence, not merely the malformed
+        // values. This retains their positions relative to valid U+FFFD units:
+        // [D800, FFFD] and [FFFD, D800] must not collapse to one key.
+        for unit in key_units {
+            key.extend([
+                ((unit >> 12) as u8) + 2,
+                (((unit >> 8) & 0xf) as u8) + 2,
+                (((unit >> 4) & 0xf) as u8) + 2,
+                ((unit & 0xf) as u8) + 2,
+            ]);
+        }
+    }
+    Ok(key)
+}
+
+fn fold_utf16_case_preserving_surrogates(units: &[u16]) -> Vec<u16> {
+    let mapper = icu_casemap::CaseMapper::new();
+    let mut output = Vec::with_capacity(units.len());
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => {
+                let scalar = character.to_string();
+                output.extend(mapper.fold_string(&scalar).encode_utf16());
+            }
+            Err(error) => output.push(error.unpaired_surrogate()),
+        }
+    }
+    output
+}
+
+fn ignore_fullwidth_katakana_type(units: &[u16]) -> Vec<u16> {
+    let mut output = Vec::with_capacity(units.len());
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => match u32::from(character) {
+                code @ 0x30a1..=0x30f6 => output.push((code - 0x60) as u16),
+                0x30f7..=0x30fa => {
+                    // Voiced WA/WI/WE/WO have no precomposed hiragana forms.
+                    output.push((0x308f + (u32::from(character) - 0x30f7)) as u16);
+                    output.push(0x3099);
+                }
+                0x30fd => output.push(0x309d),
+                0x30fe => output.push(0x309e),
+                _ => {
+                    let mut encoded = [0; 2];
+                    output.extend_from_slice(character.encode_utf16(&mut encoded));
+                }
+            },
+            Err(error) => output.push(error.unpaired_surrogate()),
+        }
+    }
+    output
+}
+
+fn map_utf16_case_units(
+    units: &[u16],
+    case_flag: u32,
+    linguistic_casing: bool,
+    locale: u32,
+) -> Vec<u16> {
+    use icu_casemap::CaseMapper;
+
+    const LCMAP_LOWERCASE: u32 = 0x0000_0100;
+    let mut output = Vec::with_capacity(units.len());
+    let mapper = CaseMapper::new();
+    let language = match locale {
+        0x0409 => icu_locale_core::langid!("en"),
+        0x0411 => icu_locale_core::langid!("ja"),
+        _ => icu_locale_core::langid!("und"),
+    };
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) if linguistic_casing => {
+                // WinNLS casing remains context-insensitive even when the
+                // linguistic table is selected. Map one scalar at a time so a
+                // Greek sigma never observes its neighbors, while retaining
+                // full per-scalar expansions such as sharp-s -> "SS".
+                let scalar = character.to_string();
+                let mapped = if case_flag == LCMAP_LOWERCASE {
+                    mapper.lowercase_to_string(&scalar, &language)
+                } else {
+                    mapper.uppercase_to_string(&scalar, &language)
+                };
+                output.extend(mapped.encode_utf16());
+            }
+            Ok(character) => {
+                let mapped = if case_flag == LCMAP_LOWERCASE {
+                    mapper.simple_lowercase(character)
+                } else {
+                    mapper.simple_uppercase(character)
+                };
+                let mut encoded = [0; 2];
+                output.extend_from_slice(mapped.encode_utf16(&mut encoded));
+            }
+            Err(error) => output.push(error.unpaired_surrogate()),
+        }
+    }
+    output
 }
 
 // These predicates intentionally use versioned Unicode data crates rather than
