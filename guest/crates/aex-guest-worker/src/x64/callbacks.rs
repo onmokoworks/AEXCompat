@@ -458,6 +458,109 @@ fn install_float_binary_import(
     .map(|_| ())
 }
 
+fn deterministic_fmodf(left: f32, right: f32) -> f32 {
+    const SIGN: u32 = 0x8000_0000;
+    const ABS: u32 = 0x7fff_ffff;
+    const INF: u32 = 0x7f80_0000;
+    const QUIET_NAN: u32 = 0x0040_0000;
+
+    let left_bits = left.to_bits();
+    let right_bits = right.to_bits();
+    let left_abs = left_bits & ABS;
+    let right_abs = right_bits & ABS;
+
+    // C leaves NaN payload selection unspecified. Keep this backend stable and
+    // host-independent by quieting and returning the first NaN operand.
+    if left_abs > INF {
+        return f32::from_bits(left_bits | QUIET_NAN);
+    }
+    if right_abs > INF {
+        return f32::from_bits(right_bits | QUIET_NAN);
+    }
+    // Domain errors are represented by a fixed quiet NaN. errno and the FP
+    // exception environment are not virtualized by this serial guest backend.
+    if right_abs == 0 || left_abs == INF {
+        return f32::from_bits(0x7fc0_0000);
+    }
+    if left_abs == 0 || right_abs == INF || left_abs < right_abs {
+        return left;
+    }
+    if left_abs == right_abs {
+        return f32::from_bits(left_bits & SIGN);
+    }
+
+    // Compute the exact binary remainder using integer significands. This is
+    // equivalent to truncating left/right toward zero, without depending on
+    // host libm, rounding mode, extended precision, or `%` NaN behavior.
+    let (mut left_significand, left_exponent) = normalized_f32_significand(left_abs);
+    let (right_significand, right_exponent) = normalized_f32_significand(right_abs);
+    for _ in right_exponent..left_exponent {
+        if left_significand >= right_significand {
+            left_significand -= right_significand;
+        }
+        left_significand <<= 1;
+    }
+    if left_significand >= right_significand {
+        left_significand -= right_significand;
+    }
+    if left_significand == 0 {
+        return f32::from_bits(left_bits & SIGN);
+    }
+
+    let mut exponent = right_exponent;
+    while left_significand < (1 << 23) {
+        left_significand <<= 1;
+        exponent -= 1;
+    }
+    let magnitude = if exponent > -127 {
+        ((exponent + 127) as u32) << 23 | (left_significand & 0x007f_ffff)
+    } else {
+        left_significand >> (-126 - exponent) as u32
+    };
+    f32::from_bits((left_bits & SIGN) | magnitude)
+}
+
+fn install_fmodf_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc(
+        "install fmodf import",
+        unicorn.add_code_hook(address, address, |unicorn, _, _| {
+            if let (Ok(mut xmm0), Ok(xmm1)) = (
+                unicorn.reg_read_long(RegisterX86::XMM0),
+                unicorn.reg_read_long(RegisterX86::XMM1),
+            ) {
+                let left = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
+                let right = f32::from_le_bytes(xmm1[..4].try_into().unwrap());
+                let output = deterministic_fmodf(left, right);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("fmodf({left},{right})={output}"));
+                }
+                // Only the low scalar lane carries the return. Preserve the
+                // remaining XMM0 bits deterministically instead of inheriting
+                // Unicorn's host-dependent narrow-register write behavior.
+                xmm0[..4].copy_from_slice(&output.to_le_bytes());
+                let _ = unicorn.reg_write_long(RegisterX86::XMM0, &xmm0);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn normalized_f32_significand(bits: u32) -> (u32, i32) {
+    let encoded_exponent = ((bits >> 23) & 0xff) as i32;
+    if encoded_exponent != 0 {
+        ((bits & 0x007f_ffff) | (1 << 23), encoded_exponent - 127)
+    } else {
+        let shift = bits.leading_zeros() - 8;
+        (bits << shift, -126 - shift as i32)
+    }
+}
+
 fn install_double_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
