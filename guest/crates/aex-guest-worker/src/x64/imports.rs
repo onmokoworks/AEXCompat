@@ -79,6 +79,7 @@ enum LegacyWin64Import {
     CreateFileW,
     CreateThread,
     NtWriteFile,
+    WakeByAddressAll,
     WaitForSingleObject,
     WaitForSingleObjectEx,
     CloseHandle,
@@ -338,6 +339,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "CreateThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ntdll.dll", "NtWriteFile") => LegacyWin64Import::NtWriteFile,
         (_, "NtWriteFile") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressAll") => {
+            LegacyWin64Import::WakeByAddressAll
+        }
+        (_, "WakeByAddressAll") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "WaitForSingleObject") => LegacyWin64Import::WaitForSingleObject,
         ("kernel32.dll", "WaitForSingleObjectEx") => LegacyWin64Import::WaitForSingleObjectEx,
         ("kernel32.dll", "CloseHandle") => LegacyWin64Import::CloseHandle,
@@ -1137,6 +1142,20 @@ fn install_win64_import(
                     "install bounded NtWriteFile import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_nt_write_file(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::WakeByAddressAll => {
+                // WakeByAddressAll is a VOID function.  A plain RET preserves
+                // RAX while the hook updates only guest-owned waiter state.
+                uc(
+                    "write WakeByAddressAll return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install bounded WakeByAddressAll import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_wake_by_address_all(unicorn);
                     }),
                 )?;
             }
@@ -3954,6 +3973,55 @@ fn emulate_windows_condition_variable(unicorn: &mut Unicorn<'_, GuestState>, ope
         }
         let _ = unicorn.emu_stop();
     }
+}
+
+#[cfg(test)]
+fn record_windows_address_waiter(
+    state: &mut GuestState,
+    address: u64,
+    thread_id: u32,
+) -> Result<(), String> {
+    if address == 0 {
+        return Err("WaitOnAddress address is null".into());
+    }
+    if !state.windows_address_waiters.contains_key(&address)
+        && state.windows_address_waiters.len() >= MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS
+    {
+        return Err(format!(
+            "Windows address-wait location count exceeds {MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS}"
+        ));
+    }
+    let waiters = state.windows_address_waiters.entry(address).or_default();
+    if !waiters.contains(&thread_id) && waiters.len() >= MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION {
+        return Err(format!(
+            "Windows address waiter count at {address:#x} exceeds \
+             {MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION}"
+        ));
+    }
+    waiters.insert(thread_id);
+    Ok(())
+}
+
+fn emulate_wake_by_address_all(unicorn: &mut Unicorn<'_, GuestState>) {
+    // Windows treats the argument as an address identity for waking purposes;
+    // WakeByAddressAll neither returns a status nor needs to read the pointed-to
+    // bytes.  This makes NULL, stale, and unmapped no-waiter addresses safe
+    // no-ops and avoids leaking host synchronization or memory behavior.
+    let address = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let state = unicorn.get_data_mut();
+    let valid = state.windows_address_waiters.len() <= MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS
+        && state
+            .windows_address_waiters
+            .values()
+            .all(|waiters| waiters.len() <= MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION);
+    if !valid {
+        if state.callback_error.is_none() {
+            state.callback_error = Some("Windows address-wait state exceeded its bounds".into());
+        }
+        let _ = unicorn.emu_stop();
+        return;
+    }
+    state.windows_address_waiters.remove(&address);
 }
 
 fn ensure_windows_condition_variable(

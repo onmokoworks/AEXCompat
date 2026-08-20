@@ -2821,6 +2821,118 @@ fn dynamic_condition_variables_are_bounded_and_blocking_fails_closed() {
 }
 
 #[test]
+fn issue1398_wake_by_address_all_is_exact_bounded_and_preserves_void_abi() {
+    const WAKE_API_SET: u64 = STUB_BASE + 0x418;
+    const WAKE_KERNEL32: u64 = STUB_BASE + 0x420;
+    let api_set = "api-ms-win-core-synch-l1-2-0.dll";
+    assert_eq!(
+        dispatch_win64_import(api_set, "WakeByAddressAll"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WakeByAddressAll)
+    );
+    assert_eq!(
+        dispatch_win64_import("kernel32.dll", "WakeByAddressAll"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WakeByAddressAll)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "WakeByAddressAll"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        WAKE_API_SET,
+        api_set,
+        "WakeByAddressAll",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        WAKE_KERNEL32,
+        "kernel32.dll",
+        "WakeByAddressAll",
+    )
+    .unwrap();
+    let first = DATA_BASE + 0xc00;
+    let second = DATA_BASE + 0xc08;
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), first, 2).unwrap();
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), first, 3).unwrap();
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), second, 4).unwrap();
+
+    let marker = 0x8877_6655_4433_2211;
+    engine.unicorn.reg_write(RegisterX86::RAX, marker).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(WAKE_API_SET, [first, 0, 0, 0, 0, 0])
+            .unwrap(),
+        marker
+    );
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_address_waiters
+            .contains_key(&first)
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_address_waiters
+            .get(&second),
+        Some(&BTreeSet::from([4]))
+    );
+
+    // No waiter means no retained address state and no guest-memory probe,
+    // including for NULL and otherwise unmapped pointer values.
+    for address in [first, 0, u64::MAX] {
+        engine.unicorn.reg_write(RegisterX86::RAX, marker).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(WAKE_KERNEL32, [address, 0, 0, 0, 0, 0])
+                .unwrap(),
+            marker
+        );
+    }
+    assert_eq!(engine.unicorn.get_data().windows_address_waiters.len(), 1);
+}
+
+#[test]
+fn issue1398_address_waiter_state_is_bounded_and_session_local() {
+    let mut first = test_engine(&[0xc3]);
+    let second = test_engine(&[0xc3]);
+    let address = DATA_BASE + 0xc80;
+    for thread_id in 0..MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION as u32 {
+        record_windows_address_waiter(first.unicorn.get_data_mut(), address, thread_id).unwrap();
+    }
+    let error = record_windows_address_waiter(
+        first.unicorn.get_data_mut(),
+        address,
+        MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION as u32,
+    )
+    .unwrap_err();
+    assert!(error.contains("waiter count"), "{error}");
+    assert!(second.unicorn.get_data().windows_address_waiters.is_empty());
+
+    let mut bounded = test_engine(&[0xc3]);
+    for index in 0..MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS {
+        record_windows_address_waiter(
+            bounded.unicorn.get_data_mut(),
+            DATA_BASE + 0x1000 + index as u64 * 8,
+            1,
+        )
+        .unwrap();
+    }
+    let error = record_windows_address_waiter(
+        bounded.unicorn.get_data_mut(),
+        DATA_BASE + 0x1000 + MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS as u64 * 8,
+        1,
+    )
+    .unwrap_err();
+    assert!(error.contains("location count"), "{error}");
+}
+
+#[test]
 fn get_proc_address_resolves_fls_alloc_to_a_stable_callable_guest_address() {
     const GET_PROC: u64 = STUB_BASE + 0x408;
     let name = DATA_BASE + 0xb00;
