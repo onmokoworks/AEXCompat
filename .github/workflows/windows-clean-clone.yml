@@ -16,15 +16,15 @@ concurrency:
   group: windows-clean-clone-${{ github.ref }}
   cancel-in-progress: true
 
-# 単一 job だったものを 4 つに割ってある (#720)。判断待ちだった「課金
+# 単一 job だったものを独立producerへ割ってある (#720, #1479)。判断待ちだった「課金
 # runner-minutes が 1.5-2 倍」は public repository の standard runner が無料に
 # なったことで消えた。hosted (windows-latest, 4 vCPU) は self-hosted の
 # ワークステーションより CPU バウンドが 3-4 倍遅いので、横に広げる以外に
 # 縮める手が無い (larger runner は public でも課金)。
 #
 # rust-broker / bridges / native は互いに依存しないので同時に走る。
-# python-tests だけが両方の成果物を要る。critical path は
-# max(rust-broker, native) + python-tests。
+# SDK由来の ABI / AEX / example fixture も別runnerで同時に作る。python-tests
+# だけが全成果物を要るため、critical path は最も遅いproducer + python-tests。
 env:
   SDK_BUCKET: aexcompat-ci
   SDK_OBJECT_KEY: sdk/AfterEffectsSDK-ae25.2-win.zip
@@ -166,8 +166,9 @@ jobs:
       - name: Download native probes
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: native-probes
+          pattern: native-probes-*
           path: target
+          merge-multiple: true
 
       - name: Test native-dependent Rust partition
         run: uv run python tools/run-broker-rust-tests.py native
@@ -295,12 +296,32 @@ jobs:
   # assert_artifact_fresh (tests/_render_session.py) が要求する mtime 順序は
   # python-tests 側で作り直す。
   native-probes:
+    name: native-probes (${{ matrix.producer }})
     runs-on: windows-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - producer: abi
+            artifact: native-probes-abi
+            artifact-path: |
+              target/instruments-build/abi_layout_probe.exe
+              target/.native-probe-artifact-root
+          - producer: aex
+            artifact: native-probes-aex
+            artifact-path: |
+              target/**/*.aex
+              target/gpu-effects/**
+              target/.native-probe-artifact-root
+          - producer: sdk-fixtures
+            artifact: native-probes-sdk-fixtures
+            artifact-path: |
+              target/sdk-fixtures/**
+              target/.native-probe-artifact-root
     env:
       PYTHONUTF8: "1"
-    outputs:
-      sdk: ${{ steps.sdk.outcome }}
+      SDK_READY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -343,7 +364,7 @@ jobs:
       # 要らないので native-workers に移っており、この job の target\ は空で
       # 始まる。
       - name: Build ABI layout probe (Ninja)
-        if: steps.sdk.outcome == 'success'
+        if: matrix.producer == 'abi' && steps.sdk.outcome == 'success'
         shell: cmd
         run: |
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
@@ -356,6 +377,7 @@ jobs:
       # probe テストの入力 fixture (37x23 raw RGBA)。内容は決定論的に生成され、
       # built_artifact テストは期待値を実行時に自己計算するため内容非依存。
       - name: Generate probe input fixture
+        if: matrix.producer == 'aex'
         shell: cmd
         run: |
           mkdir target\gpu-effects 2>nul
@@ -367,7 +389,7 @@ jobs:
       # (#940)。並列だと出力が混ざるため probe 単位で捕まえ、最初の失敗で打ち
       # 切らずに落ちたものだけまとめて出す。
       - name: Build probe AEX set
-        if: steps.sdk.outcome == 'success'
+        if: matrix.producer == 'aex' && steps.sdk.outcome == 'success'
         shell: pwsh
         run: |
           $repository = $PWD.Path
@@ -422,29 +444,35 @@ jobs:
       # built_artifact テスト (test_sdk_backwards_audio_worker) が参照する
       # SDK example fixture。pytest の収集順に依存しないよう事前にビルドする。
       - name: Build SDK example fixtures (built-artifact deps)
-        if: steps.sdk.outcome == 'success'
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
         shell: cmd
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
 
-      # SDK を取れなかった run (fork PR) でも gpu-effects の fixture は生成されて
-      # いるので、artifact 自体は必ず 1 件以上になる。SDK 依存の中身が入って
-      # いるかどうかは、この job の `sdk` output で下流が判断する。
+      # upload-artifact computes one common root across all listed paths. This
+      # zero-byte anchor keeps the original target-relative directories in each
+      # independently uploaded artifact without shipping CMake intermediates.
+      - name: Anchor native probe artifact paths
+        if: matrix.producer == 'aex' || steps.sdk.outcome == 'success'
+        shell: pwsh
+        run: New-Item -ItemType File -Force target/.native-probe-artifact-root | Out-Null
+
+      # SDK を取れない fork PR でも aex producer は gpu-effects fixture を生成し、
+      # source-only downstream用artifactを必ず出す。ABI/example producerはSDK成功時
+      # だけartifactを出し、downstreamも同じtrusted-PR条件で取得する。
       #
       # AEX は `target/**` で拾う。ビルドディレクトリの名前は
       # `pf-*-probe-build` で揃っておらず、`classic-failure-probes-build` の
       # ように複数形のものがある。名前の規則に賭けると、増えた probe が
       # 黙って運ばれないまま「テストが成果物不在で skip」に化ける。
-      - name: Publish native probes
+      - name: Publish native probe producer output
+        if: matrix.producer == 'aex' || steps.sdk.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-probes
-          path: |
-            target/**/*.aex
-            target/instruments-build/abi_layout_probe.exe
-            target/sdk-fixtures/**
-            target/gpu-effects/**
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact-path }}
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -456,6 +484,7 @@ jobs:
     env:
       PYTHONUTF8: "1"
       AEXCOMPAT_CARGO_PROFILE: debug
+      SDK_READY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -494,8 +523,9 @@ jobs:
       - name: Download native probes
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: native-probes
+          pattern: native-probes-*
           path: target
+          merge-multiple: true
 
       # 一部の built_artifact テストは worker を multi-config 時代の固定パスから
       # 探す。frozen hash を照合しないので同一バイナリの複製で満たせる。
@@ -529,7 +559,7 @@ jobs:
           $later = $base.AddSeconds(5)
           foreach ($item in $artifacts) { $item.LastWriteTime = $later }
           Write-Host "freshness_runtime_inputs=$($inputs.Count) freshness_artifacts=$($artifacts.Count)"
-          if ('${{ needs.native-probes.outputs.sdk }}' -eq 'success' -and $artifacts.Count -eq 0) {
+          if ($env:SDK_READY -eq 'true' -and $artifacts.Count -eq 0) {
             throw 'the native job built probe AEX artifacts but none arrived here'
           }
 
@@ -538,7 +568,7 @@ jobs:
       # カバレッジと取り違えないよう fail-closed で検査する。job 分割後は
       # artifact の転送漏れもここで捕まる。
       - name: Check native parameter-animation coverage inputs
-        if: needs.native-probes.outputs.sdk == 'success'
+        if: env.SDK_READY == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -560,7 +590,7 @@ jobs:
           Write-Host "coverage_source_commit=$commit"
 
       - name: Check audio-only passthrough coverage inputs
-        if: needs.native-probes.outputs.sdk == 'success'
+        if: env.SDK_READY == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -593,11 +623,10 @@ jobs:
           # native-workers job がビルド済みの worker を canonical_release_worker fixture に
           # 渡し、二重ビルドを避ける (#681)。
           AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\minihost-build\aex_render_worker.exe
-          SDK_READY: ${{ needs.native-probes.outputs.sdk }}
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           set "SDK_FLAGS="
-          if "%SDK_READY%"=="success" set "SDK_FLAGS=--run-sdk-tests --run-built-artifact-tests"
+          if "%SDK_READY%"=="true" set "SDK_FLAGS=--run-sdk-tests --run-built-artifact-tests"
           uv run python -m pytest -q -rs -n auto --dist worksteal --durations=25 %SDK_FLAGS% --validate-local-artifact-manifest > pytest-output.txt 2>&1
           set PYTEST_EXIT=%ERRORLEVEL%
           type pytest-output.txt
@@ -607,7 +636,7 @@ jobs:
       # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
       # 不在の inline skip で黙って skip されたら fail。
       - name: Fail if SDK or built-artifact tests were skipped
-        if: needs.native-probes.outputs.sdk == 'success'
+        if: env.SDK_READY == 'true'
         shell: pwsh
         run: |
           $leaks = Select-String -Path pytest-output.txt -Pattern 'SKIPPED' |
@@ -618,7 +647,7 @@ jobs:
           }
 
       - name: Record public PF layer parameter probe identity
-        if: success() && needs.native-probes.outputs.sdk == 'success'
+        if: success() && env.SDK_READY == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -637,7 +666,7 @@ jobs:
           Write-Host "published_probe_sha256=$hash"
 
       - name: Publish verified public PF layer parameter probe
-        if: success() && needs.native-probes.outputs.sdk == 'success'
+        if: success() && env.SDK_READY == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pf-layer-param-probe-windows-x86_64-${{ github.sha }}
