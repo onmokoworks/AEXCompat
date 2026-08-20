@@ -7288,6 +7288,59 @@ fn load_library_a_rejects_unmapped_or_unterminated_paths_without_host_loading() 
 }
 
 #[test]
+fn load_library_a_fails_closed_for_missing_rgbranding_dependency() {
+    const LOAD_LIBRARY: u64 = STUB_BASE + 0x1a8;
+    const RG_BRANDING_ERROR: &str = "external guest dependency unavailable: RGBranding.dll (LoadLibraryA does not host-load DLLs)";
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        LOAD_LIBRARY,
+        "kernel32.dll",
+        "LoadLibraryA",
+    )
+    .unwrap();
+    let path = DATA_BASE + 0xd00;
+    engine
+        .write(
+            path,
+            b"C:\\ProgramData\\Red Giant\\Common\\Libraries\\rGbRaNdInG.DlL\0",
+        )
+        .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    let error = engine
+        .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains(RG_BRANDING_ERROR));
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+
+    let mut second_session = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut second_session.unicorn,
+        LOAD_LIBRARY,
+        "kernel32.dll",
+        "LoadLibraryA",
+    )
+    .unwrap();
+    second_session.write(path, b"RGBranding.dll\0").unwrap();
+    let error = second_session
+        .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains(RG_BRANDING_ERROR));
+    assert_eq!(
+        second_session.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        0
+    );
+    assert_eq!(
+        second_session.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+}
+
+#[test]
 fn crt_heap_imports_return_null_for_overflow_and_budget_failure() {
     let mut engine = test_engine(&[0xc3]);
     engine
