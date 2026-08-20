@@ -4969,7 +4969,9 @@ fn emulate_output_debug_string_a(unicorn: &mut Unicorn<'_, GuestState>) {
                         && cursor <= region.end
                         && region.perms & Prot::READ.0 == Prot::READ.0
                 })
-                .ok_or_else(|| format!("OutputDebugStringA string at {cursor:#x} is unreadable"))?;
+                .ok_or_else(|| {
+                    format!("OutputDebugStringA string at {cursor:#x} is unreadable")
+                })?;
             let available = region
                 .end
                 .checked_sub(cursor)
@@ -5036,8 +5038,12 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
             "fopen_s filename",
         )?;
         const MAX_FOPEN_MODE_BYTES: u64 = 64;
-        let mode =
-            read_crt_stdio_c_string(unicorn, mode_pointer, MAX_FOPEN_MODE_BYTES, "fopen_s mode")?;
+        let mode = read_crt_stdio_c_string(
+            unicorn,
+            mode_pointer,
+            MAX_FOPEN_MODE_BYTES,
+            "fopen_s mode",
+        )?;
         let ordinary_result = if filename.is_empty() || !valid_fopen_mode(&mode) {
             EINVAL
         } else {
@@ -5222,9 +5228,7 @@ fn trim_leading_crt_mode_spaces(mut value: &[u8]) -> &[u8] {
 
 fn valid_fopen_mode(mode: &[u8]) -> bool {
     let mode = trim_leading_crt_mode_spaces(mode);
-    let Some((&first, suffix)) = mode.split_first() else {
-        return false;
-    };
+    let Some((&first, suffix)) = mode.split_first() else { return false; };
     if !matches!(first, b'r' | b'w' | b'a') {
         return false;
     }
