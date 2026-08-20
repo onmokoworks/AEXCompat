@@ -68,6 +68,9 @@ enum class Reason : std::size_t {
   AbortCallback,
   Unsupported,
   CallbackError,
+  // A numeric ANSI callback returned the host's finite 0.0 fallback because
+  // its input, domain, or computed result was non-finite.
+  Clamped,
   // Not a refusal: checkout_param answered a slot past the published table
   // with an empty layer definition, the AE-observed shape (issue #1251). It
   // rides on a result-0 history entry so the report shows which checkouts
@@ -91,7 +94,7 @@ inline constexpr std::array<const char*, static_cast<std::size_t>(Reason::Count)
                   "already_checked_out", "not_checked_out", "empty_result",
                   "invalid_area", "pixel_callback", "progress_callback",
                   "abort_callback", "unsupported", "callback_error",
-                  "beyond_param_table"}};
+                  "clamped", "beyond_param_table"}};
 
 struct Entry {
   std::atomic<uint32_t> calls{};
@@ -144,7 +147,8 @@ inline void increment_saturating(std::atomic<uint32_t>& value) noexcept {
                                       std::memory_order_relaxed)) {}
 }
 
-inline int32_t record(Callback callback, int32_t result, Reason reason = Reason::None) noexcept {
+inline int32_t record_counters(Callback callback, int32_t result,
+                               Reason reason = Reason::None) noexcept {
   auto& entry = entries()[static_cast<std::size_t>(callback)];
   increment_saturating(entry.calls);
   entry.last_result.store(result, std::memory_order_relaxed);
@@ -154,6 +158,11 @@ inline int32_t record(Callback callback, int32_t result, Reason reason = Reason:
     increment_saturating(entry.failures);
     increment_saturating(entry.reasons[static_cast<std::size_t>(reason)]);
   }
+  return result;
+}
+
+inline int32_t record(Callback callback, int32_t result, Reason reason = Reason::None) noexcept {
+  record_counters(callback, result, reason);
   {
     std::lock_guard<std::mutex> lock(history_mutex());
     const uint64_t sequence = history_next_sequence()++;

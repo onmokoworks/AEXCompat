@@ -24,16 +24,22 @@ approval and does not authorize a push or a license change.
 
 | Component | Declared metadata | Publication state |
 | --- | --- | --- |
-| `broker/` Rust workspace | MIT in Cargo workspace metadata | Blocked until repository license/provenance is approved |
-| `guest/` Rust workspace | MIT in Cargo workspace metadata | Blocked until repository license/provenance is approved |
-| AviUtl2 and YMM4 Rust bridges | MIT in Cargo package metadata | Blocked until repository license/provenance and dependency notices are approved |
-| `minihost/`, Python tools/tests, docs, schemas, instruments | No root license grant found | Blocked: owner/legal decision required |
+| AEXCompat-authored source, docs, schemas, tests, and instruments | MPL-2.0 root grant and Cargo metadata | Source grant resolved; dependency notices/SBOM and provenance review still gate publication |
+| `guest/` AEXCompat-authored Rust source | MPL-2.0 | For a distributed GPLv2 Unicorn Larger Work, relevant Covered Software must additionally be distributed under GPL-2.0 and the combined work must satisfy applicable GPLv2 terms |
+| `imports/` and provenance-identified copies | Upstream/source terms | Not relicensed by the root grant; independent provenance approval required |
 | Adobe SDK-backed probes/fixtures | Adobe-proprietary SDK dependency | Source boundary and redistribution terms require manual review; SDK is never exported |
 | Third-party Cargo/Python dependencies | Upstream licenses | Generate and manually review a locked dependency notice/SBOM before publication |
+| Private/commercial AEX corpus | Upstream proprietary or per-artifact terms | Local testing only; never included in a public export |
 
-No `LICENSE` file is added by this work because choosing one would be a
-relicense decision. The owner must approve the repository-wide grant and every
-component exception before publication.
+The root `LICENSE` grants MPL-2.0 only for material the AEXCompat contributors
+have the right to license. It does not replace upstream notices or authorize
+redistribution of excluded SDK, corpus, fixture, dependency, or generated
+material. The AEXCompat MPL files are not marked incompatible with secondary
+licenses. Publication remains blocked until the dependency notice/SBOM and
+artifact-provenance gates are separately approved; a distributed Unicorn-linked
+guest also requires the relevant AEXCompat Covered Software under both MPL-2.0
+and GPL-2.0, plus applicable notices and corresponding source/build information
+for the combined work.
 
 ## Dry run
 

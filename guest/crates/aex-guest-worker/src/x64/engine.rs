@@ -905,6 +905,7 @@ impl GuestEngine<'static> {
             unicorn,
             scheduled_windows_threads: BTreeMap::new(),
             scheduler_ready: VecDeque::new(),
+            scheduler_deferred_ready: VecDeque::new(),
             parked_main_context: None,
             next_data,
             image_base: image.image_base(),
@@ -1564,6 +1565,20 @@ impl GuestEngine<'static> {
                 args.len()
             )));
         }
+        while let Some(thread_id) = self.scheduler_deferred_ready.pop_front() {
+            if !self.scheduled_windows_threads.contains_key(&thread_id) {
+                return Err(GuestError::Callback(format!(
+                    "deferred-ready thread {thread_id} has no saved context"
+                )));
+            }
+            if self.scheduler_ready.contains(&thread_id) {
+                return Err(GuestError::Callback(format!(
+                    "deferred-ready thread {thread_id} is already runnable"
+                )));
+            }
+            self.scheduler_ready.push_back(thread_id);
+        }
+        self.unicorn.get_data_mut().scheduler_ready_hint = !self.scheduler_ready.is_empty();
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
         self.unicorn.get_data_mut().latest_runtime_target = None;
@@ -1596,14 +1611,25 @@ impl GuestEngine<'static> {
             )?;
         }
         const MAX_SCHEDULER_SWITCHES: usize = 256;
+        let timeout = Duration::from_micros(timeout_microseconds);
+        let started = Instant::now();
         let mut begin = address;
         for scheduler_switch in 0..=MAX_SCHEDULER_SWITCHES {
             self.unicorn.get_data_mut().scheduler_switches_remaining =
                 (MAX_SCHEDULER_SWITCHES - scheduler_switch) as u64;
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(self.execution_crash(format!(
+                    "execution exceeded the total timeout of {timeout_microseconds} microseconds"
+                )));
+            }
+            let remaining_timeout_microseconds = u64::try_from((timeout - elapsed).as_micros())
+                .unwrap_or(u64::MAX)
+                .max(1);
             if let Err(error) = self.unicorn.emu_start(
                 begin,
                 RETURN_ADDRESS,
-                timeout_microseconds,
+                remaining_timeout_microseconds,
                 MAX_INSTRUCTIONS,
             ) {
                 return Err(self.execution_crash(format!("emulation error: {error}")));
@@ -1912,9 +1938,13 @@ impl GuestEngine<'static> {
                             "cooperative scheduler parked thread {thread_id} twice"
                         )));
                     }
-                    if yield_reason == SchedulerYieldReason::Voluntary && !main_wait_timed_out {
-                        self.scheduler_ready.push_back(thread_id);
-                        self.unicorn.get_data_mut().scheduler_ready_hint = true;
+                    if yield_reason == SchedulerYieldReason::Voluntary {
+                        if main_wait_timed_out {
+                            self.scheduler_deferred_ready.push_back(thread_id);
+                        } else {
+                            self.scheduler_ready.push_back(thread_id);
+                            self.unicorn.get_data_mut().scheduler_ready_hint = true;
+                        }
                     }
                 } else if let Some(thread_id) = self.scheduler_ready.pop_front() {
                     self.unicorn.get_data_mut().scheduler_ready_hint =
