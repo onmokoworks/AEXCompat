@@ -4176,16 +4176,7 @@ mod tests {
         ] {
             let mut destination = tagged_pixels(9, 16);
             assert_eq!(
-                place_frame_at_origin(
-                    &mut destination,
-                    4,
-                    4,
-                    &source,
-                    2,
-                    2,
-                    origin.0,
-                    origin.1,
-                ),
+                place_frame_at_origin(&mut destination, 4, 4, &source, 2, 2, origin.0, origin.1,),
                 Ok(true)
             );
             for (index, tag) in expected {
@@ -4213,16 +4204,7 @@ mod tests {
         for origin in [(4, 0), (-2, 0), (0, 4), (0, -2)] {
             let mut destination = tagged_pixels(9, 16);
             assert_eq!(
-                place_frame_at_origin(
-                    &mut destination,
-                    4,
-                    4,
-                    &source,
-                    2,
-                    2,
-                    origin.0,
-                    origin.1,
-                ),
+                place_frame_at_origin(&mut destination, 4, 4, &source, 2, 2, origin.0, origin.1,),
                 Ok(false)
             );
             assert_eq!(red_tags(&destination), vec![9; 16]);

@@ -600,7 +600,9 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
                 Err(()) => {
                     report_frame_trouble(
                         &ctx.plugin,
-                        FrameTrouble::Refused("the frame placement is outside this bridge's bounds"),
+                        FrameTrouble::Refused(
+                            "the frame placement is outside this bridge's bounds",
+                        ),
                     );
                     return true;
                 }
@@ -1795,9 +1797,7 @@ fn place_frame_at_origin(
         let destination_row = destination
             .get_mut(destination_start..destination_end)
             .ok_or(())?;
-        for (destination_pixel, source_pixel) in
-            destination_row.iter_mut().zip(source_row.iter())
-        {
+        for (destination_pixel, source_pixel) in destination_row.iter_mut().zip(source_row.iter()) {
             destination_pixel.r = source_pixel.r;
             destination_pixel.g = source_pixel.g;
             destination_pixel.b = source_pixel.b;
