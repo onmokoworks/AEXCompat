@@ -108,10 +108,37 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # `cargo test --workspace` は native 成果物が要る。1 本は無いと fail-closed に
-  # 落ち (image_render の "CI must build aex_l2_worker.exe before broker tests")、
-  # ほかに probe AEX が無いと黙って no-op になるテストが 23 本ある (#900)。
-  # 成果物の不在をカバレッジと取り違えないため、両方を揃えてから走らせる。
+  # native成果物を読まないRust testsはCMake jobsと同時に開始する。rust-buildへ
+  # 直列追加するとbroker binaryのpublishを遅らせ、python-testsまで待たせるため、
+  # artifact producerとは独立させる (#1472 run 32373221791)。
+  rust-test-independent:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      AEXCOMPAT_CARGO_PROFILE: debug
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust-workspaces: broker
+          cache-key: broker-independent-tests
+          save-cache: 'false'
+
+      - name: Test native-independent Rust partition
+        run: uv run python tools/run-broker-rust-tests.py independent
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # native worker/probeを実行するRust targetsだけを成果物の後で走らせる。
+  # runnerはnocapture出力のskipをfailにするため、成果物欠如をcoverageと
+  # 取り違えない。残りは専用のrust-test-independent jobで並行実行する。
   rust-test:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -142,10 +169,8 @@ jobs:
           name: native-probes
           path: target
 
-      - name: Test Rust workspace
-        working-directory: broker
-        shell: pwsh
-        run: cargo test --workspace --locked
+      - name: Test native-dependent Rust partition
+        run: uv run python tools/run-broker-rust-tests.py native
 
       - name: Show sccache stats
         if: always()
