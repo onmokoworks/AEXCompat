@@ -4955,7 +4955,10 @@ fn get_acp_is_deterministic_cp932_and_matches_cp_acp_conversion() {
         dispatch_win64_import("fixture.dll", "GetACP"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
-    engine.unicorn.reg_write(RegisterX86::RAX, u64::MAX).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RAX, u64::MAX)
+        .unwrap();
     assert_eq!(engine.call_win64(GET_ACP, [u64::MAX; 6]).unwrap(), 932);
     assert_eq!(engine.call_win64(GET_ACP, [0; 6]).unwrap(), 932);
 
