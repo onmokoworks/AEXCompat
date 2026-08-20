@@ -3578,9 +3578,13 @@ fn install_dynamic_windows_import_callbacks(
     )?;
     uc(
         "install dynamic FlsAlloc callback",
-        unicorn.add_code_hook(HOST_DYNAMIC_FLS_ALLOC, HOST_DYNAMIC_FLS_ALLOC, |unicorn, _, _| {
-            emulate_fls(unicorn, LegacyWin64Import::FlsAlloc);
-        }),
+        unicorn.add_code_hook(
+            HOST_DYNAMIC_FLS_ALLOC,
+            HOST_DYNAMIC_FLS_ALLOC,
+            |unicorn, _, _| {
+                emulate_fls(unicorn, LegacyWin64Import::FlsAlloc);
+            },
+        ),
     )?;
     Ok(())
 }

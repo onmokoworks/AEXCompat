@@ -2868,10 +2868,15 @@ fn get_proc_address_rejects_foreign_modules_names_ordinals_and_unsafe_pointers()
     engine.write(name, b"FlsAlloc\0").unwrap();
 
     assert_eq!(
-        engine.call_win64(GET_PROC, [0x1234, name, 0, 0, 0, 0]).unwrap(),
+        engine
+            .call_win64(GET_PROC, [0x1234, name, 0, 0, 0, 0])
+            .unwrap(),
         0
     );
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
 
     for symbol in [b"FlsGetValue\0".as_slice(), b"flsalloc\0".as_slice()] {
         engine.write(name, symbol).unwrap();
