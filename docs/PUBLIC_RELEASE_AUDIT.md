@@ -14,7 +14,11 @@ approval and does not authorize a push or a license change.
   not export inputs. Only `main` and tags named via repeated `--tag` arguments
   are retained.
 - The private SDK asset tag `ci-sdk-ae25.2` exists. It must not be selected for
-  a public export without a separate provenance and license decision.
+  a public export without a separate provenance and license decision. CI no
+  longer reads it: the SDK zip now comes from the private R2 bucket
+  `aexcompat-ci` (#1445), which must likewise stay non-public. Publishing the
+  bucket, or moving the object behind an unauthenticated URL, would redistribute
+  the Adobe SDK and is a separate license decision, not a CI convenience.
 - Historical and current-tree secret/prohibited-file scans remain mandatory
   after rewriting. A finding blocks export; it is never converted to success.
 - Historical Python bytecode was found to contain an absolute personal path;
