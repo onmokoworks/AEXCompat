@@ -2,7 +2,7 @@
 name = "aexcompat-ymm4-native"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "MPL-2.0"
 publish = false
 description = "C ABI YMM4 adapter for an AEXCompat resident RenderSession"
 
