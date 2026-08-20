@@ -722,8 +722,13 @@ fn render_classic_via_length_one_session(
         // Invalidation (worker crash, deadline, or a host-protection invariant).
         Err(error) => {
             let reason = format!("the render session was invalidated: {error}");
-            let _ = session.close();
-            return SessionWrapperOutcome::Fallback(reason);
+            let close = session.close();
+            let diagnostics = close
+                .get("worker")
+                .and_then(|worker| worker.get("diagnostics"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            return SessionWrapperOutcome::Fallback(format!("{reason}, diagnostics={diagnostics}"));
         }
     };
     // An expand-output effect that overran the launch slot no longer surfaces
@@ -812,7 +817,7 @@ fn render_classic_via_length_one_session(
             // The gate above rejects any final report carrying a render
             // error, so this arm is defensive only.
             return SessionWrapperOutcome::Failure(invalid(format!(
-                "session frame reported error {render_error} past a clean final report"
+                "session frame reported error {render_error} past a clean final report: diagnostics={diagnostics}, report={final_report}"
             )));
         }
         FrameStatus::SmartOutputUntouched => {
