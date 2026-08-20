@@ -1433,46 +1433,7 @@ fn install_win64_import(
                 uc(
                     "install GetProcAddress import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        let module = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
-                        let pointer = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
-                        let mut bytes = Vec::new();
-                        let mut terminated = false;
-                        for index in 0..128u64 {
-                            let Some(address) = pointer.checked_add(index) else {
-                                break;
-                            };
-                            let Ok(value) = unicorn.mem_read_as_vec(address, 1) else {
-                                break;
-                            };
-                            if value[0] == 0 {
-                                terminated = true;
-                                break;
-                            }
-                            bytes.push(value[0]);
-                        }
-                        let dynamic = match bytes.as_slice() {
-                            b"InitializeConditionVariable" => {
-                                Some(HOST_INITIALIZE_CONDITION_VARIABLE)
-                            }
-                            b"SleepConditionVariableCS" => Some(HOST_SLEEP_CONDITION_VARIABLE_CS),
-                            b"WakeConditionVariable" => Some(HOST_WAKE_CONDITION_VARIABLE),
-                            b"WakeAllConditionVariable" => Some(HOST_WAKE_ALL_CONDITION_VARIABLE),
-                            _ => None,
-                        };
-                        if module == WINDOWS_KERNEL32_MODULE_TOKEN
-                            && terminated
-                            && let Some(dynamic) = dynamic
-                        {
-                            let _ = unicorn.reg_write(RegisterX86::RAX, dynamic);
-                        } else {
-                            if unicorn.get_data().callback_error.is_none() {
-                                unicorn.get_data_mut().callback_error = Some(format!(
-                                    "GetProcAddress module={module:#x} name={:?} is unsupported",
-                                    String::from_utf8_lossy(&bytes)
-                                ));
-                            }
-                            let _ = unicorn.emu_stop();
-                        }
+                        emulate_get_proc_address(unicorn);
                     }),
                 )?;
             }
@@ -3606,6 +3567,82 @@ fn install_windows_condition_variable_callbacks(
         ),
     )?;
     Ok(())
+}
+
+fn install_dynamic_windows_import_callbacks(
+    unicorn: &mut Unicorn<'static, GuestState>,
+) -> Result<(), GuestError> {
+    uc(
+        "write dynamic FlsAlloc callback return",
+        unicorn.mem_write(HOST_DYNAMIC_FLS_ALLOC, &[0xc3]),
+    )?;
+    uc(
+        "install dynamic FlsAlloc callback",
+        unicorn.add_code_hook(
+            HOST_DYNAMIC_FLS_ALLOC,
+            HOST_DYNAMIC_FLS_ALLOC,
+            |unicorn, _, _| {
+                emulate_fls(unicorn, LegacyWin64Import::FlsAlloc);
+            },
+        ),
+    )?;
+    Ok(())
+}
+
+fn emulate_get_proc_address(unicorn: &mut Unicorn<'_, GuestState>) {
+    let module = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let pointer = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    };
+
+    if module != WINDOWS_KERNEL32_MODULE_TOKEN {
+        fail(unicorn, ERROR_MOD_NOT_FOUND);
+        return;
+    }
+    // Win32 encodes an ordinal in the low 16 bits of the name pointer. This
+    // synthetic module exposes names only, so ordinals fail without probing
+    // guest memory at small integer addresses.
+    if pointer <= u64::from(u16::MAX) {
+        fail(unicorn, ERROR_PROC_NOT_FOUND);
+        return;
+    }
+
+    let mut bytes = Vec::new();
+    let mut terminated = false;
+    for index in 0..128u64 {
+        let Some(address) = pointer.checked_add(index) else {
+            break;
+        };
+        let Ok(value) = unicorn.mem_read_as_vec(address, 1) else {
+            break;
+        };
+        if value[0] == 0 {
+            terminated = true;
+            break;
+        }
+        bytes.push(value[0]);
+    }
+    let dynamic = if terminated {
+        match bytes.as_slice() {
+            b"InitializeConditionVariable" => Some(HOST_INITIALIZE_CONDITION_VARIABLE),
+            b"SleepConditionVariableCS" => Some(HOST_SLEEP_CONDITION_VARIABLE_CS),
+            b"WakeConditionVariable" => Some(HOST_WAKE_CONDITION_VARIABLE),
+            b"WakeAllConditionVariable" => Some(HOST_WAKE_ALL_CONDITION_VARIABLE),
+            b"FlsAlloc" => Some(HOST_DYNAMIC_FLS_ALLOC),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(dynamic) = dynamic {
+        // GetProcAddress leaves last error unspecified on success. Preserve the
+        // guest's value so capability probes cannot erase an earlier error.
+        let _ = unicorn.reg_write(RegisterX86::RAX, dynamic);
+    } else {
+        fail(unicorn, ERROR_PROC_NOT_FOUND);
+    }
 }
 
 fn emulate_windows_condition_variable(unicorn: &mut Unicorn<'_, GuestState>, operation: u8) {
