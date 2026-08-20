@@ -74,6 +74,7 @@ enum LegacyWin64Import {
     GetSystemTimeAsFileTime,
     GetSystemInfo,
     GetStartupInfoW,
+    RtlCaptureContext,
     GetStdHandle,
     GetConsoleMode,
     GetFileType,
@@ -146,6 +147,10 @@ enum LegacyWin64Import {
     HeapAlloc,
     HeapFree,
     HeapReAlloc,
+    WsaStartup,
+    WsaCleanup,
+    RtlPcToFileHeader,
+    RaiseException,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -330,6 +335,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetStartupInfoW") => LegacyWin64Import::GetStartupInfoW,
         (_, "GetStartupInfoW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "RtlCaptureContext") => LegacyWin64Import::RtlCaptureContext,
+        (_, "RtlCaptureContext") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetStdHandle") => LegacyWin64Import::GetStdHandle,
         (_, "GetStdHandle") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetConsoleMode") => LegacyWin64Import::GetConsoleMode,
@@ -434,6 +441,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("ws2_32.dll", "WSAStartup" | "ORDINAL 115") => LegacyWin64Import::WsaStartup,
+        ("ws2_32.dll", "WSACleanup" | "ORDINAL 116") => LegacyWin64Import::WsaCleanup,
+        (_, "WSAStartup" | "ORDINAL 115" | "WSACleanup" | "ORDINAL 116") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("kernel32.dll", "RtlPcToFileHeader") => LegacyWin64Import::RtlPcToFileHeader,
+        (_, "RtlPcToFileHeader") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "RaiseException") => LegacyWin64Import::RaiseException,
+        (_, "RaiseException") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "InitializeCriticalSection") => {
             LegacyWin64Import::InitializeCriticalSection
         }
@@ -1105,6 +1121,18 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::RtlCaptureContext => {
+                uc(
+                    "write RtlCaptureContext return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install RtlCaptureContext import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_rtl_capture_context(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::GetStdHandle => {
                 uc(
                     "write GetStdHandle return",
@@ -1711,6 +1739,48 @@ fn install_win64_import(
                     "install process heap import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                         emulate_process_heap(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::WsaStartup => {
+                uc("write WSAStartup return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install WSAStartup import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_wsa_startup(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::WsaCleanup => {
+                uc("write WSACleanup return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install WSACleanup import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_wsa_cleanup(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::RtlPcToFileHeader => {
+                uc(
+                    "write RtlPcToFileHeader return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install RtlPcToFileHeader import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_rtl_pc_to_file_header(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::RaiseException => {
+                uc(
+                    "write RaiseException trap",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install RaiseException import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_raise_exception(unicorn);
                     }),
                 )?;
             }
@@ -2399,6 +2469,18 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
             .len()
             .checked_mul(2)
             .ok_or_else(|| "MultiByteToWideChar output byte length overflows".to_string())?;
+        let source_size = bytes.len() + usize::from(include_terminator);
+        let source_end = match source.checked_add(source_size as u64) {
+            Some(end) => end,
+            None => return Ok((0, Some(ERROR_INVALID_PARAMETER))),
+        };
+        let output_end_exclusive = match destination.checked_add(output_size as u64) {
+            Some(end) => end,
+            None => return Ok((0, Some(ERROR_INVALID_PARAMETER))),
+        };
+        if source < output_end_exclusive && destination < source_end {
+            return Ok((0, Some(ERROR_INVALID_PARAMETER)));
+        }
         if output_size != 0 {
             let output_end = destination
                 .checked_add(output_size as u64 - 1)
@@ -2413,7 +2495,7 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
                     .find(|region| {
                         region.begin <= cursor
                             && cursor <= region.end
-                            && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
+                            && region.perms & Prot::WRITE.0 as u32 != 0
                     })
                     .ok_or_else(|| {
                         format!(
@@ -2532,7 +2614,7 @@ fn emulate_get_string_type_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
+                        && region.perms & Prot::WRITE.0 as u32 != 0
                 })
                 .ok_or_else(|| {
                     format!(
@@ -2717,7 +2799,7 @@ fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
                     .find(|region| {
                         region.begin <= cursor
                             && cursor <= region.end
-                            && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
+                            && region.perms & Prot::WRITE.0 as u32 != 0
                     })
                     .ok_or_else(|| {
                         format!(
@@ -3306,6 +3388,7 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
     const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
     const LOAD_LIBRARY_SEARCH_FLAGS: u32 = 0x0000_1f00;
+    const NON_EXECUTABLE_RESOURCE_FLAGS: u32 = 0x0000_0062;
     const VALID_FLAGS: u32 = 0x0000_3ffb;
     let result = (|| -> Result<Option<u64>, String> {
         let path_pointer = read_win64_import_argument(unicorn, 0)?;
@@ -3314,6 +3397,7 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
         if path_pointer == 0
             || file_handle != 0
             || flags & !VALID_FLAGS != 0
+            || flags & NON_EXECUTABLE_RESOURCE_FLAGS != 0
             || flags & LOAD_WITH_ALTERED_SEARCH_PATH != 0 && flags & LOAD_LIBRARY_SEARCH_FLAGS != 0
         {
             unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
@@ -4467,7 +4551,7 @@ fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
+                        && region.perms & Prot::WRITE.0 as u32 != 0
                 })
                 .ok_or_else(|| {
                     format!(
@@ -4488,6 +4572,203 @@ fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
             .mem_write(output, &startup_info)
             .map_err(|error| format!("GetStartupInfoW output {output:#x} is not writable: {error}"))
     });
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn emulate_rtl_capture_context(unicorn: &mut Unicorn<'_, GuestState>) {
+    const CONTEXT_SIZE: usize = 0x4d0;
+    const CONTEXT_AMD64_FULL_WITH_SEGMENTS: u32 = 0x0010_000f;
+    const INTEGER_REGISTERS: [(RegisterX86, usize); 16] = [
+        (RegisterX86::RAX, 0x78),
+        (RegisterX86::RCX, 0x80),
+        (RegisterX86::RDX, 0x88),
+        (RegisterX86::RBX, 0x90),
+        (RegisterX86::RSP, 0x98),
+        (RegisterX86::RBP, 0xa0),
+        (RegisterX86::RSI, 0xa8),
+        (RegisterX86::RDI, 0xb0),
+        (RegisterX86::R8, 0xb8),
+        (RegisterX86::R9, 0xc0),
+        (RegisterX86::R10, 0xc8),
+        (RegisterX86::R11, 0xd0),
+        (RegisterX86::R12, 0xd8),
+        (RegisterX86::R13, 0xe0),
+        (RegisterX86::R14, 0xe8),
+        (RegisterX86::R15, 0xf0),
+    ];
+    const SEGMENT_REGISTERS: [(RegisterX86, usize); 6] = [
+        (RegisterX86::CS, 0x38),
+        (RegisterX86::DS, 0x3a),
+        (RegisterX86::ES, 0x3c),
+        (RegisterX86::FS, 0x3e),
+        (RegisterX86::GS, 0x40),
+        (RegisterX86::SS, 0x42),
+    ];
+    const XMM_REGISTERS: [RegisterX86; 16] = [
+        RegisterX86::XMM0,
+        RegisterX86::XMM1,
+        RegisterX86::XMM2,
+        RegisterX86::XMM3,
+        RegisterX86::XMM4,
+        RegisterX86::XMM5,
+        RegisterX86::XMM6,
+        RegisterX86::XMM7,
+        RegisterX86::XMM8,
+        RegisterX86::XMM9,
+        RegisterX86::XMM10,
+        RegisterX86::XMM11,
+        RegisterX86::XMM12,
+        RegisterX86::XMM13,
+        RegisterX86::XMM14,
+        RegisterX86::XMM15,
+    ];
+    const X87_REGISTERS: [RegisterX86; 8] = [
+        RegisterX86::ST0,
+        RegisterX86::ST1,
+        RegisterX86::ST2,
+        RegisterX86::ST3,
+        RegisterX86::ST4,
+        RegisterX86::ST5,
+        RegisterX86::ST6,
+        RegisterX86::ST7,
+    ];
+
+    let result = (|| -> Result<(), String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        if output == 0 {
+            return Err("RtlCaptureContext output pointer is null".into());
+        }
+        let output_end = output
+            .checked_add(CONTEXT_SIZE as u64 - 1)
+            .ok_or_else(|| "RtlCaptureContext output range overflows".to_string())?;
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|error| format!("RtlCaptureContext memory-map query failed: {error}"))?;
+        let mut cursor = output;
+        while cursor <= output_end {
+            let region = regions
+                .iter()
+                .find(|region| {
+                    region.begin <= cursor
+                        && cursor <= region.end
+                        && region.perms & Prot::WRITE.0 as u32 != 0
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "RtlCaptureContext output {output:#x}..={output_end:#x} is not fully writable"
+                    )
+                })?;
+            if region.end >= output_end {
+                break;
+            }
+            cursor = region
+                .end
+                .checked_add(1)
+                .ok_or_else(|| "RtlCaptureContext writable region overflows".to_string())?;
+        }
+
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("RtlCaptureContext could not read RSP: {error}"))?;
+        let caller_rsp = rsp
+            .checked_add(8)
+            .ok_or_else(|| "RtlCaptureContext caller RSP overflows".to_string())?;
+        let mut return_address = [0u8; 8];
+        unicorn
+            .mem_read(rsp, &mut return_address)
+            .map_err(|error| {
+                format!("RtlCaptureContext return address is not readable: {error}")
+            })?;
+
+        let mut context = [0u8; CONTEXT_SIZE];
+        context[0x30..0x34].copy_from_slice(&CONTEXT_AMD64_FULL_WITH_SEGMENTS.to_le_bytes());
+        let mxcsr = unicorn
+            .reg_read(RegisterX86::MXCSR)
+            .map_err(|error| format!("RtlCaptureContext could not read MXCSR: {error}"))?
+            as u32;
+        context[0x34..0x38].copy_from_slice(&mxcsr.to_le_bytes());
+        context[0x118..0x11c].copy_from_slice(&mxcsr.to_le_bytes());
+        let fpcw = unicorn
+            .reg_read(RegisterX86::FPCW)
+            .map_err(|error| format!("RtlCaptureContext could not read FPCW: {error}"))?
+            as u16;
+        let fpsw = unicorn
+            .reg_read(RegisterX86::FPSW)
+            .map_err(|error| format!("RtlCaptureContext could not read FPSW: {error}"))?
+            as u16;
+        let full_fptag = unicorn
+            .reg_read(RegisterX86::FPTAG)
+            .map_err(|error| format!("RtlCaptureContext could not read FPTAG: {error}"))?
+            as u16;
+        let abridged_fptag = (0..8).fold(0u8, |tag, physical_index| {
+            let full_tag = (full_fptag >> (physical_index * 2)) & 0x3;
+            tag | u8::from(full_tag != 0x3) << physical_index
+        });
+        context[0x100..0x102].copy_from_slice(&fpcw.to_le_bytes());
+        context[0x102..0x104].copy_from_slice(&fpsw.to_le_bytes());
+        context[0x104] = abridged_fptag;
+        for (register, offset) in [
+            (RegisterX86::FOP, 0x106),
+            (RegisterX86::FCS, 0x10c),
+            (RegisterX86::FDS, 0x114),
+        ] {
+            let value = unicorn.reg_read(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })? as u16;
+            context[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        for (register, offset) in [(RegisterX86::FIP, 0x108), (RegisterX86::FDP, 0x110)] {
+            let value = unicorn.reg_read(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })? as u32;
+            context[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        context[0x11c..0x120].copy_from_slice(&0x0000_ffffu32.to_le_bytes());
+        for (register, offset) in SEGMENT_REGISTERS {
+            let value = unicorn.reg_read(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })? as u16;
+            context[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let eflags = unicorn
+            .reg_read(RegisterX86::EFLAGS)
+            .map_err(|error| format!("RtlCaptureContext could not read EFLAGS: {error}"))?
+            as u32;
+        context[0x44..0x48].copy_from_slice(&eflags.to_le_bytes());
+        for (register, offset) in INTEGER_REGISTERS {
+            let value = if register == RegisterX86::RSP {
+                caller_rsp
+            } else {
+                unicorn.reg_read(register).map_err(|error| {
+                    format!("RtlCaptureContext could not read {register:?}: {error}")
+                })?
+            };
+            context[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        context[0xf8..0x100].copy_from_slice(&return_address);
+        for (logical_index, register) in X87_REGISTERS.into_iter().enumerate() {
+            let value = unicorn.reg_read_long(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })?;
+            let offset = 0x120 + logical_index * 16;
+            context[offset..offset + 10].copy_from_slice(&value);
+        }
+        for (index, register) in XMM_REGISTERS.into_iter().enumerate() {
+            let value = unicorn.reg_read_long(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })?;
+            let offset = 0x1a0 + index * 16;
+            context[offset..offset + 16].copy_from_slice(&value);
+        }
+        unicorn.mem_write(output, &context).map_err(|error| {
+            format!("RtlCaptureContext output {output:#x} is not writable: {error}")
+        })
+    })();
     if let Err(error) = result {
         if unicorn.get_data().callback_error.is_none() {
             unicorn.get_data_mut().callback_error = Some(error);
@@ -4526,7 +4807,7 @@ fn emulate_get_cp_info(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && (region.perms as u32) & (Prot::WRITE.0 as u32) != 0
+                        && region.perms & Prot::WRITE.0 as u32 != 0
                 })
                 .ok_or_else(|| {
                     format!("GetCPInfo output {output:#x}..={output_end:#x} is not fully writable")
@@ -4620,12 +4901,13 @@ fn guest_range_has_permission(
     let regions = unicorn
         .mem_regions()
         .map_err(|error| format!("guest memory-map query failed: {error}"))?;
+    let permission = permission.0 as u32;
     let mut cursor = address;
     while cursor <= end {
         let Some(region) = regions.iter().find(|region| {
             region.begin <= cursor
                 && cursor <= region.end
-                && (region.perms as u32) & (permission.0 as u32) == permission.0 as u32
+                && region.perms & permission == permission
         }) else {
             return Ok(false);
         };
@@ -5564,6 +5846,49 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
                 "CreateThread start routine {start:#x} is outside the executable image"
             ));
         }
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("CreateThread stack read failed: {error}"))?;
+        let return_address = read_vcomp_u64(unicorn, rsp)
+            .map_err(|error| format!("CreateThread return address read failed: {error}"))?;
+        if flags & CREATE_SUSPENDED == 0
+            && return_address != RETURN_ADDRESS
+            && !image_executable_address(unicorn.get_data(), return_address)
+        {
+            return Err(format!(
+                "CreateThread caller return {return_address:#x} is outside the executable image"
+            ));
+        }
+        if thread_id_output != 0 {
+            let output_end = thread_id_output
+                .checked_add(3)
+                .ok_or_else(|| "CreateThread thread-id output range overflows".to_string())?;
+            let regions = unicorn
+                .mem_regions()
+                .map_err(|error| format!("CreateThread memory-map query failed: {error}"))?;
+            let mut cursor = thread_id_output;
+            while cursor <= output_end {
+                let region = regions
+                    .iter()
+                    .find(|region| {
+                        region.begin <= cursor
+                            && cursor <= region.end
+                            && region.perms & Prot::WRITE.0 as u32 != 0
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "CreateThread thread-id output {thread_id_output:#x}..={output_end:#x} is not fully writable"
+                        )
+                    })?;
+                if region.end >= output_end {
+                    break;
+                }
+                cursor = region
+                    .end
+                    .checked_add(1)
+                    .ok_or_else(|| "CreateThread writable region overflows".to_string())?;
+            }
+        }
         if unicorn.get_data().windows_threads.len() >= MAX_WINDOWS_THREADS {
             unicorn.get_data_mut().windows_last_error = ERROR_NOT_ENOUGH_MEMORY;
             unicorn
@@ -5575,14 +5900,7 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
         let handle = WINDOWS_THREAD_HANDLE_BASE
             .checked_add(u64::from(id) * 0x10)
             .ok_or_else(|| "CreateThread handle overflow".to_string())?;
-        if thread_id_output != 0 {
-            unicorn
-                .mem_write(thread_id_output, &id.to_le_bytes())
-                .map_err(|error| {
-                    format!("CreateThread thread-id output {thread_id_output:#x} is not writable: {error}")
-                })?;
-        }
-        unicorn.get_data_mut().next_windows_thread_id = id
+        let next_id = id
             .checked_add(1)
             .ok_or_else(|| "CreateThread id space exhausted".to_string())?;
         let suspended = flags & CREATE_SUSPENDED != 0;
@@ -5616,6 +5934,14 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
                 Prot::READ | Prot::WRITE,
             )
             .map_err(|error| format!("CreateThread stack map failed: {error}"))?;
+        if thread_id_output != 0 {
+            if let Err(error) = unicorn.mem_write(thread_id_output, &id.to_le_bytes()) {
+                let _ = unicorn.mem_unmap(thread_stack_base, mapped_stack_size);
+                return Err(format!(
+                    "CreateThread thread-id output {thread_id_output:#x} is not writable: {error}"
+                ));
+            }
+        }
         unicorn.get_data_mut().windows_threads.insert(
             handle,
             WindowsThread {
@@ -5631,12 +5957,8 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
                 stack_mapped: true,
             },
         );
+        unicorn.get_data_mut().next_windows_thread_id = next_id;
         if suspended {
-            let rsp = unicorn
-                .reg_read(RegisterX86::RSP)
-                .map_err(|error| format!("CreateThread stack read failed: {error}"))?;
-            let return_address = read_vcomp_u64(unicorn, rsp)
-                .map_err(|error| format!("CreateThread return address read failed: {error}"))?;
             unicorn
                 .reg_write(RegisterX86::RAX, handle)
                 .map_err(|error| format!("CreateThread suspended return failed: {error}"))?;
@@ -5647,18 +5969,6 @@ fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
                 .reg_write(RegisterX86::R11, return_address)
                 .map_err(|error| format!("CreateThread suspended return target failed: {error}"))?;
             return Ok(());
-        }
-        let rsp = unicorn
-            .reg_read(RegisterX86::RSP)
-            .map_err(|error| format!("CreateThread stack read failed: {error}"))?;
-        let return_address = read_vcomp_u64(unicorn, rsp)
-            .map_err(|error| format!("CreateThread return address read failed: {error}"))?;
-        if return_address != RETURN_ADDRESS
-            && !image_executable_address(unicorn.get_data(), return_address)
-        {
-            return Err(format!(
-                "CreateThread caller return {return_address:#x} is outside the executable image"
-            ));
         }
         dispatch_windows_thread(unicorn, handle, return_address, rsp + 8, handle)
     })();
@@ -6089,6 +6399,144 @@ fn emulate_initialize_slist_head(unicorn: &mut Unicorn<'_, GuestState>) {
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
     }
+}
+
+const WINDOWS_WSADATA_X64_SIZE: u64 = 408;
+const WINDOWS_WSA_VERSION_2_2: u16 = 0x0202;
+const WINDOWS_WSAEFAULT: u32 = 10_014;
+const WINDOWS_WSAEPROCLIM: u32 = 10_067;
+const WINDOWS_WSAVERNOTSUPPORTED: u32 = 10_092;
+const WINDOWS_WSANOTINITIALISED: u32 = 10_093;
+const MAX_WINDOWS_SOCKET_STARTUPS: u32 = 1_024;
+
+fn emulate_wsa_startup(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u32, String> {
+        let requested = read_win64_import_argument(unicorn, 0)? as u16;
+        let output = read_win64_import_argument(unicorn, 1)?;
+        if !matches!(requested, 0x0001 | 0x0101 | 0x0002 | 0x0102 | 0x0202) {
+            return Ok(WINDOWS_WSAVERNOTSUPPORTED);
+        }
+        if output == 0
+            || !guest_range_has_permission(unicorn, output, WINDOWS_WSADATA_X64_SIZE, Prot::WRITE)?
+        {
+            return Ok(WINDOWS_WSAEFAULT);
+        }
+        let count = unicorn.get_data().windows_socket_startups;
+        if count >= MAX_WINDOWS_SOCKET_STARTUPS {
+            return Ok(WINDOWS_WSAEPROCLIM);
+        }
+        let next_count = count + 1;
+        let mut data = [0u8; WINDOWS_WSADATA_X64_SIZE as usize];
+        data[0..2].copy_from_slice(&requested.to_le_bytes());
+        data[2..4].copy_from_slice(&WINDOWS_WSA_VERSION_2_2.to_le_bytes());
+        let description = b"AEXCompat deterministic Winsock 2.2 guest";
+        data[4..4 + description.len()].copy_from_slice(description);
+        let status = b"Running";
+        data[261..261 + status.len()].copy_from_slice(status);
+        unicorn
+            .mem_write(output, &data)
+            .map_err(|error| format!("write WSAStartup WSADATA: {error}"))?;
+        unicorn.get_data_mut().windows_socket_startups = next_count;
+        Ok(0)
+    })();
+    match result {
+        Ok(code) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(code));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(WINDOWS_WSAEFAULT));
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_wsa_cleanup(unicorn: &mut Unicorn<'_, GuestState>) {
+    let count = unicorn.get_data().windows_socket_startups;
+    let code = if count == 0 {
+        unicorn.get_data_mut().windows_last_error = WINDOWS_WSANOTINITIALISED;
+        u32::MAX
+    } else {
+        unicorn.get_data_mut().windows_socket_startups = count - 1;
+        0
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(code));
+}
+
+fn emulate_rtl_pc_to_file_header(unicorn: &mut Unicorn<'_, GuestState>) {
+    let pc = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+    let output = read_win64_import_argument(unicorn, 1).unwrap_or_default();
+    if output != 0 && !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false)
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    let module = unicorn
+        .get_data()
+        .image_region
+        .filter(|(start, end)| (*start..*end).contains(&pc))
+        .map(|(start, _)| start)
+        .or_else(|| (pc == WINDOWS_KERNEL32_MODULE_TOKEN).then_some(WINDOWS_KERNEL32_MODULE_TOKEN))
+        .unwrap_or_default();
+    if output != 0 && unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, module);
+}
+
+fn emulate_raise_exception(unicorn: &mut Unicorn<'_, GuestState>) {
+    const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
+    const EXCEPTION_MAXIMUM_PARAMETERS: u32 = 15;
+    let result = (|| -> Result<String, String> {
+        let code = read_win64_import_argument(unicorn, 0)? as u32;
+        let flags = read_win64_import_argument(unicorn, 1)? as u32;
+        let count = read_win64_import_argument(unicorn, 2)? as u32;
+        let arguments = read_win64_import_argument(unicorn, 3)?;
+        if flags & !EXCEPTION_NONCONTINUABLE != 0 {
+            return Err(format!("RaiseException flags {flags:#x} are invalid"));
+        }
+        if count > EXCEPTION_MAXIMUM_PARAMETERS {
+            return Err(format!(
+                "RaiseException parameter count {count} exceeds {EXCEPTION_MAXIMUM_PARAMETERS}"
+            ));
+        }
+        let byte_count = u64::from(count) * 8;
+        if count != 0
+            && (arguments == 0
+                || !guest_range_has_permission(unicorn, arguments, byte_count, Prot::READ)?)
+        {
+            return Err(format!(
+                "RaiseException parameter array {arguments:#x} is not fully readable for {count} entries"
+            ));
+        }
+        let mut values = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let address = arguments + u64::from(index) * 8;
+            let bytes = unicorn.mem_read_as_vec(address, 8).map_err(|error| {
+                format!("RaiseException parameter {index} read failed: {error}")
+            })?;
+            values.push(u64::from_le_bytes(bytes.try_into().map_err(|_| {
+                format!("RaiseException parameter {index} has the wrong size")
+            })?));
+        }
+        let values = values
+            .iter()
+            .map(|value| format!("{value:#x}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!(
+            "unhandled guest RaiseException code={code:#x} flags={flags:#x} parameters=[{values}]; x64 SEH dispatch is not modeled"
+        ))
+    })();
+    let error = result.unwrap_or_else(|error| error);
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    let _ = unicorn.emu_stop();
 }
 
 fn read_win64_import_argument(

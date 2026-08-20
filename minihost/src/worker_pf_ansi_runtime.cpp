@@ -10,28 +10,53 @@
 #include <iostream>
 namespace aexcompat::pf_ansi {
 namespace {
-void record_ansi_call(bool success = true) noexcept {
-  callback_diagnostics::record(callback_diagnostics::Callback::Ansi,
+void record_ansi_call(bool success = true,
+                      callback_diagnostics::Reason failure_reason =
+                          callback_diagnostics::Reason::InvalidArguments) noexcept {
+  callback_diagnostics::record_counters(callback_diagnostics::Callback::Ansi,
       success ? 0 : 4,
-      success ? callback_diagnostics::Reason::None
-              : callback_diagnostics::Reason::InvalidArguments);
+      success ? callback_diagnostics::Reason::None : failure_reason);
   if (aexcompat::l2_detail::extended_diag_enabled())
     std::cerr << "extended_diag:ansi -> " << (success ? 0 : 4)
-              << (success ? "\n" : " (invalid_arguments)\n") << std::flush;
+              << (success ? "\n"
+                          : failure_reason == callback_diagnostics::Reason::Clamped
+                              ? " (clamped)\n"
+                              : " (invalid_arguments)\n")
+              << std::flush;
+}
+
+void record_ansi_clamp() noexcept {
+  record_ansi_call(false, callback_diagnostics::Reason::Clamped);
 }
 }
 template <typename Operation>
 double finite_ansi_unary(double value, Operation operation) noexcept {
-  if (!std::isfinite(value)) return 0.0;
+  if (!std::isfinite(value)) {
+    record_ansi_clamp();
+    return 0.0;
+  }
   const double result = operation(value);
-  return std::isfinite(result) ? result : 0.0;
+  if (!std::isfinite(result)) {
+    record_ansi_clamp();
+    return 0.0;
+  }
+  record_ansi_call();
+  return result;
 }
 
 template <typename Operation>
 double finite_ansi_binary(double left, double right, Operation operation) noexcept {
-  if (!std::isfinite(left) || !std::isfinite(right)) return 0.0;
+  if (!std::isfinite(left) || !std::isfinite(right)) {
+    record_ansi_clamp();
+    return 0.0;
+  }
   const double result = operation(left, right);
-  return std::isfinite(result) ? result : 0.0;
+  if (!std::isfinite(result)) {
+    record_ansi_clamp();
+    return 0.0;
+  }
+  record_ansi_call();
+  return result;
 }
 
 double __cdecl ansi_atan(double value) {
@@ -43,12 +68,10 @@ double __cdecl ansi_atan2(double y, double x) {
 }
 
 double __cdecl ansi_ceil(double value) {
-  record_ansi_call();
   return finite_ansi_unary(value, [](double x) { return std::ceil(x); });
 }
 
 double __cdecl ansi_cos(double value) {
-  record_ansi_call();
   return finite_ansi_unary(value, [](double x) { return std::cos(x); });
 }
 
@@ -57,7 +80,6 @@ double __cdecl ansi_exp(double value) {
 }
 
 double __cdecl ansi_fabs(double value) {
-  record_ansi_call();
   return finite_ansi_unary(value, [](double x) { return std::fabs(x); });
 }
 
@@ -66,38 +88,46 @@ double __cdecl ansi_floor(double value) {
 }
 
 double __cdecl ansi_fmod(double value, double divisor) {
-  if (divisor == 0.0) return 0.0;
+  if (divisor == 0.0) {
+    record_ansi_clamp();
+    return 0.0;
+  }
   return finite_ansi_binary(value, divisor, [](double x, double y) { return std::fmod(x, y); });
 }
 
 double __cdecl ansi_hypot(double x, double y) {
-  record_ansi_call();
   return finite_ansi_binary(x, y, [](double a, double b) { return std::hypot(a, b); });
 }
 
 double __cdecl ansi_log(double value) {
-  if (!(value > 0.0)) return 0.0;
+  if (!(value > 0.0)) {
+    record_ansi_clamp();
+    return 0.0;
+  }
   return finite_ansi_unary(value, [](double x) { return std::log(x); });
 }
 
 double __cdecl ansi_log10(double value) {
-  if (!(value > 0.0)) return 0.0;
+  if (!(value > 0.0)) {
+    record_ansi_clamp();
+    return 0.0;
+  }
   return finite_ansi_unary(value, [](double x) { return std::log10(x); });
 }
 
 double __cdecl ansi_pow(double base, double exponent) {
-  record_ansi_call();
   return finite_ansi_binary(base, exponent, [](double x, double y) { return std::pow(x, y); });
 }
 
 double __cdecl ansi_sin(double value) {
-  record_ansi_call();
   return finite_ansi_unary(value, [](double x) { return std::sin(x); });
 }
 
 double __cdecl ansi_sqrt(double value) {
-  record_ansi_call();
-  if (value < 0.0) return 0.0;
+  if (value < 0.0) {
+    record_ansi_clamp();
+    return 0.0;
+  }
   return finite_ansi_unary(value, [](double x) { return std::sqrt(x); });
 }
 
@@ -155,14 +185,18 @@ int32_t __cdecl ansi_strcpy_bounded(char* destination, std::size_t destination_s
 }
 
 double __cdecl ansi_asin(double value) {
-  record_ansi_call();
-  if (value < -1.0 || value > 1.0) return 0.0;
+  if (value < -1.0 || value > 1.0) {
+    record_ansi_clamp();
+    return 0.0;
+  }
   return finite_ansi_unary(value, [](double x) { return std::asin(x); });
 }
 
 double __cdecl ansi_acos(double value) {
-  record_ansi_call();
-  if (value < -1.0 || value > 1.0) return 0.0;
+  if (value < -1.0 || value > 1.0) {
+    record_ansi_clamp();
+    return 0.0;
+  }
   return finite_ansi_unary(value, [](double x) { return std::acos(x); });
 }
 }  // namespace aexcompat::pf_ansi

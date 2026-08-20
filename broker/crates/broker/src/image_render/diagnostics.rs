@@ -618,7 +618,10 @@ fn worker_diagnostics(
         "render",
         // Per frame, unlike "render" which brackets the whole session. Without
         // these a classic session's frame errors carried no stage at all
-        // (issue #722). Only "classic_render" is the plug-in's own selector:
+        // (issue #722). The UI draw and teardown names are also plug-in
+        // dispatches; they bracket kEvent calls before and after RENDER and
+        // report an error only when that UI failure becomes the frame error
+        // (issue #735). "classic_render" is the RENDER selector itself:
         // "classic_output_resize" is the host refusing the requested output
         // resize before RENDER runs, and "classic_finalize" appears only when
         // the host's own finalize changed the error the selector returned.
@@ -627,7 +630,9 @@ fn worker_diagnostics(
         // reason none of them is the "output_validation" that session.rs
         // assigns from `output_pixels_valid`: that is a smart-only check on the
         // pixels that came back, not a refused resize.
+        "classic_ui_draw",
         "classic_render",
+        "classic_ui_teardown",
         "classic_output_resize",
         "classic_finalize",
         "smart_render",

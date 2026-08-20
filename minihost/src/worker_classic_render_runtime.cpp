@@ -80,6 +80,8 @@ bool dispatch_render_click(EffectEntry entry, std::array<std::byte, 408>& input,
 bool dispatch_render_draw(EffectEntry entry, std::array<std::byte, 408>& input,
                           std::array<std::byte, 408>& output,
                           std::vector<std::array<std::byte, 176>>& definitions);
+bool render_draw_dispatch_enabled();
+bool render_ui_context_active();
 bool close_render_ui_context(EffectEntry entry, std::array<std::byte, 408>& input,
                              std::array<std::byte, 408>& output,
                              std::vector<std::array<std::byte, 176>>& definitions);
@@ -453,6 +455,11 @@ struct ClassicRenderDispatchOwner {
  private:
   static const aexcompat::worker_runtime::classic_execution::RenderHooks& hooks() {
     static const aexcompat::worker_runtime::classic_execution::RenderHooks value{
+        +[](void*, const char* stage) {
+          std::cerr << "stage:" << stage << "_begin\n" << std::flush; },
+        +[](void*, const char* stage, int32_t error) {
+          std::cerr << "stage:" << stage << "_end error=" << error << "\n" << std::flush; },
+        +[](void*) { return render_draw_dispatch_enabled(); },
         +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
           return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
         // The stage markers sit inside the hooks, not around
@@ -494,8 +501,9 @@ struct ClassicRenderDispatchOwner {
           const int32_t error = static_cast<ClassicRenderDispatchOwner*>(opaque)->dispatch_selector();
           std::cerr << "stage:classic_render_end error=" << error << "\n" << std::flush;
           return error; },
+        +[](void*) { return render_ui_context_active(); },
         +[](void* opaque) { auto& h = *static_cast<ClassicRenderDispatchOwner*>(opaque);
-          return !g_render_ui_context_active || close_render_ui_context(h.entry, h.input, h.output, h.definitions); }};
+          return close_render_ui_context(h.entry, h.input, h.output, h.definitions); }};
     return value;
   }
   // Bring `in_data->extent_hint` inside the buffer that now backs the output.
@@ -902,9 +910,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
         width, height, lifecycle_owner.frame_setup_output, frame_output};
-    // The `stage:classic_render_*` and `stage:classic_output_resize_end` markers are
-    // emitted per frame from inside RenderHooks (see ClassicRenderDispatchOwner)
-    // so each brackets only the step it names. The session-wide `stage:render_*`
+    // The per-frame `stage:classic_*` markers are emitted from inside RenderHooks
+    // (see ClassicRenderDispatchOwner) so each brackets only the step it names.
+    // UI markers are gated on a draw request or a live UI context, so ordinary
+    // frames do not acquire empty stage pairs. The session-wide `stage:render_*`
     // pair in worker_invocation_orchestration.cpp is emitted once, so before
     // this a classic session's frame errors carried no stage at all and every
     // one of them came back with `first_failure_stage: null` (issue #722).

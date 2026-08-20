@@ -44,11 +44,24 @@ int32_t finish_lifecycle(void* host, LifecycleResult& state,
 }
 
 int32_t dispatch_render(void* host, int32_t error, const RenderHooks& h) {
-  if (!host || !h.prepare_output || !h.dispatch_selector || !h.close_ui) return -5;
-  if (error == 0 && h.draw && !h.draw(host)) error = -5;
+  if (!host || !h.stage_begin || !h.stage_end || !h.draw_enabled ||
+      !h.prepare_output || !h.dispatch_selector || !h.ui_context_active ||
+      !h.close_ui) return -5;
+  if (error == 0 && h.draw && h.draw_enabled(host)) {
+    h.stage_begin(host, "classic_ui_draw");
+    const bool succeeded = h.draw(host);
+    h.stage_end(host, "classic_ui_draw", succeeded ? 0 : -5);
+    if (!succeeded) error = -5;
+  }
   if (error == 0) error = h.prepare_output(host);
   if (error == 0) error = h.dispatch_selector(host);
-  if (!h.close_ui(host) && error == 0) error = -5;
+  if (h.ui_context_active(host)) {
+    h.stage_begin(host, "classic_ui_teardown");
+    const bool close_succeeded = h.close_ui(host);
+    const int32_t close_error = !close_succeeded && error == 0 ? -5 : 0;
+    h.stage_end(host, "classic_ui_teardown", close_error);
+    if (close_error != 0) error = close_error;
+  }
   return error;
 }
 
