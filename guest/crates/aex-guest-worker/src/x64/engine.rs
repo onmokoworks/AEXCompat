@@ -222,7 +222,10 @@ impl GuestEngine<'static> {
         let mut teb_stack = [0u8; 16];
         teb_stack[0..8].copy_from_slice(&(STACK_BASE + STACK_SIZE).to_le_bytes());
         teb_stack[8..16].copy_from_slice(&STACK_BASE.to_le_bytes());
-        uc("write TEB stack bounds", unicorn.mem_write(0x08, &teb_stack))?;
+        uc(
+            "write TEB stack bounds",
+            unicorn.mem_write(0x08, &teb_stack),
+        )?;
         uc(
             "map guest data",
             unicorn.mem_map(DATA_BASE, DATA_SIZE, Prot::READ | Prot::WRITE),
@@ -2099,7 +2102,10 @@ fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Resul
 fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
     const WINDOWS_COMMAND_LINE: &str = "\"aex-guest-worker.exe\"";
     let mut bytes = Vec::with_capacity((WINDOWS_COMMAND_LINE.encode_utf16().count() + 1) * 2);
-    for unit in WINDOWS_COMMAND_LINE.encode_utf16().chain(std::iter::once(0)) {
+    for unit in WINDOWS_COMMAND_LINE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
     let command_line = engine.allocate(bytes.len(), 2)?;

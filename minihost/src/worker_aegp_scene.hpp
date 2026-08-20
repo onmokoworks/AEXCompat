@@ -205,6 +205,7 @@ const AegpEffectInstance* resolve_effect_instance(
     void* effect, int32_t owner = 0, std::size_t* index = nullptr);
 bool any_effect_lease_live();
 bool layer_effect_boundary_is_live(const AegpLayerRenderOptionsValue& options);
+bool valid_scene_item_handle(void* item) noexcept;
 bool snapshot_staged_item_metadata(
     void* item, AegpStagedItemMetadata& metadata) noexcept;
 uint64_t staged_effect_instance_identity(
