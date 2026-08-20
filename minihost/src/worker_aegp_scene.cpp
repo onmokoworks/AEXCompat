@@ -2024,6 +2024,51 @@ const AegpEffectParameterRecord* loaded_effect_parameter(int32_t index) {
   published.writable = false;
   return &published;
 }
+
+bool loaded_effect_stream_value(
+    int32_t index, std::array<std::byte, 32>& output) noexcept {
+  if (index < 1) return false;
+  const auto& records = aexcompat::worker_runtime::parameters::state().records;
+  if (static_cast<std::size_t>(index) > records.size()) return false;
+  const auto& record = records[static_cast<std::size_t>(index - 1)];
+  std::array<double, 4> value{};
+  switch (record.type) {
+    case 0:  // PF_Param_LAYER: zero is no layer.
+      break;
+    case 1:   // PF_Param_SLIDER
+    case 2:   // PF_Param_FIX_SLIDER
+    case 4:   // PF_Param_CHECKBOX
+    case 7:   // PF_Param_POPUP
+    case 10:  // PF_Param_FLOAT_SLIDER
+      value[0] = record.has_current ? record.current_value
+                                    : record.default_value;
+      break;
+    case 3:  // PF_Param_ANGLE
+      if (record.component_count != 1) return false;
+      value[0] = record.current_components[0];
+      break;
+    case 5:  // PF_Param_COLOR (AEGP_ColorVal: alpha, red, green, blue)
+      if (!record.has_color) return false;
+      for (std::size_t channel = 0; channel < value.size(); ++channel)
+        value[channel] = record.current_color[channel] / 255.0;
+      break;
+    case 6:  // PF_Param_POINT
+      if (record.component_count != 2) return false;
+      std::copy_n(record.current_components.begin(), 2, value.begin());
+      break;
+    case 18:  // PF_Param_POINT_3D
+      if (record.component_count != 3) return false;
+      std::copy_n(record.current_components.begin(), 3, value.begin());
+      break;
+    default:
+      // Arbitrary data and valueless definitions have no bounded runtime
+      // representation here. Do not publish a fabricated zero value.
+      return false;
+  }
+  static_assert(sizeof(value) == 32);
+  std::memcpy(output.data(), value.data(), sizeof(value));
+  return true;
+}
 const AegpEffectParameterRecord* find_effect_parameter(
     const AegpEffectInstance& instance, int32_t index) {
   const int32_t key = instance.installed_key;
@@ -3495,30 +3540,21 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
       stream_snapshot.stream.value_kind ==
           aexcompat::scene_model::StreamValueKind::no_data)
     return 4;
-  output->stream = stream;
-  output->value.fill(std::byte{});
+  std::array<std::byte, 32> result{};
   const std::size_t fixture_slot =
       static_cast<std::size_t>(value->param_index - 1);
   if (value->param_index == 0) {
-    std::memcpy(output->value.data(), &instance.layer, sizeof(instance.layer));
+    std::memcpy(result.data(), &instance.layer, sizeof(instance.layer));
+  } else if (instance.loaded_plugin) {
+    if (!loaded_effect_stream_value(value->param_index, result)) return 4;
   } else if (!instance.loaded_plugin &&
              fixture_slot < instance.parameter_values.size()) {
-    std::memcpy(output->value.data(),
+    std::memcpy(result.data(),
                 instance.parameter_values[fixture_slot].data(),
                 sizeof(instance.parameter_values[0]));
   }
-  // Anything else stays zero, which for a layer parameter is "no layer" - the
-  // answer DeepGlow2's matte path is asking for when its matte parameter is
-  // left unset.
-  //
-  // `parameter_values` has room for twelve but only the first four carry
-  // anything: the probe's defaults, seeded at scene start, plus whatever
-  // `initialize_effect_parameter_values` writes when an effect is applied. For
-  // the loaded plug-in none of that is its own, so reading it would have
-  // answered the plug-in's first four parameters with the probe's numbers
-  // under the plug-in's names and types. The records do carry each
-  // parameter's declared default, and for some types its current value; this
-  // path is not wired to them yet (#929).
+  output->stream = stream;
+  output->value = result;
   value->value_live = true;
   value->checked_out_value = output;
   if (!scene_registry().create_child(

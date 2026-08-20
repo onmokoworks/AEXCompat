@@ -1,5 +1,6 @@
 #include "worker_aegp_compat_selftests.hpp"
 #include "worker_pf_suites_internal.hpp"
+#include "worker_parameter_execution.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_mask_runtime.hpp"
@@ -2254,7 +2255,12 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   slider.index = 1;
   slider.type = 10;  // PF_Param_FLOAT_SLIDER
   slider.name = "Amount";
+  slider.has_numeric = true;
+  slider.valid_min = 0.0;
+  slider.valid_max = 100.0;
   slider.default_value = 12.5;
+  slider.has_current = true;
+  slider.current_value = 37.25;
   records.push_back(slider);
   ParamRecord matte{};
   matte.index = 2;
@@ -2271,6 +2277,46 @@ bool verify_aegp_loaded_plugin_effect_streams() {
     marker.name = name;
     records.push_back(marker);
   }
+  ParamRecord fallback{};
+  fallback.index = 9;
+  fallback.type = 1;  // PF_Param_SLIDER
+  fallback.name = "Fallback";
+  fallback.default_value = 23.5;
+  records.push_back(fallback);
+  ParamRecord color{};
+  color.index = 10;
+  color.type = 5;  // PF_Param_COLOR
+  color.name = "Color";
+  color.has_color = true;
+  color.current_color = {64, 128, 192, 255};
+  records.push_back(color);
+  ParamRecord point{};
+  point.index = 11;
+  point.type = 6;  // PF_Param_POINT
+  point.name = "Point";
+  point.component_count = 2;
+  point.current_components = {17.5, -3.25, 0.0};
+  point.default_components = {10.0, 20.0, 0.0};
+  records.push_back(point);
+  ParamRecord point3d{};
+  point3d.index = 12;
+  point3d.type = 18;  // PF_Param_POINT_3D
+  point3d.name = "Point 3D";
+  point3d.component_count = 3;
+  point3d.current_components = {1.25, 2.5, 5.0};
+  records.push_back(point3d);
+  ParamRecord angle{};
+  angle.index = 13;
+  angle.type = 3;  // PF_Param_ANGLE
+  angle.name = "Angle";
+  angle.component_count = 1;
+  angle.current_components = {91.5, 0.0, 0.0};
+  records.push_back(angle);
+  ParamRecord arbitrary{};
+  arbitrary.index = 14;
+  arbitrary.type = 11;  // PF_Param_ARBITRARY_DATA
+  arbitrary.name = "Arbitrary";
+  records.push_back(arbitrary);
   records[0].name = u8"量";
   scene_runtime_state().effect_live = false;
 
@@ -2313,7 +2359,7 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   ok = ok && get_v9_stream_count && get_v9_effect_stream &&
       dispose_v9_stream && get_v9_stream_name && get_v9_stream_type &&
       get_v9_stream_value && dispose_v9_stream_value &&
-      get_v9_stream_count(effect, &count) == 0 && count == 9;
+      get_v9_stream_count(effect, &count) == 0 && count == 15;
 
   void* v9_amount = nullptr;
   ok = ok && get_v9_effect_stream(0, effect, 1, &v9_amount) == 0 && v9_amount;
@@ -2436,22 +2482,135 @@ bool verify_aegp_loaded_plugin_effect_streams() {
 
   // Past the declared parameters there is nothing to open.
   void* past = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
-  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 9, &past) != 0 &&
+  ok = ok && g_hooks.get_new_effect_stream_v2(0, effect, 15, &past) != 0 &&
       past == reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
 
-  // The value reads as zero: `parameter_values` holds the probe fixture's
-  // defaults, which are not this plug-in's (issue #929).
+  // A loaded plug-in reads the parameter runtime's current value, not the
+  // probe fixture's value and not a fabricated zero (issue #929).
   scene_runtime::AegpStreamValue value{};
   suite_abi::AegpTime time{0, 30};
   std::array<double, 4> scalars{-1.0, -1.0, -1.0, -1.0};
   ok = ok && g_hooks.get_new_stream_value_v2(0, amount, 1, &time, 1, &value) == 0;
   if (ok) std::memcpy(scalars.data(), value.value.data(), sizeof(scalars));
-  ok = ok && scalars[0] == 0.0;
+  ok = ok && scalars == std::array<double, 4>{37.25, 0.0, 0.0, 0.0};
   // Non-short-circuiting, like the stream disposes below: the check that
   // can fail just above it is the one that leaves a value checked out,
   // and skipping the dispose there would leave the stream undisposable
   // and its borrow spent.
   ok = g_hooks.dispose_stream_value_v2(&value) == 0 && ok;
+
+  const auto read_loaded_value = [&](int32_t index,
+                                     const std::array<double, 4>& expected) {
+    void* loaded_stream = nullptr;
+    scene_runtime::AegpStreamValue loaded_value{};
+    std::array<double, 4> actual{};
+    bool read_ok = g_hooks.get_new_effect_stream_v2(
+                       0, effect, index, &loaded_stream) == 0 &&
+        loaded_stream && g_hooks.get_new_stream_value_v2(
+                             0, loaded_stream, 1, &time, 1,
+                             &loaded_value) == 0;
+    if (read_ok)
+      std::memcpy(actual.data(), loaded_value.value.data(), sizeof(actual));
+    read_ok = read_ok && actual == expected;
+    if (loaded_value.stream)
+      read_ok = g_hooks.dispose_stream_value_v2(&loaded_value) == 0 && read_ok;
+    if (loaded_stream)
+      read_ok = g_hooks.dispose_stream_v2(loaded_stream) == 0 && read_ok;
+    return read_ok;
+  };
+  ok = ok && read_loaded_value(2, {});  // Unconnected layer.
+  ok = ok && read_loaded_value(9, {23.5, 0.0, 0.0, 0.0});
+  ok = ok && read_loaded_value(
+                 10, {64.0 / 255.0, 128.0 / 255.0,
+                      192.0 / 255.0, 1.0});
+  ok = ok && read_loaded_value(11, {17.5, -3.25, 0.0, 0.0});
+  ok = ok && read_loaded_value(12, {1.25, 2.5, 5.0, 0.0});
+  ok = ok && read_loaded_value(13, {91.5, 0.0, 0.0, 0.0});
+
+  // Cross the production assignment seam: scalar current values replace the
+  // declared default, while point percentages become current-frame pixels in
+  // both PF_ParamDef and the AEGP stream view.
+  aexcompat::worker_runtime::parameter_execution::Definitions definitions(
+      records.size() + 1);
+  aexcompat::worker_runtime::parameter_execution::initialize_parameter_definitions(
+      definitions, 200, 80);
+  aexcompat::worker_runtime::parameters::RequestedAssignment scalar_override{};
+  scalar_override.id = L"Amount";
+  scalar_override.index = 1;
+  scalar_override.kind =
+      aexcompat::worker_runtime::parameters::RequestedKind::Float;
+  scalar_override.value = 81.75;
+  aexcompat::worker_runtime::parameters::RequestedAssignment point_override{};
+  point_override.id = L"Point";
+  point_override.index = 11;
+  point_override.kind =
+      aexcompat::worker_runtime::parameters::RequestedKind::Point;
+  point_override.components = {25.0, 50.0, 0.0};
+  aexcompat::worker_runtime::parameters::RequestedAssignment color_override{};
+  color_override.id = L"Color";
+  color_override.index = 10;
+  color_override.kind =
+      aexcompat::worker_runtime::parameters::RequestedKind::Color;
+  color_override.color = {16, 32, 64, 128};
+  ok = ok &&
+      aexcompat::worker_runtime::parameter_execution::apply_requested_assignments(
+          definitions, {scalar_override, point_override, color_override},
+          200, 80) &&
+      read_loaded_value(1, {81.75, 0.0, 0.0, 0.0}) &&
+      read_loaded_value(11, {50.0, 40.0, 0.0, 0.0}) &&
+      read_loaded_value(
+          10, {16.0 / 255.0, 32.0 / 255.0,
+               64.0 / 255.0, 128.0 / 255.0});
+
+  point_override.components = {40000.0, -50000.0, 0.0};
+  aexcompat::worker_runtime::parameters::RequestedAssignment angle_override{};
+  angle_override.id = L"Angle";
+  angle_override.index = 13;
+  angle_override.kind =
+      aexcompat::worker_runtime::parameters::RequestedKind::Angle;
+  angle_override.components = {32768.0, 0.0, 0.0};
+  ok = ok &&
+      aexcompat::worker_runtime::parameter_execution::apply_requested_assignments(
+          definitions, {point_override, angle_override}, 200, 80) &&
+      read_loaded_value(11, {32767.0, -32768.0, 0.0, 0.0}) &&
+      read_loaded_value(13, {32767.0, 0.0, 0.0, 0.0});
+
+  const auto committed_definitions = definitions;
+  const double committed_scalar = records[0].current_value;
+  const auto committed_point = records[10].current_components;
+  auto invalid_second = point_override;
+  invalid_second.index = 1;
+  scalar_override.value = 42.0;
+  ok = ok &&
+      !aexcompat::worker_runtime::parameter_execution::apply_requested_assignments(
+          definitions, {scalar_override, invalid_second}, 200, 80) &&
+      definitions == committed_definitions &&
+      records[0].current_value == committed_scalar &&
+      records[10].current_components == committed_point;
+
+  // A fresh frame without overrides returns to its effective defaults. The
+  // changed extent catches stale point pixels from the preceding frame.
+  aexcompat::worker_runtime::parameter_execution::initialize_parameter_definitions(
+      definitions, 300, 100);
+  ok = ok && read_loaded_value(1, {12.5, 0.0, 0.0, 0.0}) &&
+      read_loaded_value(10, {}) &&
+      read_loaded_value(11, {30.0, 20.0, 0.0, 0.0});
+
+  // Arbitrary data has no bounded ParamRecord representation. Refuse it
+  // without modifying the caller's output or consuming the stream borrow.
+  void* arbitrary_stream = nullptr;
+  scene_runtime::AegpStreamValue arbitrary_value{};
+  arbitrary_value.stream = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
+  arbitrary_value.value.fill(std::byte{0x5a});
+  const auto arbitrary_before = arbitrary_value;
+  ok = ok && g_hooks.get_new_effect_stream_v2(
+                 0, effect, 14, &arbitrary_stream) == 0 &&
+      arbitrary_stream && g_hooks.get_new_stream_value_v2(
+                              0, arbitrary_stream, 1, &time, 1,
+                              &arbitrary_value) == 4 &&
+      std::memcmp(&arbitrary_value, &arbitrary_before,
+                  sizeof(arbitrary_value)) == 0;
+  ok = g_hooks.dispose_stream_v2(arbitrary_stream) == 0 && ok;
 
   // A null stream handle is refused, not dereferenced.
   scene_runtime::AegpStreamValue unused{};

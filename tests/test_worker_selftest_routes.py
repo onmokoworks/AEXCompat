@@ -97,6 +97,14 @@ def test_aegp_installed_effect_catalog_passes_on_all_workers() -> None:
         pass
 
 
+def test_loaded_plugin_aegp_stream_values_pass_on_all_workers() -> None:
+    for _ in _all_workers(
+        "--self-test-aegp-loaded-plugin-streams",
+        "aegp_loaded_plugin_effect_streams",
+    ):
+        pass
+
+
 def test_aegp_keyframe_mutations_pass_on_all_workers() -> None:
     for name, report in _all_workers(
         "--self-test-aegp-keyframe-mutations", "aegp_keyframe_mutations"
@@ -240,9 +248,7 @@ def test_pf_private_callbacks_answer_like_ae_on_all_workers() -> None:
     malformed blur calls fail closed with the world untouched. The verdict is
     what is asserted here.
     """
-    for _ in _all_workers(
-        "--self-test-pf-private-callbacks", "pf_private_callbacks"
-    ):
+    for _ in _all_workers("--self-test-pf-private-callbacks", "pf_private_callbacks"):
         pass
 
 
