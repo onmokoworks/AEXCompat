@@ -89,6 +89,7 @@ enum LegacyWin64Import {
     GetEnvironmentVariableW,
     WideCharToMultiByte,
     MultiByteToWideChar,
+    GetStringTypeW,
     GetLastError,
     SetLastError,
     SetThreadErrorMode,
@@ -341,6 +342,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "WideCharToMultiByte") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "MultiByteToWideChar") => LegacyWin64Import::MultiByteToWideChar,
         (_, "MultiByteToWideChar") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetStringTypeW") => LegacyWin64Import::GetStringTypeW,
+        (_, "GetStringTypeW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
         ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
         ("kernel32.dll", "SetThreadErrorMode") => LegacyWin64Import::SetThreadErrorMode,
@@ -1189,6 +1192,18 @@ fn install_win64_import(
                     "install MultiByteToWideChar import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_multi_byte_to_wide_char(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetStringTypeW => {
+                uc(
+                    "write GetStringTypeW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetStringTypeW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_string_type_w(unicorn);
                     }),
                 )?;
             }
@@ -2134,6 +2149,346 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn emulate_get_string_type_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    const CT_CTYPE1: u32 = 1;
+    const CT_CTYPE2: u32 = 2;
+    const CT_CTYPE3: u32 = 3;
+
+    let result = (|| -> Result<(u64, Option<u32>), String> {
+        let info_type = read_win64_import_argument(unicorn, 0)? as u32;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        let source_length = read_win64_import_argument(unicorn, 2)? as u32 as i32;
+        let destination = read_win64_import_argument(unicorn, 3)?;
+        if !matches!(info_type, CT_CTYPE1 | CT_CTYPE2 | CT_CTYPE3)
+            || source == 0
+            || destination == 0
+            || source_length == 0
+        {
+            return Ok((0, Some(ERROR_INVALID_PARAMETER)));
+        }
+
+        let mut units = Vec::new();
+        if source_length < 0 {
+            for index in 0..=(MAX_CRT_STRING_BYTES / 2) {
+                let address = source
+                    .checked_add(index * 2)
+                    .ok_or_else(|| "GetStringTypeW source address overflow".to_string())?;
+                let bytes = unicorn
+                    .mem_read_as_vec(address, 2)
+                    .map_err(|error| format!("GetStringTypeW source read failed: {error}"))?;
+                let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+                units.push(unit);
+                if unit == 0 {
+                    break;
+                }
+                if index == MAX_CRT_STRING_BYTES / 2 {
+                    return Err("GetStringTypeW source is unterminated".into());
+                }
+            }
+        } else {
+            let byte_length = u64::try_from(source_length)
+                .ok()
+                .and_then(|length| length.checked_mul(2))
+                .filter(|length| *length <= MAX_CRT_STRING_BYTES)
+                .ok_or_else(|| "GetStringTypeW source is too large".to_string())?;
+            let bytes = unicorn
+                .mem_read_as_vec(source, byte_length as usize)
+                .map_err(|error| format!("GetStringTypeW source read failed: {error}"))?;
+            units.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+            );
+        }
+
+        let output_size = units
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| "GetStringTypeW output byte length overflows".to_string())?;
+        let source_end = source
+            .checked_add(output_size as u64 - 1)
+            .ok_or_else(|| "GetStringTypeW source range overflows".to_string())?;
+        let output_end = destination
+            .checked_add(output_size as u64 - 1)
+            .ok_or_else(|| "GetStringTypeW output range overflows".to_string())?;
+        if source <= output_end && destination <= source_end {
+            return Ok((0, Some(ERROR_INVALID_PARAMETER)));
+        }
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|error| format!("GetStringTypeW memory-map query failed: {error}"))?;
+        let mut cursor = destination;
+        while cursor <= output_end {
+            let region = regions
+                .iter()
+                .find(|region| {
+                    region.begin <= cursor
+                        && cursor <= region.end
+                        && region.perms & Prot::WRITE.0 as u32 != 0
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "GetStringTypeW output {destination:#x}..={output_end:#x} is not fully writable"
+                    )
+                })?;
+            if region.end >= output_end {
+                break;
+            }
+            cursor = region
+                .end
+                .checked_add(1)
+                .ok_or_else(|| "GetStringTypeW writable region overflows".to_string())?;
+        }
+
+        let output = units
+            .into_iter()
+            .flat_map(|unit| classify_utf16_unit(info_type, unit).to_le_bytes())
+            .collect::<Vec<_>>();
+        unicorn.mem_write(destination, &output).map_err(|error| {
+            format!("GetStringTypeW output {destination:#x} is not writable: {error}")
+        })?;
+        Ok((1, None))
+    })();
+
+    match result {
+        Ok((returned, error)) => {
+            if let Some(error) = error {
+                unicorn.get_data_mut().windows_last_error = error;
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+// These predicates intentionally use versioned Unicode data crates rather than
+// the host locale. Windows exposes classifications per UTF-16 code unit, so
+// surrogate halves remain visible and receive only their documented C3 flags.
+fn classify_utf16_unit(info_type: u32, unit: u16) -> u16 {
+    use unicode_bidi::BidiClass;
+    use unicode_general_category::{GeneralCategory, get_general_category};
+    use unicode_script::{Script, UnicodeScript};
+    use unicode_width::UnicodeWidthChar;
+
+    const C1_UPPER: u16 = 0x0001;
+    const C1_LOWER: u16 = 0x0002;
+    const C1_DIGIT: u16 = 0x0004;
+    const C1_SPACE: u16 = 0x0008;
+    const C1_PUNCT: u16 = 0x0010;
+    const C1_CNTRL: u16 = 0x0020;
+    const C1_BLANK: u16 = 0x0040;
+    const C1_XDIGIT: u16 = 0x0080;
+    const C1_ALPHA: u16 = 0x0100;
+    const C1_DEFINED: u16 = 0x0200;
+    const C2_LEFTTORIGHT: u16 = 0x0001;
+    const C2_RIGHTTOLEFT: u16 = 0x0002;
+    const C2_EUROPENUMBER: u16 = 0x0003;
+    const C2_EUROPESEPARATOR: u16 = 0x0004;
+    const C2_EUROPETERMINATOR: u16 = 0x0005;
+    const C2_ARABICNUMBER: u16 = 0x0006;
+    const C2_COMMONSEPARATOR: u16 = 0x0007;
+    const C2_BLOCKSEPARATOR: u16 = 0x0008;
+    const C2_SEGMENTSEPARATOR: u16 = 0x0009;
+    const C2_WHITESPACE: u16 = 0x000a;
+    const C2_OTHERNEUTRAL: u16 = 0x000b;
+    const C3_NONSPACING: u16 = 0x0001;
+    const C3_DIACRITIC: u16 = 0x0002;
+    const C3_VOWELMARK: u16 = 0x0004;
+    const C3_SYMBOL: u16 = 0x0008;
+    const C3_KATAKANA: u16 = 0x0010;
+    const C3_HIRAGANA: u16 = 0x0020;
+    const C3_HALFWIDTH: u16 = 0x0040;
+    const C3_FULLWIDTH: u16 = 0x0080;
+    const C3_IDEOGRAPH: u16 = 0x0100;
+    const C3_KASHIDA: u16 = 0x0200;
+    const C3_LEXICAL: u16 = 0x0400;
+    const C3_HIGHSURROGATE: u16 = 0x0800;
+    const C3_LOWSURROGATE: u16 = 0x1000;
+    const C3_ALPHA: u16 = 0x8000;
+
+    if info_type == 3 {
+        if (0xd800..=0xdbff).contains(&unit) {
+            return C3_HIGHSURROGATE;
+        }
+        if (0xdc00..=0xdfff).contains(&unit) {
+            return C3_LOWSURROGATE;
+        }
+    }
+    let Some(character) = char::from_u32(u32::from(unit)) else {
+        return 0;
+    };
+    let code = u32::from(character);
+    let category = get_general_category(character);
+    let is_punctuation = matches!(
+        category,
+        GeneralCategory::ConnectorPunctuation
+            | GeneralCategory::DashPunctuation
+            | GeneralCategory::OpenPunctuation
+            | GeneralCategory::ClosePunctuation
+            | GeneralCategory::InitialPunctuation
+            | GeneralCategory::FinalPunctuation
+            | GeneralCategory::OtherPunctuation
+    );
+    let is_symbol = matches!(
+        category,
+        GeneralCategory::MathSymbol
+            | GeneralCategory::CurrencySymbol
+            | GeneralCategory::ModifierSymbol
+            | GeneralCategory::OtherSymbol
+    );
+    match info_type {
+        1 => {
+            let mut flags = 0;
+            if character.is_uppercase() {
+                flags |= C1_UPPER;
+            }
+            if character.is_lowercase() {
+                flags |= C1_LOWER;
+            }
+            if category == GeneralCategory::DecimalNumber {
+                flags |= C1_DIGIT;
+            }
+            if character.is_whitespace() {
+                flags |= C1_SPACE;
+            }
+            if category == GeneralCategory::Control {
+                flags |= C1_CNTRL;
+            }
+            if character == '\t' || category == GeneralCategory::SpaceSeparator {
+                flags |= C1_BLANK;
+            }
+            if character.is_ascii_hexdigit() {
+                flags |= C1_XDIGIT;
+            }
+            if character.is_alphabetic() {
+                flags |= C1_ALPHA;
+            }
+            if is_punctuation || is_symbol {
+                flags |= C1_PUNCT;
+            }
+            // C1_DEFINED is the fallback for an assigned character that has no
+            // more specific CTYPE1 attribute; it is not an all-assigned bit.
+            if flags == 0 && category != GeneralCategory::Unassigned {
+                flags = C1_DEFINED;
+            }
+            flags
+        }
+        2 => match unicode_bidi::bidi_class(character) {
+            BidiClass::L => C2_LEFTTORIGHT,
+            BidiClass::R | BidiClass::AL => C2_RIGHTTOLEFT,
+            BidiClass::EN => C2_EUROPENUMBER,
+            BidiClass::ES => C2_EUROPESEPARATOR,
+            BidiClass::ET => C2_EUROPETERMINATOR,
+            BidiClass::AN => C2_ARABICNUMBER,
+            BidiClass::CS => C2_COMMONSEPARATOR,
+            BidiClass::B => C2_BLOCKSEPARATOR,
+            BidiClass::S => C2_SEGMENTSEPARATOR,
+            BidiClass::WS => C2_WHITESPACE,
+            BidiClass::BN
+            | BidiClass::LRE
+            | BidiClass::LRO
+            | BidiClass::RLE
+            | BidiClass::RLO
+            | BidiClass::PDF
+            | BidiClass::LRI
+            | BidiClass::RLI
+            | BidiClass::FSI
+            | BidiClass::PDI => 0,
+            _ => C2_OTHERNEUTRAL,
+        },
+        3 => {
+            let mut flags = 0;
+            let combining = unicode_normalization::char::canonical_combining_class(character);
+            if category == GeneralCategory::NonspacingMark {
+                flags |= C3_NONSPACING;
+            }
+            if combining != 0 {
+                flags |= C3_DIACRITIC;
+            }
+            if is_dependent_vowel_mark(character) {
+                flags |= C3_VOWELMARK;
+            }
+            if character.is_alphabetic() {
+                flags |= C3_ALPHA;
+            }
+            match character.script() {
+                Script::Hiragana => flags |= C3_HIRAGANA,
+                Script::Katakana => flags |= C3_KATAKANA,
+                Script::Han => flags |= C3_IDEOGRAPH,
+                _ => {}
+            }
+            // Unicode width data covers East Asian W/F characters. The explicit
+            // Halfwidth Forms interval preserves Windows' C3_HALFWIDTH signal.
+            if is_assigned_halfwidth_form(code, category) {
+                flags |= C3_HALFWIDTH;
+            }
+            if (0xff66..=0xff9f).contains(&code) {
+                flags |= C3_KATAKANA;
+            }
+            if UnicodeWidthChar::width(character) == Some(2) {
+                flags |= C3_FULLWIDTH;
+            }
+            if code == 0x0640 {
+                flags |= C3_KASHIDA;
+            }
+            if is_windows_lexical_character(code, category) {
+                flags |= C3_LEXICAL;
+            }
+            if is_symbol {
+                flags |= C3_SYMBOL;
+            }
+            flags
+        }
+        _ => 0,
+    }
+}
+
+fn is_assigned_halfwidth_form(
+    code: u32,
+    category: unicode_general_category::GeneralCategory,
+) -> bool {
+    use unicode_general_category::GeneralCategory;
+
+    category != GeneralCategory::Unassigned
+        && matches!(
+            code,
+            0xff61..=0xffbe
+                | 0xffc2..=0xffc7
+                | 0xffca..=0xffcf
+                | 0xffd2..=0xffd7
+                | 0xffda..=0xffdc
+        )
+}
+
+fn is_windows_lexical_character(
+    code: u32,
+    category: unicode_general_category::GeneralCategory,
+) -> bool {
+    use unicode_general_category::GeneralCategory;
+
+    // Windows' C3_LEXICAL is narrower than Unicode punctuation: it marks
+    // word-forming/joining punctuation. Unicode dash punctuation supplies the
+    // versioned dash set; WinNLS additionally treats '=', the feminine and
+    // masculine ordinal indicators, and Arabic kashida as lexical. General
+    // punctuation such as '!' deliberately remains unmarked.
+    category == GeneralCategory::DashPunctuation
+        || matches!(code, 0x003d | 0x00aa | 0x00ba | 0x0640)
+}
+
+fn is_dependent_vowel_mark(character: char) -> bool {
+    use icu_properties::{CodePointMapData, props::IndicSyllabicCategory};
+
+    CodePointMapData::<IndicSyllabicCategory>::new().get(character)
+        == IndicSyllabicCategory::VowelDependent
 }
 
 fn encode_shift_jis_with_default(input: &str, default: u8) -> (Vec<u8>, bool) {
