@@ -237,12 +237,16 @@ jobs:
 
       # `aex_*.exe` に絞らない。minihost-build 直下には worker 3 本のほかに
       # native selftest のラッパが 30 本以上あり、pytest がそれらを直接起動する。
+      # dll も要る: worker_session_detach_fixture.dll と dynamic suite の
+      # companion/consumer fixture は selftest がロードする側の入力で、
+      # exe だけ運ぶと "missing self-test binary" になる。
       - name: Publish native workers
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-workers
           path: |
             target/minihost-build/*.exe
+            target/minihost-build/*.dll
             target/instruments-build/*.exe
           if-no-files-found: error
           retention-days: 1
@@ -392,12 +396,17 @@ jobs:
       # SDK を取れなかった run (fork PR) でも gpu-effects の fixture は生成されて
       # いるので、artifact 自体は必ず 1 件以上になる。SDK 依存の中身が入って
       # いるかどうかは、この job の `sdk` output で下流が判断する。
+      #
+      # AEX は `target/**` で拾う。ビルドディレクトリの名前は
+      # `pf-*-probe-build` で揃っておらず、`classic-failure-probes-build` の
+      # ように複数形のものがある。名前の規則に賭けると、増えた probe が
+      # 黙って運ばれないまま「テストが成果物不在で skip」に化ける。
       - name: Publish native probes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-probes
           path: |
-            target/*-probe-build/**/*.aex
+            target/**/*.aex
             target/instruments-build/abi_layout_probe.exe
             target/sdk-fixtures/**
             target/gpu-effects/**
