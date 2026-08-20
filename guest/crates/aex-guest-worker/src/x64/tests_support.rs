@@ -9765,6 +9765,254 @@ fn create_file_w_distinguishes_maximum_and_over_limit_readable_paths() {
 }
 
 #[test]
+fn find_first_file_ex_w_is_kernel32_scoped_and_observes_empty_namespace() {
+    const FIND_FIRST: u64 = STUB_BASE + 0x1c8;
+    const FIND_DATA_SIZE: usize = 592;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            FIND_FIRST,
+            "KERNEL32.DLL",
+            "FindFirstFileExW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::FindFirstFileExW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "FindFirstFileExW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let path = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\*.onnx");
+    let output = engine.allocate(FIND_DATA_SIZE, 8).unwrap();
+    let sentinel = vec![0xa5; FIND_DATA_SIZE];
+    engine.write(output, &sentinel).unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                FIND_FIRST,
+                &[path, 1, output, 0, 0, 0x1_0000_0000],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_FILE_NOT_FOUND
+    );
+    let mut actual = vec![0; FIND_DATA_SIZE];
+    engine.read(output, &mut actual).unwrap();
+    assert_eq!(actual, sentinel);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn find_first_file_ex_w_denies_traversal_device_and_unc_paths_without_output_mutation() {
+    const FIND_DATA_SIZE: usize = 592;
+    let mut engine = test_engine(&[0xc3]);
+    let output = engine.allocate(FIND_DATA_SIZE, 8).unwrap();
+    let sentinel = vec![0x5a; FIND_DATA_SIZE];
+    for path in [
+        r"D:\plugin\crates\core\../../model",
+        r"\\server\share\*.onnx",
+        r"\\.\PhysicalDrive0",
+        r"\\?\C:\secret\*",
+    ] {
+        let path = write_test_wide_path(&mut engine, path);
+        engine.write(output, &sentinel).unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, path)
+            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, 1).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, output).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R9, 0).unwrap();
+        let rsp = STACK_BASE + STACK_SIZE - 0x108 | 8;
+        engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+        for (index, value) in [0u64, 0].into_iter().enumerate() {
+            engine
+                .write(rsp + 0x28 + index as u64 * 8, &value.to_le_bytes())
+                .unwrap();
+        }
+        emulate_find_first_file_ex_w(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_ACCESS_DENIED
+        );
+        let mut actual = vec![0; FIND_DATA_SIZE];
+        engine.read(output, &mut actual).unwrap();
+        assert_eq!(actual, sentinel);
+    }
+}
+
+#[test]
+fn find_first_file_ex_w_validates_enums_flags_filter_and_output() {
+    const FIND_FIRST: u64 = STUB_BASE + 0x1c8;
+    const FIND_DATA_SIZE: usize = 592;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        FIND_FIRST,
+        "kernel32.dll",
+        "FindFirstFileExW",
+    )
+    .unwrap();
+    let path = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\*");
+    let output = engine.allocate(FIND_DATA_SIZE, 8).unwrap();
+    let sentinel = vec![0x3c; FIND_DATA_SIZE];
+
+    for arguments in [
+        [path, 2, output, 0, 0, 0],
+        [path, 1, output, 3, 0, 0],
+        [path, 1, output, 0, 1, 0],
+        [path, 1, output, 0, 0, 8],
+        [path, 1, 0, 0, 0, 0],
+        [path, 1, 0xdead_beef, 0, 0, 0],
+    ] {
+        engine.write(output, &sentinel).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(FIND_FIRST, &arguments, TIMEOUT_MICROSECONDS)
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+        let mut actual = vec![0; FIND_DATA_SIZE];
+        engine.read(output, &mut actual).unwrap();
+        assert_eq!(actual, sentinel);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                FIND_FIRST,
+                &[path, 1, output, 2, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_NOT_SUPPORTED
+    );
+
+    for (info_level, search_op, flags) in [(0, 0, 0), (1, 1, 7)] {
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    FIND_FIRST,
+                    &[path, info_level, output, search_op, 0, flags],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_FILE_NOT_FOUND
+        );
+    }
+}
+
+#[test]
+fn find_first_file_ex_w_bounds_and_validates_utf16_input() {
+    const FIND_FIRST: u64 = STUB_BASE + 0x1c8;
+    const FIND_DATA_SIZE: usize = 592;
+    const MAX_PATH_UNITS: usize = 32_767;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        FIND_FIRST,
+        "kernel32.dll",
+        "FindFirstFileExW",
+    )
+    .unwrap();
+    let output = engine.allocate(FIND_DATA_SIZE, 8).unwrap();
+
+    for (path, expected_error) in [(0, ERROR_PATH_NOT_FOUND)] {
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    FIND_FIRST,
+                    &[path, 1, output, 0, 0, 0],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, expected_error);
+    }
+    let malformed = engine.allocate(4, 2).unwrap();
+    engine
+        .write(malformed, &[0x00, 0xd8, 0x00, 0x00])
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                FIND_FIRST,
+                &[malformed, 1, output, 0, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+
+    engine
+        .unicorn
+        .mem_map(DATA_BASE + PAGE_SIZE, 0x1_0000, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let long_path = DATA_BASE + 0x800;
+    let mut bytes = Vec::with_capacity((MAX_PATH_UNITS + 2) * 2);
+    for _ in 0..=MAX_PATH_UNITS {
+        bytes.extend_from_slice(&u16::from(b'a').to_le_bytes());
+    }
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    engine.write(long_path, &bytes).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                FIND_FIRST,
+                &[long_path, 1, output, 0, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_FILENAME_EXCED_RANGE
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_find_first_file_ex_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not fully readable"))
+    );
+}
+
+#[test]
 fn get_command_line_a_returns_stable_writable_guest_owned_storage() {
     const GET_COMMAND_LINE: u64 = STUB_BASE + 0x1c8;
     const COMMAND_LINE: &[u8] = b"\"aex-guest-worker.exe\"\0";

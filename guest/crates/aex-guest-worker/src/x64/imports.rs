@@ -82,6 +82,7 @@ enum LegacyWin64Import {
     GetConsoleMode,
     GetFileType,
     CreateFileW,
+    FindFirstFileExW,
     CreateThread,
     NtWriteFile,
     WakeByAddressAll,
@@ -351,6 +352,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetFileType") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "CreateFileW") => LegacyWin64Import::CreateFileW,
         (_, "CreateFileW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "FindFirstFileExW") => LegacyWin64Import::FindFirstFileExW,
+        (_, "FindFirstFileExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "CreateThread") => LegacyWin64Import::CreateThread,
         (_, "CreateThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ntdll.dll", "NtWriteFile") => LegacyWin64Import::NtWriteFile,
@@ -1201,6 +1204,18 @@ fn install_win64_import(
                     "install bounded CreateFileW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_create_file_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::FindFirstFileExW => {
+                uc(
+                    "write FindFirstFileExW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install bounded FindFirstFileExW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_find_first_file_ex_w(unicorn);
                     }),
                 )?;
             }
@@ -5585,6 +5600,102 @@ fn emulate_create_file_w(unicorn: &mut Unicorn<'_, GuestState>) {
         // exists in this namespace, neither legal optional argument is
         // dereferenced or treated as an invalid pointer/handle.
         let _ = (security_attributes, template_file);
+        fail(unicorn, ERROR_FILE_NOT_FOUND);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.reg_write(RegisterX86::RAX, INVALID_HANDLE_VALUE);
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn emulate_find_first_file_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    const INVALID_HANDLE_VALUE: u64 = u64::MAX;
+    const MAX_PATH_UNITS: usize = 32_767;
+    const WIN32_FIND_DATA_W_SIZE: u64 = 592;
+    const FIND_EX_INFO_BASIC: u32 = 1;
+    const FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES: u32 = 1;
+    const FIND_EX_SEARCH_LIMIT_TO_DEVICES: u32 = 2;
+    const SUPPORTED_ADDITIONAL_FLAGS: u32 = 0x1 | 0x2 | 0x4;
+
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, INVALID_HANDLE_VALUE);
+    };
+    let result = (|| {
+        let path_pointer = read_win64_import_argument(unicorn, 0)?;
+        if path_pointer == 0 {
+            fail(unicorn, ERROR_PATH_NOT_FOUND);
+            return Ok(());
+        }
+        let mut units = Vec::new();
+        for index in 0..=MAX_PATH_UNITS {
+            let address = path_pointer
+                .checked_add((index as u64) * 2)
+                .ok_or_else(|| "FindFirstFileExW path range overflows".to_string())?;
+            let bytes = unicorn.mem_read_as_vec(address, 2).map_err(|error| {
+                format!(
+                    "FindFirstFileExW path {path_pointer:#x} is not fully readable: {error}"
+                )
+            })?;
+            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if unit == 0 {
+                break;
+            }
+            if index == MAX_PATH_UNITS {
+                fail(unicorn, ERROR_FILENAME_EXCED_RANGE);
+                return Ok(());
+            }
+            units.push(unit);
+        }
+        if char::decode_utf16(units.iter().copied()).any(|character| character.is_err()) {
+            fail(unicorn, ERROR_INVALID_PARAMETER);
+            return Ok(());
+        }
+        if units.is_empty() {
+            fail(unicorn, ERROR_PATH_NOT_FOUND);
+            return Ok(());
+        }
+
+        let info_level = read_win64_import_argument(unicorn, 1)? as u32;
+        let output = read_win64_import_argument(unicorn, 2)?;
+        let search_op = read_win64_import_argument(unicorn, 3)? as u32;
+        let search_filter = read_win64_import_argument(unicorn, 4)?;
+        let additional_flags = read_win64_import_argument(unicorn, 5)? as u32;
+        if info_level > FIND_EX_INFO_BASIC
+            || search_op > FIND_EX_SEARCH_LIMIT_TO_DEVICES
+            || search_filter != 0
+            || additional_flags & !SUPPORTED_ADDITIONAL_FLAGS != 0
+            || output == 0
+            || !guest_range_has_permission(unicorn, output, WIN32_FIND_DATA_W_SIZE, Prot::WRITE)?
+        {
+            fail(unicorn, ERROR_INVALID_PARAMETER);
+            return Ok(());
+        }
+        if search_op > FIND_EX_SEARCH_LIMIT_TO_DIRECTORIES {
+            fail(unicorn, ERROR_NOT_SUPPORTED);
+            return Ok(());
+        }
+
+        let path = String::from_utf16(&units)
+            .map_err(|_| "FindFirstFileExW path contains malformed UTF-16".to_string())?;
+        let normalized = path.replace('/', "\\");
+        let components = normalized.split('\\').collect::<Vec<_>>();
+        if normalized.starts_with("\\\\")
+            || normalized.starts_with("\\?\\")
+            || normalized.starts_with("\\.\\")
+            || components.iter().any(|component| *component == "..")
+        {
+            fail(unicorn, ERROR_ACCESS_DENIED);
+            return Ok(());
+        }
+
+        // The sealed guest namespace contains no mounted directory entries.
+        // Do not translate the guest path or consult the host filesystem, and
+        // leave WIN32_FIND_DATAW untouched when no match exists.
         fail(unicorn, ERROR_FILE_NOT_FOUND);
         Ok(())
     })();
