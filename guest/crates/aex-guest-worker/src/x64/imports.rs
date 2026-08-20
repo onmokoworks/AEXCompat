@@ -4987,7 +4987,7 @@ fn emulate_output_debug_string_a(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && region.perms & Prot::READ.0 == Prot::READ.0
+                        && region.perms & Prot::READ.0 as u32 == Prot::READ.0 as u32
                 })
                 .ok_or_else(|| {
                     format!("OutputDebugStringA string at {cursor:#x} is unreadable")
@@ -5210,7 +5210,7 @@ fn read_strncpy_s_source(
             .find(|region| {
                 region.begin <= cursor
                     && cursor <= region.end
-                    && region.perms & Prot::READ.0 == Prot::READ.0
+                    && region.perms & Prot::READ.0 as u32 == Prot::READ.0 as u32
             })
             .ok_or_else(|| format!("strncpy_s source at {cursor:#x} is not readable"))?;
         let available = region
