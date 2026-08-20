@@ -148,6 +148,7 @@ enum LegacyWin64Import {
     HeapReAlloc,
     WsaStartup,
     WsaCleanup,
+    RtlPcToFileHeader,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -443,6 +444,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "WSAStartup" | "ORDINAL 115" | "WSACleanup" | "ORDINAL 116") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("kernel32.dll", "RtlPcToFileHeader") => LegacyWin64Import::RtlPcToFileHeader,
+        (_, "RtlPcToFileHeader") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "InitializeCriticalSection") => {
             LegacyWin64Import::InitializeCriticalSection
         }
@@ -1736,6 +1739,18 @@ fn install_win64_import(
                     "install WSACleanup import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_wsa_cleanup(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::RtlPcToFileHeader => {
+                uc(
+                    "write RtlPcToFileHeader return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install RtlPcToFileHeader import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_rtl_pc_to_file_header(unicorn);
                     }),
                 )?;
             }
@@ -6374,6 +6389,28 @@ fn emulate_wsa_cleanup(unicorn: &mut Unicorn<'_, GuestState>) {
         0
     };
     let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(code));
+}
+
+fn emulate_rtl_pc_to_file_header(unicorn: &mut Unicorn<'_, GuestState>) {
+    let pc = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+    let output = read_win64_import_argument(unicorn, 1).unwrap_or_default();
+    if output != 0 && !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false)
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    let module = unicorn
+        .get_data()
+        .image_region
+        .filter(|(start, end)| (*start..*end).contains(&pc))
+        .map(|(start, _)| start)
+        .or_else(|| (pc == WINDOWS_KERNEL32_MODULE_TOKEN).then_some(WINDOWS_KERNEL32_MODULE_TOKEN))
+        .unwrap_or_default();
+    if output != 0 && unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, module);
 }
 
 fn read_win64_import_argument(
