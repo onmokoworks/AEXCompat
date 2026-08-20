@@ -151,6 +151,8 @@ enum LegacyWin64Import {
     HeapAlloc,
     HeapFree,
     HeapReAlloc,
+    HeapCreate,
+    HeapDestroy,
     WsaStartup,
     WsaCleanup,
     RtlPcToFileHeader,
@@ -444,7 +446,13 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "HeapAlloc") => LegacyWin64Import::HeapAlloc,
         ("kernel32.dll", "HeapFree") => LegacyWin64Import::HeapFree,
         ("kernel32.dll", "HeapReAlloc") => LegacyWin64Import::HeapReAlloc,
-        (_, "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc") => {
+        ("kernel32.dll", "HeapCreate") => LegacyWin64Import::HeapCreate,
+        ("kernel32.dll", "HeapDestroy") => LegacyWin64Import::HeapDestroy,
+        (
+            _,
+            "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc" | "HeapCreate"
+            | "HeapDestroy",
+        ) => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("ws2_32.dll", "WSAStartup" | "ORDINAL 115") => LegacyWin64Import::WsaStartup,
@@ -1790,6 +1798,18 @@ fn install_win64_import(
                     "install process heap import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                         emulate_process_heap(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::HeapCreate | LegacyWin64Import::HeapDestroy => {
+                uc(
+                    "write private heap return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install private heap import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_private_heap_lifecycle(unicorn, implementation);
                     }),
                 )?;
             }
@@ -5665,14 +5685,113 @@ fn fail_process_heap(unicorn: &mut Unicorn<'_, GuestState>, error: String) {
 fn require_process_heap_handle(
     unicorn: &mut Unicorn<'_, GuestState>,
     operation: &str,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let handle = read_win64_import_argument(unicorn, 0)?;
-    if handle != PROCESS_HEAP_HANDLE {
+    if handle != PROCESS_HEAP_HANDLE
+        && !unicorn
+            .get_data()
+            .windows_private_heaps
+            .contains_key(&handle)
+    {
         return Err(format!(
             "{operation} rejected unknown heap handle {handle:#x}"
         ));
     }
+    Ok(handle)
+}
+
+fn require_heap_allocation_owner(
+    unicorn: &Unicorn<'_, GuestState>,
+    operation: &str,
+    handle: u64,
+    pointer: u64,
+) -> Result<(), String> {
+    if handle == PROCESS_HEAP_HANDLE {
+        if unicorn
+            .get_data()
+            .windows_private_heaps
+            .values()
+            .any(|allocations| allocations.contains(&pointer))
+        {
+            return Err(format!(
+                "{operation} rejected private allocation {pointer:#x} on the process heap"
+            ));
+        }
+    } else if !unicorn
+        .get_data()
+        .windows_private_heaps
+        .get(&handle)
+        .is_some_and(|allocations| allocations.contains(&pointer))
+    {
+        return Err(format!(
+            "{operation} rejected allocation {pointer:#x} not owned by heap {handle:#x}"
+        ));
+    }
     Ok(())
+}
+
+fn emulate_private_heap_lifecycle(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    match operation {
+        LegacyWin64Import::HeapCreate => {
+            let flags = read_win64_import_argument(unicorn, 0).unwrap_or(u64::MAX);
+            let initial_size = read_win64_import_argument(unicorn, 1).unwrap_or(u64::MAX);
+            let maximum_size = read_win64_import_argument(unicorn, 2).unwrap_or(u64::MAX);
+            if flags & !u64::from(HEAP_NO_SERIALIZE) != 0
+                || initial_size != 0
+                || maximum_size != 0
+                || unicorn.get_data().windows_private_heaps.len() >= 64
+            {
+                let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+                return;
+            }
+            let generation = NEXT_PRIVATE_HEAP_TOKEN.fetch_add(1, AtomicOrdering::Relaxed);
+            let Some(handle) = PRIVATE_HEAP_TOKEN_BASE.checked_add(generation) else {
+                let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+                return;
+            };
+            unicorn
+                .get_data_mut()
+                .windows_private_heaps
+                .insert(handle, BTreeSet::new());
+            let _ = unicorn.reg_write(RegisterX86::RAX, handle);
+        }
+        LegacyWin64Import::HeapDestroy => {
+            let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+            if handle == PROCESS_HEAP_HANDLE {
+                return fail_process_heap(unicorn, "HeapDestroy rejected the process heap".into());
+            }
+            let Some(allocations) = unicorn.get_data_mut().windows_private_heaps.remove(&handle)
+            else {
+                return fail_process_heap(
+                    unicorn,
+                    format!("HeapDestroy rejected unknown heap handle {handle:#x}"),
+                );
+            };
+            for pointer in allocations {
+                let allocation = match unicorn.get_data_mut().crt_heap.remove_process_heap(pointer)
+                {
+                    Ok(allocation) => allocation,
+                    Err(error) => {
+                        return fail_process_heap(
+                            unicorn,
+                            format!("HeapDestroy allocation {pointer:#x} removal failed: {error}"),
+                        );
+                    }
+                };
+                if let Err(error) = unicorn.mem_unmap(pointer, allocation.backing_size) {
+                    return fail_process_heap(
+                        unicorn,
+                        format!("HeapDestroy allocation {pointer:#x} unmap failed: {error}"),
+                    );
+                }
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+        }
+        _ => fail_process_heap(unicorn, "invalid private heap lifecycle operation".into()),
+    }
 }
 
 fn read_process_heap_flags(
@@ -5708,6 +5827,7 @@ fn emulate_process_heap(unicorn: &mut Unicorn<'_, GuestState>, operation: Legacy
 
 fn allocate_process_heap_region(
     unicorn: &mut Unicorn<'_, GuestState>,
+    handle: u64,
     size: u64,
 ) -> Result<u64, CrtHeapError> {
     let allocation = unicorn
@@ -5725,11 +5845,24 @@ fn allocate_process_heap_region(
         let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
         return Err(error);
     }
+    if handle != PROCESS_HEAP_HANDLE {
+        let Some(allocations) = unicorn
+            .get_data_mut()
+            .windows_private_heaps
+            .get_mut(&handle)
+        else {
+            let _ = unicorn.get_data_mut().crt_heap.remove_process_heap(pointer);
+            let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
+            return Err(CrtHeapError::AllocatorMismatch);
+        };
+        allocations.insert(pointer);
+    }
     Ok(pointer)
 }
 
 fn free_process_heap_region(
     unicorn: &mut Unicorn<'_, GuestState>,
+    handle: u64,
     pointer: u64,
 ) -> Result<(), String> {
     let allocation = unicorn
@@ -5739,22 +5872,32 @@ fn free_process_heap_region(
         .map_err(|error| error.to_string())?;
     unicorn
         .mem_unmap(pointer, allocation.backing_size)
-        .map_err(|error| format!("unmap process heap allocation {pointer:#x}: {error}"))
+        .map_err(|error| format!("unmap process heap allocation {pointer:#x}: {error}"))?;
+    if handle != PROCESS_HEAP_HANDLE {
+        if let Some(allocations) = unicorn
+            .get_data_mut()
+            .windows_private_heaps
+            .get_mut(&handle)
+        {
+            allocations.remove(&pointer);
+        }
+    }
+    Ok(())
 }
 
 fn emulate_heap_alloc(unicorn: &mut Unicorn<'_, GuestState>) {
-    let arguments = (|| -> Result<(u32, u64), String> {
-        require_process_heap_handle(unicorn, "HeapAlloc")?;
+    let arguments = (|| -> Result<(u64, u32, u64), String> {
+        let handle = require_process_heap_handle(unicorn, "HeapAlloc")?;
         let flags = read_process_heap_flags(unicorn, "HeapAlloc", HEAP_ALLOC_ALLOWED_FLAGS)?;
         let size = read_win64_import_argument(unicorn, 2)?;
-        Ok((flags, size))
+        Ok((handle, flags, size))
     })();
-    let (flags, size) = match arguments {
+    let (handle, flags, size) = match arguments {
         Ok(arguments) => arguments,
         Err(error) => return fail_process_heap(unicorn, error),
     };
 
-    let pointer = match allocate_process_heap_region(unicorn, size) {
+    let pointer = match allocate_process_heap_region(unicorn, handle, size) {
         Ok(pointer) => pointer,
         Err(_) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
@@ -5764,7 +5907,7 @@ fn emulate_heap_alloc(unicorn: &mut Unicorn<'_, GuestState>) {
     if flags & HEAP_ZERO_MEMORY != 0 {
         let length = size.max(1) as usize;
         if let Err(error) = unicorn.mem_write(pointer, &vec![0; length]) {
-            let _ = free_process_heap_region(unicorn, pointer);
+            let _ = free_process_heap_region(unicorn, handle, pointer);
             return fail_process_heap(unicorn, format!("HeapAlloc zero-fill failed: {error}"));
         }
     }
@@ -5772,10 +5915,14 @@ fn emulate_heap_alloc(unicorn: &mut Unicorn<'_, GuestState>) {
 }
 
 fn emulate_heap_free(unicorn: &mut Unicorn<'_, GuestState>) {
-    let pointer = match (|| -> Result<u64, String> {
-        require_process_heap_handle(unicorn, "HeapFree")?;
+    let (handle, pointer) = match (|| -> Result<(u64, u64), String> {
+        let handle = require_process_heap_handle(unicorn, "HeapFree")?;
         let _ = read_process_heap_flags(unicorn, "HeapFree", HEAP_NO_SERIALIZE)?;
-        read_win64_import_argument(unicorn, 2)
+        let pointer = read_win64_import_argument(unicorn, 2)?;
+        if pointer != 0 {
+            require_heap_allocation_owner(unicorn, "HeapFree", handle, pointer)?;
+        }
+        Ok((handle, pointer))
     })() {
         Ok(pointer) => pointer,
         Err(error) => return fail_process_heap(unicorn, error),
@@ -5784,7 +5931,7 @@ fn emulate_heap_free(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.reg_write(RegisterX86::RAX, 1);
         return;
     }
-    match free_process_heap_region(unicorn, pointer) {
+    match free_process_heap_region(unicorn, handle, pointer) {
         Ok(()) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, 1);
         }
@@ -5793,17 +5940,18 @@ fn emulate_heap_free(unicorn: &mut Unicorn<'_, GuestState>) {
 }
 
 fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
-    let arguments = (|| -> Result<(u32, u64, u64), String> {
-        require_process_heap_handle(unicorn, "HeapReAlloc")?;
+    let arguments = (|| -> Result<(u64, u32, u64, u64), String> {
+        let handle = require_process_heap_handle(unicorn, "HeapReAlloc")?;
         let flags = read_process_heap_flags(unicorn, "HeapReAlloc", HEAP_REALLOC_ALLOWED_FLAGS)?;
         let pointer = read_win64_import_argument(unicorn, 2)?;
         let size = read_win64_import_argument(unicorn, 3)?;
         if pointer == 0 {
             return Err("HeapReAlloc pointer is null".into());
         }
-        Ok((flags, pointer, size))
+        require_heap_allocation_owner(unicorn, "HeapReAlloc", handle, pointer)?;
+        Ok((handle, flags, pointer, size))
     })();
-    let (flags, pointer, size) = match arguments {
+    let (handle, flags, pointer, size) = match arguments {
         Ok(arguments) => arguments,
         Err(error) => return fail_process_heap(unicorn, error),
     };
@@ -5923,6 +6071,17 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn,
             format!("HeapReAlloc unmap old block failed: {error}"),
         );
+    }
+    if handle != PROCESS_HEAP_HANDLE {
+        let Some(allocations) = unicorn
+            .get_data_mut()
+            .windows_private_heaps
+            .get_mut(&handle)
+        else {
+            return fail_process_heap(unicorn, "HeapReAlloc lost private heap ownership".into());
+        };
+        allocations.remove(&pointer);
+        allocations.insert(new_pointer);
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, new_pointer);
 }

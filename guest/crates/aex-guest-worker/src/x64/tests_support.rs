@@ -8508,6 +8508,191 @@ fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() 
 }
 
 #[test]
+fn private_heap_lifecycle_tracks_allocations_and_releases_them_on_destroy() {
+    const HEAP_CREATE: u64 = STUB_BASE + 0x660;
+    const HEAP_DESTROY: u64 = STUB_BASE + 0x670;
+    const HEAP_ALLOC: u64 = STUB_BASE + 0x680;
+    const HEAP_REALLOC: u64 = STUB_BASE + 0x690;
+    let mut engine = test_engine(&[0xc3]);
+    for (address, symbol) in [
+        (HEAP_CREATE, "HeapCreate"),
+        (HEAP_DESTROY, "HeapDestroy"),
+        (HEAP_ALLOC, "HeapAlloc"),
+        (HEAP_REALLOC, "HeapReAlloc"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+
+    let heap = engine.call_win64(HEAP_CREATE, [0; 6]).unwrap();
+    assert_ne!(heap, 0);
+    assert_ne!(heap, PROCESS_HEAP_HANDLE);
+    let pointer = engine
+        .call_win64(HEAP_ALLOC, [heap, u64::from(HEAP_ZERO_MEMORY), 8, 0, 0, 0])
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(pointer, &[1, 2, 3, 4, 5, 6, 7, 8])
+        .unwrap();
+    let moved = engine
+        .call_win64(HEAP_REALLOC, [heap, 0, pointer, 8192, 0, 0])
+        .unwrap();
+    assert_ne!(moved, pointer);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(moved, 8).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_private_heaps
+            .get(&heap)
+            .unwrap()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![moved]
+    );
+    assert_eq!(
+        engine
+            .call_win64(HEAP_DESTROY, [heap, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_private_heaps
+            .contains_key(&heap)
+    );
+    assert!(engine.unicorn.mem_read_as_vec(moved, 1).is_err());
+    assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+}
+
+#[test]
+fn private_heap_creation_is_bounded_and_session_handles_are_isolated() {
+    const HEAP_CREATE: u64 = STUB_BASE + 0x6a0;
+    let mut first = test_engine(&[0xc3]);
+    let mut second = test_engine(&[0xc3]);
+    for engine in [&mut first, &mut second] {
+        install_win64_import(
+            &mut engine.unicorn,
+            HEAP_CREATE,
+            "kernel32.dll",
+            "HeapCreate",
+        )
+        .unwrap();
+    }
+
+    assert_eq!(
+        first
+            .call_win64(HEAP_CREATE, [u64::from(HEAP_ZERO_MEMORY), 0, 0, 0, 0, 0])
+            .unwrap(),
+        0,
+        "allocation-only flags are not HeapCreate flags"
+    );
+    assert_eq!(
+        first.call_win64(HEAP_CREATE, [0, 1, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        first.call_win64(HEAP_CREATE, [0, 0, 1, 0, 0, 0]).unwrap(),
+        0
+    );
+
+    let first_handle = first.call_win64(HEAP_CREATE, [0; 6]).unwrap();
+    let second_handle = second.call_win64(HEAP_CREATE, [0; 6]).unwrap();
+    assert_ne!(first_handle, second_handle);
+    for _ in 1..64 {
+        assert_ne!(first.call_win64(HEAP_CREATE, [0; 6]).unwrap(), 0);
+    }
+    assert_eq!(first.call_win64(HEAP_CREATE, [0; 6]).unwrap(), 0);
+}
+
+#[test]
+fn private_heap_rejects_foreign_stale_and_cross_heap_ownership() {
+    const HEAP_CREATE: u64 = STUB_BASE + 0x6b0;
+    const HEAP_DESTROY: u64 = STUB_BASE + 0x6c0;
+    const HEAP_ALLOC: u64 = STUB_BASE + 0x6d0;
+    const HEAP_FREE: u64 = STUB_BASE + 0x6e0;
+    let prepare = || {
+        let mut engine = test_engine(&[0xc3]);
+        for (address, symbol) in [
+            (HEAP_CREATE, "HeapCreate"),
+            (HEAP_DESTROY, "HeapDestroy"),
+            (HEAP_ALLOC, "HeapAlloc"),
+            (HEAP_FREE, "HeapFree"),
+        ] {
+            install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+        }
+        engine
+    };
+
+    let mut cross_heap = prepare();
+    let owner = cross_heap.call_win64(HEAP_CREATE, [0; 6]).unwrap();
+    let other = cross_heap.call_win64(HEAP_CREATE, [0; 6]).unwrap();
+    let pointer = cross_heap
+        .call_win64(HEAP_ALLOC, [owner, 0, 8, 0, 0, 0])
+        .unwrap();
+    let error = cross_heap
+        .call_win64(HEAP_FREE, [other, 0, pointer, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("not owned by heap"));
+    assert!(
+        cross_heap
+            .unicorn
+            .get_data()
+            .windows_private_heaps
+            .get(&owner)
+            .unwrap()
+            .contains(&pointer)
+    );
+
+    let mut foreign = prepare();
+    let error = foreign
+        .call_win64(
+            HEAP_ALLOC,
+            [PRIVATE_HEAP_TOKEN_BASE + 0xffff, 0, 8, 0, 0, 0],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("unknown heap handle"));
+
+    let mut stale = prepare();
+    let heap = stale.call_win64(HEAP_CREATE, [0; 6]).unwrap();
+    assert_eq!(
+        stale
+            .call_win64(HEAP_DESTROY, [heap, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    let error = stale
+        .call_win64(HEAP_DESTROY, [heap, 0, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("unknown heap handle"));
+
+    let mut budget = prepare();
+    let heap = budget.call_win64(HEAP_CREATE, [0; 6]).unwrap();
+    assert_eq!(
+        budget
+            .call_win64(
+                HEAP_ALLOC,
+                [
+                    heap,
+                    0,
+                    crate::crt_heap::MAX_CRT_ALLOCATION_BYTES + 1,
+                    0,
+                    0,
+                    0
+                ],
+            )
+            .unwrap(),
+        0
+    );
+    assert!(budget.unicorn.get_data().windows_private_heaps[&heap].is_empty());
+}
+
+#[test]
 fn system_time_import_writes_a_deterministic_validated_filetime() {
     let mut engine = test_engine(&[0xc3]);
     let output = engine.allocate(8, 8).unwrap();

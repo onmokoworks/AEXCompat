@@ -120,6 +120,7 @@ struct GuestState {
     crt_errno: u32,
     windows_thread_error_mode: u32,
     windows_socket_startups: u32,
+    windows_private_heaps: BTreeMap<u64, BTreeSet<u64>>,
     scheduler_yield_reason: Option<SchedulerYieldReason>,
     scheduler_resume_rip: u64,
     scheduler_ready_hint: bool,
