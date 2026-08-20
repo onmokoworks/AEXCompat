@@ -4555,6 +4555,67 @@ fn get_startup_info_w_rejects_null_and_unwritable_outputs() {
 }
 
 #[test]
+fn get_std_handle_returns_deterministic_synthetic_handles_and_is_library_scoped() {
+    const GET_STD_HANDLE: u64 = STUB_BASE + 0x1b0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_STD_HANDLE,
+            "KERNEL32.DLL",
+            "GetStdHandle",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetStdHandle)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetStdHandle"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    for (selector, expected) in [
+        ((-10i32) as u32, WINDOWS_STANDARD_INPUT_TOKEN),
+        ((-11i32) as u32, WINDOWS_STANDARD_OUTPUT_TOKEN),
+        ((-12i32) as u32, WINDOWS_STANDARD_ERROR_TOKEN),
+    ] {
+        assert_eq!(
+            engine
+                .call_win64(GET_STD_HANDLE, [u64::from(selector), 0, 0, 0, 0, 0])
+                .unwrap(),
+            expected
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    }
+    assert_ne!(WINDOWS_STANDARD_INPUT_TOKEN, WINDOWS_STANDARD_OUTPUT_TOKEN);
+    assert_ne!(WINDOWS_STANDARD_OUTPUT_TOKEN, WINDOWS_STANDARD_ERROR_TOKEN);
+}
+
+#[test]
+fn get_std_handle_rejects_invalid_selector_without_host_handle_leakage() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_get_std_handle(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    let mut second = test_engine(&[0xc3]);
+    second
+        .unicorn
+        .reg_write(RegisterX86::RCX, u64::from((-11i32) as u32))
+        .unwrap();
+    emulate_get_std_handle(&mut second.unicorn);
+    assert_eq!(
+        second.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        WINDOWS_STANDARD_OUTPUT_TOKEN
+    );
+}
+
+#[test]
 fn is_debugger_present_is_false_deterministic_and_library_scoped() {
     const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);
