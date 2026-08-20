@@ -272,7 +272,7 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     let alias_possible = alias_possible(&cache, &walked, &dirs);
     let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
     let mut rekey: Vec<(String, String)> = Vec::new();
-    let remembered_names = plugins
+    let resolved_entries = plugins
         .iter()
         .map(|plugin| {
             let key = plugin.to_string_lossy().into_owned();
@@ -289,7 +289,15 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
             if let Some(alias) = alias {
                 rekey.push((alias, key));
             }
-            cached.and_then(|entry| entry.registered_name.clone())
+            cached.cloned()
+        })
+        .collect::<Vec<_>>();
+    let remembered_names = resolved_entries
+        .iter()
+        .map(|entry| {
+            entry
+                .as_ref()
+                .and_then(|entry| entry.registered_name.clone())
         })
         .collect::<Vec<_>>();
     let filter_names = stable_filter_names(
@@ -297,22 +305,16 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         &cached_naming_peers(&cache, &dirs, scan_complete, !dirs_complete, &config.ignore),
         &remembered_names,
     );
+    let secondary_names = plan_secondary_filter_names(&plugins, &filter_names, &resolved_entries);
     report_qualified_names(&plugins, &filter_names);
     let mut pending: Vec<PathBuf> = Vec::new();
     let mut registered: usize = 0;
-    for (plugin, filter_name) in plugins.iter().zip(&filter_names) {
+    for ((plugin, filter_name), resolved) in
+        plugins.iter().zip(&filter_names).zip(&resolved_entries)
+    {
         let key = plugin.to_string_lossy().into_owned();
         let meta = file_meta(plugin);
-        let (cached, _) = resolve_cached(
-            &cache,
-            &key,
-            plugin,
-            meta,
-            build,
-            &dirs,
-            alias_possible,
-            &mut aliases,
-        );
+        let cached = resolved.as_ref();
         let mut decision = classify(cached, meta, build);
         // A closure that would now resolve differently (issue #304) joins the same
         // queue rather than unregistering the filter: the dependency DLLs decide
@@ -347,16 +349,25 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
                     continue;
                 }
             };
-            register_discovered(
-                host,
-                &repository,
-                plugin,
-                &dependency,
-                entry,
-                companions,
-                filter_name,
-            );
-            registered += 1;
+            let effect_names = secondary_names
+                .iter()
+                .filter_map(|((effect_key, index), name)| {
+                    (effect_key == &key).then_some((*index, name.clone()))
+                })
+                .collect::<HashMap<_, _>>();
+            for view in virtual_effect_registrations(entry, filter_name, &effect_names) {
+                register_discovered(
+                    host,
+                    &repository,
+                    plugin,
+                    &dependency,
+                    &view.entry,
+                    companions.clone(),
+                    &view.name,
+                    view.selector,
+                );
+                registered += 1;
+            }
         }
         if decision.discover {
             pending.push(plugin.clone());
@@ -366,16 +377,25 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // Counted over `plugins` — the set actually iterated above — not over
     // `scan.seen`: an untrustworthy scan adds cached entries that were not walked
     // this launch (#321), which would otherwise read as "registered 500 of 12".
-    report_registration(plugins.len(), registered, pending.len(), limits);
+    let known_effects = resolved_entries
+        .iter()
+        .map(|entry| {
+            entry
+                .as_ref()
+                .map_or(1, |entry| 1 + entry.additional_effects.len())
+        })
+        .sum();
+    report_registration(known_effects, registered, pending.len(), limits);
 
     let rekeyed = !rekey.is_empty();
     apply_rekey(&mut cache, rekey);
     let names_remembered = remember_filter_names(&mut cache, &plugins, &filter_names);
+    let secondary_names_remembered = remember_secondary_filter_names(&mut cache, &secondary_names);
 
     if pending.is_empty() {
         // Nothing to discover, so the background pass (the only other writer)
         // will not run. Persist the re-key here or it is recomputed every launch.
-        if (rekeyed || names_remembered) && !save_cache(&cache) {
+        if (rekeyed || names_remembered || secondary_names_remembered) && !save_cache(&cache) {
             log_warn(
                 "the discovery cache could not be written; the plug-in paths it \
                  re-keyed or named this launch are resolved again on the next one",
@@ -1966,6 +1986,7 @@ struct FilterCtx {
     dependency: DependencyConfig,
     sha: String,
     smart: bool,
+    plugin_data_selector: Option<PluginDataEffectSelector>,
     /// Discovery-confirmed AEGPs installed beside this effect. Only providers
     /// that successfully registered concrete suite identities are admitted.
     companions: Vec<ApprovedCompanion>,
@@ -2104,11 +2125,171 @@ struct CacheEntry {
     /// (issue #662).
     #[serde(default)]
     registered_name: Option<String>,
+    /// Exact first PluginData registration selected by the legacy/default
+    /// route. `None` for PiPL effects and older cache entries.
+    #[serde(default)]
+    plugin_data_effect: Option<PluginDataIdentity>,
+    /// Additional effects registered by the same PluginData bundle (#1260).
+    /// Kept inside the path entry so alias/re-key and first-effect saved-project
+    /// identity remain backward compatible.
+    #[serde(default)]
+    additional_effects: Vec<CachedPluginDataEffect>,
     /// Structured record of a cluster-session fallback (issue #405, design
     /// §6): present when this entry was produced after a cluster discovery
     /// session failed — never silently rounded into a plain success.
     #[serde(default)]
     cluster_fallback: Option<ClusterFallback>,
+}
+
+fn plan_secondary_filter_names(
+    plugins: &[PathBuf],
+    primary_names: &[String],
+    resolved_entries: &[Option<CacheEntry>],
+) -> HashMap<(String, u32), String> {
+    let mut used: HashSet<String> = primary_names
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect();
+    let mut planned = HashMap::new();
+    for ((plugin, primary_name), resolved) in
+        plugins.iter().zip(primary_names).zip(resolved_entries)
+    {
+        let Some(entry) = resolved.as_ref() else {
+            continue;
+        };
+        let key = plugin.to_string_lossy().into_owned();
+        for effect in &entry.additional_effects {
+            let remembered = effect
+                .registered_name
+                .as_deref()
+                .filter(|name| valid_registered_name(name))
+                .filter(|name| used.insert(name.to_lowercase()))
+                .map(str::to_owned);
+            let name = remembered.unwrap_or_else(|| {
+                let display = effect
+                    .identity
+                    .display_name()
+                    .unwrap_or_else(|| format!("effect {}", effect.identity.index + 1));
+                let base = bounded_filter_name(&format!("{primary_name} — {display}"));
+                let mut candidate = base.clone();
+                let mut disambiguator = 2u32;
+                while !used.insert(candidate.to_lowercase()) {
+                    candidate = bounded_filter_name(&format!("{base} [{disambiguator}]"));
+                    disambiguator = disambiguator.saturating_add(1);
+                }
+                candidate
+            });
+            planned.insert((key.clone(), effect.identity.index), name);
+        }
+    }
+    planned
+}
+
+#[derive(Clone)]
+struct VirtualEffectRegistration {
+    entry: CacheEntry,
+    name: String,
+    selector: Option<PluginDataEffectSelector>,
+}
+
+fn virtual_effect_registrations(
+    entry: &CacheEntry,
+    primary_name: &str,
+    secondary_names: &HashMap<u32, String>,
+) -> Vec<VirtualEffectRegistration> {
+    let mut registrations = vec![VirtualEffectRegistration {
+        entry: entry.clone(),
+        name: primary_name.to_owned(),
+        selector: None,
+    }];
+    for effect in &entry.additional_effects {
+        let Some(name) = secondary_names.get(&effect.identity.index) else {
+            continue;
+        };
+        let mut effect_entry = entry.clone();
+        effect_entry.smart = effect.smart;
+        effect_entry.out_flags2 = effect.out_flags2;
+        effect_entry.params = effect.params.clone();
+        effect_entry.category = effect.identity.category();
+        effect_entry.registered_name = Some(name.clone());
+        effect_entry.plugin_data_effect = Some(effect.identity.clone());
+        effect_entry.additional_effects.clear();
+        effect_entry.closure_identity = None;
+        registrations.push(VirtualEffectRegistration {
+            entry: effect_entry,
+            name: name.clone(),
+            selector: Some(effect.identity.selector()),
+        });
+    }
+    registrations
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+struct PluginDataIdentity {
+    index: u32,
+    name_hex: String,
+    match_name_hex: String,
+    category_hex: String,
+    entrypoint: String,
+}
+
+impl PluginDataIdentity {
+    fn selector(&self) -> PluginDataEffectSelector {
+        PluginDataEffectSelector {
+            index: self.index,
+            match_name_hex: self.match_name_hex.clone(),
+        }
+    }
+
+    fn display_name(&self) -> Option<String> {
+        decode_plugin_data_label(&self.name_hex)
+    }
+
+    fn category(&self) -> Option<String> {
+        decode_plugin_data_label(&self.category_hex)
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct CachedPluginDataEffect {
+    identity: PluginDataIdentity,
+    smart: bool,
+    out_flags2: u32,
+    #[serde(default)]
+    params: Vec<InteractiveParameter>,
+    #[serde(default)]
+    registered_name: Option<String>,
+}
+
+fn decode_plugin_data_bytes(hex: &str) -> Option<Vec<u8>> {
+    if hex.is_empty() || hex.len() > 512 || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect::<Option<Vec<_>>>()?;
+    if bytes.iter().any(|byte| *byte < 0x20 || *byte == 0x7f) {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn decode_plugin_data_text(hex: &str) -> Option<String> {
+    let bytes = decode_plugin_data_bytes(hex)?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn decode_plugin_data_label(hex: &str) -> Option<String> {
+    let raw = decode_plugin_data_text(hex)?;
+    if raw.starts_with("$$$/")
+        && let Some((_, fallback)) = raw.rsplit_once('=')
+        && !fallback.is_empty()
+    {
+        return Some(fallback.to_owned());
+    }
+    Some(raw)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2937,8 +3118,8 @@ fn keep_best(
         stale,
         ..discovered
     };
-    if discovered.registered_name.is_none() {
-        discovered.registered_name = cached.and_then(|entry| entry.registered_name.clone());
+    if let Some(old) = cached {
+        preserve_secondary_registered_names(&mut discovered, old);
     }
     match cached {
         Some(old)
@@ -3045,6 +3226,61 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         cluster_fallback: None,
         category: None,
         registered_name: None,
+        plugin_data_effect: None,
+        additional_effects: Vec::new(),
+    }
+}
+
+fn preserve_secondary_registered_names(discovered: &mut CacheEntry, old: &CacheEntry) {
+    let mut old_names = HashMap::<(String, String), String>::new();
+    if let (Some(identity), Some(name)) = (
+        old.plugin_data_effect.as_ref(),
+        old.registered_name
+            .as_ref()
+            .filter(|name| valid_registered_name(name)),
+    ) {
+        old_names.insert(
+            (identity.match_name_hex.clone(), identity.entrypoint.clone()),
+            name.clone(),
+        );
+    }
+    for effect in &old.additional_effects {
+        if let Some(name) = effect
+            .registered_name
+            .as_ref()
+            .filter(|name| valid_registered_name(name))
+        {
+            old_names.insert(
+                (
+                    effect.identity.match_name_hex.clone(),
+                    effect.identity.entrypoint.clone(),
+                ),
+                name.clone(),
+            );
+        }
+    }
+    if discovered.registered_name.is_none() {
+        discovered.registered_name = discovered
+            .plugin_data_effect
+            .as_ref()
+            .and_then(|identity| {
+                old_names.get(&(identity.match_name_hex.clone(), identity.entrypoint.clone()))
+            })
+            .cloned()
+            // Older entries have no PluginData identity. Preserve the legacy
+            // path-level name until one successful refresh can bind it.
+            .or_else(|| old.registered_name.clone());
+    }
+    for effect in &mut discovered.additional_effects {
+        if effect.registered_name.is_some() {
+            continue;
+        }
+        effect.registered_name = old_names
+            .get(&(
+                effect.identity.match_name_hex.clone(),
+                effect.identity.entrypoint.clone(),
+            ))
+            .cloned();
     }
 }
 
@@ -3085,39 +3321,83 @@ fn merge_cache_entries(
 ) {
     let mut disk_name_owners = HashMap::<String, HashSet<String>>::new();
     for (key, entry) in on_disk {
-        let Some(name) = entry
-            .registered_name
-            .as_deref()
-            .filter(|name| valid_registered_name(name))
-        else {
-            continue;
-        };
         // apply_rekey deliberately retains an alias fallback and its walked
         // copy. They are one plug-in and therefore one owner of the name.
-        let owner = entry
+        let path_owner = entry
             .alias_fallback
             .then(|| entry.alias_target.as_deref())
             .flatten()
             .filter(|target| on_disk.contains_key(*target))
             .unwrap_or(key)
             .to_lowercase();
-        disk_name_owners
-            .entry(name.to_lowercase())
-            .or_default()
-            .insert(owner);
+        if let Some(name) = entry
+            .registered_name
+            .as_deref()
+            .filter(|name| valid_registered_name(name))
+        {
+            disk_name_owners
+                .entry(name.to_lowercase())
+                .or_default()
+                .insert(format!("{path_owner}\0primary"));
+        }
+        for effect in &entry.additional_effects {
+            if let Some(name) = effect
+                .registered_name
+                .as_deref()
+                .filter(|name| valid_registered_name(name))
+            {
+                disk_name_owners
+                    .entry(name.to_lowercase())
+                    .or_default()
+                    .insert(format!(
+                        "{path_owner}\0{}\0{}",
+                        effect.identity.match_name_hex, effect.identity.entrypoint
+                    ));
+            }
+        }
     }
     for (key, disk_entry) in on_disk {
         if let Some(local_entry) = local.get_mut(key) {
-            let stable_disk_name = disk_entry.registered_name.as_deref().filter(|name| {
-                valid_registered_name(name)
-                    && disk_name_owners
-                        .get(&name.to_lowercase())
-                        .is_some_and(|owners| owners.len() == 1)
-            });
-            if let Some(name) = stable_disk_name {
-                // The disk snapshot won the race to persist a valid, unique
-                // project identity. A later stale launch must not replace it.
-                local_entry.registered_name = Some(name.to_owned());
+            let stable_name = |name: Option<&String>| {
+                name.filter(|name| {
+                    valid_registered_name(name)
+                        && disk_name_owners
+                            .get(&name.to_lowercase())
+                            .is_some_and(|owners| owners.len() == 1)
+                })
+                .cloned()
+            };
+            let disk_name_for_identity = |identity: &PluginDataIdentity| {
+                if disk_entry
+                    .plugin_data_effect
+                    .as_ref()
+                    .is_some_and(|candidate| {
+                        candidate.match_name_hex == identity.match_name_hex
+                            && candidate.entrypoint == identity.entrypoint
+                    })
+                {
+                    return stable_name(disk_entry.registered_name.as_ref());
+                }
+                disk_entry.additional_effects.iter().find_map(|effect| {
+                    (effect.identity.match_name_hex == identity.match_name_hex
+                        && effect.identity.entrypoint == identity.entrypoint)
+                        .then(|| stable_name(effect.registered_name.as_ref()))
+                        .flatten()
+                })
+            };
+            let stable_disk_name = stable_name(disk_entry.registered_name.as_ref());
+            if let Some(identity) = &local_entry.plugin_data_effect {
+                if let Some(name) = disk_name_for_identity(identity) {
+                    local_entry.registered_name = Some(name);
+                }
+            } else if let Some(name) = stable_disk_name {
+                // Pre-#1260 entries have only the path-level identity.
+                local_entry.registered_name = Some(name);
+            }
+            for local_effect in &mut local_entry.additional_effects {
+                if let Some(name) = disk_name_for_identity(&local_effect.identity) {
+                    local_effect.registered_name = Some(name);
+                }
             }
         }
         match local.get(key) {

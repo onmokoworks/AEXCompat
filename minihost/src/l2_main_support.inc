@@ -574,6 +574,7 @@ constexpr std::size_t kPluginDataNameBytes = 256;
 constexpr std::size_t kPluginDataCategoryBytes = 256;
 constexpr std::size_t kPluginDataEntryBytes = 128;
 constexpr std::size_t kPluginDataSupportUrlBytes = 1024;
+constexpr std::size_t kMaxPluginDataRegistrations = 64;
 constexpr int32_t kPluginDataRejected = 3;  // A_Err_PARAMETER
 constexpr int32_t kPluginDataException = 512;
 constexpr int32_t kPluginDataReservedInfo = 8;
@@ -642,8 +643,90 @@ struct PluginDataContext {
   uint32_t callback_count{};
   uint32_t exception_code{};
   bool invalid{};
-  PluginDataRegistration registration{};
+  std::array<PluginDataRegistration, kMaxPluginDataRegistrations> registrations{};
 };
+
+PluginDataContext g_plugin_data_inventory;
+std::size_t g_selected_plugin_data_registration{};
+bool g_plugin_data_inventory_present{};
+bool g_plugin_data_selector_present{};
+std::size_t g_plugin_data_selector_index{};
+std::string g_plugin_data_selector_match;
+
+bool capture_plugin_data_selector(void*, const wchar_t* value) {
+  if (!value) return false;
+  const std::wstring text(value);
+  if (text.compare(0, 3, L"v1|") != 0) return false;
+  const std::size_t separator = text.find(L'|', 3);
+  if (separator == std::wstring::npos || separator == 3) return false;
+  std::size_t index = 0;
+  for (std::size_t cursor = 3; cursor < separator; ++cursor) {
+    if (text[cursor] < L'0' || text[cursor] > L'9') return false;
+    index = index * 10 + static_cast<std::size_t>(text[cursor] - L'0');
+    if (index >= kMaxPluginDataRegistrations) return false;
+  }
+  const std::size_t hex_length = text.size() - separator - 1;
+  if (hex_length == 0 || hex_length > kPluginDataNameBytes * 2 ||
+      hex_length % 2 != 0)
+    return false;
+  std::string match;
+  match.reserve(hex_length / 2);
+  const auto nibble = [](wchar_t ch) -> int {
+    if (ch >= L'0' && ch <= L'9') return ch - L'0';
+    if (ch >= L'a' && ch <= L'f') return ch - L'a' + 10;
+    return -1;
+  };
+  for (std::size_t cursor = separator + 1; cursor < text.size(); cursor += 2) {
+    const int high = nibble(text[cursor]);
+    const int low = nibble(text[cursor + 1]);
+    if (high < 0 || low < 0) return false;
+    const char decoded = static_cast<char>((high << 4) | low);
+    const auto byte = static_cast<unsigned char>(decoded);
+    if (byte < 0x20 || byte == 0x7f) return false;
+    match.push_back(decoded);
+  }
+  g_plugin_data_selector_present = true;
+  g_plugin_data_selector_index = index;
+  g_plugin_data_selector_match = std::move(match);
+  return true;
+}
+
+std::string plugin_data_hex(const char* bytes, std::size_t length) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string encoded;
+  encoded.reserve(length * 2);
+  for (std::size_t index = 0; index < length; ++index) {
+    const auto value = static_cast<unsigned char>(bytes[index]);
+    encoded.push_back(digits[value >> 4]);
+    encoded.push_back(digits[value & 0x0f]);
+  }
+  return encoded;
+}
+
+std::string plugin_data_inventory_report_json() {
+  if (!g_plugin_data_inventory_present) return ",\"plugin_data\":null";
+  std::ostringstream report;
+  report << ",\"plugin_data\":{\"selected_index\":"
+         << g_selected_plugin_data_registration << ",\"registrations\":[";
+  for (std::size_t index = 0;
+       index < g_plugin_data_inventory.callback_count; ++index) {
+    if (index) report << ',';
+    const auto& registration = g_plugin_data_inventory.registrations[index];
+    report << "{\"index\":" << index
+           << ",\"name_hex\":\""
+           << plugin_data_hex(registration.name.data(), registration.name_length)
+           << "\",\"match_name_hex\":\""
+           << plugin_data_hex(registration.match_name.data(),
+                              registration.match_name_length)
+           << "\",\"category_hex\":\""
+           << plugin_data_hex(registration.category.data(),
+                              registration.category_length)
+           << "\",\"entrypoint\":\"" << registration.entrypoint.data()
+           << "\"}";
+  }
+  report << "]}";
+  return report.str();
+}
 
 bool valid_plugin_data_export_name(const BoundedPluginDataText<kPluginDataEntryBytes>& text) {
   if (!text.readable || !text.terminated || !text.safe_bytes || text.length == 0 ||
@@ -679,13 +762,10 @@ int32_t record_plugin_data_registration(
     int32_t api_minor, int32_t reserved_info,
     const unsigned char* support_url) noexcept {
   if (!context) return kPluginDataRejected;
-  // Multi-effect bundles legitimately register more than once (issue #326):
-  // keep the first registration and accept the rest.
-  if (context->callback_count != 0) {
-    ++context->callback_count;
-    return 0;
+  if (context->callback_count >= kMaxPluginDataRegistrations) {
+    context->invalid = true;
+    return kPluginDataRejected;
   }
-  ++context->callback_count;
   const auto name_copy = copy_bounded_plugin_data_text<kPluginDataNameBytes>(name);
   const auto match_copy =
       copy_bounded_plugin_data_text<kPluginDataNameBytes>(match_name);
@@ -710,7 +790,19 @@ int32_t record_plugin_data_registration(
     context->invalid = true;
     return kPluginDataRejected;
   }
-  auto& registration = context->registration;
+  for (std::size_t index = 0; index < context->callback_count; ++index) {
+    const auto& existing = context->registrations[index];
+    // The launch selector is {registration index, exact match name}. Two
+    // registrations with the same match bytes could swap positions without a
+    // stale selector noticing, so the match identity must be unique by itself.
+    if (existing.match_name_length == match_copy.length &&
+        std::memcmp(existing.match_name.data(), match_copy.text.data(),
+                    match_copy.length) == 0) {
+      context->invalid = true;
+      return kPluginDataRejected;
+    }
+  }
+  auto& registration = context->registrations[context->callback_count++];
   std::copy_n(name_copy.text.data(), name_copy.length + 1,
               registration.name.data());
   std::copy_n(match_copy.text.data(), match_copy.length + 1,
@@ -794,18 +886,32 @@ int32_t invoke_plugin_data_entry1_seh(PluginDataEntry1 entry,
 }
 
 PiplEntrypoint resolve_plugin_data_entrypoints(PluginDataEntry2 entry2,
-                                               PluginDataEntry1 entry1) {
+                                               PluginDataEntry1 entry1,
+                                               std::size_t registration_index = 0,
+                                               const char* expected_match_name = nullptr) {
   if (!entry2 && !entry1) return {PiplPluginKind::Unknown, {}};
   PluginDataContext context;
   const int32_t result = entry2
       ? invoke_plugin_data_entry2_seh(entry2, &context)
       : invoke_plugin_data_entry1_seh(entry1, &context);
   if (result != 0 || context.exception_code != 0 || context.invalid ||
-      context.callback_count == 0 || !context.registration.valid)
+      context.callback_count == 0 ||
+      registration_index >= context.callback_count ||
+      !context.registrations[registration_index].valid)
     return {PiplPluginKind::Unknown, {}};
+  const auto& registration = context.registrations[registration_index];
+  if ((expected_match_name == nullptr && registration_index != 0) ||
+      (expected_match_name != nullptr &&
+       (std::strlen(expected_match_name) != registration.match_name_length ||
+        std::memcmp(expected_match_name, registration.match_name.data(),
+                    registration.match_name_length) != 0)))
+    return {PiplPluginKind::Unknown, {}};
+  g_plugin_data_inventory = context;
+  g_selected_plugin_data_registration = registration_index;
+  g_plugin_data_inventory_present = true;
   return {PiplPluginKind::Effect,
-          std::string(context.registration.entrypoint.data(),
-                      context.registration.entrypoint_length)};
+          std::string(registration.entrypoint.data(),
+                      registration.entrypoint_length)};
 }
 
 PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
@@ -829,6 +935,29 @@ PiplEntrypoint discover_plugin_data_entrypoint(HMODULE module) {
   const auto entry1 = reinterpret_cast<PluginDataEntry1>(
       GetProcAddress(module, "PluginDataEntryFunction"));
   return resolve_plugin_data_entrypoints(entry2, entry1);
+}
+
+PiplEntrypoint discover_effect_entrypoint(HMODULE module) {
+  g_plugin_data_inventory = {};
+  g_selected_plugin_data_registration = 0;
+  g_plugin_data_inventory_present = false;
+  PiplEntrypoint entrypoint = discover_pipl_entrypoint(module);
+  if (entrypoint.kind == PiplPluginKind::Missing) {
+    const auto entry3 = reinterpret_cast<PluginDataEntry2>(
+        GetProcAddress(module, "PluginDataEntryFunction3"));
+    const auto entry2 = entry3 ? entry3 : reinterpret_cast<PluginDataEntry2>(
+        GetProcAddress(module, "PluginDataEntryFunction2"));
+    const auto entry1 = reinterpret_cast<PluginDataEntry1>(
+        GetProcAddress(module, "PluginDataEntryFunction"));
+    entrypoint = resolve_plugin_data_entrypoints(
+        entry2, entry1,
+        g_plugin_data_selector_present ? g_plugin_data_selector_index : 0,
+        g_plugin_data_selector_present ? g_plugin_data_selector_match.c_str()
+                                       : nullptr);
+  } else if (g_plugin_data_selector_present) {
+    return {PiplPluginKind::Unknown, {}};
+  }
+  return entrypoint;
 }
 
 int32_t __cdecl synthetic_plugin_data_entry2(
@@ -902,15 +1031,47 @@ bool verify_plugin_data_entrypoint() {
                                                   &synthetic_plugin_data_entry1);
   if (v1.kind != PiplPluginKind::Effect || v1.symbol != "EffectMain")
     return false;
-  // A multi-effect bundle (Fast_Blur shape) resolves to its first registered
-  // entrypoint; PluginDataEntryFunction3 flows through this same v2 path.
+  // A multi-effect bundle defaults to its first registration, while an explicit
+  // selector must match both the bounded index and the exact match name. The
+  // pair prevents a stale cache from silently selecting a different effect
+  // after the bundle changes registration order.
   const auto multi = resolve_plugin_data_entrypoints(
       &synthetic_plugin_data_entry_multi, nullptr);
   if (multi.kind != PiplPluginKind::Effect || multi.symbol != "EffectMainExtra")
     return false;
+  const auto secondary = resolve_plugin_data_entrypoints(
+      &synthetic_plugin_data_entry_multi, nullptr, 1, "AEXCompat Secondary");
+  if (secondary.kind != PiplPluginKind::Effect ||
+      secondary.symbol != "EffectMainExtra2" ||
+      resolve_plugin_data_entrypoints(&synthetic_plugin_data_entry_multi, nullptr,
+                                      1, "AEXCompat Primary")
+              .kind != PiplPluginKind::Unknown ||
+      resolve_plugin_data_entrypoints(&synthetic_plugin_data_entry_multi, nullptr,
+                                      1)
+              .kind != PiplPluginKind::Unknown)
+    return false;
+  PluginDataContext registrations;
+  if (plugin_data_callback1(
+          &registrations, reinterpret_cast<const unsigned char*>("Name"),
+          reinterpret_cast<const unsigned char*>("Match"),
+          reinterpret_cast<const unsigned char*>("Category"),
+          reinterpret_cast<const unsigned char*>("EffectMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
+      plugin_data_callback1(
+          &registrations, reinterpret_cast<const unsigned char*>("Name2"),
+          reinterpret_cast<const unsigned char*>("Match2"),
+          reinterpret_cast<const unsigned char*>("Category2"),
+          reinterpret_cast<const unsigned char*>("EffectMain2"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
+      registrations.callback_count != 2 ||
+      std::string(registrations.registrations[0].name.data(),
+                  registrations.registrations[0].name_length) != "Name" ||
+      std::string(registrations.registrations[1].name.data(),
+                  registrations.registrations[1].name_length) != "Name2")
+    return false;
   PluginDataContext duplicate;
-  // Duplicate registrations are accepted and ignored: both calls must succeed
-  // and the first registration must win (issue #326).
   if (plugin_data_callback1(
           &duplicate, reinterpret_cast<const unsigned char*>("Name"),
           reinterpret_cast<const unsigned char*>("Match"),
@@ -919,15 +1080,38 @@ bool verify_plugin_data_entrypoint() {
           static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
           kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
       plugin_data_callback1(
-          &duplicate, reinterpret_cast<const unsigned char*>("Name2"),
-          reinterpret_cast<const unsigned char*>("Match2"),
-          reinterpret_cast<const unsigned char*>("Category2"),
-          reinterpret_cast<const unsigned char*>("EffectMain2"),
+          &duplicate, reinterpret_cast<const unsigned char*>("Other Name"),
+          reinterpret_cast<const unsigned char*>("Match"),
+          reinterpret_cast<const unsigned char*>("Other Category"),
+          reinterpret_cast<const unsigned char*>("EffectMainOther"),
           static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
-          kPluginDataApiMinor, kPluginDataReservedInfo) != 0 ||
-      duplicate.callback_count != 2 ||
-      std::string(duplicate.registration.name.data(),
-                  duplicate.registration.name_length) != "Name")
+          kPluginDataApiMinor, kPluginDataReservedInfo) == 0 ||
+      !duplicate.invalid)
+    return false;
+  PluginDataContext overflow;
+  for (std::size_t index = 0; index < kMaxPluginDataRegistrations; ++index) {
+    const std::string name = "Name" + std::to_string(index);
+    const std::string match = "Match" + std::to_string(index);
+    const std::string entrypoint = "EffectMain" + std::to_string(index);
+    if (plugin_data_callback1(
+            &overflow,
+            reinterpret_cast<const unsigned char*>(name.c_str()),
+            reinterpret_cast<const unsigned char*>(match.c_str()),
+            reinterpret_cast<const unsigned char*>("Category"),
+            reinterpret_cast<const unsigned char*>(entrypoint.c_str()),
+            static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+            kPluginDataApiMinor, kPluginDataReservedInfo) != 0)
+      return false;
+  }
+  if (plugin_data_callback1(
+          &overflow, reinterpret_cast<const unsigned char*>("Overflow"),
+          reinterpret_cast<const unsigned char*>("Overflow Match"),
+          reinterpret_cast<const unsigned char*>("Category"),
+          reinterpret_cast<const unsigned char*>("OverflowMain"),
+          static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
+          kPluginDataApiMinor, kPluginDataReservedInfo) == 0 ||
+      !overflow.invalid ||
+      overflow.callback_count != kMaxPluginDataRegistrations)
     return false;
   PluginDataContext localized;
   const unsigned char localized_name[] = {0xe3, 0x83, 0x86, 0x00};
@@ -940,7 +1124,24 @@ bool verify_plugin_data_entrypoint() {
           reinterpret_cast<const unsigned char*>("EffectMain"),
           static_cast<int32_t>('eFKT'), kPluginDataApiMajor,
           kPluginDataApiMinor, kPluginDataReservedInfo, localized_url) != 0 ||
-      !localized.registration.valid || !localized.registration.support_url_present)
+      !localized.registrations[0].valid ||
+      !localized.registrations[0].support_url_present)
+    return false;
+  g_plugin_data_inventory = registrations;
+  g_plugin_data_inventory_present = true;
+  g_selected_plugin_data_registration = 1;
+  const std::string inventory = plugin_data_inventory_report_json();
+  if (inventory.find("\"selected_index\":1") == std::string::npos ||
+      inventory.find("\"match_name_hex\":\"4d6174636832\"") ==
+          std::string::npos ||
+      inventory.find("\"entrypoint\":\"EffectMain2\"") ==
+          std::string::npos ||
+      !capture_plugin_data_selector(nullptr, L"v1|1|4d6174636832") ||
+      g_plugin_data_selector_index != 1 ||
+      g_plugin_data_selector_match != "Match2" ||
+      capture_plugin_data_selector(nullptr, L"v1|64|4d6174636832") ||
+      capture_plugin_data_selector(nullptr, L"v1|1|4D6174636832") ||
+      capture_plugin_data_selector(nullptr, L"v1|1|00"))
     return false;
   PluginDataContext invalid_pointer;
   return plugin_data_callback1(
@@ -3196,6 +3397,7 @@ std::string build_l2_report_json(
   c.suite_call_slot_probe_json = suite_call_slot_probe_report_json();
   c.compute_cache_timeline_json = compute_cache_timeline_report_json();
   c.selector_invocations_json = selector_invocations_report_json();
+  c.plugin_data_json = plugin_data_inventory_report_json();
   if (!module_audit_passed())
     c.module_audit_failure_json = module_audit_failure_json();
   if (include_module_audit) c.module_audit_json = module_audit_json();

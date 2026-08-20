@@ -1795,9 +1795,7 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   // closed like every other swap failure (the frame loop treats it as
   // swap_failure, exit 25): mid-session member changes reopen through the
   // broker's invalidation path rather than limping on a member-less session.
-  PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(module);
-  if (pipl_entrypoint.kind == PiplPluginKind::Missing)
-    pipl_entrypoint = discover_plugin_data_entrypoint(module);
+  PiplEntrypoint pipl_entrypoint = discover_effect_entrypoint(module);
   EffectEntry new_entry = nullptr;
   if (pipl_entrypoint.kind == PiplPluginKind::Effect)
     new_entry = reinterpret_cast<EffectEntry>(
@@ -1890,6 +1888,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
   EffectEntry current_entry = nullptr;
   PiplPluginKind current_entrypoint_kind = PiplPluginKind::Unknown;
   int32_t current_index = -1;
+  std::string current_plugin_data_selector;
   int32_t current_global_error = -1;
   // GLOBAL_SETUP/GLOBAL_SETDOWN pairing state: the inspect column below ends
   // every successful setup with its setdown (the one-shot params-only column
@@ -1999,10 +1998,22 @@ int run_discovery_session(const std::wstring& manifest_argument,
     }
     int32_t plugin_index{};
     int32_t request_index{};
+    int32_t effect_index{};
+    std::string effect_match_name_hex;
+    const bool has_effect_index = object.find("effect_index") != object.end();
+    const bool has_effect_match = object.find("effect_match_name_hex") != object.end();
     if (type != "inspect_plugin" ||
-        !json_exact_keys(object, {"v", "type", "plugin_index", "request_index"}) ||
+        !(json_exact_keys(object,
+                          {"v", "type", "plugin_index", "request_index"}) ||
+          json_exact_keys(object,
+                          {"v", "type", "plugin_index", "request_index",
+                           "effect_index", "effect_match_name_hex"})) ||
         !json_i32(object, "plugin_index", plugin_index) ||
         !json_i32(object, "request_index", request_index) ||
+        has_effect_index != has_effect_match ||
+        (has_effect_index &&
+         (!json_i32(object, "effect_index", effect_index) ||
+          !json_string(object, "effect_match_name_hex", effect_match_name_hex))) ||
         plugin_index < 0 ||
         plugin_index >= static_cast<int32_t>(manifest.plugins.size()) ||
         request_index != expected_request_index) {
@@ -2010,6 +2021,20 @@ int run_discovery_session(const std::wstring& manifest_argument,
       break;
     }
     ++expected_request_index;
+    std::string requested_plugin_data_selector;
+    g_plugin_data_selector_present = false;
+    g_plugin_data_selector_index = 0;
+    g_plugin_data_selector_match.clear();
+    if (has_effect_index) {
+      requested_plugin_data_selector = "v1|" + std::to_string(effect_index) +
+          "|" + effect_match_name_hex;
+      const std::wstring encoded(requested_plugin_data_selector.begin(),
+                                 requested_plugin_data_selector.end());
+      if (!capture_plugin_data_selector(nullptr, encoded.c_str())) {
+        protocol_violation = true;
+        break;
+      }
+    }
 
     std::string report_json;
     std::string error_kind;
@@ -2100,7 +2125,8 @@ int run_discovery_session(const std::wstring& manifest_argument,
       if (!ok) error_kind = "selector_error";
       if (!checkpoint_written) protocol_violation = true;
     };
-    if (plugin_index != current_index) {
+    if (plugin_index != current_index ||
+        requested_plugin_data_selector != current_plugin_data_selector) {
       // Swap to plugins[N] (design §4.2): the same column as the render
       // swap (GLOBAL_SETDOWN → quiesce → unload → load → GLOBAL_SETUP).
       // BIB teardown is session-global and deliberately NOT run here; it
@@ -2172,14 +2198,13 @@ int run_discovery_session(const std::wstring& manifest_argument,
       session_post_load_recorded = true;
       current_module = module;
       current_index = plugin_index;
+      current_plugin_data_selector = requested_plugin_data_selector;
       g_plugin_file_path =
           cluster::plugin_path(manifest, static_cast<std::size_t>(plugin_index))
               .wstring();
       // Entrypoint resolution follows the launch rules; a failure is
       // plug-in-local (design §4.2) and the session continues.
-      PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(current_module);
-      if (pipl_entrypoint.kind == PiplPluginKind::Missing)
-        pipl_entrypoint = discover_plugin_data_entrypoint(current_module);
+      PiplEntrypoint pipl_entrypoint = discover_effect_entrypoint(current_module);
       current_entrypoint_kind = pipl_entrypoint.kind;
       if (pipl_entrypoint.kind == PiplPluginKind::Effect)
         current_entry = reinterpret_cast<EffectEntry>(
@@ -2366,7 +2391,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
         parse_l2_conformance_render_settings,
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
-        capture_l2_companion_manifest, capture_l2_dependency_search_dirs},
+        capture_l2_companion_manifest, capture_l2_dependency_search_dirs,
+        capture_plugin_data_selector},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2380,7 +2406,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
           load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
           parse_l2_conformance_render_settings,
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
-        capture_l2_companion_manifest, capture_l2_dependency_search_dirs},
+        capture_l2_companion_manifest, capture_l2_dependency_search_dirs,
+        capture_plugin_data_selector},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2392,10 +2419,21 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     // dependency-dirs pair (issue #751) is the one auxiliary option they
     // accept, peeled from the tail before mode classification.
     int l2_argc = argc;
-    if (l2_argc >= 3 &&
-        std::wstring(argv[l2_argc - 2]) == L"--dependency-dirs-v1") {
-      if (!capture_l2_dependency_search_dirs(nullptr, argv[l2_argc - 1]))
-        return 2;
+    bool saw_dependency_dirs = false;
+    bool saw_plugin_data_selector = false;
+    while (l2_argc >= 3) {
+      const std::wstring flag(argv[l2_argc - 2]);
+      if (flag == L"--dependency-dirs-v1" && !saw_dependency_dirs) {
+        if (!capture_l2_dependency_search_dirs(nullptr, argv[l2_argc - 1]))
+          return 2;
+        saw_dependency_dirs = true;
+      } else if (flag == L"--plugin-data-selector-v1" &&
+                 !saw_plugin_data_selector) {
+        if (!capture_plugin_data_selector(nullptr, argv[l2_argc - 1])) return 2;
+        saw_plugin_data_selector = true;
+      } else {
+        break;
+      }
       l2_argc -= 2;
     }
     const auto mode_error = aexcompat::worker_runtime::invocation::parse_l2_modes(
@@ -2574,13 +2612,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // whose entrypoint is not literally "EffectMain" still dispatches and a
   // Kind=AEGP plug-in is never handed to the Effect selector. Fail closed on
   // AEGP, missing/invalid PiPL, ambiguity, or an unresolvable symbol.
-  PiplEntrypoint pipl_entrypoint = discover_pipl_entrypoint(module);
+  PiplEntrypoint pipl_entrypoint = discover_effect_entrypoint(module);
   // PluginData is a registration ABI used by many bundled effects that do
   // not carry a PiPL resource. It is deliberately reachable only for a
   // missing PiPL: malformed, ambiguous, AEGP, or unknown PiPL resources stay
   // fail-closed and never get a second interpretation.
-  if (pipl_entrypoint.kind == PiplPluginKind::Missing)
-    pipl_entrypoint = discover_plugin_data_entrypoint(module);
   if (pipl_entrypoint.kind != PiplPluginKind::Effect) {
     const char* plugin_kind =
         unresolved_entrypoint_plugin_kind(pipl_entrypoint.kind);

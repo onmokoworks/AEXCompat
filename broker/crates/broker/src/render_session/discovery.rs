@@ -193,6 +193,48 @@ pub struct DiscoverySession {
     _in_place_transport: Option<crate::cluster_manifest::ClusterManifestTransport>,
 }
 
+pub(super) fn inspect_plugin_request_json(
+    plugin_index: u32,
+    request_index: u32,
+    selector: Option<&super::PluginDataEffectSelector>,
+) -> io::Result<String> {
+    let mut message = serde_json::json!({
+        "v": 1,
+        "type": "inspect_plugin",
+        "plugin_index": plugin_index,
+        "request_index": request_index,
+    });
+    if let Some(selector) = selector {
+        selector.encoded()?;
+        message["effect_index"] = serde_json::json!(selector.index);
+        message["effect_match_name_hex"] = serde_json::json!(selector.match_name_hex);
+    }
+    serde_json::to_string(&message)
+        .map_err(|error| invalid(format!("could not encode inspect request: {error}")))
+}
+
+pub(super) fn report_matches_plugin_data_selector(
+    report: &Value,
+    selector: Option<&super::PluginDataEffectSelector>,
+) -> bool {
+    let Some(selector) = selector else {
+        return true;
+    };
+    let Some(plugin_data) = report.get("plugin_data") else {
+        return false;
+    };
+    plugin_data.get("selected_index").and_then(Value::as_u64) == Some(u64::from(selector.index))
+        && plugin_data
+            .get("registrations")
+            .and_then(Value::as_array)
+            .and_then(|registrations| registrations.get(selector.index as usize))
+            .is_some_and(|registration| {
+                registration.get("index").and_then(Value::as_u64) == Some(u64::from(selector.index))
+                    && registration.get("match_name_hex").and_then(Value::as_str)
+                        == Some(selector.match_name_hex.as_str())
+            })
+}
+
 impl DiscoverySession {
     /// In-place variant (issue #751): the cluster manifest (`cluster-manifest-v2`)
     /// names each plug-in by its real path and carries the dependency search
@@ -418,6 +460,15 @@ impl DiscoverySession {
         plugin_index: u32,
         request_index: u32,
     ) -> io::Result<InspectOutcome> {
+        self.inspect_plugin_effect(plugin_index, request_index, None)
+    }
+
+    pub fn inspect_plugin_effect(
+        &mut self,
+        plugin_index: u32,
+        request_index: u32,
+        selector: Option<&super::PluginDataEffectSelector>,
+    ) -> io::Result<InspectOutcome> {
         if let Some(invalidation) = &self.invalidation {
             return Err(invalid(format!(
                 "discovery session is invalidated ({}): {}",
@@ -467,9 +518,7 @@ impl DiscoverySession {
                 POST_TERMINATION_COLLECT_TIMEOUT,
             ));
         }
-        let message = format!(
-            "{{\"v\":1,\"type\":\"inspect_plugin\",\"plugin_index\":{plugin_index},\"request_index\":{request_index}}}"
-        );
+        let message = inspect_plugin_request_json(plugin_index, request_index, selector)?;
         if !self.transport.send_message(&message) {
             return Err(self.invalidate(
                 "request_pipe_closed",
@@ -600,6 +649,7 @@ impl DiscoverySession {
                     .and_then(Value::as_i64)
                     != Some(-1)
                 || !parsed.report.get("parameters").is_some_and(Value::is_array)
+                || !report_matches_plugin_data_selector(&parsed.report, selector)
             {
                 return Err(self.invalidate(
                     "inspect_checkpoint_mismatch",
@@ -640,6 +690,18 @@ impl DiscoverySession {
                     return Err(self.invalidate(
                         "malformed_inspect_done",
                         format!("request {request_index} ok response missed its report"),
+                        POST_TERMINATION_COLLECT_TIMEOUT,
+                    ));
+                }
+                if !report_matches_plugin_data_selector(
+                    done.report.as_ref().expect("checked above"),
+                    selector,
+                ) {
+                    return Err(self.invalidate(
+                        "plugin_data_selector_mismatch",
+                        format!(
+                            "request {request_index} report did not echo its exact PluginData selector"
+                        ),
                         POST_TERMINATION_COLLECT_TIMEOUT,
                     ));
                 }
