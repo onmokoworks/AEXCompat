@@ -4780,6 +4780,214 @@ fn get_startup_info_w_rejects_null_and_unwritable_outputs() {
 }
 
 #[test]
+fn rtl_capture_context_writes_the_win64_caller_context() {
+    const RTL_CAPTURE_CONTEXT: u64 = STUB_BASE + 0x1b0;
+    const CONTEXT_SIZE: usize = 0x4d0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            RTL_CAPTURE_CONTEXT,
+            "kernel32.dll",
+            "RtlCaptureContext",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::RtlCaptureContext)
+    );
+    assert_eq!(
+        dispatch_win64_import("ntdll.dll", "RtlCaptureContext"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = engine.allocate(CONTEXT_SIZE, 16).unwrap();
+    engine.write(output, &vec![0xa5; CONTEXT_SIZE]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RAX, 0x1111).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RBX, 0x2222).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RBP, 0x3333).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RSI, 0x4444).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDI, 0x5555).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R10, 0xaaaa).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R11, 0xbbbb).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R12, 0xcccc).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R13, 0xdddd).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R14, 0xeeee).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R15, 0xffff).unwrap();
+    let xmm0 = [0x5au8; 16];
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::XMM0, &xmm0)
+        .unwrap();
+    let xmm15 = [0xc3u8; 16];
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::XMM15, &xmm15)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::FPCW, 0x027f).unwrap();
+    engine.unicorn.reg_write(RegisterX86::FPSW, 0x1821).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FPTAG, 0x3fff)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::FOP, 0x0555).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FIP, 0x1234_5678)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::FCS, 0x0033).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FDP, 0x8765_4321)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::FDS, 0x002b).unwrap();
+    let st4 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::ST4, &st4)
+        .unwrap();
+    let expected_mxcsr = engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap() as u32;
+    let expected_eflags = engine.unicorn.reg_read(RegisterX86::EFLAGS).unwrap() as u32;
+    let expected_segments = [
+        RegisterX86::CS,
+        RegisterX86::DS,
+        RegisterX86::ES,
+        RegisterX86::FS,
+        RegisterX86::GS,
+        RegisterX86::SS,
+    ]
+    .map(|register| engine.unicorn.reg_read(register).unwrap() as u16);
+    engine
+        .call_win64(RTL_CAPTURE_CONTEXT, [output, 0x7777, 0x8888, 0x9999, 0, 0])
+        .unwrap();
+
+    let context = engine
+        .unicorn
+        .mem_read_as_vec(output, CONTEXT_SIZE)
+        .unwrap();
+    let qword = |offset: usize| u64::from_le_bytes(context[offset..offset + 8].try_into().unwrap());
+    assert_eq!(
+        u32::from_le_bytes(context[0x30..0x34].try_into().unwrap()),
+        0x0010_000f
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x34..0x38].try_into().unwrap()),
+        expected_mxcsr
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x44..0x48].try_into().unwrap()),
+        expected_eflags
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x100..0x102].try_into().unwrap()),
+        0x027f
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x102..0x104].try_into().unwrap()),
+        0x1821
+    );
+    assert_eq!(context[0x104], 0x80);
+    assert_eq!(
+        u16::from_le_bytes(context[0x106..0x108].try_into().unwrap()),
+        0x0555
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x108..0x10c].try_into().unwrap()),
+        0x1234_5678
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x10c..0x10e].try_into().unwrap()),
+        0x0033
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x110..0x114].try_into().unwrap()),
+        0x8765_4321
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x114..0x116].try_into().unwrap()),
+        0x002b
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x11c..0x120].try_into().unwrap()),
+        0x0000_ffff
+    );
+    assert_eq!(&context[0x160..0x16a], &st4);
+    for (index, expected) in expected_segments.into_iter().enumerate() {
+        let offset = 0x38 + index * 2;
+        assert_eq!(
+            u16::from_le_bytes(context[offset..offset + 2].try_into().unwrap()),
+            expected
+        );
+    }
+    assert_eq!(qword(0x78), 0x1111);
+    assert_eq!(qword(0x80), output);
+    assert_eq!(qword(0x88), 0x7777);
+    assert_eq!(qword(0x90), 0x2222);
+    assert_eq!(qword(0xa0), 0x3333);
+    assert_eq!(qword(0xa8), 0x4444);
+    assert_eq!(qword(0xb0), 0x5555);
+    assert_eq!(qword(0xb8), 0x8888);
+    assert_eq!(qword(0xc0), 0x9999);
+    assert_eq!(qword(0xc8), 0xaaaa);
+    assert_eq!(qword(0xd0), 0xbbbb);
+    assert_eq!(qword(0xd8), 0xcccc);
+    assert_eq!(qword(0xe0), 0xdddd);
+    assert_eq!(qword(0xe8), 0xeeee);
+    assert_eq!(qword(0xf0), 0xffff);
+    assert_eq!(qword(0xf8), RETURN_ADDRESS);
+    assert_eq!(qword(0x98), ((STACK_BASE + STACK_SIZE - 0x108) | 8) + 8);
+    assert_eq!(&context[0x1a0..0x1b0], &xmm0);
+    assert_eq!(&context[0x290..0x2a0], &xmm15);
+    assert!(context[0x48..0x78].iter().all(|byte| *byte == 0));
+    assert!(context[0x300..].iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn rtl_capture_context_rejects_null_and_partially_writable_outputs() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_rtl_capture_context(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("RtlCaptureContext output pointer is null")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_rtl_capture_context(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not fully writable"))
+    );
+
+    let boundary = DATA_BASE + PAGE_SIZE - 0x268;
+    let sentinel = vec![0x5a; 0x268];
+    engine.write(boundary, &sentinel).unwrap();
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, boundary)
+        .unwrap();
+    emulate_rtl_capture_context(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not fully writable"))
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 0x268).unwrap(),
+        sentinel
+    );
+}
+
+#[test]
 fn get_std_handle_returns_deterministic_synthetic_handles_and_is_library_scoped() {
     const GET_STD_HANDLE: u64 = STUB_BASE + 0x1b0;
     let mut engine = test_engine(&[0xc3]);
