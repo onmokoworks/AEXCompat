@@ -2,7 +2,7 @@
 name = "aex-wgpu-compute"
 version = "0.1.0"
 edition.workspace = true
-license = "GPL-2.0-only"
+license = "MPL-2.0"
 
 [dependencies]
 naga = { version = "24.0.0", features = ["wgsl-in"] }
