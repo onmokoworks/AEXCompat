@@ -77,6 +77,14 @@ enum LegacyWin64Import {
     GetConsoleMode,
     GetFileType,
     CreateFileW,
+    CreateThread,
+    WaitForSingleObject,
+    WaitForSingleObjectEx,
+    CloseHandle,
+    GetCurrentThread,
+    SetThreadStackGuarantee,
+    SwitchToThread,
+    ResumeThread,
     GetCommandLineA,
     GetCommandLineW,
     GetACP,
@@ -325,6 +333,25 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetFileType") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "CreateFileW") => LegacyWin64Import::CreateFileW,
         (_, "CreateFileW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "CreateThread") => LegacyWin64Import::CreateThread,
+        (_, "CreateThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "WaitForSingleObject") => LegacyWin64Import::WaitForSingleObject,
+        ("kernel32.dll", "WaitForSingleObjectEx") => LegacyWin64Import::WaitForSingleObjectEx,
+        ("kernel32.dll", "CloseHandle") => LegacyWin64Import::CloseHandle,
+        ("kernel32.dll", "GetCurrentThread") => LegacyWin64Import::GetCurrentThread,
+        ("kernel32.dll", "SetThreadStackGuarantee") => LegacyWin64Import::SetThreadStackGuarantee,
+        ("kernel32.dll", "SwitchToThread") => LegacyWin64Import::SwitchToThread,
+        ("kernel32.dll", "ResumeThread") => LegacyWin64Import::ResumeThread,
+        (
+            _,
+            "WaitForSingleObject"
+            | "WaitForSingleObjectEx"
+            | "CloseHandle"
+            | "GetCurrentThread"
+            | "SetThreadStackGuarantee"
+            | "SwitchToThread"
+            | "ResumeThread",
+        ) => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCommandLineA") => LegacyWin64Import::GetCommandLineA,
         (_, "GetCommandLineA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCommandLineW") => LegacyWin64Import::GetCommandLineW,
@@ -1089,6 +1116,57 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::CreateThread => {
+                uc(
+                    "write CreateThread callback tail jump",
+                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                )?;
+                uc(
+                    "install bounded CreateThread import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_create_thread(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::WaitForSingleObject
+            | LegacyWin64Import::WaitForSingleObjectEx
+            | LegacyWin64Import::CloseHandle
+            | LegacyWin64Import::SetThreadStackGuarantee => {
+                uc(
+                    "write Windows thread lifecycle return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install Windows thread lifecycle import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_windows_thread_lifecycle(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetCurrentThread => {
+                uc(
+                    "install current-thread pseudo handle",
+                    unicorn.mem_write(stub, &deterministic_u64_stub(u64::MAX - 1)),
+                )?;
+            }
+            LegacyWin64Import::SwitchToThread => {
+                uc(
+                    "install deterministic SwitchToThread",
+                    unicorn.mem_write(stub, &deterministic_i32_stub(0)),
+                )?;
+            }
+            LegacyWin64Import::ResumeThread => {
+                uc(
+                    "write ResumeThread callback tail jump",
+                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                )?;
+                uc(
+                    "install bounded ResumeThread import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_resume_thread(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::GetCommandLineA => {
                 uc(
                     "write GetCommandLineA return",
@@ -1134,7 +1212,20 @@ fn install_win64_import(
                     unicorn.mem_write(stub, &deterministic_i32_stub(0)),
                 )?;
             }
-            LegacyWin64Import::GetCurrentThreadId | LegacyWin64Import::GetCurrentProcessId => {
+            LegacyWin64Import::GetCurrentThreadId => {
+                uc(
+                    "write GetCurrentThreadId return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install deterministic guest thread identity",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let id = unicorn.get_data().current_windows_thread_id;
+                        let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(id));
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetCurrentProcessId => {
                 uc(
                     "install deterministic Windows identity import",
                     unicorn.mem_write(stub, &deterministic_i32_stub(1)),
@@ -4748,6 +4839,568 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
         );
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, new_pointer);
+}
+
+fn fail_windows_thread_callback(unicorn: &mut Unicorn<'_, GuestState>, error: String) {
+    if let Some(pending) = unicorn.get_data_mut().pending_windows_thread.take() {
+        let stack = unicorn
+            .get_data()
+            .windows_threads
+            .get(&pending.handle)
+            .filter(|thread| thread.stack_mapped)
+            .map(|thread| (thread.stack_base, thread.stack_size));
+        if let Some((stack_base, stack_size)) = stack {
+            let _ = unicorn.mem_unmap(stack_base, stack_size);
+            if let Some(thread) = unicorn
+                .get_data_mut()
+                .windows_threads
+                .get_mut(&pending.handle)
+            {
+                thread.stack_mapped = false;
+            }
+        }
+        restore_windows_thread_context(unicorn.get_data_mut(), &pending);
+        let _ = unicorn.mem_write(0x08, &pending.caller_teb_stack);
+    }
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    let _ = unicorn.emu_stop();
+}
+
+fn restore_windows_thread_context(state: &mut GuestState, pending: &PendingWindowsThread) {
+    for (index, value) in &pending.caller_tls_values {
+        if let Some(slot) = state.windows_tls_slots.get_mut(index) {
+            *slot = *value;
+        }
+    }
+    for (index, value) in &mut state.windows_tls_slots {
+        if !pending.caller_tls_values.contains_key(index) {
+            *value = 0;
+        }
+    }
+    for (index, slot) in &mut state.windows_fls_slots {
+        if let Some(value) = pending.caller_fls_values.get(index) {
+            slot.value = *value;
+        } else {
+            slot.value = 0;
+        }
+    }
+    state.windows_last_error = pending.caller_last_error;
+    state.windows_thread_error_mode = pending.caller_thread_error_mode;
+    state.current_windows_thread_id = pending.caller_thread_id;
+}
+
+fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let result = (|| -> Result<(), String> {
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("CreateThread callback stack read failed: {error}"))?;
+        let mut pending = unicorn
+            .get_data_mut()
+            .pending_windows_thread
+            .take()
+            .ok_or_else(|| "CreateThread continuation has no pending callback".to_string())?;
+        unicorn.get_data_mut().pending_windows_thread = Some(pending.clone());
+        if rsp != pending.callback_return_rsp {
+            return Err(format!(
+                "CreateThread callback stack {rsp:#x} does not match {:#x}",
+                pending.callback_return_rsp
+            ));
+        }
+        if pending.exit_code.is_none() {
+            pending.exit_code =
+                Some(unicorn.reg_read(RegisterX86::RAX).map_err(|error| {
+                    format!("CreateThread callback exit code read failed: {error}")
+                })? as u32);
+        }
+        const MAX_FLS_DESTRUCTOR_PASSES: u32 = 4;
+        loop {
+            let candidate = unicorn
+                .get_data()
+                .windows_fls_slots
+                .iter()
+                .find(|(index, slot)| {
+                    slot.callback != 0 && slot.value != 0 && !pending.fls_processed.contains(index)
+                })
+                .map(|(index, slot)| (*index, slot.callback, slot.value));
+            if let Some((index, callback, value)) = candidate {
+                unicorn
+                    .get_data_mut()
+                    .windows_fls_slots
+                    .get_mut(&index)
+                    .expect("observed FLS slot")
+                    .value = 0;
+                pending.fls_processed.insert(index);
+                let callback_rsp = pending.callback_return_rsp - 8;
+                unicorn
+                    .mem_write(callback_rsp, &HOST_CREATE_THREAD_CONTINUE.to_le_bytes())
+                    .map_err(|error| {
+                        format!("FLS destructor continuation write failed: {error}")
+                    })?;
+                unicorn
+                    .reg_write(RegisterX86::RSP, callback_rsp)
+                    .map_err(|error| format!("FLS destructor stack write failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::RCX, value)
+                    .map_err(|error| format!("FLS destructor value write failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::R11, callback)
+                    .map_err(|error| format!("FLS destructor target write failed: {error}"))?;
+                unicorn.get_data_mut().pending_windows_thread = Some(pending);
+                return Ok(());
+            }
+            let needs_another_pass = unicorn
+                .get_data()
+                .windows_fls_slots
+                .values()
+                .any(|slot| slot.callback != 0 && slot.value != 0);
+            if !needs_another_pass {
+                break;
+            }
+            if pending.fls_pass >= MAX_FLS_DESTRUCTOR_PASSES {
+                return Err(format!(
+                    "guest thread FLS destructors exceeded {MAX_FLS_DESTRUCTOR_PASSES} passes"
+                ));
+            }
+            pending.fls_pass += 1;
+            pending.fls_processed.clear();
+        }
+        let exit_code = pending.exit_code.expect("thread entry completed");
+        let (stack_base, stack_size) = {
+            let thread = unicorn
+                .get_data_mut()
+                .windows_threads
+                .get_mut(&pending.handle)
+                .ok_or_else(|| format!("CreateThread handle {:#x} disappeared", pending.handle))?;
+            thread.completed = true;
+            thread.suspended = false;
+            thread.exit_code = exit_code;
+            thread.stack_mapped = false;
+            (thread.stack_base, thread.stack_size)
+        };
+        unicorn
+            .mem_unmap(stack_base, stack_size)
+            .map_err(|error| format!("CreateThread stack unmap failed: {error}"))?;
+        unicorn
+            .mem_write(0x08, &pending.caller_teb_stack)
+            .map_err(|error| format!("CreateThread TEB stack restore failed: {error}"))?;
+        let thread = unicorn
+            .get_data()
+            .windows_threads
+            .get(&pending.handle)
+            .expect("thread remains recorded");
+        let remove_closed = !thread.handle_open;
+        restore_windows_thread_context(unicorn.get_data_mut(), &pending);
+        if remove_closed {
+            unicorn
+                .get_data_mut()
+                .windows_threads
+                .remove(&pending.handle);
+        }
+        unicorn.get_data_mut().pending_windows_thread = None;
+        unicorn
+            .reg_write(RegisterX86::RSP, pending.continuation_rsp)
+            .map_err(|error| format!("CreateThread final stack write failed: {error}"))?;
+        unicorn
+            .reg_write(RegisterX86::R11, pending.return_address)
+            .map_err(|error| format!("CreateThread return target write failed: {error}"))?;
+        unicorn
+            .reg_write(RegisterX86::RAX, pending.completion_return)
+            .map_err(|error| format!("CreateThread return value write failed: {error}"))
+    })();
+    if let Err(error) = result {
+        fail_windows_thread_callback(unicorn, error);
+    }
+}
+
+fn dispatch_windows_thread(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    handle: u64,
+    return_address: u64,
+    continuation_rsp: u64,
+    completion_return: u64,
+) -> Result<(), String> {
+    if unicorn.get_data().pending_windows_thread.is_some() {
+        return Err("nested CreateThread execution is unsupported".into());
+    }
+    let (id, start, parameter, stack_base, stack_size) = unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .filter(|thread| thread.handle_open)
+        .map(|thread| {
+            (
+                thread.id,
+                thread.start,
+                thread.parameter,
+                thread.stack_base,
+                thread.stack_size,
+            )
+        })
+        .ok_or_else(|| format!("CreateThread handle {handle:#x} is stale"))?;
+    let caller_tls_values = unicorn.get_data().windows_tls_slots.clone();
+    let caller_fls_values = unicorn
+        .get_data()
+        .windows_fls_slots
+        .iter()
+        .map(|(index, slot)| (*index, slot.value))
+        .collect();
+    let mut caller_teb_stack = [0u8; 16];
+    unicorn
+        .mem_read(0x08, &mut caller_teb_stack)
+        .map_err(|error| format!("CreateThread TEB stack read failed: {error}"))?;
+    let callback_rsp = ((stack_base + stack_size) - 0x108) | 8;
+    let pending = PendingWindowsThread {
+        handle,
+        return_address,
+        continuation_rsp,
+        callback_return_rsp: callback_rsp + 8,
+        caller_tls_values,
+        caller_fls_values,
+        caller_last_error: unicorn.get_data().windows_last_error,
+        caller_thread_error_mode: unicorn.get_data().windows_thread_error_mode,
+        caller_thread_id: unicorn.get_data().current_windows_thread_id,
+        completion_return,
+        caller_teb_stack,
+        exit_code: None,
+        fls_pass: 1,
+        fls_processed: BTreeSet::new(),
+    };
+    unicorn.get_data_mut().pending_windows_thread = Some(pending);
+    for value in unicorn.get_data_mut().windows_tls_slots.values_mut() {
+        *value = 0;
+    }
+    for slot in unicorn.get_data_mut().windows_fls_slots.values_mut() {
+        slot.value = 0;
+    }
+    unicorn.get_data_mut().windows_last_error = 0;
+    unicorn.get_data_mut().windows_thread_error_mode = 0;
+    unicorn.get_data_mut().current_windows_thread_id = id;
+    unicorn
+        .mem_write(callback_rsp, &HOST_CREATE_THREAD_CONTINUE.to_le_bytes())
+        .map_err(|error| format!("CreateThread continuation write failed: {error}"))?;
+    let mut teb_stack = [0u8; 16];
+    teb_stack[0..8].copy_from_slice(&(stack_base + stack_size).to_le_bytes());
+    teb_stack[8..16].copy_from_slice(&stack_base.to_le_bytes());
+    unicorn
+        .mem_write(0x08, &teb_stack)
+        .map_err(|error| format!("CreateThread TEB stack write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RSP, callback_rsp)
+        .map_err(|error| format!("CreateThread callback stack write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RCX, parameter)
+        .map_err(|error| format!("CreateThread callback parameter write failed: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::R11, start)
+        .map_err(|error| format!("CreateThread callback target write failed: {error}"))?;
+    Ok(())
+}
+
+fn emulate_create_thread(unicorn: &mut Unicorn<'_, GuestState>) {
+    const CREATE_SUSPENDED: u32 = 0x0000_0004;
+    const STACK_SIZE_PARAM_IS_A_RESERVATION: u32 = 0x0001_0000;
+    const MAX_WINDOWS_THREADS: usize = 32;
+    const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+    let result = (|| -> Result<(), String> {
+        let security_attributes = read_win64_import_argument(unicorn, 0)?;
+        let stack_size = read_win64_import_argument(unicorn, 1)?;
+        let start = read_win64_import_argument(unicorn, 2)?;
+        let parameter = read_win64_import_argument(unicorn, 3)?;
+        let flags = read_win64_import_argument(unicorn, 4)? as u32;
+        let thread_id_output = read_win64_import_argument(unicorn, 5)?;
+        if security_attributes != 0 {
+            return Err("CreateThread security attributes are unsupported".into());
+        }
+        if stack_size > STACK_SIZE {
+            return Err(format!(
+                "CreateThread stack reservation {stack_size:#x} exceeds bounded guest stack {STACK_SIZE:#x}"
+            ));
+        }
+        if flags & !(CREATE_SUSPENDED | STACK_SIZE_PARAM_IS_A_RESERVATION) != 0 {
+            return Err(format!("CreateThread flags {flags:#x} are unsupported"));
+        }
+        if !image_executable_address(unicorn.get_data(), start) {
+            return Err(format!(
+                "CreateThread start routine {start:#x} is outside the executable image"
+            ));
+        }
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("CreateThread stack read failed: {error}"))?;
+        let return_address = read_vcomp_u64(unicorn, rsp)
+            .map_err(|error| format!("CreateThread return address read failed: {error}"))?;
+        if flags & CREATE_SUSPENDED == 0
+            && return_address != RETURN_ADDRESS
+            && !image_executable_address(unicorn.get_data(), return_address)
+        {
+            return Err(format!(
+                "CreateThread caller return {return_address:#x} is outside the executable image"
+            ));
+        }
+        if thread_id_output != 0 {
+            let output_end = thread_id_output
+                .checked_add(3)
+                .ok_or_else(|| "CreateThread thread-id output range overflows".to_string())?;
+            let regions = unicorn
+                .mem_regions()
+                .map_err(|error| format!("CreateThread memory-map query failed: {error}"))?;
+            let mut cursor = thread_id_output;
+            while cursor <= output_end {
+                let region = regions
+                    .iter()
+                    .find(|region| {
+                        region.begin <= cursor
+                            && cursor <= region.end
+                            && region.perms & Prot::WRITE.0 as u32 != 0
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "CreateThread thread-id output {thread_id_output:#x}..={output_end:#x} is not fully writable"
+                        )
+                    })?;
+                if region.end >= output_end {
+                    break;
+                }
+                cursor = region
+                    .end
+                    .checked_add(1)
+                    .ok_or_else(|| "CreateThread writable region overflows".to_string())?;
+            }
+        }
+        if unicorn.get_data().windows_threads.len() >= MAX_WINDOWS_THREADS {
+            unicorn.get_data_mut().windows_last_error = ERROR_NOT_ENOUGH_MEMORY;
+            unicorn
+                .reg_write(RegisterX86::RAX, 0)
+                .map_err(|error| format!("CreateThread limit return failed: {error}"))?;
+            return Ok(());
+        }
+        let id = unicorn.get_data().next_windows_thread_id;
+        let handle = WINDOWS_THREAD_HANDLE_BASE
+            .checked_add(u64::from(id) * 0x10)
+            .ok_or_else(|| "CreateThread handle overflow".to_string())?;
+        let next_id = id
+            .checked_add(1)
+            .ok_or_else(|| "CreateThread id space exhausted".to_string())?;
+        let suspended = flags & CREATE_SUSPENDED != 0;
+        let requested_stack = if stack_size == 0 {
+            STACK_SIZE
+        } else if flags & STACK_SIZE_PARAM_IS_A_RESERVATION != 0 {
+            stack_size.max(PAGE_SIZE)
+        } else {
+            STACK_SIZE
+        };
+        let mapped_stack_size = requested_stack
+            .checked_add(PAGE_SIZE - 1)
+            .map(|size| size & !(PAGE_SIZE - 1))
+            .ok_or_else(|| "CreateThread stack size overflow".to_string())?;
+        let stack_slot = (0..MAX_WINDOWS_THREADS)
+            .find(|slot| {
+                let base = WINDOWS_THREAD_STACK_BASE + (*slot as u64) * WINDOWS_THREAD_STACK_STRIDE;
+                !unicorn
+                    .get_data()
+                    .windows_threads
+                    .values()
+                    .any(|thread| thread.stack_base == base)
+            })
+            .ok_or_else(|| "CreateThread stack slots exhausted".to_string())?;
+        let thread_stack_base =
+            WINDOWS_THREAD_STACK_BASE + (stack_slot as u64) * WINDOWS_THREAD_STACK_STRIDE;
+        unicorn
+            .mem_map(
+                thread_stack_base,
+                mapped_stack_size,
+                Prot::READ | Prot::WRITE,
+            )
+            .map_err(|error| format!("CreateThread stack map failed: {error}"))?;
+        if thread_id_output != 0 {
+            if let Err(error) = unicorn.mem_write(thread_id_output, &id.to_le_bytes()) {
+                let _ = unicorn.mem_unmap(thread_stack_base, mapped_stack_size);
+                return Err(format!(
+                    "CreateThread thread-id output {thread_id_output:#x} is not writable: {error}"
+                ));
+            }
+        }
+        unicorn.get_data_mut().windows_threads.insert(
+            handle,
+            WindowsThread {
+                id,
+                start,
+                parameter,
+                suspended,
+                completed: false,
+                exit_code: 0,
+                handle_open: true,
+                stack_base: thread_stack_base,
+                stack_size: mapped_stack_size,
+                stack_mapped: true,
+            },
+        );
+        unicorn.get_data_mut().next_windows_thread_id = next_id;
+        if suspended {
+            unicorn
+                .reg_write(RegisterX86::RAX, handle)
+                .map_err(|error| format!("CreateThread suspended return failed: {error}"))?;
+            unicorn
+                .reg_write(RegisterX86::RSP, rsp + 8)
+                .map_err(|error| format!("CreateThread suspended stack advance failed: {error}"))?;
+            unicorn
+                .reg_write(RegisterX86::R11, return_address)
+                .map_err(|error| format!("CreateThread suspended return target failed: {error}"))?;
+            return Ok(());
+        }
+        dispatch_windows_thread(unicorn, handle, return_address, rsp + 8, handle)
+    })();
+    if let Err(error) = result {
+        unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+        fail_windows_thread_callback(unicorn, error);
+    }
+}
+
+fn emulate_resume_thread(unicorn: &mut Unicorn<'_, GuestState>) {
+    const THREAD_ERROR: u64 = u32::MAX as u64;
+    let result = (|| -> Result<(), String> {
+        let handle = read_win64_import_argument(unicorn, 0)?;
+        match unicorn
+            .get_data()
+            .windows_threads
+            .get(&handle)
+            .filter(|thread| thread.handle_open)
+        {
+            Some(thread) if thread.suspended && !thread.completed => {}
+            Some(_) => {
+                unicorn.reg_write(RegisterX86::RAX, 0).map_err(|error| {
+                    format!("ResumeThread already-running return failed: {error}")
+                })?;
+                let rsp = unicorn
+                    .reg_read(RegisterX86::RSP)
+                    .map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
+                let return_address = read_vcomp_u64(unicorn, rsp)?;
+                unicorn
+                    .reg_write(RegisterX86::RSP, rsp + 8)
+                    .map_err(|error| format!("ResumeThread stack advance failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::R11, return_address)
+                    .map_err(|error| format!("ResumeThread return target failed: {error}"))?;
+                return Ok(());
+            }
+            None => {
+                unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+                unicorn
+                    .reg_write(RegisterX86::RAX, THREAD_ERROR)
+                    .map_err(|error| {
+                        format!("ResumeThread invalid-handle return failed: {error}")
+                    })?;
+                let rsp = unicorn
+                    .reg_read(RegisterX86::RSP)
+                    .map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
+                let return_address = read_vcomp_u64(unicorn, rsp)?;
+                unicorn
+                    .reg_write(RegisterX86::RSP, rsp + 8)
+                    .map_err(|error| format!("ResumeThread stack advance failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::R11, return_address)
+                    .map_err(|error| format!("ResumeThread return target failed: {error}"))?;
+                return Ok(());
+            }
+        }
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("ResumeThread stack read failed: {error}"))?;
+        let return_address = read_vcomp_u64(unicorn, rsp)?;
+        dispatch_windows_thread(unicorn, handle, return_address, rsp + 8, 1)
+    })();
+    if let Err(error) = result {
+        fail_windows_thread_callback(unicorn, error);
+    }
+}
+
+fn emulate_windows_thread_lifecycle(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    const WAIT_OBJECT_0: u64 = 0;
+    const WAIT_TIMEOUT: u64 = 258;
+    const WAIT_FAILED: u64 = u32::MAX as u64;
+    let returned = match operation {
+        LegacyWin64Import::WaitForSingleObject | LegacyWin64Import::WaitForSingleObjectEx => {
+            let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+            let timeout = read_win64_import_argument(unicorn, 1).unwrap_or_default() as u32;
+            if operation == LegacyWin64Import::WaitForSingleObjectEx {
+                let _ = read_win64_import_argument(unicorn, 2);
+            }
+            match unicorn
+                .get_data()
+                .windows_threads
+                .get(&handle)
+                .filter(|thread| thread.handle_open)
+            {
+                Some(thread) if thread.completed => WAIT_OBJECT_0,
+                Some(_) if timeout == 0 => WAIT_TIMEOUT,
+                Some(_) => {
+                    unicorn.get_data_mut().callback_error = Some(format!(
+                        "blocking wait on incomplete guest thread {handle:#x} is unsupported"
+                    ));
+                    let _ = unicorn.emu_stop();
+                    WAIT_FAILED
+                }
+                None => {
+                    unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+                    WAIT_FAILED
+                }
+            }
+        }
+        LegacyWin64Import::CloseHandle => {
+            let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+            match unicorn
+                .get_data()
+                .windows_threads
+                .get(&handle)
+                .filter(|thread| thread.handle_open)
+            {
+                Some(thread) if thread.completed => {
+                    unicorn.get_data_mut().windows_threads.remove(&handle);
+                    1
+                }
+                Some(_) => {
+                    unicorn
+                        .get_data_mut()
+                        .windows_threads
+                        .get_mut(&handle)
+                        .expect("observed thread")
+                        .handle_open = false;
+                    1
+                }
+                None => {
+                    unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+                    0
+                }
+            }
+        }
+        LegacyWin64Import::SetThreadStackGuarantee => {
+            let output = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+            let mut bytes = [0u8; 4];
+            if output == 0 || unicorn.mem_read(output, &mut bytes).is_err() {
+                unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+                0
+            } else {
+                let requested = u32::from_le_bytes(bytes);
+                if u64::from(requested) > STACK_SIZE {
+                    unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+                    0
+                } else if unicorn.mem_write(output, &0u32.to_le_bytes()).is_err() {
+                    unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+                    0
+                } else {
+                    1
+                }
+            }
+        }
+        _ => 0,
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, returned);
 }
 
 fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
