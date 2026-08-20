@@ -2279,7 +2279,7 @@ int32_t& g_aegp_active_camera_layer_index =
 // layer/effect/collection/stream/keyframe callbacks are compiled in
 // worker_aegp_scene.cpp.
 bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
-  return plugin_id == 1 && item == &g_aegp_comp_item;
+  return plugin_id == 1 && valid_scene_item_handle(item);
 }
 bool __cdecl initialize_layer_render_options(
     int32_t plugin_id, void* source, AegpLayerEffectBoundary boundary,
@@ -2289,8 +2289,11 @@ bool __cdecl initialize_layer_render_options(
   initialized.owner_plugin_id = plugin_id;
   initialized.effect_boundary = boundary;
   if (boundary == AegpLayerEffectBoundary::all) {
-    if (aegp_layer_index(source) < 0) return false;
-    initialized.layer = source;
+    const int32_t layer_index = aegp_layer_index(source);
+    if (layer_index < 0) return false;
+    initialized.layer = static_cast<std::size_t>(layer_index) < g_aegp_layers.size()
+        ? &g_aegp_layers[static_cast<std::size_t>(layer_index)]
+        : source;
   } else {
     const auto* instance = resolve_effect_instance(source, plugin_id);
     if (!instance) return false;
