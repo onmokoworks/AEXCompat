@@ -296,6 +296,7 @@ jobs:
   # assert_artifact_fresh (tests/_render_session.py) が要求する mtime 順序は
   # python-tests 側で作り直す。
   native-probes:
+    name: native-probes (${{ matrix.producer }})
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
