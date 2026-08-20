@@ -319,6 +319,7 @@ pub struct GuestEngine<'a> {
     unicorn: Unicorn<'a, GuestState>,
     scheduled_windows_threads: BTreeMap<u32, ParkedWindowsThread>,
     scheduler_ready: VecDeque<u32>,
+    scheduler_deferred_ready: VecDeque<u32>,
     parked_main_context: Option<Context>,
     next_data: u64,
     image_base: u64,

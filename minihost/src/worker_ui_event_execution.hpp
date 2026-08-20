@@ -95,8 +95,6 @@ struct CustomUiTelemetry {
   uint32_t register_ui_calls{};
   CustomUiRegistration registration{};
   uint32_t invalid_custom_ui_registrations{};
-  uint32_t adv_app_info_text_calls{};
-  std::string last_adv_app_info_text;
   bool render_ui_context_active{};
   uint32_t drawbot_objects_created{};
   uint32_t drawbot_objects_released{};
@@ -133,5 +131,13 @@ struct CustomUiTelemetry {
   std::vector<std::array<float, 4>> drawbot_fill_colors;
 };
 CustomUiTelemetry& custom_ui_telemetry();
+
+struct InfoTextTelemetrySnapshot {
+  uint32_t calls{};
+  std::string last_text;
+};
+void record_info_text(std::string text);
+InfoTextTelemetrySnapshot snapshot_info_text_telemetry();
+void reset_info_text_telemetry();
 
 }  // namespace aexcompat::worker_runtime::ui_event_execution

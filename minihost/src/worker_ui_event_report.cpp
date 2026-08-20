@@ -24,8 +24,6 @@ bool suite_leases_balanced();
 namespace {
 auto& g_custom_ui_telemetry =
     aexcompat::worker_runtime::ui_event_execution::custom_ui_telemetry();
-auto& g_adv_app_info_text_calls = g_custom_ui_telemetry.adv_app_info_text_calls;
-auto& g_last_adv_app_info_text = g_custom_ui_telemetry.last_adv_app_info_text;
 auto& g_drawbot_objects_created = g_custom_ui_telemetry.drawbot_objects_created;
 auto& g_drawbot_objects_released = g_custom_ui_telemetry.drawbot_objects_released;
 auto& g_drawbot_paint_rect_calls = g_custom_ui_telemetry.drawbot_paint_rect_calls;
@@ -49,6 +47,8 @@ auto& g_ui_coordinate_transform_calls = g_custom_ui_telemetry.ui_coordinate_tran
 }  // namespace
 
 bool emit_ui_event_completion_report(const UiEventCompletionInputs& in) {
+  const auto info_text =
+      aexcompat::worker_runtime::ui_event_execution::snapshot_info_text_telemetry();
   const int32_t event_error = in.event_error;
   const int32_t cursor = in.cursor;
   const int32_t event_out_flags = in.event_out_flags;
@@ -101,8 +101,8 @@ bool emit_ui_event_completion_report(const UiEventCompletionInputs& in) {
             << "\",\"event_target\":\"" << event_target
             << "\",\"event_error\":" << event_error
             << ",\"cursor\":" << cursor << ",\"event_out_flags\":" << event_out_flags
-            << ",\"adv_app_info_text_calls\":" << g_adv_app_info_text_calls
-            << ",\"adv_app_info_text\":\"" << escape(g_last_adv_app_info_text)
+            << ",\"adv_app_info_text_calls\":" << info_text.calls
+            << ",\"adv_app_info_text\":\"" << escape(info_text.last_text)
             << "\",\"arbitrary_values_disposed\":"
             << (arbitrary_values_disposed ? "true" : "false")
             << ",\"handle_lifetimes_balanced\":"
