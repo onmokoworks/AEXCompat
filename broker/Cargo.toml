@@ -4,7 +4,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-license = "MIT"
+license = "MPL-2.0"
 
 [workspace.dependencies]
 windows-sys = { version = "0.59", features = [

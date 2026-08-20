@@ -591,6 +591,10 @@ bool layer_effect_boundary_is_live(const AegpLayerRenderOptionsValue& options) {
   return options.effect_boundary == AegpLayerEffectBoundary::all ||
       resolve_effect_instance(options.upstream_effect, options.owner_plugin_id) != nullptr;
 }
+bool valid_scene_item_handle(void* item) noexcept {
+  ObjectSnapshot snapshot{};
+  return resolve_scene_item(item, snapshot);
+}
 uint64_t effect_instance_identity(std::size_t index,
                                   const AegpEffectInstance& instance) {
   if (!instance.occupied || instance.generation == 0 ||
