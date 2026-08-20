@@ -3014,16 +3014,34 @@ fn srw_exclusive_zero_initializes_acquires_releases_and_is_session_local() {
     let mut first = prepare();
     first.write(LOCK, &[0; 8]).unwrap();
     assert_eq!(first.call_win64(ACQUIRE, [LOCK, 0, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(first.unicorn.get_data().windows_srw_locks[&LOCK].owner, Some(1));
+    assert_eq!(
+        first.unicorn.get_data().windows_srw_locks[&LOCK].owner,
+        Some(1)
+    );
     assert_eq!(first.call_win64(RELEASE, [LOCK, 0, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(first.unicorn.get_data().windows_srw_locks[&LOCK].owner, None);
+    assert_eq!(
+        first.unicorn.get_data().windows_srw_locks[&LOCK].owner,
+        None
+    );
     assert_eq!(first.unicorn.mem_read_as_vec(LOCK, 8).unwrap(), vec![0; 8]);
 
     let mut second = prepare();
     second.write(LOCK, &[0; 8]).unwrap();
-    assert!(!second.unicorn.get_data().windows_srw_locks.contains_key(&LOCK));
-    assert_eq!(second.call_win64(ACQUIRE, [LOCK, 0, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(second.unicorn.get_data().windows_srw_locks[&LOCK].owner, Some(1));
+    assert!(
+        !second
+            .unicorn
+            .get_data()
+            .windows_srw_locks
+            .contains_key(&LOCK)
+    );
+    assert_eq!(
+        second.call_win64(ACQUIRE, [LOCK, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        second.unicorn.get_data().windows_srw_locks[&LOCK].owner,
+        Some(1)
+    );
 }
 
 #[test]
@@ -3048,40 +3066,55 @@ fn srw_exclusive_rejects_storage_recursive_and_unbalanced_misuse() {
         "AcquireSRWLockExclusive",
     )
     .unwrap();
-    assert!(wrong_library
-        .call_win64(STUB_BASE + 0x450, [DATA_BASE + 0x908, 0, 0, 0, 0, 0])
-        .unwrap_err()
-        .to_string()
-        .contains("unsupported"));
+    assert!(
+        wrong_library
+            .call_win64(STUB_BASE + 0x450, [DATA_BASE + 0x908, 0, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported")
+    );
 
     let mut null = prepare();
-    assert!(null.call_win64(ACQUIRE, [0; 6]).unwrap_err().to_string().contains("not readable"));
+    assert!(
+        null.call_win64(ACQUIRE, [0; 6])
+            .unwrap_err()
+            .to_string()
+            .contains("not readable")
+    );
 
     let lock = DATA_BASE + 0x908;
     let mut nonzero = prepare();
     nonzero.write(lock, &2u64.to_le_bytes()).unwrap();
-    assert!(nonzero
-        .call_win64(ACQUIRE, [lock, 0, 0, 0, 0, 0])
-        .unwrap_err()
-        .to_string()
-        .contains("not initialized by zero"));
+    assert!(
+        nonzero
+            .call_win64(ACQUIRE, [lock, 0, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("not initialized by zero")
+    );
 
     let mut recursive = prepare();
     recursive.write(lock, &[0; 8]).unwrap();
-    recursive.call_win64(ACQUIRE, [lock, 0, 0, 0, 0, 0]).unwrap();
-    assert!(recursive
+    recursive
         .call_win64(ACQUIRE, [lock, 0, 0, 0, 0, 0])
-        .unwrap_err()
-        .to_string()
-        .contains("recursive"));
+        .unwrap();
+    assert!(
+        recursive
+            .call_win64(ACQUIRE, [lock, 0, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("recursive")
+    );
 
     let mut unbalanced = prepare();
     unbalanced.write(lock, &[0; 8]).unwrap();
-    assert!(unbalanced
-        .call_win64(RELEASE, [lock, 0, 0, 0, 0, 0])
-        .unwrap_err()
-        .to_string()
-        .contains("does not own"));
+    assert!(
+        unbalanced
+            .call_win64(RELEASE, [lock, 0, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("does not own")
+    );
 }
 
 #[test]
@@ -3103,7 +3136,10 @@ fn srw_exclusive_cross_thread_contention_never_false_succeeds() {
         .call_win64(ACQUIRE, [LOCK, 0, 0, 0, 0, 0])
         .unwrap_err();
     assert!(error.to_string().contains("SRW lock deadlock"));
-    assert_eq!(engine.unicorn.get_data().windows_srw_locks[&LOCK].owner, Some(1));
+    assert_eq!(
+        engine.unicorn.get_data().windows_srw_locks[&LOCK].owner,
+        Some(1)
+    );
     assert_eq!(
         engine.unicorn.get_data().windows_srw_locks[&LOCK]
             .waiters
@@ -3168,12 +3204,27 @@ fn srw_exclusive_scheduler_parks_transfers_and_resumes_a_guest_waiter() {
     }
     engine.write(LOCK, &[0; 8]).unwrap();
     let handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
-    assert_eq!(engine.unicorn.mem_read_as_vec(OUTPUT, 4).unwrap(), 1u32.to_le_bytes());
-    let child = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(OUTPUT, 4).unwrap(),
+        1u32.to_le_bytes()
+    );
+    let child = engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .unwrap();
     assert!(child.completed);
     assert_eq!(child.exit_code, 42);
-    assert_eq!(engine.unicorn.get_data().windows_srw_locks[&LOCK].owner, None);
-    assert!(engine.unicorn.get_data().windows_srw_locks[&LOCK].waiters.is_empty());
+    assert_eq!(
+        engine.unicorn.get_data().windows_srw_locks[&LOCK].owner,
+        None
+    );
+    assert!(
+        engine.unicorn.get_data().windows_srw_locks[&LOCK]
+            .waiters
+            .is_empty()
+    );
     assert!(engine.scheduled_windows_threads.is_empty());
     assert!(engine.scheduler_ready.is_empty());
     assert!(engine.unicorn.get_data().scheduler_woken_threads.is_empty());
@@ -6231,8 +6282,7 @@ fn raise_exception_reports_bounded_msvc_record_without_host_dispatch() {
     const RAISE: u64 = STUB_BASE + 0x198;
     let mut engine = test_engine(&[0xc3]);
     assert_eq!(
-        install_win64_import(&mut engine.unicorn, RAISE, "KERNEL32.DLL", "RaiseException")
-            .unwrap(),
+        install_win64_import(&mut engine.unicorn, RAISE, "KERNEL32.DLL", "RaiseException").unwrap(),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::RaiseException)
     );
     assert_eq!(
@@ -6286,19 +6336,17 @@ fn raise_exception_validates_flags_count_and_complete_parameter_array() {
             DATA_BASE + DATA_SIZE - 8,
             "is not fully readable for 2 entries",
         ),
-        (
-            0,
-            1,
-            u64::MAX - 3,
-            "is not fully readable for 1 entries",
-        ),
+        (0, 1, u64::MAX - 3, "is not fully readable for 1 entries"),
     ];
     for (flags, count, arguments, expected) in cases {
         let mut engine = test_engine(&[0xc3]);
         engine.unicorn.reg_write(RegisterX86::RCX, 0x1234).unwrap();
         engine.unicorn.reg_write(RegisterX86::RDX, flags).unwrap();
         engine.unicorn.reg_write(RegisterX86::R8, count).unwrap();
-        engine.unicorn.reg_write(RegisterX86::R9, arguments).unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::R9, arguments)
+            .unwrap();
         emulate_raise_exception(&mut engine.unicorn);
         assert!(
             engine
@@ -7053,10 +7101,18 @@ fn private_heap_lifecycle_tracks_allocations_and_releases_them_on_destroy() {
         vec![moved]
     );
     assert_eq!(
-        engine.call_win64(HEAP_DESTROY, [heap, 0, 0, 0, 0, 0]).unwrap(),
+        engine
+            .call_win64(HEAP_DESTROY, [heap, 0, 0, 0, 0, 0])
+            .unwrap(),
         1
     );
-    assert!(!engine.unicorn.get_data().windows_private_heaps.contains_key(&heap));
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_private_heaps
+            .contains_key(&heap)
+    );
     assert!(engine.unicorn.mem_read_as_vec(moved, 1).is_err());
     assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
 }
@@ -7083,8 +7139,14 @@ fn private_heap_creation_is_bounded_and_session_handles_are_isolated() {
         0,
         "allocation-only flags are not HeapCreate flags"
     );
-    assert_eq!(first.call_win64(HEAP_CREATE, [0, 1, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(first.call_win64(HEAP_CREATE, [0, 0, 1, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        first.call_win64(HEAP_CREATE, [0, 1, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        first.call_win64(HEAP_CREATE, [0, 0, 1, 0, 0, 0]).unwrap(),
+        0
+    );
 
     let first_handle = first.call_win64(HEAP_CREATE, [0; 6]).unwrap();
     let second_handle = second.call_win64(HEAP_CREATE, [0; 6]).unwrap();
@@ -7136,13 +7198,21 @@ fn private_heap_rejects_foreign_stale_and_cross_heap_ownership() {
 
     let mut foreign = prepare();
     let error = foreign
-        .call_win64(HEAP_ALLOC, [PRIVATE_HEAP_TOKEN_BASE + 0xffff, 0, 8, 0, 0, 0])
+        .call_win64(
+            HEAP_ALLOC,
+            [PRIVATE_HEAP_TOKEN_BASE + 0xffff, 0, 8, 0, 0, 0],
+        )
         .unwrap_err();
     assert!(error.to_string().contains("unknown heap handle"));
 
     let mut stale = prepare();
     let heap = stale.call_win64(HEAP_CREATE, [0; 6]).unwrap();
-    assert_eq!(stale.call_win64(HEAP_DESTROY, [heap, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(
+        stale
+            .call_win64(HEAP_DESTROY, [heap, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
     let error = stale
         .call_win64(HEAP_DESTROY, [heap, 0, 0, 0, 0, 0])
         .unwrap_err();
@@ -7154,7 +7224,14 @@ fn private_heap_rejects_foreign_stale_and_cross_heap_ownership() {
         budget
             .call_win64(
                 HEAP_ALLOC,
-                [heap, 0, crate::crt_heap::MAX_CRT_ALLOCATION_BYTES + 1, 0, 0, 0],
+                [
+                    heap,
+                    0,
+                    crate::crt_heap::MAX_CRT_ALLOCATION_BYTES + 1,
+                    0,
+                    0,
+                    0
+                ],
             )
             .unwrap(),
         0
