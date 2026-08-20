@@ -15,8 +15,9 @@ mod windows_e2e {
     use aexcompat_broker::render_session::{
         AudioRenderSession, AudioSessionOpenRequest, AudioSpanStatus, ClusterRenderPlugins,
         DiscoverySession, FrameStatus, InPlaceDiscoverySessionOpenRequest, InspectOutcome,
-        RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome, run_video_batch,
-        validate_abandoned_smart_heap_corruption_close, validate_abandoned_smart_untouched_close,
+        PluginDataEffectSelector, RenderSession, SessionLayer, SessionOpenRequest, SwapOutcome,
+        run_video_batch, validate_abandoned_smart_heap_corruption_close,
+        validate_abandoned_smart_untouched_close,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use aexcompat_broker::secure_launch::LaunchEnvironment;
@@ -225,6 +226,69 @@ mod windows_e2e {
         (0..WIDTH * HEIGHT * 4)
             .map(|index| seed.wrapping_add(index as u8))
             .collect()
+    }
+
+    #[test]
+    fn plugin_data_secondary_selector_reaches_the_resident_render_worker() {
+        let (repository, plugin, sha) = temp_repository();
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        let mut session = RenderSession::open_plugin_data_effect(
+            SessionOpenRequest {
+                companions: Vec::new(),
+                repository: &repository.0,
+                plugin_path: &plugin,
+                plugin_sha256: &sha,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                dependency_search_dirs: fixture_dependency_search_dirs(&plugin),
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                launch_environment: behavior("plugin_data_secondary"),
+            },
+            &selector,
+        )
+        .expect("open exact PluginData secondary session");
+        let input = input_pattern(23);
+        let outcome = session
+            .render_frame(0, 0, &input)
+            .expect("secondary effect renders");
+        let FrameStatus::Rendered { pixels, .. } = outcome.status else {
+            panic!("secondary frame did not render: {:?}", outcome.status);
+        };
+        assert_eq!(
+            pixels,
+            input.iter().map(|byte| byte ^ 0x5a).collect::<Vec<_>>()
+        );
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["final_report"]["plugin_data"]["selected_index"], 1);
+        assert_eq!(
+            close["final_report"]["plugin_data"]["registrations"][1]["match_name_hex"],
+            "7365636f6e64"
+        );
     }
 
     /// Reads a file a still-running worker writes on its own schedule, waiting
@@ -3425,6 +3489,37 @@ mod windows_e2e {
             .expect("cluster audit carries epochs");
         assert_eq!(epochs.len(), 1, "close: {close}");
         assert_eq!(epochs[0]["plugin_index"], 0);
+    }
+
+    #[test]
+    fn discovery_session_reinspects_one_dll_at_an_exact_plugin_data_effect() {
+        let cluster = temp_cluster_repository();
+        let mut session = open_discovery_session(&cluster, behavior("plugin_data_secondary"));
+        let first = session
+            .inspect_plugin(0, 0)
+            .expect("inspect default effect");
+        let InspectOutcome::Inspected { report } = first else {
+            panic!("default effect inspection failed: {first:?}");
+        };
+        assert_eq!(report["plugin_data"]["selected_index"], 0);
+
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        let secondary = session
+            .inspect_plugin_effect(0, 1, Some(&selector))
+            .expect("inspect exact secondary effect");
+        let InspectOutcome::Inspected { report } = secondary else {
+            panic!("secondary effect inspection failed: {secondary:?}");
+        };
+        assert_eq!(report["plugin_data"]["selected_index"], 1);
+        assert_eq!(report["parameters"][0]["name"], "secondary");
+        assert_eq!(report["parameters"][0]["default"], 2.0);
+
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["inspects_ok"], 2, "close: {close}");
     }
 
     /// In-place discovery session (issue #751, cluster-manifest-v2): the

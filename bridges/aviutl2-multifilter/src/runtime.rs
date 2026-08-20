@@ -900,6 +900,7 @@ fn pool_open_route(
         dependency: ctx.dependency.clone(),
         sha: ctx.sha.clone(),
         smart: ctx.smart,
+        plugin_data_selector: ctx.plugin_data_selector.clone(),
         identity: key.geom.clone(),
         // No virtual-buffer layer on a pooled cluster session: the members share
         // one dependency closure but not a parameter layout, so the opener's
@@ -965,6 +966,7 @@ struct MfSessionConfig {
     dependency: DependencyConfig,
     sha: String,
     smart: bool,
+    plugin_data_selector: Option<PluginDataEffectSelector>,
     identity: GeomIdentity,
     /// Secondary layers read once at open (issue #645): AviUtl2's virtual buffer
     /// feeding an AEX layer parameter. Read on the AviUtl2 callback thread (only
@@ -975,6 +977,18 @@ struct MfSessionConfig {
     /// whole same-closure cluster and swaps plugins per request instead of
     /// serving a single AEX.
     cluster: Option<ClusterLaunch>,
+}
+
+fn route_plugin_data_session<R, T, E>(
+    request: R,
+    selector: Option<&PluginDataEffectSelector>,
+    open_default: impl FnOnce(R) -> Result<T, E>,
+    open_selected: impl FnOnce(R, &PluginDataEffectSelector) -> Result<T, E>,
+) -> Result<T, E> {
+    match selector {
+        Some(selector) => open_selected(request, selector),
+        None => open_default(request),
+    }
 }
 
 /// The cluster a pooled session opens over (issue #405): the manifest order
@@ -1118,8 +1132,13 @@ fn run_classic_fallback_once(
         payload_override: None,
         launch_environment: Default::default(),
     };
-    let mut classic = RenderSession::open(classic_request)
-        .map_err(|error| format!("Classic fallback open failed: {error}"))?;
+    let mut classic = route_plugin_data_session(
+        classic_request,
+        classic_config.plugin_data_selector.as_ref(),
+        RenderSession::open,
+        RenderSession::open_plugin_data_effect,
+    )
+    .map_err(|error| format!("Classic fallback open failed: {error}"))?;
     let classic_outcome = classic.render_frame_with_parameters(
         0,
         retained.current_time,
@@ -1153,6 +1172,11 @@ fn run_classic_fallback_once(
 /// Opens a session on its own thread, which owns the `!Send` `RenderSession` and
 /// serves render requests until the channel closes or the session is lost.
 fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
+    if config.cluster.is_some() && config.plugin_data_selector.is_some() {
+        return Err(
+            "PluginData secondary effects cannot use a DLL-indexed cluster session".to_owned(),
+        );
+    }
     let identity = config.identity.clone();
     let (tx, rx) = channel::<RenderReq>();
     let (open_tx, open_rx) = channel::<Result<(), String>>();
@@ -1296,7 +1320,12 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
                         }
                     }
                 }
-                None => match RenderSession::open(request) {
+                None => match route_plugin_data_session(
+                    request,
+                    config.plugin_data_selector.as_ref(),
+                    RenderSession::open,
+                    RenderSession::open_plugin_data_effect,
+                ) {
                     Ok(session) => (session, 0),
                     Err(error) => {
                         let _ = open_tx.send(Err(format!("RenderSession::open failed: {error}")));
@@ -1580,6 +1609,7 @@ fn open_and_get_sender(
         dependency: ctx.dependency.clone(),
         sha: ctx.sha.clone(),
         smart,
+        plugin_data_selector: ctx.plugin_data_selector.clone(),
         identity: identity.clone(),
         layers: open_layers(),
         companions: ctx.companions.clone(),

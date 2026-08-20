@@ -1673,6 +1673,31 @@ pub fn inspect_experimental_in_place(
         dependency_search_dirs,
         None,
         "--l2-params-only",
+        None,
+    )
+}
+
+pub fn inspect_experimental_in_place_plugin_data_effect(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+    selector: &crate::render_session::PluginDataEffectSelector,
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "in-place inspection requires at least one dependency search directory",
+        ));
+    }
+    inspect_experimental_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        Vec::new(),
+        dependency_search_dirs,
+        None,
+        "--l2-params-only",
+        Some(selector),
     )
 }
 
@@ -1704,6 +1729,7 @@ pub fn inspect_experimental_cleanup_contained_in_place(
         dependency_search_dirs,
         None,
         "--l2-params-inspect-cleanup-contained-v1",
+        None,
     )?;
     let diagnostics = &inspected.1;
     if !cleanup_contained_report_is_valid(diagnostics) {

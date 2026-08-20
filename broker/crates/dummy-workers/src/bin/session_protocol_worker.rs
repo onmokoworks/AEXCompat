@@ -47,6 +47,8 @@
 //!   structured parameter-local error.
 //! - `inspect_entrypoint_aegp_plugin_1`: answers plugin 1 with the real
 //!   entrypoint-error shape and a partial AEGP classification report.
+//! - `plugin_data_secondary`: requires the exact secondary PluginData launch
+//!   selector and renders a selector-specific pixel transform/report.
 
 #[cfg(windows)]
 mod worker {
@@ -388,6 +390,7 @@ mod worker {
         launch_payload: &str,
         module_audit: Value,
         behavior: &str,
+        plugin_data_selector: Option<(u32, &str)>,
     ) -> String {
         // The session-mechanics keys follow the worker flavor: the classic
         // report reuses its persistent-sequence fields while the smart report
@@ -452,6 +455,15 @@ mod worker {
                 .clone(),
             );
         }
+        if let Some((index, match_name_hex)) = plugin_data_selector {
+            report["plugin_data"] = json!({
+                "selected_index": index,
+                "registrations": [
+                    {"index": 0, "name_hex": "4669727374", "match_name_hex": "6669727374", "category_hex": "54657374", "entrypoint": "EffectFirst"},
+                    {"index": 1, "name_hex": "5365636f6e64", "match_name_hex": match_name_hex, "category_hex": "54657374", "entrypoint": "EffectSecond"}
+                ]
+            });
+        }
         report.to_string()
     }
 
@@ -487,6 +499,7 @@ mod worker {
         // so a broker writing the sidecar somewhere the real worker would
         // reject fails these tests too.
         let mut cluster_manifest: Option<ClusterManifest> = None;
+        let mut plugin_data_selector: Option<(u32, String)> = None;
         let mut effective = args.len();
         while effective >= 12 && args[effective - 2].starts_with("--") {
             let value = &args[effective - 1];
@@ -582,6 +595,13 @@ mod worker {
                         return 3;
                     }
                 }
+                "--plugin-data-selector-v1" => {
+                    let fields = value.split('|').collect::<Vec<_>>();
+                    if fields.as_slice() != ["v1", "1", "7365636f6e64"] {
+                        return 3;
+                    }
+                    plugin_data_selector = Some((1, "7365636f6e64".to_owned()));
+                }
                 _ => {}
             }
             effective -= 2;
@@ -643,6 +663,9 @@ mod worker {
             return 2;
         };
         let behavior = std::env::var("AEXCOMPAT_TEST_SESSION_BEHAVIOR").unwrap_or_default();
+        if behavior == "plugin_data_secondary" && plugin_data_selector.is_none() {
+            return 3;
+        }
         // The desktop is assigned at launch, so report it here rather than
         // from the frame handler: a caller whose frame deadline expires before
         // this process reaches the handler still gets to observe which desktop
@@ -1046,7 +1069,11 @@ mod worker {
                 );
             }
             for byte in &mut output {
-                *byte = 255 - *byte;
+                *byte = if behavior == "plugin_data_secondary" {
+                    *byte ^ 0x5a
+                } else {
+                    255 - *byte
+                };
             }
             // Stamp the received per-frame attribute digests into the frame so
             // integration tests can prove the v:2 fields actually reached the
@@ -1124,7 +1151,10 @@ mod worker {
                             &swap_epochs,
                             &behavior
                         ),
-                        &behavior
+                        &behavior,
+                        plugin_data_selector
+                            .as_ref()
+                            .map(|(index, name)| (*index, name.as_str()))
                     )
                 );
                 return 0;
@@ -1143,7 +1173,10 @@ mod worker {
                     &swap_epochs,
                     &behavior
                 ),
-                &behavior
+                &behavior,
+                plugin_data_selector
+                    .as_ref()
+                    .map(|(index, name)| (*index, name.as_str()))
             )
         );
         0
@@ -1202,13 +1235,19 @@ mod worker {
                 Some("inspect_plugin") => {}
                 _ => return EXIT_PROTOCOL_VIOLATION,
             }
-            // Exact-key strictness (design §4.2): only v, type, plugin_index,
-            // and request_index may ride the message; the index must select a
-            // manifest member and the request serial must advance.
-            let keys_ok = message.as_object().map(|object| object.len()) == Some(4)
+            // Exact-key strictness (design §4.2): an effect selector is an
+            // all-or-nothing {index, exact match-name} extension.
+            let has_effect_selector = message.get("effect_index").is_some()
+                || message.get("effect_match_name_hex").is_some();
+            let keys_ok = message
+                .as_object()
+                .is_some_and(|object| object.len() == if has_effect_selector { 6 } else { 4 })
                 && message.get("v").is_some()
                 && message.get("plugin_index").is_some()
-                && message.get("request_index").is_some();
+                && message.get("request_index").is_some()
+                && (!has_effect_selector
+                    || (message.get("effect_index").is_some()
+                        && message.get("effect_match_name_hex").is_some()));
             let (Some(plugin_index), Some(request_index)) = (
                 message["plugin_index"].as_u64(),
                 message["request_index"].as_u64(),
@@ -1219,6 +1258,9 @@ mod worker {
                 || message["v"].as_u64() != Some(1)
                 || plugin_index as usize >= manifest.plugins.len()
                 || request_index != next_request_index
+                || (has_effect_selector
+                    && (message["effect_index"].as_u64() != Some(1)
+                        || message["effect_match_name_hex"].as_str() != Some("7365636f6e64")))
             {
                 return EXIT_PROTOCOL_VIOLATION;
             }
@@ -1360,6 +1402,18 @@ mod worker {
                 .to_string()
             } else {
                 let (basename, sha256) = &manifest.plugins[new_index];
+                let selected_index = if has_effect_selector { 1 } else { 0 };
+                let plugin_data = if behavior == "plugin_data_secondary" {
+                    json!({
+                        "selected_index": selected_index,
+                        "registrations": [
+                            {"index": 0, "name_hex": "4669727374", "match_name_hex": "6669727374", "category_hex": "54657374", "entrypoint": "EffectFirst"},
+                            {"index": 1, "name_hex": "5365636f6e64", "match_name_hex": "7365636f6e64", "category_hex": "54657374", "entrypoint": "EffectSecond"}
+                        ]
+                    })
+                } else {
+                    Value::Null
+                };
                 json!({
                     "v": 1,
                     "type": "inspect_done",
@@ -1369,7 +1423,17 @@ mod worker {
                     "report": {
                         "status": "inspected",
                         "plugin": {"basename": basename, "sha256": sha256},
-                        "parameters": []
+                        "parameters": if has_effect_selector {
+                            vec![json!({"slot": 1, "name": "secondary", "kind": "float", "default": 2.0})]
+                        } else {
+                            Vec::<Value>::new()
+                        },
+                        "missing_suites": if has_effect_selector {
+                            vec![json!({"name": "Secondary Effect Suite", "version": 2})]
+                        } else {
+                            Vec::<Value>::new()
+                        },
+                        "plugin_data": plugin_data
                     }
                 })
                 .to_string()

@@ -613,6 +613,49 @@ pub struct SessionOpenRequest<'a> {
     pub launch_environment: crate::secure_launch::LaunchEnvironment,
 }
 
+/// Stable identity of one effect registered by a PluginData bundle (#1260).
+/// Both fields are required: the index makes selection unambiguous within the
+/// bounded registration order, while the exact match-name bytes prevent a
+/// changed/reordered bundle from silently dispatching another effect.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginDataEffectSelector {
+    pub index: u32,
+    pub match_name_hex: String,
+}
+
+impl PluginDataEffectSelector {
+    pub(crate) fn encoded(&self) -> io::Result<String> {
+        if self.index >= 64
+            || self.match_name_hex.is_empty()
+            || self.match_name_hex.len() > 512
+            || !self.match_name_hex.len().is_multiple_of(2)
+            || !self
+                .match_name_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(invalid("PluginData effect selector is invalid"));
+        }
+        for pair in self.match_name_hex.as_bytes().chunks_exact(2) {
+            let value = u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap();
+            if value < 0x20 || value == 0x7f {
+                return Err(invalid("PluginData effect selector contains unsafe bytes"));
+            }
+        }
+        Ok(format!("v1|{}|{}", self.index, self.match_name_hex))
+    }
+}
+
+fn append_plugin_data_selector_args(
+    args: &mut Vec<String>,
+    selector: Option<&PluginDataEffectSelector>,
+) -> io::Result<()> {
+    if let Some(selector) = selector {
+        args.extend(["--plugin-data-selector-v1".to_owned(), selector.encoded()?]);
+    }
+    Ok(())
+}
+
 /// A secondary layer whose RGBA8 pixels travel as an inherited per-layer file
 /// HANDLE for the whole session (#268), read once by the worker at open.
 /// Width/height are the layer's own geometry, independent of the primary input.
@@ -940,7 +983,19 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None)
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None, None)
+    }
+
+    pub fn open_plugin_data_effect(
+        request: SessionOpenRequest<'_>,
+        selector: &PluginDataEffectSelector,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            Some(selector),
+        )
     }
 
     /// Opens a session for an explicitly interactive GUI harness. This is
@@ -949,13 +1004,14 @@ impl RenderSession {
     pub(crate) fn open_on_current_desktop(
         request: SessionOpenRequest<'_>,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None)
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None, None)
     }
 
     fn open_with_desktop_policy(
         request: SessionOpenRequest<'_>,
         desktop_policy: WorkerDesktopPolicy,
         cluster: Option<ClusterRenderPlugins>,
+        plugin_data_selector: Option<&PluginDataEffectSelector>,
     ) -> io::Result<RenderSession> {
         if request.time_step <= 0
             // A zero-duration render (total_time == 0) is valid: the shared
@@ -980,6 +1036,11 @@ impl RenderSession {
         // entry all refer to it (design §2.2). The manifest's own structural
         // bounds are enforced by the dispatch when it builds the document.
         if let Some(cluster) = &cluster {
+            if plugin_data_selector.is_some() {
+                return Err(invalid(
+                    "PluginData effect selection is not supported in a cluster session",
+                ));
+            }
             let launch_sha256 = decode_sha256_hex(request.plugin_sha256)?;
             if cluster.plugins.first().map(|plugin| plugin.expected_sha256) != Some(launch_sha256) {
                 return Err(invalid("cluster plugins[0] must match the launch plugin"));
@@ -1402,6 +1463,7 @@ impl RenderSession {
                 transport.path().to_string_lossy().into_owned(),
             ]);
         }
+        append_plugin_data_selector_args(&mut args_after_plugin, plugin_data_selector)?;
         // The session always launches at the render dimensions; an expand grows
         // the output slot in place mid-session (#262), so there is no launch-time
         // output-capacity trailer.
@@ -1645,7 +1707,7 @@ impl RenderSession {
         request: SessionOpenRequest<'_>,
         cluster: ClusterRenderPlugins,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, Some(cluster))
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, Some(cluster), None)
     }
 
     pub fn invalidation(&self) -> Option<&SessionInvalidation> {

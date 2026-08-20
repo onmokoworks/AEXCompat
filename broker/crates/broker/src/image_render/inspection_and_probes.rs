@@ -13,6 +13,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         Vec::new(),
         runtime_policy,
         "--l2-params-only",
+        None,
     )
 }
 
@@ -25,6 +26,7 @@ fn inspect_experimental_impl(
     dependency_search_dirs: Vec<std::path::PathBuf>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
     inspection_mode: &'static str,
+    plugin_data_selector: Option<&crate::render_session::PluginDataEffectSelector>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
     // In-place inspection (issue #751): the loader resolves the closure, so
     // staged dependencies and resources cannot ride the same launch. Runtime
@@ -45,6 +47,12 @@ fn inspect_experimental_impl(
         .transpose()?;
     if let Some(authorization) = &authorization {
         authorization.append_launch(false, &mut args_after_plugin, &mut dependencies);
+    }
+    if let Some(selector) = plugin_data_selector {
+        args_after_plugin.extend([
+            "--plugin-data-selector-v1".to_owned(),
+            selector.encoded()?,
+        ]);
     }
     let started = Instant::now();
     // Parameter inspection runs with no deadline (issue #354). A watchdog here
@@ -83,6 +91,9 @@ fn inspect_experimental_impl(
     let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     let worker_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
     if let Some(report) = &worker_report {
+        if let Some(plugin_data) = report.get("plugin_data") {
+            diagnostics["plugin_data"] = plugin_data.clone();
+        }
         propagate_missing_suites(&mut diagnostics, report);
         propagate_unsupported_suite_calls(&mut diagnostics, report);
         propagate_suite_call_slot_probe(&mut diagnostics, report);

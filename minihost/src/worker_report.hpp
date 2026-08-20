@@ -42,6 +42,7 @@ struct L2ReportContext {
   std::string suite_call_slot_probe_json;
   std::string compute_cache_timeline_json;
   std::string selector_invocations_json;
+  std::string plugin_data_json;
   std::string missing_suites_json, suite_timeline_json;
   std::string module_audit_failure_json;
   std::string return_message, about_message;

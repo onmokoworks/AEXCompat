@@ -40,6 +40,8 @@ mod tests {
             cluster_fallback: None,
             category: None,
             registered_name: None,
+            plugin_data_effect: None,
+            additional_effects: Vec::new(),
         }
     }
 
@@ -49,6 +51,30 @@ mod tests {
             sha: String::new(),
             smart: false,
             ..discovered(mtime_secs, len, build)
+        }
+    }
+
+    fn plugin_data_identity(index: u32, match_name: &str) -> PluginDataIdentity {
+        PluginDataIdentity {
+            index,
+            name_hex: format!("{:x}", index + 0x41),
+            match_name_hex: match_name.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect(),
+            category_hex: "456666656374".to_owned(),
+            entrypoint: format!("effect_{index}"),
+        }
+    }
+
+    fn cached_plugin_data_effect(
+        index: u32,
+        match_name: &str,
+        registered_name: Option<&str>,
+    ) -> CachedPluginDataEffect {
+        CachedPluginDataEffect {
+            identity: plugin_data_identity(index, match_name),
+            smart: index.is_multiple_of(2),
+            out_flags2: if index.is_multiple_of(2) { 1 << 10 } else { 0 },
+            params: Vec::new(),
+            registered_name: registered_name.map(str::to_owned),
         }
     }
 
@@ -158,12 +184,44 @@ mod tests {
             internal_version: 2,
         }];
         let mut effect_entry = discovered(1, 7, build(1));
-        effect_entry.demanded_suites = vec![ProvidedSuite {
-            name: "Opaque Runtime Service 2026.1".into(),
-            api_version: 1,
-            internal_version: 0,
-        }];
-        effect_entry.companion_demand_probe_complete = true;
+        let primary_report = serde_json::json!({"missing_suites": []});
+        let secondary_report = serde_json::json!({
+            "missing_suites": [{
+                "name": "Opaque Runtime Service 2026.1",
+                "version": 1
+            }]
+        });
+        assert!(merge_demanded_suites_from_report(
+            &mut effect_entry.demanded_suites,
+            &primary_report
+        ));
+        assert!(merge_demanded_suites_from_report(
+            &mut effect_entry.demanded_suites,
+            &secondary_report
+        ));
+        let mut optional_entry = effect_entry.clone();
+        assert!(finish_companion_demand_probe(&mut optional_entry, Vec::new()));
+        assert!(
+            optional_entry.demanded_suites.is_empty(),
+            "an unconfirmed secondary miss must not load a provider"
+        );
+        assert!(finish_companion_demand_probe(
+            &mut effect_entry,
+            vec![ProvidedSuite {
+                name: "Opaque Runtime Service 2026.1".into(),
+                api_version: 1,
+                internal_version: 0,
+            }]
+        ));
+        assert_eq!(
+            effect_entry.demanded_suites,
+            vec![ProvidedSuite {
+                name: "Opaque Runtime Service 2026.1".into(),
+                api_version: 1,
+                internal_version: 0,
+            }],
+            "a provider-confirmed secondary demand must survive association"
+        );
         let mut arbitrary_entry = provider_entry.clone();
         arbitrary_entry.plugin_kind = DiscoveredPluginKind::Effect;
         let mut cache = HashMap::new();
@@ -2847,6 +2905,367 @@ mod tests {
     }
 
     #[test]
+    fn rediscovery_preserves_secondary_names_by_logical_identity_after_reorder() {
+        let mut cached = discovered(5, 64, build(1));
+        cached.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let mut refreshed = discovered(5, 64, build(2));
+        let mut reordered = cached_plugin_data_effect(1, "second", None);
+        reordered.identity.index = 2;
+        refreshed.additional_effects = vec![reordered];
+
+        let merged = keep_best(Some(&cached), refreshed, META).unwrap();
+        assert_eq!(merged.additional_effects[0].identity.index, 2);
+        assert_eq!(
+            merged.additional_effects[0].registered_name.as_deref(),
+            Some("Bundle — Second"),
+            "registration order may change, but the exact match/export identity owns the saved-project name"
+        );
+    }
+
+    #[test]
+    fn primary_secondary_reorder_keeps_each_saved_project_name_with_its_effect() {
+        let mut old = discovered(5, 64, build(1));
+        old.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        old.registered_name = Some("Bundle".to_owned());
+        old.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+
+        let mut refreshed = discovered(5, 64, build(2));
+        let mut new_primary = plugin_data_identity(1, "second");
+        new_primary.index = 0;
+        refreshed.plugin_data_effect = Some(new_primary);
+        let mut new_secondary = cached_plugin_data_effect(0, "first", None);
+        new_secondary.identity.index = 1;
+        refreshed.additional_effects = vec![new_secondary];
+
+        let merged = keep_best(Some(&old), refreshed, META).unwrap();
+        assert_eq!(merged.registered_name.as_deref(), Some("Bundle — Second"));
+        assert_eq!(
+            merged.additional_effects[0].registered_name.as_deref(),
+            Some("Bundle")
+        );
+    }
+
+    #[test]
+    fn concurrent_merge_maps_primary_secondary_names_by_effect_not_slot() {
+        let key = r"C:\AE\Bundle.aex".to_owned();
+        let mut disk = discovered(5, 64, build(1));
+        disk.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        disk.registered_name = Some("Bundle".to_owned());
+        disk.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+
+        let mut local = discovered(5, 64, build(1));
+        let mut local_primary = plugin_data_identity(1, "second");
+        local_primary.index = 0;
+        local.plugin_data_effect = Some(local_primary);
+        local.registered_name = Some("wrong-primary".to_owned());
+        let mut local_secondary = cached_plugin_data_effect(0, "first", Some("wrong-secondary"));
+        local_secondary.identity.index = 1;
+        local.additional_effects = vec![local_secondary];
+        let on_disk = HashMap::from([(key.clone(), disk)]);
+        let mut local_cache = HashMap::from([(key.clone(), local)]);
+
+        merge_cache_entries(&mut local_cache, &on_disk);
+
+        assert_eq!(
+            local_cache[&key].registered_name.as_deref(),
+            Some("Bundle — Second")
+        );
+        assert_eq!(
+            local_cache[&key].additional_effects[0]
+                .registered_name
+                .as_deref(),
+            Some("Bundle")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn alias_resolved_entry_plans_every_secondary_filter_on_first_launch() {
+        let root = temp_root("alias-multi-effect-plan");
+        let real = root.join("Effects");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("Bundle.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = root.join("link").join("Bundle.aex");
+        let old_key = real.join("Bundle.aex");
+        let meta = file_meta(&walked).unwrap();
+        let mut entry = discovered(meta.0.0, meta.1, build(1));
+        entry.mtime = meta.0;
+        entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let cache = HashMap::from([(old_key.to_string_lossy().into_owned(), entry)]);
+        let roots = vec![root.path().to_path_buf()];
+        let mut aliases = None;
+        let (resolved, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            Some(meta),
+            build(1),
+            &roots,
+            true,
+            &mut aliases,
+        );
+        assert_eq!(alias.as_deref(), Some(old_key.to_string_lossy().as_ref()));
+        let resolved_entries = vec![resolved.cloned()];
+        let names = plan_secondary_filter_names(
+            std::slice::from_ref(&walked),
+            &["Bundle".to_owned()],
+            &resolved_entries,
+        );
+        assert_eq!(
+            names.get(&(walked.to_string_lossy().into_owned(), 1)),
+            Some(&"Bundle — Second".to_owned())
+        );
+        let plans = virtual_effect_registrations(
+            resolved_entries[0].as_ref().unwrap(),
+            "Bundle",
+            &HashMap::from([(1, names.values().next().unwrap().clone())]),
+        );
+        assert_eq!(plans.len(), 2);
+        assert_eq!(cache.len(), 1, "the alias need not be rekeyed before planning");
+    }
+
+    #[test]
+    fn concurrent_cache_save_keeps_the_first_secondary_project_name() {
+        let key = r"C:\AE\Bundle.aex".to_owned();
+        let mut disk_entry = discovered(5, 64, build(1));
+        disk_entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let mut local_entry = discovered(5, 64, build(1));
+        local_entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Conflicting"),
+        )];
+        let on_disk = HashMap::from([(key.clone(), disk_entry)]);
+        let mut local = HashMap::from([(key.clone(), local_entry)]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert_eq!(
+            local[&key].additional_effects[0]
+                .registered_name
+                .as_deref(),
+            Some("Bundle — Second")
+        );
+    }
+
+    #[test]
+    fn plugin_data_inventory_requires_exact_bounded_sequential_identities() {
+        let identity0 = plugin_data_identity(0, "first");
+        let identity1 = plugin_data_identity(1, "second");
+        let report = serde_json::json!({
+            "plugin_data": {
+                "selected_index": 1,
+                "registrations": [identity0, identity1]
+            }
+        });
+        let parsed = plugin_data_identities(&report).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(selected_plugin_data_identity_matches(&report, &parsed[1]));
+
+        for malformed in [
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": []}}),
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": [plugin_data_identity(1, "wrong-index")]}}),
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": [{"index": 0, "name_hex": "41", "match_name_hex": "6669727374", "category_hex": "45", "entrypoint": "effect_0", "extra": true}]}}),
+        ] {
+            assert!(plugin_data_identities(&malformed).is_err());
+        }
+        let overflow = (0..65)
+            .map(|index| plugin_data_identity(index, &format!("effect-{index}")))
+            .collect::<Vec<_>>();
+        assert!(plugin_data_identities(&serde_json::json!({
+            "plugin_data": {"selected_index": 0, "registrations": overflow}
+        }))
+        .is_err());
+
+        let opaque = serde_json::json!({
+            "plugin_data": {
+                "selected_index": 0,
+                "registrations": [{
+                    "index": 0,
+                    "name_hex": "82a0",
+                    "match_name_hex": "82a1",
+                    "category_hex": "836583588367",
+                    "entrypoint": "EffectMain"
+                }]
+            }
+        });
+        let parsed = plugin_data_identities(&opaque).expect("opaque metadata stays selectable");
+        assert_eq!(parsed[0].match_name_hex, "82a1");
+        assert!(parsed[0].display_name().is_some());
+        assert!(parsed[0].category().is_some());
+    }
+
+    #[test]
+    fn plugin_data_bundle_flattens_to_distinct_exact_registration_plans() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        entry.closure_identity = Some("shared-dll-closure".to_owned());
+        entry.additional_effects = vec![cached_plugin_data_effect(1, "second", None)];
+        let plans = virtual_effect_registrations(
+            &entry,
+            "Bundle",
+            &HashMap::from([(1, "Bundle — Second".to_owned())]),
+        );
+
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].name, "Bundle");
+        assert!(plans[0].selector.is_none());
+        assert_eq!(plans[0].entry.closure_identity.as_deref(), Some("shared-dll-closure"));
+        assert_eq!(plans[1].name, "Bundle — Second");
+        assert_eq!(
+            plans[1].selector,
+            Some(PluginDataEffectSelector {
+                index: 1,
+                match_name_hex: "7365636f6e64".to_owned(),
+            })
+        );
+        assert_eq!(plans[1].entry.plugin_data_effect.as_ref().unwrap().index, 1);
+        assert!(plans[1].entry.closure_identity.is_none());
+        assert!(plans[1].entry.additional_effects.is_empty());
+    }
+
+    #[test]
+    fn failed_secondary_inspection_makes_the_whole_bundle_unregistrationable() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.ok = true;
+        entry.closure_identity = Some("cluster-primary".to_owned());
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        entry.additional_effects = vec![cached_plugin_data_effect(1, "second", None)];
+
+        reject_plugin_data_bundle(&mut entry);
+
+        assert!(!is_registerable_effect(&entry));
+        assert!(entry.plugin_data_effect.is_none());
+        assert!(entry.additional_effects.is_empty());
+        assert!(entry.closure_identity.is_none());
+    }
+
+    #[test]
+    fn companion_probe_confirms_each_secondary_on_its_exact_selector() {
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        let effects = vec![(None, false, 0), (Some(selector.clone()), true, 1 << 10)];
+        for repaired in [false, true] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let confirmed = confirmed_plugin_data_demands(
+                &effects,
+                |selected, _, _| {
+                    calls.borrow_mut().push(("without", selected.cloned()));
+                    Some(if selected.is_some() {
+                        vec![ProvidedSuite {
+                            name: "Secondary Effect Suite".to_owned(),
+                            api_version: 2,
+                            internal_version: 0,
+                        }]
+                    } else {
+                        Vec::new()
+                    })
+                },
+                |candidates| {
+                    assert_eq!(candidates[0].name, "Secondary Effect Suite");
+                    Some("provider")
+                },
+                |selected, smart, out_flags2, provider| {
+                    calls.borrow_mut().push(("with", selected.cloned()));
+                    assert_eq!(selected, Some(&selector));
+                    assert!(smart);
+                    assert_eq!(out_flags2, 1 << 10);
+                    assert_eq!(provider, "provider");
+                    repaired
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                calls.into_inner(),
+                vec![
+                    ("without", None),
+                    ("without", Some(selector.clone())),
+                    ("with", Some(selector.clone())),
+                ]
+            );
+            assert_eq!(confirmed.len(), usize::from(repaired));
+        }
+    }
+
+    #[test]
+    fn secondary_filter_context_routes_both_render_paths_to_the_exact_selector() {
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        for route in ["resident", "classic-fallback"] {
+            let selected = route_plugin_data_session(
+                route,
+                Some(&selector),
+                |_| -> Result<_, ()> { panic!("secondary effect used the default entrypoint") },
+                |request, selected| {
+                    Ok((request, selected.index, selected.match_name_hex.clone()))
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                selected,
+                (route, 1, "7365636f6e64".to_owned()),
+                "{route} must retain the virtual filter's exact selector"
+            );
+        }
+        let default = route_plugin_data_session(
+            "primary",
+            None,
+            |request| Ok::<_, ()>(request),
+            |_, _| panic!("legacy primary unexpectedly selected a secondary"),
+        )
+        .unwrap();
+        assert_eq!(default, "primary");
+    }
+
+    #[test]
+    fn plugin_data_labels_use_the_adobe_localization_fallback() {
+        let encoded = |text: &str| {
+            text.as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let identity = PluginDataIdentity {
+            index: 1,
+            name_hex: encoded(
+                "$$$/AE/Effect/Name/RollingShutter=Rolling Shutter Repair",
+            ),
+            match_name_hex: encoded("ADBE Rolling Shutter"),
+            category_hex: encoded(
+                "$$$/MediaCore/FiltersAndEffects/Category/Distort=Distort",
+            ),
+            entrypoint: "RollingShutterMain".to_owned(),
+        };
+        assert_eq!(identity.display_name().as_deref(), Some("Rolling Shutter Repair"));
+        assert_eq!(identity.category().as_deref(), Some("Distort"));
+    }
+
+    #[test]
     fn invalid_or_duplicate_cached_names_are_repaired_deterministically() {
         let plugins = vec![
             PathBuf::from(r"C:\AE\A\Threshold.aex"),
@@ -4032,6 +4451,7 @@ mod tests {
                 dependency: dependency(),
                 sha: sha_of(&one),
                 smart: false,
+                plugin_data_selector: None,
                 identity: GeomIdentity {
                     width: 8,
                     height: 4,

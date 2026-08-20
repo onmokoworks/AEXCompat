@@ -28,6 +28,9 @@ struct AuxiliaryOptionHooks {
   // (absolute directories joined by ';') that switches admission to the
   // in-place load mode. Null on paths that never carry it.
   bool (*set_dependency_search_dirs)(void* context, const wchar_t* value){};
+  // Optional (issue #1260): exact PluginData registration selector encoded as
+  // `v1|<index>|<lowercase match-name hex>`.
+  bool (*set_plugin_data_selector)(void* context, const wchar_t* value){};
 };
 
 struct AuxiliaryOptionResult {
