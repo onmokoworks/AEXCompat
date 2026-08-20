@@ -8,11 +8,14 @@ publishing the Adobe SDK at a URL anyone could fetch would be redistribution.
 The bucket therefore stays private and the request carries an AWS SigV4
 signature made from a read-only R2 API token.
 
-The signing is implemented here rather than shelled out to a CLI because the two
-runners this workflow uses do not share one. `windows-latest` ships the AWS CLI
-but no rclone; the self-hosted `windows-real` runner is a workstation with
-rclone but no AWS CLI. Installing either per run would add a network dependency
-to the step whose whole job is to fetch one 4.6 MiB file.
+The signing is implemented here rather than shelled out to a CLI so the step
+carries no runner-image dependency of its own. `windows-latest` ships the AWS CLI
+today, but binding the SDK fetch to a tool the image may drop, or installing one
+per run, adds a failure mode to the step whose whole job is to fetch one 4.6 MiB
+file. (The original reason was that the two runners then in use shared no CLI:
+`windows-latest` had the AWS CLI but no rclone, and the self-hosted
+`windows-real` workstation had rclone but no AWS CLI. That runner is gone as of
+issue #1457; the conclusion is unchanged.)
 
 Only GetObject is signed: the request has no body, so the payload hash is always
 the SHA256 of the empty string and no streaming signature is involved.
