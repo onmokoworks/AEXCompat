@@ -154,17 +154,47 @@ fn classic_setup_reports_the_custom_ui_registered_through_pf_in_data() {
 #[test]
 fn classic_user_changed_param_uses_the_real_selector_slot_and_returns_dynamic_flags() {
     let mut code = vec![
-        0x83, 0xf9, 0x0d, // cmp ecx, PF_CMD_USER_CHANGED_PARAM
-        0x75, 0x00, // jne failure (patched below)
-        0x49, 0x8b, 0x41, 0x08, // mov rax, [r9 + sizeof(void*)]
-        0x83, 0x78, u8::try_from(abi::PARAM_U_OFFSET).unwrap(), 0x25, // cmp current value, 37
-        0x75, 0x00, // jne failure (patched below)
-        0xc7, 0x40, 0x04, 0x20, 0x00, 0x00, 0x00, // ui_flags = DISABLED
-        0xc7, 0x40, 0x30, 0x40, 0x00, 0x00, 0x00, // flags = SUPERVISE
-        0x48, 0x8b, 0x54, 0x24, 0x30, // mov rdx, [rsp + sixth argument]
-        0x83, 0x3a, 0x01, // cmp dword ptr [rdx], 1
-        0x75, 0x00, // jne failure (patched below)
-        0x31, 0xc0, // xor eax, eax
+        0x83,
+        0xf9,
+        0x0d, // cmp ecx, PF_CMD_USER_CHANGED_PARAM
+        0x75,
+        0x00, // jne failure (patched below)
+        0x49,
+        0x8b,
+        0x41,
+        0x08, // mov rax, [r9 + sizeof(void*)]
+        0x83,
+        0x78,
+        u8::try_from(abi::PARAM_U_OFFSET).unwrap(),
+        0x25, // cmp current value, 37
+        0x75,
+        0x00, // jne failure (patched below)
+        0xc7,
+        0x40,
+        0x04,
+        0x20,
+        0x00,
+        0x00,
+        0x00, // ui_flags = DISABLED
+        0xc7,
+        0x40,
+        0x30,
+        0x40,
+        0x00,
+        0x00,
+        0x00, // flags = SUPERVISE
+        0x48,
+        0x8b,
+        0x54,
+        0x24,
+        0x30, // mov rdx, [rsp + sixth argument]
+        0x83,
+        0x3a,
+        0x01, // cmp dword ptr [rdx], 1
+        0x75,
+        0x00, // jne failure (patched below)
+        0x31,
+        0xc0, // xor eax, eax
         0xc3, // ret
     ];
     let failure = code.len();

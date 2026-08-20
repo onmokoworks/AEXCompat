@@ -200,16 +200,20 @@ mod tests {
             ),
             Some(valid.clone())
         );
-        assert!(crate::shared_ui::single_supported_dropped_path(
-            std::slice::from_ref(&memory_drop),
-            is_supported_input_image,
-        )
-        .is_none());
-        assert!(crate::shared_ui::single_supported_dropped_path(
-            &[path_drop, memory_drop],
-            is_supported_input_image,
-        )
-        .is_none());
+        assert!(
+            crate::shared_ui::single_supported_dropped_path(
+                std::slice::from_ref(&memory_drop),
+                is_supported_input_image,
+            )
+            .is_none()
+        );
+        assert!(
+            crate::shared_ui::single_supported_dropped_path(
+                &[path_drop, memory_drop],
+                is_supported_input_image,
+            )
+            .is_none()
+        );
 
         let ctx = egui::Context::default();
         let mut app = HarnessApp::new(root.clone());
@@ -559,7 +563,10 @@ mod tests {
         assert!(!app.parameters[0].enabled);
         assert!(!app.parameters[0].visible);
         assert!(app.parameters[0].supervised);
-        assert_eq!((app.parameters[0].minimum, app.parameters[0].maximum), (-100.0, 500.0));
+        assert_eq!(
+            (app.parameters[0].minimum, app.parameters[0].maximum),
+            (-100.0, 500.0)
+        );
         assert!(app.pending_live_render);
         assert_eq!(
             app.live_render_due,
