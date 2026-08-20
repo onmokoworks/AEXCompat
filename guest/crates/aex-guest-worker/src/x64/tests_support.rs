@@ -3666,6 +3666,131 @@ fn issue1398_address_waiter_state_is_bounded_and_session_local() {
 }
 
 #[test]
+fn output_debug_string_a_is_kernel32_scoped_discards_bounded_ansi_and_preserves_void_abi() {
+    const OUTPUT_DEBUG: u64 = STUB_BASE + 0x428;
+    assert_eq!(
+        dispatch_win64_import("kernel32.dll", "OutputDebugStringA"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::OutputDebugStringA)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "OutputDebugStringA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        OUTPUT_DEBUG,
+        "KERNEL32.DLL",
+        "OutputDebugStringA",
+    )
+    .unwrap();
+    let message = DATA_BASE + 0xd00;
+    engine
+        .write(message, b"[fixture] debug bytes are guest-private\n\0")
+        .unwrap();
+    let marker = 0x8877_6655_4433_2211;
+    for pointer in [message, message + 40, 0] {
+        engine.unicorn.reg_write(RegisterX86::RAX, marker).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(OUTPUT_DEBUG, [pointer, 0, 0, 0, 0, 0])
+                .unwrap(),
+            marker
+        );
+    }
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn output_debug_string_a_fails_closed_on_unreadable_or_unterminated_non_null_input() {
+    const OUTPUT_DEBUG: u64 = STUB_BASE + 0x428;
+    const LARGE_STRING: u64 = 0x5000_0000;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        OUTPUT_DEBUG,
+        "kernel32.dll",
+        "OutputDebugStringA",
+    )
+    .unwrap();
+
+    for pointer in [0xdead_beef, u64::MAX] {
+        let error = engine
+            .call_win64(OUTPUT_DEBUG, [pointer, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("unreadable"), "{error}");
+    }
+
+    engine
+        .unicorn
+        .mem_map(
+            LARGE_STRING,
+            MAX_CRT_STRING_BYTES + PAGE_SIZE,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(
+            LARGE_STRING,
+            &vec![b'X'; (MAX_CRT_STRING_BYTES + 1) as usize],
+        )
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(LARGE_STRING + MAX_CRT_STRING_BYTES, &[0])
+        .unwrap();
+    let marker = 0x1122_3344_5566_7788;
+    engine.unicorn.reg_write(RegisterX86::RAX, marker).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(OUTPUT_DEBUG, [LARGE_STRING, 0, 0, 0, 0, 0])
+            .unwrap(),
+        marker
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    engine
+        .unicorn
+        .mem_write(LARGE_STRING + MAX_CRT_STRING_BYTES, &[b'X'])
+        .unwrap();
+    let error = engine
+        .call_win64(OUTPUT_DEBUG, [LARGE_STRING, 0, 0, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("without a terminator"), "{error}");
+}
+
+#[test]
+fn output_debug_string_a_stops_guest_before_post_failure_side_effects() {
+    const OUTPUT_DEBUG: u64 = STUB_BASE + 0x428;
+    let marker = DATA_BASE + 0xe00;
+    let mut code = vec![0x48, 0xb8]; // mov rax, OUTPUT_DEBUG
+    code.extend_from_slice(&OUTPUT_DEBUG.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0xb9]); // mov rcx, invalid string
+    code.extend_from_slice(&0xdead_beefu64.to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0]); // call rax
+    code.extend_from_slice(&[0x48, 0xba]); // mov rdx, marker
+    code.extend_from_slice(&marker.to_le_bytes());
+    code.extend_from_slice(&[0xc6, 0x02, 0x5a, 0xc3]); // mov byte [rdx], 0x5a; ret
+
+    let mut engine = test_engine(&code);
+    install_win64_import(
+        &mut engine.unicorn,
+        OUTPUT_DEBUG,
+        "kernel32.dll",
+        "OutputDebugStringA",
+    )
+    .unwrap();
+    engine.write(marker, &[0]).unwrap();
+    let error = engine.call_win64(TEST_CODE, [0; 6]).unwrap_err();
+    assert!(error.to_string().contains("unreadable"), "{error}");
+    let mut observed = [0xff];
+    engine.read(marker, &mut observed).unwrap();
+    assert_eq!(observed, [0], "guest continued after the failed import");
+}
+
+#[test]
 fn issue1402_wait_on_address_sizes_timeouts_pointers_and_scope() {
     const WAIT_API: u64 = STUB_BASE + 0x428;
     const WAIT_KERNEL: u64 = STUB_BASE + 0x430;
