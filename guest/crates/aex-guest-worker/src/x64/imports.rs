@@ -2877,9 +2877,7 @@ fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
     let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
     let returned = if matches!(
         handle,
-        WINDOWS_STANDARD_INPUT_TOKEN
-            | WINDOWS_STANDARD_OUTPUT_TOKEN
-            | WINDOWS_STANDARD_ERROR_TOKEN
+        WINDOWS_STANDARD_INPUT_TOKEN | WINDOWS_STANDARD_OUTPUT_TOKEN | WINDOWS_STANDARD_ERROR_TOKEN
     ) {
         FILE_TYPE_PIPE
     } else {

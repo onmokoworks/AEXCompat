@@ -4755,7 +4755,10 @@ fn get_file_type_classifies_synthetic_standard_handles_as_pipes() {
 #[test]
 fn get_file_type_rejects_foreign_handles_without_host_descriptor_access() {
     let mut engine = test_engine(&[0xc3]);
-    engine.unicorn.reg_write(RegisterX86::RCX, 0xdead_beef).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
     emulate_get_file_type(&mut engine.unicorn);
     assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
     assert_eq!(
