@@ -76,6 +76,7 @@ enum LegacyWin64Import {
     GetStdHandle,
     GetConsoleMode,
     GetFileType,
+    CreateFileW,
     GetCommandLineA,
     GetCommandLineW,
     GetACP,
@@ -322,6 +323,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetConsoleMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetFileType") => LegacyWin64Import::GetFileType,
         (_, "GetFileType") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "CreateFileW") => LegacyWin64Import::CreateFileW,
+        (_, "CreateFileW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCommandLineA") => LegacyWin64Import::GetCommandLineA,
         (_, "GetCommandLineA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCommandLineW") => LegacyWin64Import::GetCommandLineW,
@@ -1074,6 +1077,15 @@ fn install_win64_import(
                     "install GetFileType import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_file_type(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CreateFileW => {
+                uc("write CreateFileW return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install bounded CreateFileW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_create_file_w(unicorn);
                     }),
                 )?;
             }
@@ -4276,6 +4288,120 @@ fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
         FILE_TYPE_UNKNOWN
     };
     let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+}
+
+fn emulate_create_file_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    const INVALID_HANDLE_VALUE: u64 = u64::MAX;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const GENERIC_ALL: u32 = 0x1000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const WRITE_OWNER: u32 = 0x0008_0000;
+    const FILE_WRITE_DATA: u32 = 0x0000_0002;
+    const FILE_APPEND_DATA: u32 = 0x0000_0004;
+    const FILE_WRITE_EA: u32 = 0x0000_0010;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
+    const OPEN_EXISTING: u32 = 3;
+    const MAX_PATH_UNITS: usize = 32_767;
+
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, INVALID_HANDLE_VALUE);
+    };
+    let result = (|| {
+        let path_pointer = read_win64_import_argument(unicorn, 0)?;
+        if path_pointer == 0 {
+            // A missing filename is an ordinary API failure, not corruption
+            // of the guest execution environment. ERROR_PATH_NOT_FOUND keeps
+            // it in the same path-resolution family as an empty filename and
+            // avoids turning plugin input into a worker-level abort.
+            fail(unicorn, ERROR_PATH_NOT_FOUND);
+            return Ok(());
+        }
+        let mut units = Vec::new();
+        for index in 0..=MAX_PATH_UNITS {
+            let address = path_pointer
+                .checked_add((index as u64) * 2)
+                .ok_or_else(|| "CreateFileW path range overflows".to_string())?;
+            let bytes = unicorn.mem_read_as_vec(address, 2).map_err(|error| {
+                format!("CreateFileW path {path_pointer:#x} is not fully readable: {error}")
+            })?;
+            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if unit == 0 {
+                break;
+            }
+            if index == MAX_PATH_UNITS {
+                // The mapped string is readable and terminated beyond the
+                // supported Win32 path bound. This is plugin-controlled API
+                // input, so report the ordinary filename-range error rather
+                // than escalating it to a worker execution failure.
+                fail(unicorn, ERROR_FILENAME_EXCED_RANGE);
+                return Ok(());
+            }
+            units.push(unit);
+        }
+        if char::decode_utf16(units.iter().copied()).any(|character| character.is_err()) {
+            fail(unicorn, ERROR_INVALID_PARAMETER);
+            return Ok(());
+        }
+        if units.is_empty() {
+            fail(unicorn, ERROR_PATH_NOT_FOUND);
+            return Ok(());
+        }
+        let desired_access = read_win64_import_argument(unicorn, 1)? as u32;
+        let share_mode = read_win64_import_argument(unicorn, 2)? as u32;
+        let security_attributes = read_win64_import_argument(unicorn, 3)?;
+        let creation_disposition = read_win64_import_argument(unicorn, 4)? as u32;
+        let _flags_and_attributes = read_win64_import_argument(unicorn, 5)? as u32;
+        let template_file = read_win64_import_argument(unicorn, 6)?;
+        if share_mode & !0x7 != 0 {
+            fail(unicorn, ERROR_INVALID_PARAMETER);
+            return Ok(());
+        }
+
+        let path = String::from_utf16(&units)
+            .map_err(|_| "CreateFileW path contains malformed UTF-16".to_string())?;
+        let normalized = path.replace('/', "\\");
+        let components = normalized.split('\\').collect::<Vec<_>>();
+        let is_host_escape = normalized.starts_with("\\\\")
+            || normalized.starts_with("\\?\\")
+            || normalized.starts_with("\\.\\")
+            || components.iter().any(|component| *component == "..");
+        let write_access = desired_access
+            & (GENERIC_WRITE
+                | GENERIC_ALL
+                | DELETE
+                | WRITE_DAC
+                | WRITE_OWNER
+                | FILE_WRITE_DATA
+                | FILE_APPEND_DATA
+                | FILE_WRITE_EA
+                | FILE_WRITE_ATTRIBUTES)
+            != 0;
+        if is_host_escape || write_access || creation_disposition != OPEN_EXISTING {
+            fail(unicorn, ERROR_ACCESS_DENIED);
+            return Ok(());
+        }
+
+        // The corpus bundle contains only the AEX image and no explicitly
+        // mounted plugin assets. A valid read-only open therefore observes the
+        // same missing-file result as a sandbox with an empty asset namespace.
+        // Crucially, the guest path is never translated to or opened on the host.
+        // lpSecurityAttributes is only relevant if a new object is created,
+        // and hTemplateFile is not consumed for OPEN_EXISTING. Since no object
+        // exists in this namespace, neither legal optional argument is
+        // dereferenced or treated as an invalid pointer/handle.
+        let _ = (security_attributes, template_file);
+        fail(unicorn, ERROR_FILE_NOT_FOUND);
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.reg_write(RegisterX86::RAX, INVALID_HANDLE_VALUE);
+        let _ = unicorn.emu_stop();
+    }
 }
 
 fn emulate_get_command_line_a(unicorn: &mut Unicorn<'_, GuestState>) {
