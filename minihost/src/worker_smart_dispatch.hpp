@@ -73,11 +73,24 @@ SelectorInputLayout selector_input_layout();
 /// channel mask, and bitdepth, and `pre_render_data` survives them intact.
 bool verify_selector_inputs();
 
+/// Decide whether this dispatch should enter the Premiere GPU-filter route.
+/// Merely rendering a float32 frame is not evidence that an exporter is
+/// GPU-only; the PF selector must first return the bounded retry signal.
+using PrGpuRouteRunner = bool (*)(void*);
+
+bool dispatch_pr_gpu_filter_route(bool route_available, bool float32,
+                                  bool pf_first, bool forced_retry,
+                                  smart_execution::Result&, PrGpuRouteRunner,
+                                  void* runner_context);
+
+/// Self-test hook for the depth-independent PF-first admission contract.
+bool verify_pr_gpu_route_admission();
+
 /// Whether the active plug-in exports the Premiere GPU-filter entry
 /// (`xGPUFilterEntry`), i.e. the dispatch has a Premiere GPU-filter route to
 /// offer it. The session frame loop uses this to decide whether a CPU
-/// SMART_RENDER 512 in an 8/16bpc session is worth one retry through that
-/// route (issue #1271).
+/// SMART_RENDER 512/516 is worth one retry through that route at any depth
+/// (issues #1271 and #1272).
 bool pr_gpu_filter_route_available();
 
 bool dispatch(const Request&, const Hooks&, smart_execution::Result&, State&);
