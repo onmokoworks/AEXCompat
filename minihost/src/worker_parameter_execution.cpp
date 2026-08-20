@@ -664,47 +664,78 @@ void initialize_parameter_definitions(
     return layer_width > 0 && layer_height > 0
         ? percent / 100.0 * extent : percent;
   };
-  for (std::size_t i = 0; i < runtime().records.size(); ++i) {
-    definitions[i + 1] = runtime().records[i].raw;
-    if (runtime().records[i].type == 0)
+  const auto to_fixed = [](double value) {
+    return static_cast<int32_t>(
+        std::round(std::clamp(value, -32768.0, 32767.0) * 65536.0));
+  };
+  auto staged_records = runtime().records;
+  for (std::size_t i = 0; i < staged_records.size(); ++i) {
+    auto& record = staged_records[i];
+    definitions[i + 1] = record.raw;
+    if (record.type == 0)
       std::memset(definitions[i + 1].data() + 56, 0, 40);
-    else if (runtime().records[i].type == 1 || runtime().records[i].type == 7)
-      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(runtime().records[i].default_value));
-    else if (runtime().records[i].type == 4)
-      write<int32_t>(definitions[i + 1], 56, runtime().records[i].default_value != 0 ? 1 : 0);
-    else if (runtime().records[i].type == 2)
-      write<int32_t>(definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(runtime().records[i].default_value * 65536.0)));
-    else if (runtime().records[i].type == 10)
-      write<double>(definitions[i + 1], 56, runtime().records[i].default_value);
-    else if (runtime().records[i].type == 3)
-      write<int32_t>(definitions[i + 1], 56, static_cast<int32_t>(std::round(runtime().records[i].default_components[0] * 65536.0)));
-    else if (runtime().records[i].type == 6) {
+    else if (record.type == 1 || record.type == 7) {
+      const auto encoded = static_cast<int32_t>(record.default_value);
+      write<int32_t>(definitions[i + 1], 56, encoded);
+      record.has_current = true;
+      record.current_value = encoded;
+    }
+    else if (record.type == 4) {
+      write<int32_t>(definitions[i + 1], 56, record.default_value != 0 ? 1 : 0);
+      record.has_current = true;
+      record.current_value = record.default_value != 0 ? 1.0 : 0.0;
+    }
+    else if (record.type == 2) {
+      const auto encoded = to_fixed(record.default_value);
+      write<int32_t>(definitions[i + 1], 56, encoded);
+      record.has_current = true;
+      record.current_value = encoded / 65536.0;
+    }
+    else if (record.type == 10) {
+      write<double>(definitions[i + 1], 56, record.default_value);
+      record.has_current = true;
+      record.current_value = record.default_value;
+    }
+    else if (record.type == 5) {
+      std::memcpy(record.current_color.data(), record.raw.data() + 56,
+                  record.current_color.size());
+      for (std::size_t channel = 0; channel < 4; ++channel)
+        record.current_float_color[channel] =
+            record.current_color[channel] / 255.0f;
+    }
+    else if (record.type == 3) {
+      const auto encoded = to_fixed(record.default_components[0]);
+      write<int32_t>(definitions[i + 1], 56, encoded);
+      record.current_components[0] = encoded / 65536.0;
+    }
+    else if (record.type == 6) {
       // Fixed (16.16) pixels: clamp to the same +/-32768 pixel range the point
       // override path parses (worker_l2_payload_parsers) so a pathological
       // percentage scaled by the extent cannot overflow the int32 value.
-      const auto to_fixed = [](double pixels) {
-        return static_cast<int32_t>(
-            std::round(std::clamp(pixels, -32768.0, 32767.0) * 65536.0));
-      };
-      write<int32_t>(definitions[i + 1], 56,
-          to_fixed(point_pixels(runtime().records[i].default_components[0], layer_width)));
-      write<int32_t>(definitions[i + 1], 60,
-          to_fixed(point_pixels(runtime().records[i].default_components[1], layer_height)));
-    } else if (runtime().records[i].type == 18) {
+      const auto encoded_x = to_fixed(
+          point_pixels(record.default_components[0], layer_width));
+      const auto encoded_y = to_fixed(
+          point_pixels(record.default_components[1], layer_height));
+      write<int32_t>(definitions[i + 1], 56, encoded_x);
+      write<int32_t>(definitions[i + 1], 60, encoded_y);
+      record.current_components[0] = encoded_x / 65536.0;
+      record.current_components[1] = encoded_y / 65536.0;
+    } else if (record.type == 18) {
       // x is % of width, y and z are both % of _height_ (SDK PF_Point3DDef).
       const std::array<int32_t, 3> extents{layer_width, layer_height, layer_height};
-      for (int component = 0; component < 3; ++component)
-        write<double>(definitions[i + 1], 56 + component * 8,
-            point_pixels(runtime().records[i].default_components[component], extents[component]));
+      for (int component = 0; component < 3; ++component) {
+        record.current_components[component] = point_pixels(record.default_components[component], extents[component]);
+        write<double>(definitions[i + 1], 56 + component * 8, record.current_components[component]);
+      }
     }
-    else if (runtime().records[i].type == 12) {
-      const int32_t index = static_cast<int32_t>(runtime().records[i].default_value);
+    else if (record.type == 12) {
+      const int32_t index = static_cast<int32_t>(record.default_value);
       int32_t mask_id = 0;
       if (index > 0) hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id);
       write<int32_t>(definitions[i + 1], 56, mask_id);
     }
   }
+  runtime().records = std::move(staged_records);
 }
 
 bool apply_requested_assignments(
@@ -712,6 +743,8 @@ bool apply_requested_assignments(
     const parameters::RequestedAssignments& requested,
     int32_t layer_width, int32_t layer_height) {
   if (!validate_requested_assignments(requested)) return false;
+  auto staged_definitions = definitions;
+  auto staged_records = runtime().records;
   // Point assignments carry the same percentage-of-layer unit as their
   // defaults (the multifilter sources them from discovery, which reads the
   // SDK `x_dephault` percentage); convert to the pixel `x_value` the plug-in
@@ -725,42 +758,65 @@ bool apply_requested_assignments(
   };
   for (const auto& assignment : requested) {
     const auto slot = static_cast<std::size_t>(assignment.index);
-    const auto type = runtime().records[slot - 1].type;
+    const auto type = staged_records[slot - 1].type;
+    auto& record = staged_records[slot - 1];
     if (type == 11 && assignment.kind == parameters::RequestedKind::ArbitraryText) continue;
-    if (type == 1 || type == 4 || type == 7)
-      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(assignment.value));
+    if (type == 1 || type == 4 || type == 7) {
+      const auto encoded = static_cast<int32_t>(assignment.value);
+      write<int32_t>(staged_definitions[slot], 56, encoded);
+      record.has_current = true;
+      record.current_value = encoded;
+    }
     else if (type == 12) {
       const int32_t index = static_cast<int32_t>(assignment.value);
       int32_t mask_id = 0;
       if (index > 0 && !hooks().active_mask_id(static_cast<std::size_t>(index - 1), &mask_id)) return false;
-      write<int32_t>(definitions[slot], 56, mask_id);
+      write<int32_t>(staged_definitions[slot], 56, mask_id);
     }
     else if (type == 2) {
       const double fixed = assignment.value * 65536.0;
       if (!std::isfinite(fixed) || fixed < INT32_MIN || fixed > INT32_MAX) return false;
-      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(fixed)));
-    } else if (type == 10)
-      write<double>(definitions[slot], 56, assignment.value);
-    else if (type == 5) {
-      std::memcpy(definitions[slot].data() + 56, assignment.color.data(), assignment.color.size());
-      runtime().records[slot - 1].current_color = assignment.color;
-      for (std::size_t channel = 0; channel < 4; ++channel)
-        runtime().records[slot - 1].current_float_color[channel] = assignment.color[channel] / 255.0f;
+      const auto encoded = static_cast<int32_t>(std::round(fixed));
+      write<int32_t>(staged_definitions[slot], 56, encoded);
+      record.has_current = true;
+      record.current_value = encoded / 65536.0;
+    } else if (type == 10) {
+      write<double>(staged_definitions[slot], 56, assignment.value);
+      record.has_current = true;
+      record.current_value = assignment.value;
     }
-    else if (type == 3)
-      write<int32_t>(definitions[slot], 56, static_cast<int32_t>(std::round(assignment.components[0] * 65536.0)));
+    else if (type == 5) {
+      std::memcpy(staged_definitions[slot].data() + 56, assignment.color.data(), assignment.color.size());
+      record.current_color = assignment.color;
+      for (std::size_t channel = 0; channel < 4; ++channel)
+        record.current_float_color[channel] = assignment.color[channel] / 255.0f;
+    }
+    else if (type == 3) {
+      const auto encoded = to_fixed(assignment.components[0]);
+      write<int32_t>(staged_definitions[slot], 56, encoded);
+      record.current_components[0] = encoded / 65536.0;
+    }
     else if (type == 6) {
-      write<int32_t>(definitions[slot], 56, to_fixed(point_pixels(assignment.components[0], layer_width)));
-      write<int32_t>(definitions[slot], 60, to_fixed(point_pixels(assignment.components[1], layer_height)));
+      const auto encoded_x = to_fixed(
+          point_pixels(assignment.components[0], layer_width));
+      const auto encoded_y = to_fixed(
+          point_pixels(assignment.components[1], layer_height));
+      write<int32_t>(staged_definitions[slot], 56, encoded_x);
+      write<int32_t>(staged_definitions[slot], 60, encoded_y);
+      record.current_components[0] = encoded_x / 65536.0;
+      record.current_components[1] = encoded_y / 65536.0;
     } else if (type == 18) {
       const std::array<int32_t, 3> extents{layer_width, layer_height, layer_height};
-      for (int component = 0; component < 3; ++component)
-        write<double>(definitions[slot], 56 + component * 8,
-            point_pixels(assignment.components[component], extents[component]));
+      for (int component = 0; component < 3; ++component) {
+        record.current_components[component] = point_pixels(assignment.components[component], extents[component]);
+        write<double>(staged_definitions[slot], 56 + component * 8, record.current_components[component]);
+      }
     }
     else
       return false;
   }
+  definitions = std::move(staged_definitions);
+  runtime().records = std::move(staged_records);
   return true;
 }
 
