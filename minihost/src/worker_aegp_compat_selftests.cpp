@@ -45,6 +45,8 @@ int32_t compat_release_suite(const char* name, int32_t version) {
   return g_hooks.release_suite(name, version);
 }
 bool compat_suite_leases_balanced() { return g_hooks.suite_leases_balanced(); }
+bool __cdecl receipt_disabled_for_test() { return false; }
+bool __cdecl receipt_enabled_for_test() { return true; }
 
 uint32_t unsupported_effect_slot_seven_count(const std::string& report) {
   constexpr char marker[] =
@@ -347,6 +349,75 @@ bool verify_aegp_layer_suite1_slots() {
   } else {
     ok = false;
   }
+
+  // Version 15 used to make its availability and ten otherwise-supported
+  // slots depend on an active render receipt, even though versions 13 and 14
+  // exposed the same operations unconditionally. Exercise the production
+  // acquisition path with both receipt states and idle mode disabled: both
+  // must publish the same complete table, with every unclaimed slot left on
+  // its exact diagnostic stub.
+  const SceneContext* configured_context = scene_context();
+  if (!configured_context) return finish(false);
+  const SceneContext saved_context = *configured_context;
+  const bool saved_idle_mode = g_aegp_comp_idle_roundtrip_mode;
+  g_aegp_comp_idle_roundtrip_mode = false;
+  const std::array<std::pair<std::size_t, void*>, 23> version15_wired{{
+      {0, reinterpret_cast<void*>(&aegp_get_comp_num_layers)},
+      {1, reinterpret_cast<void*>(&aegp_get_comp_layer_by_index)},
+      {2, reinterpret_cast<void*>(&aegp_get_active_layer)},
+      {3, reinterpret_cast<void*>(&aegp_get_layer_index)},
+      {4, reinterpret_cast<void*>(&aegp_get_layer_source_item)},
+      {6, reinterpret_cast<void*>(&aegp_get_layer_parent_comp)},
+      {7, reinterpret_cast<void*>(&aegp_get_layer_name)},
+      {10, reinterpret_cast<void*>(&aegp_get_layer_flags)},
+      {11, reinterpret_cast<void*>(&aegp_set_layer_flag)},
+      {15, reinterpret_cast<void*>(&aegp_get_layer_in_point)},
+      {16, reinterpret_cast<void*>(&aegp_get_layer_duration)},
+      {17, reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration)},
+      {22, reinterpret_cast<void*>(&aegp_get_layer_transfer_mode)},
+      {27, reinterpret_cast<void*>(&aegp_get_layer_masked_bounds)},
+      {28, reinterpret_cast<void*>(&aegp_get_layer_object_type)},
+      {34, reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time)},
+      {35, reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time)},
+      {37, reinterpret_cast<void*>(&aegp_get_layer_id)},
+      {38, reinterpret_cast<void*>(&aegp_get_layer_to_world_xform)},
+      {41, reinterpret_cast<void*>(&aegp_get_layer_parent)},
+      {42, reinterpret_cast<void*>(&aegp_set_layer_parent)},
+      {43, reinterpret_cast<void*>(&aegp_delete_layer)},
+      {45, reinterpret_cast<void*>(&aegp_get_layer_from_id)},
+  }};
+  const auto version15_claimed = [&version15_wired](std::size_t slot) {
+    for (const auto& entry : version15_wired)
+      if (entry.first == slot) return true;
+    return false;
+  };
+  const auto verify_version15 = [&](bool receipt) {
+    SceneContext test_context = saved_context;
+    test_context.hooks.suite_factory.render_scene_enabled =
+        receipt ? &receipt_enabled_for_test : &receipt_disabled_for_test;
+    bool result = configure_scene_context(test_context);
+    const void* version15_raw = nullptr;
+    const bool acquired = result &&
+        compat_acquire_suite("AEGP Layer Suite", 15, &version15_raw) == 0;
+    const auto* version15 = static_cast<void* const*>(version15_raw);
+    result = acquired && version15 && version15_raw == g_aegp_layer_suite9.data();
+    if (version15) {
+      for (const auto& [slot, implementation] : version15_wired)
+        result = result && version15[slot] == implementation;
+      const auto& stubs =
+          aexcompat::worker_runtime::unsupported_suite_slots<
+              aexcompat::worker_runtime::UnsupportedSuiteId::aegp_layer_15, 53>();
+      for (std::size_t slot = 0; slot < stubs.size(); ++slot)
+        if (!version15_claimed(slot))
+          result = result && version15[slot] == stubs[slot];
+    }
+    if (acquired)
+      result = compat_release_suite("AEGP Layer Suite", 15) == 0 && result;
+    result = configure_scene_context(saved_context) && result;
+    return result;
+  };
+  ok = verify_version15(false) && verify_version15(true) && ok;
+  g_aegp_comp_idle_roundtrip_mode = saved_idle_mode;
   return finish(ok);
 }
 
