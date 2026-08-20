@@ -78,6 +78,7 @@ enum LegacyWin64Import {
     GetCommandLineA,
     GetCommandLineW,
     GetACP,
+    GetCPInfo,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -319,6 +320,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetCommandLineW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetACP") => LegacyWin64Import::GetACP,
         (_, "GetACP") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetCPInfo") => LegacyWin64Import::GetCPInfo,
+        (_, "GetCPInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -1072,6 +1075,15 @@ fn install_win64_import(
                 uc(
                     "install deterministic GetACP import",
                     unicorn.mem_write(stub, &deterministic_i32_stub(932)),
+                )?;
+            }
+            LegacyWin64Import::GetCPInfo => {
+                uc("write GetCPInfo return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install GetCPInfo import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_cp_info(unicorn);
+                    }),
                 )?;
             }
             LegacyWin64Import::IsDebuggerPresent => {
@@ -2877,6 +2889,70 @@ fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
         if unicorn.get_data().callback_error.is_none() {
             unicorn.get_data_mut().callback_error = Some(error);
         }
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn emulate_get_cp_info(unicorn: &mut Unicorn<'_, GuestState>) {
+    const CP_ACP: u32 = 0;
+    const CP_SHIFT_JIS: u32 = 932;
+    const CP_INFO_SIZE: usize = 20;
+    let result = (|| {
+        let code_page = read_win64_import_argument(unicorn, 0)? as u32;
+        let output = read_win64_import_argument(unicorn, 1)?;
+        if code_page != CP_ACP && code_page != CP_SHIFT_JIS {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            unicorn
+                .reg_write(RegisterX86::RAX, 0)
+                .map_err(|error| format!("GetCPInfo could not write failure result: {error}"))?;
+            return Ok(());
+        }
+        if output == 0 {
+            return Err("GetCPInfo output pointer is null".to_string());
+        }
+        let output_end = output
+            .checked_add(CP_INFO_SIZE as u64 - 1)
+            .ok_or_else(|| "GetCPInfo output range overflows".to_string())?;
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|error| format!("GetCPInfo memory-map query failed: {error}"))?;
+        let mut cursor = output;
+        while cursor <= output_end {
+            let region = regions
+                .iter()
+                .find(|region| {
+                    region.begin <= cursor
+                        && cursor <= region.end
+                        && region.perms & Prot::WRITE.0 as u32 != 0
+                })
+                .ok_or_else(|| {
+                    format!("GetCPInfo output {output:#x}..={output_end:#x} is not fully writable")
+                })?;
+            if region.end >= output_end {
+                break;
+            }
+            cursor = region
+                .end
+                .checked_add(1)
+                .ok_or_else(|| "GetCPInfo writable region overflows".to_string())?;
+        }
+        let mut info = [0u8; CP_INFO_SIZE];
+        info[0..4].copy_from_slice(&2u32.to_le_bytes());
+        info[4] = b'?';
+        info[6..10].copy_from_slice(&[0x81, 0x9f, 0xe0, 0xfc]);
+        unicorn
+            .mem_write(output, &info)
+            .map_err(|error| format!("GetCPInfo output {output:#x} is not writable: {error}"))?;
+        unicorn
+            .reg_write(RegisterX86::RAX, 1)
+            .map_err(|error| format!("GetCPInfo could not write success result: {error}"))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         let _ = unicorn.emu_stop();
     }
 }

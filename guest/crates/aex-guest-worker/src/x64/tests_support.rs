@@ -4993,6 +4993,108 @@ fn get_acp_is_deterministic_cp932_and_matches_cp_acp_conversion() {
 }
 
 #[test]
+fn get_cp_info_reports_cp932_and_rejects_invalid_outputs_atomically() {
+    const GET_CP_INFO: u64 = STUB_BASE + 0x1e8;
+    const EXPECTED: [u8; 20] = [
+        2, 0, 0, 0, b'?', 0, 0x81, 0x9f, 0xe0, 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_CP_INFO,
+            "KERNEL32.DLL",
+            "GetCPInfo",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetCPInfo)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetCPInfo"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = DATA_BASE + 0xe00;
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RAX, u64::MAX)
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [0, output, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    engine.write(output, &[0xaa; 20]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [932, output, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
+
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [65001, output, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
+
+    for bad_output in [0, 0xdead_beef] {
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine.unicorn.reg_write(RegisterX86::RCX, 932).unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RDX, bad_output)
+            .unwrap();
+        emulate_get_cp_info(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert!(engine.unicorn.get_data().callback_error.is_some());
+    }
+
+    let crossing = DATA_BASE + PAGE_SIZE - 10;
+    engine.write(crossing, &[0x5a; 10]).unwrap();
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.unicorn.reg_write(RegisterX86::RCX, 932).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, crossing)
+        .unwrap();
+    emulate_get_cp_info(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 10).unwrap(),
+        [0x5a; 10]
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not fully writable"))
+    );
+}
+
+#[test]
 fn is_debugger_present_is_false_deterministic_and_library_scoped() {
     const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);
