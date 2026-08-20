@@ -2946,7 +2946,9 @@ fn emulate_rtl_capture_context(unicorn: &mut Unicorn<'_, GuestState>) {
         let mut return_address = [0u8; 8];
         unicorn
             .mem_read(rsp, &mut return_address)
-            .map_err(|error| format!("RtlCaptureContext return address is not readable: {error}"))?;
+            .map_err(|error| {
+                format!("RtlCaptureContext return address is not readable: {error}")
+            })?;
 
         let mut context = [0u8; CONTEXT_SIZE];
         context[0x30..0x34].copy_from_slice(&CONTEXT_AMD64_FULL_WITH_SEGMENTS.to_le_bytes());
@@ -2980,25 +2982,22 @@ fn emulate_rtl_capture_context(unicorn: &mut Unicorn<'_, GuestState>) {
             (RegisterX86::FCS, 0x10c),
             (RegisterX86::FDS, 0x114),
         ] {
-            let value = unicorn
-                .reg_read(register)
-                .map_err(|error| format!("RtlCaptureContext could not read {register:?}: {error}"))?
-                as u16;
+            let value = unicorn.reg_read(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })? as u16;
             context[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
         }
         for (register, offset) in [(RegisterX86::FIP, 0x108), (RegisterX86::FDP, 0x110)] {
-            let value = unicorn
-                .reg_read(register)
-                .map_err(|error| format!("RtlCaptureContext could not read {register:?}: {error}"))?
-                as u32;
+            let value = unicorn.reg_read(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })? as u32;
             context[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
         }
         context[0x11c..0x120].copy_from_slice(&0x0000_ffffu32.to_le_bytes());
         for (register, offset) in SEGMENT_REGISTERS {
-            let value = unicorn
-                .reg_read(register)
-                .map_err(|error| format!("RtlCaptureContext could not read {register:?}: {error}"))?
-                as u16;
+            let value = unicorn.reg_read(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })? as u16;
             context[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
         }
         let eflags = unicorn

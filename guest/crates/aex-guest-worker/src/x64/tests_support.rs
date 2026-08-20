@@ -4598,11 +4598,20 @@ fn rtl_capture_context_writes_the_win64_caller_context() {
         .unwrap();
     engine.unicorn.reg_write(RegisterX86::FPCW, 0x027f).unwrap();
     engine.unicorn.reg_write(RegisterX86::FPSW, 0x1821).unwrap();
-    engine.unicorn.reg_write(RegisterX86::FPTAG, 0x3fff).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FPTAG, 0x3fff)
+        .unwrap();
     engine.unicorn.reg_write(RegisterX86::FOP, 0x0555).unwrap();
-    engine.unicorn.reg_write(RegisterX86::FIP, 0x1234_5678).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FIP, 0x1234_5678)
+        .unwrap();
     engine.unicorn.reg_write(RegisterX86::FCS, 0x0033).unwrap();
-    engine.unicorn.reg_write(RegisterX86::FDP, 0x8765_4321).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FDP, 0x8765_4321)
+        .unwrap();
     engine.unicorn.reg_write(RegisterX86::FDS, 0x002b).unwrap();
     let st4 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     engine
@@ -4624,24 +4633,63 @@ fn rtl_capture_context_writes_the_win64_caller_context() {
         .call_win64(RTL_CAPTURE_CONTEXT, [output, 0x7777, 0x8888, 0x9999, 0, 0])
         .unwrap();
 
-    let context = engine.unicorn.mem_read_as_vec(output, CONTEXT_SIZE).unwrap();
+    let context = engine
+        .unicorn
+        .mem_read_as_vec(output, CONTEXT_SIZE)
+        .unwrap();
     let qword = |offset: usize| u64::from_le_bytes(context[offset..offset + 8].try_into().unwrap());
-    assert_eq!(u32::from_le_bytes(context[0x30..0x34].try_into().unwrap()), 0x0010_000f);
-    assert_eq!(u32::from_le_bytes(context[0x34..0x38].try_into().unwrap()), expected_mxcsr);
-    assert_eq!(u32::from_le_bytes(context[0x44..0x48].try_into().unwrap()), expected_eflags);
-    assert_eq!(u16::from_le_bytes(context[0x100..0x102].try_into().unwrap()), 0x027f);
-    assert_eq!(u16::from_le_bytes(context[0x102..0x104].try_into().unwrap()), 0x1821);
+    assert_eq!(
+        u32::from_le_bytes(context[0x30..0x34].try_into().unwrap()),
+        0x0010_000f
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x34..0x38].try_into().unwrap()),
+        expected_mxcsr
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x44..0x48].try_into().unwrap()),
+        expected_eflags
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x100..0x102].try_into().unwrap()),
+        0x027f
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x102..0x104].try_into().unwrap()),
+        0x1821
+    );
     assert_eq!(context[0x104], 0x80);
-    assert_eq!(u16::from_le_bytes(context[0x106..0x108].try_into().unwrap()), 0x0555);
-    assert_eq!(u32::from_le_bytes(context[0x108..0x10c].try_into().unwrap()), 0x1234_5678);
-    assert_eq!(u16::from_le_bytes(context[0x10c..0x10e].try_into().unwrap()), 0x0033);
-    assert_eq!(u32::from_le_bytes(context[0x110..0x114].try_into().unwrap()), 0x8765_4321);
-    assert_eq!(u16::from_le_bytes(context[0x114..0x116].try_into().unwrap()), 0x002b);
-    assert_eq!(u32::from_le_bytes(context[0x11c..0x120].try_into().unwrap()), 0x0000_ffff);
+    assert_eq!(
+        u16::from_le_bytes(context[0x106..0x108].try_into().unwrap()),
+        0x0555
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x108..0x10c].try_into().unwrap()),
+        0x1234_5678
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x10c..0x10e].try_into().unwrap()),
+        0x0033
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x110..0x114].try_into().unwrap()),
+        0x8765_4321
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x114..0x116].try_into().unwrap()),
+        0x002b
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x11c..0x120].try_into().unwrap()),
+        0x0000_ffff
+    );
     assert_eq!(&context[0x160..0x16a], &st4);
     for (index, expected) in expected_segments.into_iter().enumerate() {
         let offset = 0x38 + index * 2;
-        assert_eq!(u16::from_le_bytes(context[offset..offset + 2].try_into().unwrap()), expected);
+        assert_eq!(
+            u16::from_le_bytes(context[offset..offset + 2].try_into().unwrap()),
+            expected
+        );
     }
     assert_eq!(qword(0x78), 0x1111);
     assert_eq!(qword(0x80), output);
@@ -4677,7 +4725,10 @@ fn rtl_capture_context_rejects_null_and_partially_writable_outputs() {
     );
 
     engine.unicorn.get_data_mut().callback_error = None;
-    engine.unicorn.reg_write(RegisterX86::RCX, 0xdead_beef).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
     emulate_rtl_capture_context(&mut engine.unicorn);
     assert!(
         engine
@@ -4692,7 +4743,10 @@ fn rtl_capture_context_rejects_null_and_partially_writable_outputs() {
     let sentinel = vec![0x5a; 0x268];
     engine.write(boundary, &sentinel).unwrap();
     engine.unicorn.get_data_mut().callback_error = None;
-    engine.unicorn.reg_write(RegisterX86::RCX, boundary).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, boundary)
+        .unwrap();
     emulate_rtl_capture_context(&mut engine.unicorn);
     assert!(
         engine
@@ -4702,7 +4756,10 @@ fn rtl_capture_context_rejects_null_and_partially_writable_outputs() {
             .as_deref()
             .is_some_and(|error| error.contains("is not fully writable"))
     );
-    assert_eq!(engine.unicorn.mem_read_as_vec(boundary, 0x268).unwrap(), sentinel);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 0x268).unwrap(),
+        sentinel
+    );
 }
 
 #[test]
@@ -4712,7 +4769,7 @@ fn get_std_handle_returns_deterministic_synthetic_handles_and_is_library_scoped(
     assert_eq!(
         install_win64_import(
             &mut engine.unicorn,
-             GET_STD_HANDLE,
+            GET_STD_HANDLE,
             "KERNEL32.DLL",
             "GetStdHandle",
         )
@@ -4866,7 +4923,7 @@ fn get_console_mode_rejects_foreign_handles_without_touching_guest_memory() {
         engine.unicorn.mem_read_as_vec(boundary, 2).unwrap(),
         sentinel
     );
-     assert!(engine.unicorn.get_data().callback_error.is_none());
+    assert!(engine.unicorn.get_data().callback_error.is_none());
 }
 
 #[test]
