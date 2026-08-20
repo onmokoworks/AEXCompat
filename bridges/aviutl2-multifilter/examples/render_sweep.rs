@@ -34,6 +34,8 @@
 //!                        whatever is at its own --json, so give each slice its
 //!                        own path; merging them is not something this does
 //!   --filter <substr>    only plug-ins whose file name contains it (no case)
+//!   --verify-pixel-determinism
+//!                        repeat rendered plug-ins in a fresh session and compare pixels
 //!   --depth 8|16|32      session bit depth (a plug-in can fail at one and not
 //!                        another: #777 access-violated at 16 while answering 4
 //!                        at 8 and 32)
@@ -277,6 +279,7 @@ struct Options {
     plugin_defaults: bool,
     frames: u32,
     discovery_only: bool,
+    verify_pixel_determinism: bool,
     dump_frames: Option<PathBuf>,
     dirs: Vec<PathBuf>,
 }
@@ -298,6 +301,7 @@ fn parse_options() -> Options {
         plugin_defaults: false,
         frames: 1,
         discovery_only: false,
+        verify_pixel_determinism: false,
         dump_frames: None,
         dirs: Vec::new(),
     };
@@ -355,6 +359,7 @@ fn parse_options() -> Options {
                 assert!(options.frames >= 1, "--frames takes at least 1");
             }
             "--discovery-only" => options.discovery_only = true,
+            "--verify-pixel-determinism" => options.verify_pixel_determinism = true,
             other if other.starts_with("--") => panic!("unknown option {other}"),
             other => options.dirs.push(PathBuf::from(other)),
         }
@@ -501,7 +506,7 @@ fn main() {
         let plugin_started = Instant::now();
         // Third-party AEX in-process code paths (the PE read, the parameter
         // translation) can panic; one plug-in must not end the sweep.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sweep_one(
                 &repository,
                 record,
@@ -514,6 +519,23 @@ fn main() {
         .unwrap_or_else(|_| Outcome {
             bucket: "sweep_panicked".to_owned(),
             detail: Map::new(),
+        });
+        verify_pixel_determinism(&mut outcome, options.verify_pixel_determinism, || {
+            let mut repeat_options = options.clone();
+            // The primary frame dump is the artifact requested by the
+            // caller. A verification pass must not overwrite it.
+            repeat_options.dump_frames = None;
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sweep_one(
+                    &repository,
+                    record,
+                    &records,
+                    &repeat_options,
+                    &input,
+                    &layer_pixels,
+                )
+            }))
+            .unwrap_or_else(|_| Outcome::bare("sweep_panicked"))
         });
         let elapsed_ms = plugin_started.elapsed().as_millis();
         // Numbered from the corpus, not from this slice: the number an operator
@@ -646,6 +668,66 @@ fn discovery_outcome(record: &DiagnosticDiscovery) -> Outcome {
 struct Outcome {
     bucket: String,
     detail: Map<String, Value>,
+}
+
+/// Optionally repeats a successful pixel-producing render in a fresh session.
+/// The primary bucket remains the sweep result; repeat failures and differing
+/// bytes are evidence beside it, not a reclassification of the plug-in.
+fn verify_pixel_determinism<F>(primary: &mut Outcome, enabled: bool, repeat: F)
+where
+    F: FnOnce() -> Outcome,
+{
+    if !enabled {
+        return;
+    }
+    if primary.bucket != "rendered" {
+        primary.detail.insert(
+            "pixel_determinism".to_owned(),
+            json!({ "status": "not_applicable", "repeat_bucket": Value::Null }),
+        );
+        return;
+    }
+
+    let primary_hash = primary
+        .detail
+        .get("pixel_sha256")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let repeated = repeat();
+    let repeat_hash = repeated
+        .detail
+        .get("pixel_sha256")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let primary_signature = pixel_run_signature(primary);
+    let repeat_signature = pixel_run_signature(&repeated);
+    let status = if repeated.bucket != "rendered" || primary_hash.is_none() || repeat_hash.is_none()
+    {
+        "repeat_failed"
+    } else if primary_signature == repeat_signature {
+        "deterministic"
+    } else {
+        "nondeterministic"
+    };
+    primary.detail.insert(
+        "pixel_determinism".to_owned(),
+        json!({
+            "status": status,
+            "repeat_bucket": repeated.bucket,
+            "repeat_pixel_sha256": repeat_hash,
+            "repeat_frames": repeated.detail.get("frames"),
+        }),
+    );
+}
+
+fn pixel_run_signature(outcome: &Outcome) -> Value {
+    outcome.detail.get("frames").cloned().unwrap_or_else(|| {
+        json!([{
+            "frame_index": 0,
+            "bucket": outcome.bucket,
+            "pixel_sha256": outcome.detail.get("pixel_sha256"),
+        }])
+    })
 }
 
 impl Outcome {
@@ -908,7 +990,13 @@ fn sweep_one(
             frames
                 .iter()
                 .enumerate()
-                .map(|(index, frame)| json!({ "frame_index": index, "bucket": frame.bucket }))
+                .map(|(index, frame)| {
+                    json!({
+                        "frame_index": index,
+                        "bucket": frame.bucket,
+                        "pixel_sha256": frame.detail.get("pixel_sha256"),
+                    })
+                })
                 .collect(),
         )
     });
@@ -1452,6 +1540,7 @@ fn report(
             "secondary_layer": !options.no_layer,
             "force_classic": options.force_classic,
             "plugin_defaults": options.plugin_defaults,
+            "verify_pixel_determinism": options.verify_pixel_determinism,
             "frame_deadline_ms": FRAME_DEADLINE.as_millis(),
             "time_step": TIME_STEP,
             "total_time": TOTAL_TIME,
@@ -1559,6 +1648,7 @@ mod tests {
             plugin_defaults: false,
             frames: 1,
             discovery_only: true,
+            verify_pixel_determinism: false,
             dump_frames: None,
             dirs: Vec::new(),
         }
@@ -1746,6 +1836,119 @@ mod tests {
         }));
         assert_eq!(empty.bucket, "rendered_empty");
         assert_eq!(empty.detail["pixel_bytes"], 0);
+    }
+
+    fn rendered_pixels(bytes: &[u8]) -> Outcome {
+        frame_outcome(Ok(FrameOutcome {
+            frame_index: 0,
+            status: FrameStatus::Rendered {
+                pixels: bytes.to_vec(),
+                width: 1,
+                height: 1,
+                origin_x: 0,
+                origin_y: 0,
+            },
+        }))
+    }
+
+    #[test]
+    fn pixel_determinism_records_equal_and_different_fresh_session_outputs() {
+        let mut equal = rendered_pixels(&[1, 2, 3, 4]);
+        verify_pixel_determinism(&mut equal, true, || rendered_pixels(&[1, 2, 3, 4]));
+        assert_eq!(equal.bucket, "rendered");
+        assert_eq!(
+            equal.detail["pixel_determinism"],
+            json!({
+                "status": "deterministic",
+                "repeat_bucket": "rendered",
+                "repeat_pixel_sha256": equal.detail["pixel_sha256"],
+                "repeat_frames": Value::Null,
+            })
+        );
+
+        let mut different = rendered_pixels(&[1, 2, 3, 4]);
+        let expected_repeat = rendered_pixels(&[4, 3, 2, 1]);
+        let expected_hash = expected_repeat.detail["pixel_sha256"].clone();
+        verify_pixel_determinism(&mut different, true, || expected_repeat);
+        assert_eq!(different.bucket, "rendered");
+        assert_eq!(
+            different.detail["pixel_determinism"],
+            json!({
+                "status": "nondeterministic",
+                "repeat_bucket": "rendered",
+                "repeat_pixel_sha256": expected_hash,
+                "repeat_frames": Value::Null,
+            })
+        );
+    }
+
+    #[test]
+    fn pixel_determinism_compares_every_frame_in_order() {
+        let first_hash = rendered_pixels(&[1, 2, 3, 4]).detail["pixel_sha256"].clone();
+        let second_hash = rendered_pixels(&[5, 6, 7, 8]).detail["pixel_sha256"].clone();
+        let changed_second_hash = rendered_pixels(&[8, 7, 6, 5]).detail["pixel_sha256"].clone();
+        let frames = |second: Value| {
+            json!([
+                { "frame_index": 0, "bucket": "rendered", "pixel_sha256": first_hash },
+                { "frame_index": 1, "bucket": "rendered", "pixel_sha256": second },
+            ])
+        };
+        let mut primary = rendered_pixels(&[1, 2, 3, 4]);
+        primary
+            .detail
+            .insert("frames".to_owned(), frames(second_hash));
+        let mut repeated = rendered_pixels(&[1, 2, 3, 4]);
+        repeated
+            .detail
+            .insert("frames".to_owned(), frames(changed_second_hash));
+
+        verify_pixel_determinism(&mut primary, true, || repeated);
+
+        assert_eq!(
+            primary.detail["pixel_determinism"]["status"],
+            "nondeterministic"
+        );
+        assert_eq!(
+            primary.detail["pixel_determinism"]["repeat_frames"][0]["pixel_sha256"],
+            primary.detail["frames"][0]["pixel_sha256"]
+        );
+        assert_ne!(
+            primary.detail["pixel_determinism"]["repeat_frames"][1]["pixel_sha256"],
+            primary.detail["frames"][1]["pixel_sha256"]
+        );
+    }
+
+    #[test]
+    fn pixel_determinism_skips_non_rendered_and_preserves_repeat_failures_as_evidence() {
+        let called = std::cell::Cell::new(false);
+        let mut failed = Outcome::bare("frame_error:1");
+        verify_pixel_determinism(&mut failed, true, || {
+            called.set(true);
+            rendered_pixels(&[0; 4])
+        });
+        assert!(!called.get());
+        assert_eq!(failed.bucket, "frame_error:1");
+        assert_eq!(
+            failed.detail["pixel_determinism"],
+            json!({ "status": "not_applicable", "repeat_bucket": Value::Null })
+        );
+
+        let mut rendered = rendered_pixels(&[1; 4]);
+        verify_pixel_determinism(&mut rendered, true, || Outcome::bare("session_open_failed"));
+        assert_eq!(rendered.bucket, "rendered");
+        assert_eq!(
+            rendered.detail["pixel_determinism"],
+            json!({
+                "status": "repeat_failed",
+                "repeat_bucket": "session_open_failed",
+                "repeat_pixel_sha256": Value::Null,
+                "repeat_frames": Value::Null,
+            })
+        );
+
+        let mut disabled = rendered_pixels(&[2; 4]);
+        verify_pixel_determinism(&mut disabled, false, || panic!("repeat must stay opt-in"));
+        assert!(!disabled.detail.contains_key("pixel_determinism"));
     }
 
     #[test]
