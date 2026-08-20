@@ -127,7 +127,10 @@ if (-not $normalizedKey) {
     throw 'Key must name an object'
 }
 $segments = @($Bucket) + $normalizedKey.Split('/')
-if ($segments | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }) {
+# @().Count rather than the pipeline's own truthiness: a lone '' match makes
+# `if ($segments | Where-Object ...)` false, which is exactly the case this
+# guard exists for.
+if (@($segments | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
     throw "Key must not contain empty or relative path segments: $Key"
 }
 $canonicalUri = '/' + (($segments | ForEach-Object { ConvertTo-SigV4Segment $_ }) -join '/')
