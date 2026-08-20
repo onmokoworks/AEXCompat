@@ -93,6 +93,7 @@ enum LegacyWin64Import {
     GetModuleHandleW,
     GetModuleHandleExA,
     GetModuleFileNameW,
+    LoadLibraryW,
     GetProcAddress,
     InitializeSListHead,
     DisableThreadLibraryCalls,
@@ -305,6 +306,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
         ("kernel32.dll", "GetModuleHandleExA") => LegacyWin64Import::GetModuleHandleExA,
         ("kernel32.dll", "GetModuleFileNameW") => LegacyWin64Import::GetModuleFileNameW,
+        ("kernel32.dll", "LoadLibraryW") => LegacyWin64Import::LoadLibraryW,
         ("kernel32.dll", "GetProcAddress") => LegacyWin64Import::GetProcAddress,
         (
             _,
@@ -1094,6 +1096,18 @@ fn install_win64_import(
                     "install GetModuleFileNameW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_module_file_name_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::LoadLibraryW => {
+                uc(
+                    "write LoadLibraryW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install LoadLibraryW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_load_library_w(unicorn);
                     }),
                 )?;
             }
@@ -1952,6 +1966,86 @@ fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
     } else {
         let _ = unicorn.reg_write(RegisterX86::RAX, copied as u64);
     }
+}
+
+fn emulate_load_library_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    let pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    };
+    if pointer == 0 {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    let mut units = Vec::new();
+    let mut terminated = false;
+    for index in 0..512u64 {
+        let Some(address) = pointer.checked_add(index * 2) else {
+            break;
+        };
+        let Ok(bytes) = unicorn.mem_read_as_vec(address, 2) else {
+            break;
+        };
+        let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if unit == 0 {
+            terminated = true;
+            break;
+        }
+        units.push(unit);
+    }
+    if !terminated {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    let Ok(name) = String::from_utf16(&units) else {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    };
+    let normalized = name.replace('/', "\\");
+    let path_qualified =
+        normalized.contains('\\') || normalized.as_bytes().get(1).copied() == Some(b':');
+    let module = if path_qualified {
+        if normalized.eq_ignore_ascii_case(r"C:\Windows\System32\kernel32.dll") {
+            Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+        } else if normalized.eq_ignore_ascii_case(r"C:\AEXCompat\guest-plugin.aex") {
+            unicorn.get_data().image_region.map(|region| region.0)
+        } else {
+            None
+        }
+    } else {
+        let completed = if normalized.contains('.') {
+            normalized
+        } else {
+            format!("{normalized}.dll")
+        };
+        if completed.eq_ignore_ascii_case("kernel32.dll") {
+            Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+        } else if completed.eq_ignore_ascii_case("guest-plugin.aex") {
+            unicorn.get_data().image_region.map(|region| region.0)
+        } else {
+            None
+        }
+    };
+    let Some(module) = module else {
+        fail(unicorn, ERROR_MOD_NOT_FOUND);
+        return;
+    };
+    let count = unicorn
+        .get_data()
+        .windows_module_refcounts
+        .get(&module)
+        .copied()
+        .unwrap_or_default();
+    if count >= MAX_WINDOWS_MODULE_REFERENCES {
+        fail(unicorn, ERROR_NOT_ENOUGH_MEMORY);
+        return;
+    }
+    unicorn
+        .get_data_mut()
+        .windows_module_refcounts
+        .insert(module, count + 1);
+    let _ = unicorn.reg_write(RegisterX86::RAX, module);
 }
 
 fn install_windows_condition_variable_callbacks(
