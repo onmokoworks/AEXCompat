@@ -85,6 +85,7 @@ bool parse_mask_context_payload(const wchar_t* text) {
   const std::wstring encoded(text);
   if (encoded.size() < 3 || encoded.size() > 8192 || encoded.compare(0, 3, L"v2|") != 0)
     return false;
+  configure_mask_runtime_hooks();
   std::vector<HostMask> masks;
   std::size_t total_vertices = 0;
   const std::wstring payload = encoded.substr(3);

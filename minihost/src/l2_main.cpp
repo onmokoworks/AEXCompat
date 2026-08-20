@@ -80,6 +80,7 @@
 #include "worker_selector_dispatch.hpp"
 #include "worker_runtime_admission.hpp"
 #include "worker_openmp_policy.hpp"
+#include "worker_bee_bib_installer.hpp"
 #include "worker_legacy_support_init.hpp"
 #include "worker_entry_admission.hpp"
 #include "worker_session.hpp"
