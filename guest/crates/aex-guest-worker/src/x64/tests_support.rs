@@ -1712,21 +1712,52 @@ fn stdio_vsprintf_formats_observed_olm_parameter_name_with_size_max() {
         b"Threshold 7\0"
     );
 
-    engine.unicorn.mem_write(output, b"unchanged\0").unwrap();
-    let error = engine
-        .call_win64_with_timeout(
-            VSPRINTF,
-            &[0x25, output, 8, format, 0, va_list],
-            TIMEOUT_MICROSECONDS,
-        )
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("finite vsprintf buffer count 8"),
-        "{error}"
+    engine.unicorn.mem_write(output, &[0xa5; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 12, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        11
     );
     assert_eq!(
-        engine.unicorn.mem_read_as_vec(output, 10).unwrap(),
-        b"unchanged\0"
+        engine.unicorn.mem_read_as_vec(output, 12).unwrap(),
+        b"Threshold 7\0"
+    );
+
+    engine.unicorn.mem_write(output, &[0xa5; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 11, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        11
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 12).unwrap(),
+        [b"Threshold 7".as_slice(), &[0xa5]].concat()
+    );
+
+    engine.unicorn.mem_write(output, &[0xa5; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 8, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        u32::MAX as u64
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 9).unwrap(),
+        [b"Threshol".as_slice(), &[0xa5]].concat()
     );
 
     let error = engine
@@ -1739,6 +1770,210 @@ fn stdio_vsprintf_formats_observed_olm_parameter_name_with_size_max() {
     assert!(
         error.to_string().contains("formatting options 0x0"),
         "{error}"
+    );
+}
+
+#[test]
+fn stdio_finite_vsprintf_formats_bang_path_and_validates_complete_guest_ranges() {
+    const VSPRINTF: u64 = STUB_BASE + 0x1d0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        VSPRINTF,
+        "ucrtbase.dll",
+        "__stdio_common_vsprintf",
+    )
+    .unwrap();
+    let format = DATA_BASE + 0x100;
+    let root = DATA_BASE + 0x180;
+    let suffix = DATA_BASE + 0x1c0;
+    let va_list = DATA_BASE + 0x280;
+    let output = DATA_BASE + 0x400;
+    engine.unicorn.mem_write(format, b"%s\\%s\0").unwrap();
+    engine
+        .unicorn
+        .mem_write(root, b"C:\\ProgramData\0")
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(suffix, b"\\Red Giant\\Common\\Libraries\\RGBranding.dll\0")
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(
+            va_list,
+            &[root, suffix]
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0x2468;
+    let expected = b"C:\\ProgramData\\\\Red Giant\\Common\\Libraries\\RGBranding.dll\0";
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 260, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        (expected.len() - 1) as u64
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(output, expected.len())
+            .unwrap(),
+        expected
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x2468);
+
+    engine.unicorn.mem_write(output, b"unchanged\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 0, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        u32::MAX as u64
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 10).unwrap(),
+        b"unchanged\0"
+    );
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, 0, 0, format, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        (expected.len() - 1) as u64
+    );
+
+    let boundary = DATA_BASE + PAGE_SIZE - 259;
+    engine.unicorn.mem_write(boundary, &[0x5a; 16]).unwrap();
+    let error = engine
+        .call_win64_with_timeout(
+            VSPRINTF,
+            &[0x25, boundary, 260, format, 0, va_list],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("not writable"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 16).unwrap(),
+        vec![0x5a; 16]
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.unicorn.mem_write(format, b"%s\0").unwrap();
+    engine.unicorn.mem_write(output, b"%s\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                VSPRINTF,
+                &[0x25, output, 32, output, 0, va_list],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        14
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 15).unwrap(),
+        b"C:\\ProgramData\0"
+    );
+}
+
+#[test]
+fn stdio_finite_vsprintf_rejects_unreadable_inputs_and_readonly_destinations_atomically() {
+    const VSPRINTF: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        VSPRINTF,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "__stdio_common_vsprintf",
+    )
+    .unwrap();
+    let format = DATA_BASE + 0x100;
+    let value = DATA_BASE + 0x180;
+    let output = DATA_BASE + 0x300;
+    let va_list = HANDLE_DATA_BASE + 0x100;
+    engine.unicorn.mem_write(format, b"%s\0").unwrap();
+    engine.unicorn.mem_write(value, b"guest\0").unwrap();
+    engine
+        .unicorn
+        .mem_write(va_list, &value.to_le_bytes())
+        .unwrap();
+    engine.unicorn.mem_write(output, b"unchanged\0").unwrap();
+
+    engine
+        .unicorn
+        .mem_protect(HANDLE_DATA_BASE, PAGE_SIZE, Prot::WRITE)
+        .unwrap();
+    let error = engine
+        .call_win64_with_timeout(
+            VSPRINTF,
+            &[0x25, output, 32, format, 0, va_list],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("va_list slot"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 10).unwrap(),
+        b"unchanged\0"
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .mem_protect(HANDLE_DATA_BASE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine
+        .unicorn
+        .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    let error = engine
+        .call_win64_with_timeout(
+            VSPRINTF,
+            &[0x25, output, 32, format, 0, va_list],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("not writable"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 10).unwrap(),
+        b"unchanged\0"
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let error = engine
+        .call_win64_with_timeout(
+            VSPRINTF,
+            &[
+                0x25,
+                output,
+                MAX_CRT_STDIO_BUFFER_BYTES + 2,
+                format,
+                0,
+                va_list,
+            ],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("buffer count"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 10).unwrap(),
+        b"unchanged\0"
     );
 }
 

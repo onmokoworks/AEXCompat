@@ -1189,6 +1189,11 @@ fn read_crt_stdio_c_string(
         let address = address
             .checked_add(offset)
             .ok_or_else(|| format!("stdio {label} range overflow"))?;
+        if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+            return Err(format!(
+                "stdio {label} address {address:#x} is not readable"
+            ));
+        }
         let mut byte = [0u8; 1];
         unicorn
             .mem_read(address, &mut byte)
@@ -1214,11 +1219,6 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
         let options = read_win64_import_argument(unicorn, 0)?;
         let destination = read_win64_import_argument(unicorn, 1)?;
         let requested_buffer_count = read_win64_import_argument(unicorn, 2)?;
-        if !secure && requested_buffer_count != u64::MAX {
-            return Err(format!(
-                "stdio finite vsprintf buffer count {requested_buffer_count} is unsupported"
-            ));
-        }
         let (buffer_count, max_count, format_address, locale, va_list) = if secure {
             (
                 requested_buffer_count,
@@ -1249,8 +1249,14 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
         if locale != 0 {
             return Err("stdio locale-aware formatting is unsupported".to_string());
         }
-        if destination == 0 || buffer_count == 0 {
+        if secure && (destination == 0 || buffer_count == 0) {
             return Err("stdio destination and buffer count must be nonzero".to_string());
+        }
+        if !secure
+            && (requested_buffer_count == u64::MAX || requested_buffer_count != 0)
+            && destination == 0
+        {
+            return Err("stdio destination pointer is null".to_string());
         }
         let maximum_buffer_count = MAX_CRT_STDIO_BUFFER_BYTES + u64::from(!secure);
         if buffer_count > maximum_buffer_count {
@@ -1258,7 +1264,7 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
                 "stdio buffer count {buffer_count} exceeds {maximum_buffer_count}"
             ));
         }
-        if max_count != u64::MAX && max_count >= buffer_count {
+        if secure && max_count != u64::MAX && max_count >= buffer_count {
             return Err(format!(
                 "stdio max count {max_count} must be smaller than buffer count {buffer_count}"
             ));
@@ -1295,6 +1301,11 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
                 let slot_address = va_list
                     .checked_add((argument_index as u64) * 8)
                     .ok_or_else(|| "stdio va_list address overflow".to_string())?;
+                if !guest_range_has_permission(unicorn, slot_address, 8, Prot::READ)? {
+                    return Err(format!(
+                        "stdio va_list slot {slot_address:#x} is not readable"
+                    ));
+                }
                 let slot = unicorn
                     .mem_read_as_vec(slot_address, 8)
                     .map_err(|error| format!("stdio va_list read: {error}"))?;
@@ -1326,24 +1337,58 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
             }
         }
 
-        let limit = if max_count == u64::MAX {
-            buffer_count - 1
+        let return_value;
+        if !secure && requested_buffer_count != u64::MAX {
+            if requested_buffer_count == 0 && destination == 0 {
+                return_value = output.len() as u64;
+                output.clear();
+                return Ok((destination, output, return_value));
+            }
+            if !guest_range_has_permission(
+                unicorn,
+                destination,
+                requested_buffer_count,
+                Prot::WRITE,
+            )? {
+                return Err(format!(
+                    "stdio destination {destination:#x} is not writable for {requested_buffer_count} bytes"
+                ));
+            }
+            match (output.len() as u64).cmp(&requested_buffer_count) {
+                std::cmp::Ordering::Less => {
+                    return_value = output.len() as u64;
+                    output.push(0);
+                }
+                std::cmp::Ordering::Equal => {
+                    return_value = output.len() as u64;
+                }
+                std::cmp::Ordering::Greater => {
+                    output.truncate(requested_buffer_count as usize);
+                    return_value = u32::MAX as u64;
+                }
+            }
         } else {
-            max_count
-        };
-        let truncated = output.len() as u64 > limit;
-        output.truncate(limit as usize);
-        output.push(0);
-        let return_value = if truncated {
-            u32::MAX as u64
-        } else {
-            (output.len() - 1) as u64
-        };
+            let limit = if max_count == u64::MAX {
+                buffer_count - 1
+            } else {
+                max_count
+            };
+            let truncated = output.len() as u64 > limit;
+            output.truncate(limit as usize);
+            output.push(0);
+            return_value = if truncated {
+                u32::MAX as u64
+            } else {
+                (output.len() - 1) as u64
+            };
+        }
         Ok((destination, output, return_value))
     })();
     match result {
         Ok((destination, output, return_value)) => {
-            if let Err(error) = unicorn.mem_write(destination, &output) {
+            if !output.is_empty()
+                && let Err(error) = unicorn.mem_write(destination, &output)
+            {
                 if unicorn.get_data().callback_error.is_none() {
                     unicorn.get_data_mut().callback_error =
                         Some(format!("stdio destination write: {error}"));
