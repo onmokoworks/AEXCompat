@@ -5,11 +5,12 @@ use iced_x86::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
-use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
+use unicorn_engine::{Context, RegisterX86, UcHookId, Unicorn};
 
 use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_HEAP_BYTES};
 use crate::pe::{PeImage, StaticTlsImage};
@@ -28,6 +29,7 @@ use wgpu_runtime::{
 const PAGE_SIZE: u64 = 0x1000;
 const STACK_BASE: u64 = 0x0000_0000_7000_0000;
 const STACK_SIZE: u64 = 0x20_0000;
+const MAX_WINDOWS_THREADS: usize = 32;
 const STUB_BASE: u64 = 0x0000_0000_6000_0000;
 const STUB_SIZE: u64 = 0x10_0000;
 const STUB_STRIDE: u64 = 16;

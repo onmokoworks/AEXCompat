@@ -1757,11 +1757,550 @@ void initialize_dvacore_localizer() {
             << std::flush;
 }
 
+// COR owns the BIB proc-address resolver every module that talks to BIB needs,
+// and hands it out through this export. It answers 0x5301 ("BIB is
+// uninitialized") until COR_Conception has run, which is an entry in the birth
+// table above - so this is only ever asked after that table.
+//
+// `query_result` separates the ways this can come back empty, because they
+// call for different reads of a trace. A non-negative value is COR's own
+// answer: it was asked and declined, 0x5301 being the uninitialized case.
+// `-1` and `-2` mean it was never asked - no COR mapping, no export. `-3` is
+// the third thing: it was asked and the call faulted, which is why the call is
+// contained at all, a COR that has not been conceived being exactly where that
+// is plausible.
+constexpr int kCorResolverNoModule = -1;
+constexpr int kCorResolverNoExport = -2;
+constexpr int kCorResolverFaulted = -3;
+
+void* cor_bib_resolver(int& query_result) {
+  const HMODULE cor = GetModuleHandleW(L"COR.dll");
+  if (cor == nullptr) {
+    query_result = kCorResolverNoModule;
+    return nullptr;
+  }
+  auto* const get_resolver = reinterpret_cast<int(__cdecl*)(void**)>(
+      GetProcAddress(cor, "?COR_GetBIBAddressProc@@YAHPEAP6APEAXPEBD00@Z@Z"));
+  if (get_resolver == nullptr) {
+    query_result = kCorResolverNoExport;
+    return nullptr;
+  }
+  void* resolver = nullptr;
+  __try {
+    query_result = get_resolver(&resolver);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    query_result = kCorResolverFaulted;
+    return nullptr;
+  }
+  return resolver;
+}
+
+namespace bee_bib = aexcompat::worker_runtime::bee_bib;
+
+// Reading one pointer out of BEE's `.data`. Contained for the same reason the
+// header walk is: `bee_bib::inspect` bounds the offset by SizeOfImage and the
+// prologue matched, so the page is BEE's own, but "the image is not what this
+// build expects" is the whole premise here, and an uncontained read would take
+// the worker down on exactly the module it was written to be careful about.
+// One of the three call sites reads the word from inside an `__except` handler,
+// where a fault would be a fault during exception dispatch and the worker
+// would die with no diagnostic at all - the outcome this exists to prevent.
+bool read_image_word(void** word, void*& value) {
+  __try {
+    value = *word;
+    return true;
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    value = nullptr;
+    return false;
+  }
+}
+
+// Reading BEE's image, contained. The decision itself is in
+// worker_bee_bib_installer.hpp so its refusals can be self-tested without a
+// real BEE.dll; what belongs here is the SEH, because the module is one this
+// build did not produce and a layout it does not expect has to come back as a
+// diagnostic rather than take the worker down with it.
+bee_bib::Check inspect_bee_installer(HMODULE bee, bee_bib::Site& site) {
+  const auto* const image = reinterpret_cast<const unsigned char*>(bee);
+  __try {
+    // SIZE_MAX because a real mapping's extent is the thing being read out of
+    // the headers; this SEH is what stands in for a bound.
+    return bee_bib::inspect(image, SIZE_MAX, site);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    return bee_bib::Check::ReadFaulted;
+  }
+}
+
+// BEE.dll resolves the interfaces it draws with - notably
+// `ARE_BezierPathRasterPainterInterface` (NewFill / NewStroke), which its
+// ShapeKernel rasterises paths through - by calling a BIB proc-address
+// resolver it keeps at BEE.dll+0x16a13e0. When that word is null every
+// resolution fails, and the failure path itself calls through the equally
+// null BIBNewErrorProc at +0x16a1530:
+//
+//     180c559de: MOV  R10, qword ptr [0x1816a1530]   ; BIBNewErrorProc
+//     180c559fd: CALL R10                            ; access violation
+//
+// so a plug-in that reaches it dies inside CBIBError's constructor - which is
+// what ShapeBlur's PF_Err_INTERNAL_STRUCT_DAMAGED was (issue #1264). The same
+// null word is why PSL_Adjustments returned 14 (issue #1302): one cause, two
+// plug-ins, and installing the resolver is by itself the whole fix for the
+// second.
+//
+// COR owns the resolver and exports it (`COR_GetBIBAddressProc`), so the
+// value is available. What is not exported is the function that installs it
+// into BEE, `FUN_180c568a0`, which BEE_Birth calls partway through a long
+// chain of SND_InstallProcs / FLT_InstallProcs calls. Reaching it through
+// BEE_Birth is not a smaller problem: FLT_Birth pulls in AE's GPU renderer
+// and VideoFilterHost initialisation (`Initialize_RendererGPU`,
+// `Initialize_VideoFilterHost_ML`, `PF_SetOverrideFunc`, `PLUG_InstallScan`)
+// and access-violates without them - measured, not assumed.
+//
+// So the host calls the installer directly, at an image-relative address, and
+// `bee_bib::inspect` is what makes that defensible: nothing is called unless
+// the bytes at that offset are the ones this behaviour was read from and the
+// instruction there names the word read back afterwards. On any other build
+// this leaves BEE exactly as it was, which is the state every build before
+// this change shipped with.
+//
+// What the installer does, from its disassembly in AE 2026's BEE.dll:
+//
+//   * It is idempotent. `cmp qword ptr [rip+0xa4ab2b], 0` at +0xc568ad tests
+//     the resolver word and jumps to a tail that returns 1 having touched
+//     nothing.
+//   * A null argument returns 0 without touching anything either.
+//   * On the install path it stores the resolver first (+0xc568c4), then
+//     resolves five BIB procs through it. Each of the five null-checks jumps
+//     to the `xor eax,eax; ret` tail, so a `result=0` from a call that did run
+//     means one of the five did not resolve while the resolver word is set
+//     anyway - `installed=yes result=0` is a real state, not a contradiction.
+//   * Past the five it keeps going for roughly another 0x160 bytes: a sixth
+//     indirect call storing another global, a guard on a count, four direct
+//     calls, and two symmetric construct-and-register blocks that call back
+//     through the resolver with static data. Those were read as BIB-local
+//     bookkeeping, not as the stream registration, project initialization or
+//     class-factory work the rest of BEE_Birth does - which is the part of
+//     BEE_Birth this deliberately does not run - but "BIB-local" is how far
+//     the reading goes, not a proof that they are inert.
+//
+// Answers whether BEE's resolver is in place on a build this recognized, which
+// is what the ARE half is gated on.
+bool initialize_bee_bib_resolver(HMODULE bee) {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  // Readiness is keyed on the mapping rather than kept beside the latch as a
+  // plain flag, because it is a fact about one mapping and a bool would answer
+  // for whichever mapping asked. A second BEE that gets refused is still
+  // latched, so a later call with it answers `AlreadyInitialized` - and a bool
+  // set by the first BEE would then claim readiness for the refused one, which
+  // is the case the ARE half must not run in. Defensive rather than observed:
+  // the worker retires plug-in images instead of freeing them (issue #474), so
+  // the name resolves to one mapping for the life of the process and the
+  // caller cannot currently produce a second one.
+  static HMODULE ready_mapping = nullptr;
+  // Decided per mapping, not once per process: BEE arrives with the plug-in's
+  // dependency closure, so a session whose first member has no BEE must still
+  // install the resolver when a later member maps it (issue #1063's shape).
+  // There is no birth export to look for here - what makes the call safe is
+  // `bee_bib::inspect` - so the export question is answered `true`.
+  if (legacy::decide(state, bee, /*birth_exported=*/true) !=
+      legacy::Decision::Call)
+    return bee != nullptr && ready_mapping == bee;
+
+  bee_bib::Site site{};
+  const bee_bib::Check check = inspect_bee_installer(bee, site);
+  // Identity of what was read, on every outcome: a line that names no build
+  // cannot be tied back afterwards to the one the check ruled on, and that is
+  // the whole point of recording it. `bee_bib::inspect` fills these in as soon
+  // as the NT headers are readable, so `not_amd64`, `offset_outside_image` and
+  // `entry_mismatch` all carry them. `not_an_image` prints zeros, which is the
+  // honest answer there - nothing legible about the module was reached.
+  // `read_faulted` prints whichever of the two it got to: zeros if the headers
+  // themselves faulted, the real identity if the fault came later, at the code
+  // or data offset (`SizeOfImage` spans reserved gaps and PAGE_NOACCESS pages
+  // that a header check cannot rule out, so that is a reachable fault).
+  const auto identity = [&site] {
+    std::cerr << " bee_size=0x" << std::hex << site.image_size
+              << " bee_timestamp=0x" << site.timestamp << std::dec;
+  };
+  if (check != bee_bib::Check::Ok) {
+    legacy::note_called(state, bee);
+    std::cerr << "stage:bee_bib_resolver status=" << bee_bib::check_text(check);
+    identity();
+    std::cerr << "\n" << std::flush;
+    return false;
+  }
+
+  auto* const base = reinterpret_cast<unsigned char*>(bee);
+  auto* const entry = base + site.installer_offset;
+  auto* const resolver_word =
+      reinterpret_cast<void**>(base + site.resolver_offset);
+
+  void* existing = nullptr;
+  if (!read_image_word(resolver_word, existing)) {
+    legacy::note_called(state, bee);
+    std::cerr << "stage:bee_bib_resolver status=unreadable_word";
+    identity();
+    std::cerr << "\n" << std::flush;
+    return false;
+  }
+  if (existing != nullptr) {
+    // A BEE that birthed itself, or a second mapping that already went
+    // through this. The installer would return 1 without doing anything.
+    legacy::note_called(state, bee);
+    ready_mapping = bee;
+    std::cerr << "stage:bee_bib_resolver status=already_installed";
+    identity();
+    std::cerr << "\n" << std::flush;
+    return true;
+  }
+
+  // The COR step below is the one thing here that is not latched on failure.
+  // Everything above it is a property of the mapping and gives the same answer
+  // next time, so those paths latch; this is the first step that depends on a
+  // second module, and latching a COR that was not ready yet would deny a
+  // later member the install it could have had.
+  int query_result = 0;
+  void* const resolver = cor_bib_resolver(query_result);
+  if (resolver == nullptr) {
+    // Logged once per process: this path is deliberately not latched, so it is
+    // re-reached for every session member, and a 300-member session must not
+    // fill the bounded stderr tail the broker keeps with the same line.
+    static bool no_resolver_logged = false;
+    if (!no_resolver_logged) {
+      no_resolver_logged = true;
+      std::cerr << "stage:bee_bib_resolver status=no_resolver cor_result="
+                << query_result;
+      identity();
+      std::cerr << "\n" << std::flush;
+    }
+    return false;
+  }
+  legacy::note_called(state, bee);
+
+  int install_result = -1;
+  __try {
+    install_result = reinterpret_cast<int(__cdecl*)(void*)>(entry)(resolver);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    // The installer stores the resolver before it looks up the five BIB procs
+    // through it, so a fault partway leaves BEE in a state worth reporting
+    // rather than only saying that something went wrong. Readiness is left
+    // false either way: BEE's word may be set, but a fault says the rest of
+    // what the installer does did not finish, and the ARE half registers into
+    // exactly that unfinished state.
+    void* after_fault = nullptr;
+    const bool word_readable = read_image_word(resolver_word, after_fault);
+    // `call_faulted`, not `faulted`: the other fault this step can report is
+    // `read_faulted`, which means BEE's image was unreadable and nothing was
+    // called. This one means the host jumped into BEE and BEE crashed, and
+    // conflating the two would hide the distinction the whole design rests on.
+    std::cerr << "stage:bee_bib_resolver status=call_faulted installed="
+              << (!word_readable ? "unreadable"
+                                 : (after_fault != nullptr ? "yes" : "no"));
+    identity();
+    std::cerr << "\n" << std::flush;
+    return false;
+  }
+  // `installed` is read back rather than inferred from the return value: the
+  // point of the whole step is that word being non-null.
+  void* after_install = nullptr;
+  const bool installed =
+      read_image_word(resolver_word, after_install) && after_install != nullptr;
+  if (installed) ready_mapping = bee;
+  std::cerr << "stage:bee_bib_resolver status=called result=" << install_result
+            << " installed=" << (installed ? "yes" : "no");
+  identity();
+  std::cerr << "\n" << std::flush;
+  return installed;
+}
+
+// Whether two paths name the same file. The textual compare answers it for
+// the case this is actually asked about - both spellings come from
+// `GetModuleFileNameW`, one on ARE and one derived from BEE's, so the loader
+// canonicalized both the same way - and it is ordinal rather than `_wcsicmp` so
+// a plug-in that called `setlocale` in its DllMain cannot change what the host
+// considers equal. When the text differs the question is still open: a
+// junction in AE's install path, a `subst` drive, an 8.3 component or a UNC
+// spelling all name one file with two spellings, and answering "different"
+// there would disable the ARE step for the rest of the process without saying
+// anything useful.
+// So the fallback asks the filesystem, and only a genuine answer counts -
+// if either open fails, the paths are not claimed to match. The file index it
+// compares is unique per volume on NTFS; on ReFS and Dev Drive it is not
+// guaranteed to be, so a match there is weaker evidence than on the volume AE
+// actually installs to.
+bool same_file(const wchar_t* left, const wchar_t* right) {
+  if (CompareStringOrdinal(left, -1, right, -1, /*bIgnoreCase=*/TRUE) ==
+      CSTR_EQUAL)
+    return true;
+  const auto open = [](const wchar_t* path) {
+    return CreateFileW(path, 0,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
+                       nullptr);
+  };
+  const HANDLE left_handle = open(left);
+  if (left_handle == INVALID_HANDLE_VALUE) return false;
+  const HANDLE right_handle = open(right);
+  if (right_handle == INVALID_HANDLE_VALUE) {
+    CloseHandle(left_handle);
+    return false;
+  }
+  BY_HANDLE_FILE_INFORMATION left_info{};
+  BY_HANDLE_FILE_INFORMATION right_info{};
+  const bool both =
+      GetFileInformationByHandle(left_handle, &left_info) != 0 &&
+      GetFileInformationByHandle(right_handle, &right_info) != 0;
+  CloseHandle(left_handle);
+  CloseHandle(right_handle);
+  return both &&
+         left_info.dwVolumeSerialNumber == right_info.dwVolumeSerialNumber &&
+         left_info.nFileIndexHigh == right_info.nFileIndexHigh &&
+         left_info.nFileIndexLow == right_info.nFileIndexLow;
+}
+
+// A load runs the DllMain of the module and of everything it pulls in, and a
+// fault there would take the worker down mid-session rather than cost this one
+// step. Contained the same way `load_library_guarded` contains the Sweet Pea
+// and BIB loads, which is the precedent this follows.
+//
+// Containing it is not free: unwinding out of the loader leaves the module in
+// its list with DllMain half-run, so the name stays poisoned for the process.
+// That is still the better trade for a worker that is disposable under a
+// kill-on-close Job Object. What it does mean is that the caller has to be
+// able to tell a fault from an ordinary load failure - `GetLastError()` after
+// an SEH unwind out of the loader is a stale value that would be reported as
+// a reason - so the error is captured next to the call that set it and the
+// fault is its own answer.
+struct ContainedLoad {
+  HMODULE module;
+  DWORD error;
+  bool faulted;
+};
+
+ContainedLoad load_library_contained(const wchar_t* path, DWORD flags) {
+  ContainedLoad result{nullptr, 0, false};
+  __try {
+    result.module = LoadLibraryExW(path, nullptr, flags);
+    result.error = result.module != nullptr ? 0 : GetLastError();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    result.module = nullptr;
+    result.faulted = true;
+  }
+  return result;
+}
+
+// The other half of what a shape-rasterising effect needs, and the reason the
+// resolver alone is not enough. BEE's ShapeKernel does not rasterise anything
+// itself: it resolves `ARE_BezierPathRasterPainterInterface` through BIB and
+// paints through that interface's NewFill / NewStroke. The interface lives in
+// ARE.dll and is published by a `TBIBAutoRegister` that `ARE_Initialize` runs.
+//
+// ARE.dll is not in any effect's import closure - real AE loads it as part of
+// its own startup - so nothing maps it here unless the host does. Measured
+// with BEE's resolver installed and ARE left absent, ShapeBlur stops crashing
+// and returns 14 from SmartRender instead: the resolution now fails cleanly
+// instead of calling through a null BIBNewErrorProc, but it still fails. It
+// takes both steps for ShapeBlur to render (issue #1264). PSL_Adjustments
+// renders on the resolver alone and is unaffected by this one (issue #1302),
+// which is what says the two steps are separate gaps rather than one.
+//
+// Runs only where the resolver step recognized the build and left BEE's word
+// set. Registering a raster painter into a BIB whose BEE half was correctly
+// refused publishes an interface nothing can reach, so an unrecognized build
+// would pay a DLL load, a DllMain and a call through an assumed ABI for
+// nothing.
+void initialize_are_raster_painter(HMODULE bee) {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  // Logged once per process apiece: the decision is re-asked for every session
+  // member, and a 300-member session must not fill the bounded stderr tail the
+  // broker keeps with the same line.
+  static bool path_logged = false;
+  static bool absent_logged = false;
+  static bool foreign_logged = false;
+  static bool no_export_logged = false;
+  static bool no_resolver_logged = false;
+  // A load that faulted is the one outcome that has to stop every later
+  // member, not just its own. `LoadLibraryExW` inserts the module into the
+  // loader's list before running its DllMain, so after a fault in there the
+  // name resolves to a module whose initialization half-ran - and the
+  // already-mapped path below would find it, agree it is the file it wanted,
+  // and call `ARE_Initialize` on uninitialized state. A log-once flag would
+  // silence the second report without preventing the second call.
+  //
+  // Deliberately broader than that one poisoned name: it is per process, so a
+  // later member mapping a BEE from a different directory gets no ARE step
+  // either, even though its sibling ARE might have loaded cleanly. After
+  // unwinding out of the loader the loader lock is plausibly still held, and a
+  // second `LoadLibraryExW` would deadlock the worker rather than fail it.
+  static bool load_faulted = false;
+  if (load_faulted) return;
+
+  // ARE is taken from BEE's own directory. The worker runs under the same
+  // token as the plug-in and its search path admits every plug-in directory in
+  // the manifest (LOAD_LIBRARY_SEARCH_USER_DIRS), so a name-resolved ARE.dll
+  // is one a plug-in's own closure could have supplied. The AE support library
+  // BEE itself came out of is the one meant here, and its directory is the one
+  // fact about it this host does not have to take on trust.
+  wchar_t are_path[MAX_PATH]{};
+  const DWORD bee_path_length = GetModuleFileNameW(bee, are_path, MAX_PATH);
+  const DWORD bee_path_error = bee_path_length == 0 ? GetLastError() : 0;
+  wchar_t* const leaf = (bee_path_length != 0 && bee_path_length < MAX_PATH)
+                            ? std::wcsrchr(are_path, L'\\')
+                            : nullptr;
+  static constexpr wchar_t kAreLeaf[] = L"\\ARE.dll";
+  const bool fits =
+      leaf != nullptr &&
+      static_cast<std::size_t>(leaf - are_path) + std::size(kAreLeaf) <=
+          MAX_PATH;
+  if (!fits) {
+    if (!path_logged) {
+      path_logged = true;
+      // The three ways this happens read differently: a failed query, a path
+      // with no separator, and one long enough that appending the leaf would
+      // not fit (a `length` of MAX_PATH is the truncation return).
+      std::cerr << "stage:are_raster_painter status=no_bee_path length="
+                << bee_path_length << " error=" << bee_path_error
+                << " separator=" << (leaf != nullptr ? "yes" : "no") << "\n"
+                << std::flush;
+    }
+    return;
+  }
+  std::memcpy(leaf, kAreLeaf, sizeof(kAreLeaf));
+
+  // Already mapped is the common case after the first member, and asking the
+  // loader again would add a reference per member for the rest of the process.
+  // It is only accepted when it is the same file the load below would have
+  // taken: an ARE.dll a plug-in's closure already pulled in from a plug-in
+  // directory would otherwise be accepted here, and pinning the load's
+  // directory would have bought nothing.
+  HMODULE are = GetModuleHandleW(L"ARE.dll");
+  if (are != nullptr) {
+    wchar_t mapped_path[MAX_PATH]{};
+    const DWORD mapped_length = GetModuleFileNameW(are, mapped_path, MAX_PATH);
+    const bool mapped_path_known =
+        mapped_length != 0 && mapped_length < MAX_PATH;
+    if (!mapped_path_known || !same_file(mapped_path, are_path)) {
+      if (!foreign_logged) {
+        foreign_logged = true;
+        // The path itself is not printed - it is a private absolute path -
+        // so what goes out is enough to tell the two causes apart: the
+        // loader would not say where the module came from, or it did and the
+        // file is not the one beside BEE.
+        std::cerr << "stage:are_raster_painter status=foreign_module path="
+                  << (mapped_path_known ? "known" : "unknown") << "\n"
+                  << std::flush;
+      }
+      return;
+    }
+  } else {
+    // Pinned to BEE's directory for ARE's own dependency resolution too, not
+    // just for ARE itself: leaving that on USER_DIRS would put the closure
+    // back in the plug-in directories this just avoided.
+    const ContainedLoad load = load_library_contained(
+        are_path,
+        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (load.faulted) {
+      // Distinct from a load that failed: DllMain ran and faulted, so the
+      // loader's list now holds a half-initialized module under that name.
+      // The latch at the top of this function is what keeps every later
+      // member away from it, since `GetModuleHandleW` would otherwise hand
+      // back exactly that module and it would pass the identity check.
+      load_faulted = true;
+      std::cerr << "stage:are_raster_painter status=load_faulted\n"
+                << std::flush;
+      return;
+    }
+    if (load.module == nullptr) {
+      // The error separates "no ARE.dll beside BEE" from "ARE.dll is there and
+      // its own dependency closure did not resolve", which pinning the search
+      // to that one directory makes a real possibility.
+      if (!absent_logged) {
+        absent_logged = true;
+        std::cerr << "stage:are_raster_painter status=absent error="
+                  << load.error << "\n"
+                  << std::flush;
+      }
+      return;
+    }
+    are = load.module;
+  }
+
+  auto* const initialize = reinterpret_cast<int(__cdecl*)(void*)>(
+      GetProcAddress(are, "ARE_Initialize"));
+  if (legacy::decide(state, are, initialize != nullptr) !=
+      legacy::Decision::Call) {
+    if (initialize == nullptr && !no_export_logged) {
+      no_export_logged = true;
+      std::cerr << "stage:are_raster_painter status=no_export\n" << std::flush;
+    }
+    return;
+  }
+
+  // ARE_Initialize takes the same BIB resolver BEE was just given: ARE uses it
+  // to resolve the five BIB procs of its own before registering anything, and
+  // returns 0 - its failure value - when handed null. It answers 1 here, which
+  // is what says the registration happened. Whether a second call would
+  // register twice is not something this has to answer: `note_called` below
+  // makes it one call per ARE mapping.
+  int query_result = 0;
+  void* const resolver = cor_bib_resolver(query_result);
+  if (resolver == nullptr) {
+    // Deliberately not latched, so a later member can still get the
+    // registration - which means this is re-reached every member until one
+    // does, and has to be logged once like the others. Reachable despite the
+    // resolver step having answered yes: that step answers yes without asking
+    // COR anything when BEE's word was already set.
+    if (!no_resolver_logged) {
+      no_resolver_logged = true;
+      std::cerr << "stage:are_raster_painter status=no_resolver cor_result="
+                << query_result << "\n"
+                << std::flush;
+    }
+    return;
+  }
+  legacy::note_called(state, are);
+  int result = -1;
+  __try {
+    result = initialize(resolver);
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    std::cerr << "stage:are_raster_painter status=faulted\n" << std::flush;
+    return;
+  }
+  std::cerr << "stage:are_raster_painter status=called result=" << result
+            << "\n"
+            << std::flush;
+}
+
 void initialize_legacy_support_libraries() {
   initialize_dvacore_localizer();
   initialize_u_dll_allocator();
   initialize_process_support_libraries();
   initialize_pf_dll_host_layer();
+  // Last, and after the PF layer rather than before it. These come after the
+  // table because the resolver they install comes from COR, whose
+  // COR_Conception entry is in that table; they come after PF because the
+  // second of them loads ARE.dll, whose own import closure this host does not
+  // control - if it reaches into PF.dll, PF is already wired by then. Going
+  // last costs nothing observed in return: the corpus was swept with the block
+  // in each position and rendered identically both times (recorded in §9 of
+  // docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md). That is weaker than a
+  // reading of the PF layer's dependencies, but it is what was measured.
+  //
+  // What this ordering does not fix: a support library that ARE's closure maps
+  // for the first time arrives after the birth table has already run, so it
+  // stays un-birthed for the member that triggered it and is picked up by the
+  // next one, since every latch keys on the mapping. That was true of the
+  // block's old position too.
+  //
+  // The second step is gated on the first: a raster painter registered into a
+  // BIB that BEE cannot reach is a DLL load and a call through an assumed ABI
+  // for nothing.
+  if (const HMODULE bee_module = GetModuleHandleW(L"BEE.dll")) {
+    if (initialize_bee_bib_resolver(bee_module))
+      initialize_are_raster_painter(bee_module);
+  }
 }
 
 const aexcompat::host_audio::Telemetry& audio_telemetry() {

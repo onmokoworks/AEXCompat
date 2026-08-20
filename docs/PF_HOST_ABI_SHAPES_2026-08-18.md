@@ -198,7 +198,16 @@ build のもの)。BEE.dll / ShapeBlur.aex 側の RVA は AE 2026 26.3 の同梱
 - cdb 実測 (fault 時の同プロセス): `+0x16a13e0` = 0、`+0x16a1530` (NewError) = 0、
   `+0x16a52f0/f8` (bezier painter) = 0、`+0x16a12a8` (BIB unregister count) = 0。
 
-**host 内で閉じない、と考えている**。
+~~**host 内で閉じない、と考えている**。~~
+
+> **訂正・解決 (2026-08-20、#1439)**: この結論は**外れ**だった。**host 内で閉じる。**
+> 下の観測はどれも正しい (`DAT_1816a13e0` は 0、書くのは `FUN_180c568a0` だけ、
+> それを参照するのは `BEE_Birth` だけ、BEE は resolver を渡す export を持たない)
+> が、そこから「だから host では設置できない」は導かれない。`FUN_180c568a0` を
+> **host が image-relative に直接呼べばよい** (呼ぶ前にビルド判定をする)。
+> さらに、`BEE_Birth` を呼べば設置される、という前提自体も誤りで、実測では
+> `BEE_Birth` は設置に到達せずに抜ける。実装と実測は
+> `docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md` §9。
 
 - 観測: `DAT_1816a13e0` は fault 時に 0 (cdb)。BEE.dll の逆アセンブル上、ここに
   書く関数は `FUN_180c568a0` の 1 つだけで、それを参照するのは `BEE_Birth` だけ
@@ -211,6 +220,10 @@ build のもの)。BEE.dll / ShapeBlur.aex 側の RVA は AE 2026 26.3 の同梱
   いる (`docs/PSL_PARTICLE_COHORT_2026-08-19.md` §3.1)。ただし「だから
   `frame_error:14` になる」は同 §3.2 が明記しているとおり**推論**で、resolver を
   立てて 14 が消えることの反証は取られていない。ShapeBlur 側も同じ立場にある。
+  → **追記 (2026-08-20、#1439)**: 反証は取られ、**推論は当たっていた**。
+  resolver を立てると PSL_Adjustments の 14 は消える (それだけで rendered)。
+  ShapeBlur は resolver に加えて `ARE_Initialize` の 1 段を要し、resolver だけ
+  だと 512 → 14 に変わって止まる。
 - `BEE_Birth` の規模の見積もりは同 §3.2。推測で `BEE_Birth` の引数 (MSVC
   `std::map` の内部表現) を組み立てて呼ぶことはしていない。
 
@@ -221,6 +234,14 @@ BEE / COR / MSK / SelectionFoundation / TXT)。ARE.dll の export は
 `ARE_GetVersion` / `ARE_Initialize` / `ARE_Terminate` の 3 本だけで、
 `ARE_Initialize` は引数 1 本の plain C。その引数が BIB address proc かどうかは
 未確認。
+
+> **確認済み (2026-08-20、#1439)**: その引数は **BIB address proc である**。
+> `COR_GetBIBAddressProc` で取った resolver を渡すと `ARE_Initialize` は 1 を
+> 返し (null を渡すと 0 = 失敗値)、`ARE_BezierPathRasterPainterInterface` が
+> 解決できるようになって ShapeBlur が render する。ARE.dll はどのエフェクトの
+> import closure にも入っていないので、host が明示的にロードする必要がある。
+> 実装は `initialize_are_raster_painter`。この段は「次のセッション向け」ではなく
+> 済み。
 
 cdb についての注意: `cdb -o` で `render_sweep` を子ごと debug すると、
 render worker (`trusted-worker.exe`) 側で ShapeBlur の `EffectMainExtra` に
@@ -272,8 +293,13 @@ full-corpus (AE 2026 `Support Files\Plug-ins\Effects` 304 AEX、depth 8、
   `$$$/AE/Curl_Noise/GPUWarning=Curl Noise Requires Mercury GPU Acceleration`
   の文字列を作って 0x200 (512) を返す = **plug-in 自身の戻り値**で、host の
   SEH 代替ではない。GPU 経路 (#1072 / #1157 の err14-retry gate) の軸。
-- **ShapeBlur**: §2.4.1 の通り、BEE.dll の BIB resolver が `BEE_Birth`
-  未呼び出しで null であることに行き着いた。host 内では閉じない (#1264 に記録)。
+- ~~**ShapeBlur**: §2.4.1 の通り、BEE.dll の BIB resolver が `BEE_Birth`
+  未呼び出しで null であることに行き着いた。host 内では閉じない (#1264 に記録)。~~
+  → **訂正・解決 (2026-08-20、#1439)**。resolver が null という観測は正しいが、
+  「`BEE_Birth` 未呼び出しが原因」も「host 内では閉じない」も**外れ**だった。
+  実際は `BEE_Birth` を呼んでも resolver 設置に到達せず、host が設置関数を直接
+  呼べば閉じる。ShapeBlur はさらに `ARE_Initialize` の 1 段を要する。
+  実測と実装は `docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md` §9。
 - PF_World facade の未観測 slot はすべて識別 trap。full-corpus では 1 件も
   取られていない (取られれば `unsupported_suite_calls` に `PF_World vtable`
   slot N として出る)。
