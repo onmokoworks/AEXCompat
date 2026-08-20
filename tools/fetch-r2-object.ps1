@@ -133,13 +133,28 @@ $segments = @($Bucket) + $normalizedKey.Split('/')
 if (@($segments | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
     throw "Key must not contain empty or relative path segments: $Key"
 }
+# The signed path is handed to HttpRequestMessage as a string, and System.Uri
+# re-parses and normalizes it there. That normalization is not guaranteed to
+# reproduce the exact bytes that went into the canonical request, so rather than
+# sign something the client may rewrite, refuse any name that needs escaping at
+# all. Every object this repo fetches is unreserved ASCII; a key that is not
+# should fail at signing time with a name, not later as SignatureDoesNotMatch.
+foreach ($segment in $segments) {
+    if ((ConvertTo-SigV4Segment $segment) -ne $segment) {
+        throw "bucket or key segment needs percent-encoding, which this signer does not support: '$segment'"
+    }
+}
 $canonicalUri = '/' + (($segments | ForEach-Object { ConvertTo-SigV4Segment $_ }) -join '/')
 
 $region = 'auto'
 $service = 's3'
 $now = [DateTime]::UtcNow
-$amzDate = $now.ToString('yyyyMMddTHHmmssZ')
-$dateStamp = $now.ToString('yyyyMMdd')
+# InvariantCulture explicitly: DateTime.ToString(format) otherwise resolves
+# `yyyy` against the thread's CurrentCulture calendar, and a runner whose Region
+# is set to a non-Gregorian calendar would sign a different year than R2 expects.
+$invariant = [System.Globalization.CultureInfo]::InvariantCulture
+$amzDate = $now.ToString('yyyyMMddTHHmmssZ', $invariant)
+$dateStamp = $now.ToString('yyyyMMdd', $invariant)
 $payloadHash = Get-Sha256Hex ([byte[]]@())
 
 $canonicalHeaders = "host:$($endpointUri.Host)`nx-amz-content-sha256:$payloadHash`nx-amz-date:$amzDate`n"
