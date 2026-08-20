@@ -3914,8 +3914,7 @@ fn lc_map_string_w_is_kernel32_scoped_and_maps_case_with_win32_lengths() {
     const UPPERCASE: u64 = 0x200;
     let mut engine = test_engine(&[0xc3]);
     assert_eq!(
-        install_win64_import(&mut engine.unicorn, MAP, "KERNEL32.DLL", "LCMapStringW")
-            .unwrap(),
+        install_win64_import(&mut engine.unicorn, MAP, "KERNEL32.DLL", "LCMapStringW").unwrap(),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LCMapStringW)
     );
     assert_eq!(
@@ -3940,10 +3939,7 @@ fn lc_map_string_w_is_kernel32_scoped_and_maps_case_with_win32_lengths() {
     // Win32 treats any negative cchSrc as a request to scan through NUL.
     assert_eq!(
         engine
-            .call_win64(
-                MAP,
-                [0x411, UPPERCASE, source, u32::MAX as u64 - 1, 0, 0],
-            )
+            .call_win64(MAP, [0x411, UPPERCASE, source, u32::MAX as u64 - 1, 0, 0],)
             .unwrap(),
         6
     );
@@ -3958,7 +3954,10 @@ fn lc_map_string_w_is_kernel32_scoped_and_maps_case_with_win32_lengths() {
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 12).unwrap(), expected);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 12).unwrap(),
+        expected
+    );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
 
     let explicit = "AZあ".encode_utf16().collect::<Vec<_>>();
@@ -3973,20 +3972,30 @@ fn lc_map_string_w_is_kernel32_scoped_and_maps_case_with_win32_lengths() {
         )
         .unwrap();
     assert_eq!(
-        engine.call_win64(MAP, [0x7f, LOWERCASE, source, 3, output, 3]).unwrap(),
+        engine
+            .call_win64(MAP, [0x7f, LOWERCASE, source, 3, output, 3])
+            .unwrap(),
         3
     );
     assert_eq!(
         engine.unicorn.mem_read_as_vec(output, 6).unwrap(),
-        "azあ".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>()
+        "azあ"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
-        engine.call_win64(MAP, [0x7f, UPPERCASE, source, 3, source, 3]).unwrap(),
+        engine
+            .call_win64(MAP, [0x7f, UPPERCASE, source, 3, source, 3])
+            .unwrap(),
         3
     );
     assert_eq!(
         engine.unicorn.mem_read_as_vec(source, 6).unwrap(),
-        "AZあ".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>()
+        "AZあ"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -4016,7 +4025,10 @@ fn lc_map_string_w_uses_locale_tailored_icu_sort_keys() {
         assert!(required > 1);
         assert_eq!(
             engine
-                .call_win64(MAP, [locale, flags, source, units.len() as u64, output, required])
+                .call_win64(
+                    MAP,
+                    [locale, flags, source, units.len() as u64, output, required]
+                )
                 .unwrap(),
             required
         );
@@ -4036,19 +4048,13 @@ fn lc_map_string_w_uses_locale_tailored_icu_sort_keys() {
         make_key(0x409, SORTKEY_IGNORECASE, "signal")
     );
     // Win32's default ja-JP key preserves kana type.
-    assert_ne!(
-        make_key(0x411, 0x400, "あ"),
-        make_key(0x411, 0x400, "ア")
-    );
+    assert_ne!(make_key(0x411, 0x400, "あ"), make_key(0x411, 0x400, "ア"));
     // NORM_IGNOREKANATYPE alone lowers the tailored kana distinction.
     assert_eq!(
         make_key(0x411, 0x0001_0400, "あ"),
         make_key(0x411, 0x0001_0400, "ア")
     );
-    assert_ne!(
-        make_key(0x411, 0x400, "ア"),
-        make_key(0x411, 0x400, "ｱ")
-    );
+    assert_ne!(make_key(0x411, 0x400, "ア"), make_key(0x411, 0x400, "ｱ"));
     assert_ne!(
         make_key(0x411, 0x0001_0400, "ア"),
         make_key(0x411, 0x0001_0400, "ｱ")
@@ -4123,32 +4129,52 @@ fn lc_map_string_w_distinguishes_simple_and_linguistic_casing() {
         )
         .unwrap();
 
-    assert_eq!(engine.call_win64(MAP, [0x409, 0x100, source, 2, output, 2]).unwrap(), 2);
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x409, 0x100, source, 2, output, 2])
+            .unwrap(),
+        2
+    );
     assert_eq!(
         engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
-        "οσ".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>()
+        "οσ"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
     );
     // The linguistic table may expand a scalar, but mapping is still
     // context-insensitive: the final sigma remains ordinary sigma.
     assert_eq!(
-        engine.call_win64(MAP, [0x409, 0x0100_0100, source, 2, output, 2]).unwrap(),
+        engine
+            .call_win64(MAP, [0x409, 0x0100_0100, source, 2, output, 2])
+            .unwrap(),
         2
     );
     assert_eq!(
         engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
-        "οσ".encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>()
+        "οσ"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
     );
 
     engine.write(source, &0x00dfu16.to_le_bytes()).unwrap();
     assert_eq!(
-        engine.call_win64(MAP, [0x409, 0x0100_0200, source, 1, 0, 0]).unwrap(),
+        engine
+            .call_win64(MAP, [0x409, 0x0100_0200, source, 1, 0, 0])
+            .unwrap(),
         2
     );
     assert_eq!(
-        engine.call_win64(MAP, [0x409, 0x0100_0200, source, 1, output, 2]).unwrap(),
+        engine
+            .call_win64(MAP, [0x409, 0x0100_0200, source, 1, output, 2])
+            .unwrap(),
         2
     );
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), [b'S', 0, b'S', 0]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [b'S', 0, b'S', 0]
+    );
 }
 
 #[test]
@@ -4167,9 +4193,15 @@ fn lc_map_string_w_reports_flags_lengths_buffers_locales_and_overlap() {
         ([0x409, 0x0001_0100, source, 1, output, 1], 1004),
         ([0x409, 0x0002_0400, source, 1, output, 64], 1004),
         ([0x409, 0x100, 0, 1, output, 1], ERROR_INVALID_PARAMETER),
-        ([0x409, 0x100, source, 0, output, 1], ERROR_INVALID_PARAMETER),
+        (
+            [0x409, 0x100, source, 0, output, 1],
+            ERROR_INVALID_PARAMETER,
+        ),
         ([0x409, 0x100, source, 1, 0, 1], ERROR_INVALID_PARAMETER),
-        ([0x9999, 0x100, source, 1, output, 1], ERROR_INVALID_PARAMETER),
+        (
+            [0x9999, 0x100, source, 1, output, 1],
+            ERROR_INVALID_PARAMETER,
+        ),
         ([0x409, 0x100, source, 2, output, 1], 122),
         ([0x409, 0x100, source, 2, source + 2, 2], 1004),
         ([0x409, 0x400, source, 1, source, 64], 1004),
@@ -4178,7 +4210,10 @@ fn lc_map_string_w_reports_flags_lengths_buffers_locales_and_overlap() {
         assert_eq!(engine.call_win64(MAP, arguments).unwrap(), 0);
         assert_eq!(engine.unicorn.get_data().windows_last_error, error);
     }
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), [0xaa; 8]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0xaa; 8]
+    );
 }
 
 #[test]
@@ -4194,7 +4229,10 @@ fn lc_map_string_w_preflights_complete_output_before_mutation() {
         .call_win64(MAP, [0x7f, 0x100, source, 2, crossing, 2])
         .unwrap_err();
     assert!(error.to_string().contains("not fully writable"), "{error}");
-    assert_eq!(engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(), [0x5a; 2]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(),
+        [0x5a; 2]
+    );
 
     let mut engine = test_engine(&[0xc3]);
     install_win64_import(&mut engine.unicorn, MAP, "kernel32.dll", "LCMapStringW").unwrap();
@@ -4204,7 +4242,10 @@ fn lc_map_string_w_preflights_complete_output_before_mutation() {
         .call_win64(MAP, [0x7f, 0x100, DATA_BASE + PAGE_SIZE, 2, output, 2])
         .unwrap_err();
     assert!(error.to_string().contains("source read failed"), "{error}");
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), [0x5a; 4]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x5a; 4]
+    );
 }
 
 #[test]

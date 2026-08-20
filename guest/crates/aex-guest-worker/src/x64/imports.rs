@@ -2324,8 +2324,7 @@ fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
         };
         if flags == 0
             || flags & !valid_flags != 0
-            || (!is_sort_key
-                && !matches!(case_flags, LCMAP_LOWERCASE | LCMAP_UPPERCASE))
+            || (!is_sort_key && !matches!(case_flags, LCMAP_LOWERCASE | LCMAP_UPPERCASE))
             || (is_sort_key && case_flags != 0)
         {
             return Ok((0, Some(ERROR_INVALID_FLAGS)));
@@ -2337,9 +2336,9 @@ fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 let address = source
                     .checked_add(index * 2)
                     .ok_or_else(|| "LCMapStringW source address overflow".to_string())?;
-                let bytes = unicorn.mem_read_as_vec(address, 2).map_err(|error| {
-                    format!("LCMapStringW source read failed: {error}")
-                })?;
+                let bytes = unicorn
+                    .mem_read_as_vec(address, 2)
+                    .map_err(|error| format!("LCMapStringW source read failed: {error}"))?;
                 let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
                 source_units.push(unit);
                 if unit == 0 {
@@ -2355,9 +2354,9 @@ fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 .and_then(|length| length.checked_mul(2))
                 .filter(|length| *length <= MAX_CRT_STRING_BYTES)
                 .ok_or_else(|| "LCMapStringW source is too large".to_string())?;
-            let bytes = unicorn.mem_read_as_vec(source, byte_length as usize).map_err(|error| {
-                format!("LCMapStringW source read failed: {error}")
-            })?;
+            let bytes = unicorn
+                .mem_read_as_vec(source, byte_length as usize)
+                .map_err(|error| format!("LCMapStringW source read failed: {error}"))?;
             source_units.extend(
                 bytes
                     .chunks_exact(2)
@@ -2383,9 +2382,9 @@ fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 flags & LCMAP_LINGUISTIC_CASING != 0,
                 locale,
             )
-                .into_iter()
-                .flat_map(u16::to_le_bytes)
-                .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
         };
         let required = if is_sort_key {
             output.len()
@@ -2427,7 +2426,7 @@ fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
                     .find(|region| {
                         region.begin <= cursor
                             && cursor <= region.end
-                            && region.perms & Prot::WRITE.0 != 0
+                            && region.perms & Prot::WRITE.0 as u32 != 0
                     })
                     .ok_or_else(|| {
                         format!(
@@ -2469,8 +2468,8 @@ fn emulate_lc_map_string_w(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn make_lcmap_sort_key(locale: u32, flags: u32, units: &[u16]) -> Result<Vec<u8>, String> {
     use icu_collator::{
-        options::{CollatorOptions, Strength},
         Collator,
+        options::{CollatorOptions, Strength},
     };
 
     const NORM_IGNORECASE: u32 = 0x0000_0001;
