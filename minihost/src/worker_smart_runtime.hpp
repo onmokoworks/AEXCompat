@@ -33,6 +33,14 @@ struct PixelCheckout {
   // pixels by construction and `checkout_pixels` hands back the host's own
   // empty world rather than treating the absent world as a fault (issue #898).
   bool empty_layer_param{};
+  // Distinguishes an unused PreRender registration from a pixel lease that
+  // was already checked back in. The former may be retired once without ever
+  // asking for pixels; the latter must still reject a duplicate checkin.
+  bool ever_checked_out{};
+  // A failed pixel request is not an unused registration. Its later checkin
+  // remains a failure instead of laundering the earlier missing/empty-world
+  // refusal into a successful cleanup.
+  bool checkout_attempted{};
 };
 
 struct State {
