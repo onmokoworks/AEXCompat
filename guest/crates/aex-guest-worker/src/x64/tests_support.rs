@@ -3417,7 +3417,9 @@ fn multi_byte_to_wide_char_converts_cp932_and_utf8_with_win32_lengths() {
     );
     let source = DATA_BASE + 0xd40;
     let output = DATA_BASE + 0xd80;
-    engine.write(source, &[b'A', 0x93, 0xfa, 0x96, 0x7b, 0]).unwrap();
+    engine
+        .write(source, &[b'A', 0x93, 0xfa, 0x96, 0x7b, 0])
+        .unwrap();
     engine.write(output, &[0xaa; 20]).unwrap();
 
     let required = engine
@@ -3471,12 +3473,16 @@ fn multi_byte_to_wide_char_reports_validation_and_malformed_input_failures() {
     engine.write(output, &[0xaa; 8]).unwrap();
 
     assert_eq!(
-        engine.call_win64(CONVERT, [65_001, 0x08, source, 1, 0, 0]).unwrap(),
+        engine
+            .call_win64(CONVERT, [65_001, 0x08, source, 1, 0, 0])
+            .unwrap(),
         0
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 1113);
     assert_eq!(
-        engine.call_win64(CONVERT, [65_001, 0, source, 1, output, 2]).unwrap(),
+        engine
+            .call_win64(CONVERT, [65_001, 0, source, 1, output, 2])
+            .unwrap(),
         1
     );
     assert_eq!(
@@ -3486,12 +3492,16 @@ fn multi_byte_to_wide_char_reports_validation_and_malformed_input_failures() {
 
     engine.write(source, &[0x81]).unwrap();
     assert_eq!(
-        engine.call_win64(CONVERT, [932, 0x08, source, 1, 0, 0]).unwrap(),
+        engine
+            .call_win64(CONVERT, [932, 0x08, source, 1, 0, 0])
+            .unwrap(),
         0
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 1113);
     assert_eq!(
-        engine.call_win64(CONVERT, [932, 0, source, 1, output, 2]).unwrap(),
+        engine
+            .call_win64(CONVERT, [932, 0, source, 1, output, 2])
+            .unwrap(),
         1
     );
     assert_eq!(
@@ -3500,7 +3510,9 @@ fn multi_byte_to_wide_char_reports_validation_and_malformed_input_failures() {
     );
     engine.write(source, &[0x82, 0xa0]).unwrap();
     assert_eq!(
-        engine.call_win64(CONVERT, [932, 1, source, 2, output, 1]).unwrap(),
+        engine
+            .call_win64(CONVERT, [932, 1, source, 2, output, 1])
+            .unwrap(),
         1
     );
     assert_eq!(
@@ -3509,7 +3521,9 @@ fn multi_byte_to_wide_char_reports_validation_and_malformed_input_failures() {
     );
     engine.write(source, &[0x82, 0xaa, 0x07]).unwrap();
     assert_eq!(
-        engine.call_win64(CONVERT, [932, 2, source, 2, output, 2]).unwrap(),
+        engine
+            .call_win64(CONVERT, [932, 2, source, 2, output, 2])
+            .unwrap(),
         2
     );
     assert_eq!(
@@ -3519,7 +3533,9 @@ fn multi_byte_to_wide_char_reports_validation_and_malformed_input_failures() {
     // CP932 is an ANSI code page and has no OEM glyph table, so
     // MB_USEGLYPHCHARS leaves its C0 control mapping unchanged.
     assert_eq!(
-        engine.call_win64(CONVERT, [932, 4, source + 2, 1, output, 1]).unwrap(),
+        engine
+            .call_win64(CONVERT, [932, 4, source + 2, 1, output, 1])
+            .unwrap(),
         1
     );
     assert_eq!(
@@ -3544,14 +3560,41 @@ fn multi_byte_to_wide_char_reports_validation_and_malformed_input_failures() {
             ERROR_INVALID_PARAMETER
         );
     }
+    let overlap_start = source - 2;
+    let overlap_sentinel = [0x11, 0x22, b'A', b'B', 0x55, 0x66, 0x77, 0x88];
+    engine.write(overlap_start, &overlap_sentinel).unwrap();
+    for destination in [source + 1, source - 2] {
+        assert_eq!(
+            engine
+                .call_win64(CONVERT, [932, 0, source, 2, destination, 2])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(overlap_start, overlap_sentinel.len())
+                .unwrap(),
+            overlap_sentinel
+        );
+    }
     engine.write(source, b"AB").unwrap();
     engine.write(output, &[0xaa; 8]).unwrap();
     assert_eq!(
-        engine.call_win64(CONVERT, [932, 0, source, 2, output, 1]).unwrap(),
+        engine
+            .call_win64(CONVERT, [932, 0, source, 2, output, 1])
+            .unwrap(),
         0
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 122);
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), [0xaa; 8]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0xaa; 8]
+    );
 }
 
 #[test]
@@ -3573,7 +3616,10 @@ fn multi_byte_to_wide_char_preflights_the_entire_output_before_writing() {
         .call_win64(CONVERT, [932, 0, source, 2, crossing, 2])
         .unwrap_err();
     assert!(error.to_string().contains("not fully writable"), "{error}");
-    assert_eq!(engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(), [0x5a; 2]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(),
+        [0x5a; 2]
+    );
 }
 
 #[test]

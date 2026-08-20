@@ -1963,10 +1963,8 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
         let valid_flags = if code_page == CP_UTF8 {
             flags == 0 || flags == MB_ERR_INVALID_CHARS
         } else {
-            flags & !(MB_PRECOMPOSED | MB_COMPOSITE | MB_USEGLYPHCHARS | MB_ERR_INVALID_CHARS)
-                == 0
-                && flags & (MB_PRECOMPOSED | MB_COMPOSITE)
-                    != (MB_PRECOMPOSED | MB_COMPOSITE)
+            flags & !(MB_PRECOMPOSED | MB_COMPOSITE | MB_USEGLYPHCHARS | MB_ERR_INVALID_CHARS) == 0
+                && flags & (MB_PRECOMPOSED | MB_COMPOSITE) != (MB_PRECOMPOSED | MB_COMPOSITE)
         };
         if !matches!(code_page, CP_ACP | CP_SHIFT_JIS | CP_UTF8)
             || !valid_flags
@@ -1987,9 +1985,10 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
                 let address = source
                     .checked_add(index)
                     .ok_or_else(|| "MultiByteToWideChar source address overflow".to_string())?;
-                let byte = unicorn.mem_read_as_vec(address, 1).map_err(|error| {
-                    format!("MultiByteToWideChar source read failed: {error}")
-                })?[0];
+                let byte = unicorn
+                    .mem_read_as_vec(address, 1)
+                    .map_err(|error| format!("MultiByteToWideChar source read failed: {error}"))?
+                    [0];
                 if byte == 0 {
                     break;
                 }
@@ -2004,9 +2003,9 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
                 .ok()
                 .filter(|length| *length as u64 <= MAX_CRT_STRING_BYTES)
                 .ok_or_else(|| "MultiByteToWideChar source is too large".to_string())?;
-            unicorn.mem_read_as_vec(source, length).map_err(|error| {
-                format!("MultiByteToWideChar source read failed: {error}")
-            })?
+            unicorn
+                .mem_read_as_vec(source, length)
+                .map_err(|error| format!("MultiByteToWideChar source read failed: {error}"))?
         };
 
         let (unicode, malformed) = if code_page == CP_UTF8 {
@@ -2028,7 +2027,11 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
         // `encoding_rs` and `from_utf8_lossy` deterministically use U+FFFD.
         let _ = malformed;
         let mut units = if flags & MB_COMPOSITE != 0 {
-            unicode.nfd().collect::<String>().encode_utf16().collect::<Vec<_>>()
+            unicode
+                .nfd()
+                .collect::<String>()
+                .encode_utf16()
+                .collect::<Vec<_>>()
         } else {
             unicode.encode_utf16().collect::<Vec<_>>()
         };
@@ -2048,13 +2051,25 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
             .len()
             .checked_mul(2)
             .ok_or_else(|| "MultiByteToWideChar output byte length overflows".to_string())?;
+        let source_size = bytes.len() + usize::from(include_terminator);
+        let source_end = match source.checked_add(source_size as u64) {
+            Some(end) => end,
+            None => return Ok((0, Some(ERROR_INVALID_PARAMETER))),
+        };
+        let output_end_exclusive = match destination.checked_add(output_size as u64) {
+            Some(end) => end,
+            None => return Ok((0, Some(ERROR_INVALID_PARAMETER))),
+        };
+        if source < output_end_exclusive && destination < source_end {
+            return Ok((0, Some(ERROR_INVALID_PARAMETER)));
+        }
         if output_size != 0 {
             let output_end = destination
                 .checked_add(output_size as u64 - 1)
                 .ok_or_else(|| "MultiByteToWideChar output range overflows".to_string())?;
-            let regions = unicorn.mem_regions().map_err(|error| {
-                format!("MultiByteToWideChar memory-map query failed: {error}")
-            })?;
+            let regions = unicorn
+                .mem_regions()
+                .map_err(|error| format!("MultiByteToWideChar memory-map query failed: {error}"))?;
             let mut cursor = destination;
             while cursor <= output_end {
                 let region = regions
@@ -2062,7 +2077,7 @@ fn emulate_multi_byte_to_wide_char(unicorn: &mut Unicorn<'_, GuestState>) {
                     .find(|region| {
                         region.begin <= cursor
                             && cursor <= region.end
-                            && region.perms & Prot::WRITE.0 != 0
+                            && region.perms & Prot::WRITE.0 as u32 != 0
                     })
                     .ok_or_else(|| {
                         format!(
