@@ -121,6 +121,11 @@ struct GuestState {
     scheduler_yield_reason: Option<SchedulerYieldReason>,
     scheduler_resume_rip: u64,
     scheduler_ready_hint: bool,
+    scheduler_woken_threads: VecDeque<u32>,
+    scheduler_virtual_tick: u64,
+    scheduler_switches_remaining: u64,
+    scheduler_wait_deadline: Option<u64>,
+    scheduler_main_wait: Option<SchedulerMainWait>,
     scheduler_child_completed: bool,
     scheduler_resume_active: bool,
     scheduler_parent_context: Option<Context>,
@@ -313,6 +318,7 @@ pub struct GuestEngine<'a> {
     unicorn: Unicorn<'a, GuestState>,
     scheduled_windows_threads: BTreeMap<u32, ParkedWindowsThread>,
     scheduler_ready: VecDeque<u32>,
+    scheduler_deferred_ready: VecDeque<u32>,
     parked_main_context: Option<Context>,
     next_data: u64,
     image_base: u64,
@@ -333,11 +339,20 @@ struct ParkedWindowsThread {
     last_error: u32,
     thread_error_mode: u32,
     teb_stack: [u8; 16],
+    wait_deadline: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SchedulerYieldReason {
     Voluntary,
+    AddressWait,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SchedulerMainWait {
+    address: u64,
+    deadline: Option<u64>,
+    woken: bool,
 }
 
 impl Drop for GuestEngine<'_> {

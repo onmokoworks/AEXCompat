@@ -80,6 +80,8 @@ enum LegacyWin64Import {
     CreateThread,
     NtWriteFile,
     WakeByAddressAll,
+    WakeByAddressSingle,
+    WaitOnAddress,
     WaitForSingleObject,
     WaitForSingleObjectEx,
     CloseHandle,
@@ -343,6 +345,14 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::WakeByAddressAll
         }
         (_, "WakeByAddressAll") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressSingle") => {
+            LegacyWin64Import::WakeByAddressSingle
+        }
+        (_, "WakeByAddressSingle") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-2-0.dll", "WaitOnAddress") => {
+            LegacyWin64Import::WaitOnAddress
+        }
+        (_, "WaitOnAddress") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "WaitForSingleObject") => LegacyWin64Import::WaitForSingleObject,
         ("kernel32.dll", "WaitForSingleObjectEx") => LegacyWin64Import::WaitForSingleObjectEx,
         ("kernel32.dll", "CloseHandle") => LegacyWin64Import::CloseHandle,
@@ -1159,6 +1169,30 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::WakeByAddressSingle => {
+                uc(
+                    "write WakeByAddressSingle return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install bounded WakeByAddressSingle import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_wake_by_address(unicorn, false);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::WaitOnAddress => {
+                uc(
+                    "write WaitOnAddress return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install cooperative WaitOnAddress import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_wait_on_address(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::WaitForSingleObject
             | LegacyWin64Import::WaitForSingleObjectEx
             | LegacyWin64Import::CloseHandle
@@ -1181,7 +1215,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::SwitchToThread => {
-                uc("write cooperative SwitchToThread return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write cooperative SwitchToThread return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install cooperative SwitchToThread",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -3978,7 +4015,6 @@ fn emulate_windows_condition_variable(unicorn: &mut Unicorn<'_, GuestState>, ope
     }
 }
 
-#[cfg(test)]
 fn record_windows_address_waiter(
     state: &mut GuestState,
     address: u64,
@@ -4010,6 +4046,10 @@ fn emulate_wake_by_address_all(unicorn: &mut Unicorn<'_, GuestState>) {
     // WakeByAddressAll neither returns a status nor needs to read the pointed-to
     // bytes.  This makes NULL, stale, and unmapped no-waiter addresses safe
     // no-ops and avoids leaking host synchronization or memory behavior.
+    emulate_wake_by_address(unicorn, true);
+}
+
+fn emulate_wake_by_address(unicorn: &mut Unicorn<'_, GuestState>, wake_all: bool) {
     let address = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let state = unicorn.get_data_mut();
     let valid = state.windows_address_waiters.len() <= MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS
@@ -4024,7 +4064,157 @@ fn emulate_wake_by_address_all(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.emu_stop();
         return;
     }
-    state.windows_address_waiters.remove(&address);
+    let mut awakened = Vec::new();
+    if wake_all {
+        if let Some(waiters) = state.windows_address_waiters.remove(&address) {
+            awakened.extend(waiters);
+        }
+    } else if let Some(waiters) = state.windows_address_waiters.get_mut(&address) {
+        if let Some(thread_id) = waiters.first().copied() {
+            waiters.remove(&thread_id);
+            awakened.push(thread_id);
+        }
+        if waiters.is_empty() {
+            state.windows_address_waiters.remove(&address);
+        }
+    }
+    for thread_id in awakened {
+        if thread_id == 1 {
+            if let Some(main_wait) = state.scheduler_main_wait.as_mut() {
+                if main_wait.address == address {
+                    main_wait.woken = true;
+                }
+            }
+            continue;
+        }
+        if !state
+            .windows_threads
+            .values()
+            .any(|thread| thread.id == thread_id && !thread.completed)
+        {
+            continue;
+        }
+        if state.scheduler_woken_threads.len() >= MAX_WINDOWS_THREADS {
+            if state.callback_error.is_none() {
+                state.callback_error = Some(format!(
+                    "Windows address wake queue exceeds {MAX_WINDOWS_THREADS} threads"
+                ));
+            }
+            let _ = unicorn.emu_stop();
+            return;
+        }
+        state.scheduler_woken_threads.push_back(thread_id);
+        state.scheduler_ready_hint = true;
+    }
+}
+
+fn emulate_wait_on_address(unicorn: &mut Unicorn<'_, GuestState>) {
+    const ERROR_TIMEOUT: u32 = 1460;
+    let result = (|| -> Result<(), String> {
+        let address = read_win64_import_argument(unicorn, 0)?;
+        let compare_address = read_win64_import_argument(unicorn, 1)?;
+        let address_size = read_win64_import_argument(unicorn, 2)?;
+        let milliseconds = read_win64_import_argument(unicorn, 3)? as u32;
+        let size = match address_size {
+            1 | 2 | 4 | 8 => address_size as usize,
+            _ => {
+                unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+                unicorn.reg_write(RegisterX86::RAX, 0).map_err(|error| {
+                    format!("WaitOnAddress invalid-size return failed: {error}")
+                })?;
+                return Ok(());
+            }
+        };
+        if address == 0 || compare_address == 0 {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            unicorn
+                .reg_write(RegisterX86::RAX, 0)
+                .map_err(|error| format!("WaitOnAddress null return failed: {error}"))?;
+            return Ok(());
+        }
+        let mut current = [0_u8; 8];
+        let mut compare = [0_u8; 8];
+        if unicorn.mem_read(address, &mut current[..size]).is_err()
+            || unicorn
+                .mem_read(compare_address, &mut compare[..size])
+                .is_err()
+        {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            unicorn
+                .reg_write(RegisterX86::RAX, 0)
+                .map_err(|error| format!("WaitOnAddress pointer return failed: {error}"))?;
+            return Ok(());
+        }
+        if current[..size] != compare[..size] {
+            unicorn
+                .reg_write(RegisterX86::RAX, 1)
+                .map_err(|error| format!("WaitOnAddress changed return failed: {error}"))?;
+            return Ok(());
+        }
+        if milliseconds == 0 {
+            unicorn.get_data_mut().windows_last_error = ERROR_TIMEOUT;
+            unicorn
+                .reg_write(RegisterX86::RAX, 0)
+                .map_err(|error| format!("WaitOnAddress timeout return failed: {error}"))?;
+            return Ok(());
+        }
+        if milliseconds != u32::MAX && unicorn.get_data().scheduler_switches_remaining <= 1 {
+            unicorn.get_data_mut().windows_last_error = ERROR_TIMEOUT;
+            unicorn.reg_write(RegisterX86::RAX, 0).map_err(|error| {
+                format!("WaitOnAddress exhausted-scheduler timeout return failed: {error}")
+            })?;
+            return Ok(());
+        }
+        let thread_id = unicorn.get_data().current_windows_thread_id;
+        record_windows_address_waiter(unicorn.get_data_mut(), address, thread_id)?;
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("WaitOnAddress stack read failed: {error}"))?;
+        let return_address = read_vcomp_u64(unicorn, rsp)?;
+        unicorn
+            .reg_write(RegisterX86::RSP, rsp + 8)
+            .map_err(|error| format!("WaitOnAddress stack advance failed: {error}"))?;
+        unicorn
+            .reg_write(RegisterX86::RIP, return_address)
+            .map_err(|error| format!("WaitOnAddress return target failed: {error}"))?;
+        // A resumed wait may be spurious; Win32 callers must re-check their
+        // predicate.  TRUE means only that this bounded wait attempt returned.
+        unicorn
+            .reg_write(RegisterX86::RAX, 1)
+            .map_err(|error| format!("WaitOnAddress wake return failed: {error}"))?;
+        unicorn.get_data_mut().scheduler_yield_reason = Some(SchedulerYieldReason::AddressWait);
+        unicorn.get_data_mut().scheduler_resume_rip = return_address;
+        let deadline = (milliseconds != u32::MAX).then(|| {
+            let bounded_ticks = u64::from(milliseconds).min(
+                unicorn
+                    .get_data()
+                    .scheduler_switches_remaining
+                    .saturating_sub(1),
+            );
+            unicorn
+                .get_data()
+                .scheduler_virtual_tick
+                .saturating_add(bounded_ticks)
+        });
+        if unicorn.get_data().pending_windows_thread.is_some() {
+            unicorn.get_data_mut().scheduler_wait_deadline = deadline;
+        } else {
+            unicorn.get_data_mut().scheduler_main_wait = Some(SchedulerMainWait {
+                address,
+                deadline,
+                woken: false,
+            });
+        }
+        unicorn
+            .emu_stop()
+            .map_err(|error| format!("WaitOnAddress scheduler stop failed: {error}"))
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
 }
 
 fn ensure_windows_condition_variable(
@@ -5219,7 +5409,9 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
             unicorn.get_data_mut().scheduler_child_completed = true;
             unicorn
                 .reg_write(RegisterX86::RIP, pending.return_address)
-                .map_err(|error| format!("CreateThread completed scheduler target failed: {error}"))?;
+                .map_err(|error| {
+                    format!("CreateThread completed scheduler target failed: {error}")
+                })?;
             unicorn
                 .emu_stop()
                 .map_err(|error| format!("CreateThread scheduler stop failed: {error}"))?;
