@@ -905,6 +905,7 @@ impl GuestEngine<'static> {
             unicorn,
             scheduled_windows_threads: BTreeMap::new(),
             scheduler_ready: VecDeque::new(),
+            scheduler_deferred_ready: VecDeque::new(),
             parked_main_context: None,
             next_data,
             image_base: image.image_base(),
@@ -1564,6 +1565,20 @@ impl GuestEngine<'static> {
                 args.len()
             )));
         }
+        while let Some(thread_id) = self.scheduler_deferred_ready.pop_front() {
+            if !self.scheduled_windows_threads.contains_key(&thread_id) {
+                return Err(GuestError::Callback(format!(
+                    "deferred-ready thread {thread_id} has no saved context"
+                )));
+            }
+            if self.scheduler_ready.contains(&thread_id) {
+                return Err(GuestError::Callback(format!(
+                    "deferred-ready thread {thread_id} is already runnable"
+                )));
+            }
+            self.scheduler_ready.push_back(thread_id);
+        }
+        self.unicorn.get_data_mut().scheduler_ready_hint = !self.scheduler_ready.is_empty();
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
         self.unicorn.get_data_mut().latest_runtime_target = None;
@@ -1639,8 +1654,7 @@ impl GuestEngine<'static> {
                     self.scheduler_ready.push_back(thread_id);
                 }
             }
-            self.unicorn.get_data_mut().scheduler_ready_hint =
-                !self.scheduler_ready.is_empty();
+            self.unicorn.get_data_mut().scheduler_ready_hint = !self.scheduler_ready.is_empty();
             let expired_waiter = self
                 .scheduled_windows_threads
                 .iter()
@@ -1653,43 +1667,44 @@ impl GuestEngine<'static> {
                 })
                 .min_by_key(|(thread_id, deadline)| (*deadline, *thread_id));
             let timed_out_waiter = expired_waiter.or_else(|| {
-                self.scheduler_ready.is_empty().then(|| {
-                    self
-                    .scheduled_windows_threads
-                    .iter()
-                    .filter_map(|(thread_id, thread)| {
-                        thread.wait_deadline.map(|deadline| (*thread_id, deadline))
+                self.scheduler_ready
+                    .is_empty()
+                    .then(|| {
+                        self.scheduled_windows_threads
+                            .iter()
+                            .filter_map(|(thread_id, thread)| {
+                                thread.wait_deadline.map(|deadline| (*thread_id, deadline))
+                            })
+                            .min_by_key(|(thread_id, deadline)| (*deadline, *thread_id))
                     })
-                    .min_by_key(|(thread_id, deadline)| (*deadline, *thread_id))
-                }).flatten()
+                    .flatten()
             });
             if let Some((thread_id, deadline)) = timed_out_waiter {
-                    self.unicorn.get_data_mut().scheduler_virtual_tick = self
-                        .unicorn
-                        .get_data()
-                        .scheduler_virtual_tick
-                        .max(deadline);
-                    let thread = self
-                        .scheduled_windows_threads
-                        .get_mut(&thread_id)
-                        .expect("observed finite waiter");
-                    thread
-                        .context
-                        .reg_write(RegisterX86::RAX, 0)
-                        .map_err(|error| GuestError::Callback(format!(
+                self.unicorn.get_data_mut().scheduler_virtual_tick =
+                    self.unicorn.get_data().scheduler_virtual_tick.max(deadline);
+                let thread = self
+                    .scheduled_windows_threads
+                    .get_mut(&thread_id)
+                    .expect("observed finite waiter");
+                thread
+                    .context
+                    .reg_write(RegisterX86::RAX, 0)
+                    .map_err(|error| {
+                        GuestError::Callback(format!(
                             "set timed-out WaitOnAddress result failed: {error}"
-                        )))?;
-                    thread.last_error = 1460;
-                    thread.wait_deadline = None;
-                    self.unicorn
-                        .get_data_mut()
-                        .windows_address_waiters
-                        .retain(|_, waiters| {
-                            waiters.remove(&thread_id);
-                            !waiters.is_empty()
-                        });
-                    self.scheduler_ready.push_back(thread_id);
-                    self.unicorn.get_data_mut().scheduler_ready_hint = true;
+                        ))
+                    })?;
+                thread.last_error = 1460;
+                thread.wait_deadline = None;
+                self.unicorn
+                    .get_data_mut()
+                    .windows_address_waiters
+                    .retain(|_, waiters| {
+                        waiters.remove(&thread_id);
+                        !waiters.is_empty()
+                    });
+                self.scheduler_ready.push_back(thread_id);
+                self.unicorn.get_data_mut().scheduler_ready_hint = true;
             }
             if self.unicorn.get_data_mut().scheduler_child_completed {
                 self.unicorn.get_data_mut().scheduler_child_completed = false;
@@ -1701,32 +1716,27 @@ impl GuestEngine<'static> {
                 if let Some(main_wait) = self.unicorn.get_data_mut().scheduler_main_wait.take() {
                     if !main_wait.woken {
                         if let Some(deadline) = main_wait.deadline {
-                            self.unicorn.get_data_mut().scheduler_virtual_tick = self
-                                .unicorn
-                                .get_data()
-                                .scheduler_virtual_tick
-                                .max(deadline);
+                            self.unicorn.get_data_mut().scheduler_virtual_tick =
+                                self.unicorn.get_data().scheduler_virtual_tick.max(deadline);
                             parent.reg_write(RegisterX86::RAX, 0).map_err(|error| {
                                 GuestError::Callback(format!(
                                     "set completed-peer main WaitOnAddress timeout failed: {error}"
                                 ))
                             })?;
                             self.unicorn.get_data_mut().windows_last_error = 1460;
-                            self.unicorn
-                                .get_data_mut()
-                                .windows_address_waiters
-                                .retain(|_, waiters| {
+                            self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                |_, waiters| {
                                     waiters.remove(&1);
                                     !waiters.is_empty()
-                                });
+                                },
+                            );
                         } else {
-                            self.unicorn
-                                .get_data_mut()
-                                .windows_address_waiters
-                                .retain(|_, waiters| {
+                            self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                |_, waiters| {
                                     waiters.remove(&1);
                                     !waiters.is_empty()
-                                });
+                                },
+                            );
                             return Err(GuestError::Callback(
                                 "WaitOnAddress deadlock: completed peer did not wake the INFINITE main wait"
                                     .into(),
@@ -1759,20 +1769,16 @@ impl GuestEngine<'static> {
                     Some(SchedulerYieldReason::Voluntary);
                 self.unicorn.get_data_mut().scheduler_resume_rip = RETURN_ADDRESS;
             }
-            if let Some(yield_reason) =
-                self.unicorn.get_data_mut().scheduler_yield_reason.take()
-            {
+            if let Some(yield_reason) = self.unicorn.get_data_mut().scheduler_yield_reason.take() {
                 if self.unicorn.get_data().pending_windows_thread.is_some() {
                     // The running child is leaving the CPU without completing.
                     // Its next completion must be classified only after this
                     // saved context is explicitly resumed again.
                     self.unicorn.get_data_mut().scheduler_resume_active = false;
                     if self.scheduled_windows_threads.len() >= MAX_WINDOWS_THREADS {
-                        return Err(GuestError::Callback(
-                            format!(
-                                "cooperative scheduler exceeded {MAX_WINDOWS_THREADS} parked threads"
-                            ),
-                        ));
+                        return Err(GuestError::Callback(format!(
+                            "cooperative scheduler exceeded {MAX_WINDOWS_THREADS} parked threads"
+                        )));
                     }
                     let mut context = uc(
                         "save yielding child thread context",
@@ -1804,7 +1810,8 @@ impl GuestEngine<'static> {
                     };
                     let mut keep_main_waiting = false;
                     let mut main_wait_timed_out = false;
-                    if let Some(main_wait) = self.unicorn.get_data_mut().scheduler_main_wait.take() {
+                    if let Some(main_wait) = self.unicorn.get_data_mut().scheduler_main_wait.take()
+                    {
                         if !main_wait.woken {
                             if let Some(deadline) = main_wait.deadline {
                                 if deadline <= self.unicorn.get_data().scheduler_virtual_tick {
@@ -1815,13 +1822,12 @@ impl GuestEngine<'static> {
                                     })?;
                                     pending.caller_last_error = 1460;
                                     main_wait_timed_out = true;
-                                    self.unicorn
-                                        .get_data_mut()
-                                        .windows_address_waiters
-                                        .retain(|_, waiters| {
+                                    self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                        |_, waiters| {
                                             waiters.remove(&1);
                                             !waiters.is_empty()
-                                        });
+                                        },
+                                    );
                                 } else if yield_reason == SchedulerYieldReason::Voluntary {
                                     self.unicorn.get_data_mut().scheduler_main_wait =
                                         Some(main_wait);
@@ -1835,25 +1841,23 @@ impl GuestEngine<'static> {
                                     })?;
                                     pending.caller_last_error = 1460;
                                     main_wait_timed_out = true;
-                                    self.unicorn
-                                        .get_data_mut()
-                                        .windows_address_waiters
-                                        .retain(|_, waiters| {
+                                    self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                        |_, waiters| {
                                             waiters.remove(&1);
                                             !waiters.is_empty()
-                                        });
+                                        },
+                                    );
                                 }
                             } else if yield_reason == SchedulerYieldReason::Voluntary {
                                 self.unicorn.get_data_mut().scheduler_main_wait = Some(main_wait);
                                 keep_main_waiting = true;
                             } else {
-                                self.unicorn
-                                    .get_data_mut()
-                                    .windows_address_waiters
-                                    .retain(|_, waiters| {
+                                self.unicorn.get_data_mut().windows_address_waiters.retain(
+                                    |_, waiters| {
                                         waiters.remove(&1);
                                         !waiters.is_empty()
-                                    });
+                                    },
+                                );
                                 return Err(GuestError::Callback(
                                     "WaitOnAddress deadlock: main and peer are both parked INFINITE"
                                         .into(),
@@ -1906,28 +1910,41 @@ impl GuestEngine<'static> {
                         .windows_threads
                         .get(&pending.handle)
                         .map(|thread| thread.id)
-                        .ok_or_else(|| GuestError::Callback("yielding child handle disappeared".into()))?;
-                    if self.scheduled_windows_threads.insert(thread_id, ParkedWindowsThread {
-                        context,
-                        pending,
-                        tls_values,
-                        fls_values,
-                        last_error,
-                        thread_error_mode,
-                        teb_stack,
-                        wait_deadline: self
-                            .unicorn
-                            .get_data_mut()
-                            .scheduler_wait_deadline
-                            .take(),
-                    }).is_some() {
+                        .ok_or_else(|| {
+                            GuestError::Callback("yielding child handle disappeared".into())
+                        })?;
+                    if self
+                        .scheduled_windows_threads
+                        .insert(
+                            thread_id,
+                            ParkedWindowsThread {
+                                context,
+                                pending,
+                                tls_values,
+                                fls_values,
+                                last_error,
+                                thread_error_mode,
+                                teb_stack,
+                                wait_deadline: self
+                                    .unicorn
+                                    .get_data_mut()
+                                    .scheduler_wait_deadline
+                                    .take(),
+                            },
+                        )
+                        .is_some()
+                    {
                         return Err(GuestError::Callback(format!(
                             "cooperative scheduler parked thread {thread_id} twice"
                         )));
                     }
-                    if yield_reason == SchedulerYieldReason::Voluntary && !main_wait_timed_out {
-                        self.scheduler_ready.push_back(thread_id);
-                        self.unicorn.get_data_mut().scheduler_ready_hint = true;
+                    if yield_reason == SchedulerYieldReason::Voluntary {
+                        if main_wait_timed_out {
+                            self.scheduler_deferred_ready.push_back(thread_id);
+                        } else {
+                            self.scheduler_ready.push_back(thread_id);
+                            self.unicorn.get_data_mut().scheduler_ready_hint = true;
+                        }
                     }
                 } else if let Some(thread_id) = self.scheduler_ready.pop_front() {
                     self.unicorn.get_data_mut().scheduler_ready_hint =
@@ -1935,9 +1952,11 @@ impl GuestEngine<'static> {
                     let mut child = self
                         .scheduled_windows_threads
                         .remove(&thread_id)
-                        .ok_or_else(|| GuestError::Callback(format!(
-                            "ready thread {thread_id} has no saved context"
-                        )))?;
+                        .ok_or_else(|| {
+                            GuestError::Callback(format!(
+                                "ready thread {thread_id} has no saved context"
+                            ))
+                        })?;
                     if self.parked_main_context.is_some() {
                         return Err(GuestError::Callback(
                             "cooperative scheduler already has a parked main context".into(),
@@ -1968,7 +1987,8 @@ impl GuestEngine<'static> {
                         self.unicorn.get_data().current_windows_thread_id;
                     uc(
                         "read yielding main TEB stack bounds",
-                        self.unicorn.mem_read(0x08, &mut child.pending.caller_teb_stack),
+                        self.unicorn
+                            .mem_read(0x08, &mut child.pending.caller_teb_stack),
                     )?;
                     for (index, slot) in &mut self.unicorn.get_data_mut().windows_tls_slots {
                         *slot = child.tls_values.get(index).copied().unwrap_or(0);
@@ -1984,7 +2004,9 @@ impl GuestEngine<'static> {
                         .windows_threads
                         .get(&child.pending.handle)
                         .map(|thread| thread.id)
-                        .ok_or_else(|| GuestError::Callback("parked child handle disappeared".into()))?;
+                        .ok_or_else(|| {
+                            GuestError::Callback("parked child handle disappeared".into())
+                        })?;
                     uc(
                         "restore parked child TEB stack bounds",
                         self.unicorn.mem_write(0x08, &child.teb_stack),
@@ -2008,11 +2030,8 @@ impl GuestEngine<'static> {
                             )
                         })?;
                     if let Some(deadline) = main_wait.deadline {
-                        self.unicorn.get_data_mut().scheduler_virtual_tick = self
-                            .unicorn
-                            .get_data()
-                            .scheduler_virtual_tick
-                            .max(deadline);
+                        self.unicorn.get_data_mut().scheduler_virtual_tick =
+                            self.unicorn.get_data().scheduler_virtual_tick.max(deadline);
                         self.unicorn.get_data_mut().windows_last_error = 1460;
                         self.unicorn
                             .get_data_mut()
@@ -2021,11 +2040,13 @@ impl GuestEngine<'static> {
                                 waiters.remove(&1);
                                 !waiters.is_empty()
                             });
-                        self.unicorn.reg_write(RegisterX86::RAX, 0).map_err(|error| {
-                            GuestError::Callback(format!(
-                                "set quiescent main WaitOnAddress timeout failed: {error}"
-                            ))
-                        })?;
+                        self.unicorn
+                            .reg_write(RegisterX86::RAX, 0)
+                            .map_err(|error| {
+                                GuestError::Callback(format!(
+                                    "set quiescent main WaitOnAddress timeout failed: {error}"
+                                ))
+                            })?;
                         let resume_rip = self.unicorn.get_data().scheduler_resume_rip;
                         uc(
                             "advance timed-out main WaitOnAddress",

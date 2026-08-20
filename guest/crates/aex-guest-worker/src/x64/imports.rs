@@ -1182,7 +1182,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::WaitOnAddress => {
-                uc("write WaitOnAddress return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write WaitOnAddress return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install cooperative WaitOnAddress import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -1212,7 +1215,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::SwitchToThread => {
-                uc("write cooperative SwitchToThread return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write cooperative SwitchToThread return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install cooperative SwitchToThread",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -4152,9 +4158,7 @@ fn emulate_wait_on_address(unicorn: &mut Unicorn<'_, GuestState>) {
                 .map_err(|error| format!("WaitOnAddress timeout return failed: {error}"))?;
             return Ok(());
         }
-        if milliseconds != u32::MAX
-            && unicorn.get_data().scheduler_switches_remaining <= 1
-        {
+        if milliseconds != u32::MAX && unicorn.get_data().scheduler_switches_remaining <= 1 {
             unicorn.get_data_mut().windows_last_error = ERROR_TIMEOUT;
             unicorn.reg_write(RegisterX86::RAX, 0).map_err(|error| {
                 format!("WaitOnAddress exhausted-scheduler timeout return failed: {error}")
@@ -5405,7 +5409,9 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
             unicorn.get_data_mut().scheduler_child_completed = true;
             unicorn
                 .reg_write(RegisterX86::RIP, pending.return_address)
-                .map_err(|error| format!("CreateThread completed scheduler target failed: {error}"))?;
+                .map_err(|error| {
+                    format!("CreateThread completed scheduler target failed: {error}")
+                })?;
             unicorn
                 .emu_stop()
                 .map_err(|error| format!("CreateThread scheduler stop failed: {error}"))?;

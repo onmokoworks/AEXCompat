@@ -373,6 +373,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         unicorn,
         scheduled_windows_threads: BTreeMap::new(),
         scheduler_ready: VecDeque::new(),
+        scheduler_deferred_ready: VecDeque::new(),
         parked_main_context: None,
         next_data: DATA_BASE,
         image_base: TEST_CODE,
@@ -3074,7 +3075,12 @@ fn issue1402_wait_scheduler_fixture(timeout: u32, wake: bool) -> (GuestEngine<'s
 fn issue1402_infinite_and_finite_waiters_run_peer_before_wake_or_timeout() {
     for timeout in [u32::MAX, 25] {
         let (engine, handle) = issue1402_wait_scheduler_fixture(timeout, true);
-        let thread = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+        let thread = engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .get(&handle)
+            .unwrap();
         assert!(thread.completed);
         assert_eq!(thread.exit_code, 1);
         assert!(engine.scheduled_windows_threads.is_empty());
@@ -3082,7 +3088,12 @@ fn issue1402_infinite_and_finite_waiters_run_peer_before_wake_or_timeout() {
         assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
     }
     let (engine, handle) = issue1402_wait_scheduler_fixture(25, false);
-    let thread = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+    let thread = engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .unwrap();
     assert!(thread.completed);
     assert_eq!(thread.exit_code, 1460);
     assert!(engine.scheduled_windows_threads.is_empty());
@@ -3093,13 +3104,15 @@ fn issue1402_infinite_and_finite_waiters_run_peer_before_wake_or_timeout() {
     // main call returns; this is not a main-thread deadlock and remains bounded
     // for a later exact wake in the same guest session.
     let (engine, handle) = issue1402_wait_scheduler_fixture(u32::MAX, false);
-    assert!(!engine
-        .unicorn
-        .get_data()
-        .windows_threads
-        .get(&handle)
-        .unwrap()
-        .completed);
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .get(&handle)
+            .unwrap()
+            .completed
+    );
     assert_eq!(engine.scheduled_windows_threads.len(), 1);
     assert_eq!(engine.unicorn.get_data().windows_address_waiters.len(), 1);
 }
@@ -3109,10 +3122,7 @@ fn issue1402_wake_single_is_exact_and_infinite_deadlock_fails_closed() {
     const WAKE_SINGLE: u64 = STUB_BASE + 0x490;
     const WAIT: u64 = STUB_BASE + 0x4a0;
     assert_eq!(
-        dispatch_win64_import(
-            "api-ms-win-core-synch-l1-2-0.dll",
-            "WakeByAddressSingle"
-        ),
+        dispatch_win64_import("api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressSingle"),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WakeByAddressSingle)
     );
     assert_eq!(
@@ -3148,29 +3158,39 @@ fn issue1402_wake_single_is_exact_and_infinite_deadlock_fails_closed() {
         marker
     );
     assert_eq!(
-        engine.unicorn.get_data().windows_address_waiters.get(&first),
+        engine
+            .unicorn
+            .get_data()
+            .windows_address_waiters
+            .get(&first),
         Some(&BTreeSet::from([3]))
     );
     assert_eq!(
-        engine.unicorn.get_data().windows_address_waiters.get(&second),
+        engine
+            .unicorn
+            .get_data()
+            .windows_address_waiters
+            .get(&second),
         Some(&BTreeSet::from([4]))
     );
 
     engine.write(first, &[0; 8]).unwrap();
     engine.write(second, &[0; 8]).unwrap();
     let error = engine
-        .call_win64(
-            WAIT,
-            [first, second, 8, u64::from(u32::MAX), 0, 0],
-        )
+        .call_win64(WAIT, [first, second, 8, u64::from(u32::MAX), 0, 0])
         .unwrap_err();
-    assert!(error.to_string().contains("WaitOnAddress deadlock"), "{error}");
-    assert!(engine
-        .unicorn
-        .get_data()
-        .windows_address_waiters
-        .values()
-        .all(|waiters| !waiters.contains(&1)));
+    assert!(
+        error.to_string().contains("WaitOnAddress deadlock"),
+        "{error}"
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_address_waiters
+            .values()
+            .all(|waiters| !waiters.contains(&1))
+    );
 }
 
 #[test]
@@ -3180,6 +3200,7 @@ fn issue1402_finite_main_wait_runs_ready_peer_then_times_out_without_starvation(
     const WAIT: u64 = STUB_BASE + 0x4d0;
     const GET_LAST_ERROR: u64 = STUB_BASE + 0x4e0;
     const CHILD_OFFSET: usize = 0x180;
+    const DRAIN_OFFSET: usize = 0x280;
     let address = DATA_BASE + 0xe20;
     let compare = DATA_BASE + 0xe40;
     let mut code = vec![0x48, 0x83, 0xec, 0x38];
@@ -3207,6 +3228,8 @@ fn issue1402_finite_main_wait_runs_ready_peer_then_times_out_without_starvation(
     let after_branch = code.len();
     code[after_branch - 1] = (yield_loop as isize - after_branch as isize) as i8 as u8;
     code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xb8, 7, 0, 0, 0, 0xc3]);
+    code.resize(DRAIN_OFFSET, 0x90);
+    code.extend_from_slice(&[0xb8, 0x55, 0, 0, 0, 0xc3]);
 
     let mut engine = test_engine(&code);
     engine
@@ -3224,15 +3247,35 @@ fn issue1402_finite_main_wait_runs_ready_peer_then_times_out_without_starvation(
         install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", symbol).unwrap();
     }
     assert_eq!(engine.call_win64(TEST_CODE, [0; 6]).unwrap(), 1460);
-    assert!(engine
-        .unicorn
-        .get_data()
-        .windows_threads
-        .values()
-        .any(|thread| !thread.completed));
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .values()
+            .any(|thread| !thread.completed)
+    );
     assert!(engine.scheduler_ready.is_empty());
+    assert_eq!(engine.scheduler_deferred_ready.len(), 1);
     assert_eq!(engine.scheduled_windows_threads.len(), 1);
     assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
+    assert_eq!(
+        engine
+            .call_win64(TEST_CODE + DRAIN_OFFSET as u64, [0; 6])
+            .unwrap(),
+        0x55
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .values()
+            .all(|thread| thread.completed && thread.exit_code == 7)
+    );
+    assert!(engine.scheduler_ready.is_empty());
+    assert!(engine.scheduler_deferred_ready.is_empty());
+    assert!(engine.scheduled_windows_threads.is_empty());
 }
 
 #[test]
@@ -3266,9 +3309,7 @@ fn issue1402_finite_main_wait_survives_multiple_peer_slices_until_exact_wake() {
     }
     push_mov_imm64(&mut code, [0x48, 0xb9], address);
     push_mov_imm64(&mut code, [0x48, 0xb8], WAKE);
-    code.extend_from_slice(&[
-        0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0xb8, 7, 0, 0, 0, 0xc3,
-    ]);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0xb8, 7, 0, 0, 0, 0xc3]);
 
     let mut engine = test_engine(&code);
     engine
@@ -3288,12 +3329,14 @@ fn issue1402_finite_main_wait_survives_multiple_peer_slices_until_exact_wake() {
     engine.unicorn.get_data_mut().windows_last_error = 0x1234;
     assert_eq!(engine.call_win64(TEST_CODE, [0; 6]).unwrap(), 1);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
-    assert!(engine
-        .unicorn
-        .get_data()
-        .windows_threads
-        .values()
-        .any(|thread| thread.completed && thread.exit_code == 7));
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .values()
+            .any(|thread| thread.completed && thread.exit_code == 7)
+    );
     assert!(engine.scheduler_ready.is_empty());
     assert!(engine.scheduled_windows_threads.is_empty());
     assert!(engine.unicorn.get_data().windows_address_waiters.is_empty());
@@ -7599,10 +7642,18 @@ fn issue1404_yielding_child_parks_then_parent_resumes_and_runs_child_to_completi
         install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
     }
     let handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
-    let thread = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+    let thread = engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .unwrap();
     assert!(thread.completed);
     assert_eq!(thread.exit_code, 7);
-    assert_eq!(engine.unicorn.mem_read_as_vec(parameter, 8).unwrap(), 7u64.to_le_bytes());
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(parameter, 8).unwrap(),
+        7u64.to_le_bytes()
+    );
     assert!(engine.scheduled_windows_threads.is_empty());
     assert!(engine.scheduler_ready.is_empty());
     assert!(engine.parked_main_context.is_none());
@@ -7696,10 +7747,29 @@ fn issue1404_two_children_queue_fifo_and_complete_once() {
     }
     let second_handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
     assert_eq!(engine.unicorn.get_data().windows_threads.len(), 2);
-    assert!(engine.unicorn.get_data().windows_threads.values().all(|thread| thread.completed && thread.exit_code == 9));
-    assert!(engine.unicorn.get_data().windows_threads.contains_key(&second_handle));
-    assert_eq!(engine.unicorn.mem_read_as_vec(first_output, 8).unwrap(), 1u64.to_le_bytes());
-    assert_eq!(engine.unicorn.mem_read_as_vec(second_output, 8).unwrap(), 1u64.to_le_bytes());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .values()
+            .all(|thread| thread.completed && thread.exit_code == 9)
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .contains_key(&second_handle)
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(first_output, 8).unwrap(),
+        1u64.to_le_bytes()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(second_output, 8).unwrap(),
+        1u64.to_le_bytes()
+    );
     assert!(engine.scheduler_ready.is_empty());
     assert!(engine.scheduled_windows_threads.is_empty());
 }
@@ -7821,16 +7891,36 @@ fn issue1404_context_switch_isolates_last_error_and_callee_saved_registers() {
         install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
     }
     engine.unicorn.get_data_mut().windows_last_error = 0x1111;
-    engine.unicorn.get_data_mut().windows_tls_slots.insert(3, 0xaaaa);
+    engine
+        .unicorn
+        .get_data_mut()
+        .windows_tls_slots
+        .insert(3, 0xaaaa);
     assert_eq!(engine.call_win64(TEST_CODE, [0; 6]).unwrap(), 0x1111);
-    assert_eq!(engine.unicorn.reg_read(RegisterX86::RBX).unwrap(), 0x1122_3344_5566_7788);
+    assert_eq!(
+        engine.unicorn.reg_read(RegisterX86::RBX).unwrap(),
+        0x1122_3344_5566_7788
+    );
     assert_eq!(
         &engine.unicorn.reg_read_long(RegisterX86::XMM6).unwrap()[..8],
         &0x1122_3344_5566_7788u64.to_le_bytes()
     );
-    assert_eq!(engine.unicorn.get_data().windows_threads.values().next().unwrap().exit_code, 0x2222);
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .values()
+            .next()
+            .unwrap()
+            .exit_code,
+        0x2222
+    );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1111);
-    assert_eq!(engine.unicorn.get_data().windows_tls_slots.get(&3), Some(&0xaaaa));
+    assert_eq!(
+        engine.unicorn.get_data().windows_tls_slots.get(&3),
+        Some(&0xaaaa)
+    );
 }
 
 #[test]
