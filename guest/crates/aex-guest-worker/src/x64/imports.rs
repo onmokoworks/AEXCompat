@@ -72,6 +72,7 @@ enum LegacyWin64Import {
     GetSystemTimeAsFileTime,
     GetSystemInfo,
     GetStartupInfoW,
+    RtlCaptureContext,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -301,6 +302,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetStartupInfoW") => LegacyWin64Import::GetStartupInfoW,
         (_, "GetStartupInfoW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "RtlCaptureContext") => LegacyWin64Import::RtlCaptureContext,
+        (_, "RtlCaptureContext") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -990,6 +993,18 @@ fn install_win64_import(
                     "install GetStartupInfoW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_startup_info_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::RtlCaptureContext => {
+                uc(
+                    "write RtlCaptureContext return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install RtlCaptureContext import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_rtl_capture_context(unicorn);
                     }),
                 )?;
             }
@@ -2792,6 +2807,204 @@ fn emulate_get_startup_info_w(unicorn: &mut Unicorn<'_, GuestState>) {
             .mem_write(output, &startup_info)
             .map_err(|error| format!("GetStartupInfoW output {output:#x} is not writable: {error}"))
     });
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
+    }
+}
+
+fn emulate_rtl_capture_context(unicorn: &mut Unicorn<'_, GuestState>) {
+    const CONTEXT_SIZE: usize = 0x4d0;
+    const CONTEXT_AMD64_FULL_WITH_SEGMENTS: u32 = 0x0010_000f;
+    const INTEGER_REGISTERS: [(RegisterX86, usize); 16] = [
+        (RegisterX86::RAX, 0x78),
+        (RegisterX86::RCX, 0x80),
+        (RegisterX86::RDX, 0x88),
+        (RegisterX86::RBX, 0x90),
+        (RegisterX86::RSP, 0x98),
+        (RegisterX86::RBP, 0xa0),
+        (RegisterX86::RSI, 0xa8),
+        (RegisterX86::RDI, 0xb0),
+        (RegisterX86::R8, 0xb8),
+        (RegisterX86::R9, 0xc0),
+        (RegisterX86::R10, 0xc8),
+        (RegisterX86::R11, 0xd0),
+        (RegisterX86::R12, 0xd8),
+        (RegisterX86::R13, 0xe0),
+        (RegisterX86::R14, 0xe8),
+        (RegisterX86::R15, 0xf0),
+    ];
+    const SEGMENT_REGISTERS: [(RegisterX86, usize); 6] = [
+        (RegisterX86::CS, 0x38),
+        (RegisterX86::DS, 0x3a),
+        (RegisterX86::ES, 0x3c),
+        (RegisterX86::FS, 0x3e),
+        (RegisterX86::GS, 0x40),
+        (RegisterX86::SS, 0x42),
+    ];
+    const XMM_REGISTERS: [RegisterX86; 16] = [
+        RegisterX86::XMM0,
+        RegisterX86::XMM1,
+        RegisterX86::XMM2,
+        RegisterX86::XMM3,
+        RegisterX86::XMM4,
+        RegisterX86::XMM5,
+        RegisterX86::XMM6,
+        RegisterX86::XMM7,
+        RegisterX86::XMM8,
+        RegisterX86::XMM9,
+        RegisterX86::XMM10,
+        RegisterX86::XMM11,
+        RegisterX86::XMM12,
+        RegisterX86::XMM13,
+        RegisterX86::XMM14,
+        RegisterX86::XMM15,
+    ];
+    const X87_REGISTERS: [RegisterX86; 8] = [
+        RegisterX86::ST0,
+        RegisterX86::ST1,
+        RegisterX86::ST2,
+        RegisterX86::ST3,
+        RegisterX86::ST4,
+        RegisterX86::ST5,
+        RegisterX86::ST6,
+        RegisterX86::ST7,
+    ];
+
+    let result = (|| -> Result<(), String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        if output == 0 {
+            return Err("RtlCaptureContext output pointer is null".into());
+        }
+        let output_end = output
+            .checked_add(CONTEXT_SIZE as u64 - 1)
+            .ok_or_else(|| "RtlCaptureContext output range overflows".to_string())?;
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|error| format!("RtlCaptureContext memory-map query failed: {error}"))?;
+        let mut cursor = output;
+        while cursor <= output_end {
+            let region = regions
+                .iter()
+                .find(|region| {
+                    region.begin <= cursor
+                        && cursor <= region.end
+                        && region.perms & Prot::WRITE.0 as u32 != 0
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "RtlCaptureContext output {output:#x}..={output_end:#x} is not fully writable"
+                    )
+                })?;
+            if region.end >= output_end {
+                break;
+            }
+            cursor = region
+                .end
+                .checked_add(1)
+                .ok_or_else(|| "RtlCaptureContext writable region overflows".to_string())?;
+        }
+
+        let rsp = unicorn
+            .reg_read(RegisterX86::RSP)
+            .map_err(|error| format!("RtlCaptureContext could not read RSP: {error}"))?;
+        let caller_rsp = rsp
+            .checked_add(8)
+            .ok_or_else(|| "RtlCaptureContext caller RSP overflows".to_string())?;
+        let mut return_address = [0u8; 8];
+        unicorn
+            .mem_read(rsp, &mut return_address)
+            .map_err(|error| format!("RtlCaptureContext return address is not readable: {error}"))?;
+
+        let mut context = [0u8; CONTEXT_SIZE];
+        context[0x30..0x34].copy_from_slice(&CONTEXT_AMD64_FULL_WITH_SEGMENTS.to_le_bytes());
+        let mxcsr = unicorn
+            .reg_read(RegisterX86::MXCSR)
+            .map_err(|error| format!("RtlCaptureContext could not read MXCSR: {error}"))?
+            as u32;
+        context[0x34..0x38].copy_from_slice(&mxcsr.to_le_bytes());
+        context[0x118..0x11c].copy_from_slice(&mxcsr.to_le_bytes());
+        let fpcw = unicorn
+            .reg_read(RegisterX86::FPCW)
+            .map_err(|error| format!("RtlCaptureContext could not read FPCW: {error}"))?
+            as u16;
+        let fpsw = unicorn
+            .reg_read(RegisterX86::FPSW)
+            .map_err(|error| format!("RtlCaptureContext could not read FPSW: {error}"))?
+            as u16;
+        let full_fptag = unicorn
+            .reg_read(RegisterX86::FPTAG)
+            .map_err(|error| format!("RtlCaptureContext could not read FPTAG: {error}"))?
+            as u16;
+        let abridged_fptag = (0..8).fold(0u8, |tag, physical_index| {
+            let full_tag = (full_fptag >> (physical_index * 2)) & 0x3;
+            tag | u8::from(full_tag != 0x3) << physical_index
+        });
+        context[0x100..0x102].copy_from_slice(&fpcw.to_le_bytes());
+        context[0x102..0x104].copy_from_slice(&fpsw.to_le_bytes());
+        context[0x104] = abridged_fptag;
+        for (register, offset) in [
+            (RegisterX86::FOP, 0x106),
+            (RegisterX86::FCS, 0x10c),
+            (RegisterX86::FDS, 0x114),
+        ] {
+            let value = unicorn
+                .reg_read(register)
+                .map_err(|error| format!("RtlCaptureContext could not read {register:?}: {error}"))?
+                as u16;
+            context[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        for (register, offset) in [(RegisterX86::FIP, 0x108), (RegisterX86::FDP, 0x110)] {
+            let value = unicorn
+                .reg_read(register)
+                .map_err(|error| format!("RtlCaptureContext could not read {register:?}: {error}"))?
+                as u32;
+            context[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        context[0x11c..0x120].copy_from_slice(&0x0000_ffffu32.to_le_bytes());
+        for (register, offset) in SEGMENT_REGISTERS {
+            let value = unicorn
+                .reg_read(register)
+                .map_err(|error| format!("RtlCaptureContext could not read {register:?}: {error}"))?
+                as u16;
+            context[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        let eflags = unicorn
+            .reg_read(RegisterX86::EFLAGS)
+            .map_err(|error| format!("RtlCaptureContext could not read EFLAGS: {error}"))?
+            as u32;
+        context[0x44..0x48].copy_from_slice(&eflags.to_le_bytes());
+        for (register, offset) in INTEGER_REGISTERS {
+            let value = if register == RegisterX86::RSP {
+                caller_rsp
+            } else {
+                unicorn.reg_read(register).map_err(|error| {
+                    format!("RtlCaptureContext could not read {register:?}: {error}")
+                })?
+            };
+            context[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        context[0xf8..0x100].copy_from_slice(&return_address);
+        for (logical_index, register) in X87_REGISTERS.into_iter().enumerate() {
+            let value = unicorn.reg_read_long(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })?;
+            let offset = 0x120 + logical_index * 16;
+            context[offset..offset + 10].copy_from_slice(&value);
+        }
+        for (index, register) in XMM_REGISTERS.into_iter().enumerate() {
+            let value = unicorn.reg_read_long(register).map_err(|error| {
+                format!("RtlCaptureContext could not read {register:?}: {error}")
+            })?;
+            let offset = 0x1a0 + index * 16;
+            context[offset..offset + 16].copy_from_slice(&value);
+        }
+        unicorn.mem_write(output, &context).map_err(|error| {
+            format!("RtlCaptureContext output {output:#x} is not writable: {error}")
+        })
+    })();
     if let Err(error) = result {
         if unicorn.get_data().callback_error.is_none() {
             unicorn.get_data_mut().callback_error = Some(error);
