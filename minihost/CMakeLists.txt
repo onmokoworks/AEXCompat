@@ -350,7 +350,8 @@ target_link_libraries(aex_l2_worker PRIVATE bcrypt aexcompat_trace_writer)
 
 add_executable(worker_report_json_selftest
     ../tests/native/worker_report_json_selftest.cpp
-    src/worker_report.cpp)
+    src/worker_report.cpp
+    src/native_stdout_guard.cpp)
 target_compile_features(worker_report_json_selftest PRIVATE cxx_std_17)
 target_include_directories(worker_report_json_selftest PRIVATE src)
 
