@@ -1054,7 +1054,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetCommandLineW => {
-                uc("write GetCommandLineW return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write GetCommandLineW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install GetCommandLineW import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
