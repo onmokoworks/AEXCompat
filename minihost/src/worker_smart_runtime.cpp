@@ -397,6 +397,7 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
       });
   if (checkout == runtime.pixel_checkouts.end())
     return finish_callback(Callback::CheckoutPixels, 4, Reason::UnknownCheckout);
+  checkout->checkout_attempted = true;
   // A checkout PreRender already answered as empty. The plug-in was told there
   // are no pixels here (an empty result_rect, which the SDK documents as a real
   // answer), and asking for them anyway is not a fault on either side: AE hands
@@ -442,6 +443,7 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
     }
     ++runtime.empty_layer_param_pixel_checkouts;
     checkout->checked_out = true;
+    checkout->ever_checked_out = true;
     *world = runtime.empty_layer_world.data();
     return finish_callback(Callback::CheckoutPixels, 0);
   }
@@ -456,6 +458,7 @@ int32_t __cdecl checkout_pixels(void*, int32_t checkout_id, void** world) {
   if (checkout->checked_out)
     return finish_callback(Callback::CheckoutPixels, 0);
   checkout->checked_out = true;
+  checkout->ever_checked_out = true;
   return finish_callback(Callback::CheckoutPixels, 0);
 }
 
@@ -471,8 +474,20 @@ int32_t __cdecl checkin_pixels(void*, int32_t checkout_id) {
       });
   if (checkout == runtime.pixel_checkouts.end())
     return finish_callback(Callback::CheckinPixels, 4, Reason::UnknownCheckout);
-  if (!checkout->checked_out)
+  if (!checkout->checked_out &&
+      (checkout->ever_checked_out || checkout->checkout_attempted))
     return finish_callback(Callback::CheckinPixels, 4, Reason::NotCheckedOut);
+  // Some effects retire every successful PreRender checkout id even when
+  // SmartRender did not need that id's pixels. PathArray does this for an
+  // empty alternate layer: rejecting the first checkin makes the otherwise
+  // valid render fail. Consume the unused registration exactly once. Erasing
+  // it keeps a second checkin and any later checkout fail-closed as stale,
+  // while the ordinary checkout/checkin/re-checkout lifecycle below remains
+  // reusable.
+  if (!checkout->checked_out) {
+    runtime.pixel_checkouts.erase(checkout);
+    return finish_callback(Callback::CheckinPixels, 0);
+  }
   checkout->checked_out = false;
   return finish_callback(Callback::CheckinPixels, 0);
 }
@@ -638,7 +653,7 @@ bool checkout_intersection_self_test() {
   runtime.pixel_checkouts.push_back({99, nullptr, nullptr, partial, false, false});
   checked_out = input_world.data();
   passed = checkout_pixels(nullptr, 99, &checked_out) == 4 &&
-      checked_out == nullptr && passed;
+      checked_out == nullptr && checkin_pixels(nullptr, 99) == 4 && passed;
   forget_checkout(runtime, 99);
   passed = pre_checkout_layer(nullptr, 3, 7, narrower_request.data(), 7, 1, 30,
                               hosted_result.data()) == 0 &&
@@ -753,6 +768,22 @@ bool checkout_intersection_self_test() {
       checkout_pixels(nullptr, 24, &checked_out) == 0 &&
       g_empty_layer_allocations_for_self_test == 1 &&
       checkin_pixels(nullptr, 24) == 0 && passed;
+  // A successful PreRender registration may be retired without a pixel
+  // checkout. This is the exact PathArray shape: it registers an empty
+  // alternate layer, uses only its other layers in SmartRender, then checks
+  // every registered id back in. The first checkin consumes the registration;
+  // a duplicate checkin and a later checkout remain stale failures, and no
+  // empty world was allocated for pixels that were never requested.
+  const int allocations_before_unused_checkin =
+      g_empty_layer_allocations_for_self_test;
+  passed = pre_checkout_layer(nullptr, 9, 26, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 &&
+      checkin_pixels(nullptr, 26) == 0 &&
+      checkin_pixels(nullptr, 26) == 4 &&
+      checkout_pixels(nullptr, 26, &checked_out) == 4 &&
+      g_empty_layer_allocations_for_self_test ==
+          allocations_before_unused_checkin &&
+      passed;
   // A hook that cannot allocate leaves the checkout refused, not answered.
   runtime.empty_layer_world_live = false;
   runtime.allocate_empty_layer = +[](void*) { return false; };
