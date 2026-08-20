@@ -4,6 +4,7 @@
 #include "AE_GeneralPlug.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <type_traits>
 
@@ -88,6 +89,13 @@ PF_Err render(PF_InData* in_data, PF_LayerDef* output) {
   if (!err) err = pf->AEGP_GetEffectLayer(in_data->effect_ref, &layer);
   if (!err) err = layers->AEGP_GetLayerSourceItem(layer, &item);
   if (!err) err = options_suite->AEGP_NewFromItem(g_plugin_id, item, &options);
+
+  AEGP_RenderOptionsH invalid_options = nullptr;
+  if (!err && options_suite->AEGP_NewFromItem(
+      g_plugin_id, reinterpret_cast<AEGP_ItemH>(uintptr_t{1}),
+      &invalid_options) == A_Err_NONE)
+    err = PF_Err_BAD_CALLBACK_PARAM;
+  if (!err && invalid_options) err = PF_Err_BAD_CALLBACK_PARAM;
 
   // Invalid creation and reference paths must fail without yielding handles.
   AEGP_PlatformWorldH invalid_platform = nullptr;
