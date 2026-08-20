@@ -33,6 +33,7 @@ enum LegacyWin64Import {
     MemCmp,
     StdioVsnprintfS,
     StdioVsprintf,
+    FopenS,
     MsvcpMutexInit,
     MsvcpMutexLock,
     MsvcpMutexUnlock,
@@ -556,6 +557,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "__stdio_common_vsprintf") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen_s") => {
+            LegacyWin64Import::FopenS
+        }
+        (_, "fopen_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "_strdup") => {
             LegacyWin64Import::CrtStrdup
         }
@@ -1740,6 +1745,15 @@ fn install_win64_import(
                     "install OutputDebugStringA import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_output_debug_string_a(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::FopenS => {
+                uc("write fopen_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install fopen_s import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_fopen_s(unicorn);
                     }),
                 )?;
             }
@@ -4969,6 +4983,163 @@ fn emulate_output_debug_string_a(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    const EINVAL: u32 = 22;
+    const ENOENT: u32 = 2;
+
+    let result = (|| -> Result<u32, String> {
+        let result_pointer = read_win64_import_argument(unicorn, 0)?;
+        let filename_pointer = read_win64_import_argument(unicorn, 1)?;
+        let mode_pointer = read_win64_import_argument(unicorn, 2)?;
+
+        if result_pointer == 0 {
+            return Ok(EINVAL);
+        }
+        if !guest_range_has_permission(unicorn, result_pointer, 8, Prot::WRITE)? {
+            return Err(format!(
+                "fopen_s result pointer {result_pointer:#x} is not writable"
+            ));
+        }
+
+        // UCRT's invalid-parameter path preserves a non-null result slot when
+        // either string pointer is NULL.  There is no guest-visible `_errno`
+        // import in this backend, so the ABI-observable contract here is the
+        // returned `errno_t`; the internal errno remains thread-logical and
+        // must not be exposed as process-global guest storage.
+        if filename_pointer == 0 || mode_pointer == 0 {
+            return Ok(EINVAL);
+        }
+        let filename = read_crt_stdio_c_string(
+            unicorn,
+            filename_pointer,
+            MAX_CRT_STRING_BYTES,
+            "fopen_s filename",
+        )?;
+        const MAX_FOPEN_MODE_BYTES: u64 = 64;
+        let mode = read_crt_stdio_c_string(
+            unicorn,
+            mode_pointer,
+            MAX_FOPEN_MODE_BYTES,
+            "fopen_s mode",
+        )?;
+        let ordinary_result = if filename.is_empty() || !valid_fopen_mode(&mode) {
+            EINVAL
+        } else {
+            // Guest paths are never resolved against the host.  A secure open
+            // failure is truthful until a bounded guest-owned stream and its
+            // complete observed lifecycle are implemented.
+            ENOENT
+        };
+        unicorn
+            .mem_write(result_pointer, &0u64.to_le_bytes())
+            .map_err(|error| format!("fopen_s result write failed: {error}"))?;
+        Ok(ordinary_result)
+    })();
+
+    match result {
+        Ok(errno) => {
+            unicorn.get_data_mut().crt_errno = errno;
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(errno));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn trim_leading_crt_mode_spaces(mut value: &[u8]) -> &[u8] {
+    while let Some(rest) = value.strip_prefix(b" ") {
+        value = rest;
+    }
+    value
+}
+
+fn valid_fopen_mode(mode: &[u8]) -> bool {
+    let mode = trim_leading_crt_mode_spaces(mode);
+    let Some((&first, suffix)) = mode.split_first() else { return false; };
+    if !matches!(first, b'r' | b'w' | b'a') {
+        return false;
+    }
+
+    let mut seen_plus = false;
+    let mut seen_text_mode = false;
+    let mut seen_commit_mode = false;
+    let mut seen_scan_mode = false;
+    let mut seen_temporary = false;
+    let mut seen_delete = false;
+    let mut parse_flag = |byte: u8| -> bool {
+        match byte {
+            b' ' => true,
+            b'+' if !seen_plus => {
+                seen_plus = true;
+                true
+            }
+            b'b' | b't' if !seen_text_mode => {
+                seen_text_mode = true;
+                true
+            }
+            b'c' | b'n' if !seen_commit_mode => {
+                seen_commit_mode = true;
+                true
+            }
+            b'S' | b'R' if !seen_scan_mode => {
+                seen_scan_mode = true;
+                true
+            }
+            b'T' if !seen_temporary => {
+                seen_temporary = true;
+                true
+            }
+            b'D' if !seen_delete => {
+                seen_delete = true;
+                true
+            }
+            b'N' => true,
+            b'x' if first == b'w' => true,
+            _ => false,
+        }
+    };
+
+    let (core_flags, comma_options) = match suffix.iter().position(|byte| *byte == b',') {
+        Some(comma) => (&suffix[..comma], Some(&suffix[comma + 1..])),
+        None => (suffix, None),
+    };
+    if !core_flags.iter().copied().all(&mut parse_flag) {
+        return false;
+    }
+
+    let Some(mut options) = comma_options else {
+        return true;
+    };
+    options = trim_leading_crt_mode_spaces(options);
+    if options.is_empty() {
+        return false;
+    }
+
+    let Some(mut encoding) = options.strip_prefix(b"ccs") else {
+        return false;
+    };
+    encoding = trim_leading_crt_mode_spaces(encoding);
+    let Some(rest) = encoding.strip_prefix(b"=") else {
+        return false;
+    };
+    encoding = trim_leading_crt_mode_spaces(rest);
+    let encoding_length = [b"UTF-16LE".as_slice(), b"UNICODE", b"UTF-8"]
+        .into_iter()
+        .find(|candidate| {
+            encoding.len() >= candidate.len()
+                && encoding[..candidate.len()].eq_ignore_ascii_case(candidate)
+        })
+        .map(<[u8]>::len);
+    let Some(encoding_length) = encoding_length else {
+        return false;
+    };
+    encoding[encoding_length..].iter().all(|byte| *byte == b' ')
+}
+
 fn guest_range_has_permission(
     unicorn: &Unicorn<'_, GuestState>,
     address: u64,
@@ -5635,6 +5806,7 @@ fn restore_windows_thread_context(state: &mut GuestState, pending: &PendingWindo
         }
     }
     state.windows_last_error = pending.caller_last_error;
+    state.crt_errno = pending.caller_crt_errno;
     state.windows_thread_error_mode = pending.caller_thread_error_mode;
     state.current_windows_thread_id = pending.caller_thread_id;
 }
@@ -5834,6 +6006,7 @@ fn dispatch_windows_thread(
         caller_tls_values,
         caller_fls_values,
         caller_last_error: unicorn.get_data().windows_last_error,
+        caller_crt_errno: unicorn.get_data().crt_errno,
         caller_thread_error_mode: unicorn.get_data().windows_thread_error_mode,
         caller_thread_id: unicorn.get_data().current_windows_thread_id,
         completion_return,
@@ -5851,6 +6024,7 @@ fn dispatch_windows_thread(
         slot.value = 0;
     }
     unicorn.get_data_mut().windows_last_error = 0;
+    unicorn.get_data_mut().crt_errno = 0;
     unicorn.get_data_mut().windows_thread_error_mode = 0;
     unicorn.get_data_mut().current_windows_thread_id = id;
     unicorn
