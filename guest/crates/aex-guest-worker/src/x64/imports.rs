@@ -1012,7 +1012,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetConsoleMode => {
-                uc("write GetConsoleMode return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write GetConsoleMode return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install GetConsoleMode import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {

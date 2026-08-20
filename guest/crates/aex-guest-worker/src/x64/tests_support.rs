@@ -4648,7 +4648,10 @@ fn get_console_mode_models_synthetic_standard_handles_as_redirected() {
                 .unwrap(),
             0
         );
-        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_HANDLE);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_HANDLE
+        );
         assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), sentinel);
     }
 }
@@ -4656,8 +4659,14 @@ fn get_console_mode_models_synthetic_standard_handles_as_redirected() {
 #[test]
 fn get_console_mode_rejects_foreign_handles_without_touching_guest_memory() {
     let mut engine = test_engine(&[0xc3]);
-    engine.unicorn.reg_write(RegisterX86::RCX, 0xdead_beef).unwrap();
-    engine.unicorn.reg_write(RegisterX86::RDX, 0xdead_beef).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, 0xdead_beef)
+        .unwrap();
     emulate_get_console_mode(&mut engine.unicorn);
     assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
     assert_eq!(
@@ -4692,7 +4701,10 @@ fn get_console_mode_rejects_foreign_handles_without_touching_guest_memory() {
         .unicorn
         .reg_write(RegisterX86::RCX, WINDOWS_STANDARD_ERROR_TOKEN)
         .unwrap();
-    engine.unicorn.reg_write(RegisterX86::RDX, boundary).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, boundary)
+        .unwrap();
     emulate_get_console_mode(&mut engine.unicorn);
     assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
     assert_eq!(
