@@ -87,6 +87,8 @@ enum LegacyWin64Import {
     QueryPerformanceFrequency,
     GetEnvironmentVariableA,
     GetEnvironmentVariableW,
+    GetEnvironmentStringsW,
+    FreeEnvironmentStringsW,
     WideCharToMultiByte,
     MultiByteToWideChar,
     GetStringTypeW,
@@ -339,6 +341,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "GetEnvironmentVariableA") => LegacyWin64Import::GetEnvironmentVariableA,
         ("kernel32.dll", "GetEnvironmentVariableW") => LegacyWin64Import::GetEnvironmentVariableW,
         (_, "GetEnvironmentVariableW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetEnvironmentStringsW") => LegacyWin64Import::GetEnvironmentStringsW,
+        (_, "GetEnvironmentStringsW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "FreeEnvironmentStringsW") => LegacyWin64Import::FreeEnvironmentStringsW,
+        (_, "FreeEnvironmentStringsW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "WideCharToMultiByte") => LegacyWin64Import::WideCharToMultiByte,
         (_, "WideCharToMultiByte") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "MultiByteToWideChar") => LegacyWin64Import::MultiByteToWideChar,
@@ -1174,6 +1180,30 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::GetEnvironmentStringsW => {
+                uc(
+                    "write GetEnvironmentStringsW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetEnvironmentStringsW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_environment_strings_w(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::FreeEnvironmentStringsW => {
+                uc(
+                    "write FreeEnvironmentStringsW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install FreeEnvironmentStringsW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_free_environment_strings_w(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::WideCharToMultiByte => {
                 uc(
                     "write WideCharToMultiByte return",
@@ -1798,10 +1828,122 @@ fn read_windows_environment_name(
 }
 
 fn deterministic_guest_environment_value(name: &[u8]) -> Option<&'static [u8]> {
-    if name.eq_ignore_ascii_case(b"OPENCV_FOR_THREADS_NUM") {
-        Some(b"1")
-    } else {
-        None
+    deterministic_guest_environment_entries()
+        .iter()
+        .find_map(|(candidate, value)| name.eq_ignore_ascii_case(candidate).then_some(*value))
+}
+
+fn deterministic_guest_environment_entries() -> &'static [(&'static [u8], &'static [u8])] {
+    // Keep this sorted case-insensitively, matching the ordering of a Windows
+    // environment block and the allowlist used by GetEnvironmentVariableA/W.
+    &[(b"OPENCV_FOR_THREADS_NUM", b"1")]
+}
+
+fn deterministic_guest_environment_block_w() -> Vec<u8> {
+    let mut block = Vec::new();
+    for (name, value) in deterministic_guest_environment_entries() {
+        for byte in name
+            .iter()
+            .copied()
+            .chain(std::iter::once(b'='))
+            .chain(value.iter().copied())
+            .chain(std::iter::once(0))
+        {
+            block.extend_from_slice(&u16::from(byte).to_le_bytes());
+        }
+    }
+    // The final entry terminator plus this unit form the required double NUL.
+    block.extend_from_slice(&0u16.to_le_bytes());
+    block
+}
+
+fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), String> {
+    if state.environment_strings_base == 0 {
+        let namespace = NEXT_ENVIRONMENT_STRINGS_NAMESPACE
+            .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| "GetEnvironmentStringsW namespace exhausted".to_string())?;
+        let offset = namespace
+            .checked_mul(ENVIRONMENT_STRINGS_NAMESPACE_SIZE)
+            .ok_or_else(|| "GetEnvironmentStringsW namespace exhausted".to_string())?;
+        state.environment_strings_base = ENVIRONMENT_STRINGS_BASE
+            .checked_add(offset)
+            .ok_or_else(|| "GetEnvironmentStringsW namespace exhausted".to_string())?;
+    }
+    let end = state
+        .environment_strings_base
+        .checked_add(ENVIRONMENT_STRINGS_NAMESPACE_SIZE)
+        .filter(|end| *end <= ENVIRONMENT_STRINGS_END)
+        .ok_or_else(|| "GetEnvironmentStringsW namespace exhausted".to_string())?;
+    Ok((state.environment_strings_base, end))
+}
+
+fn emulate_get_environment_strings_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
+    let result = (|| -> Result<u64, String> {
+        let block = deterministic_guest_environment_block_w();
+        let allocation = unicorn
+            .get_data()
+            .crt_heap
+            .prepare_environment_strings_allocation(block.len() as u64)
+            .map_err(|error| error.to_string())?;
+        let (range_start, range_end) = environment_strings_range(unicorn.get_data_mut())?;
+        let pointer = unicorn
+            .get_data()
+            .crt_heap
+            .first_fit(range_start, range_end, allocation)
+            .map_err(|error| error.to_string())?;
+        unicorn
+            .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
+            .map_err(|error| format!("GetEnvironmentStringsW map failed: {error}"))?;
+        if let Err(error) = unicorn.mem_write(pointer, &block) {
+            let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
+            return Err(format!(
+                "GetEnvironmentStringsW block write failed: {error}"
+            ));
+        }
+        if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
+            let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
+            return Err(error.to_string());
+        }
+        Ok(pointer)
+    })();
+    match result {
+        Ok(pointer) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+        }
+        Err(_) => {
+            unicorn.get_data_mut().windows_last_error = ERROR_NOT_ENOUGH_MEMORY;
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+    }
+}
+
+fn emulate_free_environment_strings_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let allocation = unicorn
+            .get_data_mut()
+            .crt_heap
+            .remove_environment_strings(pointer)
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = unicorn.mem_unmap(pointer, allocation.backing_size) {
+            // Restore ownership if unmapping unexpectedly fails, so callers can
+            // retry and the allocation is still cleaned up with the session.
+            let _ = unicorn.get_data_mut().crt_heap.insert(pointer, allocation);
+            return Err(format!("FreeEnvironmentStringsW unmap failed: {error}"));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+        }
+        Err(_) => {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
     }
 }
 
