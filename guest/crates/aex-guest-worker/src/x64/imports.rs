@@ -76,6 +76,7 @@ enum LegacyWin64Import {
     GetConsoleMode,
     GetFileType,
     GetCommandLineA,
+    GetCommandLineW,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -313,6 +314,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetFileType") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCommandLineA") => LegacyWin64Import::GetCommandLineA,
         (_, "GetCommandLineA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetCommandLineW") => LegacyWin64Import::GetCommandLineW,
+        (_, "GetCommandLineW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -1047,6 +1050,18 @@ fn install_win64_import(
                     "install GetCommandLineA import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_command_line_a(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetCommandLineW => {
+                uc(
+                    "write GetCommandLineW return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetCommandLineW import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_command_line_w(unicorn);
                     }),
                 )?;
             }
@@ -2908,6 +2923,20 @@ fn emulate_get_command_line_a(unicorn: &mut Unicorn<'_, GuestState>) {
         if unicorn.get_data().callback_error.is_none() {
             unicorn.get_data_mut().callback_error =
                 Some("GetCommandLineA process string is not initialized".into());
+        }
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        let _ = unicorn.emu_stop();
+        return;
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+}
+
+fn emulate_get_command_line_w(unicorn: &mut Unicorn<'_, GuestState>) {
+    let pointer = unicorn.get_data().windows_command_line_w;
+    if pointer == 0 {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error =
+                Some("GetCommandLineW process string is not initialized".into());
         }
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         let _ = unicorn.emu_stop();

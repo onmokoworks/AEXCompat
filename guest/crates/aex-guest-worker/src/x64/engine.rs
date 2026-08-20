@@ -895,6 +895,7 @@ impl GuestEngine<'static> {
             trace_modules,
         };
         initialize_windows_command_line_a(&mut engine)?;
+        initialize_windows_command_line_w(&mut engine)?;
         if let Some(table) = image.string_table() {
             let empty = engine.allocate(1, 1)?;
             engine.write(empty, &[0])?;
@@ -2076,5 +2077,20 @@ fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Resul
     let command_line = engine.allocate(WINDOWS_COMMAND_LINE_A.len(), 1)?;
     engine.write(command_line, WINDOWS_COMMAND_LINE_A)?;
     engine.unicorn.get_data_mut().windows_command_line_a = command_line;
+    Ok(())
+}
+
+fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
+    const WINDOWS_COMMAND_LINE: &str = "\"aex-guest-worker.exe\"";
+    let mut bytes = Vec::with_capacity((WINDOWS_COMMAND_LINE.encode_utf16().count() + 1) * 2);
+    for unit in WINDOWS_COMMAND_LINE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let command_line = engine.allocate(bytes.len(), 2)?;
+    engine.write(command_line, &bytes)?;
+    engine.unicorn.get_data_mut().windows_command_line_w = command_line;
     Ok(())
 }
