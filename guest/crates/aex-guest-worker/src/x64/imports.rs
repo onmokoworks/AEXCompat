@@ -3800,25 +3800,27 @@ fn emulate_windows_critical_section(
 }
 
 fn emulate_get_module_handle_w(unicorn: &mut Unicorn<'_, GuestState>) {
-    let result = (|| -> Result<(), String> {
-        let pointer = read_win64_import_argument(unicorn, 0)?;
-        if pointer == 0 {
-            return Err("GetModuleHandleW(NULL) host-executable lookup is unsupported".into());
-        }
+    let pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>| {
+        unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    };
+    let returned = if pointer == 0 {
+        unicorn.get_data().image_region.map(|(start, _)| start)
+    } else {
         let mut units = Vec::new();
         let mut terminated = false;
         for index in 0..128u64 {
-            let address = pointer
-                .checked_add(index * 2)
-                .ok_or_else(|| "GetModuleHandleW name address overflow".to_string())?;
-            let bytes = unicorn
-                .mem_read_as_vec(address, 2)
-                .map_err(|error| format!("GetModuleHandleW name read failed: {error}"))?;
-            let unit = u16::from_le_bytes(
-                bytes
-                    .try_into()
-                    .map_err(|_| "GetModuleHandleW name unit has wrong size".to_string())?,
-            );
+            let Some(address) = pointer.checked_add(index.saturating_mul(2)) else {
+                break;
+            };
+            if !guest_range_has_permission(unicorn, address, 2, Prot::READ).unwrap_or(false) {
+                break;
+            }
+            let Ok(bytes) = unicorn.mem_read_as_vec(address, 2) else {
+                break;
+            };
+            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
             if unit == 0 {
                 terminated = true;
                 break;
@@ -3826,28 +3828,31 @@ fn emulate_get_module_handle_w(unicorn: &mut Unicorn<'_, GuestState>) {
             units.push(unit);
         }
         if !terminated {
-            return Err("GetModuleHandleW name exceeds 127 UTF-16 code units".into());
-        }
-        let name = String::from_utf16(&units)
-            .map_err(|_| "GetModuleHandleW name is not valid UTF-16".to_string())?;
-        let returned = if name.eq_ignore_ascii_case("api-ms-win-core-synch-l1-2-0.dll") {
-            // This API-set lookup is an optional capability probe. Expose it as
-            // unavailable so the guest takes its critical-section fallback.
-            0
-        } else if name.eq_ignore_ascii_case("kernel32.dll") {
-            WINDOWS_KERNEL32_MODULE_TOKEN
+            None
+        } else if let Ok(name) = String::from_utf16(&units) {
+            let basename = name
+                .rsplit(['\\', '/'])
+                .next()
+                .filter(|basename| !basename.is_empty());
+            match basename {
+                Some(name) if name.eq_ignore_ascii_case("kernel32.dll") => {
+                    Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+                }
+                Some(name) if name.eq_ignore_ascii_case("ntdll.dll") => {
+                    Some(WINDOWS_NTDLL_MODULE_TOKEN)
+                }
+                // This API-set lookup is an optional capability probe. Keep
+                // it unavailable so the guest takes its modeled fallback.
+                _ => None,
+            }
         } else {
-            return Err(format!("GetModuleHandleW module {name:?} is unsupported"));
-        };
-        unicorn
-            .reg_write(RegisterX86::RAX, returned)
-            .map_err(|error| format!("GetModuleHandleW return write failed: {error}"))
-    })();
-    if let Err(error) = result {
-        if unicorn.get_data().callback_error.is_none() {
-            unicorn.get_data_mut().callback_error = Some(error);
+            None
         }
-        let _ = unicorn.emu_stop();
+    };
+    if let Some(returned) = returned {
+        let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+    } else {
+        fail(unicorn);
     }
 }
 
@@ -4006,6 +4011,8 @@ fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
         Some(r"C:\AEXCompat\guest-plugin.aex")
     } else if module == WINDOWS_KERNEL32_MODULE_TOKEN {
         Some(r"C:\Windows\System32\kernel32.dll")
+    } else if module == WINDOWS_NTDLL_MODULE_TOKEN {
+        Some(r"C:\Windows\System32\ntdll.dll")
     } else {
         None
     };
@@ -4123,7 +4130,7 @@ fn emulate_get_proc_address(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
     };
 
-    if module != WINDOWS_KERNEL32_MODULE_TOKEN {
+    if module != WINDOWS_KERNEL32_MODULE_TOKEN && module != WINDOWS_NTDLL_MODULE_TOKEN {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     }
@@ -4150,7 +4157,7 @@ fn emulate_get_proc_address(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         bytes.push(value[0]);
     }
-    let dynamic = if terminated {
+    let dynamic = if module == WINDOWS_KERNEL32_MODULE_TOKEN && terminated {
         match bytes.as_slice() {
             b"InitializeConditionVariable" => Some(HOST_INITIALIZE_CONDITION_VARIABLE),
             b"SleepConditionVariableCS" => Some(HOST_SLEEP_CONDITION_VARIABLE_CS),
