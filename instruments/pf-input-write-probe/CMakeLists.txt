@@ -1,5 +1,5 @@
 foreach(target pf_input_write_allowed_probe pf_input_write_denied_probe)
-  add_library(${target} MODULE pf_input_write_probe.cpp)
+  add_library(${target} MODULE pf_input_write_probe.cpp ${target}.rc)
   target_include_directories(${target} PRIVATE
     "$ENV{AE_SDK_ROOT}/Examples/Headers"
     "$ENV{AE_SDK_ROOT}/Examples/Headers/SP"
