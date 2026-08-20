@@ -146,6 +146,8 @@ enum LegacyWin64Import {
     HeapAlloc,
     HeapFree,
     HeapReAlloc,
+    WsaStartup,
+    WsaCleanup,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -434,6 +436,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "HeapFree") => LegacyWin64Import::HeapFree,
         ("kernel32.dll", "HeapReAlloc") => LegacyWin64Import::HeapReAlloc,
         (_, "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("ws2_32.dll", "WSAStartup" | "ORDINAL 115") => LegacyWin64Import::WsaStartup,
+        ("ws2_32.dll", "WSACleanup" | "ORDINAL 116") => LegacyWin64Import::WsaCleanup,
+        (_, "WSAStartup" | "ORDINAL 115" | "WSACleanup" | "ORDINAL 116") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("kernel32.dll", "InitializeCriticalSection") => {
@@ -1711,6 +1718,24 @@ fn install_win64_import(
                     "install process heap import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                         emulate_process_heap(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::WsaStartup => {
+                uc("write WSAStartup return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install WSAStartup import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_wsa_startup(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::WsaCleanup => {
+                uc("write WSACleanup return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install WSACleanup import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_wsa_cleanup(unicorn);
                     }),
                 )?;
             }
@@ -6285,6 +6310,70 @@ fn emulate_initialize_slist_head(unicorn: &mut Unicorn<'_, GuestState>) {
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
     }
+}
+
+const WINDOWS_WSADATA_X64_SIZE: u64 = 408;
+const WINDOWS_WSA_VERSION_2_2: u16 = 0x0202;
+const WINDOWS_WSAEFAULT: u32 = 10_014;
+const WINDOWS_WSAEPROCLIM: u32 = 10_067;
+const WINDOWS_WSAVERNOTSUPPORTED: u32 = 10_092;
+const WINDOWS_WSANOTINITIALISED: u32 = 10_093;
+const MAX_WINDOWS_SOCKET_STARTUPS: u32 = 1_024;
+
+fn emulate_wsa_startup(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u32, String> {
+        let requested = read_win64_import_argument(unicorn, 0)? as u16;
+        let output = read_win64_import_argument(unicorn, 1)?;
+        if !matches!(requested, 0x0001 | 0x0101 | 0x0002 | 0x0102 | 0x0202) {
+            return Ok(WINDOWS_WSAVERNOTSUPPORTED);
+        }
+        if output == 0
+            || !guest_range_has_permission(unicorn, output, WINDOWS_WSADATA_X64_SIZE, Prot::WRITE)?
+        {
+            return Ok(WINDOWS_WSAEFAULT);
+        }
+        let count = unicorn.get_data().windows_socket_startups;
+        if count >= MAX_WINDOWS_SOCKET_STARTUPS {
+            return Ok(WINDOWS_WSAEPROCLIM);
+        }
+        let next_count = count + 1;
+        let mut data = [0u8; WINDOWS_WSADATA_X64_SIZE as usize];
+        data[0..2].copy_from_slice(&requested.to_le_bytes());
+        data[2..4].copy_from_slice(&WINDOWS_WSA_VERSION_2_2.to_le_bytes());
+        let description = b"AEXCompat deterministic Winsock 2.2 guest";
+        data[4..4 + description.len()].copy_from_slice(description);
+        let status = b"Running";
+        data[261..261 + status.len()].copy_from_slice(status);
+        unicorn
+            .mem_write(output, &data)
+            .map_err(|error| format!("write WSAStartup WSADATA: {error}"))?;
+        unicorn.get_data_mut().windows_socket_startups = next_count;
+        Ok(0)
+    })();
+    match result {
+        Ok(code) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(code));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(WINDOWS_WSAEFAULT));
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_wsa_cleanup(unicorn: &mut Unicorn<'_, GuestState>) {
+    let count = unicorn.get_data().windows_socket_startups;
+    let code = if count == 0 {
+        unicorn.get_data_mut().windows_last_error = WINDOWS_WSANOTINITIALISED;
+        u32::MAX
+    } else {
+        unicorn.get_data_mut().windows_socket_startups = count - 1;
+        0
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(code));
 }
 
 fn read_win64_import_argument(
