@@ -77,6 +77,7 @@ enum LegacyWin64Import {
     GetFileType,
     GetCommandLineA,
     GetCommandLineW,
+    GetACP,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -316,6 +317,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetCommandLineA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCommandLineW") => LegacyWin64Import::GetCommandLineW,
         (_, "GetCommandLineW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetACP") => LegacyWin64Import::GetACP,
+        (_, "GetACP") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -1063,6 +1066,12 @@ fn install_win64_import(
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_command_line_w(unicorn);
                     }),
+                )?;
+            }
+            LegacyWin64Import::GetACP => {
+                uc(
+                    "install deterministic GetACP import",
+                    unicorn.mem_write(stub, &deterministic_i32_stub(932)),
                 )?;
             }
             LegacyWin64Import::IsDebuggerPresent => {

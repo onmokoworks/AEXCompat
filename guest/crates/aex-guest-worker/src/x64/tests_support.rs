@@ -4943,6 +4943,56 @@ fn get_command_line_w_is_session_local_and_fails_closed_if_uninitialized() {
 }
 
 #[test]
+fn get_acp_is_deterministic_cp932_and_matches_cp_acp_conversion() {
+    const GET_ACP: u64 = STUB_BASE + 0x1d8;
+    const CONVERT: u64 = STUB_BASE + 0x1e0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(&mut engine.unicorn, GET_ACP, "KERNEL32.DLL", "GetACP").unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetACP)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetACP"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RAX, u64::MAX)
+        .unwrap();
+    assert_eq!(engine.call_win64(GET_ACP, [u64::MAX; 6]).unwrap(), 932);
+    assert_eq!(engine.call_win64(GET_ACP, [0; 6]).unwrap(), 932);
+
+    install_win64_import(
+        &mut engine.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "WideCharToMultiByte",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xd00;
+    let output = DATA_BASE + 0xd20;
+    engine.write(source, &0x3042u16.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[0, 0, source, 1, output, 2, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        [0x82, 0xa0]
+    );
+
+    let mut second = test_engine(&[0xc3]);
+    install_win64_import(&mut second.unicorn, GET_ACP, "kernel32.dll", "GetACP").unwrap();
+    assert_eq!(second.call_win64(GET_ACP, [0; 6]).unwrap(), 932);
+}
+
+#[test]
 fn is_debugger_present_is_false_deterministic_and_library_scoped() {
     const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);
