@@ -45,7 +45,8 @@ std::string serialize_l2_report(const L2ReportContext& c) {
   o << ",\"update_params_ui_error\":" << c.update_params_ui_error << ",\"query_dynamic_flags_error\":" << c.query_dynamic_flags_error
     << ",\"update_param_ui_calls\":" << c.update_param_ui_calls << ",\"pf_get_current_state_calls\":" << c.pf_get_current_state_calls
     << ",\"pf_are_states_identical_calls\":" << c.pf_are_states_identical_calls << ",\"suite_leases_balanced\":"; boolean(o, c.suite_leases_balanced);
-  o << c.unsupported_suite_calls_json << c.suite_call_slot_probe_json
+  o << c.unsupported_suite_calls_json << c.bee_facade_json
+    << c.suite_call_slot_probe_json
     << c.compute_cache_timeline_json
     << c.selector_invocations_json;
   if (!c.module_audit_failure_json.empty())

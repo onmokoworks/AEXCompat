@@ -5,6 +5,7 @@
 #include "gpu_opencl_backend.hpp"
 #include "host_audio_runtime.hpp"
 #include "runtime_module_audit.hpp"
+#include "worker_bee_scene_facade.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
@@ -183,6 +184,11 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       {static_cast<int64_t>(suite_acquire_count()), static_cast<int64_t>(suite_release_count()), static_cast<int64_t>(live_suite_lease_count()),
        static_cast<int64_t>(live_suite_reference_count())},
       missing_suites_report_json() + unsupported_suite_calls_report_json() +
+          // Which BEE facade slots were actually taken, next to the slots
+          // nobody implemented: an empty `unsupported_suite_calls` alone
+          // cannot separate "the facade held" from "nothing reached it"
+          // (issue #1264).
+          aexcompat::worker_runtime::bee_facade::report_json() +
           suite_timeline_report_json() +
           aexcompat::worker_runtime::suite_call_slot_probe::report_json(),
       live_suite_lease_summary(),

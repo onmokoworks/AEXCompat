@@ -2876,6 +2876,75 @@ mod tests {
     }
 
     #[test]
+    fn bee_facade_block_is_rebuilt_from_validated_integers_and_bounded() {
+        // The facade counters are the positive half of the facade diagnostic:
+        // `unsupported_suite_calls` names slots nobody implemented, and an
+        // empty list there reads the same whether a slot held or nothing
+        // reached it (issue #1264). This is the boundary against worker
+        // stdout, so what lands in the record has to be integers this side
+        // built, not whatever the report happened to contain.
+        let mut diagnostics = json!({});
+        propagate_bee_facade(
+            &mut diagnostics,
+            &json!({"bee_facade": {
+                "effect_layer_hand_outs": 2,
+                "trap_count": 0,
+                "layer_vtable_calls": [
+                    {"slot": 56, "call_count": 1},
+                    {"slot": 183, "call_count": 2},
+                    // Dropped: no legible slot/count pair.
+                    {"slot": "56", "call_count": 1},
+                    "not an entry",
+                ],
+                // Not copied through: only the named fields survive.
+                "sealed_path": "a private path the worker had no business emitting",
+            }}),
+        );
+        let block = &diagnostics["bee_facade"];
+        assert_eq!(block["effect_layer_hand_outs"], 2);
+        assert_eq!(block["trap_count"], 0);
+        assert_eq!(
+            block["layer_vtable_calls"],
+            json!([{"slot": 56, "call_count": 1}, {"slot": 183, "call_count": 2}])
+        );
+        // The dropped entries are why the flag exists: a shortened list read
+        // as a complete one turns "not legible" into "did not happen".
+        assert_eq!(block["layer_vtable_calls_truncated"], true);
+        assert!(!diagnostics.to_string().contains("private"));
+
+        // A report without the block leaves the diagnostics untouched, so the
+        // null default keeps meaning "no facade block was reported".
+        let mut absent = json!({"bee_facade": Value::Null});
+        propagate_bee_facade(&mut absent, &json!({}));
+        assert_eq!(absent["bee_facade"], Value::Null);
+
+        // A non-object where the block belongs is refused rather than copied.
+        let mut malformed = json!({"bee_facade": Value::Null});
+        propagate_bee_facade(&mut malformed, &json!({"bee_facade": 7}));
+        assert_eq!(malformed["bee_facade"], Value::Null);
+
+        // A list longer than any real facade could produce is capped.
+        let long: Vec<Value> = (0..64)
+            .map(|slot| json!({"slot": slot, "call_count": 1}))
+            .collect();
+        let mut capped = json!({});
+        propagate_bee_facade(
+            &mut capped,
+            &json!({"bee_facade": {"layer_vtable_calls": long}}),
+        );
+        assert_eq!(
+            capped["bee_facade"]["layer_vtable_calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            32
+        );
+        assert_eq!(capped["bee_facade"]["layer_vtable_calls_truncated"], true);
+        // Counters the report omitted stay null rather than reading as zero.
+        assert_eq!(capped["bee_facade"]["effect_layer_hand_outs"], Value::Null);
+    }
+
+    #[test]
     fn structured_worker_report_supplies_bounded_suite_timeline_without_rounding_failure() {
         let boundary_name = format!("A{}Z", "n".repeat(MAX_SUITE_NAME_LEN - 2));
         let boundary_selector = "S".repeat(MAX_SUITE_NAME_LEN);

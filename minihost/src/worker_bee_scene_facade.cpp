@@ -19,6 +19,20 @@ namespace aexcompat::worker_runtime::bee_facade {
 namespace {
 
 std::atomic<uint32_t> g_trap_count{};
+// How many times the effect layer facade was handed out. See
+// prepare_effect_layer.
+std::atomic<uint32_t> g_hand_out_count{};
+// The counter values the current attribution window started from, so a report
+// describes one plug-in rather than everything the process has done.
+//
+// Atomic rather than a plain struct: the render session opens a window on its
+// message-loop thread, and a smart-render worker thread from the outgoing
+// plug-in could in principle still be unwinding when it does. The writes are
+// between plug-ins either way, so no report straddles one - the atomics are
+// here so that "in principle" is not a data race.
+std::atomic<uint32_t> g_window_hand_outs{};
+std::atomic<uint32_t> g_window_traps{};
+std::array<std::atomic<uint32_t>, kLayerVtableSlots> g_window_slots{};
 // The last trap's caller: the raw return address is kept only for the
 // self-test's frame check and is never written out; the classified string is
 // what the stage line carried.
@@ -250,6 +264,11 @@ int32_t clamp_dimension(int32_t value) noexcept {
 }  // namespace
 
 void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcept {
+  // Counted, not just latched: a report that says the facade was handed out
+  // zero times is what separates "a plug-in took the BEE path and the facade
+  // held" from "nothing ever reached the facade", and a sweep cannot tell
+  // those apart from the absence of a trap alone (issue #1264).
+  ++g_hand_out_count;
   const Tables& vtables = tables();
   Objects& graph = objects();
   // Hand-outs from concurrent smart-render threads must not tear each other's
@@ -380,6 +399,75 @@ std::string last_trap_caller() {
 }
 uint32_t observed_call_count(std::size_t layer_slot) noexcept {
   return layer_slot < kLayerVtableSlots ? g_observed_calls[layer_slot].load() : 0;
+}
+
+Counters counters() noexcept {
+  Counters snapshot{};
+  snapshot.effect_layer_hand_outs = g_hand_out_count.load();
+  snapshot.traps = g_trap_count.load();
+  for (std::size_t slot = 0; slot < kLayerVtableSlots; ++slot)
+    snapshot.layer_vtable_calls[slot] = g_observed_calls[slot].load();
+  return snapshot;
+}
+
+void begin_attribution_window() noexcept {
+  g_window_hand_outs.store(g_hand_out_count.load());
+  g_window_traps.store(g_trap_count.load());
+  for (std::size_t slot = 0; slot < kLayerVtableSlots; ++slot)
+    g_window_slots[slot].store(g_observed_calls[slot].load());
+}
+
+std::string report_json() {
+  // The positive half of what the traps already report, and deliberately named
+  // for what it counts rather than for what one would like to conclude from
+  // it.
+  //
+  // `effect_layer_hand_outs` counts the AEGP_GetEffectLayer calls that were
+  // answered - a bad effect ref or a null out-parameter is refused before the
+  // hand-out and does not count. That handle is also an ordinary AEGP_LayerH,
+  // so a plug-in that never touches BEE at all increments it: measured across
+  // the 304-AEX corpus, 11 plug-ins do and only 4 of them import BEE.dll. A
+  // non-zero count means "was given the effect layer", not "used it as a BEE
+  // object".
+  //
+  // `layer_vtable_calls` counts dispatches through the BEE_AVLayer vtable
+  // slots this host implements. What it cannot see is the traffic the ABI
+  // notes at the top of this file say dominates: BEE.dll's exports mostly read
+  // the graph by offset (layer+0x260, item+0x38, project+0xe8), and a field
+  // read executes none of this host's code. So an empty list means "dispatched
+  // no vtable slot", not "did not use the facade" - ShapeBlur reads the
+  // project colour settings through the parent comp and shows up empty here.
+  //
+  // What the pair does settle is the question that has no other answer: an
+  // empty `unsupported_suite_calls` on its own cannot distinguish a slot that
+  // held from a slot nothing reached, and `layer_vtable_calls` names the slots
+  // that were taken (issue #1264).
+  //
+  // Counted against the current attribution window, not the process. Both
+  // multi-plug-in routes open one per plug-in - the discovery session at each
+  // inspect column, the render session at each swap - because a whole-process
+  // counter would report the earlier plug-ins' activity on every later record,
+  // the exact false positive this exists to remove.
+  //
+  // Only non-zero slots are listed. Five of the slots are implemented and the
+  // rest are traps that can never increment, so this is about keeping the
+  // record free of entries that are structurally always zero.
+  std::ostringstream json;
+  json << ",\"bee_facade\":{\"effect_layer_hand_outs\":"
+       << (g_hand_out_count.load() - g_window_hand_outs.load())
+       << ",\"trap_count\":" << (g_trap_count.load() - g_window_traps.load())
+       << ",\"layer_vtable_calls\":[";
+  bool first = true;
+  for (std::size_t slot = 0; slot < kLayerVtableSlots; ++slot) {
+    const uint32_t calls =
+        g_observed_calls[slot].load() - g_window_slots[slot].load();
+    if (calls == 0) continue;
+    if (!first) json << ',';
+    first = false;
+    json << "{\"slot\":" << slot << ",\"call_count\":" << calls << '}';
+  }
+  json << "]}";
+  return json.str();
 }
 
 namespace {
@@ -576,6 +664,50 @@ bool selftest() {
               caller.find('=') == std::string::npos &&
               !self_base.empty() && caller.substr(0, plus) == self_base,
           "trap caller classification is not <this module>+0x<rva>");
+  }
+  // What the report says, and what it is measured against. The window is the
+  // part worth pinning: the discovery closure session runs many plug-ins
+  // through one process, so a report built from whole-process counters would
+  // attribute an earlier plug-in's facade activity to a later one (issue
+  // #1264). Everything below is measured from a window opened here, with the
+  // process totals deliberately non-zero beforehand (the traps above ran), so
+  // a report that ignored the window would fail these.
+  {
+    begin_attribution_window();
+    const auto typed = reinterpret_cast<IsLayerType>(vtable[kLayerSlotIsLayerType]);
+    typed(&layer, 0);
+    typed(&layer, 0);
+    prepare_effect_layer(layer, SceneValues{});
+
+    const std::string report = report_json();
+    check(report.rfind(",\"bee_facade\":{", 0) == 0,
+          "the facade report does not open with its own key");
+    // The needles carry the field's terminating comma: without it
+    // `"effect_layer_hand_outs":1` also matches inside `...":10`, so a
+    // serializer that ran the value into something longer would pass.
+    check(report.find("\"effect_layer_hand_outs\":1,") != std::string::npos,
+          "the facade report does not count the window's hand-out");
+    check(report.find("\"trap_count\":0,") != std::string::npos,
+          "the facade report counts traps from before the window");
+    check(report.find("{\"slot\":" + std::to_string(kLayerSlotIsLayerType) +
+                      ",\"call_count\":2}") != std::string::npos,
+          "the facade report does not carry the slot the window took");
+    // Slots outside the window are absent rather than listed as zero - which
+    // includes slots whose process total is non-zero from earlier in this
+    // self-test, so this also pins that the window is subtracted.
+    for (std::size_t slot = 0; slot < kLayerVtableSlots; ++slot) {
+      if (slot == kLayerSlotIsLayerType) continue;
+      check(report.find("{\"slot\":" + std::to_string(slot) + ',') ==
+                std::string::npos,
+            "the facade report lists a slot the window did not take");
+    }
+
+    // The counters themselves keep the process totals; only the report is
+    // windowed.
+    const Counters totals = counters();
+    check(totals.layer_vtable_calls[kLayerSlotIsLayerType] >= 2 &&
+              totals.traps >= 5,
+          "the counters lost the process totals the window subtracts from");
   }
   // Leave the shared graph as a fresh hand-out would (every AEGP_GetEffectLayer
   // re-publishes anyway).

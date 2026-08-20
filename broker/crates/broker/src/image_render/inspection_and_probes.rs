@@ -85,6 +85,7 @@ fn inspect_experimental_impl(
     if let Some(report) = &worker_report {
         propagate_missing_suites(&mut diagnostics, report);
         propagate_unsupported_suite_calls(&mut diagnostics, report);
+        propagate_bee_facade(&mut diagnostics, report);
         propagate_suite_call_slot_probe(&mut diagnostics, report);
         propagate_selector_invocations(&mut diagnostics, report);
         propagate_host_callback_timeline(&mut diagnostics, report);
