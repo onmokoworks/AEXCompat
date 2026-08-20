@@ -4472,6 +4472,89 @@ fn get_system_info_rejects_null_and_unwritable_outputs() {
 }
 
 #[test]
+fn get_startup_info_w_writes_the_deterministic_win64_layout() {
+    const GET_STARTUP_INFO: u64 = STUB_BASE + 0x1a8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_STARTUP_INFO,
+            "KERNEL32.DLL",
+            "GetStartupInfoW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetStartupInfoW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetStartupInfoW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = engine.allocate(104, 8).unwrap();
+    engine.write(output, &[0xa5; 104]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RAX, 0x1234).unwrap();
+    engine
+        .call_win64(GET_STARTUP_INFO, [output, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0x1234);
+    let startup_info = engine.unicorn.mem_read_as_vec(output, 104).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(startup_info[..4].try_into().unwrap()),
+        104
+    );
+    assert!(startup_info[4..].iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn get_startup_info_w_rejects_null_and_unwritable_outputs() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_get_startup_info_w(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("GetStartupInfoW output pointer is null")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_get_startup_info_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| {
+                error.contains("output 0xdeadbeef") && error.contains("not fully writable")
+            })
+    );
+
+    let boundary = DATA_BASE + PAGE_SIZE - 52;
+    let sentinel = [0x5a; 52];
+    engine.write(boundary, &sentinel).unwrap();
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, boundary)
+        .unwrap();
+    emulate_get_startup_info_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not fully writable"))
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 52).unwrap(),
+        sentinel
+    );
+}
+
+#[test]
 fn is_debugger_present_is_false_deterministic_and_library_scoped() {
     const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);
