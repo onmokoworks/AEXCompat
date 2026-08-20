@@ -1,9 +1,11 @@
+import dis
 import json
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
+import _native_selftest
 import pytest
 
 
@@ -196,6 +198,51 @@ def _manifest_entries(path):
     return set(entries)
 
 
+def _calls_native_selftest_run(function, seen=None):
+    if seen is None:
+        seen = set()
+    if function in seen:
+        return False
+    seen.add(function)
+    code = getattr(function, "__code__", None)
+    globals_ = getattr(function, "__globals__", {})
+    if code is None:
+        return False
+
+    instructions = tuple(dis.get_instructions(code))
+    for index, instruction in enumerate(instructions):
+        if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}:
+            continue
+        value = globals_.get(instruction.argval)
+        if value is _native_selftest.run:
+            return True
+        if value is _native_selftest and index + 1 < len(instructions):
+            following = instructions[index + 1]
+            if following.opname in {"LOAD_ATTR", "LOAD_METHOD"} and following.argval == "run":
+                return True
+
+    for instruction in instructions:
+        if instruction.opname not in {"LOAD_GLOBAL", "LOAD_NAME"}:
+            continue
+        helper = globals_.get(instruction.argval)
+        if (
+            callable(helper)
+            and getattr(helper, "__globals__", None) is globals_
+            and _calls_native_selftest_run(helper, seen)
+        ):
+            return True
+    return False
+
+
+def _native_selftest_run_node_ids(items):
+    node_ids = set()
+    for item in items:
+        function = getattr(item, "obj", None)
+        if _calls_native_selftest_run(function):
+            node_ids.add(item.nodeid.replace("\\", "/"))
+    return node_ids
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--run-local-artifact-tests",
@@ -247,11 +294,24 @@ def pytest_collection_modifyitems(config, items):
     if config.getoption("--validate-local-artifact-manifest"):
         collected = {item.nodeid.replace("\\", "/") for item in items}
         required = set(all_entries)
+        built_artifact_entries = next(
+            entries
+            for _, marker, _, _, entries in manifests
+            if marker == "built_artifact"
+        )
         missing = sorted(required - collected)
         if missing:
             raise pytest.UsageError(
                 "local-artifact manifest contains uncollected node ids: "
                 + ", ".join(missing)
+            )
+        unregistered_native_selftests = sorted(
+            _native_selftest_run_node_ids(items) - built_artifact_entries
+        )
+        if unregistered_native_selftests:
+            raise pytest.UsageError(
+                "tests that call _native_selftest.run are absent from "
+                "built_artifact_tests.txt: " + ", ".join(unregistered_native_selftests)
             )
 
     # canonical_release_worker (minihost の MSVC ビルド、数分) を含む
