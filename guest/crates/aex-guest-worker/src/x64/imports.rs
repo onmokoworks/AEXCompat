@@ -73,6 +73,8 @@ enum LegacyWin64Import {
     GetSystemInfo,
     GetStartupInfoW,
     RtlCaptureContext,
+    GetStdHandle,
+    GetConsoleMode,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -304,6 +306,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetStartupInfoW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "RtlCaptureContext") => LegacyWin64Import::RtlCaptureContext,
         (_, "RtlCaptureContext") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetStdHandle") => LegacyWin64Import::GetStdHandle,
+        (_, "GetStdHandle") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetConsoleMode") => LegacyWin64Import::GetConsoleMode,
+        (_, "GetConsoleMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -1005,6 +1011,30 @@ fn install_win64_import(
                     "install RtlCaptureContext import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_rtl_capture_context(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetStdHandle => {
+                uc(
+                    "write GetStdHandle return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetStdHandle import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_std_handle(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetConsoleMode => {
+                uc(
+                    "write GetConsoleMode return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install GetConsoleMode import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_console_mode(unicorn);
                     }),
                 )?;
             }
@@ -3011,6 +3041,35 @@ fn emulate_rtl_capture_context(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         let _ = unicorn.emu_stop();
     }
+}
+
+fn emulate_get_std_handle(unicorn: &mut Unicorn<'_, GuestState>) {
+    const STD_INPUT_HANDLE: u32 = (-10i32) as u32;
+    const STD_OUTPUT_HANDLE: u32 = (-11i32) as u32;
+    const STD_ERROR_HANDLE: u32 = (-12i32) as u32;
+    const INVALID_HANDLE_VALUE: u64 = u64::MAX;
+    let selector = read_win64_import_argument(unicorn, 0).unwrap_or_default() as u32;
+    let returned = match selector {
+        STD_INPUT_HANDLE => WINDOWS_STANDARD_INPUT_TOKEN,
+        STD_OUTPUT_HANDLE => WINDOWS_STANDARD_OUTPUT_TOKEN,
+        STD_ERROR_HANDLE => WINDOWS_STANDARD_ERROR_TOKEN,
+        _ => {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+            INVALID_HANDLE_VALUE
+        }
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, returned);
+}
+
+fn emulate_get_console_mode(unicorn: &mut Unicorn<'_, GuestState>) {
+    let _handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+    let _mode_output = read_win64_import_argument(unicorn, 1).unwrap_or_default();
+    // The synthetic standard streams intentionally model redirected endpoints,
+    // not host console buffers. Windows reports ERROR_INVALID_HANDLE when
+    // GetConsoleMode is used on a redirected pipe/file handle and leaves the
+    // caller's mode storage untouched.
+    unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
 fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {
