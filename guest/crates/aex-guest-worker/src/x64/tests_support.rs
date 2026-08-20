@@ -4777,6 +4777,84 @@ fn get_file_type_rejects_foreign_handles_without_host_descriptor_access() {
 }
 
 #[test]
+fn get_command_line_a_returns_stable_writable_guest_owned_storage() {
+    const GET_COMMAND_LINE: u64 = STUB_BASE + 0x1c8;
+    const COMMAND_LINE: &[u8] = b"\"aex-guest-worker.exe\"\0";
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_COMMAND_LINE,
+            "KERNEL32.DLL",
+            "GetCommandLineA",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetCommandLineA)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetCommandLineA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    initialize_windows_command_line_a(&mut engine).unwrap();
+    let command_line = engine.unicorn.get_data().windows_command_line_a;
+    for _ in 0..2 {
+        assert_eq!(
+            engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(),
+            command_line
+        );
+    }
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(command_line, COMMAND_LINE.len())
+            .unwrap(),
+        COMMAND_LINE
+    );
+    engine.write(command_line + 1, b"A").unwrap();
+    assert_eq!(
+        engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(),
+        command_line
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(command_line + 1, 1).unwrap(),
+        b"A"
+    );
+}
+
+#[test]
+fn get_command_line_a_is_session_local_and_fails_closed_if_uninitialized() {
+    const COMMAND_LINE: &[u8] = b"\"aex-guest-worker.exe\"\0";
+    let mut first = test_engine(&[0xc3]);
+    initialize_windows_command_line_a(&mut first).unwrap();
+    let first_pointer = first.unicorn.get_data().windows_command_line_a;
+    first.write(first_pointer + 1, b"X").unwrap();
+
+    let mut second = test_engine(&[0xc3]);
+    initialize_windows_command_line_a(&mut second).unwrap();
+    let second_pointer = second.unicorn.get_data().windows_command_line_a;
+    emulate_get_command_line_a(&mut second.unicorn);
+    assert_eq!(
+        second.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        second_pointer
+    );
+    assert_eq!(
+        second
+            .unicorn
+            .mem_read_as_vec(second_pointer, COMMAND_LINE.len())
+            .unwrap(),
+        COMMAND_LINE
+    );
+
+    let mut uninitialized = test_engine(&[0xc3]);
+    emulate_get_command_line_a(&mut uninitialized.unicorn);
+    assert_eq!(uninitialized.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        uninitialized.unicorn.get_data().callback_error.as_deref(),
+        Some("GetCommandLineA process string is not initialized")
+    );
+}
+
+#[test]
 fn is_debugger_present_is_false_deterministic_and_library_scoped() {
     const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);

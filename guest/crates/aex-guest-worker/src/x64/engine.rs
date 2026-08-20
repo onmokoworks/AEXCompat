@@ -894,6 +894,7 @@ impl GuestEngine<'static> {
             entry_export: image_report.entry_export,
             trace_modules,
         };
+        initialize_windows_command_line_a(&mut engine)?;
         if let Some(table) = image.string_table() {
             let empty = engine.allocate(1, 1)?;
             engine.write(empty, &[0])?;
@@ -2068,4 +2069,12 @@ impl GuestEngine<'static> {
     pub fn parameters(&self) -> &[GuestParam] {
         &self.unicorn.get_data().params
     }
+}
+
+fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
+    const WINDOWS_COMMAND_LINE_A: &[u8] = b"\"aex-guest-worker.exe\"\0";
+    let command_line = engine.allocate(WINDOWS_COMMAND_LINE_A.len(), 1)?;
+    engine.write(command_line, WINDOWS_COMMAND_LINE_A)?;
+    engine.unicorn.get_data_mut().windows_command_line_a = command_line;
+    Ok(())
 }
