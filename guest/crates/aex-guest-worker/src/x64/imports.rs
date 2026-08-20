@@ -38,6 +38,7 @@ enum LegacyWin64Import {
     MsvcpMutexUnlock,
     MsvcpMutexDestroy,
     MsvcpHardwareConcurrency,
+    ShGetFolderPathA,
     MsvcpExceptionPtrCreate,
     MsvcpExceptionPtrCopy,
     MsvcpExceptionPtrAssign,
@@ -580,6 +581,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("msvcp140.dll", "_Thrd_hardware_concurrency") => {
             LegacyWin64Import::MsvcpHardwareConcurrency
         }
+        ("shell32.dll", "SHGetFolderPathA") => LegacyWin64Import::ShGetFolderPathA,
+        (_, "SHGetFolderPathA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, symbol)
             if matches!(
                 symbol,
@@ -876,6 +879,18 @@ fn install_win64_import(
                 uc(
                     "install deterministic hardware concurrency import",
                     unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                )?;
+            }
+            LegacyWin64Import::ShGetFolderPathA => {
+                uc(
+                    "write SHGetFolderPathA return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install bounded SHGetFolderPathA import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_sh_get_folder_path_a(unicorn);
+                    }),
                 )?;
             }
             LegacyWin64Import::MsvcpExceptionPtrCreate
@@ -4905,6 +4920,43 @@ fn guest_range_has_permission(
         cursor = next;
     }
     Ok(true)
+}
+
+fn emulate_sh_get_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    const CSIDL_COMMON_APPDATA: u32 = 0x23;
+    const CSIDL_PROGRAM_FILES: u32 = 0x26;
+    const SHGFP_TYPE_CURRENT: u32 = 0;
+    const COMMON_APPDATA_PATH: &[u8] = b"C:\\ProgramData\0";
+    const PROGRAM_FILES_PATH: &[u8] = b"C:\\Program Files\0";
+
+    let result = (|| {
+        let hwnd = read_win64_import_argument(unicorn, 0).map_err(|_| HRESULT_E_INVALIDARG)?;
+        let csidl =
+            read_win64_import_argument(unicorn, 1).map_err(|_| HRESULT_E_INVALIDARG)? as u32;
+        let token = read_win64_import_argument(unicorn, 2).map_err(|_| HRESULT_E_INVALIDARG)?;
+        let flags =
+            read_win64_import_argument(unicorn, 3).map_err(|_| HRESULT_E_INVALIDARG)? as u32;
+        let output = read_win64_import_argument(unicorn, 4).map_err(|_| HRESULT_E_INVALIDARG)?;
+        if hwnd != 0 || token != 0 || flags != SHGFP_TYPE_CURRENT || output == 0 {
+            return Err(HRESULT_E_INVALIDARG);
+        }
+        let path = match csidl {
+            CSIDL_COMMON_APPDATA => COMMON_APPDATA_PATH,
+            CSIDL_PROGRAM_FILES => PROGRAM_FILES_PATH,
+            _ => return Err(HRESULT_E_INVALIDARG),
+        };
+        if !guest_range_has_permission(unicorn, output, WINDOWS_MAX_PATH_BYTES, Prot::WRITE)
+            .unwrap_or(false)
+        {
+            return Err(HRESULT_E_INVALIDARG);
+        }
+        unicorn
+            .mem_write(output, path)
+            .map_err(|_| HRESULT_E_INVALIDARG)?;
+        Ok(0)
+    })();
+    let returned = result.unwrap_or_else(|error| error);
+    let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(returned));
 }
 
 fn emulate_nt_write_file(unicorn: &mut Unicorn<'_, GuestState>) {

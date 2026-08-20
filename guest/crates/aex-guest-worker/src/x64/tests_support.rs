@@ -2125,6 +2125,140 @@ fn msvcp_mutex_requires_a_complete_writable_guest_object_before_state_changes() 
 }
 
 #[test]
+fn sh_get_folder_path_a_returns_deterministic_observed_guest_paths() {
+    const SH_GET_FOLDER_PATH_A: u64 = STUB_BASE + 0x310;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        SH_GET_FOLDER_PATH_A,
+        "SHELL32.DLL",
+        "SHGetFolderPathA",
+    )
+    .unwrap();
+    let output = DATA_BASE + 0x100;
+
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(SH_GET_FOLDER_PATH_A, [0, 0x23, 0, 0, output, 0],)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 15).unwrap(),
+        b"C:\\ProgramData\0"
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+    engine.unicorn.mem_write(output, &[0xcc; 32]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(SH_GET_FOLDER_PATH_A, [0, 0x26, 0, 0, output, 0],)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 17).unwrap(),
+        b"C:\\Program Files\0"
+    );
+    let mut other = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut other.unicorn,
+        SH_GET_FOLDER_PATH_A,
+        "shell32.dll",
+        "SHGetFolderPathA",
+    )
+    .unwrap();
+    assert_eq!(
+        other
+            .call_win64(SH_GET_FOLDER_PATH_A, [0, 0x23, 0, 0, output, 0],)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        other.unicorn.mem_read_as_vec(output, 15).unwrap(),
+        b"C:\\ProgramData\0"
+    );
+    assert_eq!(other.unicorn.get_data().windows_last_error, 0);
+}
+
+#[test]
+fn sh_get_folder_path_a_rejects_unobserved_inputs_without_mutating_output() {
+    const SH_GET_FOLDER_PATH_A: u64 = STUB_BASE + 0x320;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        SH_GET_FOLDER_PATH_A,
+        "shell32.dll",
+        "SHGetFolderPathA",
+    )
+    .unwrap();
+    let output = DATA_BASE + 0x300;
+    for arguments in [
+        [1, 0x23, 0, 0, output, 0],
+        [0, 0x24, 0, 0, output, 0],
+        [0, 0x23, 1, 0, output, 0],
+        [0, 0x23, 0, 1, output, 0],
+        [0, 0x23, 0, 0, 0, 0],
+    ] {
+        engine.unicorn.mem_write(output, &[0xa5; 32]).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x5678;
+        assert_eq!(
+            engine.call_win64(SH_GET_FOLDER_PATH_A, arguments).unwrap(),
+            HRESULT_E_INVALIDARG as u64
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 32).unwrap(),
+            vec![0xa5; 32]
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x5678);
+    }
+
+    let boundary = DATA_BASE + PAGE_SIZE - (WINDOWS_MAX_PATH_BYTES - 1);
+    engine.unicorn.mem_write(boundary, &[0x6d; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(SH_GET_FOLDER_PATH_A, [0, 0x23, 0, 0, boundary, 0],)
+            .unwrap(),
+        HRESULT_E_INVALIDARG as u64
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 16).unwrap(),
+        vec![0x6d; 16]
+    );
+
+    engine
+        .unicorn
+        .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(SH_GET_FOLDER_PATH_A, [0, 0x26, 0, 0, output, 0],)
+            .unwrap(),
+        HRESULT_E_INVALIDARG as u64
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 32).unwrap(),
+        vec![0xa5; 32]
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn sh_get_folder_path_a_is_shell32_only() {
+    assert_eq!(
+        dispatch_win64_import("shell32.dll", "SHGetFolderPathA"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::ShGetFolderPathA)
+    );
+    for library in ["kernel32.dll", "fixture.dll", "shfolder.dll"] {
+        assert_eq!(
+            dispatch_win64_import(library, "SHGetFolderPathA"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+}
+
+#[test]
 fn msvcp_exception_ptr_null_lifecycle_is_deterministic_and_library_qualified() {
     const BASE: u64 = STUB_BASE + 0x5b0;
     const SYMBOLS: [(&str, LegacyWin64Import); 6] = [
