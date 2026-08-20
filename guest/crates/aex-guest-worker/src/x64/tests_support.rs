@@ -6096,8 +6096,7 @@ fn raise_exception_reports_bounded_msvc_record_without_host_dispatch() {
     const RAISE: u64 = STUB_BASE + 0x198;
     let mut engine = test_engine(&[0xc3]);
     assert_eq!(
-        install_win64_import(&mut engine.unicorn, RAISE, "KERNEL32.DLL", "RaiseException")
-            .unwrap(),
+        install_win64_import(&mut engine.unicorn, RAISE, "KERNEL32.DLL", "RaiseException").unwrap(),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::RaiseException)
     );
     assert_eq!(
@@ -6151,19 +6150,17 @@ fn raise_exception_validates_flags_count_and_complete_parameter_array() {
             DATA_BASE + DATA_SIZE - 8,
             "is not fully readable for 2 entries",
         ),
-        (
-            0,
-            1,
-            u64::MAX - 3,
-            "is not fully readable for 1 entries",
-        ),
+        (0, 1, u64::MAX - 3, "is not fully readable for 1 entries"),
     ];
     for (flags, count, arguments, expected) in cases {
         let mut engine = test_engine(&[0xc3]);
         engine.unicorn.reg_write(RegisterX86::RCX, 0x1234).unwrap();
         engine.unicorn.reg_write(RegisterX86::RDX, flags).unwrap();
         engine.unicorn.reg_write(RegisterX86::R8, count).unwrap();
-        engine.unicorn.reg_write(RegisterX86::R9, arguments).unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::R9, arguments)
+            .unwrap();
         emulate_raise_exception(&mut engine.unicorn);
         assert!(
             engine

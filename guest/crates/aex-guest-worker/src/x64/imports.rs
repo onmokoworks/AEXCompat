@@ -1758,7 +1758,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::RaiseException => {
-                uc("write RaiseException trap", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write RaiseException trap",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install RaiseException import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -6453,9 +6456,9 @@ fn emulate_raise_exception(unicorn: &mut Unicorn<'_, GuestState>) {
         let mut values = Vec::with_capacity(count as usize);
         for index in 0..count {
             let address = arguments + u64::from(index) * 8;
-            let bytes = unicorn
-                .mem_read_as_vec(address, 8)
-                .map_err(|error| format!("RaiseException parameter {index} read failed: {error}"))?;
+            let bytes = unicorn.mem_read_as_vec(address, 8).map_err(|error| {
+                format!("RaiseException parameter {index} read failed: {error}")
+            })?;
             values.push(u64::from_le_bytes(bytes.try_into().map_err(|_| {
                 format!("RaiseException parameter {index} has the wrong size")
             })?));
