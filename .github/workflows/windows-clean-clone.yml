@@ -32,15 +32,16 @@ env:
   SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
 
 jobs:
-  # broker workspace のビルドとテスト。実測でここが一番長いので critical path。
-  rust-broker:
+  # cargo build だけを先に済ませて実行ファイルを配る。python-tests は cargo test
+  # の結果ではなくこの成果物しか要らないので、テストの完走を待たせない。
+  rust-build:
     # self-hosted は使わない (#1457)。public repository では fork PR が任意の
     # コードを持ち込むので、物理ワークステーションに届く経路自体を残さない。
     runs-on: windows-latest
     timeout-minutes: 60
     env:
       PYTHONUTF8: "1"
-      # built_artifact テストの broker/harness を、下の `cargo build --workspace`
+      # built_artifact テストの broker/harness を、この `cargo build --workspace`
       # が作る debug から取る。release に戻すと同じクレートを二度作る (#945)。
       AEXCOMPAT_CARGO_PROFILE: debug
       # mtime 復元 (#935) が拾えなかった、実際に変更されたクレートを sccache が
@@ -76,20 +77,12 @@ jobs:
           rustfmt --edition 2024 --check --config skip_children=true @files
 
       # ここを `cargo check` に戻さない: rmeta は codegen に使い回されず、後続の
-      # build/test と同じコードを二度検査するだけになる (#940)。テスト実行と同じ
-      # feature 解決で fixture を作るので、テスト側が `cargo build -p ...` を
-      # 起動して fingerprint を奪い合わない (#937)。
+      # build/test と同じコードを二度検査するだけになる (#940)。
       - name: Build the workspace fixtures
         working-directory: broker
         run: cargo build --workspace --locked
 
-      - name: Test Rust workspace
-        working-directory: broker
-        shell: pwsh
-        run: cargo test --workspace --locked
-
-      # python-tests が使う実行ファイルだけを渡す。target 全体は数 GB あるうえ、
-      # 向こうは deps を要らない。
+      # deps/ は要らない。python-tests が探すのは直下の実行ファイルと FFI dll。
       - name: Publish broker binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -105,6 +98,49 @@ jobs:
         if: always()
         run: sccache --show-stats
 
+  # `cargo test --workspace` は native 成果物が要る。1 本は無いと fail-closed に
+  # 落ち (image_render の "CI must build aex_l2_worker.exe before broker tests")、
+  # ほかに probe AEX が無いと黙って no-op になるテストが 23 本ある (#900)。
+  # 成果物の不在をカバレッジと取り違えないため、両方を揃えてから走らせる。
+  rust-test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    needs: [native-workers, native-probes]
+    env:
+      PYTHONUTF8: "1"
+      AEXCOMPAT_CARGO_PROFILE: debug
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust-workspaces: broker
+          cache-key: broker
+          save-cache: 'false'
+
+      - name: Download native workers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-workers
+          path: target
+      - name: Download native probes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-probes
+          path: target
+
+      - name: Test Rust workspace
+        working-directory: broker
+        shell: pwsh
+        run: cargo test --workspace --locked
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
   # broker 外の Cargo ルート (#899, #917)。互いに独立なので matrix で横に並べる。
   bridges:
     runs-on: windows-latest
@@ -112,10 +148,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # args は分割前の workflow が root ごとに使っていたものをそのまま
+        # 持ってきている。guest だけ --workspace が付くのは元からで、
+        # 揃えると走るテストが変わる。
         include:
-          # args は分割前の workflow が root ごとに使っていたものをそのまま
-          # 持ってきている。guest だけ --workspace が付くのは元からで、
-          # 揃えると走るテストが変わる。
           - name: aviutl2-multifilter
             args: --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
             workspace: bridges/aviutl2-multifilter
@@ -150,52 +186,21 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # C++ 側の成果物。broker のビルドとは無関係なので同時に走る。
-  #
-  # 旧 workflow にあった「Rebuild native AEX artifacts after the runtime
-  # harness」はここには無い。あれは同一 runner 上で `cargo test --workspace` が
-  # probe の出力を踏むのを取り消すためのもので、job が分かれた今は起こり得ない。
-  # assert_artifact_fresh (tests/_render_session.py) が要求する mtime 順序は
-  # python-tests 側で作り直す。
-  native:
+  # worker と trace writer。SDK を要らないので (minihost は imports/ の凍結
+  # コントラクトでビルドする) SDK 取得も待たない。
+  native-workers:
     runs-on: windows-latest
     timeout-minutes: 60
     env:
       PYTHONUTF8: "1"
-    outputs:
-      sdk: ${{ steps.sdk.outcome }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      # この job は cmake しか呼ばない。probe の build スクリプトも
-      # resolve-cmake-generator / resolve-build-cmake 経由で cmake を叩くだけで
-      # cargo を使わない。
+      # この job は cmake しか呼ばない。
       - uses: ./.github/actions/ci-setup
         with:
           rust: 'false'
-
-      # SDK zip を置いた R2 バケットは非公開で、資格情報は secrets にしかない。
-      # fork PR は secrets を受け取れないので、fork PR はここから下の SDK 依存
-      # ステップに到達してはならない。job ごと落とすのではなく個々のステップを
-      # 条件付けし、source-only の検証は fork でも走らせる。
-      #
-      # 条件は repository の可視性ではなく secrets が渡るかどうかで書く。
-      # `github.event.repository.private` で書くと public 化した時点で常に false
-      # になり、SDK 取得と下流が丸ごと skip され、それを検出するはずのガードまで
-      # 同じ条件で skip されて、中身の抜けた CI が緑になる (#1457)。
-      - name: Fetch After Effects SDK
-        id: sdk
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: ./.github/actions/fetch-ae-sdk
-        with:
-          bucket: ${{ env.SDK_BUCKET }}
-          object-key: ${{ env.SDK_OBJECT_KEY }}
-          asset-name: ${{ env.SDK_ASSET }}
-          expected-sha256: ${{ env.SDK_SHA256 }}
-          r2-endpoint: ${{ secrets.R2_SDK_ENDPOINT }}
-          r2-access-key-id: ${{ secrets.R2_SDK_ACCESS_KEY_ID }}
-          r2-secret-access-key: ${{ secrets.R2_SDK_SECRET_ACCESS_KEY }}
 
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。
@@ -228,6 +233,64 @@ jobs:
           cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
           cmake --build target\instruments-build --target trace_writer_selftest || exit /b 1
           dir /b target\instruments-build\trace_writer_selftest.exe
+
+
+      # `aex_*.exe` に絞らない。minihost-build 直下には worker 3 本のほかに
+      # native selftest のラッパが 30 本以上あり、pytest がそれらを直接起動する。
+      - name: Publish native workers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-workers
+          path: |
+            target/minihost-build/*.exe
+            target/instruments-build/*.exe
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  # SDK が要る成果物。worker のビルドとは独立なので同時に走る。
+  #
+  # 旧 workflow にあった「Rebuild native AEX artifacts after the runtime
+  # harness」はここには無い。あれは同一 runner 上で `cargo test --workspace` が
+  # probe の出力を踏むのを取り消すためのもので、job が分かれた今は起こり得ない。
+  # assert_artifact_fresh (tests/_render_session.py) が要求する mtime 順序は
+  # python-tests 側で作り直す。
+  native-probes:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+    outputs:
+      sdk: ${{ steps.sdk.outcome }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
+
+      # SDK zip を置いた R2 バケットは非公開で、資格情報は secrets にしかない。
+      # fork PR は secrets を受け取れないので、fork PR はここから下の SDK 依存
+      # ステップに到達してはならない。job ごと落とすのではなく個々のステップを
+      # 条件付けし、source-only の検証は fork でも走らせる。
+      #
+      # 条件は repository の可視性ではなく secrets が渡るかどうかで書く。
+      # `github.event.repository.private` で書くと public 化した時点で常に false
+      # になり、SDK 取得と下流が丸ごと skip され、それを検出するはずのガードまで
+      # 同じ条件で skip されて、中身の抜けた CI が緑になる (#1457)。
+      - name: Fetch After Effects SDK
+        id: sdk
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: ./.github/actions/fetch-ae-sdk
+        with:
+          bucket: ${{ env.SDK_BUCKET }}
+          object-key: ${{ env.SDK_OBJECT_KEY }}
+          asset-name: ${{ env.SDK_ASSET }}
+          expected-sha256: ${{ env.SDK_SHA256 }}
+          r2-endpoint: ${{ secrets.R2_SDK_ENDPOINT }}
+          r2-access-key-id: ${{ secrets.R2_SDK_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SDK_SECRET_ACCESS_KEY }}
 
       # abi_layout_probe の static_assert は、生成 ABI コントラクトのオフセットを
       # 実 SDK の struct レイアウトに固定している唯一の照合で、ビルドしない限り
@@ -320,17 +383,16 @@ jobs:
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
 
-      # 成果物だけを渡す。CMake の build ディレクトリごと送ると数百 MB になり、
-      # python-tests 側では使わない。列挙したパスの共通祖先が target なので、
-      # 受け側は path: target で元の配置に戻る。
-      - name: Publish native artifacts
+      # SDK を取れなかった run (fork PR) でも gpu-effects の fixture は生成されて
+      # いるので、artifact 自体は必ず 1 件以上になる。SDK 依存の中身が入って
+      # いるかどうかは、この job の `sdk` output で下流が判断する。
+      - name: Publish native probes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: native-artifacts
+          name: native-probes
           path: |
-            target/minihost-build/aex_*.exe
-            target/instruments-build/*.exe
             target/*-probe-build/**/*.aex
+            target/instruments-build/abi_layout_probe.exe
             target/sdk-fixtures/**
             target/gpu-effects/**
           if-no-files-found: error
@@ -340,7 +402,7 @@ jobs:
   python-tests:
     runs-on: windows-latest
     timeout-minutes: 60
-    needs: [rust-broker, native]
+    needs: [rust-build, native-workers, native-probes]
     env:
       PYTHONUTF8: "1"
       AEXCOMPAT_CARGO_PROFILE: debug
@@ -355,7 +417,7 @@ jobs:
           save-cache: 'false'
 
       # pytest が起動するテストの一部は SDK ヘッダを要るビルドを自前で走らせる。
-      # native job が取ったのと同じ zip を取り直す (4.6 MiB、実測 4 秒)。
+      # native-probes が取ったのと同じ zip を取り直す (4.6 MiB、実測 4 秒)。
       - name: Fetch After Effects SDK
         id: sdk
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -374,11 +436,15 @@ jobs:
         with:
           name: broker-debug-bins
           path: broker/target/debug
-
-      - name: Download native artifacts
+      - name: Download native workers
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: native-artifacts
+          name: native-workers
+          path: target
+      - name: Download native probes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-probes
           path: target
 
       # 一部の built_artifact テストは worker を multi-config 時代の固定パスから
@@ -413,7 +479,7 @@ jobs:
           $later = $base.AddSeconds(5)
           foreach ($item in $artifacts) { $item.LastWriteTime = $later }
           Write-Host "freshness_runtime_inputs=$($inputs.Count) freshness_artifacts=$($artifacts.Count)"
-          if ('${{ needs.native.outputs.sdk }}' -eq 'success' -and $artifacts.Count -eq 0) {
+          if ('${{ needs.native-probes.outputs.sdk }}' -eq 'success' -and $artifacts.Count -eq 0) {
             throw 'the native job built probe AEX artifacts but none arrived here'
           }
 
@@ -422,7 +488,7 @@ jobs:
       # カバレッジと取り違えないよう fail-closed で検査する。job 分割後は
       # artifact の転送漏れもここで捕まる。
       - name: Check native parameter-animation coverage inputs
-        if: needs.native.outputs.sdk == 'success'
+        if: needs.native-probes.outputs.sdk == 'success'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -444,7 +510,7 @@ jobs:
           Write-Host "coverage_source_commit=$commit"
 
       - name: Check audio-only passthrough coverage inputs
-        if: needs.native.outputs.sdk == 'success'
+        if: needs.native-probes.outputs.sdk == 'success'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -474,10 +540,10 @@ jobs:
       - name: Run Python tests
         shell: cmd
         env:
-          # native job がビルド済みの worker を canonical_release_worker fixture に
+          # native-workers job がビルド済みの worker を canonical_release_worker fixture に
           # 渡し、二重ビルドを避ける (#681)。
           AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\minihost-build\aex_render_worker.exe
-          SDK_READY: ${{ needs.native.outputs.sdk }}
+          SDK_READY: ${{ needs.native-probes.outputs.sdk }}
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           set "SDK_FLAGS="
@@ -491,7 +557,7 @@ jobs:
       # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
       # 不在の inline skip で黙って skip されたら fail。
       - name: Fail if SDK or built-artifact tests were skipped
-        if: needs.native.outputs.sdk == 'success'
+        if: needs.native-probes.outputs.sdk == 'success'
         shell: pwsh
         run: |
           $leaks = Select-String -Path pytest-output.txt -Pattern 'SKIPPED' |
@@ -502,7 +568,7 @@ jobs:
           }
 
       - name: Record public PF layer parameter probe identity
-        if: success() && needs.native.outputs.sdk == 'success'
+        if: success() && needs.native-probes.outputs.sdk == 'success'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -521,7 +587,7 @@ jobs:
           Write-Host "published_probe_sha256=$hash"
 
       - name: Publish verified public PF layer parameter probe
-        if: success() && needs.native.outputs.sdk == 'success'
+        if: success() && needs.native-probes.outputs.sdk == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pf-layer-param-probe-windows-x86_64-${{ github.sha }}
