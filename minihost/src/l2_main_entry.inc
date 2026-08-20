@@ -141,7 +141,8 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
     std::array<std::byte, kInSize>& input, std::array<std::byte, kOutSize>& output,
     int32_t global_error, int32_t params_error,
     std::array<int32_t, 5>& lifecycle_errors, bool& lifecycle_data_null,
-    bool& user_changed_ok, bool& conditional_ui_ok) {
+    bool& user_changed_ok, bool& conditional_ui_ok,
+    int32_t layer_width, int32_t layer_height) {
   std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
   std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
   aexcompat::world_safety::EffectWorldStorage lifecycle_world{};
@@ -160,33 +161,12 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
   // world; see copy_world_into_param_def in the render runtimes).
   (void)aexcompat::worker_runtime::pf_world_facade::embed(lifecycle_world.data(), 4);
   std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
-  for (std::size_t i = 0; i < g_params.size(); ++i) {
-    lifecycle_definitions[i + 1] = g_params[i].raw;
-    if (g_params[i].type == 1 || g_params[i].type == 7)
-      write<int32_t>(lifecycle_definitions[i + 1], 56, static_cast<int32_t>(g_params[i].default_value));
-    else if (g_params[i].type == 4)
-      write<int32_t>(lifecycle_definitions[i + 1], 56, g_params[i].default_value != 0 ? 1 : 0);
-    else if (g_params[i].type == 2)
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_value * 65536.0)));
-    else if (g_params[i].type == 10)
-      write<double>(lifecycle_definitions[i + 1], 56, g_params[i].default_value);
-    else if (g_params[i].type == 3)
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
-    else if (g_params[i].type == 6) {
-      write<int32_t>(lifecycle_definitions[i + 1], 56,
-          static_cast<int32_t>(std::round(g_params[i].default_components[0] * 65536.0)));
-      write<int32_t>(lifecycle_definitions[i + 1], 60,
-          static_cast<int32_t>(std::round(g_params[i].default_components[1] * 65536.0)));
-    } else if (g_params[i].type == 18) {
-      for (int component = 0; component < 3; ++component)
-        write<double>(lifecycle_definitions[i + 1], 56 + component * 8,
-            g_params[i].default_components[component]);
-    }
-  }
+  initialize_parameter_definitions(
+      lifecycle_definitions, layer_width, layer_height);
   if (g_user_changed_param_requested &&
-      !apply_requested_assignments(lifecycle_definitions, g_user_changed_parameters)) {
+      !apply_requested_assignments(
+          lifecycle_definitions, g_user_changed_parameters,
+          layer_width, layer_height)) {
     if (global_error == 0)
       invoke_global_setdown(entry, input.data(), output.data());
     return 3;
@@ -262,6 +242,85 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
   lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr &&
       read<void*>(output, kOutFrameData) == nullptr;
   return std::nullopt;
+}
+
+struct L2PointDefaultProbe {
+  bool frame_setup_seen{};
+  std::array<double, 2> point{};
+  std::array<double, 3> point3d{};
+};
+L2PointDefaultProbe g_l2_point_default_probe;
+
+int32_t __cdecl l2_point_default_probe_entry(
+    int32_t selector, void*, void*, void** params, void*, void*) {
+  if (selector != kFrameSetup) return 0;
+  if (!params || !params[1] || !params[2]) return 4;
+  int32_t point_x = 0;
+  int32_t point_y = 0;
+  std::memcpy(&point_x, static_cast<const std::byte*>(params[1]) + 56,
+              sizeof(point_x));
+  std::memcpy(&point_y, static_cast<const std::byte*>(params[1]) + 60,
+              sizeof(point_y));
+  g_l2_point_default_probe.point = {
+      point_x / 65536.0, point_y / 65536.0};
+  for (int component = 0; component < 3; ++component)
+    std::memcpy(&g_l2_point_default_probe.point3d[component],
+                static_cast<const std::byte*>(params[2]) + 56 + component * 8,
+                sizeof(double));
+  g_l2_point_default_probe.frame_setup_seen = true;
+  return 0;
+}
+
+bool verify_l2_point_default_units() {
+  auto& parameter_state =
+      aexcompat::worker_runtime::parameters::state();
+  const auto saved_records = parameter_state.records;
+  const auto saved_timelines = parameter_state.timelines;
+  const bool saved_user_changed_requested = g_user_changed_param_requested;
+  const auto saved_user_changed_parameters = g_user_changed_parameters;
+  parameter_state.records.clear();
+  parameter_state.timelines.clear();
+  g_user_changed_param_requested = false;
+  g_user_changed_parameters.clear();
+
+  aexcompat::worker_runtime::parameters::ParamRecord point{};
+  point.index = 1;
+  point.type = 6;
+  point.component_count = 2;
+  point.default_components = {25.0, 50.0, 0.0};
+  parameter_state.records.push_back(point);
+  aexcompat::worker_runtime::parameters::ParamRecord point3d{};
+  point3d.index = 2;
+  point3d.type = 18;
+  point3d.component_count = 3;
+  point3d.default_components = {25.0, 50.0, 75.0};
+  parameter_state.records.push_back(point3d);
+
+  std::array<std::byte, kInSize> input{};
+  std::array<std::byte, kOutSize> output{};
+  std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
+  bool lifecycle_data_null = false;
+  bool user_changed_ok = false;
+  bool conditional_ui_ok = false;
+  g_l2_point_default_probe = {};
+  const auto lifecycle_exit = run_l2_parameter_lifecycle(
+      &l2_point_default_probe_entry, input, output, 0, 0,
+      lifecycle_errors, lifecycle_data_null, user_changed_ok,
+      conditional_ui_ok, 256, 144);
+  const bool passed = !lifecycle_exit &&
+      g_l2_point_default_probe.frame_setup_seen &&
+      g_l2_point_default_probe.point == std::array<double, 2>{64.0, 72.0} &&
+      g_l2_point_default_probe.point3d ==
+          std::array<double, 3>{64.0, 72.0, 108.0} &&
+      std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(),
+                  [](int32_t error) { return error == 0; }) &&
+      lifecycle_data_null && user_changed_ok && conditional_ui_ok;
+
+  parameter_state.records = saved_records;
+  parameter_state.timelines = saved_timelines;
+  g_user_changed_param_requested = saved_user_changed_requested;
+  g_user_changed_parameters = saved_user_changed_parameters;
+  return passed;
 }
 
 // The worker-entry bootstrap wiring and the selftest command dispatch moved
@@ -2285,6 +2344,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
                  "\"bounded\":true,\"fail_closed\":true}\n";
     return passed ? 0 : 73;
   }
+  if (argc == 2 &&
+      std::wstring(argv[1]) == L"--self-test-l2-point-default-units") {
+    const bool passed = verify_l2_point_default_units();
+    std::cout << "{\"l2_point_default_units\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"width\":256,\"height\":144,"
+                 "\"point\":[64,72],\"point3d\":[64,72,108]}\n";
+    return passed ? 0 : 74;
+  }
   RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
                                   &restore_native_stdout};
   // GPU module-audit preflight (#290): authorize the AEXRMA1-listed GPU runtime
@@ -2934,7 +3002,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   if (!is_rendering_worker()) {
     if (const auto lifecycle_exit = run_l2_parameter_lifecycle(
             entry, input, output, global_error, params_error, lifecycle_errors,
-            lifecycle_data_null, user_changed_ok, conditional_ui_ok))
+            lifecycle_data_null, user_changed_ok, conditional_ui_ok,
+            invocation.external_width, invocation.external_height))
       return session.finish(*lifecycle_exit);
   }
   std::string case_id;
