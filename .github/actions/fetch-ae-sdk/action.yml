@@ -1,0 +1,53 @@
+name: Fetch After Effects SDK
+description: >
+  非公開の R2 バケットから AE SDK zip を取得し、AFTER_EFFECTS_SDK_ROOT を
+  GITHUB_ENV に書く (#1445)。呼び出し側で `id` を付けて `steps.<id>.outcome` を
+  下流ステップの条件に使うこと。
+
+  fork PR に流してはならない。gate は呼び出し側の `if:` で掛ける。ここに
+  gate を持たせると、条件を書き忘れた呼び出しが黙って通る。
+
+inputs:
+  bucket:
+    required: true
+    description: R2 バケット名。
+  object-key:
+    required: true
+    description: バケット内のキー。
+  asset-name:
+    required: true
+    description: ダウンロード先のファイル名。
+  expected-sha256:
+    required: true
+    description: >
+      期待する SHA256。一致しない限り OutFile は作られない
+      (tools/fetch-r2-object.ps1 が .partial 経由で書く)。
+  r2-endpoint:
+    required: true
+    description: R2 の S3 互換エンドポイント。secrets から渡すこと。
+  r2-access-key-id:
+    required: true
+    description: read-only な R2 API トークンのアクセスキー ID。
+  r2-secret-access-key:
+    required: true
+    description: read-only な R2 API トークンのシークレット。
+
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      env:
+        R2_S3_ENDPOINT: ${{ inputs.r2-endpoint }}
+        R2_ACCESS_KEY_ID: ${{ inputs.r2-access-key-id }}
+        R2_SECRET_ACCESS_KEY: ${{ inputs.r2-secret-access-key }}
+      run: |
+        $zip = Join-Path $env:RUNNER_TEMP '${{ inputs.asset-name }}'
+        # hash 照合はスクリプト側で行い、一致しない限り $zip は作られない。
+        & .\tools\fetch-r2-object.ps1 -Bucket '${{ inputs.bucket }}' -Key '${{ inputs.object-key }}' -OutFile $zip -ExpectedSha256 '${{ inputs.expected-sha256 }}'
+        $dest = Join-Path $env:RUNNER_TEMP 'aesdk'
+        Expand-Archive -Path $zip -DestinationPath $dest -Force
+        $root = Join-Path $dest 'AfterEffectsSDK'
+        if (-not (Test-Path (Join-Path $root 'Examples\Headers\AE_Effect.h'))) {
+          throw 'extracted SDK is missing Examples\Headers\AE_Effect.h'
+        }
+        "AFTER_EFFECTS_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

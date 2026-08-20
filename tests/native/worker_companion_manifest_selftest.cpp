@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <system_error>
 
 namespace {
 std::filesystem::path temp_root() {
@@ -13,7 +14,16 @@ std::filesystem::path temp_root() {
   const auto root = std::filesystem::path(base) /
       (L"aexcompat-companion-manifest-" + std::to_wstring(GetCurrentProcessId()));
   std::filesystem::create_directories(root);
-  return root;
+  // GetTempPathW returns whatever TEMP holds, which on hosted CI runners is the
+  // 8.3 short form (C:\Users\RUNNER~1\...). load_manifest requires a path whose
+  // spelling already equals std::filesystem::canonical, so an un-canonicalised
+  // fixture root fails the accept case below for a reason this test is not about
+  // (#1467). Rejecting non-canonical spellings is what the alias case covers, and
+  // that one builds its own alias explicitly.
+  std::error_code error;
+  const auto canonical = std::filesystem::canonical(root, error);
+  assert(!error);
+  return canonical;
 }
 
 void write(const std::filesystem::path& path, const std::string& text) {
