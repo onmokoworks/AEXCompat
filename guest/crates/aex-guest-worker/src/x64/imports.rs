@@ -997,7 +997,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetStdHandle => {
-                uc("write GetStdHandle return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write GetStdHandle return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install GetStdHandle import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
