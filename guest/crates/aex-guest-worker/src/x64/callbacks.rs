@@ -41,6 +41,78 @@ fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_register_ui(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    let registration = (|| -> Result<Option<CustomUiRegistration>, String> {
+        let effect_ref = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("register_ui effect ref: {error}"))?;
+        let info = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("register_ui info: {error}"))?;
+        if effect_ref != 1 || info == 0 {
+            return Ok(None);
+        }
+        if !guest_range_has_permission(
+            unicorn,
+            info,
+            abi::PF_CUSTOM_UI_INFO_SIZE as u64,
+            Prot::READ,
+        )? {
+            return Ok(None);
+        }
+        let bytes = unicorn
+            .mem_read_as_vec(info, abi::PF_CUSTOM_UI_INFO_SIZE)
+            .map_err(|error| format!("register_ui PF_CustomUIInfo: {error}"))?;
+        let read_i32 = |offset: usize| {
+            i32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .expect("generated PF_CustomUIInfo field is four bytes"),
+            )
+        };
+        let registration = CustomUiRegistration {
+            events: read_i32(abi::CUSTOM_UI_EVENTS_OFFSET) as u32,
+            comp_width: read_i32(abi::CUSTOM_UI_COMP_WIDTH_OFFSET),
+            comp_height: read_i32(abi::CUSTOM_UI_COMP_HEIGHT_OFFSET),
+            comp_alignment: read_i32(abi::CUSTOM_UI_COMP_ALIGNMENT_OFFSET),
+            layer_width: read_i32(abi::CUSTOM_UI_LAYER_WIDTH_OFFSET),
+            layer_height: read_i32(abi::CUSTOM_UI_LAYER_HEIGHT_OFFSET),
+            layer_alignment: read_i32(abi::CUSTOM_UI_LAYER_ALIGNMENT_OFFSET),
+            preview_width: read_i32(abi::CUSTOM_UI_PREVIEW_WIDTH_OFFSET),
+            preview_height: read_i32(abi::CUSTOM_UI_PREVIEW_HEIGHT_OFFSET),
+            preview_alignment: read_i32(abi::CUSTOM_UI_PREVIEW_ALIGNMENT_OFFSET),
+        };
+        let valid_dimension = |value: i32| (0..=8192).contains(&value);
+        if registration.events & !15 != 0
+            || !valid_dimension(registration.comp_width)
+            || !valid_dimension(registration.comp_height)
+            || !valid_dimension(registration.layer_width)
+            || !valid_dimension(registration.layer_height)
+            || !valid_dimension(registration.preview_width)
+            || !valid_dimension(registration.preview_height)
+        {
+            return Ok(None);
+        }
+        Ok(Some(registration))
+    })();
+    match registration {
+        Ok(Some(registration)) => {
+            unicorn.get_data_mut().custom_ui_registration = Some(registration);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        Ok(None) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.reg_write(RegisterX86::RAX, 4);
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn capture_plugin_data_registration(
     unicorn: &mut Unicorn<'_, GuestState>,
     includes_support_url: bool,
