@@ -225,7 +225,11 @@ READMEの構成とAE SDK上の用語は、次の公開プロジェクトを参�
 
 ### ライセンスと商標
 
-`broker/`、`guest/`および一部Rust bridgeはCargo metadataでMITと宣言されています。一方、repository全体、`minihost/`、Python、文書、schema、instrumentには包括的なlicense grantがまだありません。第三者依存やAdobe SDK-backed componentを含む正確な公開条件は[Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md)を参照してください。Adobe SDKは再配布せず、各自の正規なローカルSDKを利用してください。
+AEXCompat contributorが権利を持つsource code、文書、schema、testおよびinstrumentは、下記の除外対象を除き[Mozilla Public License 2.0](LICENSE)で提供します。MPL-2.0はfile単位のcopyleft licenseであり、本projectはExhibit Bの「Incompatible With Secondary Licenses」を指定しません。
+
+このgrantは、第三者依存、`imports/aviutlas-rust-contracts/`、[provenance台帳](contracts/PROVENANCE.md)でimported/byte-identical copyとされたmaterial、Adobe SDKとその生成物、別licenseが明記されたfixture、またはprivate/commercial AEX corpusを再licenseしません。Adobe SDKとAEX corpusはrepositoryに同梱せず、各利用者が正規に入手したlocal copyだけを使用します。
+
+`guest/`のAEXCompat-authored sourceはMPL-2.0ですが、default guest executableはGPLv2のUnicorn Engineをlinkします。そのcombined executableを配布する場合は、MPL-2.0 section 3.3に従って関連するAEXCompat Covered SoftwareをMPL-2.0に加えてGPL-2.0の条件でも提供し、combined workについて適用されるGPLv2の条件（必要なnotice、対応sourceおよびbuild情報を含む）を満たす必要があります。CargoのMPL-2.0 metadataはAEXCompat sourceの元のgrantを示すもので、Unicornを再licenseしたりcombined-binaryの義務を解除したりしません。正確な公開境界と残るdependency notice/SBOM gateは[Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md)を参照してください。
 
 Adobe、After Effects、および関連する製品名は各権利者の商標です。AEXCompatはAdobeによる公式プロジェクトではありません。
 
@@ -406,6 +410,10 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting and [CONTRIBUTING.md]
 
 ### License and Trademarks
 
-`broker/`, `guest/`, and selected Rust bridges declare MIT in Cargo metadata. The repository as a whole, including `minihost/`, Python, documentation, schemas, and instruments, does not yet have a comprehensive license grant. See the [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) for the unresolved component and third-party licensing boundary. Adobe SDK files are not redistributed; contributors must use their own legitimate local SDK installation.
+Except for the exclusions below, Source Code Form that AEXCompat contributors have the right to license, including documentation, schemas, tests, and instruments, is available under the [Mozilla Public License 2.0](LICENSE), a file-level copyleft license. This project does not mark that code “Incompatible With Secondary Licenses” under Exhibit B.
+
+This grant does not relicense third-party dependencies, `imports/aviutlas-rust-contracts/`, material identified as imported or byte-identical in the [provenance ledger](contracts/PROVENANCE.md), Adobe SDK material or generated artifacts, fixtures carrying their own license, or the private/commercial AEX corpus. Adobe SDK and AEX corpus files are not included in the repository; each user must supply a legitimately obtained local copy.
+
+AEXCompat-authored source under `guest/` is MPL-2.0, but the default guest executable links the GPLv2 Unicorn Engine. Under MPL-2.0 section 3.3, distribution of that combined executable requires the relevant AEXCompat Covered Software to be additionally distributed under GPL-2.0 as well as MPL-2.0, and the combined work must satisfy the applicable GPLv2 conditions, including required notices and corresponding source/build information. MPL-2.0 Cargo metadata describes the original AEXCompat source grant; it neither relicenses Unicorn nor removes combined-binary obligations. See the [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) for the exact publication boundary and the remaining dependency-notice/SBOM gate.
 
 Adobe, After Effects, and related product names are trademarks of their respective owners. AEXCompat is not an official Adobe project.

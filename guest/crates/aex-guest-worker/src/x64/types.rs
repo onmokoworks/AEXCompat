@@ -119,6 +119,18 @@ struct GuestState {
     windows_last_error: u32,
     crt_errno: u32,
     windows_thread_error_mode: u32,
+    windows_socket_startups: u32,
+    scheduler_yield_reason: Option<SchedulerYieldReason>,
+    scheduler_resume_rip: u64,
+    scheduler_ready_hint: bool,
+    scheduler_woken_threads: VecDeque<u32>,
+    scheduler_virtual_tick: u64,
+    scheduler_switches_remaining: u64,
+    scheduler_wait_deadline: Option<u64>,
+    scheduler_main_wait: Option<SchedulerMainWait>,
+    scheduler_child_completed: bool,
+    scheduler_resume_active: bool,
+    scheduler_parent_context: Option<Context>,
     windows_command_line_a: u64,
     windows_command_line_w: u64,
     environment_strings_base: u64,
@@ -169,6 +181,7 @@ struct VcompDynamicLoop {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MsvcpMutex {
     mutex_type: u32,
+    owner_thread_id: Option<u32>,
     lock_count: u32,
 }
 
@@ -307,6 +320,10 @@ struct AegpMemoryBlock {
 
 pub struct GuestEngine<'a> {
     unicorn: Unicorn<'a, GuestState>,
+    scheduled_windows_threads: BTreeMap<u32, ParkedWindowsThread>,
+    scheduler_ready: VecDeque<u32>,
+    scheduler_deferred_ready: VecDeque<u32>,
+    parked_main_context: Option<Context>,
     next_data: u64,
     image_base: u64,
     image_end: u64,
@@ -316,6 +333,30 @@ pub struct GuestEngine<'a> {
     image_sha256: String,
     entry_export: String,
     trace_modules: Vec<TraceModule>,
+}
+
+struct ParkedWindowsThread {
+    context: Context,
+    pending: PendingWindowsThread,
+    tls_values: BTreeMap<u32, u64>,
+    fls_values: BTreeMap<u32, u64>,
+    last_error: u32,
+    thread_error_mode: u32,
+    teb_stack: [u8; 16],
+    wait_deadline: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SchedulerYieldReason {
+    Voluntary,
+    AddressWait,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SchedulerMainWait {
+    address: u64,
+    deadline: Option<u64>,
+    woken: bool,
 }
 
 impl Drop for GuestEngine<'_> {

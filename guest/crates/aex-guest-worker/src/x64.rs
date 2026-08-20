@@ -5,11 +5,12 @@ use iced_x86::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
-use unicorn_engine::{RegisterX86, UcHookId, Unicorn};
+use unicorn_engine::{Context, RegisterX86, UcHookId, Unicorn};
 
 use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_HEAP_BYTES};
 use crate::pe::{PeImage, StaticTlsImage};
@@ -28,6 +29,7 @@ use wgpu_runtime::{
 const PAGE_SIZE: u64 = 0x1000;
 const STACK_BASE: u64 = 0x0000_0000_7000_0000;
 const STACK_SIZE: u64 = 0x20_0000;
+const MAX_WINDOWS_THREADS: usize = 32;
 const STUB_BASE: u64 = 0x0000_0000_6000_0000;
 const STUB_SIZE: u64 = 0x10_0000;
 const STUB_STRIDE: u64 = 16;
@@ -122,6 +124,7 @@ const HOST_AEGP_COMPUTE_CACHE_CALLBACKS: [u64; 6] = [
 const HOST_DYNAMIC_FLS_ALLOC: u64 = STUB_BASE + 0x80570;
 const HOST_CREATE_THREAD_CONTINUE: u64 = STUB_BASE + 0x80580;
 const WINDOWS_KERNEL32_MODULE_TOKEN: u64 = STUB_BASE + 0x8f000;
+const WINDOWS_NTDLL_MODULE_TOKEN: u64 = STUB_BASE + 0x8f180;
 const WINDOWS_STANDARD_INPUT_TOKEN: u64 = STUB_BASE + 0x8f100;
 const WINDOWS_STANDARD_OUTPUT_TOKEN: u64 = STUB_BASE + 0x8f110;
 const WINDOWS_STANDARD_ERROR_TOKEN: u64 = STUB_BASE + 0x8f120;
@@ -260,9 +263,15 @@ const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 const ERROR_PROC_NOT_FOUND: u32 = 127;
-const OBSERVED_MSVCP_MUTEX_TYPE: u32 = 0x102;
+const HRESULT_E_INVALIDARG: u32 = 0x8007_0057;
+const WINDOWS_MAX_PATH_BYTES: u64 = 260;
+const MSVCP_MUTEX_TRY: u32 = 0x02;
+const MSVCP_MUTEX_RECURSIVE: u32 = 0x100;
+const OBSERVED_MSVCP_MUTEX_TYPE: u32 = MSVCP_MUTEX_TRY | MSVCP_MUTEX_RECURSIVE;
+const MSVCP_MUTEX_BYTES: usize = 80;
 const MAX_MSVCP_MUTEXES: usize = 256;
 const MAX_MSVCP_MUTEX_RECURSION: u32 = 1024;
+const MSVCP_THRD_BUSY: u32 = 3;
 const MSVCP_EXCEPTION_PTR_BYTES: usize = 16;
 const VCRUNTIME_EXCEPTION_DATA_BYTES: usize = 16;
 
