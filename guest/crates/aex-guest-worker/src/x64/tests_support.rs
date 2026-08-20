@@ -3623,6 +3623,291 @@ fn multi_byte_to_wide_char_preflights_the_entire_output_before_writing() {
 }
 
 #[test]
+fn get_string_type_w_is_kernel32_scoped_and_classifies_ctype1() {
+    const CLASSIFY: u64 = STUB_BASE + 0x500;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            CLASSIFY,
+            "KERNEL32.DLL",
+            "GetStringTypeW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetStringTypeW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetStringTypeW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let source = DATA_BASE + 0xe40;
+    let output = DATA_BASE + 0xe80;
+    let units = [
+        'A' as u16,
+        'z' as u16,
+        '9' as u16,
+        ' ' as u16,
+        '!' as u16,
+        '\n' as u16,
+        0x3042,
+        0x0301,
+        0x0378,
+    ];
+    engine
+        .write(
+            source,
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [1, source, units.len() as u64, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    let words = engine
+        .unicorn
+        .mem_read_as_vec(output, units.len() * 2)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        words,
+        [
+            0x0181, 0x0102, 0x0084, 0x0048, 0x0010, 0x0028, 0x0100, 0x0200, 0
+        ]
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+}
+
+#[test]
+fn get_string_type_w_classifies_bidi_japanese_combining_and_utf16_units() {
+    const CLASSIFY: u64 = STUB_BASE + 0x500;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CLASSIFY,
+        "kernel32.dll",
+        "GetStringTypeW",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xea0;
+    let output = DATA_BASE + 0xee0;
+    let units = [
+        b'A' as u16,
+        b'7' as u16,
+        b'+' as u16,
+        b',' as u16,
+        0x05d0,
+        0x0661,
+        0x2029,
+        0x200b,
+        0x0301,
+    ];
+    engine
+        .write(
+            source,
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [2, source, 9, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    let words = engine
+        .unicorn
+        .mem_read_as_vec(output, 18)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    assert_eq!(words, [1, 3, 4, 7, 2, 6, 8, 0, 11]);
+
+    let units = [0x3042, 0x30a2, 0xff71, 0x6f22, 0x0301, 0xd83d, 0xde00];
+    engine
+        .write(
+            source,
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [3, source, 7, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    let words = engine
+        .unicorn
+        .mem_read_as_vec(output, 14)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        words,
+        [0x80a0, 0x8090, 0x8050, 0x8180, 0x0003, 0x0800, 0x1000]
+    );
+
+    let units = [
+        0x093e,
+        0x0941,
+        0x0a41,
+        0x09be,
+        0x0903,
+        0x0640,
+        b'!' as u16,
+        b'-' as u16,
+        b'=' as u16,
+        0x00aa,
+        0x00ba,
+        0x20ac,
+        0xffc0,
+    ];
+    engine
+        .write(
+            source,
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [3, source, 13, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    let words = engine
+        .unicorn
+        .mem_read_as_vec(output, 26)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        words,
+        [
+            0x8004, 0x8005, 0x8005, 0x8004, 0x8000, 0x8600, 0, 0x0400, 0x0408, 0x8400, 0x8400,
+            0x0008, 0,
+        ]
+    );
+}
+
+#[test]
+fn get_string_type_w_supports_minus_one_and_reports_validation_failures() {
+    const CLASSIFY: u64 = STUB_BASE + 0x500;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CLASSIFY,
+        "kernel32.dll",
+        "GetStringTypeW",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xf00;
+    let output = DATA_BASE + 0xf20;
+    engine.write(source, &[b'A', 0, 0, 0]).unwrap();
+    engine.write(output, &[0xaa; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [1, source, u32::MAX as u64, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x81, 0x01, 0x20, 0x00]
+    );
+
+    for arguments in [
+        [0, source, 1, output, 0, 0],
+        [4, source, 1, output, 0, 0],
+        [1, 0, 1, output, 0, 0],
+        [1, source, 0, output, 0, 0],
+        [1, source, 1, 0, 0, 0],
+        [1, source, 1, source, 0, 0],
+        [1, source, 2, source + 2, 0, 0],
+    ] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(engine.call_win64(CLASSIFY, arguments).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+
+    engine.write(output, &[0xaa; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [1, source, u32::MAX as u64 - 1, output, 0, 0],)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x81, 0x01, 0x20, 0x00]
+    );
+}
+
+#[test]
+fn get_string_type_w_preflights_the_entire_output_before_writing() {
+    const CLASSIFY: u64 = STUB_BASE + 0x500;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CLASSIFY,
+        "kernel32.dll",
+        "GetStringTypeW",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xf40;
+    let crossing = DATA_BASE + PAGE_SIZE - 2;
+    engine.write(source, &[b'A', 0, b'B', 0]).unwrap();
+    engine.write(crossing, &[0x5a; 2]).unwrap();
+    let error = engine
+        .call_win64(CLASSIFY, [1, source, 2, crossing, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("not fully writable"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(),
+        [0x5a; 2]
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CLASSIFY,
+        "kernel32.dll",
+        "GetStringTypeW",
+    )
+    .unwrap();
+    let output = DATA_BASE + 0xf80;
+    engine.write(output, &[0x5a; 4]).unwrap();
+    let error = engine
+        .call_win64(CLASSIFY, [1, DATA_BASE + PAGE_SIZE, 2, output, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("source read failed"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x5a; 4]
+    );
+}
+
+#[test]
 fn get_environment_variable_a_rejects_invalid_names_and_outputs() {
     let mut engine = test_engine(&[0xc3]);
     engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
