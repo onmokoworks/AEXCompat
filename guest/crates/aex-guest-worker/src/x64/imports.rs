@@ -149,6 +149,7 @@ enum LegacyWin64Import {
     WsaStartup,
     WsaCleanup,
     RtlPcToFileHeader,
+    RaiseException,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -446,6 +447,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "RtlPcToFileHeader") => LegacyWin64Import::RtlPcToFileHeader,
         (_, "RtlPcToFileHeader") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "RaiseException") => LegacyWin64Import::RaiseException,
+        (_, "RaiseException") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "InitializeCriticalSection") => {
             LegacyWin64Import::InitializeCriticalSection
         }
@@ -1751,6 +1754,18 @@ fn install_win64_import(
                     "install RtlPcToFileHeader import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_rtl_pc_to_file_header(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::RaiseException => {
+                uc(
+                    "write RaiseException trap",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install RaiseException import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_raise_exception(unicorn);
                     }),
                 )?;
             }
@@ -6411,6 +6426,58 @@ fn emulate_rtl_pc_to_file_header(unicorn: &mut Unicorn<'_, GuestState>) {
         return;
     }
     let _ = unicorn.reg_write(RegisterX86::RAX, module);
+}
+
+fn emulate_raise_exception(unicorn: &mut Unicorn<'_, GuestState>) {
+    const EXCEPTION_NONCONTINUABLE: u32 = 0x1;
+    const EXCEPTION_MAXIMUM_PARAMETERS: u32 = 15;
+    let result = (|| -> Result<String, String> {
+        let code = read_win64_import_argument(unicorn, 0)? as u32;
+        let flags = read_win64_import_argument(unicorn, 1)? as u32;
+        let count = read_win64_import_argument(unicorn, 2)? as u32;
+        let arguments = read_win64_import_argument(unicorn, 3)?;
+        if flags & !EXCEPTION_NONCONTINUABLE != 0 {
+            return Err(format!("RaiseException flags {flags:#x} are invalid"));
+        }
+        if count > EXCEPTION_MAXIMUM_PARAMETERS {
+            return Err(format!(
+                "RaiseException parameter count {count} exceeds {EXCEPTION_MAXIMUM_PARAMETERS}"
+            ));
+        }
+        let byte_count = u64::from(count) * 8;
+        if count != 0
+            && (arguments == 0
+                || !guest_range_has_permission(unicorn, arguments, byte_count, Prot::READ)?)
+        {
+            return Err(format!(
+                "RaiseException parameter array {arguments:#x} is not fully readable for {count} entries"
+            ));
+        }
+        let mut values = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let address = arguments + u64::from(index) * 8;
+            let bytes = unicorn.mem_read_as_vec(address, 8).map_err(|error| {
+                format!("RaiseException parameter {index} read failed: {error}")
+            })?;
+            values.push(u64::from_le_bytes(bytes.try_into().map_err(|_| {
+                format!("RaiseException parameter {index} has the wrong size")
+            })?));
+        }
+        let values = values
+            .iter()
+            .map(|value| format!("{value:#x}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!(
+            "unhandled guest RaiseException code={code:#x} flags={flags:#x} parameters=[{values}]; x64 SEH dispatch is not modeled"
+        ))
+    })();
+    let error = result.unwrap_or_else(|error| error);
+    if unicorn.get_data().callback_error.is_none() {
+        unicorn.get_data_mut().callback_error = Some(error);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    let _ = unicorn.emu_stop();
 }
 
 fn read_win64_import_argument(
