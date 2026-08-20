@@ -226,6 +226,7 @@ jobs:
           # モジュールを見つけられないので、5.1 用の 2 つを先頭に足す。
           $env:PSModulePath = "$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules;$env:PSModulePath"
           $probes = @(
+            'build-classic-failure-probes'
             'build-pf-sampling-probe'
             'build-pf-aegp-async-layer-receipt-probe'
             'build-pf-aegp-external-cache-roundtrip-probe'
