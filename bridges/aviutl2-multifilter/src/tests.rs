@@ -39,6 +39,7 @@ mod tests {
             closure_identity: None,
             cluster_fallback: None,
             category: None,
+            registered_name: None,
         }
     }
 
@@ -1004,6 +1005,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn a_registered_name_survives_cache_save_reload_and_concurrent_merge() {
+        let dir = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-saved-name-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let path = dir.join("discovery-cache.json");
+        let key = "effect.aex".to_owned();
+        let mut named = discovered(5, 64, build(1));
+        named.registered_name = Some("Threshold (Effects)".to_owned());
+        assert!(save_cache_at(&path, &HashMap::from([(key.clone(), named)])));
+
+        // A concurrently running older build can write the same entry without
+        // the additive field. It must not erase the stable project identity.
+        assert!(save_cache_at(
+            &path,
+            &HashMap::from([(key.clone(), discovered(5, 64, build(1)))])
+        ));
+        assert_eq!(
+            load_cache_at(&path)[&key].registered_name.as_deref(),
+            Some("Threshold (Effects)")
+        );
+
+        let mut conflicting = discovered(5, 64, build(1));
+        conflicting.registered_name = Some("Threshold".to_owned());
+        assert!(save_cache_at(
+            &path,
+            &HashMap::from([(key.clone(), conflicting)])
+        ));
+        assert_eq!(
+            load_cache_at(&path)[&key].registered_name.as_deref(),
+            Some("Threshold (Effects)"),
+            "the first valid persisted identity wins a concurrent save race"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The concurrent-launch half still holds through the file: disjoint
     /// keys from an earlier save survive a later one, and an on-disk
     /// same-meta known-good beats a later transient negative.
@@ -1759,6 +1801,45 @@ mod tests {
         assert!(found.is_some(), "but the real path finds it");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn an_alias_rekey_uses_the_old_registered_name_before_registration() {
+        let root = temp_root("alias-registered-name");
+        let real = root.join("Effects");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("Threshold.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+
+        let walked = root.join("link").join("Threshold.aex");
+        let old_key = real.join("Threshold.aex");
+        let meta = file_meta(&walked).unwrap();
+        let mut old_entry = discovered(meta.0.0, meta.1, build(1));
+        old_entry.mtime = meta.0;
+        old_entry.registered_name = Some("Threshold (Effects)".to_owned());
+        let cache = peer_cache(&[(old_key.to_str().unwrap(), old_entry)]);
+        let walked_key = walked.to_string_lossy().into_owned();
+        let roots = vec![root.path().to_path_buf()];
+        let mut aliases = None;
+
+        let (resolved, alias) = resolve_cached(
+            &cache,
+            &walked_key,
+            &walked,
+            Some(meta),
+            build(1),
+            &roots,
+            true,
+            &mut aliases,
+        );
+        assert_eq!(alias.as_deref(), Some(old_key.to_string_lossy().as_ref()));
+        let remembered = vec![resolved.and_then(|entry| entry.registered_name.clone())];
+        assert_eq!(
+            stable_filter_names(std::slice::from_ref(&walked), &[], &remembered),
+            vec!["Threshold (Effects)".to_owned()],
+            "the old saved-project identity is chosen before registration"
+        );
+    }
+
     /// After an aliased hit the entry must also be reachable under the spelling
     /// the scan walked: the background pass keys by that, and without it
     /// `keep_best` sees no cached entry, so a transient discovery failure would
@@ -1776,6 +1857,26 @@ mod tests {
         // And now the background merge sees it, so a failed recheck cannot demote.
         let merged = keep_best(Some(moved), failed(5, 64, build(2)), META).unwrap();
         assert!(merged.ok, "the demotion guard applies again");
+    }
+
+    #[test]
+    fn alias_copies_count_as_one_owner_during_registered_name_merge() {
+        let mut named = discovered(5, 64, build(1));
+        named.registered_name = Some("Threshold (Effects)".to_owned());
+        let mut on_disk = peer_cache(&[("old.aex", named)]);
+        apply_rekey(
+            &mut on_disk,
+            vec![("old.aex".to_owned(), "walked.aex".to_owned())],
+        );
+        let mut local = on_disk.clone();
+        local.get_mut("walked.aex").unwrap().registered_name = Some("Threshold".to_owned());
+
+        merge_cache_entries(&mut local, &on_disk);
+        assert_eq!(
+            local["walked.aex"].registered_name.as_deref(),
+            Some("Threshold (Effects)"),
+            "the retained alias must not make one disk identity look duplicated"
+        );
     }
 
     /// The alias index only covers the folders this launch scanned, so a leftover
@@ -2661,6 +2762,135 @@ mod tests {
                 "Levels".to_owned(),
                 "Threshold (Effects)".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn installing_a_same_stem_plugin_does_not_rename_the_existing_filter() {
+        let existing = PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex");
+        let added = PathBuf::from(r"C:\AE\Plug-ins\Effects\CycoreFXHD\Threshold.aex");
+        let mut cache = peer_cache(&[(existing.to_str().unwrap(), discovered(5, 64, build(1)))]);
+
+        let first_names = stable_filter_names(
+            std::slice::from_ref(&existing),
+            &[],
+            &remembered_filter_names(std::slice::from_ref(&existing), &cache),
+        );
+        assert_eq!(first_names, ["Threshold"]);
+        assert!(remember_filter_names(
+            &mut cache,
+            std::slice::from_ref(&existing),
+            &first_names
+        ));
+
+        cache.insert(
+            added.to_string_lossy().into_owned(),
+            discovered(5, 64, build(1)),
+        );
+        let plugins = vec![existing, added];
+        assert_eq!(
+            stable_filter_names(&plugins, &[], &remembered_filter_names(&plugins, &cache)),
+            vec!["Threshold".to_owned(), "Threshold (CycoreFXHD)".to_owned()],
+            "the newly installed peer moves aside from the saved-project name"
+        );
+    }
+
+    #[test]
+    fn uninstalling_a_same_stem_plugin_keeps_the_qualified_name() {
+        let existing = PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex");
+        let removed = PathBuf::from(r"C:\AE\Plug-ins\Effects\CycoreFXHD\Threshold.aex");
+        let plugins = vec![existing.clone(), removed.clone()];
+        let mut cache = peer_cache(&[
+            (existing.to_str().unwrap(), discovered(5, 64, build(1))),
+            (removed.to_str().unwrap(), discovered(5, 64, build(1))),
+        ]);
+        let collision_names =
+            stable_filter_names(&plugins, &[], &remembered_filter_names(&plugins, &cache));
+        assert_eq!(
+            collision_names,
+            vec![
+                "Threshold (Effects)".to_owned(),
+                "Threshold (CycoreFXHD)".to_owned()
+            ]
+        );
+        assert!(remember_filter_names(
+            &mut cache,
+            &plugins,
+            &collision_names
+        ));
+
+        cache.remove(removed.to_str().unwrap());
+        assert_eq!(
+            stable_filter_names(
+                std::slice::from_ref(&existing),
+                &[],
+                &remembered_filter_names(std::slice::from_ref(&existing), &cache)
+            ),
+            vec!["Threshold (Effects)".to_owned()],
+            "removing the peer must not invalidate saved-project objects"
+        );
+    }
+
+    #[test]
+    fn rediscovery_preserves_the_registered_name() {
+        let mut cached = discovered(5, 64, build(1));
+        cached.registered_name = Some("Threshold (Effects)".to_owned());
+        let refreshed = discovered(5, 64, build(2));
+
+        assert_eq!(
+            keep_best(Some(&cached), refreshed, META)
+                .unwrap()
+                .registered_name
+                .as_deref(),
+            Some("Threshold (Effects)")
+        );
+    }
+
+    #[test]
+    fn invalid_or_duplicate_cached_names_are_repaired_deterministically() {
+        let plugins = vec![
+            PathBuf::from(r"C:\AE\A\Threshold.aex"),
+            PathBuf::from(r"C:\AE\B\Threshold.aex"),
+            PathBuf::from(r"C:\AE\C\Levels.aex"),
+        ];
+        let repaired = stable_filter_names(
+            &plugins,
+            &[],
+            &[
+                Some("Threshold".to_owned()),
+                Some("threshold".to_owned()),
+                Some("bad\0name".to_owned()),
+            ],
+        );
+        assert_eq!(
+            repaired,
+            vec![
+                "Threshold".to_owned(),
+                "Threshold (B)".to_owned(),
+                "Levels".to_owned()
+            ]
+        );
+
+        let mut on_disk = peer_cache(&[
+            (plugins[0].to_str().unwrap(), discovered(5, 64, build(1))),
+            (plugins[1].to_str().unwrap(), discovered(5, 64, build(1))),
+        ]);
+        for entry in on_disk.values_mut() {
+            entry.registered_name = Some("Threshold".to_owned());
+        }
+        let mut local = on_disk.clone();
+        assert!(remember_filter_names(
+            &mut local,
+            &plugins[..2],
+            &repaired[..2]
+        ));
+        merge_cache_entries(&mut local, &on_disk);
+        assert_eq!(
+            local[plugins[1].to_str().unwrap()]
+                .registered_name
+                .as_deref(),
+            Some("Threshold (B)"),
+            "two logical owners on disk must not block duplicate repair"
         );
     }
 
