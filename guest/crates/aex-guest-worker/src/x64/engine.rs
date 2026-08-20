@@ -903,6 +903,9 @@ impl GuestEngine<'static> {
         )?;
         let mut engine = Self {
             unicorn,
+            scheduled_windows_threads: BTreeMap::new(),
+            scheduler_ready: VecDeque::new(),
+            parked_main_context: None,
             next_data,
             image_base: image.image_base(),
             image_end: image.image_base() + image_size,
@@ -1592,13 +1595,236 @@ impl GuestEngine<'static> {
                 self.unicorn.reg_write(register, value),
             )?;
         }
-        if let Err(error) = self.unicorn.emu_start(
-            address,
-            RETURN_ADDRESS,
-            timeout_microseconds,
-            MAX_INSTRUCTIONS,
-        ) {
-            return Err(self.execution_crash(format!("emulation error: {error}")));
+        const MAX_SCHEDULER_SWITCHES: usize = 256;
+        let timeout = Duration::from_micros(timeout_microseconds);
+        let started = Instant::now();
+        let mut begin = address;
+        for scheduler_switch in 0..=MAX_SCHEDULER_SWITCHES {
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(self.execution_crash(format!(
+                    "execution exceeded the total timeout of {timeout_microseconds} microseconds"
+                )));
+            }
+            let remaining_timeout_microseconds = u64::try_from((timeout - elapsed).as_micros())
+                .unwrap_or(u64::MAX)
+                .max(1);
+            if let Err(error) = self.unicorn.emu_start(
+                begin,
+                RETURN_ADDRESS,
+                remaining_timeout_microseconds,
+                MAX_INSTRUCTIONS,
+            ) {
+                return Err(self.execution_crash(format!("emulation error: {error}")));
+            }
+            if self.unicorn.get_data_mut().scheduler_child_completed {
+                self.unicorn.get_data_mut().scheduler_child_completed = false;
+                let parent = self.parked_main_context.take().ok_or_else(|| {
+                    GuestError::Callback(
+                        "scheduler completed a child without a parked parent context".into(),
+                    )
+                })?;
+                uc(
+                    "restore parked main thread context",
+                    self.unicorn.context_restore(&parent),
+                )?;
+                begin = uc(
+                    "read resumed main thread instruction pointer",
+                    self.unicorn.reg_read(RegisterX86::RIP),
+                )?;
+                continue;
+            }
+            let stopped_rip = uc(
+                "read scheduler stop instruction pointer",
+                self.unicorn.reg_read(RegisterX86::RIP),
+            )?;
+            if stopped_rip == RETURN_ADDRESS
+                && self.unicorn.get_data().scheduler_yield_reason.is_none()
+                && !self.scheduler_ready.is_empty()
+            {
+                // A Win32 process does not terminate a runnable child merely
+                // because the creating callback returned. Drain ready guest
+                // work deterministically before declaring the call quiescent.
+                self.unicorn.get_data_mut().scheduler_yield_reason =
+                    Some(SchedulerYieldReason::Voluntary);
+                self.unicorn.get_data_mut().scheduler_resume_rip = RETURN_ADDRESS;
+            }
+            if self.unicorn.get_data_mut().scheduler_yield_reason.take().is_some() {
+                if self.unicorn.get_data().pending_windows_thread.is_some() {
+                    // The running child is leaving the CPU without completing.
+                    // Its next completion must be classified only after this
+                    // saved context is explicitly resumed again.
+                    self.unicorn.get_data_mut().scheduler_resume_active = false;
+                    if self.scheduled_windows_threads.len() >= MAX_WINDOWS_THREADS {
+                        return Err(GuestError::Callback(
+                            format!(
+                                "cooperative scheduler exceeded {MAX_WINDOWS_THREADS} parked threads"
+                            ),
+                        ));
+                    }
+                    let mut context = uc(
+                        "save yielding child thread context",
+                        self.unicorn.context_init(),
+                    )?;
+                    let resume_rip = self.unicorn.get_data().scheduler_resume_rip;
+                    uc(
+                        "advance yielding child context past SwitchToThread",
+                        context.reg_write(RegisterX86::RIP, resume_rip),
+                    )?;
+                    let pending = self
+                        .unicorn
+                        .get_data_mut()
+                        .pending_windows_thread
+                        .take()
+                        .expect("observed pending child");
+                    let parent = if let Some(parent) = self.parked_main_context.take() {
+                        parent
+                    } else {
+                        self.unicorn
+                            .get_data_mut()
+                            .scheduler_parent_context
+                            .take()
+                            .ok_or_else(|| {
+                                GuestError::Callback(
+                                    "yielding child has no saved parent context".into(),
+                                )
+                            })?
+                    };
+                    let tls_values = self.unicorn.get_data().windows_tls_slots.clone();
+                    let fls_values = self
+                        .unicorn
+                        .get_data()
+                        .windows_fls_slots
+                        .iter()
+                        .map(|(index, slot)| (*index, slot.value))
+                        .collect();
+                    let last_error = self.unicorn.get_data().windows_last_error;
+                    let thread_error_mode = self.unicorn.get_data().windows_thread_error_mode;
+                    let mut teb_stack = [0u8; 16];
+                    uc(
+                        "read yielding child TEB stack bounds",
+                        self.unicorn.mem_read(0x08, &mut teb_stack),
+                    )?;
+                    restore_windows_thread_context(self.unicorn.get_data_mut(), &pending);
+                    uc(
+                        "restore yielding child's parent context",
+                        self.unicorn.context_restore(&parent),
+                    )?;
+                    uc(
+                        "restore yielding child's parent TEB stack bounds",
+                        self.unicorn.mem_write(0x08, &pending.caller_teb_stack),
+                    )?;
+                    let thread_id = self
+                        .unicorn
+                        .get_data()
+                        .windows_threads
+                        .get(&pending.handle)
+                        .map(|thread| thread.id)
+                        .ok_or_else(|| GuestError::Callback("yielding child handle disappeared".into()))?;
+                    if self.scheduled_windows_threads.insert(thread_id, ParkedWindowsThread {
+                        context,
+                        pending,
+                        tls_values,
+                        fls_values,
+                        last_error,
+                        thread_error_mode,
+                        teb_stack,
+                    }).is_some() {
+                        return Err(GuestError::Callback(format!(
+                            "cooperative scheduler parked thread {thread_id} twice"
+                        )));
+                    }
+                    self.scheduler_ready.push_back(thread_id);
+                    self.unicorn.get_data_mut().scheduler_ready_hint = true;
+                } else if let Some(thread_id) = self.scheduler_ready.pop_front() {
+                    self.unicorn.get_data_mut().scheduler_ready_hint =
+                        !self.scheduler_ready.is_empty();
+                    let mut child = self
+                        .scheduled_windows_threads
+                        .remove(&thread_id)
+                        .ok_or_else(|| GuestError::Callback(format!(
+                            "ready thread {thread_id} has no saved context"
+                        )))?;
+                    if self.parked_main_context.is_some() {
+                        return Err(GuestError::Callback(
+                            "cooperative scheduler already has a parked main context".into(),
+                        ));
+                    }
+                    let mut main_context = uc(
+                        "save yielding main thread context",
+                        self.unicorn.context_init(),
+                    )?;
+                    let resume_rip = self.unicorn.get_data().scheduler_resume_rip;
+                    uc(
+                        "advance yielding main context past SwitchToThread",
+                        main_context.reg_write(RegisterX86::RIP, resume_rip),
+                    )?;
+                    child.pending.caller_tls_values =
+                        self.unicorn.get_data().windows_tls_slots.clone();
+                    child.pending.caller_fls_values = self
+                        .unicorn
+                        .get_data()
+                        .windows_fls_slots
+                        .iter()
+                        .map(|(index, slot)| (*index, slot.value))
+                        .collect();
+                    child.pending.caller_last_error = self.unicorn.get_data().windows_last_error;
+                    child.pending.caller_thread_error_mode =
+                        self.unicorn.get_data().windows_thread_error_mode;
+                    child.pending.caller_thread_id =
+                        self.unicorn.get_data().current_windows_thread_id;
+                    uc(
+                        "read yielding main TEB stack bounds",
+                        self.unicorn.mem_read(0x08, &mut child.pending.caller_teb_stack),
+                    )?;
+                    for (index, slot) in &mut self.unicorn.get_data_mut().windows_tls_slots {
+                        *slot = child.tls_values.get(index).copied().unwrap_or(0);
+                    }
+                    for (index, slot) in &mut self.unicorn.get_data_mut().windows_fls_slots {
+                        slot.value = child.fls_values.get(index).copied().unwrap_or(0);
+                    }
+                    self.unicorn.get_data_mut().windows_last_error = child.last_error;
+                    self.unicorn.get_data_mut().windows_thread_error_mode = child.thread_error_mode;
+                    self.unicorn.get_data_mut().current_windows_thread_id = self
+                        .unicorn
+                        .get_data()
+                        .windows_threads
+                        .get(&child.pending.handle)
+                        .map(|thread| thread.id)
+                        .ok_or_else(|| GuestError::Callback("parked child handle disappeared".into()))?;
+                    uc(
+                        "restore parked child TEB stack bounds",
+                        self.unicorn.mem_write(0x08, &child.teb_stack),
+                    )?;
+                    uc(
+                        "restore parked child CPU context",
+                        self.unicorn.context_restore(&child.context),
+                    )?;
+                    self.unicorn.get_data_mut().pending_windows_thread = Some(child.pending);
+                    self.unicorn.get_data_mut().scheduler_resume_active = true;
+                    self.parked_main_context = Some(main_context);
+                } else {
+                    // Windows permits SwitchToThread to find no runnable peer.
+                    // The hook has already completed the call and returned FALSE/TRUE
+                    // deterministically; resume the same logical thread.
+                    let resume_rip = self.unicorn.get_data().scheduler_resume_rip;
+                    uc(
+                        "advance yielding thread past SwitchToThread",
+                        self.unicorn.reg_write(RegisterX86::RIP, resume_rip),
+                    )?;
+                }
+                begin = uc(
+                    "read scheduler resume instruction pointer",
+                    self.unicorn.reg_read(RegisterX86::RIP),
+                )?;
+                if scheduler_switch == MAX_SCHEDULER_SWITCHES {
+                    return Err(GuestError::Callback(format!(
+                        "cooperative scheduler exceeded {MAX_SCHEDULER_SWITCHES} context switches"
+                    )));
+                }
+                continue;
+            }
+            break;
         }
         if let Some(abort) = self.unicorn.get_data_mut().selector_abort.take() {
             return Err(GuestError::SelectorAbort {
@@ -1617,6 +1843,12 @@ impl GuestEngine<'static> {
         )?;
         if let Some(error) = self.unicorn.get_data_mut().callback_error.take() {
             return Err(GuestError::Callback(error));
+        }
+        if !self.scheduled_windows_threads.is_empty() {
+            return Err(GuestError::Callback(format!(
+                "cooperative scheduler reached quiescence with {} parked guest thread(s)",
+                self.scheduled_windows_threads.len()
+            )));
         }
         if rip != RETURN_ADDRESS {
             return Err(self.execution_crash(format!(
