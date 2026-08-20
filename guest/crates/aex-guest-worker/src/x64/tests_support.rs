@@ -2304,7 +2304,12 @@ fn fopen_s_fails_closed_on_unmapped_or_unterminated_guest_memory() {
             TIMEOUT_MICROSECONDS,
         )
         .unwrap_err();
-    assert!(error.to_string().contains("fopen_s filename read"), "{error}");
+    assert!(
+        error
+            .to_string()
+            .contains("fopen_s filename address 0x40001000 is not readable"),
+        "{error}"
+    );
     assert_eq!(
         engine.unicorn.mem_read_as_vec(result_pointer, 8).unwrap(),
         SENTINEL.to_le_bytes()
