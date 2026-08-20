@@ -2456,14 +2456,75 @@ mod tests {
             "classic_output_resize"
         );
 
+        // The custom-UI draw is a plug-in dispatch before RENDER. Its own
+        // failure short-circuits the selector, so it has to be the frame's
+        // failure rather than falling back to the session-wide `render` stage.
+        let ui_draw = worker_diagnostics(
+            "stage:classic_ui_draw_begin\nstage:classic_ui_draw_end error=-5\n\
+             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=0\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(ui_draw["first_failure_stage"], "classic_ui_draw");
+        assert_eq!(ui_draw["failure_stage"], "classic_ui_draw");
+
+        // A close failure becomes -5 only on an otherwise clean frame. This
+        // is distinct from a teardown that returned false after an existing
+        // selector error: the latter emits error=0 and must not steal the
+        // failure attribution from RENDER.
+        let ui_teardown = worker_diagnostics(
+            "stage:classic_render_begin\nstage:classic_render_end error=0\n\
+             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=-5\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(ui_teardown["first_failure_stage"], "classic_ui_teardown");
+        assert_eq!(ui_teardown["failure_stage"], "classic_ui_teardown");
+
+        let selector_then_suppressed_close = worker_diagnostics(
+            "stage:classic_render_begin\nstage:classic_render_end error=512\n\
+             stage:classic_ui_teardown_begin\nstage:classic_ui_teardown_end error=0\n",
+            false,
+            "ok",
+            0,
+            9,
+        );
+        assert_eq!(
+            selector_then_suppressed_close["first_failure_stage"],
+            "classic_render"
+        );
+        assert_eq!(
+            selector_then_suppressed_close["failure_stage"],
+            "classic_render"
+        );
+
+        // A crash or hang inside either UI dispatch leaves its begin unmatched.
+        // That incomplete pair must name the operation the worker was executing.
+        for stage in ["classic_ui_draw", "classic_ui_teardown"] {
+            let crashed = worker_diagnostics(
+                &format!("stage:{stage}_begin\n"),
+                false,
+                "crash",
+                0xC0000005,
+                9,
+            );
+            assert_eq!(crashed["active_stage"], stage);
+            assert_eq!(crashed["first_failure_stage"], stage);
+            assert_eq!(crashed["failure_stage"], stage);
+        }
+
         // A frame that never reached the selector carries no `classic_render`
         // pair, because the markers live inside the selector hook rather than
         // around the dispatch call. On a non-zero incoming error
         // `dispatch_render` skips the draw, prepare_output, and selector steps,
         // so bracketing the call would re-emit that error under the selector's
         // name; `failure_stage` takes the last failing stage and would blame a
-        // RENDER the plug-in never saw. (It does not skip close_ui, which does
-        // enter the plug-in and is still unbracketed - issue #735.)
+        // RENDER the plug-in never saw. It does not skip close_ui, whose stage
+        // is clean when an earlier error already owns the frame (issue #735).
         //
         // FRAME_SETUP is not yet one of the steps that gets skipped: the
         // `render_once` path drops its error instead of propagating it and
@@ -2641,6 +2702,40 @@ mod tests {
         // blamed as a failure stage.
         assert!(diagnostics["stage_events"].as_array().unwrap().is_empty());
         assert_eq!(diagnostics["failure_stage"], Value::Null);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn worker_callback_addr_denial_round_trips_through_broker_diagnostics() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        if !worker.exists() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must build aex_l2_worker.exe before broker tests"
+            );
+            return;
+        }
+
+        let output = std::process::Command::new(&worker)
+            .arg("--self-test-pf-private-callbacks")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostics = worker_diagnostics(&stderr, false, "ok", 0, 1);
+        assert_eq!(
+            diagnostics["callback_addr_denials"],
+            json!([{"id": -3, "quality": 1, "mode": 0}])
+        );
+        assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
     }
 
     #[test]

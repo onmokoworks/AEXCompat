@@ -2083,7 +2083,10 @@ fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Resul
 fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
     const WINDOWS_COMMAND_LINE: &str = "\"aex-guest-worker.exe\"";
     let mut bytes = Vec::with_capacity((WINDOWS_COMMAND_LINE.encode_utf16().count() + 1) * 2);
-    for unit in WINDOWS_COMMAND_LINE.encode_utf16().chain(std::iter::once(0)) {
+    for unit in WINDOWS_COMMAND_LINE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
     let command_line = engine.allocate(bytes.len(), 2)?;
