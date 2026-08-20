@@ -2902,9 +2902,9 @@ fn emulate_get_cp_info(unicorn: &mut Unicorn<'_, GuestState>) {
         let output = read_win64_import_argument(unicorn, 1)?;
         if code_page != CP_ACP && code_page != CP_SHIFT_JIS {
             unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
-            unicorn.reg_write(RegisterX86::RAX, 0).map_err(|error| {
-                format!("GetCPInfo could not write failure result: {error}")
-            })?;
+            unicorn
+                .reg_write(RegisterX86::RAX, 0)
+                .map_err(|error| format!("GetCPInfo could not write failure result: {error}"))?;
             return Ok(());
         }
         if output == 0 {
@@ -2923,12 +2923,10 @@ fn emulate_get_cp_info(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && region.perms & Prot::WRITE.0 != 0
+                        && region.perms & Prot::WRITE.0 as u32 != 0
                 })
                 .ok_or_else(|| {
-                    format!(
-                        "GetCPInfo output {output:#x}..={output_end:#x} is not fully writable"
-                    )
+                    format!("GetCPInfo output {output:#x}..={output_end:#x} is not fully writable")
                 })?;
             if region.end >= output_end {
                 break;

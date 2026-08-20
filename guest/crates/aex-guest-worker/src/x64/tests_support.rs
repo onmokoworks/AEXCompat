@@ -5015,23 +5015,56 @@ fn get_cp_info_reports_cp932_and_rejects_invalid_outputs_atomically() {
     );
     let output = DATA_BASE + 0xe00;
     engine.unicorn.get_data_mut().windows_last_error = 0x1234;
-    engine.unicorn.reg_write(RegisterX86::RAX, u64::MAX).unwrap();
-    assert_eq!(engine.call_win64(GET_CP_INFO, [0, output, 0, 0, 0, 0]).unwrap(), 1);
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 20).unwrap(), EXPECTED);
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RAX, u64::MAX)
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [0, output, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
     engine.write(output, &[0xaa; 20]).unwrap();
-    assert_eq!(engine.call_win64(GET_CP_INFO, [932, output, 0, 0, 0, 0]).unwrap(), 1);
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 20).unwrap(), EXPECTED);
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [932, output, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
 
     engine.unicorn.get_data_mut().windows_last_error = 0;
-    assert_eq!(engine.call_win64(GET_CP_INFO, [65001, output, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 20).unwrap(), EXPECTED);
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [65001, output, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
 
     for bad_output in [0, 0xdead_beef] {
         engine.unicorn.get_data_mut().callback_error = None;
         engine.unicorn.reg_write(RegisterX86::RCX, 932).unwrap();
-        engine.unicorn.reg_write(RegisterX86::RDX, bad_output).unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RDX, bad_output)
+            .unwrap();
         emulate_get_cp_info(&mut engine.unicorn);
         assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
         assert!(engine.unicorn.get_data().callback_error.is_some());
@@ -5041,10 +5074,16 @@ fn get_cp_info_reports_cp932_and_rejects_invalid_outputs_atomically() {
     engine.write(crossing, &[0x5a; 10]).unwrap();
     engine.unicorn.get_data_mut().callback_error = None;
     engine.unicorn.reg_write(RegisterX86::RCX, 932).unwrap();
-    engine.unicorn.reg_write(RegisterX86::RDX, crossing).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, crossing)
+        .unwrap();
     emulate_get_cp_info(&mut engine.unicorn);
     assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
-    assert_eq!(engine.unicorn.mem_read_as_vec(crossing, 10).unwrap(), [0x5a; 10]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 10).unwrap(),
+        [0x5a; 10]
+    );
     assert!(
         engine
             .unicorn
