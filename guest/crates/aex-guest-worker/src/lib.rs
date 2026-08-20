@@ -1,8 +1,10 @@
 //! Out-of-process Windows x64 AEX guest worker for Apple Silicon.
 //!
-//! The worker is a separate GPL-licensed process because its execution backend
-//! will link Unicorn. The broker-facing protocol and generated ABI crate remain
-//! independent of that backend.
+//! AEXCompat-authored worker source is MPL-2.0. The default build links the
+//! GPLv2 Unicorn backend. Under MPL-2.0 section 3.3, distribution of that
+//! combined executable requires the relevant Covered Software to be
+//! additionally distributed under GPL-2.0 and the combined work to satisfy the
+//! applicable GPLv2 terms. Process isolation does not waive those conditions.
 
 #![cfg_attr(not(feature = "native-carrier"), forbid(unsafe_code))]
 
