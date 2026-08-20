@@ -2804,47 +2804,34 @@ SceneSuiteAcquireResult scene_acquire_suite(
   }
 
   if (named("AEGP Layer Suite") && version == 15) {
-    const bool render_receipt = factory.render_scene_enabled();
-    if (render_receipt || state().comp_idle_roundtrip_mode) {
-      g_aegp_layer_suite9 =
-          unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_15, 53>();
-      g_aegp_layer_suite9[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
-      g_aegp_layer_suite9[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
-      g_aegp_layer_suite9[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
-      g_aegp_layer_suite9[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
-      g_aegp_layer_suite9[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
-      g_aegp_layer_suite9[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
-      g_aegp_layer_suite9[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
-      // These sit outside the receipt block because every other table wires
-      // them ungated - version 14 has had `AEGP_SetLayerFlag` there since
-      // before this gate existed. That is the honest state of the gate: it is
-      // not a boundary. A plug-in that wants what the block below withholds
-      // acquires version 13 or 14 instead and gets it, in-point included.
-      // Making it one, or dropping it, is #921.
-      g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
-      g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
-      g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
-      if (!render_receipt) {
-        g_aegp_layer_suite9[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
-        g_aegp_layer_suite9[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
-        g_aegp_layer_suite9[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
-        g_aegp_layer_suite9[17] =
-            reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
-        g_aegp_layer_suite9[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
-        g_aegp_layer_suite9[37] = reinterpret_cast<void*>(&aegp_get_layer_id);
-        g_aegp_layer_suite9[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
-        g_aegp_layer_suite9[42] =
-            reinterpret_cast<void*>(&aegp_set_layer_parent);
-        g_aegp_layer_suite9[43] =
-            reinterpret_cast<void*>(&aegp_delete_layer);
-        g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
-      }
-      g_aegp_layer_suite9[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
-      g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
-      g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
-      *suite = g_aegp_layer_suite9.data();
-      return SceneSuiteAcquireResult::acquired;
-    }
+    g_aegp_layer_suite9 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_15, 53>();
+    g_aegp_layer_suite9[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
+    g_aegp_layer_suite9[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
+    g_aegp_layer_suite9[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
+    g_aegp_layer_suite9[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
+    g_aegp_layer_suite9[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
+    g_aegp_layer_suite9[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
+    g_aegp_layer_suite9[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
+    g_aegp_layer_suite9[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
+    g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+    g_aegp_layer_suite9[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
+    g_aegp_layer_suite9[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
+    g_aegp_layer_suite9[17] =
+        reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
+    g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    g_aegp_layer_suite9[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
+    g_aegp_layer_suite9[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
+    g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
+    g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
+    g_aegp_layer_suite9[37] = reinterpret_cast<void*>(&aegp_get_layer_id);
+    g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+    g_aegp_layer_suite9[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
+    g_aegp_layer_suite9[42] = reinterpret_cast<void*>(&aegp_set_layer_parent);
+    g_aegp_layer_suite9[43] = reinterpret_cast<void*>(&aegp_delete_layer);
+    g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
+    *suite = g_aegp_layer_suite9.data();
+    return SceneSuiteAcquireResult::acquired;
   }
   // Version 5 is `AEGP_LayerSuite1`, frozen in AE 5.0. The suite struct number
   // and the version a plug-in acquires with do not line up - `AEGP_LayerSuite5`
@@ -2867,10 +2854,9 @@ SceneSuiteAcquireResult scene_acquire_suite(
   // `AEGP_MemHandle` outputs). Pointing one at the other would be a different
   // call, not a compatible one.
   //
-  // Unconditional, like version 14 beside it. Version 11 is behind
-  // `comp_idle_roundtrip_mode` and version 15 withholds part of its table under
-  // a render receipt; neither gate is adopted here because this table exposes
-  // nothing they withhold that version 14 does not already expose ungated.
+  // Unconditional, like versions 14 and 15 beside it. Version 11 remains
+  // behind `comp_idle_roundtrip_mode`; its gate is not adopted here because
+  // this table exposes nothing version 14 does not already expose ungated.
   if (named("AEGP Layer Suite") && version == 5) {
     g_aegp_layer_suite1 =
         unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_5, 39>();
