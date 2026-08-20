@@ -7413,10 +7413,18 @@ fn issue1404_yielding_child_parks_then_parent_resumes_and_runs_child_to_completi
         install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
     }
     let handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
-    let thread = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+    let thread = engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .unwrap();
     assert!(thread.completed);
     assert_eq!(thread.exit_code, 7);
-    assert_eq!(engine.unicorn.mem_read_as_vec(parameter, 8).unwrap(), 7u64.to_le_bytes());
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(parameter, 8).unwrap(),
+        7u64.to_le_bytes()
+    );
     assert!(engine.scheduled_windows_threads.is_empty());
     assert!(engine.scheduler_ready.is_empty());
     assert!(engine.parked_main_context.is_none());
@@ -7510,10 +7518,29 @@ fn issue1404_two_children_queue_fifo_and_complete_once() {
     }
     let second_handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
     assert_eq!(engine.unicorn.get_data().windows_threads.len(), 2);
-    assert!(engine.unicorn.get_data().windows_threads.values().all(|thread| thread.completed && thread.exit_code == 9));
-    assert!(engine.unicorn.get_data().windows_threads.contains_key(&second_handle));
-    assert_eq!(engine.unicorn.mem_read_as_vec(first_output, 8).unwrap(), 1u64.to_le_bytes());
-    assert_eq!(engine.unicorn.mem_read_as_vec(second_output, 8).unwrap(), 1u64.to_le_bytes());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .values()
+            .all(|thread| thread.completed && thread.exit_code == 9)
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .contains_key(&second_handle)
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(first_output, 8).unwrap(),
+        1u64.to_le_bytes()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(second_output, 8).unwrap(),
+        1u64.to_le_bytes()
+    );
     assert!(engine.scheduler_ready.is_empty());
     assert!(engine.scheduled_windows_threads.is_empty());
 }
@@ -7635,16 +7662,36 @@ fn issue1404_context_switch_isolates_last_error_and_callee_saved_registers() {
         install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
     }
     engine.unicorn.get_data_mut().windows_last_error = 0x1111;
-    engine.unicorn.get_data_mut().windows_tls_slots.insert(3, 0xaaaa);
+    engine
+        .unicorn
+        .get_data_mut()
+        .windows_tls_slots
+        .insert(3, 0xaaaa);
     assert_eq!(engine.call_win64(TEST_CODE, [0; 6]).unwrap(), 0x1111);
-    assert_eq!(engine.unicorn.reg_read(RegisterX86::RBX).unwrap(), 0x1122_3344_5566_7788);
+    assert_eq!(
+        engine.unicorn.reg_read(RegisterX86::RBX).unwrap(),
+        0x1122_3344_5566_7788
+    );
     assert_eq!(
         &engine.unicorn.reg_read_long(RegisterX86::XMM6).unwrap()[..8],
         &0x1122_3344_5566_7788u64.to_le_bytes()
     );
-    assert_eq!(engine.unicorn.get_data().windows_threads.values().next().unwrap().exit_code, 0x2222);
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .values()
+            .next()
+            .unwrap()
+            .exit_code,
+        0x2222
+    );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1111);
-    assert_eq!(engine.unicorn.get_data().windows_tls_slots.get(&3), Some(&0xaaaa));
+    assert_eq!(
+        engine.unicorn.get_data().windows_tls_slots.get(&3),
+        Some(&0xaaaa)
+    );
 }
 
 #[test]

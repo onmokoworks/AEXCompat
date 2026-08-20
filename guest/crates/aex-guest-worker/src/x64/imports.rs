@@ -1183,7 +1183,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::SwitchToThread => {
-                uc("write cooperative SwitchToThread return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write cooperative SwitchToThread return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install cooperative SwitchToThread",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
@@ -5313,7 +5316,9 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
             unicorn.get_data_mut().scheduler_child_completed = true;
             unicorn
                 .reg_write(RegisterX86::RIP, pending.return_address)
-                .map_err(|error| format!("CreateThread completed scheduler target failed: {error}"))?;
+                .map_err(|error| {
+                    format!("CreateThread completed scheduler target failed: {error}")
+                })?;
             unicorn
                 .emu_stop()
                 .map_err(|error| format!("CreateThread scheduler stop failed: {error}"))?;
