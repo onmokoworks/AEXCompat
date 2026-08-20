@@ -4132,6 +4132,107 @@ mod tests {
         );
     }
 
+    fn tagged_pixel(tag: u8) -> PIXEL_RGBA {
+        PIXEL_RGBA {
+            r: tag,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    }
+
+    fn red_tags(pixels: &[PIXEL_RGBA]) -> Vec<u8> {
+        pixels.iter().map(|pixel| pixel.r).collect()
+    }
+
+    fn tagged_pixels(tag: u8, count: usize) -> Vec<PIXEL_RGBA> {
+        (0..count).map(|_| tagged_pixel(tag)).collect()
+    }
+
+    #[test]
+    fn rendered_frame_origin_places_and_clips_at_every_object_edge() {
+        let source = [
+            tagged_pixel(1),
+            tagged_pixel(2),
+            tagged_pixel(3),
+            tagged_pixel(4),
+        ];
+
+        let mut zero = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut zero, 4, 4, &source, 2, 2, 0, 0),
+            Ok(true)
+        );
+        assert_eq!(
+            red_tags(&zero),
+            vec![1, 2, 9, 9, 3, 4, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]
+        );
+
+        for (origin, expected) in [
+            ((-1, 1), vec![(4, 2), (8, 4)]),
+            ((3, 1), vec![(7, 1), (11, 3)]),
+            ((1, -1), vec![(1, 3), (2, 4)]),
+            ((1, 3), vec![(13, 1), (14, 2)]),
+        ] {
+            let mut destination = tagged_pixels(9, 16);
+            assert_eq!(
+                place_frame_at_origin(&mut destination, 4, 4, &source, 2, 2, origin.0, origin.1,),
+                Ok(true)
+            );
+            for (index, tag) in expected {
+                assert_eq!(destination[index].r, tag, "origin={origin:?} index={index}");
+            }
+            assert_eq!(
+                destination.iter().filter(|pixel| pixel.r != 9).count(),
+                2,
+                "only the clipped overlap is written for origin={origin:?}"
+            );
+        }
+
+        let mut corner = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut corner, 4, 4, &source, 2, 2, 3, 3),
+            Ok(true)
+        );
+        assert_eq!(corner[15].r, 1);
+        assert_eq!(corner.iter().filter(|pixel| pixel.r != 9).count(), 1);
+    }
+
+    #[test]
+    fn rendered_frame_origin_fails_closed_without_an_object_overlap() {
+        let source = tagged_pixels(1, 4);
+        for origin in [(4, 0), (-2, 0), (0, 4), (0, -2)] {
+            let mut destination = tagged_pixels(9, 16);
+            assert_eq!(
+                place_frame_at_origin(&mut destination, 4, 4, &source, 2, 2, origin.0, origin.1,),
+                Ok(false)
+            );
+            assert_eq!(red_tags(&destination), vec![9; 16]);
+        }
+
+        let mut destination = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut destination, 4, 4, &source, 3, 2, 0, 0),
+            Err(()),
+            "a source geometry/length mismatch is never copied"
+        );
+        assert_eq!(
+            place_frame_at_origin(
+                &mut destination,
+                u32::MAX,
+                u32::MAX,
+                &source,
+                2,
+                2,
+                i32::MAX,
+                i32::MAX,
+            ),
+            Err(()),
+            "an unrepresentable destination geometry fails before indexing"
+        );
+        assert_eq!(red_tags(&destination), vec![9; 16]);
+    }
+
     /// The virtual-buffer wiring reads layer slots from the RAW discovery
     /// parameters. Extracting from the registered config defaults instead is
     /// the bug this pins: `build_item` maps only float/integer/color, so a

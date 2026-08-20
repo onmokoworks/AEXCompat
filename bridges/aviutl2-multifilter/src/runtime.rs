@@ -562,27 +562,14 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
     };
     match reply {
         FrameReply::Rendered(frame) => {
-            // The frame is published at whatever size it came back as, which is
-            // not always the object's. A SmartFX effect that grows its output -
-            // a glow reaching past the layer - answers larger, and set_image_data
-            // takes the size as an argument ("width,height: 画像サイズ" in the
-            // filter2 API), so the grown frame goes through unchanged.
-            //
-            // This used to be refused on the stated grounds that "a filter object
-            // cannot change the image size". Nothing checked that: the frame was
-            // dropped and the object kept its old pixels, so DeepGlow2 rendered
-            // correctly every frame and nothing reached the screen (#914).
-            // The bounds the input is held to apply to the output too, rather
-            // than being left to the broker's matching constants: what this
-            // hands `set_image_data` is this crate's invariant to keep.
             let out = bytes_to_pixels(&frame.pixels);
-            let pixels = u64::from(frame.width) * u64::from(frame.height);
+            let output_pixel_count = u64::from(frame.width) * u64::from(frame.height);
             if frame.width == 0
                 || frame.height == 0
                 || frame.width > MAX_DIMENSION
                 || frame.height > MAX_DIMENSION
-                || pixels > MAX_PIXELS
-                || out.len() as u64 != pixels
+                || output_pixel_count > MAX_PIXELS
+                || out.len() as u64 != output_pixel_count
             {
                 // Unreachable while the broker validates the frame it sends,
                 // which is exactly why it must say something if it happens -
@@ -593,6 +580,33 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
                 );
                 return true;
             }
+            // The worker reports the frame top-left in layer coordinates.
+            // filter2's set_image_data has no placement argument, so publish an
+            // object-sized image after placing the returned frame onto the
+            // current object pixels. This preserves pixels outside a partial
+            // result and clips an expanded result at all four object edges.
+            let mut placed = pixels;
+            let overlaps = match place_frame_at_origin(
+                &mut placed,
+                width,
+                height,
+                &out,
+                frame.width,
+                frame.height,
+                frame.origin_x,
+                frame.origin_y,
+            ) {
+                Ok(overlaps) => overlaps,
+                Err(()) => {
+                    report_frame_trouble(
+                        &ctx.plugin,
+                        FrameTrouble::Refused(
+                            "the frame placement is outside this bridge's bounds",
+                        ),
+                    );
+                    return true;
+                }
+            };
             // Says so once when a filter that had been failing renders again;
             // silent for one that never stopped. After the refusal above, not
             // before it: a filter refused on every frame would otherwise clear
@@ -601,9 +615,9 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
             // the refusal - at preview frame rate, and the first of the two
             // untrue.
             report_frame_recovered(&ctx.plugin);
-            unsafe {
-                ((*video).set_image_data)(out.as_ptr(), frame.width as i32, frame.height as i32)
-            };
+            if overlaps {
+                unsafe { ((*video).set_image_data)(placed.as_ptr(), width as i32, height as i32) };
+            }
             true
         }
         // Keep the session; leave this frame's pixels. Saying so matters: with
@@ -1721,4 +1735,74 @@ fn bytes_to_pixels(bytes: &[u8]) -> Vec<PIXEL_RGBA> {
             a: c[3],
         })
         .collect()
+}
+
+fn place_frame_at_origin(
+    destination: &mut [PIXEL_RGBA],
+    destination_width: u32,
+    destination_height: u32,
+    source: &[PIXEL_RGBA],
+    source_width: u32,
+    source_height: u32,
+    origin_x: i32,
+    origin_y: i32,
+) -> Result<bool, ()> {
+    let destination_len = usize::try_from(
+        u64::from(destination_width)
+            .checked_mul(u64::from(destination_height))
+            .ok_or(())?,
+    )
+    .map_err(|_| ())?;
+    let source_len = usize::try_from(
+        u64::from(source_width)
+            .checked_mul(u64::from(source_height))
+            .ok_or(())?,
+    )
+    .map_err(|_| ())?;
+    if destination.len() != destination_len || source.len() != source_len {
+        return Err(());
+    }
+
+    let source_left = i64::from(origin_x);
+    let source_top = i64::from(origin_y);
+    let source_right = source_left.checked_add(i64::from(source_width)).ok_or(())?;
+    let source_bottom = source_top.checked_add(i64::from(source_height)).ok_or(())?;
+    let left = source_left.max(0);
+    let top = source_top.max(0);
+    let right = source_right.min(i64::from(destination_width));
+    let bottom = source_bottom.min(i64::from(destination_height));
+    if left >= right || top >= bottom {
+        return Ok(false);
+    }
+
+    let copy_width = usize::try_from(right - left).map_err(|_| ())?;
+    let source_x = usize::try_from(left - source_left).map_err(|_| ())?;
+    let destination_x = usize::try_from(left).map_err(|_| ())?;
+    let source_stride = usize::try_from(source_width).map_err(|_| ())?;
+    let destination_stride = usize::try_from(destination_width).map_err(|_| ())?;
+    for y in top..bottom {
+        let destination_y = usize::try_from(y).map_err(|_| ())?;
+        let source_y = usize::try_from(y - source_top).map_err(|_| ())?;
+        let source_start = source_y
+            .checked_mul(source_stride)
+            .and_then(|offset| offset.checked_add(source_x))
+            .ok_or(())?;
+        let destination_start = destination_y
+            .checked_mul(destination_stride)
+            .and_then(|offset| offset.checked_add(destination_x))
+            .ok_or(())?;
+        let source_end = source_start.checked_add(copy_width).ok_or(())?;
+        let destination_end = destination_start.checked_add(copy_width).ok_or(())?;
+        let source_row = source.get(source_start..source_end).ok_or(())?;
+        let destination_row = destination
+            .get_mut(destination_start..destination_end)
+            .ok_or(())?;
+        for (destination_pixel, source_pixel) in destination_row.iter_mut().zip(source_row.iter()) {
+            destination_pixel.r = source_pixel.r;
+            destination_pixel.g = source_pixel.g;
+            destination_pixel.b = source_pixel.b;
+            destination_pixel.a = source_pixel.a;
+        }
+    }
+    Ok(true)
 }
