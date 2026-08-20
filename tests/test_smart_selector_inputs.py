@@ -42,7 +42,9 @@ def test_native_selector_input_self_test_passes_all_three_workers() -> None:
     for name in WORKERS:
         worker = BUILD / name
         assert worker.exists(), f"build {name} before running the native test"
-        assert _self_test(worker)["smart_selector_inputs"] == "passed"
+        report = _self_test(worker)
+        assert report["smart_selector_inputs"] == "passed"
+        assert report["pr_gpu_pf_first_all_depths"] is True
 
 
 def test_reported_offsets_match_the_frozen_sdk_abi_observation() -> None:
@@ -66,7 +68,4 @@ def test_reported_offsets_match_the_frozen_sdk_abi_observation() -> None:
         # PF_Field then PF_ChannelMask follow the 16-byte PF_LRect.
         assert reported["field_offset"] == 16
         assert reported["channel_mask_offset"] == 20
-        assert (
-            reported["channel_mask_offset"] + 4
-            <= reported["render_request_bytes"]
-        )
+        assert reported["channel_mask_offset"] + 4 <= reported["render_request_bytes"]

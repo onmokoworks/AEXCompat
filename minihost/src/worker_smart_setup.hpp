@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace aexcompat::worker_runtime::smart_setup {
 
@@ -87,9 +88,8 @@ class ForceGpuRetryScope {
 // those from effects whose PF CPU path works (Levels2, Box_Blur, Lumetri and
 // others export it too), so the runtime 512 is the signal. When the frame loop
 // sees it, it sets this flag and re-runs the frame, which lets the smart
-// dispatch take the Premiere GPU-filter route at the session depth. Float32
-// sessions take that route first and never need the flag. Thread-local like
-// the GPU retry flag above, with the same RAII holder shape.
+// dispatch take the Premiere GPU-filter route at the session depth. Thread-
+// local like the GPU retry flag above, with the same RAII holder shape.
 void set_force_pr_gpu_retry(bool, int32_t cause);
 bool force_pr_gpu_retry_requested();
 // The PF CPU path's own refusal that sent this frame to the GPU route, or 0
@@ -110,6 +110,28 @@ class ForcePrGpuRetryScope {
   ForcePrGpuRetryScope(const ForcePrGpuRetryScope&) = delete;
   ForcePrGpuRetryScope& operator=(const ForcePrGpuRetryScope&) = delete;
 };
+
+// Resident smart sessions can observe the PF selector result and retry, so
+// they defer an otherwise export-first float32 Premiere route. One-shot
+// callers have no frame-loop retry and retain the existing float32 behavior.
+void set_pr_gpu_pf_first(bool);
+bool pr_gpu_pf_first_requested();
+
+class PrGpuPfFirstScope {
+ public:
+  PrGpuPfFirstScope() { set_pr_gpu_pf_first(true); }
+  ~PrGpuPfFirstScope() { set_pr_gpu_pf_first(false); }
+  PrGpuPfFirstScope(const PrGpuPfFirstScope&) = delete;
+  PrGpuPfFirstScope& operator=(const PrGpuPfFirstScope&) = delete;
+};
+
+// Production resident-frame coordinator seam. Every SmartFX attempt made by
+// the session loop goes through this wrapper, including bounded retries.
+template <typename Attempt>
+decltype(auto) run_pr_gpu_pf_first_session_attempt(Attempt&& attempt) {
+  const PrGpuPfFirstScope pf_first;
+  return std::forward<Attempt>(attempt)();
+}
 
 struct WorldBuffers {
   render_safety::InputPixelBuffer* source{};
