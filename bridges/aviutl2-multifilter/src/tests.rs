@@ -58,7 +58,11 @@ mod tests {
         PluginDataIdentity {
             index,
             name_hex: format!("{:x}", index + 0x41),
-            match_name_hex: match_name.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect(),
+            match_name_hex: match_name
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
             category_hex: "456666656374".to_owned(),
             entrypoint: format!("effect_{index}"),
         }
@@ -200,7 +204,10 @@ mod tests {
             &secondary_report
         ));
         let mut optional_entry = effect_entry.clone();
-        assert!(finish_companion_demand_probe(&mut optional_entry, Vec::new()));
+        assert!(finish_companion_demand_probe(
+            &mut optional_entry,
+            Vec::new()
+        ));
         assert!(
             optional_entry.demanded_suites.is_empty(),
             "an unconfirmed secondary miss must not load a provider"
@@ -3038,7 +3045,11 @@ mod tests {
             &HashMap::from([(1, names.values().next().unwrap().clone())]),
         );
         assert_eq!(plans.len(), 2);
-        assert_eq!(cache.len(), 1, "the alias need not be rekeyed before planning");
+        assert_eq!(
+            cache.len(),
+            1,
+            "the alias need not be rekeyed before planning"
+        );
     }
 
     #[test]
@@ -3062,9 +3073,7 @@ mod tests {
         merge_cache_entries(&mut local, &on_disk);
 
         assert_eq!(
-            local[&key].additional_effects[0]
-                .registered_name
-                .as_deref(),
+            local[&key].additional_effects[0].registered_name.as_deref(),
             Some("Bundle — Second")
         );
     }
@@ -3093,10 +3102,12 @@ mod tests {
         let overflow = (0..65)
             .map(|index| plugin_data_identity(index, &format!("effect-{index}")))
             .collect::<Vec<_>>();
-        assert!(plugin_data_identities(&serde_json::json!({
-            "plugin_data": {"selected_index": 0, "registrations": overflow}
-        }))
-        .is_err());
+        assert!(
+            plugin_data_identities(&serde_json::json!({
+                "plugin_data": {"selected_index": 0, "registrations": overflow}
+            }))
+            .is_err()
+        );
 
         let opaque = serde_json::json!({
             "plugin_data": {
@@ -3131,7 +3142,10 @@ mod tests {
         assert_eq!(plans.len(), 2);
         assert_eq!(plans[0].name, "Bundle");
         assert!(plans[0].selector.is_none());
-        assert_eq!(plans[0].entry.closure_identity.as_deref(), Some("shared-dll-closure"));
+        assert_eq!(
+            plans[0].entry.closure_identity.as_deref(),
+            Some("shared-dll-closure")
+        );
         assert_eq!(plans[1].name, "Bundle — Second");
         assert_eq!(
             plans[1].selector,
@@ -3221,9 +3235,7 @@ mod tests {
                 route,
                 Some(&selector),
                 |_| -> Result<_, ()> { panic!("secondary effect used the default entrypoint") },
-                |request, selected| {
-                    Ok((request, selected.index, selected.match_name_hex.clone()))
-                },
+                |request, selected| Ok((request, selected.index, selected.match_name_hex.clone())),
             )
             .unwrap();
             assert_eq!(
@@ -3252,16 +3264,15 @@ mod tests {
         };
         let identity = PluginDataIdentity {
             index: 1,
-            name_hex: encoded(
-                "$$$/AE/Effect/Name/RollingShutter=Rolling Shutter Repair",
-            ),
+            name_hex: encoded("$$$/AE/Effect/Name/RollingShutter=Rolling Shutter Repair"),
             match_name_hex: encoded("ADBE Rolling Shutter"),
-            category_hex: encoded(
-                "$$$/MediaCore/FiltersAndEffects/Category/Distort=Distort",
-            ),
+            category_hex: encoded("$$$/MediaCore/FiltersAndEffects/Category/Distort=Distort"),
             entrypoint: "RollingShutterMain".to_owned(),
         };
-        assert_eq!(identity.display_name().as_deref(), Some("Rolling Shutter Repair"));
+        assert_eq!(
+            identity.display_name().as_deref(),
+            Some("Rolling Shutter Repair")
+        );
         assert_eq!(identity.category().as_deref(), Some("Distort"));
     }
 

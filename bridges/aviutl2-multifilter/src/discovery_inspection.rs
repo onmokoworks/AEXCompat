@@ -225,9 +225,7 @@ fn finish_one_shot_in_place(
     entry
 }
 
-fn plugin_data_identities(
-    diagnostics: &serde_json::Value,
-) -> Result<Vec<PluginDataIdentity>, ()> {
+fn plugin_data_identities(diagnostics: &serde_json::Value) -> Result<Vec<PluginDataIdentity>, ()> {
     let Some(plugin_data) = diagnostics.get("plugin_data") else {
         return Ok(Vec::new());
     };
@@ -2062,10 +2060,12 @@ fn remember_secondary_filter_names(
 ) -> bool {
     let mut changed = false;
     for ((plugin, index), name) in names {
-        let Some(effect) = cache
-            .get_mut(plugin)
-            .and_then(|entry| entry.additional_effects.iter_mut().find(|effect| effect.identity.index == *index))
-        else {
+        let Some(effect) = cache.get_mut(plugin).and_then(|entry| {
+            entry
+                .additional_effects
+                .iter_mut()
+                .find(|effect| effect.identity.index == *index)
+        }) else {
             continue;
         };
         if effect.registered_name.as_deref() != Some(name) {

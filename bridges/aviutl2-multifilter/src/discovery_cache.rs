@@ -294,7 +294,11 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         .collect::<Vec<_>>();
     let remembered_names = resolved_entries
         .iter()
-        .map(|entry| entry.as_ref().and_then(|entry| entry.registered_name.clone()))
+        .map(|entry| {
+            entry
+                .as_ref()
+                .and_then(|entry| entry.registered_name.clone())
+        })
         .collect::<Vec<_>>();
     let filter_names = stable_filter_names(
         &plugins,
@@ -305,10 +309,8 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     report_qualified_names(&plugins, &filter_names);
     let mut pending: Vec<PathBuf> = Vec::new();
     let mut registered: usize = 0;
-    for ((plugin, filter_name), resolved) in plugins
-        .iter()
-        .zip(&filter_names)
-        .zip(&resolved_entries)
+    for ((plugin, filter_name), resolved) in
+        plugins.iter().zip(&filter_names).zip(&resolved_entries)
     {
         let key = plugin.to_string_lossy().into_owned();
         let meta = file_meta(plugin);
@@ -377,7 +379,11 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // this launch (#321), which would otherwise read as "registered 500 of 12".
     let known_effects = resolved_entries
         .iter()
-        .map(|entry| entry.as_ref().map_or(1, |entry| 1 + entry.additional_effects.len()))
+        .map(|entry| {
+            entry
+                .as_ref()
+                .map_or(1, |entry| 1 + entry.additional_effects.len())
+        })
         .sum();
     report_registration(known_effects, registered, pending.len(), limits);
 
@@ -2145,10 +2151,8 @@ fn plan_secondary_filter_names(
         .map(|name| name.to_lowercase())
         .collect();
     let mut planned = HashMap::new();
-    for ((plugin, primary_name), resolved) in plugins
-        .iter()
-        .zip(primary_names)
-        .zip(resolved_entries)
+    for ((plugin, primary_name), resolved) in
+        plugins.iter().zip(primary_names).zip(resolved_entries)
     {
         let Some(entry) = resolved.as_ref() else {
             continue;
@@ -2264,9 +2268,7 @@ fn decode_plugin_data_bytes(hex: &str) -> Option<Vec<u8>> {
     let bytes = hex
         .as_bytes()
         .chunks_exact(2)
-        .map(|pair| {
-            u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
-        })
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect::<Option<Vec<_>>>()?;
     if bytes.iter().any(|byte| *byte < 0x20 || *byte == 0x7f) {
         return None;
@@ -3262,10 +3264,7 @@ fn preserve_secondary_registered_names(discovered: &mut CacheEntry, old: &CacheE
             .plugin_data_effect
             .as_ref()
             .and_then(|identity| {
-                old_names.get(&(
-                    identity.match_name_hex.clone(),
-                    identity.entrypoint.clone(),
-                ))
+                old_names.get(&(identity.match_name_hex.clone(), identity.entrypoint.clone()))
             })
             .cloned()
             // Older entries have no PluginData identity. Preserve the legacy
@@ -3369,10 +3368,14 @@ fn merge_cache_entries(
                 .cloned()
             };
             let disk_name_for_identity = |identity: &PluginDataIdentity| {
-                if disk_entry.plugin_data_effect.as_ref().is_some_and(|candidate| {
-                    candidate.match_name_hex == identity.match_name_hex
-                        && candidate.entrypoint == identity.entrypoint
-                }) {
+                if disk_entry
+                    .plugin_data_effect
+                    .as_ref()
+                    .is_some_and(|candidate| {
+                        candidate.match_name_hex == identity.match_name_hex
+                            && candidate.entrypoint == identity.entrypoint
+                    })
+                {
                     return stable_name(disk_entry.registered_name.as_ref());
                 }
                 disk_entry.additional_effects.iter().find_map(|effect| {

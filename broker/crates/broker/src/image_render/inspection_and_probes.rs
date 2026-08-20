@@ -49,10 +49,7 @@ fn inspect_experimental_impl(
         authorization.append_launch(false, &mut args_after_plugin, &mut dependencies);
     }
     if let Some(selector) = plugin_data_selector {
-        args_after_plugin.extend([
-            "--plugin-data-selector-v1".to_owned(),
-            selector.encoded()?,
-        ]);
+        args_after_plugin.extend(["--plugin-data-selector-v1".to_owned(), selector.encoded()?]);
     }
     let started = Instant::now();
     // Parameter inspection runs with no deadline (issue #354). A watchdog here
