@@ -211,17 +211,20 @@ exe で測り、「修正が効いていない」ように見える (08-17 に�
 
 ## 5. CI runner
 
-- CI (`Windows clean clone`) は現状の設定 (`vars.USE_SELF_HOSTED_RUNNER`) では
-  self-hosted runner `windows-real` で走り、AE と機械を共有する。owner が AfterFX
-  を開いている間は `test_ae_reference_capture_automation` が fail-closed で red に
-  なり ("After Effects is already running; refusing to touch an existing user
-  session")、AfterFX 終了後の `gh run rerun <run-id> --failed` で回復する
-  (PR #1215 の初回 run がこれ)。
-- run が queued のまま数十分動かないなら runner が落ちている。担当セッションから
-  runner の再起動はできないので owner に依頼する (runner を触らない)。CI が
-  動かない間のマージ可否は owner 判断で、担当セッションは blocked として報告する
-  (PR #1255 で CI を待たずにマージしたのは、明示の owner 指示による 1 回限りの
-  例外)。
+- CI (`Windows clean clone`) は GitHub-hosted の `windows-latest` で走る
+  (#1457)。self-hosted runner `windows-real` は廃止したので、CI が AE と機械を
+  共有することはもう無い。owner が AfterFX を開いていても CI 側は影響を受けない。
+  - 訂正前の記述 (2026-08-20 まで): CI は `vars.USE_SELF_HOSTED_RUNNER` により
+    self-hosted runner `windows-real` で走り AE と機械を共有していた。AfterFX
+    起動中は `test_ae_reference_capture_automation` が fail-closed で red になり
+    ("After Effects is already running; refusing to touch an existing user
+    session")、AfterFX 終了後の `gh run rerun <run-id> --failed` で回復していた
+    (PR #1215 の初回 run がこれ)。ローカルで pytest を回すときの AE 排他は
+    §6 のとおり今も有効。
+- run が queued のまま長時間動かないのは GitHub 側の事情 (無料枠、同時実行上限、
+  runner 障害) になった。担当セッションから打てる手は無いので、blocked として
+  報告する。CI が動かない間のマージ可否は owner 判断 (PR #1255 で CI を待たずに
+  マージしたのは、明示の owner 指示による 1 回限りの例外)。
 
 ## 6. local pytest の既知の環境要因 fail
 

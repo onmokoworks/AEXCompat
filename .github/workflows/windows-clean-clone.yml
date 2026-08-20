@@ -18,13 +18,12 @@ concurrency:
 
 jobs:
   source-reproducible:
-    # Keep untrusted public-repository jobs off the physical workstation.
-    runs-on: ${{ github.event.repository.private && vars.USE_SELF_HOSTED_RUNNER == 'true' && fromJSON('["self-hosted","Windows","X64","windows-real"]') || 'windows-latest' }}
+    # self-hosted は使わない (#1457)。public repository では fork PR が任意の
+    # コードを持ち込むので、物理ワークステーションに届く経路自体を残さない。
+    runs-on: windows-latest
     timeout-minutes: 120
     env:
       PYTHONUTF8: "1"
-      # bindgen in the Windows guest workspace loads libclang at build time.
-      LIBCLANG_PATH: 'C:\Program Files\LLVM\bin'
       # built_artifact テストの broker/harness を、下の `cargo build --workspace`
       # が作る debug から取る。release に戻すと同じクレートを二度作る (#945)。
       AEXCOMPAT_CARGO_PROFILE: debug
@@ -39,7 +38,7 @@ jobs:
       SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
       SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Read repository Rust toolchain
@@ -51,11 +50,11 @@ jobs:
             throw 'rust-toolchain.toml must declare exactly one channel'
           }
           "channel=$($match.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: ${{ steps.repository-rust.outputs.channel }}
           components: rustfmt
-      - uses: mozilla/sccache-action@v0.0.11
+      - uses: mozilla/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: v0.17.0
       - name: Check Rust formatting
@@ -73,7 +72,7 @@ jobs:
             exit 0
           }
           rustfmt --edition 2024 --check --config skip_children=true @files
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: |
             broker
@@ -82,7 +81,7 @@ jobs:
             guest
       # Python 版は .python-version (3.12) に従う。
       # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
-      - uses: astral-sh/setup-uv@v8.3.2
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
       - name: Install Python test dependencies
@@ -94,13 +93,19 @@ jobs:
         run: uv run python tools/restore-mtime.py
 
       # SDK zip を置いた R2 バケットは非公開で、資格情報は secrets にしかない。
-      # fork PR は secrets を受け取れないので、public repository と fork PR は
-      # 今までどおりここから下の SDK 依存ステップに到達してはならない。job ごと
-      # 落とすのではなく個々のステップを条件付けし、source-only の検証は fork でも
-      # 走らせる。
+      # fork PR は secrets を受け取れないので、fork PR はここから下の SDK 依存
+      # ステップに到達してはならない。job ごと落とすのではなく個々のステップを
+      # 条件付けし、source-only の検証は fork でも走らせる。
+      #
+      # 条件は repository の可視性ではなく secrets が渡るかどうかで書く。
+      # `github.event.repository.private` で書くと public 化した時点で常に false
+      # になり、SDK 取得と下流 (probe AEX、fixture、artifact 公開、
+      # --run-sdk-tests) が丸ごと skip され、それを検出するはずの
+      # 「Fail if SDK or built-artifact tests were skipped」まで同じ条件で
+      # skip されて、中身の抜けた CI が緑になる (#1457)。
       - name: Fetch After Effects SDK
         id: sdk
-        if: github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         shell: pwsh
         env:
           R2_S3_ENDPOINT: ${{ secrets.R2_SDK_ENDPOINT }}
@@ -132,24 +137,45 @@ jobs:
         run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
       - name: Test YMM4 native bridge
         run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
-      - name: Verify guest libclang prerequisite
+      # guest workspace の bindgen が libclang.dll をロードする。runner image の
+      # LLVM の位置をハードコードすると、image 更新で黙って別物を掴んだり
+      # 見失ったりする。clang.exe と libclang.dll が揃っているディレクトリを
+      # 実際に探して LIBCLANG_PATH を決め、掴んだ版を記録する。VS 同梱の
+      # clang toolset のように libclang.dll を持たない候補は落とす。
+      # 版そのものを固定する必要が出たら、その時点で install-llvm-action を
+      # 足す (毎 run 数百 MB のダウンロードになるので、必要と分かるまで入れない)。
+      - name: Resolve guest libclang
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $library = Join-Path $env:LIBCLANG_PATH 'libclang.dll'
-          $clang = Join-Path $env:LIBCLANG_PATH 'clang.exe'
-          if (-not (Test-Path -LiteralPath $library -PathType Leaf)) {
-            throw "guest workspace requires libclang.dll under LIBCLANG_PATH: $env:LIBCLANG_PATH"
+          $candidates = @(
+            Get-Command clang.exe -All -CommandType Application -ErrorAction SilentlyContinue |
+              ForEach-Object { Split-Path -Parent $_.Source }
+          )
+          $candidates += 'C:\Program Files\LLVM\bin'
+          $resolved = $null
+          foreach ($candidate in ($candidates | Select-Object -Unique)) {
+            $clang = Join-Path $candidate 'clang.exe'
+            $library = Join-Path $candidate 'libclang.dll'
+            if ((Test-Path -LiteralPath $clang -PathType Leaf) -and
+                (Test-Path -LiteralPath $library -PathType Leaf)) {
+              $resolved = $candidate
+              break
+            }
+            Write-Host "libclang candidate rejected (needs both clang.exe and libclang.dll): $candidate"
           }
-          if (-not (Test-Path -LiteralPath $clang -PathType Leaf)) {
-            throw "guest workspace requires clang.exe under LIBCLANG_PATH: $env:LIBCLANG_PATH"
+          if (-not $resolved) {
+            throw "no directory on this runner holds both clang.exe and libclang.dll (checked: $($candidates -join '; '))"
           }
-          & $clang --version
+          $version = & (Join-Path $resolved 'clang.exe') --version
           if ($LASTEXITCODE -ne 0) {
             throw "clang --version failed with exit code $LASTEXITCODE"
           }
-          $file = Get-Item -LiteralPath $library
+          $file = Get-Item -LiteralPath (Join-Path $resolved 'libclang.dll')
+          Write-Host "guest_libclang_path=$resolved"
           Write-Host "guest_libclang_size=$($file.Length)"
+          Write-Host "guest_libclang_version=$($version[0])"
+          "LIBCLANG_PATH=$resolved" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Test guest workspace
         run: cargo test --manifest-path guest/Cargo.toml --workspace --locked
 
@@ -465,7 +491,7 @@ jobs:
 
       - name: Publish verified public PF layer parameter probe
         if: success() && steps.sdk.outcome == 'success'
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pf-layer-param-probe-windows-x86_64-${{ github.sha }}
           path: |
