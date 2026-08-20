@@ -5637,9 +5637,7 @@ fn emulate_find_first_file_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 .checked_add((index as u64) * 2)
                 .ok_or_else(|| "FindFirstFileExW path range overflows".to_string())?;
             let bytes = unicorn.mem_read_as_vec(address, 2).map_err(|error| {
-                format!(
-                    "FindFirstFileExW path {path_pointer:#x} is not fully readable: {error}"
-                )
+                format!("FindFirstFileExW path {path_pointer:#x} is not fully readable: {error}")
             })?;
             let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
             if unit == 0 {

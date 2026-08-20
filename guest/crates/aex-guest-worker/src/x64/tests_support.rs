@@ -9823,10 +9823,7 @@ fn find_first_file_ex_w_denies_traversal_device_and_unc_paths_without_output_mut
     ] {
         let path = write_test_wide_path(&mut engine, path);
         engine.write(output, &sentinel).unwrap();
-        engine
-            .unicorn
-            .reg_write(RegisterX86::RCX, path)
-            .unwrap();
+        engine.unicorn.reg_write(RegisterX86::RCX, path).unwrap();
         engine.unicorn.reg_write(RegisterX86::RDX, 1).unwrap();
         engine.unicorn.reg_write(RegisterX86::R8, output).unwrap();
         engine.unicorn.reg_write(RegisterX86::R9, 0).unwrap();
@@ -9952,9 +9949,7 @@ fn find_first_file_ex_w_bounds_and_validates_utf16_input() {
         assert_eq!(engine.unicorn.get_data().windows_last_error, expected_error);
     }
     let malformed = engine.allocate(4, 2).unwrap();
-    engine
-        .write(malformed, &[0x00, 0xd8, 0x00, 0x00])
-        .unwrap();
+    engine.write(malformed, &[0x00, 0xd8, 0x00, 0x00]).unwrap();
     assert_eq!(
         engine
             .call_win64_with_timeout(
