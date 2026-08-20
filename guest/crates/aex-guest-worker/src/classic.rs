@@ -23,6 +23,7 @@ const CMD_SEQUENCE_SETDOWN: u64 = abi::PF_CMD_SEQUENCE_SETDOWN as u64;
 const CMD_FRAME_SETUP: u64 = abi::PF_CMD_FRAME_SETUP as u64;
 const CMD_RENDER: u64 = abi::PF_CMD_RENDER as u64;
 const CMD_FRAME_SETDOWN: u64 = abi::PF_CMD_FRAME_SETDOWN as u64;
+const CMD_USER_CHANGED_PARAM: u64 = abi::PF_CMD_USER_CHANGED_PARAM as u64;
 const CMD_SMART_PRE_RENDER: u64 = abi::PF_CMD_SMART_PRE_RENDER as u64;
 const CMD_SMART_RENDER: u64 = abi::PF_CMD_SMART_RENDER as u64;
 const CMD_SMART_RENDER_GPU: u64 = abi::PF_CMD_SMART_RENDER_GPU as u64;
@@ -74,6 +75,12 @@ pub struct ParameterReport {
     pub index: i32,
     pub param_type: i32,
     pub name: String,
+    pub ui_flags: u32,
+    pub flags: u32,
+    pub ui_width: u16,
+    pub ui_height: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choices: Option<String>,
     pub default_value: Option<f64>,
     pub valid_min: Option<f64>,
     pub valid_max: Option<f64>,
@@ -84,6 +91,10 @@ pub struct ParameterReport {
     pub current_color: Option<[u8; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_color: Option<[u8; 4]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_components: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_components: Option<Vec<f64>>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +155,20 @@ pub struct SetupReport {
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ParameterUiState {
+    pub slot: usize,
+    pub ui_flags: u32,
+    pub flags: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UserChangedReport {
+    pub slot: usize,
+    pub selector_error: i32,
+    pub parameters: Vec<ParameterUiState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -389,6 +414,7 @@ pub struct ClassicHost {
     global_active: bool,
     sequence_active: bool,
     frame_resources: Option<FrameResources>,
+    user_changed_extra: Option<u64>,
     resident_frames: u64,
     resident_frame_setdown_error: i32,
     last_gpu_diagnostic: GpuRenderDiagnostic,
@@ -491,6 +517,7 @@ impl ClassicHost {
             global_active: false,
             sequence_active: false,
             frame_resources: None,
+            user_changed_extra: None,
             resident_frames: 0,
             resident_frame_setdown_error: 0,
             last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
@@ -552,6 +579,7 @@ impl ClassicHost {
             global_active: false,
             sequence_active: false,
             frame_resources: None,
+            user_changed_extra: None,
             resident_frames: 0,
             resident_frame_setdown_error: 0,
             last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
@@ -605,11 +633,25 @@ impl ClassicHost {
                     numeric_descriptor(&param.bytes, param.param_type);
                 let (current_color, default_color) =
                     color_descriptor(&param.bytes, param.param_type);
-                ParameterReport {
+                let (current_components, default_components) =
+                    component_descriptor(&param.bytes, param.param_type);
+                let choices = if param.param_type == PARAM_POPUP {
+                    let pointer =
+                        read_u64(&param.bytes, abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET);
+                    Some(self.read_guest_text(pointer, 4096)?)
+                } else {
+                    None
+                };
+                Ok(ParameterReport {
                     slot: offset + 1,
                     index: param.index,
                     param_type: param.param_type,
                     name: param.name.clone(),
+                    ui_flags: read_u32(&param.bytes, abi::PARAM_UI_FLAGS_OFFSET),
+                    flags: read_u32(&param.bytes, abi::PARAM_FLAGS_OFFSET),
+                    ui_width: read_i16(&param.bytes, abi::PARAM_UI_WIDTH_OFFSET).max(0) as u16,
+                    ui_height: read_i16(&param.bytes, abi::PARAM_UI_HEIGHT_OFFSET).max(0) as u16,
+                    choices,
                     default_value,
                     valid_min,
                     valid_max,
@@ -618,9 +660,11 @@ impl ClassicHost {
                     precision,
                     current_color,
                     default_color,
-                }
+                    current_components,
+                    default_components,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ClassicError>>()?;
         let report = SetupReport {
             schema_version: 1,
             execution_backend: self.engine.backend_name(),
@@ -637,6 +681,24 @@ impl ClassicHost {
         };
         self.setup_report = Some(report.clone());
         Ok(report)
+    }
+
+    fn read_guest_text(&self, address: u64, limit: usize) -> Result<String, ClassicError> {
+        if address == 0 {
+            return Ok(String::new());
+        }
+        let mut bytes = Vec::new();
+        for offset in 0..limit {
+            let mut byte = [0u8; 1];
+            self.engine.read(address + offset as u64, &mut byte)?;
+            if byte[0] == 0 {
+                return Ok(String::from_utf8_lossy(&bytes).into_owned());
+            }
+            bytes.push(byte[0]);
+        }
+        Err(ClassicError::Input(
+            "popup choice text exceeds the 4096-byte setup bound".into(),
+        ))
     }
 
     pub fn begin_resident_session(
@@ -921,6 +983,161 @@ impl ClassicHost {
                 && sequence_setdown_error == 0
                 && global_setdown_error == 0,
         }
+    }
+
+    pub fn apply_resident_parameter_values(
+        &mut self,
+        parameter_values: &[ParameterValue],
+    ) -> Result<(), ClassicError> {
+        let resources = self.frame_resources.as_ref().ok_or_else(|| {
+            ClassicError::Input("resident parameters have not been prepared".into())
+        })?;
+        let mut seen_slots = BTreeSet::new();
+        let mut pending_writes = Vec::with_capacity(parameter_values.len());
+        for requested in parameter_values {
+            let slot = requested.slot.ok_or_else(|| {
+                ClassicError::Input("resident parameter update requires an exact slot".into())
+            })?;
+            if slot == 0 || slot > resources.parameter_definitions.len() || !seen_slots.insert(slot)
+            {
+                return Err(ClassicError::Input(format!(
+                    "resident parameter slot {slot} is invalid or duplicated"
+                )));
+            }
+            let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+            self.engine
+                .read(resources.parameter_definitions[slot - 1], &mut definition)?;
+            let param_type = read_i32(&definition, abi::PARAM_PARAM_TYPE_OFFSET);
+            apply_parameter_value_for_layer(
+                &mut definition,
+                param_type,
+                requested,
+                resources.width,
+                resources.height,
+            )?;
+            pending_writes.push((resources.parameter_definitions[slot - 1], definition));
+        }
+        for (address, definition) in pending_writes {
+            self.engine.write(address, &definition)?;
+        }
+        Ok(())
+    }
+
+    pub fn user_changed_parameter(
+        &mut self,
+        slot: usize,
+    ) -> Result<UserChangedReport, ClassicError> {
+        if !self.sequence_active {
+            return Err(ClassicError::Input(
+                "resident session has not been opened".into(),
+            ));
+        }
+        let resources = self.frame_resources.as_ref().ok_or_else(|| {
+            ClassicError::Input("resident parameters have not been prepared".into())
+        })?;
+        if slot == 0 || slot > resources.parameter_definitions.len() {
+            return Err(ClassicError::Input(format!(
+                "user-changed parameter slot {slot} is invalid"
+            )));
+        }
+        let params = resources.params;
+        let definitions = resources.parameter_definitions.clone();
+        let extra = match self.user_changed_extra {
+            Some(extra) => extra,
+            None => {
+                let extra = self
+                    .engine
+                    .allocate(abi::PF_USER_CHANGED_PARAM_EXTRA_SIZE, 4)?;
+                self.user_changed_extra = Some(extra);
+                extra
+            }
+        };
+        let mut extra_bytes = vec![0u8; abi::PF_USER_CHANGED_PARAM_EXTRA_SIZE];
+        write_i32(
+            &mut extra_bytes,
+            abi::USER_CHANGED_PARAM_INDEX_OFFSET,
+            slot as i32,
+        );
+        self.engine.write(extra, &extra_bytes)?;
+        let selector_error = self
+            .engine
+            .call_selector_win64(
+                self.entry,
+                [
+                    CMD_USER_CHANGED_PARAM,
+                    self.input,
+                    self.output,
+                    params,
+                    0,
+                    extra,
+                ],
+            )
+            .map_err(|source| selector_guest_error("USER_CHANGED_PARAM", source))?
+            as i32;
+        if selector_error != 0 {
+            return Err(ClassicError::Selector {
+                selector: "USER_CHANGED_PARAM",
+                error: selector_error,
+            });
+        }
+        let mut parameters = Vec::with_capacity(definitions.len());
+        for (index, definition) in definitions.into_iter().enumerate() {
+            let mut bytes = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+            self.engine.read(definition, &mut bytes)?;
+            parameters.push(ParameterUiState {
+                slot: index + 1,
+                ui_flags: read_u32(&bytes, abi::PARAM_UI_FLAGS_OFFSET),
+                flags: read_u32(&bytes, abi::PARAM_FLAGS_OFFSET),
+            });
+        }
+        Ok(UserChangedReport {
+            slot,
+            selector_error,
+            parameters,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_test_user_changed_parameters(
+        &mut self,
+        definitions: Vec<Vec<u8>>,
+    ) -> Result<(), ClassicError> {
+        let params = self.engine.allocate((definitions.len() + 1) * 8, 8)?;
+        let mut parameter_definitions = Vec::with_capacity(definitions.len());
+        for (index, definition) in definitions.into_iter().enumerate() {
+            if definition.len() != abi::PF_PARAM_DEF_SIZE {
+                return Err(ClassicError::Input(
+                    "test parameter definition has the wrong size".into(),
+                ));
+            }
+            let address = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
+            self.engine.write(address, &definition)?;
+            self.engine
+                .write_u64(params + ((index + 1) * 8) as u64, address)?;
+            parameter_definitions.push(address);
+        }
+        let placeholder = self.engine.allocate(1, 1)?;
+        self.sequence_active = true;
+        self.frame_resources = Some(FrameResources {
+            width: 1,
+            height: 1,
+            format: FramePixelFormat::Argb8,
+            pixel_bytes: 4,
+            input_param: placeholder,
+            params,
+            output_world: placeholder,
+            input_pixels: placeholder,
+            output_guard_base: placeholder,
+            output_pixels: placeholder,
+            parameter_definitions,
+            secondary_layers: Vec::new(),
+        });
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_user_changed_extra(&self) -> Option<u64> {
+        self.user_changed_extra
     }
 
     pub fn failure_report(&self, error: &ClassicError) -> FailureReport {
@@ -2671,6 +2888,10 @@ fn read_f32(bytes: &[u8], offset: usize) -> f32 {
     f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+fn read_f64(bytes: &[u8], offset: usize) -> f64 {
+    f64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
 fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
@@ -2956,6 +3177,25 @@ fn color_descriptor(definition: &[u8], param_type: i32) -> (Option<[u8; 4]>, Opt
     // AE materializes `dephault` into `value` before the first render. Report
     // that effective initial state rather than the add-param scratch bytes.
     (Some(default), Some(default))
+}
+
+fn component_descriptor(
+    definition: &[u8],
+    param_type: i32,
+) -> (Option<Vec<f64>>, Option<Vec<f64>>) {
+    let union = abi::PARAM_U_OFFSET;
+    let defaults = match param_type {
+        PARAM_ANGLE => vec![read_i32(definition, union + ANGLE_DEFAULT_OFFSET) as f64 / 65536.0],
+        PARAM_POINT => vec![
+            read_i32(definition, union + POINT_DEFAULT_X_OFFSET) as f64 / 65536.0,
+            read_i32(definition, union + POINT_DEFAULT_Y_OFFSET) as f64 / 65536.0,
+        ],
+        PARAM_POINT3D => (0..3)
+            .map(|component| read_f64(definition, union + 24 + component * 8))
+            .collect(),
+        _ => return (None, None),
+    };
+    (Some(defaults.clone()), Some(defaults))
 }
 
 fn numeric_descriptor(
@@ -3321,6 +3561,43 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn setup_component_descriptors_preserve_angle_point_and_point3d_defaults() {
+        let mut angle = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        angle[abi::PARAM_U_OFFSET + ANGLE_DEFAULT_OFFSET
+            ..abi::PARAM_U_OFFSET + ANGLE_DEFAULT_OFFSET + 4]
+            .copy_from_slice(&(45i32 * 65536).to_le_bytes());
+        assert_eq!(
+            component_descriptor(&angle, PARAM_ANGLE),
+            (Some(vec![45.0]), Some(vec![45.0]))
+        );
+
+        let mut point = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        point[abi::PARAM_U_OFFSET + POINT_DEFAULT_X_OFFSET
+            ..abi::PARAM_U_OFFSET + POINT_DEFAULT_X_OFFSET + 4]
+            .copy_from_slice(&(25i32 * 65536).to_le_bytes());
+        point[abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET
+            ..abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET + 4]
+            .copy_from_slice(&(-10i32 * 65536).to_le_bytes());
+        assert_eq!(
+            component_descriptor(&point, PARAM_POINT),
+            (Some(vec![25.0, -10.0]), Some(vec![25.0, -10.0]))
+        );
+
+        let mut point3d = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        for (index, value) in [10.5f64, -20.25, 30.75].into_iter().enumerate() {
+            let offset = abi::PARAM_U_OFFSET + 24 + index * 8;
+            point3d[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        assert_eq!(
+            component_descriptor(&point3d, PARAM_POINT3D),
+            (
+                Some(vec![10.5, -20.25, 30.75]),
+                Some(vec![10.5, -20.25, 30.75])
+            )
+        );
     }
 
     #[test]

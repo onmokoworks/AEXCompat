@@ -2,8 +2,11 @@
 
 mod licenses;
 
-#[cfg(target_os = "macos")]
+mod shared_ui;
+
 mod gui_state;
+#[cfg(any(target_os = "macos", test))]
+mod shared_descriptor;
 
 #[cfg(target_os = "macos")]
 mod macos;

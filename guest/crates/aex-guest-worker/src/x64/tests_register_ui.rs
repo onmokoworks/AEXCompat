@@ -150,3 +150,87 @@ fn classic_setup_reports_the_custom_ui_registered_through_pf_in_data() {
         })
     );
 }
+
+#[test]
+fn classic_user_changed_param_uses_the_real_selector_slot_and_returns_dynamic_flags() {
+    let mut code = vec![
+        0x83,
+        0xf9,
+        0x0d, // cmp ecx, PF_CMD_USER_CHANGED_PARAM
+        0x75,
+        0x00, // jne failure (patched below)
+        0x49,
+        0x8b,
+        0x41,
+        0x08, // mov rax, [r9 + sizeof(void*)]
+        0x83,
+        0x78,
+        u8::try_from(abi::PARAM_U_OFFSET).unwrap(),
+        0x25, // cmp current value, 37
+        0x75,
+        0x00, // jne failure (patched below)
+        0xc7,
+        0x40,
+        0x04,
+        0x20,
+        0x00,
+        0x00,
+        0x00, // ui_flags = DISABLED
+        0xc7,
+        0x40,
+        0x30,
+        0x40,
+        0x00,
+        0x00,
+        0x00, // flags = SUPERVISE
+        0x48,
+        0x8b,
+        0x54,
+        0x24,
+        0x30, // mov rdx, [rsp + sixth argument]
+        0x83,
+        0x3a,
+        0x01, // cmp dword ptr [rdx], 1
+        0x75,
+        0x00, // jne failure (patched below)
+        0x31,
+        0xc0, // xor eax, eax
+        0xc3, // ret
+    ];
+    let failure = code.len();
+    code.extend_from_slice(&[0xb8, 0x11, 0x00, 0x00, 0x00, 0xc3]);
+    code[4] = u8::try_from(failure - 5).unwrap();
+    code[14] = u8::try_from(failure - 15).unwrap();
+    code[failure - 4] = 3;
+
+    let engine = test_engine(&code);
+    let mut host = crate::classic::ClassicHost::from_test_engine(engine, TEST_CODE).unwrap();
+    let mut definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+    definition[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+        .copy_from_slice(&1i32.to_le_bytes());
+    host.prepare_test_user_changed_parameters(vec![definition])
+        .unwrap();
+    host.apply_resident_parameter_values(&[crate::classic::ParameterValue {
+        slot: Some(1),
+        name: "Amount".into(),
+        value: Some(37.0),
+        color: None,
+        point: None,
+        angle: None,
+        point3d: None,
+    }])
+    .unwrap();
+
+    let report = host.user_changed_parameter(1).unwrap();
+    let extra = host.test_user_changed_extra().unwrap();
+    assert_eq!(report.slot, 1);
+    assert_eq!(report.selector_error, 0);
+    assert_eq!(report.parameters.len(), 1);
+    assert_eq!(report.parameters[0].slot, 1);
+    assert_eq!(report.parameters[0].ui_flags, 1 << 5);
+    assert_eq!(report.parameters[0].flags, 1 << 6);
+    assert_eq!(host.user_changed_parameter(1).unwrap().slot, 1);
+    assert_eq!(host.test_user_changed_extra(), Some(extra));
+    assert!(host.user_changed_parameter(0).is_err());
+    assert!(host.user_changed_parameter(2).is_err());
+}
