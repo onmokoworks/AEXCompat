@@ -1688,6 +1688,7 @@ void reset_cluster_effect_state() {
     g_parameter_runtime.checkout.live.clear();
   }
   g_custom_ui_telemetry = aexcompat::worker_runtime::ui_event_execution::CustomUiTelemetry{};
+  aexcompat::worker_runtime::ui_event_execution::reset_info_text_telemetry();
   aexcompat::pf_state_runtime::reset_pf_state_statistics();
 }
 

@@ -117,6 +117,7 @@ struct GuestState {
     current_windows_thread_id: u32,
     pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
+    crt_errno: u32,
     windows_thread_error_mode: u32,
     windows_socket_startups: u32,
     windows_private_heaps: BTreeMap<u64, BTreeSet<u64>>,
@@ -181,6 +182,7 @@ struct VcompDynamicLoop {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MsvcpMutex {
     mutex_type: u32,
+    owner_thread_id: Option<u32>,
     lock_count: u32,
 }
 
@@ -222,6 +224,7 @@ struct PendingWindowsThread {
     caller_tls_values: BTreeMap<u32, u64>,
     caller_fls_values: BTreeMap<u32, u64>,
     caller_last_error: u32,
+    caller_crt_errno: u32,
     caller_thread_error_mode: u32,
     caller_thread_id: u32,
     completion_return: u64,
@@ -320,6 +323,7 @@ pub struct GuestEngine<'a> {
     unicorn: Unicorn<'a, GuestState>,
     scheduled_windows_threads: BTreeMap<u32, ParkedWindowsThread>,
     scheduler_ready: VecDeque<u32>,
+    scheduler_deferred_ready: VecDeque<u32>,
     parked_main_context: Option<Context>,
     next_data: u64,
     image_base: u64,

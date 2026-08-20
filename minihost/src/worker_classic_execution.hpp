@@ -27,9 +27,13 @@ LifecycleResult begin_lifecycle(void* host, const LifecycleHooks& hooks);
 int32_t finish_lifecycle(void* host, LifecycleResult& state,
                          const LifecycleHooks& hooks, bool draw);
 struct RenderHooks {
+  void (*stage_begin)(void* host, const char* stage);
+  void (*stage_end)(void* host, const char* stage, int32_t error);
+  bool (*draw_enabled)(void* host);
   bool (*draw)(void* host);
   int32_t (*prepare_output)(void* host);
   int32_t (*dispatch_selector)(void* host);
+  bool (*ui_context_active)(void* host);
   bool (*close_ui)(void* host);
 };
 int32_t dispatch_render(void* host, int32_t error, const RenderHooks& hooks);

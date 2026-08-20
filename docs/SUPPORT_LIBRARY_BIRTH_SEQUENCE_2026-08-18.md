@@ -728,6 +728,108 @@ resolver を立てれば 14 が消えることは未検証** (この unit では
 同じ run で `PREF_Birth` (step 7、未実装) 起因と思われる first-chance throw も
 AdobePIE の PSL 初期化中に出ているが、14 の直接原因ではない (同 §3.3)。
 
+## 9. 訂正と決着 (2026-08-20、issue #1439 / #1302 の作業)
+
+§8 の「resolver を立てれば 14 が消えることは未検証」は**検証済みになった。
+消える。** ただし §8 の見立てのうち「`BEE_Birth` を呼んでいないことが原因」は
+**外れ**で、正しくは「`BEE_Birth` を呼んでも resolver 設置に到達しない」だった。
+
+観測 (AE 2026 Effects 304 AEX、depth 8):
+
+| 構成 | ShapeBlur | PSL_Adjustments | rendered |
+| --- | --- | --- | --- |
+| main (`b52d8a77`) | `frame_error:512` | `frame_error:14` | 299 |
+| resolver 設置のみ | `frame_error:14` | **rendered** | 未計測 (2本のみ計測) |
+| resolver + `ARE_Initialize` | **rendered** | **rendered** | **301** |
+
+「resolver 設置のみ」の行は ShapeBlur / PSL_Adjustments の 2 本だけを計測した
+構成で、full corpus は流していない (この構成は採用しないため)。
+
+回帰は 2 本のみ: 他 302 本のうち 301 本は bucket も `pixel_sha256` も baseline と
+一致し、残り 1 本 `Numbers.aex` は **同一バイナリの連続実行で hash が変わる**
+(実測: 3 回中 1 回だけ別値)。これは本変更起因ではなく、sweep 間比較の恒常的な
+偽陽性源として #1440 に分離した。
+
+### depth 16 / 32 でも計測 (実測)
+
+上の表は depth 8。depth を変えると母集団の様子はかなり変わる (depth 32 では
+`render_frame_failed:worker_exited` が 135 本ある) ので、3 つの depth すべてで
+baseline と比較した。**どの depth でも動いた record は意図した 2 本だけ**:
+
+| depth | rendered (base → fix) | 動いた record |
+| --- | --- | --- |
+| 8 | 299 → **301** | ShapeBlur、PSL_Adjustments |
+| 16 | 222 → **224** | ShapeBlur、PSL_Adjustments |
+| 32 | 151 → **152** | ShapeBlur のみ |
+
+depth 32 で PSL_Adjustments が動かないのは本変更と無関係で、baseline / fix
+どちらも `render_frame_failed:worker_exited` (= 14 に到達する前の別要因)。
+depth 32 の母集団全体の失敗も baseline と同一で、増えても減ってもいない。
+
+### admission 判定を実ビルドに当てた結果 (実測)
+
+`FUN_180c568a0` は非 export なので image-relative call になる。呼ぶ前に
+`worker_bee_bib_installer.hpp` の `inspect` で判定する: PE ヘッダ、
+`SizeOfImage` に対する両オフセットの範囲、entry の 16 バイト prologue 一致、
+idempotence の `cmp` の imm8 == 0、そして **disp32 をデコードして参照先が
+resolver word オフセットと一致すること** (= 2 つのハードコード定数の相互検証)。
+
+この判定ロジックをこの機械にある全ての BEE.dll に当てた結果 (PE を直接パース
+して同じ手順を再現):
+
+| ビルド | SizeOfImage | TimeDateStamp | 判定 |
+| --- | --- | --- | --- |
+| AE 2024 (24.5.0.52) | 0x1571000 | 0x666340a0 | `offset_outside_image` |
+| AE 2025 (25.3.1.3) | 0x16b0000 | 0x685b3f45 | `entry_mismatch` |
+| **AE 2026 (26.3.0.87)** | **0x17d3000** | **0x6a2ae3d2** | **`ok`** (disp=0xa4ab2b) |
+| Media Encoder 2024 | 0x1571000 | - | `offset_outside_image` |
+| Media Encoder 2025 | 0x1627000 | - | `offset_outside_image` |
+| Premiere Pro 2024 | 0x1571000 | - | `offset_outside_image` |
+
+AE 2025 では **resolver word のオフセットが `.reloc` に落ちて非 null に読める**。
+つまり「先に byte 照合、後で word 読み取り」の順序でなければ
+`already_installed` と誤報告する。判定の順序はこの観測に基づく。
+
+AE 2026 の `SizeOfImage` / `TimeDateStamp` は worker の trace が出す
+`bee_size=0x17d3000 bee_timestamp=0x6a2ae3d2` と一致する (= 実行時に読んでいる
+モジュールがこの表の行と同じであることの確認)。
+
+拒否は何も変更せず診断行を出すだけなので、未知ビルドでの退行は
+「ShapeBlur / PSL_Adjustments が本変更前の状態に戻る」に留まる。
+
+### 呼び出し順序 (実測)
+
+新しい 2 段を `initialize_pf_dll_host_layer()` の**前**に置いた構成と**後ろ**に
+置いた構成で、それぞれ full corpus を流した。**結果は同一** (どちらも 301、
+動いた record は同じ 2 本、他は bucket / `pixel_sha256` とも一致)。
+
+採用したのは「後ろ」。理由は計測差ではなく、2 段目が `ARE.dll` を読み込み、その
+import closure をこのホストが制御していないため: closure が PF.dll に届く場合、
+後ろに置けば PF は既に配線済みになる。逆向きの依存 (PF layer が BEE / ARE に
+依存する) は観測されていない。
+
+- resolver を書く関数は `FUN_180c568a0` (BEE.dll+0xc568a0) ただ一つで、
+  `BEE_Birth` からしか呼ばれない。その `BEE_Birth` は
+  `SND_InstallProcs` / `FLT_InstallProcs` の `&&` 連鎖の途中で抜けており、
+  設置に到達していない (実測: `alloc=set resolver=null`)。
+- `FLT_Birth` 側から前提を満たす路は、`Initialize_RendererGPU` /
+  `Initialize_VideoFilterHost_ML` / `PF_SetOverrideFunc` / `PLUG_InstallScan`
+  を芋づるで要求し、実測で AV する。目的に対して手段が重すぎるので採らなかった。
+- §8 の `PREF_Birth` 起因の throw は 14 の直接原因ではない、という判断は正しい。
+  実装では `PREF_Birth` を足す案を一度採ったが、**無くても両方 rendered になる**
+  ことを実測して落とした。
+
+ShapeBlur はもう一段 (`ARE.dll` の `ARE_Initialize`) を要する。
+`ARE_BezierPathRasterPainterInterface` (NewFill / NewStroke) を publish するのは
+ARE.dll の `TBIBAutoRegister` で、ARE.dll はどのエフェクトの import closure にも
+入っていない (実 AE は自身の起動列でロードする)。resolver だけだと ShapeBlur は
+512 から 14 に変わるだけで render しない。**つまり 2 本は共通の根を持つが、
+ギャップは 2 段で、PSL_Adjustments は 1 段目だけで足りる。**
+
+実装は `minihost/src/worker_bee_bib_installer.hpp` (非 export 呼び出しの
+admission 判定、self-test 付き) と `l2_main_support.inc` の
+`initialize_bee_bib_resolver` / `initialize_are_raster_painter`。
+
 ---
 
 方針の正本は `CLAUDE.md`。計測手順は

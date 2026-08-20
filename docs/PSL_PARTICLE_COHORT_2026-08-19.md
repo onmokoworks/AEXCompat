@@ -156,7 +156,7 @@ alpha、AE の PNG は premultiplied なので host 値を premultiply
 (`round(c*a/255)`) してから比較した。赤い particle 42 px + 透明 36822 px で、
 alpha のヒストグラムまで一致する。
 
-## 3. PSL_Adjustments — `frame_error:14` (#1302、未解決)
+## 3. PSL_Adjustments — `frame_error:14` (#1302、~~未解決~~ → **解決済み**、§5 と §3.2 の追記を参照)
 
 ### 3.1 観測
 
@@ -233,13 +233,19 @@ if (uVar8 == 0) {
 issue #1302 本文の「169 本の `bib_resolve` が全部 non-null」はこの plug-in 側の
 解決で、**BEE 側は 1 本も引いていない** (trace に 169 本ぶんしか出ない)。
 
-### 3.2 原因の見立てと、なぜ host 内で閉じないか
+### 3.2 原因の見立てと、~~なぜ host 内で閉じないか~~ (閉じた。下の追記を参照)
 
 以下の連鎖のうち **観測**は「host が `BEE_Birth` を呼んでいない」「BEE の BIB
 resolver を書くのは `BEE_Birth` だけ」「投げられた例外は
 `BRVException("couldn't init CACE")`」の 3 つで、「だから `frame_error:14` に
 なる」は**推論**。反証 (BEE の resolver を立てて 14 が消えることの確認) は
 行っていない。
+
+> **追記 (2026-08-20、#1439)**: この反証は実施済み。resolver を立てると 14 は
+> 消える (推論は当たり)。ただし「host が `BEE_Birth` を呼んでいない」ことが
+> 原因という部分は**外れ**で、実際は `BEE_Birth` を呼んでも resolver 設置に
+> 到達しない。§5 と
+> `docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md` §9 を参照。
 
 - 観測 (逆アセンブルと cdb で確かめられる範囲): このホストは `BEE_Birth` を
   呼んでいない
@@ -365,7 +371,13 @@ trace では `stderr_tail` に末尾が入らない。§2.1 の観測はこれ�
 
 ## 5. 残件
 
-- PSL_Adjustments の `frame_error:14` (§3)。→ #1302 (open)
+- ~~PSL_Adjustments の `frame_error:14` (§3)~~ → **解決 (2026-08-20、#1439)**。
+  §3.2 の「反証 (BEE の resolver を立てて 14 が消えることの確認) は行っていない」
+  はその後実施され、**14 は消えた**。ただし §3 の見立てのうち「`BEE_Birth` を
+  呼んでいないことが原因」は外れで、正しくは「`BEE_Birth` は resolver 設置に
+  到達していない」だった。詳細と実測は
+  `docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md` §9。
+  §3 以下の記述は当時の観測として残す。
 - Particle_Playground の `ext_lookup` id 234..335 が空の件は #1289 本文の
   記録どおり未解明。render 出力が AE と一致したので、少なくとも frame 0 の
   pixel には影響していない (観察)。
