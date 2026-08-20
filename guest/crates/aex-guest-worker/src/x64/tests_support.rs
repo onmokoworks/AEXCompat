@@ -3599,6 +3599,238 @@ fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
 }
 
 #[test]
+fn get_module_handle_ex_w_resolves_guest_modules_with_win32_flags() {
+    const GET_MODULE_EX: u64 = STUB_BASE + 0x418;
+    const PIN: u64 = 0x1;
+    const UNCHANGED_REFCOUNT: u64 = 0x2;
+    const FROM_ADDRESS: u64 = 0x4;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        dispatch_win64_import("kernel32.dll", "GetModuleHandleExW"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetModuleHandleExW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetModuleHandleExW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_MODULE_EX,
+        "kernel32.dll",
+        "GetModuleHandleExW",
+    )
+    .unwrap();
+
+    let name = DATA_BASE + 0xb00;
+    let output = DATA_BASE + 0xb80;
+    let mut encoded = "KeRnEl32.DlL".encode_utf16().collect::<Vec<_>>();
+    encoded.push(0);
+    engine
+        .write(
+            name,
+            &encoded
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(GET_MODULE_EX, [PIN, name, output, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    let mut module_bytes = [0; 8];
+    engine.read(output, &mut module_bytes).unwrap();
+    assert_eq!(
+        u64::from_le_bytes(module_bytes),
+        WINDOWS_KERNEL32_MODULE_TOKEN
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+    for flags in [0, PIN, UNCHANGED_REFCOUNT] {
+        engine.write(output, &[0; 8]).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x5678;
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE_EX, [flags, 0, output, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        engine.read(output, &mut module_bytes).unwrap();
+        assert_eq!(u64::from_le_bytes(module_bytes), TEST_CODE);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x5678);
+    }
+
+    for address in [TEST_CODE, TEST_CODE + PAGE_SIZE - 1] {
+        engine.write(output, &[0; 8]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    GET_MODULE_EX,
+                    [FROM_ADDRESS | UNCHANGED_REFCOUNT, address, output, 0, 0, 0],
+                )
+                .unwrap(),
+            1
+        );
+        engine.read(output, &mut module_bytes).unwrap();
+        assert_eq!(u64::from_le_bytes(module_bytes), TEST_CODE);
+    }
+}
+
+#[test]
+fn get_module_handle_ex_w_rejects_invalid_flags_names_addresses_and_outputs_atomically() {
+    const GET_MODULE_EX: u64 = STUB_BASE + 0x418;
+    const PIN: u64 = 0x1;
+    const UNCHANGED_REFCOUNT: u64 = 0x2;
+    const FROM_ADDRESS: u64 = 0x4;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_MODULE_EX,
+        "kernel32.dll",
+        "GetModuleHandleExW",
+    )
+    .unwrap();
+    let name = DATA_BASE + 0xc00;
+    let output = DATA_BASE + 0xc80;
+    let sentinel = 0x1122_3344_5566_7788u64.to_le_bytes();
+
+    let mut missing = "missing.dll".encode_utf16().collect::<Vec<_>>();
+    missing.push(0);
+    engine
+        .write(
+            name,
+            &missing
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    for (flags, name_or_address, expected_error) in [
+        (0, name, ERROR_MOD_NOT_FOUND),
+        (FROM_ADDRESS, DATA_BASE, ERROR_MOD_NOT_FOUND),
+        (FROM_ADDRESS, TEST_CODE + PAGE_SIZE, ERROR_MOD_NOT_FOUND),
+        (PIN | UNCHANGED_REFCOUNT, 0, ERROR_INVALID_PARAMETER),
+        (0x8, 0, ERROR_INVALID_PARAMETER),
+    ] {
+        engine.write(output, &sentinel).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    GET_MODULE_EX,
+                    [flags, name_or_address, output, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        let mut actual = [0; 8];
+        engine.read(output, &mut actual).unwrap();
+        assert_eq!(actual, sentinel);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, expected_error);
+    }
+
+    engine.write(name, &[b'A', 0].repeat(128)).unwrap();
+    for invalid_name in [name, u64::MAX, DATA_BASE + DATA_SIZE - 1] {
+        engine.write(output, &sentinel).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(GET_MODULE_EX, [0, invalid_name, output, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+        let mut actual = [0; 8];
+        engine.read(output, &mut actual).unwrap();
+        assert_eq!(actual, sentinel);
+    }
+
+    assert_eq!(
+        engine
+            .call_win64(GET_MODULE_EX, [0, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+
+    engine
+        .unicorn
+        .mem_protect(TEST_CODE, PAGE_SIZE, Prot::READ | Prot::EXEC)
+        .unwrap();
+    let mut code_before = [0; 8];
+    engine.read(TEST_CODE, &mut code_before).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_MODULE_EX, [0, 0, TEST_CODE, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    let mut code_after = [0; 8];
+    engine.read(TEST_CODE, &mut code_after).unwrap();
+    assert_eq!(code_after, code_before);
+
+    let partial_output = DATA_BASE + PAGE_SIZE - 4;
+    engine.write(partial_output, &[0x5a; 4]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_MODULE_EX, [0, 0, partial_output, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+    let mut tail = [0; 4];
+    engine.read(partial_output, &mut tail).unwrap();
+    assert_eq!(tail, [0x5a; 4]);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn get_module_handle_ex_w_does_not_read_guest_inaccessible_names() {
+    const GET_MODULE_EX: u64 = STUB_BASE + 0x418;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_MODULE_EX,
+        "kernel32.dll",
+        "GetModuleHandleExW",
+    )
+    .unwrap();
+    let name = DATA_BASE + 0xd00;
+    let output = HANDLE_DATA_BASE + 0x100;
+    let mut encoded = "kernel32.dll".encode_utf16().collect::<Vec<_>>();
+    encoded.push(0);
+    engine
+        .write(
+            name,
+            &encoded
+                .iter()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let sentinel = 0x1122_3344_5566_7788u64.to_le_bytes();
+    engine.write(output, &sentinel).unwrap();
+    engine
+        .unicorn
+        .mem_protect(DATA_BASE, PAGE_SIZE, Prot::WRITE)
+        .unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64(GET_MODULE_EX, [0, name, output, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_MOD_NOT_FOUND);
+    let mut actual = [0; 8];
+    engine.read(output, &mut actual).unwrap();
+    assert_eq!(actual, sentinel);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
 fn get_module_file_name_w_bounds_utf16_and_reports_win32_errors() {
     const GET_MODULE_FILE_NAME: u64 = STUB_BASE + 0x420;
     let mut engine = test_engine(&[0xc3]);
