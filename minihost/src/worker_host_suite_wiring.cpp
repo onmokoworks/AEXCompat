@@ -4,10 +4,13 @@
 #include "worker_extended_diag.hpp"
 #include "worker_dynamic_suite_registry.hpp"
 #include "worker_aefx_ace_suite.hpp"
+#include "worker_pf_private_effect_suite.hpp"
 #include "worker_aegp_persistent_data_suite.hpp"
 #include "worker_flt_blur_suite.hpp"
+#include "worker_pica_component_lock.hpp"
 #include "worker_suite_call_slot_probe.hpp"
 #include "worker_suite_registry.hpp"
+#include "worker_sweetpea_bootstrap.hpp"
 
 #include "pf_cache_on_load_suite.hpp"
 #include "gpu_memory_world_transport.hpp"
@@ -263,14 +266,58 @@ void run_bib_memory_probe() {
 // after ae_sweetpea's SPInit + SPStartupPlugins, which the real host runs
 // at process start. SPInit(nullptr, nullptr, 0) installs ae_sweetpea's own
 // default host procs for every null slot (verified in its disassembly).
+//
+// Starting Sweet Pea that way is not enough for the plug-ins that reach it
+// through U.dll (issue #1279). `U_SP_GetSPBasicSuite` hands out a table of
+// U.dll's own locking thunks and answers 11 while U.dll's underlying
+// `SPBasicSuite*` global is null; U.dll only latches that pointer from the
+// `("SP Interface", "Startup")` message delivered to the "Sweet Pea 2
+// Adapter" host plug-in it registers itself. The whole sequence is U.dll's
+// exported `U_SP_Birth`: install U's `SPHostProcs`, `SPInit` with them,
+// `SPAddHostPlugin` for the adapter, add the two `AS ZString` suites, then
+// `SPStartupPlugins`. Calling ae_sweetpea directly starts Sweet Pea but
+// never registers that adapter, so the Startup message never arrives and
+// `U_SP_GetSPBasicSuite` keeps answering 11 - which is the only nonzero
+// value that function can return, and the only U.dll symbol
+// Particle_Playground imports. Run the vendor's own bootstrap when U.dll is
+// mapped, and keep the direct ae_sweetpea start for closures without it.
 int bravo_init_seh_filter(EXCEPTION_POINTERS*);
 typedef int(__cdecl* SPInitFn)(void*, void*, int32_t);
 typedef int(__cdecl* SPStartupPluginsFn)();
-int sweetpea_init_guarded(SPInitFn sp_init, SPStartupPluginsFn sp_startup) {
+typedef int(__cdecl* USweetPeaLifecycleFn)();
+// `initialized` is reported separately from the overall result because an
+// `SPInit` that succeeded has to be unwound at exit even when the
+// `SPStartupPlugins` after it failed (issue #1279 review).
+struct SweetPeaStartOutcome {
+  bool initialized = false;
+  int result = -1;
+};
+
+SweetPeaStartOutcome sweetpea_init_guarded(SPInitFn sp_init,
+                                           SPStartupPluginsFn sp_startup) {
+  SweetPeaStartOutcome outcome;
   __try {
-    const int init_result = sp_init(nullptr, nullptr, 0);
-    if (init_result != 0) return init_result;
-    return sp_startup();
+    outcome.result = sp_init(nullptr, nullptr, 0);
+    if (outcome.result != 0) return outcome;
+    outcome.initialized = true;
+    outcome.result = sp_startup();
+    return outcome;
+  } __except (bravo_init_seh_filter(GetExceptionInformation())) {
+    outcome.result = -1;
+    return outcome;
+  }
+}
+
+// `U_SP_Birth` reports SPAddSuite failures by throwing, so the guard has to
+// cover C++ exceptions as well as faults; both arrive here as SEH. Catching a
+// throw this way skips the destructors of the U.dll and ae_sweetpea frames it
+// unwinds, so the SP state the fallback direct start then runs on top of is
+// half-built. That is the crash-containment tradeoff this worker makes
+// everywhere, but a throw and a fault are not equally safe to continue from,
+// and the fallback is best-effort rather than a clean retry.
+int u_sweetpea_lifecycle_guarded(USweetPeaLifecycleFn entry) {
+  __try {
+    return entry();
   } __except (bravo_init_seh_filter(GetExceptionInformation())) {
     return -1;
   }
@@ -308,6 +355,35 @@ int bravo_call_guarded(HMODULE module, const char* export_name,
   }
 }
 
+// Which bootstrap actually started Sweet Pea, and the mappings already
+// attempted (issue #1279). The decision itself lives in
+// worker_sweetpea_bootstrap.hpp, so the latch is exercisable without a real
+// U.dll; this holds only the state it is asked about.
+//
+// The PICA component init is reached from `provide_bib_suite`, which runs
+// with the BIB mutex released, and suite acquires arrive from plug-in
+// threads. Before this change the whole tail was a one-shot `attempted`
+// flag, so a second thread found the work already done; now the decision is
+// re-asked on every acquire, so it needs a lock of its own. It must not be
+// `BibSuiteState::mutex`: the component init deliberately runs outside that
+// one (issue #362).
+namespace sweetpea = aexcompat::worker_runtime::sweetpea_bootstrap;
+
+// Recursive on purpose: both bootstraps run foreign code (`SPStartupPlugins`,
+// `InitBravoComponents`) that can acquire a suite and re-enter this path on
+// the same thread. A plain mutex would deadlock there; the recursive one lets
+// the re-entrant call run the decision, which answers "nothing to do" because
+// every attempt is recorded before it is made.
+std::recursive_mutex& pica_component_mutex() {
+  static std::recursive_mutex mutex;
+  return mutex;
+}
+
+sweetpea::State& sweetpea_state() {
+  static sweetpea::State state;
+  return state;
+}
+
 // Reverse-order teardown for the PICA components (issue #362): dvacore
 // fast-fails during LdrShutdownProcess when the Bravo/sweetpea-initialized
 // subsystems were never torn down through the host path. Registering this
@@ -320,14 +396,67 @@ void teardown_pica_components() {
   std::cout.flush();
   std::fflush(stdout);
   __try {
-    if (HMODULE sweetpea = GetModuleHandleW(L"ae_sweetpea.dll")) {
-      const auto sp_shutdown = reinterpret_cast<int(__cdecl*)()>(
-          GetProcAddress(sweetpea, "?SPShutdownPlugins@ae_sweetpea@@YAHXZ"));
-      const auto sp_term = reinterpret_cast<int(__cdecl*)()>(
-          GetProcAddress(sweetpea, "?SPTerm@ae_sweetpea@@YAHXZ"));
+    // Unwind through the layer that started Sweet Pea, on the mapping it
+    // started, and through no layer at all when this process never started
+    // it: ae_sweetpea can be mapped by a closure without this host having
+    // run its SPInit, and shutting that down would tear down a layer this
+    // process does not own.
+    // No object with a destructor may live across this `__try` (MSVC
+    // C2712), so the two outcomes are reported as separate plain fields.
+    const sweetpea::State& sp_state = sweetpea_state();
+    const char* u_teardown = "none";
+    const char* sweetpea_teardown = "none";
+    // U first, because U's bootstrap is the one that ran last. Re-resolve the
+    // recorded mapping: calling through a handle the loader has since dropped
+    // would read a freed image, and by atexit it usually has (see the
+    // `u_unmapped` note in docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md).
+    if (const HMODULE bootstrapped_u = sweetpea::teardown_u_module(sp_state)) {
+      const HMODULE u_module =
+          bootstrapped_u == GetModuleHandleW(L"U.dll") ? bootstrapped_u
+                                                       : nullptr;
+      const auto u_sp_death = u_module
+          ? reinterpret_cast<USweetPeaLifecycleFn>(
+                GetProcAddress(u_module, "?U_SP_Death@@YAHXZ"))
+          : nullptr;
+      u_teardown = !u_module ? "remapped_or_unmapped"
+                             : (u_sp_death ? "u_sp_death" : "export_missing");
+      // Emitted before the calls as well as after: if `U_SP_Death` faults,
+      // the `__except` below swallows it and the post-call line never runs,
+      // and this trace is the only view of what teardown decided (it is what
+      // the pin experiment turned on).
+      if (aexcompat::l2_detail::extended_diag_enabled())
+        std::cerr << "extended_diag:pica_component stage=teardown_begin u="
+                  << u_teardown << "\n" << std::flush;
+      if (u_sp_death) u_sp_death();
+    }
+    // Then the direct start, if this process ran one: `SPInit` is
+    // reference-counted, so each successful one is owed its own `SPTerm`.
+    if (sweetpea::teardown_sweetpea_directly(sp_state)) {
+      const HMODULE sweetpea_module = GetModuleHandleW(L"ae_sweetpea.dll");
+      const auto sp_shutdown = sweetpea_module
+          ? reinterpret_cast<int(__cdecl*)()>(GetProcAddress(
+                sweetpea_module, "?SPShutdownPlugins@ae_sweetpea@@YAHXZ"))
+          : nullptr;
+      const auto sp_term = sweetpea_module
+          ? reinterpret_cast<int(__cdecl*)()>(
+                GetProcAddress(sweetpea_module, "?SPTerm@ae_sweetpea@@YAHXZ"))
+          : nullptr;
+      sweetpea_teardown = !sweetpea_module ? "unmapped"
+          : ((sp_shutdown && sp_term)
+                 ? "sp_shutdown_term"
+                 : (sp_shutdown ? "sp_shutdown_only"
+                                : (sp_term ? "sp_term_only" : "no_export")));
+      if (aexcompat::l2_detail::extended_diag_enabled())
+        std::cerr << "extended_diag:pica_component stage=teardown_begin"
+                     " sweetpea=" << sweetpea_teardown << "\n" << std::flush;
       if (sp_shutdown) sp_shutdown();
       if (sp_term) sp_term();
     }
+    // Which layer ran is otherwise unobservable, and "unwind through the
+    // layer that started it" is the whole point of the branch above.
+    if (aexcompat::l2_detail::extended_diag_enabled())
+      std::cerr << "extended_diag:pica_component stage=teardown u="
+                << u_teardown << " sweetpea=" << sweetpea_teardown << "\n" << std::flush;
     if (HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll")) {
       const auto terminate = reinterpret_cast<bool(__cdecl*)(bool)>(
           GetProcAddress(
@@ -338,32 +467,248 @@ void teardown_pica_components() {
   }
 }
 
-void ensure_pica_components_initialized() {
-  auto& state = bib_suite_state();
-  static bool attempted = false;
-  if (attempted) return;
-  attempted = true;
-  HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll");
-  if (!bravo && !g_plugin_file_path.empty()) {
-    const std::filesystem::path sealed_bravo =
-        std::filesystem::path(g_plugin_file_path).parent_path() /
-        L"dvabravoinitializer.dll";
-    bravo = LoadLibraryExW(sealed_bravo.c_str(), nullptr,
-                           LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                               LOAD_LIBRARY_SEARCH_SYSTEM32);
+// The admitted plug-in directory of the member currently being inspected,
+// which is both the sealed load root and half of the direct bootstrap's
+// attempt key (issue #1279).
+std::wstring admitted_plugin_directory() {
+  if (g_plugin_file_path.empty()) return std::wstring();
+  return std::filesystem::path(g_plugin_file_path).parent_path().wstring();
+}
+
+// Loads ae_sweetpea the way the BIB fallback above loads BIB.dll: the
+// admitted plug-in directory first, then the admitted USER_DIRS name search.
+// The caller decides when this may run; the attempt key in the bootstrap
+// state keeps it to one attempt per (mapping, admitted directory) pair, so it
+// never re-runs on every suite acquire and a later member admitted from a
+// different directory still gets its own attempt.
+// A load runs the DllMain of the module and of everything it pulls in. If
+// that faults, the attempt this load sits inside would never be closed - the
+// in-flight flag would stay set and the bootstrap would be skipped, silently,
+// for the rest of the process. Contain the fault here so the caller always
+// gets an answer, even if the answer is "no module".
+HMODULE load_library_guarded(const wchar_t* path, DWORD flags) {
+  __try {
+    return LoadLibraryExW(path, nullptr, flags);
+  } __except (bravo_init_seh_filter(GetExceptionInformation())) {
+    return nullptr;
+  }
+}
+
+HMODULE load_sweetpea_module(const std::wstring& directory) {
+  HMODULE module = nullptr;
+  if (!directory.empty()) {
+    const std::filesystem::path sealed_sp =
+        std::filesystem::path(directory) / L"ae_sweetpea.dll";
+    module = load_library_guarded(sealed_sp.c_str(),
+                                  LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                      LOAD_LIBRARY_SEARCH_SYSTEM32);
   }
   // In-place loads (issue #751): same admitted USER_DIRS name resolution as
   // the BIB fallback above.
-  if (!bravo)
-    bravo = LoadLibraryExW(L"dvabravoinitializer.dll", nullptr,
-                           LOAD_LIBRARY_SEARCH_USER_DIRS |
-                               LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!module)
+    module = load_library_guarded(L"ae_sweetpea.dll",
+                                  LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                      LOAD_LIBRARY_SEARCH_SYSTEM32);
+  return module;
+}
+
+// The pre-#1279 bootstrap: start ae_sweetpea itself. This is what a closure
+// that reaches SP without going through U.dll needs, and it stays the
+// fallback when U.dll is absent or its own bootstrap failed.
+//
+// The trace distinguishes the three outcomes rather than reporting them all
+// as a failed call: a record must not say a call happened when the module was
+// never resolved or its entry points did not.
+void start_sweetpea_directly(HMODULE module) {
+  const auto sp_init = module
+      ? reinterpret_cast<SPInitFn>(GetProcAddress(
+            module,
+            "?SPInit@ae_sweetpea@@YAHPEAUSPHostProcs@@PEBUSPPlatformFileSpecification@@H@Z"))
+      : nullptr;
+  const auto sp_startup = module
+      ? reinterpret_cast<SPStartupPluginsFn>(
+            GetProcAddress(module, "?SPStartupPlugins@ae_sweetpea@@YAHXZ"))
+      : nullptr;
+  const bool callable = sp_init && sp_startup;
+  const SweetPeaStartOutcome outcome =
+      callable ? sweetpea_init_guarded(sp_init, sp_startup)
+               : SweetPeaStartOutcome{};
+  sweetpea::finish_direct_start(sweetpea_state(), outcome.initialized,
+                                callable && outcome.result == 0);
+  if (!aexcompat::l2_detail::extended_diag_enabled()) return;
+  std::cerr << "extended_diag:pica_component dll=ae_sweetpea.dll status=";
+  if (!module) {
+    std::cerr << "absent";
+  } else if (!callable) {
+    std::cerr << "no_export";
+  } else {
+    std::cerr << "called result=" << outcome.result;
+  }
+  std::cerr << "\n" << std::flush;
+}
+
+// Sweet Pea bootstrap, asked again for every member of an in-place cluster
+// session (issue #1279). U.dll enters the process with the member that
+// imports it, so a first member without U.dll must not decide for the ones
+// after it; what is remembered is the attempt key already tried, the same
+// shape as the U_Birth latch in worker_legacy_support_init.hpp (#1267).
+//
+// Both bootstraps run foreign code that can acquire a suite and re-enter
+// here, so each attempt is recorded before it is made: the re-entrant
+// decision then answers "nothing to do" instead of starting a second
+// bootstrap. `pica_component_mutex()` is held by
+// `ensure_pica_components_initialized` across the state transitions and
+// startup calls. The ae_sweetpea LoadLibraryEx itself temporarily releases it.
+void ensure_sweetpea_started(
+    std::unique_lock<std::recursive_mutex>& component_lock) {
+  sweetpea::State& state = sweetpea_state();
+  const HMODULE u_module = GetModuleHandleW(L"U.dll");
+  const auto u_sp_birth = u_module
+      ? reinterpret_cast<USweetPeaLifecycleFn>(
+            GetProcAddress(u_module, "?U_SP_Birth@@YAHXZ"))
+      : nullptr;
+  // Asking whether ae_sweetpea is already mapped is free; loading it happens
+  // only inside the StartDirectly branch, which the attempt key bounds.
+  const HMODULE mapped_sweetpea = GetModuleHandleW(L"ae_sweetpea.dll");
+  const std::wstring directory = admitted_plugin_directory();
+  switch (sweetpea::decide(state, u_module, u_sp_birth != nullptr,
+                           mapped_sweetpea, directory)) {
+    case sweetpea::Decision::AlreadyBootstrappedThroughU:
+    case sweetpea::Decision::Nothing:
+      return;
+    case sweetpea::Decision::StartDirectly: {
+      // No U.dll bootstrap available: start Sweet Pea the way closures that
+      // reach SP without going through U.dll need it started. The attempt is
+      // opened before the load, because the load runs ae_sweetpea's DllMain
+      // and its closure's, which can acquire a suite and re-enter here.
+      sweetpea::begin_direct_attempt(state, directory);
+      const HMODULE loaded = mapped_sweetpea
+          ? mapped_sweetpea
+          : aexcompat::worker_runtime::pica_component_lock::
+                load_outside_component_lock(component_lock, [&] {
+                  return load_sweetpea_module(directory);
+                }, [] { return GetModuleHandleW(L"ae_sweetpea.dll"); },
+                [](HMODULE) {});
+      const HMODULE module = loaded;
+      sweetpea::note_direct_module(state, module);
+      start_sweetpea_directly(module);
+      return;
+    }
+    case sweetpea::Decision::CallUSpBirth:
+      break;
+  }
+  sweetpea::begin_u_sp_birth(state, u_module);
+  const int result = u_sweetpea_lifecycle_guarded(u_sp_birth);
+  sweetpea::finish_u_sp_birth(state, u_module, result == 0);
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:pica_component dll=U.dll entry=U_SP_Birth"
+                 " status=called result=" << result << "\n" << std::flush;
+  // A failed U_SP_Birth leaves Sweet Pea unstarted; ask again now that this
+  // mapping is recorded, which yields the direct start (or Nothing when a
+  // direct start already happened).
+  if (result != 0) ensure_sweetpea_started(component_lock);
+}
+
+// State transitions and foreign initialization calls stay serialized. The two
+// LoadLibraryEx paths temporarily release the component mutex after recording
+// their in-flight latch, then re-check the process mapping after reacquiring.
+// This avoids ordering the component mutex before the loader lock while still
+// preventing a re-entrant or concurrent caller from starting a second
+// bootstrap (issue #1287).
+void ensure_pica_components_initialized() {
+  auto& state = bib_suite_state();
+  std::unique_lock<std::recursive_mutex> component_lock(pica_component_mutex());
+  // The initialization is keyed on the mapping: a later member of an in-place
+  // cluster session that maps dvabravoinitializer.dll itself is still
+  // initialized, instead of the first member's answer deciding for everyone
+  // (the #1063 latch lesson). The *load* is still a process-wide one-shot,
+  // unlike the ae_sweetpea one, which keys on the admitted directory too: a
+  // later member whose own directory holds dvabravoinitializer.dll but which
+  // does not import it keeps the first member's answer. Nothing measured
+  // needs that, and admission puts every member's directory in USER_DIRS up
+  // front, so the first attempt already searches all of them.
+  static aexcompat::worker_runtime::pica_component_lock::LoadState load_state;
+  static bool absent_logged = false;
+  static HMODULE initialized_bravo = nullptr;
+  static bool bravo_init_in_flight = false;
+  static bool teardown_registered = false;
+  HMODULE bravo = GetModuleHandleW(L"dvabravoinitializer.dll");
+  using aexcompat::worker_runtime::pica_component_lock::LoadDecision;
+  switch (aexcompat::worker_runtime::pica_component_lock::decide(
+      load_state, bravo != nullptr)) {
+  case LoadDecision::StartLoad: {
+    // Latched and in-flight before the load, for the same reason as the
+    // ae_sweetpea one: LoadLibraryEx runs the DllMain of this module and its
+    // closure, and a suite acquire from inside that would otherwise re-enter
+    // with the load still running and drive the handshake on a
+    // half-initialized DLL.
+    aexcompat::worker_runtime::pica_component_lock::begin_load(load_state);
+    bravo_init_in_flight = true;
+    bravo = aexcompat::worker_runtime::pica_component_lock::
+        load_outside_component_lock(component_lock, [] {
+          HMODULE loaded = nullptr;
+          if (!g_plugin_file_path.empty()) {
+            const std::filesystem::path sealed_bravo =
+                std::filesystem::path(g_plugin_file_path).parent_path() /
+                L"dvabravoinitializer.dll";
+            loaded = load_library_guarded(
+                sealed_bravo.c_str(), LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                           LOAD_LIBRARY_SEARCH_SYSTEM32);
+          }
+          // In-place loads (issue #751): same admitted USER_DIRS name
+          // resolution as the BIB fallback above.
+          if (!loaded)
+            loaded = load_library_guarded(
+                L"dvabravoinitializer.dll", LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                                   LOAD_LIBRARY_SEARCH_SYSTEM32);
+          return loaded;
+        }, [] { return GetModuleHandleW(L"dvabravoinitializer.dll"); },
+        [&](HMODULE) {
+          aexcompat::worker_runtime::pica_component_lock::finish_load(load_state);
+          bravo_init_in_flight = false;
+        });
+    break;
+  }
+  case LoadDecision::UseMapped:
+    break;
+  case LoadDecision::InFlight:
+    return;
+  case LoadDecision::Absent:
+    bravo = nullptr;
+    break;
+  }
+  // No Bravo initializer means no Sweet Pea bootstrap either: this early
+  // return is ahead of every ensure_sweetpea_started() call. That coupling
+  // predates issue #1279 (both are reached only through provide_bib_suite,
+  // which needs BIB.dll, and dvabravoinitializer ships beside it), but the
+  // U_SP_Birth path now depends on it, so it is written down rather than
+  // left implicit.
   if (!bravo) {
-    if (aexcompat::l2_detail::extended_diag_enabled())
+    // Once per process: the decision is re-asked for every member, and a
+    // 300-member session must not fill the bounded stderr tail the broker
+    // keeps with the same line. The count of members without Bravo is
+    // therefore not recoverable from the trace.
+    if (aexcompat::l2_detail::extended_diag_enabled() && !absent_logged) {
+      absent_logged = true;
       std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=absent"
                 "\n" << std::flush;
+    }
     return;
   }
+  // A suite acquire from inside SetBIBProcAddress/InitBravoComponents lands
+  // here again on this thread (the mutex is recursive). It must not start
+  // Sweet Pea underneath a Bravo handshake that has not returned and before
+  // the resolver is stored: real AE starts SP after that handshake, and the
+  // order this host already deviates from AE on is documented, not widened.
+  if (bravo_init_in_flight) return;
+  if (bravo == initialized_bravo) {
+    ensure_sweetpea_started(component_lock);
+    return;
+  }
+  // Latched before the calls, so a faulted handshake is not retried on the
+  // same mapping either.
+  initialized_bravo = bravo;
+  bravo_init_in_flight = true;
   BravoResolver current = state.resolver;
   int result = bravo_call_guarded(
       bravo, "?SetBIBProcAddress@dvabravoinitializer@@YAXP6APEAXPEBD00@Z@Z",
@@ -377,37 +722,21 @@ void ensure_pica_components_initialized() {
     std::lock_guard<std::mutex> lock(state.mutex);
     state.resolver = current;
   }
+  bravo_init_in_flight = false;
   if (aexcompat::l2_detail::extended_diag_enabled())
+    // The resolver is logged because `COR_Conception` (issue #1279) calls
+    // `InitBravoComponents(nullptr)` itself, at plug-in load, before any
+    // suite acquire reaches this function. Recording the pointer this call
+    // answers with is what makes "both calls hand out the same resolver"
+    // an observation rather than an assumption.
     std::cerr << "extended_diag:pica_component dll=dvabravoinitializer.dll status=called result="
-              << result << "\n" << std::flush;
-  HMODULE sweetpea = GetModuleHandleW(L"ae_sweetpea.dll");
-  if (!sweetpea && !g_plugin_file_path.empty()) {
-    const std::filesystem::path sealed_sp =
-        std::filesystem::path(g_plugin_file_path).parent_path() /
-        L"ae_sweetpea.dll";
-    sweetpea = LoadLibraryExW(sealed_sp.c_str(), nullptr,
-                              LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
-                                  LOAD_LIBRARY_SEARCH_SYSTEM32);
+              << result << " resolver=" << reinterpret_cast<const void*>(current)
+              << "\n" << std::flush;
+  ensure_sweetpea_started(component_lock);
+  if (!teardown_registered) {
+    teardown_registered = true;
+    std::atexit(&teardown_pica_components);
   }
-  // In-place loads (issue #751): same admitted USER_DIRS name resolution as
-  // the BIB fallback above.
-  if (!sweetpea)
-    sweetpea = LoadLibraryExW(L"ae_sweetpea.dll", nullptr,
-                              LOAD_LIBRARY_SEARCH_USER_DIRS |
-                                  LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (sweetpea) {
-    const auto sp_init = reinterpret_cast<SPInitFn>(GetProcAddress(
-        sweetpea,
-        "?SPInit@ae_sweetpea@@YAHPEAUSPHostProcs@@PEBUSPPlatformFileSpecification@@H@Z"));
-    const auto sp_startup = reinterpret_cast<SPStartupPluginsFn>(
-        GetProcAddress(sweetpea, "?SPStartupPlugins@ae_sweetpea@@YAHXZ"));
-    const int sp_result = (sp_init && sp_startup)
-        ? sweetpea_init_guarded(sp_init, sp_startup) : -1;
-    if (aexcompat::l2_detail::extended_diag_enabled())
-      std::cerr << "extended_diag:pica_component dll=ae_sweetpea.dll status=called result="
-                << sp_result << "\n" << std::flush;
-  }
-  std::atexit(&teardown_pica_components);
 }
 
 const void* provide_bib_suite(void*) {
@@ -528,6 +857,27 @@ const void* provide_aefx_ace1(void*) {
           provide_aefx_ace_probe1(nullptr))
     return probe;
   return aexcompat::aefx_ace::suite1();
+}
+// Same shape for AE's `PF AE Private Effect Suite` (issue #1283). One table
+// answers versions 3, 5 and 6 because `VideoFilterHost.dll`'s
+// `RegisterPrivateEffectSuite` (0x1800443d0) registers one table pointer
+// under all three, and the slot probe still takes precedence when armed.
+const void* provide_private_effect3(void*) {
+  if (const void* probe = aexcompat::worker_runtime::suite_call_slot_probe::
+          provide_private_effect_probe3(nullptr))
+    return probe;
+  return aexcompat::pf_private_effect::suite();
+}
+const void* provide_private_effect5(void*) {
+  if (const void* probe = aexcompat::worker_runtime::suite_call_slot_probe::
+          provide_private_effect_probe5(nullptr))
+    return probe;
+  return aexcompat::pf_private_effect::suite();
+}
+// No probe target exists for version 6: the environment variable names
+// only @3 and @5, so this version always answers with the implementation.
+const void* provide_private_effect6(void*) {
+  return aexcompat::pf_private_effect::suite();
 }
 // Versions 3, 4 and 6 of "PF Color Settings Suite" are frozen prefixes of the
 // v7 table, so all four are served from it (issue #362: the OCIO family acquires
@@ -707,6 +1057,8 @@ bool configure_component_suite_catalog() {
        &mask_suite_provider_available},
       {"AEGP Keyframe Suite", 4, &g_keyframe_suite4, nullptr, nullptr,
        &mask_keyframe_suite4_provider_available},
+      {"AEGP Keyframe Suite", 3, &g_keyframe_suite3, nullptr, nullptr,
+       &mask_keyframe_suite4_provider_available},
       {"AEGP Dynamic Stream Suite", 5, &g_dynamic_stream_suite,
        nullptr, nullptr, &mask_suite_provider_available},
       {"AEGP Mask Outline Suite", 5, &g_mask_outline_suite,
@@ -726,26 +1078,16 @@ bool configure_component_suite_catalog() {
       {"PF Effect UI Suite", 1, nullptr, &provide_effect_ui1},
       {"PF AE Adv App Suite", 1, nullptr, &provide_adv_app1},
       {"PF AE Adv App Suite", 2, nullptr, &provide_adv_app2},
-      {aexcompat::worker_runtime::suite_call_slot_probe::
-           kPrivateEffectSuiteName,
-       aexcompat::worker_runtime::suite_call_slot_probe::
-           kPrivateEffectSuiteVersion3,
-       nullptr,
-       &aexcompat::worker_runtime::suite_call_slot_probe::
-           provide_private_effect_probe3,
-       nullptr,
-       &aexcompat::worker_runtime::suite_call_slot_probe::
-           private_effect_probe3_available},
-      {aexcompat::worker_runtime::suite_call_slot_probe::
-           kPrivateEffectSuiteName,
-       aexcompat::worker_runtime::suite_call_slot_probe::
-           kPrivateEffectSuiteVersion5,
-       nullptr,
-       &aexcompat::worker_runtime::suite_call_slot_probe::
-           provide_private_effect_probe5,
-       nullptr,
-       &aexcompat::worker_runtime::suite_call_slot_probe::
-           private_effect_probe5_available},
+      {"AE Timecode Helper Suite", 1, nullptr, &provide_ae_timecode_helper1},
+      {aexcompat::pf_private_effect::kSuiteName,
+       aexcompat::pf_private_effect::kSuiteVersion3, nullptr,
+       &provide_private_effect3},
+      {aexcompat::pf_private_effect::kSuiteName,
+       aexcompat::pf_private_effect::kSuiteVersion5, nullptr,
+       &provide_private_effect5},
+      {aexcompat::pf_private_effect::kSuiteName,
+       aexcompat::pf_private_effect::kSuiteVersion6, nullptr,
+       &provide_private_effect6},
       {aexcompat::worker_runtime::compute_cache::kSuiteName,
        aexcompat::worker_runtime::compute_cache::kSuiteVersion1,
        nullptr,

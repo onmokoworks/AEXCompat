@@ -11,6 +11,8 @@
 
 #include "worker_aegp_scene_model.hpp"
 
+namespace aexcompat::worker_runtime::bee_facade { struct LayerObject; }
+
 namespace aexcompat::l2_detail {
 
 struct OpaqueHostObject { uint32_t tag; };
@@ -74,7 +76,9 @@ struct AddKeyframesTransaction {
 };
 
 extern std::vector<HostMask> g_mask_scene;
-extern OpaqueHostObject g_layer;
+// The effect layer handle is a BEE-layout object (worker_bee_scene_facade,
+// issue #1210); its address is the identity every callback here compares.
+extern aexcompat::worker_runtime::bee_facade::LayerObject g_layer;
 extern std::list<HostStreamRef> g_stream_refs;
 extern std::unordered_map<StreamValue*, CheckedStreamValue> g_stream_values;
 extern MaskLifetimeCounts g_mask_lifetime;
@@ -105,6 +109,7 @@ bool ensure_keyframe_identity(HostStreamRef*, HostKeyframe*, int32_t);
 AddKeyframesTransaction* find_add_transaction(void*);
 void inject_keyframe_apply_failure_after(int32_t applied_count) noexcept;
 uint64_t mask_scene_fingerprint() noexcept;
+void configure_mask_runtime_hooks();
 bool valid_time_mode(int16_t mode);
 bool valid_stream_plugin(int32_t plugin_id);
 int32_t __cdecl get_mask_outline_vertex_info(void*, int32_t, MaskVertex*);

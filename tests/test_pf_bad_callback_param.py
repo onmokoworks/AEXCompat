@@ -26,6 +26,9 @@ def test_world_transform_distinguishes_bad_arguments_from_allocation_failure(tmp
             str(ROOT / "tests" / "native" / "worker_pf_bad_callback_param_selftest.cpp"),
             str(ROOT / "minihost" / "src" / "worker_pf_world_transform_runtime.cpp"),
             str(ROOT / "minihost" / "src" / "worker_world_safety.cpp"),
+            # world_safety's register_world gives each handed-out world AE's
+            # PF_World shape behind reserved_long4 (issue #1276).
+            str(ROOT / "minihost" / "src" / "worker_pf_world_facade.cpp"),
             "-o",
             str(output),
         ],

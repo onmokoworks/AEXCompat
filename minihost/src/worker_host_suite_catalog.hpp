@@ -55,6 +55,9 @@ const void* provide_path_data1(void*);
 const void* provide_duck1(void*);
 const void* provide_effect_ui1(void*);
 const void* provide_adv_app1(void*);
+// AE-private host-presence gate suite (issue #1210): every slot is a
+// diagnosed unsupported stub; Timecode.aex acquires and releases it only.
+const void* provide_ae_timecode_helper1(void*);
 const void* provide_adv_app2(void*);
 const void* provide_drawbot_draw1(void*);
 const void* provide_drawbot_supplier1(void*);

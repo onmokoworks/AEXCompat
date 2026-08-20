@@ -60,6 +60,14 @@
 //!   --include-scan-paths record absolute folder paths in the report. Off by
 //!                        default: the report is meant to be shareable, and
 //!                        private absolute paths are not (EVIDENCE_POLICY §)
+//!   --dump-frames <dir>  write every rendered frame's raw pixels to
+//!                        <dir>/<plugin>.<sha8>.f<n>.<W>x<H>.<format> so "rendered"
+//!                        can be checked against an AE reference (a Scribble
+//!                        with no mask renders fully transparent in AE, an
+//!                        Inner/Outer Key or Reshape with no mask passes the
+//!                        input through; #1253). Raw image contents, so the
+//!                        directory is not part of the shareable report; the
+//!                        record carries only the pixel SHA-256
 //!
 //! `AEXCOMPAT_EXTENDED_DIAG=1` additionally turns on the worker's host-callback
 //! trace on stderr, which is worth having on a re-run of one bucket, not on a
@@ -269,6 +277,7 @@ struct Options {
     plugin_defaults: bool,
     frames: u32,
     discovery_only: bool,
+    dump_frames: Option<PathBuf>,
     dirs: Vec<PathBuf>,
 }
 
@@ -289,6 +298,7 @@ fn parse_options() -> Options {
         plugin_defaults: false,
         frames: 1,
         discovery_only: false,
+        dump_frames: None,
         dirs: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -330,6 +340,15 @@ fn parse_options() -> Options {
             "--force-classic" => options.force_classic = true,
             "--include-scan-paths" => options.include_scan_paths = true,
             "--close-report" => options.close_report = true,
+            "--dump-frames" => {
+                let dir = PathBuf::from(value());
+                // Fail here, not once per frame: a mistyped directory would
+                // otherwise leave a whole sweep of `dump_error` records and
+                // no dumps.
+                std::fs::create_dir_all(&dir)
+                    .unwrap_or_else(|error| panic!("--dump-frames {}: {error}", dir.display()));
+                options.dump_frames = Some(dir);
+            }
             "--plugin-defaults" => options.plugin_defaults = true,
             "--frames" => {
                 options.frames = value().parse().expect("--frames takes a count");
@@ -843,12 +862,31 @@ fn sweep_one(
     // a failing one to a sweep that only ever asks for frame 0.
     let mut frames: Vec<Outcome> = Vec::with_capacity(options.frames as usize);
     for frame_index in 0..options.frames {
-        let frame = frame_outcome(session.render_frame_with_parameters(
+        let plugin_stem = record
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("plugin");
+        let dump = options.dump_frames.as_deref().map(|dir| FrameDump {
+            dir,
+            plugin_stem,
+            plugin_sha256_prefix: record.sha256.get(..8).unwrap_or(&record.sha256),
             frame_index,
-            options.current_time + (frame_index as i32) * TIME_STEP,
-            input,
-            parameters,
-        ));
+            format: match options.pixel_format {
+                RenderPixelFormat::Argb8 => "argb8",
+                RenderPixelFormat::Argb16 => "argb16",
+                RenderPixelFormat::Argb32f => "argb32f",
+            },
+        });
+        let frame = frame_outcome_dumping(
+            session.render_frame_with_parameters(
+                frame_index,
+                options.current_time + (frame_index as i32) * TIME_STEP,
+                input,
+                parameters,
+            ),
+            dump,
+        );
         // A refused frame invalidates the session, so there is no next frame to
         // ask for; anything else leaves it usable.
         let ended = frame.bucket == "render_frame_failed";
@@ -1009,8 +1047,58 @@ fn discovery_failure_bucket(diagnostics: Option<&Value>, classification: Option<
             .and_then(Value::as_str)
             .map(|kind| format!("exit_12_{kind}"))
             .unwrap_or_else(|| "exit_12".to_owned()),
+        // The inspect column ran and a selector refused (the one-shot exit
+        // 20; the session path's `selector_error`). Which selector, and its
+        // code, is what a fix is planned from, so it is the bucket (#1063).
+        Some(20) => format!("exit_20_{}", selector_error_suffix(diagnostics)),
         Some(code) => format!("exit_{code}"),
-        None => classification.unwrap_or("unknown").to_owned(),
+        // No exit code: an unclassified session-path failure still names its
+        // cause (`identity_changed`, `hash_unavailable`,
+        // `inspected_report_unusable`) instead of folding into `unknown`.
+        None => classification
+            .or_else(|| {
+                diagnostics
+                    .and_then(|value| value.get("cluster_error_kind"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("unknown")
+            .to_owned(),
+    }
+}
+
+/// Names the selector an exit-20 discovery failure stopped at, from the
+/// worker's report fields: `unattributed` when the record does not carry them
+/// (one written before the fields were recorded); else the first nonzero of
+/// GLOBAL_SETUP / PARAMS_SETUP / GLOBAL_SETDOWN with its code; else the
+/// parameter-count contract when the selectors all returned 0; else
+/// `no_selector_error` (the worker refused for a reason the report fields do
+/// not carry, e.g. the arbitrary defaults could not be disposed). A negative
+/// field is the worker's "not invoked" sentinel (-1), never a plug-in code, so
+/// it is skipped rather than named.
+fn selector_error_suffix(diagnostics: Option<&Value>) -> String {
+    let field = |name: &str| {
+        diagnostics
+            .and_then(|value| value.get(name))
+            .and_then(Value::as_i64)
+    };
+    for (name, label) in [
+        ("global_setup_error", "global_setup"),
+        ("params_setup_error", "params_setup"),
+        ("global_setdown_error", "global_setdown"),
+    ] {
+        match field(name) {
+            Some(code) if code <= 0 => continue,
+            Some(code) => return format!("{label}:{code}"),
+            // A field the record never carried: nothing after it can be
+            // read as "the earlier selectors passed".
+            None => return "unattributed".to_owned(),
+        }
+    }
+    match (field("reported_num_params"), field("parameter_count")) {
+        (Some(reported), Some(count)) if reported != count + 1 => {
+            format!("param_count_contract:{reported}_vs_{count}")
+        }
+        _ => "no_selector_error".to_owned(),
     }
 }
 
@@ -1066,6 +1154,86 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
                 .unwrap_or(Value::Null),
         );
     }
+    // How the Premiere GPU-filter route ended, lifted out of `stage_events`
+    // (issue #1271). The whole event list is too big for a 300-plug-in sweep,
+    // but this one identifier is what a sweep reader needs: the route's faults
+    // are contained, so a plug-in whose GPU route died on entry renders
+    // through the PF path and lands in `rendered` with nothing else saying the
+    // route was tried. Absent when the route never ran, and also when the
+    // capped event list did not reach it: the cap is per session, so on a
+    // many-frame session this names an early frame's outcome. The entry rule is
+    // the same every frame, but neither the entry nor the outcome is: at 8/16
+    // only a frame whose own PF selector answered 512 enters the route at all,
+    // and a frame that enters can decline where an earlier one committed. So a
+    // late decline can sit behind an early `committed` on a multi-frame
+    // session.
+    if let Some(reason) = diagnostics
+        .and_then(|value| value.get("stage_events"))
+        .and_then(|events| events.as_array())
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.get("stage").and_then(Value::as_str) == Some("pr_gpu_route")
+                        && event.get("state").and_then(Value::as_str) == Some("end")
+                })
+                .and_then(|event| event.pointer("/errors/reason"))
+        })
+    {
+        worker.insert("pr_gpu_route".to_owned(), reason.clone());
+    }
+    // How the route was entered, when it was the PF CPU path's own refusal that
+    // sent the frame there (issue #1283). Without this a `rendered` record
+    // whose route committed cannot be told from one whose CPU path worked, so a
+    // host callback refusal the GPU route then stood in for would be invisible
+    // in the default record - and the default record is what a corpus
+    // comparison reads. The worker only puts a reason on the `begin` line when
+    // the retry is what entered the route, so its absence is the ordinary case.
+    if let Some(reason) = diagnostics
+        .and_then(|value| value.get("stage_events"))
+        .and_then(|events| events.as_array())
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.get("stage").and_then(Value::as_str) == Some("pr_gpu_route")
+                        && event.get("state").and_then(Value::as_str) == Some("begin")
+                })
+                .and_then(|event| event.pointer("/errors/reason"))
+        })
+    {
+        worker.insert("pr_gpu_route_entered_from".to_owned(), reason.clone());
+    }
+    // Why a frame with pixels can come out of a session whose plug-in rendered
+    // nothing: a SmartFX PreRender that promises an empty `result_rect` gets
+    // the effect's input copied into the output instead of an empty frame
+    // (issue #1285), which puts it in `rendered` rather than `rendered_empty`.
+    // `input_copied` means the copy happened; any other reason means the host
+    // declined and the frame stayed empty. Named `_reason` because the worker
+    // and session reports already carry a boolean `empty_result_passthrough`,
+    // and one name holding a bool in one record and a string in another is how
+    // a reader's filter silently matches nothing. Same per-session caveat as
+    // `pr_gpu_route`: this names the last such frame the capped event list
+    // reached.
+    if let Some(reason) = diagnostics
+        .and_then(|value| value.get("stage_events"))
+        .and_then(|events| events.as_array())
+        .and_then(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|event| {
+                    event.get("stage").and_then(Value::as_str)
+                        == Some("smart_empty_result_passthrough")
+                        && event.get("state").and_then(Value::as_str) == Some("end")
+                })
+                .and_then(|event| event.pointer("/errors/reason"))
+        })
+    {
+        worker.insert("empty_result_passthrough_reason".to_owned(), reason.clone());
+    }
     outcome.detail.insert("worker".to_owned(), worker.into());
     outcome
         .detail
@@ -1082,9 +1250,32 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
     }
 }
 
-/// One frame's bucket and evidence. A session renders several and each is
-/// classified the same way.
+/// The unit tests' shape of `frame_outcome_dumping`: no dump.
+#[cfg(test)]
 fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
+    frame_outcome_dumping(outcome, None)
+}
+
+/// Where a rendered frame's raw pixels go under `--dump-frames`: the directory,
+/// the plug-in's file stem plus a prefix of its SHA-256 (two `Foo.aex` in
+/// different scan folders must not overwrite each other), the frame index and
+/// the pixel-format tag for the file name.
+struct FrameDump<'a> {
+    dir: &'a Path,
+    plugin_stem: &'a str,
+    plugin_sha256_prefix: &'a str,
+    frame_index: u32,
+    format: &'static str,
+}
+
+/// One frame's bucket and evidence. A session renders several and each is
+/// classified the same way. With a `FrameDump` the pixels of a rendered frame
+/// are also written out (an empty frame writes nothing: it is `rendered_empty`,
+/// and there is nothing to compare).
+fn frame_outcome_dumping(
+    outcome: std::io::Result<FrameOutcome>,
+    dump: Option<FrameDump<'_>>,
+) -> Outcome {
     let mut detail = Map::new();
     let bucket = match outcome {
         Ok(outcome) => match outcome.status {
@@ -1100,6 +1291,36 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
                 detail.insert("height".to_owned(), json!(height));
                 detail.insert("origin_x".to_owned(), json!(origin_x));
                 detail.insert("origin_y".to_owned(), json!(origin_y));
+                // The hash of the bytes the worker answered, so two runs (or a
+                // run and an AE reference decoded to the same layout) can be
+                // compared without carrying the pixels in the report.
+                detail.insert(
+                    "pixel_sha256".to_owned(),
+                    json!(format!("{:x}", Sha256::digest(&pixels))),
+                );
+                if let Some(dump) = dump.filter(|_| !pixels.is_empty() && width != 0 && height != 0)
+                {
+                    let path = dump.dir.join(format!(
+                        "{}.{}.f{}.{}x{}.{}",
+                        dump.plugin_stem,
+                        dump.plugin_sha256_prefix,
+                        dump.frame_index,
+                        width,
+                        height,
+                        dump.format
+                    ));
+                    match std::fs::write(&path, &pixels) {
+                        Ok(()) => {
+                            detail.insert(
+                                "dumped_frame".to_owned(),
+                                json!(path.file_name().and_then(|n| n.to_str()).unwrap_or("")),
+                            );
+                        }
+                        Err(error) => {
+                            detail.insert("dump_error".to_owned(), json!(error.to_string()));
+                        }
+                    }
+                }
                 // A rendered frame of no pixels is not a render: an effect that
                 // answers 0x0 has produced nothing, and rounding it into
                 // `rendered` is how a sweep reports progress it did not make.
@@ -1338,6 +1559,7 @@ mod tests {
             plugin_defaults: false,
             frames: 1,
             discovery_only: true,
+            dump_frames: None,
             dirs: Vec::new(),
         }
     }
@@ -1545,6 +1767,193 @@ mod tests {
         assert_eq!(
             discovery_failure_bucket(Some(&diagnostics), Some("nonzero_exit")),
             "exit_11_load_library"
+        );
+    }
+
+    /// Issue #1063: an exit-20 discovery failure is bucketed by the selector
+    /// that refused and its code, and an unclassified session-path failure by
+    /// its cause, so `not_discovered:unknown` is reserved for a record with
+    /// genuinely nothing in it.
+    #[test]
+    fn discovery_buckets_name_the_refusing_selector() {
+        let selector = |setup: i64, params: i64, setdown: i64| {
+            json!({
+                "classification": "nonzero_exit",
+                "cluster_error_kind": "selector_error",
+                "exit_code": 20,
+                "global_setup_error": setup,
+                "params_setup_error": params,
+                "global_setdown_error": setdown,
+                "reported_num_params": 0,
+                "parameter_count": 0,
+            })
+        };
+        assert_eq!(
+            discovery_failure_bucket(Some(&selector(14, -1, -1)), Some("nonzero_exit")),
+            "exit_20_global_setup:14"
+        );
+        assert_eq!(
+            discovery_failure_bucket(Some(&selector(0, 13, 0)), Some("nonzero_exit")),
+            "exit_20_params_setup:13"
+        );
+        assert_eq!(
+            discovery_failure_bucket(Some(&selector(0, 0, 25)), Some("nonzero_exit")),
+            "exit_20_global_setdown:25"
+        );
+        // Selectors all 0: the parameter-count contract is what failed.
+        let mut contract = selector(0, 0, 0);
+        contract["reported_num_params"] = json!(9);
+        contract["parameter_count"] = json!(7);
+        assert_eq!(
+            discovery_failure_bucket(Some(&contract), Some("nonzero_exit")),
+            "exit_20_param_count_contract:9_vs_7"
+        );
+        // Selectors 0 and the count contract holds (reported = declared + 1):
+        // the worker refused for a reason the report fields do not carry.
+        let mut consistent = selector(0, 0, 0);
+        consistent["reported_num_params"] = json!(8);
+        consistent["parameter_count"] = json!(7);
+        assert_eq!(
+            discovery_failure_bucket(Some(&consistent), Some("nonzero_exit")),
+            "exit_20_no_selector_error"
+        );
+        // -1 is the worker's "not invoked" sentinel, not a selector code: a
+        // setdown that never ran after a clean setup/params pair does not
+        // become the refusing selector.
+        let mut sentinel = selector(0, 0, -1);
+        sentinel["reported_num_params"] = json!(8);
+        sentinel["parameter_count"] = json!(7);
+        assert_eq!(
+            discovery_failure_bucket(Some(&sentinel), Some("nonzero_exit")),
+            "exit_20_no_selector_error"
+        );
+        // A record without the report fields (a pre-#1063 one-shot record).
+        let bare = json!({"classification": "nonzero_exit", "exit_code": 20});
+        assert_eq!(
+            discovery_failure_bucket(Some(&bare), Some("nonzero_exit")),
+            "exit_20_unattributed"
+        );
+        // Unclassified session-path failures name their cause.
+        let unclassified =
+            json!({"classification": null, "cluster_error_kind": "identity_changed"});
+        assert_eq!(
+            discovery_failure_bucket(Some(&unclassified), None),
+            "identity_changed"
+        );
+        assert_eq!(discovery_failure_bucket(None, None), "unknown");
+    }
+
+    #[test]
+    fn the_premiere_gpu_route_outcome_reaches_the_record_without_extended_diag() {
+        // The route's faults are contained, so a plug-in whose GPU route died
+        // on entry renders through the PF path and lands in `rendered`. What
+        // keeps that from being a silent success is this key, and it depends on
+        // three shapes the broker owns - the stage name, the `end` state and
+        // the `reason` inside `errors`. This pins the sweep side against them;
+        // the broker side that produces them is pinned by
+        // `the_premiere_gpu_route_outcome_survives_the_allowlist_and_the_reason_filter`
+        // in the broker's image_render tests, because fixtures built here
+        // cannot notice a change on that side.
+        let close_with = |events: Value| {
+            json!({
+                "session_clean": true,
+                "invalidated_reason": Value::Null,
+                "worker": {
+                    "classification": "ok",
+                    "exit_code": 0,
+                    "diagnostics": { "stage_events": events }
+                }
+            })
+        };
+        let route_event = |state: &str, reason: Value| json!({"stage": "pr_gpu_route", "state": state, "errors": {"reason": reason}});
+
+        let mut declined = Outcome::bare("rendered");
+        attach_close(
+            &mut declined,
+            close_with(json!([
+                route_event("begin", Value::Null),
+                route_event("end", json!("startup_fault")),
+            ])),
+            false,
+        );
+        assert_eq!(
+            declined.detail["worker"]["pr_gpu_route"],
+            json!("startup_fault"),
+            "a declined route has to be readable off an ordinary rendered record"
+        );
+
+        let mut committed = Outcome::bare("rendered");
+        attach_close(
+            &mut committed,
+            close_with(json!([
+                route_event("end", json!("output_frame_alloc")),
+                json!({"stage": "smart_render_cpu", "state": "end", "errors": {"error": 0}}),
+                route_event("end", json!("committed")),
+            ])),
+            false,
+        );
+        assert_eq!(
+            committed.detail["worker"]["pr_gpu_route"],
+            json!("committed"),
+            "the last entry into the route is the one the record names"
+        );
+
+        // The other stage carries a `reason` of its own (classic_output_resize
+        // really does, issue #984), so an extraction that stopped checking the
+        // stage name would mislabel that reason as the route's outcome.
+        let mut never_ran = Outcome::bare("rendered");
+        attach_close(
+            &mut never_ran,
+            close_with(json!([json!({
+                "stage": "classic_output_resize",
+                "state": "end",
+                "errors": {"reason": "output_resize_refused"}
+            })])),
+            false,
+        );
+        assert!(
+            never_ran.detail["worker"].get("pr_gpu_route").is_none(),
+            "an effect that never entered the route carries no key at all"
+        );
+
+        // Two ways an entered route still carries no reason, and they take
+        // different paths through the search: a `_begin` with no `_end` at all
+        // (the worker died inside the route) finds nothing, while an `_end`
+        // whose reason the broker's shape check dropped finds an event without
+        // one. Neither may invent a reason; `active_stage` is what names those.
+        let mut died_inside = Outcome::bare("render_frame_failed");
+        attach_close(
+            &mut died_inside,
+            close_with(json!([route_event("begin", Value::Null)])),
+            false,
+        );
+        assert!(died_inside.detail["worker"].get("pr_gpu_route").is_none());
+
+        let mut no_reason = Outcome::bare("render_frame_failed");
+        attach_close(
+            &mut no_reason,
+            close_with(json!([
+                route_event("begin", Value::Null),
+                json!({"stage": "pr_gpu_route", "state": "end", "errors": {}}),
+            ])),
+            false,
+        );
+        assert!(no_reason.detail["worker"].get("pr_gpu_route").is_none());
+
+        let mut missing_events = Outcome::bare("rendered");
+        attach_close(
+            &mut missing_events,
+            json!({
+                "session_clean": true,
+                "invalidated_reason": Value::Null,
+                "worker": {"classification": "ok", "exit_code": 0, "diagnostics": {}}
+            }),
+            false,
+        );
+        assert!(
+            missing_events.detail["worker"]
+                .get("pr_gpu_route")
+                .is_none()
         );
     }
 

@@ -48,6 +48,7 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_effect_4,
   aegp_effect_2,
   aegp_effect_3,
+  aegp_effect_1,
   aegp_stream_11,
   aegp_stream_7,
   aegp_stream_8,
@@ -68,6 +69,25 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_dynamic_stream_2,
   pf_batch_sampling_1,
   aefx_ace_1,
+  // Every slot of `PF AE Private Effect Suite` except the one this host
+  // implements (issue #1283). One id covers versions 3, 5 and 6 because AE
+  // registers one table under all three, so a diagnostic cannot say which
+  // version the caller acquired and the descriptor names the lowest.
+  pf_ae_private_effect,
+  // AE-private suites acquired as a host-presence gate (issue #1210): the
+  // observed callers acquire and release them and never call a slot, so every
+  // slot is a diagnosed unsupported stub.
+  ae_timecode_helper_1,
+  // Not suites: the vtables of the BEE.dll-compatible scene objects behind the
+  // effect layer handle (worker_bee_scene_facade). An unobserved virtual slot
+  // is recorded here by index so the report names it (issue #1210).
+  bee_av_layer_vtable,
+  bee_item_vtable,          // comp item
+  bee_footage_item_vtable,  // source (footage) item
+  bee_project_vtable,
+  // The vtable of the PF_World-compatible object behind every handed-out
+  // world's reserved_long4 (worker_pf_world_facade, issue #1276).
+  pf_world_vtable,
 };
 
 int32_t record_unsupported_suite_call(UnsupportedSuiteId suite,

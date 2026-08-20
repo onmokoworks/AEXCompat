@@ -5,6 +5,7 @@
 #include "worker_smart_execution.hpp"
 #include "worker_smart_setup.hpp"
 
+#include "worker_world_safety.hpp"
 #include <array>
 #include <cstddef>
 
@@ -20,8 +21,8 @@ struct Request {
   parameter_execution::BufferOut* output{};
   smart_setup::Plan const* plan{};
   smart_setup::ParameterState* parameters{};
-  std::array<std::byte, 120>* input_world{};
-  std::array<std::byte, 120>* output_world{};
+  aexcompat::world_safety::EffectWorldStorage* input_world{};
+  aexcompat::world_safety::EffectWorldStorage* output_world{};
   world_safety::DispatchWorldFormatScope* formats{};
   render_safety::OutputPixelBuffer* guarded{};
   unsigned char** destination{};
@@ -71,6 +72,13 @@ SelectorInputLayout selector_input_layout();
 /// Self-test hook: both selector inputs carry the same request rect, field,
 /// channel mask, and bitdepth, and `pre_render_data` survives them intact.
 bool verify_selector_inputs();
+
+/// Whether the active plug-in exports the Premiere GPU-filter entry
+/// (`xGPUFilterEntry`), i.e. the dispatch has a Premiere GPU-filter route to
+/// offer it. The session frame loop uses this to decide whether a CPU
+/// SMART_RENDER 512 in an 8/16bpc session is worth one retry through that
+/// route (issue #1271).
+bool pr_gpu_filter_route_available();
 
 bool dispatch(const Request&, const Hooks&, smart_execution::Result&, State&);
 

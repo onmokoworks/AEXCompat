@@ -37,6 +37,11 @@ struct HostHooks {
 struct Snapshot {
   uint32_t checkout_calls{};
   uint32_t checkin_calls{};
+  // PF_CheckoutPath / PF_CheckinPath answered PF_Err_NONE with a NULL path
+  // for a unique_id that names no path (PF_PathID_NONE or a deleted mask);
+  // the SDK's "can return NULL ptr if path doesn't exist" (issue #1253).
+  uint32_t absent_checkouts{};
+  uint32_t absent_checkins{};
   uint32_t mask_calls{};
   uint32_t composition_calls{};
   uint32_t invalid_operations{};

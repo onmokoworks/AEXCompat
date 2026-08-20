@@ -375,6 +375,14 @@ fn deterministic_i32_stub(value: i32) -> [u8; 6] {
     [0xb8, bytes[0], bytes[1], bytes[2], bytes[3], 0xc3]
 }
 
+fn deterministic_u64_stub(value: u64) -> [u8; 11] {
+    let bytes = value.to_le_bytes();
+    [
+        0x48, 0xb8, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        0xc3,
+    ]
+}
+
 pub(super) fn msvc_udt_by_value_return_import(symbol: &str) -> bool {
     // These MSVC decorations identify a class/struct returned by value. Win64
     // passes hidden return storage for nontrivial objects, so the scalar-zero
@@ -2701,7 +2709,7 @@ fn smart_checkout_world(
     index: i32,
 ) -> Result<(u64, i32, i32), String> {
     let state = unicorn.get_data();
-    let world = if index == 0 {
+    let mut world = if index == 0 {
         state.smart_input_world
     } else {
         let offset = usize::try_from(index)
@@ -2728,26 +2736,59 @@ fn smart_checkout_world(
     if world == 0 {
         return Err(format!("smart checkout layer index={index} has no world"));
     }
-    let data = read_guest_u64(
+    let mut data = read_guest_u64(
         unicorn,
         world + abi::LAYER_DATA_OFFSET as u64,
         "smart checkout world data",
     )?;
-    let rowbytes = read_guest_i32(
+    let mut rowbytes = read_guest_i32(
         unicorn,
         world + abi::LAYER_ROWBYTES_OFFSET as u64,
         "smart checkout world rowbytes",
     )?;
-    let width = read_guest_i32(
+    let mut width = read_guest_i32(
         unicorn,
         world + abi::LAYER_WIDTH_OFFSET as u64,
         "smart checkout world width",
     )?;
-    let height = read_guest_i32(
+    let mut height = read_guest_i32(
         unicorn,
         world + abi::LAYER_HEIGHT_OFFSET as u64,
         "smart checkout world height",
     )?;
+    // AE exposes an unselected secondary layer as an empty PF_LayerDef. SmartFX
+    // effects commonly still checkout that declared layer slot and expect the
+    // current input world. Preserve explicitly materialized secondary worlds,
+    // but inherit the active input only for the all-zero unselected descriptor.
+    let unselected_secondary = index != 0
+        && unicorn
+            .mem_read_as_vec(world, abi::PF_LAYER_DEF_SIZE)
+            .map_err(|error| format!("smart checkout layer descriptor read failed: {error}"))?
+            .iter()
+            .all(|byte| *byte == 0);
+    if unselected_secondary {
+        world = state.smart_input_world;
+        data = read_guest_u64(
+            unicorn,
+            world + abi::LAYER_DATA_OFFSET as u64,
+            "smart checkout inherited world data",
+        )?;
+        rowbytes = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_ROWBYTES_OFFSET as u64,
+            "smart checkout inherited world rowbytes",
+        )?;
+        width = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_WIDTH_OFFSET as u64,
+            "smart checkout inherited world width",
+        )?;
+        height = read_guest_i32(
+            unicorn,
+            world + abi::LAYER_HEIGHT_OFFSET as u64,
+            "smart checkout inherited world height",
+        )?;
+    }
     let pixel_bytes = match state.smart_pixel_format {
         crate::pixel::PF_PIXEL_FORMAT_ARGB32 => abi::PF_PIXEL_SIZE as i32,
         crate::pixel::PF_PIXEL_FORMAT_ARGB64 => abi::PF_PIXEL16_SIZE as i32,

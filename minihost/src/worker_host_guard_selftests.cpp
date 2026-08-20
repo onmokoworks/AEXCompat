@@ -4,12 +4,16 @@
 #include "worker_host_suite_catalog.hpp"
 #include "worker_pf_pixel_format_registry.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_ui_event_execution.hpp"
 #include "worker_world_registry.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <windows.h>
 
@@ -75,6 +79,116 @@ bool verify_pf_adv_app_suite_versions() {
         reinterpret_cast<InfoDrawText>(slots1[6])("suite1-line1", "suite1-line2") == 0 &&
         reinterpret_cast<InfoDrawText3>(slots1[8])(
             "suite1-line1", "suite1-line2", "suite1-line3") == 0;
+    // slots 6 and 8 take the same `...Z0` arguments slot 9 does, so an absent
+    // line is a null, not a bad parameter (issue #1280: Particle_Playground
+    // ends its RENDER with PF_InfoDrawText("Number of particles: N", NULL) and
+    // returned the rejection as PF_Err_OUT_OF_MEMORY for the whole frame).
+    // Over-long strings stay rejected on every argument, which is what keeps
+    // an unterminated one from being read past its end.
+    //
+    // The cases below go through v1 only: the catalog gives v1 and v2 the same
+    // three info-text pointers, which is asserted here rather than assumed, so
+    // running each case through both versions would run the same code twice.
+    // The `slots2[9]` call above predates that assertion and is left alone.
+    ok = ok && slots1[6] == slots2[6] && slots1[8] == slots2[8] &&
+        slots1[9] == slots2[9] &&
+        reinterpret_cast<InfoDrawText>(slots1[6])("suite1-line1", nullptr) == 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])(nullptr, "suite1-line2") == 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])(nullptr, nullptr) == 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])(over_long.c_str(), nullptr) != 0 &&
+        reinterpret_cast<InfoDrawText>(slots1[6])(nullptr, over_long.c_str()) != 0 &&
+        reinterpret_cast<InfoDrawText3>(slots1[8])("l1", nullptr, nullptr) == 0 &&
+        reinterpret_cast<InfoDrawText3>(slots1[8])(nullptr, nullptr, nullptr) == 0 &&
+        reinterpret_cast<InfoDrawText3>(slots1[8])(
+            nullptr, over_long.c_str(), nullptr) != 0;
+
+    // Exercise the real suite callback from plug-in-owned threads. The
+    // telemetry count must not lose increments, and its captured string must
+    // always be one complete value from a caller rather than a torn write.
+    constexpr std::size_t kThreads = 12;
+    constexpr std::size_t kCallsPerThread = 200;
+    const auto before = aexcompat::worker_runtime::ui_event_execution::
+        snapshot_info_text_telemetry();
+    std::array<std::string, kThreads> messages;
+    std::atomic<bool> start{false};
+    std::atomic<uint32_t> callback_failures{0};
+    std::atomic<std::size_t> finished{0};
+    std::atomic<uint32_t> snapshot_failures{0};
+    std::vector<std::thread> callers;
+    callers.reserve(kThreads);
+    for (std::size_t index = 0; index < kThreads; ++index) {
+      messages[index] = "concurrent-info-text-" + std::to_string(index);
+      callers.emplace_back([&, index] {
+        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (std::size_t call = 0; call < kCallsPerThread; ++call) {
+          if (reinterpret_cast<InfoDrawText>(slots1[6])(
+                  messages[index].c_str(), nullptr) != 0)
+            callback_failures.fetch_add(1, std::memory_order_relaxed);
+        }
+        finished.fetch_add(1, std::memory_order_release);
+      });
+    }
+    std::thread reporter([&] {
+      while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
+      uint32_t previous_calls = before.calls;
+      while (finished.load(std::memory_order_acquire) != kThreads) {
+        const auto snapshot = aexcompat::worker_runtime::ui_event_execution::
+            snapshot_info_text_telemetry();
+        const bool text_is_complete = snapshot.calls == before.calls
+            ? snapshot.last_text == before.last_text
+            : std::find(messages.begin(), messages.end(), snapshot.last_text) !=
+                messages.end();
+        if (snapshot.calls < previous_calls ||
+            snapshot.calls > before.calls + kThreads * kCallsPerThread ||
+            !text_is_complete)
+          snapshot_failures.fetch_add(1, std::memory_order_relaxed);
+        previous_calls = snapshot.calls;
+        std::this_thread::yield();
+      }
+    });
+    start.store(true, std::memory_order_release);
+    for (auto& caller : callers) caller.join();
+    reporter.join();
+    const auto after = aexcompat::worker_runtime::ui_event_execution::
+        snapshot_info_text_telemetry();
+    ok = callback_failures.load(std::memory_order_relaxed) == 0 &&
+        snapshot_failures.load(std::memory_order_relaxed) == 0 &&
+        after.calls == before.calls + kThreads * kCallsPerThread &&
+        std::find(messages.begin(), messages.end(), after.last_text) !=
+            messages.end() && ok;
+
+    // The bounds check stops at the first argument with no terminator in
+    // reach, and nothing after it is read - not by the check and not by the
+    // trace the same change added. A caller that got one pointer wrong may
+    // have got the rest wrong too, and a diagnostic that dereferences them
+    // would fault exactly where the plain build returns a clean 4. The later
+    // arguments here point at a page with no access, so reading one at all
+    // ends the process instead of reporting a failure.
+    // Not an early return on failure: the two suites acquired above are
+    // released below, and leaving without that would unbalance the leases for
+    // the rest of the process.
+    void* const no_access =
+        VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_NOACCESS);
+    ok = no_access != nullptr && ok;
+    if (no_access) {
+      const auto* unreadable = static_cast<const char*>(no_access);
+      ok = reinterpret_cast<InfoDrawText>(slots1[6])(over_long.c_str(),
+                                                     unreadable) == 4 && ok;
+      ok = reinterpret_cast<InfoDrawText3>(slots1[8])(
+               over_long.c_str(), unreadable, unreadable) == 4 && ok;
+      ok = reinterpret_cast<InfoDrawText3Plus>(slots1[9])(
+               over_long.c_str(), unreadable, unreadable, unreadable,
+               unreadable) == 4 && ok;
+      // Rejection in the middle of the list, not at its head: this is the case
+      // that distinguishes stopping at the first bad argument from merely
+      // skipping it, and the three above all pass either way.
+      ok = reinterpret_cast<InfoDrawText3>(slots1[8])("ok", over_long.c_str(),
+                                                      unreadable) == 4 && ok;
+      ok = reinterpret_cast<InfoDrawText3Plus>(slots1[9])(
+               "ok", nullptr, over_long.c_str(), unreadable,
+               unreadable) == 4 && ok;
+      ok = VirtualFree(no_access, 0, MEM_RELEASE) != 0 && ok;
+    }
   }
   ok = g_hooks.release_suite("PF AE Adv App Suite", 2) == 0 &&
       g_hooks.release_suite("PF AE Adv App Suite", 1) == 0 && ok;

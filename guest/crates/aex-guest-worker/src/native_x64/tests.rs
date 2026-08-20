@@ -962,6 +962,69 @@ fn smart_checkout_rejects_other_times_and_tracks_pixel_balance() {
 }
 
 #[test]
+fn native_smart_checkout_inherits_only_an_exactly_empty_declared_layer() {
+    let mut arena = vec![0u8; 4096];
+    let arena_base = arena.as_mut_ptr() as u64;
+    let input_world = arena_base;
+    let layer_definition = arena_base + 512;
+    let layer_world = layer_definition + abi::PARAM_U_OFFSET as u64;
+    let input_pixels = arena_base + 1024;
+    for (offset, bytes) in [
+        (abi::LAYER_DATA_OFFSET, input_pixels.to_le_bytes().to_vec()),
+        (abi::LAYER_ROWBYTES_OFFSET, 16i32.to_le_bytes().to_vec()),
+        (abi::LAYER_WIDTH_OFFSET, 4i32.to_le_bytes().to_vec()),
+        (abi::LAYER_HEIGHT_OFFSET, 3i32.to_le_bytes().to_vec()),
+    ] {
+        arena[offset..offset + bytes.len()].copy_from_slice(&bytes);
+    }
+    let state = NativeState {
+        smart_input_world: input_world,
+        smart_pixel_format: crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+        arena_next: arena_base,
+        arena_end: arena_base + ARENA_SIZE as u64,
+        params: vec![GuestParam {
+            index: 1,
+            param_type: 0,
+            name: "Optional Map".into(),
+            bytes: vec![0; abi::PF_PARAM_DEF_SIZE],
+        }],
+        parameter_definitions: vec![layer_definition],
+        ..NativeState::default()
+    };
+
+    assert_eq!(
+        native_smart_checkout_world(&state, 1),
+        Some((input_world, 4, 3))
+    );
+
+    arena[512 + abi::PARAM_U_OFFSET + abi::LAYER_WORLD_FLAGS_OFFSET
+        ..512 + abi::PARAM_U_OFFSET + abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+        .copy_from_slice(&1i32.to_le_bytes());
+    assert_eq!(native_smart_checkout_world(&state, 1), None);
+    arena[512 + abi::PARAM_U_OFFSET + abi::LAYER_WORLD_FLAGS_OFFSET
+        ..512 + abi::PARAM_U_OFFSET + abi::LAYER_WORLD_FLAGS_OFFSET + 4]
+        .fill(0);
+
+    let secondary_pixels = arena_base + 1200;
+    for (offset, bytes) in [
+        (
+            abi::LAYER_DATA_OFFSET,
+            secondary_pixels.to_le_bytes().to_vec(),
+        ),
+        (abi::LAYER_ROWBYTES_OFFSET, 8i32.to_le_bytes().to_vec()),
+        (abi::LAYER_WIDTH_OFFSET, 2i32.to_le_bytes().to_vec()),
+        (abi::LAYER_HEIGHT_OFFSET, 2i32.to_le_bytes().to_vec()),
+    ] {
+        let start = 512 + abi::PARAM_U_OFFSET + offset;
+        arena[start..start + bytes.len()].copy_from_slice(&bytes);
+    }
+    assert_eq!(
+        native_smart_checkout_world(&state, 1),
+        Some((layer_world, 2, 2))
+    );
+}
+
+#[test]
 fn crt_heap_imports_allocate_zero_and_reject_invalid_free() {
     let mut state = NativeState::default();
     ACTIVE_STATE.with(|slot| slot.set(&mut state));

@@ -1,7 +1,9 @@
 #include "worker_aegp_pf_interface_suite.hpp"
 
 #include "render_subsystem.h"
+#include "worker_pf_progress_info.hpp"
 #include "worker_aegp_scene.hpp"
+#include "worker_bee_scene_facade.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_pf_state_runtime.hpp"
 #include "worker_smart_runtime.hpp"
@@ -16,8 +18,8 @@ using aexcompat::pf_state_runtime::effect_is_live;
 
 // Worker-entry owned effect/layer identity objects stay in l2_main with the
 // callback ABI that hands them out; the callbacks here read them cross-TU.
-extern OpaqueHostObject g_effect;
-extern OpaqueHostObject g_layer;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
+extern aexcompat::worker_runtime::bee_facade::LayerObject g_layer;
 
 namespace {
 auto& smart_state_ref() { return aexcompat::worker_runtime::smart::state(); }
@@ -49,6 +51,18 @@ bool valid_camera_spatial_context() {
 
 int32_t __cdecl get_effect_layer(void* effect, void** layer) {
   if (effect != &g_effect || !layer) return 4;
+  // The handle is a BEE.dll-compatible object (issue #1210): an Adobe-bundled
+  // effect that reads it as a `BEE_AVLayer*` finds the host's scene contract
+  // (30 fps, 300 frames, the comp dimensions the AEGP item suite reports)
+  // behind it. Refreshed at every hand-out so the values match the current
+  // render context.
+  namespace bee = aexcompat::worker_runtime::bee_facade;
+  bee::SceneValues values{};
+  values.comp_width = g_full_resolution_width > 0
+      ? g_full_resolution_width : smart_state().width;
+  values.comp_height = g_full_resolution_height > 0
+      ? g_full_resolution_height : smart_state().height;
+  bee::prepare_effect_layer(g_layer, values);
   *layer = &g_layer;
   return 0;
 }

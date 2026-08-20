@@ -13,7 +13,18 @@ template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
   T value{}; std::memcpy(&value, bytes.data() + offset, sizeof(value)); return value;
 }
+
+void record_output_extent_hint(
+    const aexcompat::world_safety::EffectWorldStorage& output_world,
+    smart_execution::Result& result) {
+  std::memcpy(result.output_extent_hint.data(), output_world.data() + 44,
+              sizeof(result.output_extent_hint));
+  if (result.output_allocation_failed ||
+      (result.empty_result_rect && !result.empty_result_passthrough))
+    result.output_extent_hint = {0, 0, 0, 0};
 }
+}
+
 bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result) {
   if (!r.entry || !r.input || !r.output || !r.parameters || !r.output_world ||
       !r.lifecycle || !r.source || !r.guarded || !r.pre_output || !h.close_ui ||
@@ -60,19 +71,27 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
       std::all_of(logical_output.begin(), logical_output.end(),
                   [](unsigned char value) { return value == 0xCC; });
   result.output_untouched = untouched;
-  const bool finite = r.pixel_bytes != 16 || render::finite_float_world(logical_output);
+  // An 8/16bpc world cannot hold a non-finite value, so the check is on the
+  // float32 world; the Premiere GPU-filter route reports the same condition
+  // for the float32 frame it narrowed into an 8/16bpc world (issue #1271).
+  const bool finite =
+      (r.pixel_bytes != 16 || render::finite_float_world(logical_output)) &&
+      !result.output_non_finite;
   // A legally empty result promised no pixels; zero output bytes are the
   // correct fulfillment of that contract, not a validation failure.
-  result.output_pixels_valid = result.empty_result_rect
+  result.output_pixels_valid = (result.empty_result_rect &&
+                                !result.empty_result_passthrough)
       ? true
       : !logical_output.empty() && !untouched && finite;
   if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
   // The output world extent_hint is read back from the world the plug-in saw.
   // The empty answer never resized or dispatched the output world; reporting
   // the stale full-frame extent would claim pixels that were never promised.
-  std::memcpy(result.output_extent_hint.data(), r.output_world->data() + 44,
-              sizeof(result.output_extent_hint));
-  if (result.empty_result_rect) result.output_extent_hint = {0, 0, 0, 0};
+  // The passthrough did size and fill an output world, so its extent is the
+  // one the world carries. A promised-nothing frame and an allocation failure
+  // both report empty; the latter must not republish the previous world's
+  // stale extent.
+  record_output_extent_hint(*r.output_world, result);
   result.guards_intact = r.guarded->sentinels_intact();
   return true;
 }

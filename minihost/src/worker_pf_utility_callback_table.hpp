@@ -14,10 +14,12 @@ struct Sources {
   void* subpixel_sample{};
   void* area_sample{};
   void* end_sampling{};
+  void* composite_rect{};
   void* blend{};
   void* convolve{};
   void* copy{};
   void* fill{};
+  void* gaussian_kernel{};
   void* premultiply{};
   void* premultiply_color{};
   void* subpixel_sample16{};
@@ -70,15 +72,17 @@ struct Binding {
   void* Sources::*source;
 };
 
-inline constexpr std::array<Binding, 53> BINDINGS{{
+inline constexpr std::array<Binding, 55> BINDINGS{{
     {contract::UTILS_BEGIN_SAMPLING_OFFSET, &Sources::begin_sampling},
     {contract::UTILS_SUBPIXEL_SAMPLE_OFFSET, &Sources::subpixel_sample},
     {contract::UTILS_AREA_SAMPLE_OFFSET, &Sources::area_sample},
     {contract::UTILS_END_SAMPLING_OFFSET, &Sources::end_sampling},
+    {contract::UTILS_COMPOSITE_RECT_OFFSET, &Sources::composite_rect},
     {contract::UTILS_BLEND_OFFSET, &Sources::blend},
     {contract::UTILS_CONVOLVE_OFFSET, &Sources::convolve},
     {contract::UTILS_COPY_OFFSET, &Sources::copy},
     {contract::UTILS_FILL_OFFSET, &Sources::fill},
+    {contract::UTILS_GAUSSIAN_KERNEL_OFFSET, &Sources::gaussian_kernel},
     {contract::UTILS_PREMULTIPLY_OFFSET, &Sources::premultiply},
     {contract::UTILS_PREMULTIPLY_COLOR_OFFSET, &Sources::premultiply_color},
     {contract::UTILS_SUBPIXEL_SAMPLE16_OFFSET, &Sources::subpixel_sample16},

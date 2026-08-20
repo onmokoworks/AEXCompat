@@ -1,4 +1,5 @@
 #include "worker_drawbot_runtime.hpp"
+#include "worker_pf_progress_info.hpp"
 
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_pf_helper_runtime.hpp"
@@ -8,11 +9,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <iostream>
+#include <string>
 #include <utility>
 #include <vector>
 #include <new>
@@ -319,13 +323,11 @@ int32_t __cdecl adv_app_info_text3_plus(const char*, const char*, const char*,
 }
 using CustomUiRegistration =
     aexcompat::worker_runtime::ui_event_execution::CustomUiRegistration;
-extern OpaqueHostObject g_effect;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
 namespace {
 auto& g_custom_ui_registration = g_custom_ui_telemetry.registration;
 auto& g_invalid_custom_ui_registrations = g_custom_ui_telemetry.invalid_custom_ui_registrations;
 auto& g_register_ui_calls = g_custom_ui_telemetry.register_ui_calls;
-auto& g_adv_app_info_text_calls = g_custom_ui_telemetry.adv_app_info_text_calls;
-auto& g_last_adv_app_info_text = g_custom_ui_telemetry.last_adv_app_info_text;
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
   T value{};
@@ -359,22 +361,192 @@ int32_t __cdecl register_custom_ui(void* effect_ref, const void* custom_ui_info)
   return 0;
 }
 
-int32_t __cdecl adv_app_info_text(const char* first, const char* second) {
-  if (!first || !second || strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256)
+namespace {
+
+// Shared by all three info-text slots (PF_AdvAppSuite1/2 slots 6, 8 and 9):
+// every one of their string arguments is declared `...Z0` in
+// AE_AdvEffectSuites.h, i.e. an optional zero-terminated string that may be
+// null, so a null is a legal "this line is empty" and only a string with no
+// terminator in reach is a fault (issue #1280; the same reading #1055 already
+// applied to PF_InfoDrawText3Plus). Particle_Playground's RENDER ends by
+// drawing its "Number of particles: %d" line with the second line absent, and
+// rejecting that null made the whole selector return 4.
+constexpr std::size_t kInfoTextMaxBytes = 256;
+constexpr std::size_t kMaxInfoTextArguments = 5;
+
+enum class InfoTextArgumentState { absent, bounded, unterminated };
+
+struct InfoTextArgument {
+  InfoTextArgumentState state{};
+  std::size_t length{};
+};
+
+struct InfoTextArguments {
+  std::array<InfoTextArgument, kMaxInfoTextArguments> items{};
+  // How many the slot takes, and how many were actually read. They differ
+  // only when an argument was rejected.
+  std::size_t total{};
+  std::size_t classified{};
+  bool rejected{};
+};
+
+// Classified left to right, stopping at the first argument with no terminator
+// in reach. Nothing after it is read - not by the check, not by the join and
+// not by the trace. That ordering is the contract the pre-#1280 `||` chain
+// had, and losing it would make the diagnostic build dereference a pointer the
+// plain build never touches, which is the opposite of what a diagnostic is
+// for.
+//
+// The argument list is one `std::array` per slot, handed to both this and the
+// join below, so the two cannot drift apart, and `N` is checked against the
+// classification's capacity at compile time rather than silently truncated.
+template <std::size_t N>
+InfoTextArguments classify_info_text(const std::array<const char*, N>& arguments) {
+  static_assert(N <= kMaxInfoTextArguments,
+                "an info-text slot with more arguments needs a bigger "
+                "kMaxInfoTextArguments, not a truncated classification");
+  InfoTextArguments result;
+  result.total = N;
+  for (const char* text : arguments) {
+    InfoTextArgument& item = result.items[result.classified];
+    if (!text) {
+      item = {InfoTextArgumentState::absent, 0};
+    } else {
+      const std::size_t length = strnlen_s(text, kInfoTextMaxBytes);
+      item = {length == kInfoTextMaxBytes ? InfoTextArgumentState::unterminated
+                                          : InfoTextArgumentState::bounded,
+              length};
+    }
+    ++result.classified;
+    if (item.state == InfoTextArgumentState::unterminated) {
+      result.rejected = true;
+      break;
+    }
+  }
+  return result;
+}
+
+// One trace line per info-text call, because these slots are otherwise
+// invisible: a plug-in that ends its render on a rejected info-text call
+// reports the rejection as its own selector error and leaves nothing in the
+// callback trace to point at (this is how #1280's 4 looked before the line
+// existed). The per-argument shape is what distinguishes an absent line from
+// an unterminated one, so it is what the line carries.
+//
+// Bounded, and accepted and rejected calls are bounded separately: the
+// broker's extended trace keeps a fixed tail, so an effect that draws its info
+// line every frame would otherwise push the fault site out of it, and it is
+// the rejections that name a fault site. The info-text telemetry snapshot in
+// the report carries the accepted total whatever this drops.
+// The counters are `std::atomic` because the surrounding suite is reachable
+// from whatever thread the plug-in calls it on, and unsynchronized access
+// would be a data race whatever the hardware does with a 32-bit word. The
+// decision is taken from `fetch_add`'s own previous value, so exactly one
+// `status=suppressed` line is printed however many threads arrive at once.
+//
+// This is the diagnostic's own bookkeeping only. The report telemetry the
+// same functions write is synchronized separately by ui_event_execution so
+// plug-in-owned threads cannot race each other or the report (issue #1293).
+constexpr uint32_t kMaxInfoTextTraces = 64;
+std::atomic<uint32_t> g_info_text_traces_accepted{};
+std::atomic<uint32_t> g_info_text_traces_rejected{};
+
+// One line per call, built up and then written with a single `<<` like every
+// other `extended_diag:` site, so concurrent calls will not in practice
+// interleave halfway through a line that the trace's readers match on. That
+// is a practical property, not a guaranteed one: the standard promises only
+// that a synchronized stream is race-free, and says characters from
+// concurrent inserts may still interleave.
+void trace_info_text(const char* slot, const InfoTextArguments& arguments,
+                     int32_t result) {
+  if (!extended_diag_enabled()) return;
+  std::atomic<uint32_t>& traced =
+      result == 0 ? g_info_text_traces_accepted : g_info_text_traces_rejected;
+  const uint32_t previous = traced.fetch_add(1);
+  if (previous > kMaxInfoTextTraces) {
+    // Clamp rather than let a long run keep incrementing towards a wrap.
+    traced.store(kMaxInfoTextTraces + 1);
+    return;
+  }
+  if (previous == kMaxInfoTextTraces) {
+    // No `slot=` here: the cap is per result class and shared by all three
+    // slots, so naming one of them would name whichever happened to arrive
+    // last.
+    std::cerr << "extended_diag:info_draw_text status=suppressed result=" +
+                     std::to_string(result) + " after=" +
+                     std::to_string(kMaxInfoTextTraces) + "\n"
+              << std::flush;
+    return;
+  }
+  std::string line = "extended_diag:info_draw_text slot=";
+  line += slot;
+  line += " args=";
+  for (std::size_t index = 0; index < arguments.total; ++index) {
+    if (index) line += ',';
+    if (index >= arguments.classified) {
+      line += "unread";
+      continue;
+    }
+    switch (arguments.items[index].state) {
+      case InfoTextArgumentState::absent: line += "null"; break;
+      case InfoTextArgumentState::unterminated: line += "unterminated"; break;
+      case InfoTextArgumentState::bounded:
+        line += std::to_string(arguments.items[index].length);
+        break;
+    }
+  }
+  line += " -> ";
+  line += std::to_string(result);
+  line += '\n';
+  std::cerr << line << std::flush;
+}
+
+// The joined telemetry line, over the same array the classification was run
+// on, so the two lists cannot disagree about what the call was. Only reached
+// once `classify_info_text` has said every argument is either absent or
+// terminated within the bound, which is what makes reading the strings here
+// safe. Absent parts are skipped rather than joined as empty, which is what
+// PF_InfoDrawText3Plus has done since #1055 and is now what all three slots
+// do. The join therefore records what was said, not which line said it; the
+// per-argument shape is in the trace, when the trace is on.
+template <std::size_t N>
+std::string join_info_text(const std::array<const char*, N>& arguments) {
+  std::string joined;
+  for (const char* part : arguments) {
+    if (!part) continue;
+    if (!joined.empty()) joined += " | ";
+    joined += part;
+  }
+  return joined;
+}
+
+// The shared body of all three slots: classify once, refuse without touching
+// anything past the refusal, otherwise record and report success.
+template <std::size_t N>
+int32_t serve_info_text(const char* slot,
+                        const std::array<const char*, N>& arguments) {
+  const InfoTextArguments classified = classify_info_text(arguments);
+  if (classified.rejected) {
+    trace_info_text(slot, classified, 4);
     return 4;
-  g_last_adv_app_info_text = std::string(first) + " | " + second;
-  ++g_adv_app_info_text_calls;
+  }
+  aexcompat::worker_runtime::ui_event_execution::record_info_text(
+      join_info_text(arguments));
+  trace_info_text(slot, classified, 0);
   return 0;
+}
+
+}  // namespace
+
+int32_t __cdecl adv_app_info_text(const char* first, const char* second) {
+  return serve_info_text("PF_InfoDrawText",
+                         std::array<const char*, 2>{first, second});
 }
 
 int32_t __cdecl adv_app_info_text3(const char* first, const char* second,
                                    const char* third) {
-  if (!first || !second || (third && strnlen_s(third, 256) == 256) ||
-      strnlen_s(first, 256) == 256 || strnlen_s(second, 256) == 256) return 4;
-  g_last_adv_app_info_text = std::string(first) + " | " + second;
-  if (third) g_last_adv_app_info_text += std::string(" | ") + third;
-  ++g_adv_app_info_text_calls;
-  return 0;
+  return serve_info_text("PF_InfoDrawText3",
+                         std::array<const char*, 3>{first, second, third});
 }
 
 // PF_InfoDrawText3Plus (PF_AdvAppSuite1/2 slot 9): three lines, where line 2 and
@@ -384,27 +556,16 @@ int32_t __cdecl adv_app_info_text3(const char* first, const char* second,
 // of leaving the slot a recorder stub that returns 4 (issue #1055). Every
 // argument is declared `...Z0` in the SDK, i.e. an optional zero-terminated
 // string that may be null, so none is required; only over-long strings are
-// rejected. Rejecting a null the way the two/three-line variants reject their
-// first arguments would fail effects (Environment, Overbrights) that leave a
-// justification half empty.
+// rejected. Rejecting a null the way the two/three-line variants used to
+// reject their first arguments would fail effects (Environment, Overbrights)
+// that leave a justification half empty.
 int32_t __cdecl adv_app_info_text3_plus(const char* line1, const char* line2_jr,
                                         const char* line2_jl, const char* line3_jr,
                                         const char* line3_jl) {
-  const auto bounded = [](const char* text) {
-    return !text || strnlen_s(text, 256) < 256;
-  };
-  if (!bounded(line1) || !bounded(line2_jr) || !bounded(line2_jl) ||
-      !bounded(line3_jr) || !bounded(line3_jl))
-    return 4;
-  std::string joined;
-  for (const char* part : {line1, line2_jr, line2_jl, line3_jr, line3_jl}) {
-    if (!part) continue;
-    if (!joined.empty()) joined += " | ";
-    joined += part;
-  }
-  g_last_adv_app_info_text = joined;
-  ++g_adv_app_info_text_calls;
-  return 0;
+  return serve_info_text(
+      "PF_InfoDrawText3Plus",
+      std::array<const char*, 5>{line1, line2_jr, line2_jl, line3_jr,
+                                 line3_jl});
 }
 
 bool drawbot_objects_empty() { return g_drawbot_objects.empty(); }
@@ -514,6 +675,14 @@ bool dispatch_render_draw(EffectEntry entry, std::array<std::byte, kInSize>& inp
        g_drawbot_stroke_path_calls + g_overlay_stroke_path_calls) > 0 &&
       g_drawbot_objects_created == g_drawbot_objects_released &&
       drawbot_objects_empty() && g_drawbot_invalid_operations == 0;
+}
+
+bool render_draw_dispatch_enabled() {
+  return g_render_draw_enabled;
+}
+
+bool render_ui_context_active() {
+  return g_render_ui_context_active;
 }
 
 bool close_render_ui_context(EffectEntry entry, std::array<std::byte, kInSize>& input,

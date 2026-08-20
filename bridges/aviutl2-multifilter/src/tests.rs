@@ -122,14 +122,14 @@ mod tests {
 
     #[test]
     fn companion_association_uses_discovered_aegp_suites_in_exact_install_dir() {
-        let root = std::env::temp_dir().join(format!(
+        let root = TempRoot::from_path(std::env::temp_dir().join(format!(
             "aexcompat-mf-companions-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        )));
         let package = root.join("package");
         let other = root.join("other");
         std::fs::create_dir_all(&package).unwrap();
@@ -209,14 +209,14 @@ mod tests {
 
     #[test]
     fn failed_load_resolves_one_registered_runtime_provider_fail_closed() {
-        let root = std::env::temp_dir().join(format!(
+        let root = TempRoot::from_path(std::env::temp_dir().join(format!(
             "aexcompat-mf-runtime-root-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
+        )));
         let plugin_root = root.join("plugins");
         let registered_install = root.join("registered-install");
         let runtime = registered_install.join("redist").join("intel64");
@@ -335,15 +335,14 @@ mod tests {
 
     #[test]
     fn registered_runtime_retry_fails_closed_when_dependency_diagnostics_truncate() {
-        let root = std::env::temp_dir().join(format!(
+        let root = TempRoot::from_path(std::env::temp_dir().join(format!(
             "aexcompat-mf-runtime-truncated-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        )));
         let names: Vec<String> = (0..65)
             .map(|index| format!("missing-{index}.dll"))
             .collect();
@@ -354,7 +353,7 @@ mod tests {
             aexcompat_broker::test_pe::pe64_importing(&borrowed),
         )
         .unwrap();
-        let result = registered_runtime_retry_roots(&plugin, &[root.clone()], |_| {
+        let result = registered_runtime_retry_roots(&plugin, &[root.to_path_buf()], |_| {
             aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
                 std::collections::BTreeMap::new(),
             )
@@ -365,15 +364,14 @@ mod tests {
 
     #[test]
     fn registered_runtime_retry_checks_every_provider_before_choosing_a_root() {
-        let root = std::env::temp_dir().join(format!(
+        let root = TempRoot::from_path(std::env::temp_dir().join(format!(
             "aexcompat-mf-runtime-provider-cap-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
+        )));
         let plugin = root.join("effect.aex");
         std::fs::write(
             &plugin,
@@ -395,7 +393,7 @@ mod tests {
             .unwrap();
             providers.push(directory);
         }
-        let result = registered_runtime_retry_roots(&plugin, &[root.clone()], |_| {
+        let result = registered_runtime_retry_roots(&plugin, &[root.to_path_buf()], |_| {
             aexcompat_broker::installed_runtime_roots::RegisteredRuntimeLookup::Found(
                 std::collections::BTreeMap::from([("common.dll".into(), providers.clone())]),
             )
@@ -553,6 +551,52 @@ mod tests {
                 discover: true
             }
         );
+    }
+
+    /// A plug-in whose metadata is readable but whose contents cannot be read
+    /// produces a bare negative entry with no recorded closure. That mismatch
+    /// is a retry trigger, so the negative-to-negative merge must retain the
+    /// attempt ledger instead of resetting it on every launch (issue #658).
+    #[test]
+    fn an_unreadable_negative_entry_converges_after_the_retry_budget() {
+        let root = temp_root("unreadable-negative-budget");
+        let plugin = root.join("locked.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let meta = file_meta(&plugin).expect("fixture metadata");
+        let roots = search_roots_for(&plugin, &[]);
+        let mut entry = negative_entry(&plugin, build(1));
+        assert!(needs_closure_recheck(&entry, build(1), &roots));
+
+        for attempt in 1..=RETRY_BUDGET {
+            let unreadable = negative_entry(&plugin, build(1));
+            entry = keep_best(Some(&entry), unreadable, Some(meta)).unwrap();
+            assert_eq!(entry.attempts, attempt);
+            assert_eq!(
+                needs_closure_recheck(&entry, build(1), &roots),
+                attempt < RETRY_BUDGET
+            );
+        }
+
+        let replacement_meta = (meta.0, meta.1 + 1);
+        let replacement = keep_best(
+            Some(&entry),
+            negative_entry(&plugin, build(1)),
+            Some(replacement_meta),
+        )
+        .unwrap();
+        assert_eq!(replacement.attempts, 0, "new bytes get a fresh ledger");
+        assert!(
+            needs_closure_recheck(&replacement, build(1), &roots),
+            "replacement bytes remain eligible for discovery"
+        );
+
+        assert!(
+            needs_closure_recheck(&entry, build(2), &roots),
+            "a different host build gets a fresh retry budget"
+        );
+        entry = keep_best(Some(&entry), negative_entry(&plugin, build(2)), Some(meta)).unwrap();
+        assert_eq!(entry.checked, build(2));
+        assert_eq!(entry.attempts, 1, "the new host starts its own ledger");
     }
 
     /// A replaced AEX is a different plug-in, so its old parameters are
@@ -930,15 +974,14 @@ mod tests {
     /// swapped call site.
     #[test]
     fn a_saved_update_to_an_existing_key_persists() {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = TempRoot::from_path(std::env::temp_dir().join(format!(
             "aexcompat-mf-savecache-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        )));
         let path = dir.join("discovery-cache.json");
         let key = "effect.aex".to_string();
 
@@ -966,15 +1009,14 @@ mod tests {
     /// same-meta known-good beats a later transient negative.
     #[test]
     fn a_save_unions_disjoint_keys_and_keeps_known_good_on_disk() {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = TempRoot::from_path(std::env::temp_dir().join(format!(
             "aexcompat-mf-savecache2-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        )));
         let path = dir.join("discovery-cache.json");
 
         let other_launch = HashMap::from([
@@ -1003,10 +1045,10 @@ mod tests {
 
     #[test]
     fn a_readable_folder_scans_completely() {
-        let dir = std::env::temp_dir().join(format!("aexcompat-mf-{}-scan", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::create_dir_all(&dir);
-        let limits = collect_aex(&[dir], &[]).limits;
+        let dir = TempRoot::from_path(
+            std::env::temp_dir().join(format!("aexcompat-mf-{}-scan", std::process::id())),
+        );
+        let limits = collect_aex(&[dir.path().to_path_buf()], &[]).limits;
         assert!(limits.authoritative(), "{limits:?}");
     }
 
@@ -1196,11 +1238,9 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    fn temp_root(tag: &str) -> PathBuf {
+    fn temp_root(tag: &str) -> TempRoot {
         let dir = std::env::temp_dir().join(format!("aexcompat-mf-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp root");
-        dir
+        TempRoot::from_path(dir)
     }
 
     #[test]
@@ -1355,13 +1395,13 @@ mod tests {
         let root = temp_root("ignored");
         std::fs::write(root.join("keep.aex"), b"x").unwrap();
         std::fs::write(root.join("skip.aex"), b"x").unwrap();
-        let scan = collect_aex(std::slice::from_ref(&root), &["skip".into()]);
+        let scan = collect_aex(std::slice::from_ref(&root.0), &["skip".into()]);
         assert_eq!(scan.plugins.len(), 1, "the ignored one is not registered");
         assert_eq!(scan.seen.len(), 2, "but it was seen");
 
         let key = root.join("skip.aex").to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
-        prune_cache(&mut cache, &scan.seen, &[root], true);
+        prune_cache(&mut cache, &scan.seen, &[root.to_path_buf()], true);
         assert!(cache.contains_key(&key), "an ignored AEX is not gone");
     }
 
@@ -1610,7 +1650,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("only.aex"), b"x").unwrap();
         junction(&root.join("loop"), &root);
-        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        let scan = collect_aex(std::slice::from_ref(&root.0), &[]);
         assert_eq!(scan.seen.len(), 1, "one AEX, seen once: {:?}", scan.seen);
     }
 
@@ -1646,7 +1686,7 @@ mod tests {
         std::fs::write(real.join("foo.aex"), b"x").unwrap();
         junction(&root.join("AAA-link"), &real);
 
-        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        let scan = collect_aex(std::slice::from_ref(&root.0), &[]);
         assert_eq!(scan.seen.len(), 1, "walked once: {:?}", scan.seen);
 
         // Key the cache by the spelling the scan did NOT keep.
@@ -1657,7 +1697,12 @@ mod tests {
         };
         let key = other.to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
-        prune_cache(&mut cache, &scan.seen, &[root], scan.limits.authoritative());
+        prune_cache(
+            &mut cache,
+            &scan.seen,
+            &[root.to_path_buf()],
+            scan.limits.authoritative(),
+        );
         assert!(
             cache.contains_key(&key),
             "the file is still there, so is its entry"
@@ -1670,7 +1715,7 @@ mod tests {
         let root = temp_root("deleted");
         let key = root.join("gone.aex").to_string_lossy().into_owned();
         let mut cache = cache_of(&[&key]);
-        prune_cache(&mut cache, &[], &[root], true);
+        prune_cache(&mut cache, &[], &[root.to_path_buf()], true);
         assert!(
             cache.is_empty(),
             "the file does not exist, so the entry goes"
@@ -1690,7 +1735,7 @@ mod tests {
         std::fs::write(real.join("foo.aex"), b"x").unwrap();
         junction(&root.join("AAA-link"), &real);
 
-        let scan = collect_aex(std::slice::from_ref(&root), &[]);
+        let scan = collect_aex(std::slice::from_ref(&root.0), &[]);
         assert_eq!(scan.seen.len(), 1);
         let walked = &scan.seen[0];
         // Key the cache by the other spelling, as an earlier launch would have.
@@ -1705,7 +1750,7 @@ mod tests {
             !cache.contains_key(&walked.to_string_lossy().into_owned()),
             "the exact key really does miss"
         );
-        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
         let found = walked
             .canonicalize()
             .ok()
@@ -1745,7 +1790,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
         let cache = cache_of(&[&inside, &outside]);
-        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
         assert_eq!(index.len(), 1, "only the key under the scanned root");
         assert!(index.values().any(|keys| keys.contains(&inside)));
     }
@@ -1810,7 +1855,7 @@ mod tests {
             let mut cache = HashMap::new();
             cache.insert(negative.clone(), failed(5, 64, build(1)));
             cache.insert(positive.clone(), discovered(5, 64, build(1)));
-            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
             assert_eq!(index.len(), 1, "both spellings resolved to one file");
             let winner = &index.values().next().unwrap()[0];
             assert!(cache[winner].ok, "the registering entry won");
@@ -1848,7 +1893,7 @@ mod tests {
             b.sha = "bbb".into();
             cache.insert(direct.clone(), a);
             cache.insert(via_link.clone(), b);
-            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
             assert_eq!(index.len(), 1);
             winners.insert(cache[&index.values().next().unwrap()[0]].sha.clone());
         }
@@ -1880,7 +1925,7 @@ mod tests {
             fresh.sha = "new".into();
             cache.insert(stale_key.clone(), stale);
             cache.insert(fresh_key.clone(), fresh);
-            let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(2));
+            let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(2));
             let winner = &index.values().next().unwrap()[0];
             assert_eq!(cache[winner].sha, "new", "the current build's entry won");
         }
@@ -1917,7 +1962,7 @@ mod tests {
             !classify(direct, META, build(1)).register,
             "the direct hit alone would not register"
         );
-        let index = index_by_real_path(&cache, std::slice::from_ref(&root), build(1));
+        let index = index_by_real_path(&cache, std::slice::from_ref(&root.0), build(1));
         let candidates = index
             .get(&real.join("foo.aex").canonicalize().unwrap())
             .expect("the file is in the index");
@@ -1963,7 +2008,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -2009,7 +2054,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -2141,7 +2186,7 @@ mod tests {
                 &real.join("foo.aex"),
                 META,
                 build(1),
-                std::slice::from_ref(&root),
+                std::slice::from_ref(&root.0),
                 true,
                 &mut aliases,
             );
@@ -2184,7 +2229,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -2422,7 +2467,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -2466,7 +2511,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -2513,7 +2558,7 @@ mod tests {
             &walked,
             META,
             build(1),
-            std::slice::from_ref(&root),
+            std::slice::from_ref(&root.0),
             true,
             &mut aliases,
         );
@@ -3283,12 +3328,102 @@ mod tests {
         assert_eq!(entry.params[2].choices, vec!["A", "B", "C"]);
         assert_eq!(entry.params[3].color, [255, 10, 20, 30]);
 
-        // PARAMS_SETUP rejection is a plugin-local failure, not a discovery.
-        let rejected = serde_json::json!({"params_setup_error": 25, "parameters": []});
+        // PARAMS_SETUP rejection is a plugin-local failure, not a discovery,
+        // and the entry says so (issue #1063) instead of staying a bare
+        // negative.
+        let rejected = serde_json::json!({
+            "status": "selector_error", "params_setup_error": 25, "parameters": []
+        });
         let mut entry = negative_entry(Path::new("effect.aex"), build(1));
         fill_entry_from_inspect_report(&mut entry, &rejected);
         assert!(!entry.ok);
         assert!(entry.params.is_empty());
+        assert!(
+            entry.failure_classification.is_none(),
+            "unclassified: retried"
+        );
+        let diagnostics = entry
+            .failure_diagnostics
+            .expect("an unusable report is recorded");
+        assert_eq!(diagnostics["classification"], serde_json::Value::Null);
+        assert_eq!(
+            diagnostics["cluster_error_kind"],
+            "inspected_report_unusable"
+        );
+        assert_eq!(diagnostics["reason"], "params_setup_rejected");
+        assert_eq!(diagnostics["params_setup_error"], 25);
+        assert_eq!(diagnostics["inspection_status"], "selector_error");
+        assert_eq!(diagnostics["parameter_count"], 0);
+
+        // A report the conversion cannot read is recorded with its reason.
+        let unreadable = serde_json::json!({"params_setup_error": 0});
+        let mut entry = negative_entry(Path::new("effect.aex"), build(1));
+        fill_entry_from_inspect_report(&mut entry, &unreadable);
+        assert!(!entry.ok);
+        let diagnostics = entry.failure_diagnostics.expect("recorded");
+        assert_eq!(
+            diagnostics["cluster_error_kind"],
+            "inspected_report_unusable"
+        );
+        assert_eq!(diagnostics["reason"], "inspection report has no parameters");
+    }
+
+    /// The session-path failure record (issue #1063): every `InspectError`
+    /// carries diagnostics, classified or not, and a partial worker report's
+    /// selector fields ride along.
+    #[test]
+    fn cluster_inspect_error_diagnostics_carry_the_partial_report() {
+        let report = serde_json::json!({
+            "status": "selector_error",
+            "global_setup_error": 0,
+            "params_setup_error": 13,
+            "global_setdown_error": 0,
+            "reported_num_params": 0,
+            "parameters": [],
+            "missing_suites": [{"name": "PF AE Private Effect Suite", "version": 5}],
+            "missing_suites_truncated": false,
+            "host_callback_timeline": {"records": [1, 2, 3]}
+        });
+        let diagnostics = cluster_inspect_error_diagnostics(
+            Some("nonzero_exit"),
+            "selector_error",
+            Some(20),
+            None,
+            Some(&report),
+        );
+        assert_eq!(diagnostics["classification"], "nonzero_exit");
+        assert_eq!(diagnostics["cluster_error_kind"], "selector_error");
+        assert_eq!(diagnostics["exit_code"], 20);
+        assert_eq!(diagnostics["inspection_status"], "selector_error");
+        assert_eq!(diagnostics["params_setup_error"], 13);
+        assert_eq!(diagnostics["global_setup_error"], 0);
+        assert_eq!(diagnostics["reported_num_params"], 0);
+        assert_eq!(diagnostics["parameter_count"], 0);
+        assert_eq!(diagnostics["missing_suites"][0]["version"], 5);
+        assert!(
+            diagnostics.get("host_callback_timeline").is_none(),
+            "only the bounded selector fields travel, not the whole report"
+        );
+        assert!(diagnostics.get("plugin_kind").is_none());
+
+        // Unclassified by design (the #309 state transition) still names why.
+        let diagnostics =
+            cluster_inspect_error_diagnostics(None, "identity_changed", None, None, None);
+        assert_eq!(diagnostics["classification"], serde_json::Value::Null);
+        assert_eq!(diagnostics["cluster_error_kind"], "identity_changed");
+        assert!(diagnostics.get("exit_code").is_none());
+        assert!(diagnostics.get("inspection_status").is_none());
+
+        // The entrypoint case keeps its plugin_kind for the AEGP router.
+        let diagnostics = cluster_inspect_error_diagnostics(
+            Some("nonzero_exit"),
+            "entrypoint_unresolved",
+            Some(12),
+            Some("invalid_pipl"),
+            Some(&serde_json::json!({"plugin_kind": "invalid_pipl"})),
+        );
+        assert_eq!(diagnostics["exit_code"], 12);
+        assert_eq!(diagnostics["plugin_kind"], "invalid_pipl");
     }
 
     // --- cluster session smoke tests against the protocol fixture (issue #405) ---
@@ -3345,16 +3480,16 @@ mod tests {
         /// L2 worker is deliberately absent: the one-shot inspect cannot
         /// succeed here, so a successful entry proves the cluster session
         /// path produced it.
-        fn cluster_repository() -> (PathBuf, PathBuf, PathBuf) {
+        fn cluster_repository() -> (TempRoot, PathBuf, PathBuf) {
             let fixture = build_session_fixture();
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let root = std::env::temp_dir().join(format!(
+            let root = TempRoot::from_path(std::env::temp_dir().join(format!(
                 "aexcompat-mf-cluster-{}-{nonce:032x}",
                 std::process::id()
-            ));
+            )));
             // The broker's worker-freshness check (#613, a recorded warning
             // rather than a gate since #729) walks `<repository>/minihost/src`
             // and flags a worker older than the newest source file. Give the
@@ -3550,6 +3685,70 @@ mod tests {
             std::fs::remove_dir_all(&root).unwrap();
         }
 
+        /// A member whose inspect column ran and whose selector refused
+        /// (issue #1063): the session continues, the member is a classified
+        /// negative (`nonzero_exit`, the one-shot exit-20 equivalent), and its
+        /// diagnostics carry the worker's partial report — which selector,
+        /// what code, which suite it could not acquire — instead of nothing.
+        #[test]
+        fn in_place_cluster_selector_error_keeps_the_worker_report_as_diagnostics() {
+            let _guard = BEHAVIOR_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            unsafe {
+                std::env::set_var(
+                    "AEXCOMPAT_TEST_SESSION_BEHAVIOR",
+                    "inspect_selector_error_report_plugin_1",
+                );
+                std::env::remove_var("AEXCOMPAT_MULTIFILTER_STAGED_DISCOVERY");
+            }
+            let (root, one, two) = cluster_repository();
+            let results = discover_all(&root, &[one.clone(), two.clone()], &dependency(), build(1));
+            unsafe {
+                std::env::remove_var("AEXCOMPAT_TEST_SESSION_BEHAVIOR");
+            }
+            assert_eq!(results.len(), 2, "every plug-in gets a result");
+            let entry_of = |wanted: &PathBuf| {
+                results
+                    .iter()
+                    .find(|(path, _)| path == wanted)
+                    .map(|(_, entry)| entry)
+                    .expect("member has an entry")
+            };
+            let first = entry_of(&one);
+            assert!(first.ok, "the member before the failure still discovers");
+            assert!(first.failure_diagnostics.is_none());
+            let second = entry_of(&two);
+            assert!(!second.ok, "a refused selector is never rounded to success");
+            assert!(
+                second.cluster_fallback.is_none(),
+                "plug-in-local: the session was not invalidated"
+            );
+            assert_eq!(
+                second.failure_classification.as_deref(),
+                Some("nonzero_exit"),
+                "converges like the one-shot exit-20 path"
+            );
+            let diagnostics = second
+                .failure_diagnostics
+                .as_ref()
+                .expect("a selector_error records diagnostics");
+            assert_eq!(diagnostics["classification"], "nonzero_exit");
+            assert_eq!(diagnostics["cluster_error_kind"], "selector_error");
+            assert_eq!(diagnostics["exit_code"], 20);
+            assert_eq!(diagnostics["inspection_status"], "selector_error");
+            assert_eq!(diagnostics["global_setup_error"], 14);
+            assert_eq!(diagnostics["params_setup_error"], -1);
+            assert_eq!(diagnostics["global_setdown_error"], -1);
+            assert_eq!(diagnostics["reported_num_params"], 0);
+            assert_eq!(diagnostics["parameter_count"], 0);
+            assert_eq!(
+                diagnostics["missing_suites"],
+                serde_json::json!([{"name": "PF AE Private Effect Suite", "version": 3}])
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+
         #[test]
         fn in_place_cluster_sharding_keeps_singleton_tails_authenticated() {
             let cluster = |indices: &[usize]| DiscoveryTask::Cluster(indices.to_vec());
@@ -3598,7 +3797,7 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner())
                 .clear();
             let session = open_mf_session(MfSessionConfig {
-                repository: root.clone(),
+                repository: root.to_path_buf(),
                 plugin: one.clone(),
                 dependency: dependency(),
                 sha: sha_of(&one),
@@ -3849,12 +4048,16 @@ mod tests {
     struct TempRoot(PathBuf);
 
     impl TempRoot {
-        fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("aexcompat-mf-root-{}-{tag}", std::process::id()));
+        fn from_path(dir: PathBuf) -> Self {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
+        }
+
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("aexcompat-mf-root-{}-{tag}", std::process::id()));
+            Self::from_path(dir)
         }
 
         fn path(&self) -> &Path {
@@ -3866,6 +4069,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    impl std::ops::Deref for TempRoot {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            self.path()
+        }
+    }
+
+    impl AsRef<Path> for TempRoot {
+        fn as_ref(&self) -> &Path {
+            self.path()
+        }
+    }
+
+    #[test]
+    fn temp_root_is_removed_during_unwind() {
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-mf-root-{}-drop-on-unwind",
+            std::process::id()
+        ));
+        let unwind = std::panic::catch_unwind(|| {
+            let root = TempRoot::from_path(path.clone());
+            std::fs::write(root.join("fixture"), b"x").unwrap();
+            panic!("exercise panic cleanup");
+        });
+        assert!(unwind.is_err());
+        assert!(!path.exists(), "TempRoot::drop removed the fixture tree");
     }
 
     /// A deployed plugin finds its workers next to itself, with no setting at

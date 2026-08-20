@@ -2,7 +2,7 @@
 name = "aex-guest-worker"
 version = "0.1.0"
 edition.workspace = true
-license = "GPL-2.0-only"
+license = "MPL-2.0"
 
 [features]
 default = []
@@ -18,6 +18,16 @@ aex-apple-opencl = { path = "../aex-apple-opencl" }
 aex-clspv = { path = "../aex-clspv", optional = true }
 aex-unicorn-buffer = { path = "../aex-unicorn-buffer" }
 aex-wgpu-compute = { path = "../aex-wgpu-compute", optional = true }
+encoding_rs = "0.8"
+icu_casemap = "=2.3.0"
+icu_collator = "=2.3.0"
+icu_locale_core = "=2.3.0"
+icu_properties = "=2.3.0"
+unicode-normalization = "0.1"
+unicode-bidi = "0.3.18"
+unicode-general-category = "1.1.0"
+unicode-script = "0.5.8"
+unicode-width = "0.1.14"
 goblin.workspace = true
 iced-x86.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }

@@ -2,7 +2,7 @@
 name = "aexcompat-aviutl2-multifilter"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "MPL-2.0"
 publish = false
 description = "AviUtl2 generic (.aux2) plugin registering each AEX in a folder as its own keyframeable filter (issue #295)"
 

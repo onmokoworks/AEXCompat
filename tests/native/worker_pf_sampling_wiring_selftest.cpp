@@ -254,6 +254,17 @@ void the_utility_table_is_wired_one_to_one() {
   check(contract::UTILS_ANSI_LOG_OFFSET == 280, "ansi.log sits at 280");
   check(contract::UTILS_ANSI_LOG10_OFFSET == 288, "ansi.log10 sits at 288");
   check(contract::UTILS_ANSI_TAN_OFFSET == 320, "ansi.tan sits at 320");
+  // composite_rect, the slot between end_sampling and blend that the contract
+  // left out until issue #1252 (Write_on's RENDER jumped to address 0 through
+  // it). Same defect shape again.
+  void* composite_rect{};
+  std::memcpy(&composite_rect, state.utils.data() + contract::UTILS_COMPOSITE_RECT_OFFSET,
+              sizeof(composite_rect));
+  check(composite_rect != nullptr, "utils.composite_rect is wired");
+  check(contract::UTILS_COMPOSITE_RECT_OFFSET == 40, "composite_rect sits at 40");
+  check(contract::UTILS_END_SAMPLING_OFFSET + sizeof(void*) == contract::UTILS_COMPOSITE_RECT_OFFSET &&
+            contract::UTILS_COMPOSITE_RECT_OFFSET + sizeof(void*) == contract::UTILS_BLEND_OFFSET,
+        "composite_rect sits between end_sampling and blend");
 }
 
 // PF_AREA_SAMPLE's field handling as issue #1033 settled it. The measured

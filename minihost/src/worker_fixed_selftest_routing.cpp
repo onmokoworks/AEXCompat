@@ -177,12 +177,30 @@ int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+int selftest_selector_fault_unwind(int, wchar_t**) {
+  const SelectorFaultUnwindProbe probe = verify_selector_fault_unwind();
+  std::cout << "{\"selector_fault_unwind\":\""
+            << (probe.passed ? "passed" : "failed")
+            << "\",\"frames\":" << probe.frame_count
+            << ",\"fault_site_is_null\":"
+            << (probe.fault_site_is_null ? "true" : "false")
+            << ",\"call_site_frame_identified\":"
+            << (probe.call_site_frame_identified ? "true" : "false")
+            << ",\"caller_frame_identified\":"
+            << (probe.caller_frame_identified ? "true" : "false")
+            << ",\"reference_identities_resolved\":"
+            << (probe.reference_identities_resolved ? "true" : "false")
+            << "}\n";
+  return probe.passed ? 0 : 1;
+}
+
 }  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 12> host_commands{{
+  const std::array<selftest::HostCommand, 13> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
+      {L"--self-test-selector-fault-unwind", 2, &selftest_selector_fault_unwind},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
       {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
@@ -209,7 +227,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 34> simple_commands{{
+  const std::array<selftest::SimpleCommand, 43> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -274,10 +292,68 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       // stderr.
       {L"--self-test-utility-callback-table", "utility_callback_table",
        hooks.simple.utility_callback_table},
+      // PF_UtilCallbacks.composite_rect called through the installed
+      // in_data->utils block (issue #1252): the slot the table check above
+      // proves non-null is the composite the transfer modes describe, and a
+      // malformed call fails closed with the destination untouched.
+      {L"--self-test-pf-utils-composite-rect", "pf_utils_composite_rect",
+       hooks.simple.pf_utils_composite_rect, 1,
+       ",\"reached_via_in_data_utils\":true"},
+      // PF_UtilCallbacks.gaussian_kernel called through the installed
+      // in_data->utils block (issue #1253): AE's PF_GaussianKernel values for
+      // the 1D NORMALIZED kernel Inner/Outer Key builds, and malformed calls
+      // fail closed with the buffer untouched.
+      {L"--self-test-pf-utils-gaussian-kernel", "pf_utils_gaussian_kernel",
+       hooks.simple.pf_utils_gaussian_kernel, 1,
+       ",\"reached_via_in_data_utils\":true"},
+      // PF_InteractCallbacks.checkout_param through the installed in_data
+      // block asked for slots past the published table (issue #1251): AE
+      // answers PF_Err_NONE with an empty layer def and takes the checkin;
+      // negative slots and an unpublished table stay refused.
+      {L"--self-test-checkout-param-beyond-table", "checkout_param_beyond_table",
+       hooks.simple.checkout_param_beyond_table, 1,
+       ",\"reached_via_in_data_inter\":true"},
+      // AE's private get_callback_addr ids -5 (PFp_GaussianValue) and -2 (the
+      // FLT.dll in-place blur) reached through the installed in_data->utils
+      // get_callback_addr slot (issue #985): the answers AE 2026's own
+      // dispatcher gave, and malformed blur calls failing closed.
+      {L"--self-test-pf-private-callbacks", "pf_private_callbacks",
+       hooks.simple.pf_private_callbacks, 1,
+       ",\"reached_via_in_data_utils\":true"},
+      // The BEE.dll-compatible scene object behind AEGP_GetEffectLayer's handle
+      // and the "AE Timecode Helper Suite" v1 gate suite (issue #1210): the
+      // production hand-out publishes the observed BEE_AVLayer / BEE_Item /
+      // BEE_Project layout, and every unobserved vtable slot traps by index.
+      {L"--self-test-bee-scene-facade", "bee_scene_facade",
+       hooks.simple.bee_scene_facade, 1,
+       ",\"reached_via_aegp_pf_interface_suite\":true"},
+      // The PF_ProgressInfo-shaped object behind in_data->effect_ref (issue
+      // #1275): the production hand-out publishes {refcon, abort, progress}
+      // and both slots, read the way PF.dll / CannedWarp read them, forward to
+      // the host's abort / progress callbacks.
+      {L"--self-test-pf-progress-info", "pf_progress_info",
+       hooks.simple.pf_progress_info, 1,
+       ",\"reached_via_in_data_effect_ref\":true"},
+      // The PF_World-shaped object behind every registered world's
+      // reserved_long4 (issue #1276): vtable slot 1 answers the world's depth,
+      // the LayerDef mirror follows the hand-out, every other slot traps by
+      // index, and PF_NewWorld's world carries the same object.
+      {L"--self-test-pf-world-facade", "pf_world_facade",
+       hooks.simple.pf_world_facade, 1,
+       ",\"reached_via_reserved_long4\":true"},
       {L"--self-test-flt-blur-suite1", "flt_blur_suite1",
        hooks.simple.flt_blur_suite1},
       {L"--self-test-aefx-ace-suite1", "aefx_ace_suite1",
        hooks.simple.aefx_ace_suite1},
+      // AE's `PF AE Private Effect Suite` (issues #1283, #1295): the
+      // implemented slots' conversions and bounds - slot 2's UTF-16 to narrow
+      // and slot 3's ZString to UTF-16, including the ZString split
+      // `dvacore::GetNonLocalizedString` performs - and the diagnosed refusal
+      // on every other slot of the published table.
+      {L"--self-test-pf-private-effect-suite", "pf_private_effect_suite",
+       hooks.simple.pf_private_effect_suite, 1,
+       ",\"versions\":[3,5,6],\"published_slots\":32,\"host_table_slots\":10"
+       ",\"implemented_slots\":[2,3]"},
       {L"--self-test-aegp-persistent-data-suite3",
        "aegp_persistent_data_suite3",
        hooks.simple.aegp_persistent_data_suite3},
@@ -290,6 +366,12 @@ Result dispatch(const Request& request, const Hooks& hooks) {
        "headless_system_sound_suppression",
        hooks.simple.headless_system_sound_suppression, 1,
        ",\"process_local\":true,\"dialog_containment_unchanged\":true"},
+      // The 8/16bpc <-> float32 ARGB conversion the Premiere GPU-filter route
+      // (VR family) widens its input through and narrows its output through
+      // when the session is not float32 (issue #1271): exact round trip at
+      // both integer depths, bounded narrowing, float32 pass-through.
+      {L"--self-test-argb32f-depth-conversion", "argb32f_depth_conversion",
+       hooks.simple.argb32f_depth_conversion, 1, ",\"depths\":[8,16,32]"},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))

@@ -118,6 +118,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::aegp_effect_4: return {"AEGP Effect Suite", 4};
     case UnsupportedSuiteId::aegp_effect_2: return {"AEGP Effect Suite", 2};
     case UnsupportedSuiteId::aegp_effect_3: return {"AEGP Effect Suite", 3};
+    case UnsupportedSuiteId::aegp_effect_1: return {"AEGP Effect Suite", 1};
     case UnsupportedSuiteId::aegp_stream_11: return {"AEGP Stream Suite", 11};
     case UnsupportedSuiteId::aegp_stream_7: return {"AEGP Stream Suite", 7};
     case UnsupportedSuiteId::aegp_stream_8: return {"AEGP Stream Suite", 8};
@@ -141,6 +142,20 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::pf_batch_sampling_1:
       return {"PF Batch Sampling Suite", 1};
     case UnsupportedSuiteId::aefx_ace_1: return {"AEFX ACE Suite", 1};
+    // Versions 3, 5 and 6 share one table, so this names the lowest rather
+    // than the version the caller asked for (issue #1283).
+    case UnsupportedSuiteId::pf_ae_private_effect:
+      return {"PF AE Private Effect Suite", 3};
+    case UnsupportedSuiteId::ae_timecode_helper_1:
+      return {"AE Timecode Helper Suite", 1};
+    case UnsupportedSuiteId::bee_av_layer_vtable:
+      return {"BEE_AVLayer vtable", 1};
+    case UnsupportedSuiteId::bee_item_vtable: return {"BEE_CompItem vtable", 1};
+    case UnsupportedSuiteId::bee_footage_item_vtable:
+      return {"BEE_FootageItem vtable", 1};
+    case UnsupportedSuiteId::bee_project_vtable:
+      return {"BEE_Project vtable", 1};
+    case UnsupportedSuiteId::pf_world_vtable: return {"PF_World vtable", 1};
   }
   return {};
 }

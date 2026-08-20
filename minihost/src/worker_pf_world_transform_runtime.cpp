@@ -13,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -777,7 +778,7 @@ int32_t dispatch_pixel_format_bytes(int32_t pixel_format) {
        (pixel_format == kPixelFormatArgb128 ? 16 : 0));
 }
 
-// A copy operand the format registry has never seen, admitted the way the
+// A world operand the format registry has never seen, admitted the way the
 // sampling callbacks admit their source worlds (worker_pf_sampling_runtime.cpp,
 // issues #777/#813): by the declared-stride bounds check, not by ownership.
 // AE's PF_COPY takes any PF_EffectWorld the caller can describe, not only
@@ -789,6 +790,49 @@ int32_t dispatch_pixel_format_bytes(int32_t pixel_format) {
 // misdescribes the plug-in's own memory is the plug-in's fault, contained by
 // the worker process exactly as it is for sampling.
 //
+// PF_TRANSFORM_WORLD takes the same latitude and is admitted through this same
+// fallback (issue #1289). Particle Playground composites each particle by
+// laying a 4x4 `PF_EffectWorld` over a row inside its own sprite atlas
+// (observed: `width=4 height=4 rowbytes=416`, a pixel base the host never
+// issued and no registered reference names) and asking TRANSFORM_WORLD to warp
+// it into the frame output; refusing that source failed the whole frame with
+// 516. The transform reads its source through one bounded row-by-row copy
+// capped by exactly these declared fields before it samples anything, so the
+// admission buys it the same bound the copy callbacks get, not a wider one.
+//
+// The admission is symmetric, so TRANSFORM_WORLD's *destination* can be
+// foreign too, and that side the host both reads and writes - the blend mixes
+// the existing destination pixels in, which the copy callbacks never do. Both
+// are capped by the same declared fields: `resolve_world` above has already
+// refused a null base, a width/height outside 1..4096, and a `rowbytes` under
+// `width * pixel_bytes`, and the read and the write walk the same
+// `clip_legacy_rect(destination_rect, width, height)` at that stride. It is
+// the latitude `copy_world8` already writes a foreign destination with, plus a
+// read inside the same bound - and the two refusals above (a registry-known
+// reference that failed to resolve, a host-issued pixel base) still stand on
+// both sides.
+//
+// One consequence worth naming: the source's declared extent now sizes a host
+// allocation (`source_copy` below is `width * height * pixel_bytes`, up to
+// 256 MiB at the 4096 cap in float), and the row loop reads the whole declared
+// extent whatever the matrix samples. A mis-declared world therefore turns a
+// 516 into an allocation the Job Object may end rather than into a wrong
+// picture; `bad_alloc` is caught and answered 4.
+//
+// PF_TRANSFER_RECT (below) is deliberately left registry-only. It is
+// TRANSFORM_WORLD's untransformed twin and the same argument would apply, but
+// nothing measured asks for it, and widening an admission without a caller to
+// check it against is what this comment exists to avoid.
+//
+// That is not the same question as TRANSFORM_WORLD's destination side, which
+// has no measured caller either. The difference is which way the special case
+// runs: TRANSFER_RECT would need admission *added*, while TRANSFORM_WORLD's
+// destination arrives with the resolver it shares with `copy_world8` - which
+// has written a foreign destination since #1037 - and would need a flag
+// *added* to take it away. Neither invention is worth making, and the one that
+// keeps the two callbacks answering the same question about the same world is
+// the shared resolver.
+//
 // Three refusals survive, deliberately:
 // - A world the dispatch-format registry already knows - a registered struct
 //   whose fields no longer match registration, or a struct re-declaring a
@@ -796,11 +840,10 @@ int32_t dispatch_pixel_format_bytes(int32_t pixel_format) {
 //   this path: reaching a failed resolve with one is the registry's
 //   fail-closed mismatch refusal on a host-handed reference (the frame input
 //   and output worlds above all), and it must stay a refusal instead of
-//   degrading into foreign admission. That refusal is only as wide as the
-//   dispatch scope's thread: the registry is thread_local, so on a thread the
-//   plug-in spawned itself the scope stack is empty and this check cannot see
-//   the dispatch worlds - the guarantee holds for the thread that holds the
-//   scope, which is every thread the host itself dispatches on.
+//   degrading into foreign admission. The refusal is as wide as the process:
+//   the registry keeps its scope stack per-thread but publishes every live
+//   stack, so this check sees the dispatch worlds from a thread the plug-in
+//   spawned itself as well as from the one holding the scope (issue #1299).
 // - A world whose pixel base the host allocated (`PF_NEW_WORLD`, AEGP
 //   platform/owned backings) never takes this path either:
 //   `world_pixels_owned` keeps each allocation's own fail-closed geometry
@@ -812,8 +855,8 @@ int32_t dispatch_pixel_format_bytes(int32_t pixel_format) {
 //   copy requires the two formats equal anyway, and the DEEP-flag check inside
 //   `resolve_world` still has to agree). With neither side resolved there is
 //   no format to anchor on and the copy stays refused.
-bool resolve_foreign_copy_world(void* world, const DispatchWorldFormat& known,
-                                DispatchWorldFormat& result) {
+bool resolve_foreign_operand_world(void* world, const DispatchWorldFormat& known,
+                                   DispatchWorldFormat& result) {
   if (!g_configured || !g_context.hooks.world_pixels_owned ||
       world_safety::dispatch_world_reference_known(world) ||
       g_context.hooks.world_pixels_owned(world))
@@ -834,21 +877,43 @@ bool resolve_foreign_copy_world(void* world, const DispatchWorldFormat& known,
   return true;
 }
 
-bool resolve_copy_worlds(void* source_world, void* destination_world,
-                         DispatchWorldFormat& source_info,
-                         DispatchWorldFormat& destination_info) {
+// Which operand the pair below could not place. The copy callbacks answer one
+// refusal for either, but TRANSFORM_WORLD's marker names the side (issue
+// #1289), and re-asking the registry afterwards would be both a third resolve
+// and a race: the registry is deliberately cross-thread (issue #1299), so a
+// scope pushed or popped on another thread between the two calls could flip
+// the answer. Reporting it from inside the one resolve that decided it cannot.
+enum class OperandRefusal { none, source, destination, both };
+
+bool resolve_operand_worlds(void* source_world, void* destination_world,
+                            DispatchWorldFormat& source_info,
+                            DispatchWorldFormat& destination_info,
+                            OperandRefusal* refused = nullptr) {
+  const auto refuse = [&](OperandRefusal which) {
+    if (refused) *refused = which;
+    return false;
+  };
+  if (refused) *refused = OperandRefusal::none;
   const bool source_known =
       resolve_dispatch_world_format(source_world, source_info);
   const bool destination_known =
       resolve_dispatch_world_format(destination_world, destination_info);
   if (source_known && destination_known) return true;
-  if (source_known)
-    return resolve_foreign_copy_world(destination_world, source_info,
-                                      destination_info);
-  if (destination_known)
-    return resolve_foreign_copy_world(source_world, destination_info,
-                                      source_info);
-  return false;
+  if (source_known) {
+    return resolve_foreign_operand_world(destination_world, source_info,
+                                         destination_info)
+        ? true
+        : refuse(OperandRefusal::destination);
+  }
+  if (destination_known) {
+    return resolve_foreign_operand_world(source_world, destination_info,
+                                         source_info)
+        ? true
+        : refuse(OperandRefusal::source);
+  }
+  // Neither side resolved, so there is no pixel format to anchor the fallback
+  // on and neither can be blamed over the other.
+  return refuse(OperandRefusal::both);
 }
 
 }  // namespace
@@ -856,8 +921,8 @@ bool resolve_copy_worlds(void* source_world, void* destination_world,
 int32_t __cdecl copy_world8(void*, void* source_world, void* destination_world,
                             const LegacyRect* source_rect, const LegacyRect* destination_rect) {
   DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_copy_worlds(source_world, destination_world, source_info,
-                           destination_info))
+  if (!resolve_operand_worlds(source_world, destination_world, source_info,
+                              destination_info))
     return copy_denied("unresolved_world");
   if (source_info.pixel_format != destination_info.pixel_format)
     return copy_denied("pixel_format_mismatch");
@@ -1125,6 +1190,55 @@ bool verify_copy_foreign_world_gate() {
 }
 
 namespace {
+
+// The shape of a TRANSFORM_WORLD operand when the pair could not be placed, so
+// the trace says what the plug-in actually handed over rather than only that it
+// was refused (issue #1289: the answer was a 4x4 struct laid over a
+// 104-pixel-wide row of the plug-in's own sprite atlas, which no
+// `stage:callback_denied` reason could have conveyed). Both operands are
+// printed, because which of them is the odd one out is the question and
+// `registry_known` plus the geometry is what answers it; the one that resolved
+// is context, not an accusation.
+//
+// Under `AEXCOMPAT_EXTENDED_DIAG` only: it prints raw pointers. It cannot reach
+// a report without that variable (`extended_diagnostics_stderr_tail` answers
+// `None`), and the always-on denial marker is emitted before this, so
+// attribution never depends on the walk below returning.
+//
+// Deliberately reads no further than offset 44. `world_safety::read_world_layout`
+// has already dereferenced 24..44 of the same struct on every path that reaches
+// here, so the only field this adds is the flags word at 16 - below an offset
+// already read, not past one. (`bounded_typed_world` reads that word too, but
+// only on the paths that reach the foreign fallback, and the
+// `both_worlds_unresolved` arm returns before it.) That is a same-allocation
+// argument, not a same-page one: a page boundary anywhere in offsets 17..24 -
+// which is to say offset 16 and offset 24 landing on different pages - would
+// put the flags word on a page nothing has touched yet.
+// A real `PF_EffectWorld` is one 120-byte object, so that cannot arise, and
+// the residual is a contained worker fault *after* the always-on denial marker
+// has been flushed - which is why the marker goes first. `reserved_long4` at offset
+// 0x50 is not printed even though it would be informative: it is 36 bytes past
+// anything proven reachable, on the one path where the struct is least
+// trustworthy.
+void diag_operand_world(const char* label, const void* world) {
+  if (!aexcompat::l2_detail::extended_diag_enabled()) return;
+  std::cerr << "extended_diag:operand_world " << label << " world=" << world;
+  if (world) {
+    const auto* bytes = static_cast<const std::byte*>(world);
+    int32_t flags{}, rowbytes{}, width{}, height{};
+    void* data{};
+    std::memcpy(&flags, bytes + 16, sizeof(flags));
+    std::memcpy(&data, bytes + 24, sizeof(data));
+    std::memcpy(&rowbytes, bytes + 32, sizeof(rowbytes));
+    std::memcpy(&width, bytes + 36, sizeof(width));
+    std::memcpy(&height, bytes + 40, sizeof(height));
+    std::cerr << " flags=" << flags << " data=" << data << " rowbytes=" << rowbytes
+              << " width=" << width << " height=" << height
+              << " registry_known="
+              << (world_safety::dispatch_world_reference_known(world) ? 1 : 0);
+  }
+  std::cerr << "\n" << std::flush;
+}
 
 // Answers a refused TRANSFORM_WORLD naming the condition that refused it.
 // The numeric 516 alone cannot: this function refuses for a dozen reasons, and
@@ -1401,10 +1515,30 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
                    [](double value) { return std::isfinite(value); }))
     return transform_world_denied("matrix_not_finite");
   DispatchWorldFormat source_info{}, destination_info{};
-  if (!resolve_dispatch_world_format(source_world, source_info))
-    return transform_world_denied("source_world_unresolved");
-  if (!resolve_dispatch_world_format(destination_world, destination_info))
-    return transform_world_denied("destination_world_unresolved");
+  // `source_world` is read-only for the whole callback - the row-by-row copy
+  // below is the only thing that touches its pixels - but the shared operand
+  // resolver takes the same non-const world pointer the copy callbacks hand
+  // it, so the constness is dropped here rather than duplicating the resolver.
+  OperandRefusal refusal = OperandRefusal::none;
+  if (!resolve_operand_worlds(const_cast<void*>(source_world), destination_world,
+                              source_info, destination_info, &refusal)) {
+    // The always-on marker first, then the optional trace: the marker is what
+    // the broker's parser reads, and emitting it before the struct walk below
+    // keeps a refusal attributable even if that walk faults on a world the
+    // plug-in mis-declared.
+    // `none` cannot reach here today - every false return from the resolver
+    // goes through its `refuse` helper - but it is spelled out rather than
+    // folded into the source arm, so a later path that forgets to name a side
+    // says so instead of blaming the source.
+    const int32_t answer = transform_world_denied(
+        refusal == OperandRefusal::destination ? "destination_world_unresolved"
+        : refusal == OperandRefusal::both      ? "both_worlds_unresolved"
+        : refusal == OperandRefusal::source    ? "source_world_unresolved"
+                                               : "operand_refusal_unnamed");
+    diag_operand_world("transform_world_source", source_world);
+    diag_operand_world("transform_world_destination", destination_world);
+    return answer;
+  }
   if (source_info.pixel_format != destination_info.pixel_format)
     return transform_world_denied("pixel_format_mismatch");
   const int32_t pixel_bytes = source_info.pixel_format == kPixelFormatArgb32 ? 4 :
@@ -1612,6 +1746,157 @@ int32_t __cdecl transform_world(void* effect_ref, int32_t quality, uint32_t mode
   *g_context.telemetry.last_y = static_cast<int32_t>(std::lround(matrix[7]));
   *g_context.telemetry.last_opacity = opacity;
   return 0;
+}
+
+// TRANSFORM_WORLD's half of the shared operand admission (issue #1289), in the
+// shape the sweep observed: a small source world laid over a row inside a much
+// wider buffer the host never issued (`rowbytes` describes the wide buffer, so
+// the declared stride is what bounds every read), warped into a registered
+// destination. What is pinned together, because the value of the admission is
+// exactly that it stays narrow:
+//   * a foreign source is admitted and its pixels land at the declared stride
+//     (a packed-stride read would put different values in row 1);
+//   * the mirror case, a registered source into a foreign destination - the
+//     side the host writes;
+//   * both are refused instead when `world_pixels_owned` claims the base is a
+//     host allocation, which is the gate that keeps host-issued worlds under
+//     their own registry's geometry check (the caller flips the hook, as it
+//     does for `verify_copy_foreign_world_gate`);
+//   * with neither operand registered there is no pixel format to anchor on and
+//     the callback refuses rather than guesses;
+//   * and every refusal names the right side, read off the always-on marker.
+//     Without that last one the enum that names the side could have its arms
+//     swapped and nothing here would notice.
+// `admitted` says whether the caller has the gate open or shut.
+bool verify_transform_world_foreign_operand(bool admitted) {
+  DispatchWorldFormatScope formats;
+  // A 2x2 source inside a 26-pixel-wide atlas row: the same "declared stride is
+  // far wider than the declared width" shape Particle Playground passes. The
+  // expected pixels below only come out if that declared stride is what the
+  // read walks, so this pins the bound as well as the admission.
+  constexpr int32_t kAtlasWidth = 26;
+  constexpr int32_t kSourceWidth = 2, kSourceHeight = 2;
+  constexpr int32_t kDestinationWidth = 4, kDestinationHeight = 4;
+  using DestinationPixels = std::array<uint8_t, kDestinationWidth * kDestinationHeight * 4>;
+  std::vector<uint8_t> atlas(static_cast<std::size_t>(kAtlasWidth) * kSourceHeight * 4, 0);
+  for (int32_t y = 0; y < kSourceHeight; ++y) {
+    for (int32_t x = 0; x < kSourceWidth; ++x) {
+      const std::size_t offset =
+          (static_cast<std::size_t>(y) * kAtlasWidth + x) * 4;
+      atlas[offset] = 255;
+      atlas[offset + 1] = static_cast<uint8_t>((y * kSourceWidth + x + 1) * 10);
+    }
+  }
+  DestinationPixels destination_pixels{};
+  LocalEffectWorld source{}, destination{};
+  source.data = atlas.data();
+  source.rowbytes = kAtlasWidth * 4;
+  source.width = kSourceWidth;
+  source.height = kSourceHeight;
+  destination.data = destination_pixels.data();
+  destination.rowbytes = kDestinationWidth * 4;
+  destination.width = kDestinationWidth;
+  destination.height = kDestinationHeight;
+  std::array<std::byte, 12> composite{};
+  const int32_t copy_mode = 0;
+  const uint8_t opacity = 255;
+  const uint16_t opacity16 = 32768;
+  std::memcpy(composite.data(), &copy_mode, sizeof(copy_mode));
+  std::memcpy(composite.data() + 8, &opacity, sizeof(opacity));
+  std::memcpy(composite.data() + 10, &opacity16, sizeof(opacity16));
+  const std::array<double, 9> identity{{1,0,0, 0,1,0, 0,0,1}};
+  LegacyRect bounds{0, 0, kDestinationWidth, kDestinationHeight};
+  // The refusal reason is the point of naming the sides, so the self-test reads
+  // the marker rather than only the 516: without this, swapping the source and
+  // destination arms of the answer would leave every assertion here passing.
+  // The restore is a destructor rather than a statement after the call: if
+  // anything below ever throws, leaving `std::cerr` pointing at a destroyed
+  // `ostringstream` would turn a throw into corruption somewhere else.
+  struct CerrCapture {
+    std::ostringstream captured;
+    std::streambuf* previous;
+    CerrCapture() : previous(std::cerr.rdbuf(captured.rdbuf())) {}
+    ~CerrCapture() { std::cerr.rdbuf(previous); }
+  };
+  const auto call = [&](void* source_world, void* destination_world, std::string& trace) {
+    CerrCapture capture;
+    const int32_t answer =
+        transform_world(&source, 0, 1, 0, source_world, composite.data(), nullptr,
+                        identity.data(), 1, 0, &bounds, destination_world);
+    trace = capture.captured.str();
+    return answer;
+  };
+  const auto denied_for = [](const std::string& trace, const char* reason) {
+    return trace.find(std::string("stage:callback_denied callback=transform_world reason=") +
+                      reason) != std::string::npos;
+  };
+
+  // Foreign source over the atlas, registered destination.
+  if (!formats.register_world(&destination, kPixelFormatArgb32)) return false;
+  std::string trace;
+  int32_t answer = call(&source, &destination, trace);
+  const auto red = [&](int32_t x, int32_t y) {
+    return destination_pixels[(static_cast<std::size_t>(y) * kDestinationWidth + x) * 4 + 1];
+  };
+  if (admitted) {
+    // Row 1 of the source is the atlas's second row, not the two pixels after
+    // the first two, which is the declared stride doing its job.
+    if (answer != 0 || red(0, 0) != 10 || red(1, 0) != 20 || red(0, 1) != 30 ||
+        red(1, 1) != 40 || red(2, 0) != 0 || red(0, 2) != 0)
+      return false;
+  } else {
+    if (answer != kPfErrBadCallbackParam || destination_pixels != DestinationPixels{} ||
+        !denied_for(trace, "source_world_unresolved"))
+      return false;
+    // The operand trace is what an investigator greps for when a refusal has to
+    // be explained (issue #1289 was unreadable until it existed), so its field
+    // names and the geometry it reports are pinned here rather than left to a
+    // sweep to discover. The harness turns `AEXCOMPAT_EXTENDED_DIAG` on.
+    if (trace.find("extended_diag:operand_world transform_world_source") == std::string::npos ||
+        trace.find(" rowbytes=104 width=2 height=2 registry_known=0") == std::string::npos ||
+        trace.find("extended_diag:operand_world transform_world_destination") ==
+            std::string::npos)
+      return false;
+  }
+
+  // The mirror case: registered source, foreign destination. This is the side
+  // the host writes, and the only path that answers `destination_world_unresolved`.
+  DispatchWorldFormatScope inner;
+  std::array<uint8_t, kSourceWidth * kSourceHeight * 4> packed_source{};
+  for (int32_t index = 0; index < kSourceWidth * kSourceHeight; ++index) {
+    packed_source[index * 4] = 255;
+    packed_source[index * 4 + 1] = static_cast<uint8_t>((index + 1) * 10);
+  }
+  LocalEffectWorld registered_source{};
+  registered_source.data = packed_source.data();
+  registered_source.rowbytes = kSourceWidth * 4;
+  registered_source.width = kSourceWidth;
+  registered_source.height = kSourceHeight;
+  if (!inner.register_world(&registered_source, kPixelFormatArgb32)) return false;
+  DestinationPixels foreign_pixels{};
+  LocalEffectWorld foreign_destination = destination;
+  foreign_destination.reserved_long4 = nullptr;
+  foreign_destination.data = foreign_pixels.data();
+  answer = call(&registered_source, &foreign_destination, trace);
+  if (admitted) {
+    const auto foreign_red = [&](int32_t x, int32_t y) {
+      return foreign_pixels[(static_cast<std::size_t>(y) * kDestinationWidth + x) * 4 + 1];
+    };
+    if (answer != 0 || foreign_red(0, 0) != 10 || foreign_red(1, 1) != 40) return false;
+  } else {
+    if (answer != kPfErrBadCallbackParam || foreign_pixels != DestinationPixels{} ||
+        !denied_for(trace, "destination_world_unresolved"))
+      return false;
+  }
+
+  // Neither operand registered: no pixel format to anchor the fallback on, so
+  // the refusal names neither side and nothing is written.
+  DestinationPixels spare{};
+  LocalEffectWorld unregistered_destination = foreign_destination;
+  unregistered_destination.data = spare.data();
+  answer = call(&source, &unregistered_destination, trace);
+  return answer == kPfErrBadCallbackParam && spare == DestinationPixels{} &&
+      denied_for(trace, "both_worlds_unresolved");
 }
 
 bool verify_world_transform_affine() {
@@ -1918,8 +2203,8 @@ int32_t __cdecl copy_world_hq(void* effect_ref, void* source_world, void* destin
   // admit the same worlds (the #962 lesson below, applied to operands): a
   // plug-in that branches on `in_data->quality` must not find its scratch
   // world accepted at draft and refused at the quality a final renders at.
-  if (!resolve_copy_worlds(source_world, destination_world, source_info,
-                           destination_info))
+  if (!resolve_operand_worlds(source_world, destination_world, source_info,
+                              destination_info))
     return copy_denied("unresolved_world");
   // The same clipping PF_COPY does, so the two entry points admit the same
   // rectangles. Refusing here while `copy_world8` clipped would have left a

@@ -144,10 +144,21 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
     bool& user_changed_ok, bool& conditional_ui_ok) {
   std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
   std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
-  std::array<std::byte, 120> lifecycle_world{};
+  aexcompat::world_safety::EffectWorldStorage lifecycle_world{};
   write<void*>(lifecycle_world, 24, lifecycle_pixel.data());
   write<int32_t>(lifecycle_world, 32, 4); write<int32_t>(lifecycle_world, 36, 1);
   write<int32_t>(lifecycle_world, 40, 1); write_rect(lifecycle_world.data() + 44, 1, 1);
+  // The one world the host builds without render::prepare_world_layout, so it
+  // needs the PF_World shape put on it here: the discovery path hands it to
+  // FRAME_SETUP / FRAME_SETDOWN, and an effect that reads `world + 0x50` and
+  // calls slot 1 without a null check (the Glow shape, issue #1276) would
+  // otherwise dereference null right here. This covers the world handed over
+  // directly; the copy inside `lifecycle_definitions[0]` carries the same
+  // `reserved_long4`, but `world - 8` on *that* copy is ParamDef bytes rather
+  // than a prefix, so a Spill2/Curl_Noise-shape effect computing it during
+  // discovery still finds no vtable there (as it does for every ParamDef
+  // world; see copy_world_into_param_def in the render runtimes).
+  (void)aexcompat::worker_runtime::pf_world_facade::embed(lifecycle_world.data(), 4);
   std::memcpy(lifecycle_definitions[0].data() + 56, lifecycle_world.data(), lifecycle_world.size());
   for (std::size_t i = 0; i < g_params.size(); ++i) {
     lifecycle_definitions[i + 1] = g_params[i].raw;
@@ -313,11 +324,24 @@ int32_t __cdecl timeline_checkout_layer_audio(
     void* effect_ref, int32_t index, int32_t start_time, int32_t duration,
     uint32_t time_scale, uint32_t rate, int32_t bytes_per_sample,
     int32_t channels, int32_t format, void** audio) {
-  return timeline_result(
+  // Trace the request as the plug-in made it (issue #1253: AudWave's
+  // SMART_RENDER answered PF_Err_OUT_OF_MEMORY with the audio counters at
+  // zero because the checkout was refused before any counter it increments,
+  // and nothing showed the arguments it was refused on).
+  const void* audio_in = audio ? *audio : nullptr;
+  const int32_t result = timeline_result(
       "inter.checkout_layer_audio",
       checkout_layer_audio(
           effect_ref, index, start_time, duration, time_scale, rate,
           bytes_per_sample, channels, format, audio));
+  if (extended_diag_enabled())
+    std::cerr << "extended_diag:checkout_layer_audio index=" << index
+              << " start=" << start_time << " duration=" << duration
+              << " scale=" << time_scale << " rate=" << rate
+              << " bytes=" << bytes_per_sample << " channels=" << channels
+              << " format=" << format << " audio_out=" << static_cast<const void*>(audio)
+              << " audio_in=" << audio_in << " -> " << result << "\n" << std::flush;
+  return result;
 }
 
 int32_t __cdecl timeline_checkin_layer_audio(
@@ -439,6 +463,35 @@ int32_t __cdecl diag_dispose_world(void* effect_ref, void* world) {
       dispose_world(effect_ref, world),
       !world ? aexcompat::callback_diagnostics::Reason::MissingWorld
              : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+// PF_UtilCallbacks.composite_rect (0x28). Same implementation the World
+// Transform Suite hands out as its slot 0, so the two entry points agree on
+// arguments, bounds and transfer modes. Write_on's RENDER calls it with the
+// input layer as source and the output as destination (issue #1252).
+int32_t __cdecl diag_composite_rect(void* effect_ref, ::LegacyRect* source_rect,
+                                   int32_t source_opacity, void* source_world,
+                                   int32_t destination_x, int32_t destination_y,
+                                   int32_t field, int32_t transfer_mode,
+                                   void* destination_world) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::CompositeRect,
+      composite_rect8(effect_ref, source_rect, source_opacity, source_world, destination_x,
+                      destination_y, field, transfer_mode, destination_world),
+      !effect_ref || !source_rect || !source_world || !destination_world
+          ? aexcompat::callback_diagnostics::Reason::InvalidArguments
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
+// PF_UtilCallbacks.gaussian_kernel (0x50). AE's PF_GaussianKernel values
+// (worker_pf_gaussian_kernel.cpp); Inner/Outer Key's RENDER builds its 1D
+// NORMALIZED edge-blur kernel through it (issue #1253).
+int32_t __cdecl diag_gaussian_kernel(void* effect_ref, double radius, uint32_t flags,
+                                     double multiplier, int32_t* diameter, void* kernel) {
+  // Every non-zero answer of this callback is an argument refusal (null
+  // effect_ref / diameter / kernel, negative or unbounded radius) made before
+  // anything is written; it has no other failure mode.
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::GaussianKernel,
+      aexcompat::pf_gaussian_kernel::gaussian_kernel(effect_ref, radius, flags, multiplier,
+                                                    diameter, kernel),
+      aexcompat::callback_diagnostics::Reason::InvalidArguments);
 }
 int32_t __cdecl diag_transfer_rect(void* effect_ref, int32_t quality, uint32_t mode_flags,
                                   int32_t field, const ::LegacyRect* source_rect,
@@ -569,6 +622,15 @@ aexcompat::worker_runtime::effect_bootstrap::AbiHooks make_bootstrap_abi_hooks()
   sources.subpixel_sample = reinterpret_cast<void*>(&subpixel_sample8);
   sources.area_sample = reinterpret_cast<void*>(&area_sample8);
   sources.end_sampling = reinterpret_cast<void*>(&end_sampling8);
+  // composite_rect (0x28) had no contract offset until issue #1252, so the
+  // table handed plug-ins a null pointer there: Write_on's RENDER (paint style
+  // "On Original Image") composites the input behind its strokes through this
+  // slot and jumped to address 0.
+  sources.composite_rect = reinterpret_cast<void*>(&diag_composite_rect);
+  // gaussian_kernel (0x50) had no contract offset until issue #1253, so the
+  // table handed plug-ins a null pointer there: Inner/Outer Key's RENDER
+  // builds its edge-blur kernel through this slot and jumped to address 0.
+  sources.gaussian_kernel = reinterpret_cast<void*>(&diag_gaussian_kernel);
   sources.blend = reinterpret_cast<void*>(&diag_blend_world);
   sources.convolve = reinterpret_cast<void*>(&diag_convolve_world);
   sources.copy = reinterpret_cast<void*>(&diag_copy_world);
@@ -674,6 +736,921 @@ bool verify_production_utility_callback_table() {
               << " offset=" << slot.offset << "\n" << std::flush;
   return unwired.empty();
 }
+
+// PF_UtilCallbacks.composite_rect reached the way a plug-in reaches it: read
+// the pointer back out of the installed `in_data->utils` block at the generated
+// offset and call through it (issue #1252, Write_on's RENDER). The table check
+// above proves the slot is non-null; this proves the pointer behind it is the
+// composite that PF_Xfer_BEHIND / COPY / IN_FRONT describe and that malformed
+// arguments come back as PF_Err_BAD_CALLBACK_PARAM with the destination
+// untouched, rather than as a write through an unchecked world.
+bool verify_production_composite_rect_callback() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  using CompositeRect = int32_t(__cdecl*)(void*, ::LegacyRect*, int32_t, void*, int32_t,
+                                          int32_t, int32_t, int32_t, void*);
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  void* utils{};
+  std::memcpy(&utils, state.input.data() + contract::IN_UTILS_OFFSET, sizeof(utils));
+  CompositeRect composite{};
+  std::memcpy(&composite, static_cast<const std::byte*>(utils) + contract::UTILS_COMPOSITE_RECT_OFFSET,
+              sizeof(composite));
+  if (!composite) {
+    std::cerr << "utils_composite_rect: slot at offset " << contract::UTILS_COMPOSITE_RECT_OFFSET
+              << " is null\n" << std::flush;
+    return false;
+  }
+  void* effect_ref{};
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET, sizeof(effect_ref));
+
+  // Two 2x1 ARGB8 worlds registered the way the classic render path registers
+  // the input and output worlds. Layout offsets are the LAYER_* contract ones.
+  DispatchWorldFormatScope worlds;
+  auto make_world = [&](std::array<std::byte, aexcompat::world_safety::kEffectWorldSize>& world, unsigned char* pixels) {
+    world.fill(std::byte{});
+    const int32_t rowbytes = 8, width = 2, height = 1;
+    std::memcpy(world.data() + contract::LAYER_DATA_OFFSET, &pixels, sizeof(pixels));
+    std::memcpy(world.data() + contract::LAYER_ROWBYTES_OFFSET, &rowbytes, sizeof(rowbytes));
+    std::memcpy(world.data() + contract::LAYER_WIDTH_OFFSET, &width, sizeof(width));
+    std::memcpy(world.data() + contract::LAYER_HEIGHT_OFFSET, &height, sizeof(height));
+    return worlds.register_world(world.data(), kPixelFormatArgb32);
+  };
+  // Source: two opaque pixels. Destination: pixel 0 transparent, pixel 1 opaque.
+  std::array<unsigned char, 8> source{255, 200, 100, 50, 255, 10, 20, 30};
+  std::array<unsigned char, 8> destination{0, 0, 0, 0, 255, 90, 80, 70};
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> source_world{}, destination_world{};
+  if (!make_world(source_world, source.data()) ||
+      !make_world(destination_world, destination.data())) {
+    std::cerr << "utils_composite_rect: world registration failed\n" << std::flush;
+    return false;
+  }
+  ::LegacyRect whole{0, 0, 2, 1};
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "utils_composite_rect: " << what << "\n" << std::flush;
+  };
+  // BEHIND (Write_on's mode): a transparent destination pixel takes the source,
+  // an opaque one keeps its own value.
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 0, 1, &destination_world) == 0,
+        "PF_Xfer_BEHIND call failed");
+  check((destination == std::array<unsigned char, 8>{255, 200, 100, 50, 255, 90, 80, 70}),
+        "PF_Xfer_BEHIND result");
+  // COPY at full opacity replaces the destination outright.
+  destination = {0, 0, 0, 0, 255, 90, 80, 70};
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 0, 0, &destination_world) == 0,
+        "PF_Xfer_COPY call failed");
+  check(destination == source, "PF_Xfer_COPY result");
+  // IN_FRONT with an opaque source covers the destination.
+  destination = {0, 0, 0, 0, 255, 90, 80, 70};
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 0, 2, &destination_world) == 0,
+        "PF_Xfer_IN_FRONT call failed");
+  check(destination == source, "PF_Xfer_IN_FRONT result");
+  // Fail-closed: each malformed call returns PF_Err_BAD_CALLBACK_PARAM (516) and
+  // leaves the destination as it was.
+  const std::array<unsigned char, 8> before = destination;
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 0, 3, &destination_world) == kPfBadCallbackParam,
+        "transfer mode 3 accepted");
+  check(composite(effect_ref, &whole, 256, &source_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "opacity 256 accepted");
+  check(composite(effect_ref, nullptr, 255, &source_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "null source rect accepted");
+  check(composite(nullptr, &whole, 255, &source_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "null effect_ref accepted");
+  check(composite(effect_ref, &whole, 255, nullptr, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "null source world accepted");
+  check(composite(effect_ref, &whole, 255, &source_world, 0, 0, 3, 1, &destination_world) == kPfBadCallbackParam,
+        "field 3 accepted");
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> foreign_world{};
+  unsigned char foreign_pixels[8]{};
+  unsigned char* foreign_data = foreign_pixels;
+  const int32_t foreign_rowbytes = 8, foreign_width = 2, foreign_height = 1;
+  std::memcpy(foreign_world.data() + contract::LAYER_DATA_OFFSET, &foreign_data, sizeof(foreign_data));
+  std::memcpy(foreign_world.data() + contract::LAYER_ROWBYTES_OFFSET, &foreign_rowbytes, sizeof(foreign_rowbytes));
+  std::memcpy(foreign_world.data() + contract::LAYER_WIDTH_OFFSET, &foreign_width, sizeof(foreign_width));
+  std::memcpy(foreign_world.data() + contract::LAYER_HEIGHT_OFFSET, &foreign_height, sizeof(foreign_height));
+  check(composite(effect_ref, &whole, 255, &foreign_world, 0, 0, 0, 1, &destination_world) == kPfBadCallbackParam,
+        "unregistered source world accepted");
+  check(destination == before, "a rejected call wrote the destination");
+  return passed;
+}
+
+// PF_UtilCallbacks.gaussian_kernel reached the way a plug-in reaches it: the
+// pointer read back out of the installed `in_data->utils` block at the
+// generated offset and called through it (issue #1253, Inner/Outer Key's
+// RENDER). The table check proves the slot non-null; this proves the pointer
+// behind it produces AE's PF_GaussianKernel values (radius 1, 1D, NORMALIZED
+// -> 192, 380, 192, diameter 3; radius 1, 2D, unnormalized -> the ceil-radius
+// bell rounded to 0..255 with the centre at 255) and that malformed calls come
+// back as errors with the buffer untouched.
+bool verify_production_gaussian_kernel_callback() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  using GaussianKernel = int32_t(__cdecl*)(void*, double, uint32_t, double, int32_t*, void*);
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  void* utils{};
+  std::memcpy(&utils, state.input.data() + contract::IN_UTILS_OFFSET, sizeof(utils));
+  GaussianKernel gaussian{};
+  std::memcpy(&gaussian, static_cast<const std::byte*>(utils) + contract::UTILS_GAUSSIAN_KERNEL_OFFSET,
+              sizeof(gaussian));
+  if (!gaussian) {
+    std::cerr << "utils_gaussian_kernel: slot at offset " << contract::UTILS_GAUSSIAN_KERNEL_OFFSET
+              << " is null\n" << std::flush;
+    return false;
+  }
+  void* effect_ref{};
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET, sizeof(effect_ref));
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "utils_gaussian_kernel: " << what << "\n" << std::flush;
+  };
+  // Inner/Outer Key's call shape: 1D, NORMALIZED, longs; radius 1 -> 3 entries.
+  std::array<int32_t, 9> kernel{};
+  int32_t diameter = -1;
+  check(gaussian(effect_ref, 1.0, 0x3, 1.0, &diameter, kernel.data()) == 0,
+        "1D normalized call failed");
+  check(diameter == 3, "1D normalized diameter");
+  check((kernel[0] == 192 && kernel[1] == 380 && kernel[2] == 192),
+        "1D normalized values (AE PF_GaussianKernel: 192, 380, 192)");
+  // 2D unnormalized radius 1: the bell over hypot(x, y) / 2, times 255,
+  // rounded: corners d = 0.7071 -> exp(-1.189) = 0.3045 -> 1 - 0.6955 * 1.102
+  // = 0.2336 -> 60; edges d = 0.5 -> 129; centre 255.
+  kernel.fill(-1);
+  diameter = -1;
+  check(gaussian(effect_ref, 1.0, 0x0, 1.0, &diameter, kernel.data()) == 0,
+        "2D unnormalized call failed");
+  check(diameter == 3, "2D diameter");
+  check((kernel == std::array<int32_t, 9>{60, 129, 60, 129, 255, 129, 60, 129, 60}),
+        "2D unnormalized values");
+  // The multiplier scales before rounding and clamping (2.0 clamps the centre
+  // at 255 and doubles the rest); a fractional radius ceils.
+  kernel.fill(-1);
+  check(gaussian(effect_ref, 0.5, 0x1, 2.0, &diameter, kernel.data()) == 0 && diameter == 3 &&
+            kernel[1] == 255 && kernel[0] == kernel[2] && kernel[0] > 0 && kernel[0] < 255,
+        "multiplier / fractional radius");
+  // Fail-closed: AE's own refusals (negative radius, null outputs) and the
+  // host's (null effect_ref, radius past the bound) leave the buffer untouched.
+  kernel.fill(-1);
+  diameter = -1;
+  check(gaussian(effect_ref, -1.0, 0x1, 1.0, &diameter, kernel.data()) != 0, "negative radius accepted");
+  check(gaussian(effect_ref, 1.0, 0x1, 1.0, nullptr, kernel.data()) != 0, "null diameter accepted");
+  check(gaussian(effect_ref, 1.0, 0x1, 1.0, &diameter, nullptr) != 0, "null kernel accepted");
+  check(gaussian(nullptr, 1.0, 0x1, 1.0, &diameter, kernel.data()) == kPfBadCallbackParam,
+        "null effect_ref accepted");
+  check(gaussian(effect_ref, 1e9, 0x1, 1.0, &diameter, kernel.data()) == kPfBadCallbackParam,
+        "unbounded radius accepted");
+  check(diameter == -1 && kernel == std::array<int32_t, 9>{-1, -1, -1, -1, -1, -1, -1, -1, -1},
+        "a rejected call wrote its outputs");
+  return passed;
+}
+
+// PF_InteractCallbacks.checkout_param / checkin_param reached through the
+// installed in_data block, asked for slots past the published table (issue
+// #1251, Pixel Motion Blur's checkout of Timewarp's slots 29/31 against a
+// 5-slot table). AE 2026 answers those with PF_Err_NONE and an empty layer
+// definition and takes the checkin (instruments/pf-checkout-index-probe,
+// docs/CHECKOUT_PARAM_INDEX_OBSERVATION_2026-08-17.md); this proves the host
+// does the same on both the classic-context and the hosted-table path, that
+// the checkout is recorded (the checkin balances instead of counting as
+// invalid), that an in-table slot still comes back with its definition, and
+// that a negative slot and an unpublished table stay refused.
+bool verify_checkout_param_beyond_table() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  namespace classic = aexcompat::worker_runtime::classic;
+  namespace parameters = aexcompat::worker_runtime::parameters;
+  using Checkout = int32_t(__cdecl*)(void*, int32_t, int32_t, int32_t, uint32_t, void*);
+  using Checkin = int32_t(__cdecl*)(void*, void*);
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  Checkout checkout{};
+  Checkin checkin{};
+  std::memcpy(&checkout, state.input.data() + contract::IN_INTER_OFFSET +
+                             contract::INTER_CHECKOUT_PARAM_OFFSET, sizeof(checkout));
+  std::memcpy(&checkin, state.input.data() + contract::IN_INTER_OFFSET +
+                            contract::INTER_CHECKIN_PARAM_OFFSET, sizeof(checkin));
+  if (!checkout || !checkin) {
+    std::cerr << "checkout_param_beyond_table: inter slot is null\n" << std::flush;
+    return false;
+  }
+  void* effect_ref{};
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET, sizeof(effect_ref));
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "checkout_param_beyond_table: " << what << "\n" << std::flush;
+  };
+  const classic::ParameterDefinition zero{};
+  auto marked = [](std::byte marker) {
+    classic::ParameterDefinition definition{};
+    definition.fill(marker);
+    return definition;
+  };
+  constexpr int32_t kTime = 0, kStep = 1;
+  constexpr uint32_t kScale = 30;
+  // Classic-context path: the table the classic render publishes (slots 0..4,
+  // Pixel Motion Blur's shape) with each slot carrying its own marker.
+  {
+    classic::Context context;
+    for (int32_t slot = 0; slot <= 4; ++slot)
+      context.set_definition(slot, marked(std::byte{static_cast<unsigned char>(0x10 + slot)}));
+    for (const int32_t slot : {29, 31, 5}) {
+      classic::ParameterDefinition definition = marked(std::byte{0xAB});
+      check(checkout(effect_ref, slot, kTime, kStep, kScale, definition.data()) == 0,
+            "classic: slot past the table refused");
+      check(definition == zero, "classic: slot past the table did not come back empty");
+      check(checkin(effect_ref, definition.data()) == 0,
+            "classic: checkin of a past-the-table checkout refused");
+    }
+    classic::ParameterDefinition in_table{};
+    check(checkout(effect_ref, 2, kTime, kStep, kScale, in_table.data()) == 0 &&
+              in_table == marked(std::byte{0x12}),
+          "classic: in-table slot lost its definition");
+    check(checkin(effect_ref, in_table.data()) == 0, "classic: in-table checkin refused");
+    classic::ParameterDefinition negative = marked(std::byte{0xAB});
+    check(checkout(effect_ref, -1, kTime, kStep, kScale, negative.data()) != 0,
+          "classic: negative slot accepted");
+    check(negative == marked(std::byte{0xAB}), "classic: refused checkout wrote the def");
+    check(context.checkouts_balanced(), "classic: checkouts did not balance");
+  }
+  {
+    // No table published yet: nothing is "beyond" it, so the slot is refused.
+    classic::Context unpublished;
+    classic::ParameterDefinition definition = marked(std::byte{0xAB});
+    check(checkout(effect_ref, 29, kTime, kStep, kScale, definition.data()) != 0,
+          "classic: slot accepted before the table was published");
+    check(definition == marked(std::byte{0xAB}), "classic: refused checkout wrote the def");
+  }
+  // Hosted-table path (no classic context; the lifecycle / smart routes).
+  {
+    auto& hosted = parameters::state().checkout;
+    struct HostedScope {
+      parameters::CheckoutState& hosted;
+      ~HostedScope() {
+        hosted.definitions.clear();
+        std::lock_guard<std::mutex> lock(hosted.mutex);
+        hosted.live.clear();
+      }
+    } hosted_scope{hosted};
+    hosted.definitions.clear();
+    {
+      std::lock_guard<std::mutex> lock(hosted.mutex);
+      hosted.live.clear();
+    }
+    classic::ParameterDefinition definition = marked(std::byte{0xAB});
+    check(checkout(effect_ref, 29, kTime, kStep, kScale, definition.data()) != 0,
+          "hosted: slot accepted with no table published");
+    for (int32_t slot = 0; slot <= 4; ++slot)
+      hosted.definitions[slot] = marked(std::byte{static_cast<unsigned char>(0x20 + slot)});
+    for (const int32_t slot : {29, 31, 5}) {
+      definition = marked(std::byte{0xAB});
+      check(checkout(effect_ref, slot, kTime, kStep, kScale, definition.data()) == 0,
+            "hosted: slot past the table refused");
+      check(definition == zero, "hosted: slot past the table did not come back empty");
+      check(checkin(effect_ref, definition.data()) == 0,
+            "hosted: checkin of a past-the-table checkout refused");
+    }
+    definition = marked(std::byte{0xAB});
+    check(checkout(effect_ref, -1, kTime, kStep, kScale, definition.data()) != 0,
+          "hosted: negative slot accepted");
+    std::lock_guard<std::mutex> lock(hosted.mutex);
+    check(hosted.live.empty(), "hosted: checkouts did not balance");
+  }
+  return passed;
+}
+
+// AE's private get_callback_addr ids -5 and -2, obtained the way a plug-in
+// obtains them: through the get_callback_addr slot read back out of the
+// installed in_data->utils block (issue #985; Bulge asks for -5, Compound
+// Blur / CC Cross Blur / Matte Choker for -2). Expected values are AE 2026's
+// own answers, captured by hooking the live dispatcher with Frida
+// (docs/PRIVATE_CALLBACK_IDS_OBSERVATION_2026-08-17.md): PFp_GaussianValue's
+// curve for -5, and for -2 the 8-bit impulse responses and straight/premul
+// alpha handling of the FLT.dll blur on synthetic worlds handed to AE's own
+// function. Malformed calls fail closed with the world untouched.
+bool verify_pf_private_callbacks() {
+  namespace boot = aexcompat::worker_runtime::effect_bootstrap;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  using GetCallbackAddr = int32_t(__cdecl*)(void*, int32_t, uint32_t, int32_t, void**);
+  using Easing = double(__cdecl*)(double);
+  using PrivateBlur = int32_t(__cdecl*)(void*, void*, double, void*, int32_t, void*);
+  boot::State state{};
+  boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
+  void* utils{};
+  std::memcpy(&utils, state.input.data() + contract::IN_UTILS_OFFSET, sizeof(utils));
+  GetCallbackAddr get_callback_addr{};
+  std::memcpy(&get_callback_addr,
+              static_cast<const std::byte*>(utils) + contract::UTILS_GET_CALLBACK_ADDR_OFFSET,
+              sizeof(get_callback_addr));
+  if (!get_callback_addr) {
+    std::cerr << "pf_private_callbacks: get_callback_addr slot is null\n" << std::flush;
+    return false;
+  }
+  void* effect_ref{};
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET, sizeof(effect_ref));
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "pf_private_callbacks: " << what << "\n" << std::flush;
+  };
+  auto set_quality = [&](int32_t quality) {
+    std::memcpy(state.input.data() + contract::IN_QUALITY_OFFSET, &quality, sizeof(quality));
+  };
+
+  // id -5: the same function for every (quality, mode); PFp_GaussianValue's
+  // values as AE returned them (double, tolerance for the CRT's exp).
+  void* raw_easing{};
+  check(get_callback_addr(effect_ref, 1, 0, -5, &raw_easing) == 0 && raw_easing,
+        "id -5 refused");
+  for (int32_t quality = 0; quality <= 1; ++quality)
+    for (uint32_t mode = 0; mode <= 2; ++mode) {
+      void* other{};
+      check(get_callback_addr(effect_ref, quality, mode, -5, &other) == 0 && other == raw_easing,
+            "id -5 depends on quality/mode");
+    }
+  if (raw_easing) {
+    const auto easing = reinterpret_cast<Easing>(raw_easing);
+    auto close_to = [](double a, double b) { return std::fabs(a - b) <= 1e-12; };
+    check(easing(0.0) == 1.0, "easing(0) != 1");
+    check(close_to(easing(0.5), 0.5061259345505494), "easing(0.5)");
+    check(close_to(easing(0.25), 0.847805274821874), "easing(0.25)");
+    check(close_to(easing(0.9), 0.05856550493005852), "easing(0.9)");
+    check(close_to(easing(1.0), 0.00019492200675952365), "easing(1.0)");
+    check(easing(1.1) == 0.0 && easing(2.0) == 0.0, "easing(>1) != 0");
+    check(close_to(easing(-0.5), 0.5061259345505494) && close_to(easing(-1.0), 0.00019492200675952365),
+          "easing(negative)");
+  }
+
+  // id -2: mode 1 selects the straight-alpha entry, any other mode the
+  // premultiplied one; quality does not matter at request time.
+  void* raw_straight{};
+  void* raw_premul{};
+  void* raw_mode2{};
+  void* raw_q0{};
+  check(get_callback_addr(effect_ref, 1, 1, -2, &raw_straight) == 0 && raw_straight, "id -2 mode 1 refused");
+  check(get_callback_addr(effect_ref, 1, 0, -2, &raw_premul) == 0 && raw_premul, "id -2 mode 0 refused");
+  check(get_callback_addr(effect_ref, 1, 2, -2, &raw_mode2) == 0 && raw_mode2 == raw_premul, "id -2 mode 2");
+  check(get_callback_addr(effect_ref, 0, 1, -2, &raw_q0) == 0 && raw_q0 == raw_straight, "id -2 quality 0");
+  check(raw_straight != raw_premul, "id -2 mode 1 and mode 0 answer the same function");
+  void* raw_unknown = reinterpret_cast<void*>(1);
+  check(get_callback_addr(effect_ref, 1, 0, -3, &raw_unknown) == kPfBadCallbackParam && raw_unknown == nullptr,
+        "id -3 answered");
+  if (!raw_straight || !raw_premul) return false;
+  const auto blur_straight = reinterpret_cast<PrivateBlur>(raw_straight);
+  const auto blur_premul = reinterpret_cast<PrivateBlur>(raw_premul);
+
+  // A 33x1 ARGB8 world registered like the classic render path's worlds.
+  constexpr int32_t width = 33, height = 1, rowbytes = width * 4;
+  DispatchWorldFormatScope worlds;
+  std::array<unsigned char, static_cast<std::size_t>(rowbytes) * height> pixels{};
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> world{};
+  {
+    unsigned char* data = pixels.data();
+    std::memcpy(world.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+    std::memcpy(world.data() + contract::LAYER_ROWBYTES_OFFSET, &rowbytes, sizeof(rowbytes));
+    std::memcpy(world.data() + contract::LAYER_WIDTH_OFFSET, &width, sizeof(width));
+    std::memcpy(world.data() + contract::LAYER_HEIGHT_OFFSET, &height, sizeof(height));
+    if (!worlds.register_world(world.data(), kPixelFormatArgb32)) {
+      std::cerr << "pf_private_callbacks: world registration failed\n" << std::flush;
+      return false;
+    }
+  }
+  auto impulse = [&](unsigned char a, unsigned char r, unsigned char g, unsigned char b) {
+    pixels.fill(0);
+    pixels[16 * 4 + 0] = a; pixels[16 * 4 + 1] = r; pixels[16 * 4 + 2] = g; pixels[16 * 4 + 3] = b;
+  };
+  auto channel_row = [&](int channel, int first, int count) {
+    std::vector<int> row;
+    for (int i = 0; i < count; ++i) row.push_back(pixels[static_cast<std::size_t>(first + i) * 4 + channel]);
+    return row;
+  };
+  const int32_t kHorizontalAll = 0x4f;  // horizontal, all channels, no repeat
+
+  // Gaussian path (rho <= 1): AE's integer kernel, r=1 -> [64,127,64], r=2 -> [23,62,84,62,23].
+  set_quality(1);
+  impulse(255, 255, 255, 255);
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == 0, "premul r=1 refused");
+  check(channel_row(0, 14, 5) == std::vector<int>{0, 64, 127, 64, 0}, "premul r=1 alpha kernel");
+  check(channel_row(1, 14, 5) == std::vector<int>{0, 64, 127, 64, 0}, "premul r=1 red kernel");
+  impulse(255, 255, 255, 255);
+  check(blur_premul(state.input.data(), nullptr, 2.0, nullptr, kHorizontalAll, world.data()) == 0, "premul r=2 refused");
+  check(channel_row(0, 13, 7) == std::vector<int>{0, 23, 62, 84, 62, 23, 0}, "premul r=2 kernel");
+  // Box path (rho > 1): quality 1 = three passes, r=6.3 -> AE's 15-tap response;
+  // quality 0 = one pass at 1.4x, r=6.3 -> [9,34x7,9].
+  impulse(255, 255, 255, 255);
+  check(blur_premul(state.input.data(), nullptr, 6.3, nullptr, kHorizontalAll, world.data()) == 0, "premul r=6.3 refused");
+  check(channel_row(0, 9, 15) == std::vector<int>{2, 5, 9, 14, 21, 28, 32, 33, 32, 28, 21, 14, 9, 5, 2},
+        "premul q1 r=6.3 kernel");
+  set_quality(0);
+  impulse(255, 255, 255, 255);
+  check(blur_premul(state.input.data(), nullptr, 6.3, nullptr, kHorizontalAll, world.data()) == 0, "premul q0 r=6.3 refused");
+  check(channel_row(0, 12, 9) == std::vector<int>{9, 34, 34, 34, 34, 34, 34, 34, 9}, "premul q0 r=6.3 kernel");
+  // Straight vs premultiplied on a half-alpha impulse (a=127, r=204, g=102):
+  // the straight entry keeps the color where alpha spreads, the premultiplied
+  // one spreads the color values themselves.
+  set_quality(1);
+  impulse(127, 204, 102, 0);
+  check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == 0, "straight r=1 refused");
+  check(channel_row(0, 15, 3) == std::vector<int>{32, 63, 32} &&
+        channel_row(1, 15, 3) == std::vector<int>{205, 205, 205} &&
+        channel_row(2, 15, 3) == std::vector<int>{102, 102, 102},
+        "straight half-alpha result");
+  impulse(127, 204, 102, 0);
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == 0, "premul half-alpha refused");
+  check(channel_row(0, 15, 3) == std::vector<int>{32, 63, 32} &&
+        channel_row(1, 15, 3) == std::vector<int>{51, 101, 51} &&
+        channel_row(2, 15, 3) == std::vector<int>{26, 51, 26},
+        "premul half-alpha result");
+  // Alpha-only channel flag leaves the colors alone (Matte Choker's 0x71).
+  impulse(255, 200, 100, 50);
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, 0x41, world.data()) == 0, "alpha-only refused");
+  check(channel_row(0, 15, 3) == std::vector<int>{64, 127, 64} &&
+        channel_row(1, 15, 3) == std::vector<int>{0, 200, 0}, "alpha-only result");
+  // Radius 0 is a no-op that succeeds (AE builds no blur node), the pixels
+  // untouched.
+  impulse(255, 200, 100, 50);
+  check(blur_premul(state.input.data(), nullptr, 0.0, nullptr, kHorizontalAll, world.data()) == 0 &&
+        channel_row(1, 15, 3) == std::vector<int>{0, 200, 0}, "radius 0");
+  // Both axes, straight, no repeat, on AE's 65x65 step world (opaque
+  // (255,200,100,50) for x<32 && y<32, transparent elsewhere; r=1, flags
+  // 0x6f): X pass premultiplied intermediate, Y pass unpremultiplies at the
+  // end, zero beyond the world. Values are the ones AE's function wrote
+  // (probe case "step m=1 q=1 r=1 flags=0x6f", 8-bit).
+  {
+    constexpr int32_t side = 65;
+    std::vector<unsigned char> step(static_cast<std::size_t>(side) * side * 4);
+    for (int32_t y = 0; y < side; ++y)
+      for (int32_t x = 0; x < side; ++x) {
+        auto* px = &step[(static_cast<std::size_t>(y) * side + x) * 4];
+        const bool on = x < 32 && y < 32;
+        px[0] = on ? 255 : 0; px[1] = on ? 200 : 0; px[2] = on ? 100 : 0; px[3] = on ? 50 : 0;
+      }
+    std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> step_world{};
+    unsigned char* data = step.data();
+    const int32_t step_rowbytes = side * 4;
+    std::memcpy(step_world.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+    std::memcpy(step_world.data() + contract::LAYER_ROWBYTES_OFFSET, &step_rowbytes, sizeof(step_rowbytes));
+    std::memcpy(step_world.data() + contract::LAYER_WIDTH_OFFSET, &side, sizeof(side));
+    std::memcpy(step_world.data() + contract::LAYER_HEIGHT_OFFSET, &side, sizeof(side));
+    check(worlds.register_world(step_world.data(), kPixelFormatArgb32), "step world registration");
+    check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, 0x6f, step_world.data()) == 0,
+          "straight two-axis step refused");
+    auto at = [&](int32_t x, int32_t y, int32_t c) {
+      return static_cast<int>(step[(static_cast<std::size_t>(y) * side + x) * 4 + c]);
+    };
+    // Corner (30..34, 30..34): alpha falls off in both axes, colors keep their
+    // straight values, blue shows AE's premul/unpremul rounding (50/49/52).
+    const std::vector<int> alpha_rows{255, 191, 64, 0, 0, 191, 143, 48, 0, 0, 64, 48, 16, 0, 0};
+    std::vector<int> got_alpha, got_red, got_blue;
+    for (int32_t y = 30; y < 33; ++y)
+      for (int32_t x = 30; x < 35; ++x) {
+        got_alpha.push_back(at(x, y, 0));
+        got_red.push_back(at(x, y, 1));
+        got_blue.push_back(at(x, y, 3));
+      }
+    check(got_alpha == alpha_rows, "two-axis straight alpha corner");
+    check(got_red == std::vector<int>{200, 200, 199, 0, 0, 200, 200, 199, 0, 0, 200, 200, 199, 0, 0},
+          "two-axis straight red corner");
+    check(got_blue == std::vector<int>{50, 49, 52, 0, 0, 50, 49, 52, 0, 0, 50, 49, 52, 0, 0},
+          "two-axis straight blue corner");
+    check(at(33, 33, 0) == 0 && at(33, 33, 1) == 0, "two-axis straight outside the step");
+    // World border: zero beyond the world in both axes (row 0 / column 0 of the
+    // opaque region reads 143 at the corner, 191 along the edges).
+    check(at(0, 0, 0) == 143 && at(1, 0, 0) == 191 && at(4, 0, 0) == 191 && at(0, 1, 0) == 191 &&
+              at(0, 4, 0) == 191 && at(0, 0, 1) == 200 && at(4, 0, 1) == 200,
+          "two-axis straight world border");
+  }
+  // 16-bit (ARGB64, 0..32768): the same integer gaussian weights and the same
+  // three-pass box, values as AE wrote them into a 16-bit world (probe cases
+  // "impulse deep m=0 q=1 r=1 / r=6.3", "halfalpha deep m=1 q=1 r=1").
+  {
+    constexpr int32_t deep_width = 33, deep_rowbytes = deep_width * 8;
+    std::vector<uint16_t> deep(static_cast<std::size_t>(deep_width) * 4);
+    std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> deep_world{};
+    uint16_t* data = deep.data();
+    const int32_t one = 1;
+    std::memcpy(deep_world.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+    std::memcpy(deep_world.data() + contract::LAYER_ROWBYTES_OFFSET, &deep_rowbytes, sizeof(deep_rowbytes));
+    std::memcpy(deep_world.data() + contract::LAYER_WIDTH_OFFSET, &deep_width, sizeof(deep_width));
+    std::memcpy(deep_world.data() + contract::LAYER_HEIGHT_OFFSET, &one, sizeof(one));
+    check(worlds.register_world(deep_world.data(), kPixelFormatArgb64), "16-bit world registration");
+    auto deep_impulse = [&](uint16_t a, uint16_t r, uint16_t g) {
+      std::fill(deep.begin(), deep.end(), uint16_t{0});
+      deep[16 * 4 + 0] = a; deep[16 * 4 + 1] = r; deep[16 * 4 + 2] = g;
+    };
+    auto deep_row = [&](int channel, int first, int count) {
+      std::vector<int> row;
+      for (int i = 0; i < count; ++i) row.push_back(deep[static_cast<std::size_t>(first + i) * 4 + channel]);
+      return row;
+    };
+    set_quality(1);
+    deep_impulse(32768, 32768, 32768);
+    check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit r=1 refused");
+    check(deep_row(0, 15, 3) == std::vector<int>{8240, 16288, 8240} &&
+              deep_row(1, 15, 3) == std::vector<int>{8240, 16288, 8240},
+          "16-bit r=1 kernel");
+    deep_impulse(32768, 32768, 32768);
+    check(blur_premul(state.input.data(), nullptr, 6.3, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit r=6.3 refused");
+    // Exact: the 16-bit path rounds every pass to a whole step the way AE's
+    // integer path does (kept in double, the 3rd pass lands one step off at
+    // two taps).
+    check(deep_row(0, 7, 19) == std::vector<int>{6, 57, 234, 593, 1134, 1856, 2721, 3549, 4094, 4276,
+                                                 4094, 3549, 2721, 1856, 1134, 593, 234, 57, 6},
+          "16-bit q1 r=6.3 kernel");
+    deep_impulse(16384, 26214, 13107);
+    check(blur_straight(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, deep_world.data()) == 0,
+          "16-bit straight refused");
+    // Exact: green is 13106, not 13107, only when the 16-bit premultiply
+    // truncates (13107 * 16384 / 32768 = 6553.5 -> 6553), which is what the
+    // host does at that depth.
+    check(deep_row(0, 15, 3) == std::vector<int>{4120, 8144, 4120} &&
+              deep_row(1, 15, 3) == std::vector<int>{26214, 26214, 26214} &&
+              deep_row(2, 15, 3) == std::vector<int>{13106, 13106, 13106},
+          "16-bit straight half-alpha result");
+  }
+  // Fail-closed: each malformed call answers PF_Err_BAD_CALLBACK_PARAM (516)
+  // and leaves the world untouched.
+  impulse(255, 200, 100, 50);
+  const auto before = pixels;
+  check(blur_premul(nullptr, nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == kPfBadCallbackParam,
+        "null in_data accepted");
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, nullptr) == kPfBadCallbackParam,
+        "null world accepted");
+  check(blur_premul(state.input.data(), nullptr, -1.0, nullptr, kHorizontalAll, world.data()) == kPfBadCallbackParam,
+        "negative radius accepted");
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll | 0x200, world.data()) == kPfBadCallbackParam,
+        "unknown flag accepted");
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, 0x40, world.data()) == kPfBadCallbackParam,
+        "no channel accepted");
+  set_quality(2);
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == kPfBadCallbackParam,
+        "quality 2 accepted");
+  set_quality(1);
+  std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> foreign_world{};
+  check(blur_premul(state.input.data(), nullptr, 1.0, nullptr, kHorizontalAll, foreign_world.data()) == kPfBadCallbackParam,
+        "empty unregistered world accepted");
+  auto other_in_data = state.input;
+  void* wrong_ref = reinterpret_cast<void*>(0x1234);
+  std::memcpy(other_in_data.data() + contract::IN_EFFECT_REF_OFFSET, &wrong_ref, sizeof(wrong_ref));
+  check(blur_premul(other_in_data.data(), nullptr, 1.0, nullptr, kHorizontalAll, world.data()) == kPfBadCallbackParam,
+        "foreign effect_ref accepted");
+  check(pixels == before, "a rejected call wrote the world");
+  return passed;
+}
+
+// The BEE.dll-compatible scene object behind the effect layer handle (issue
+// #1210). Timecode.aex acquires "AE Timecode Helper Suite" v1 as a
+// host-presence gate (never calls a slot), then reads the AEGP_LayerH from
+// AEGP PF Interface Suite::AEGP_GetEffectLayer as a `BEE_AVLayer*`: parent
+// comp item at +0x260, its project at item+0x38, the item tag/type/flags, and
+// the vtable slots BEE.dll's exports call (docs/BEE_SCENE_OBJECT_ABI_2026-08-17.md).
+// This proves the production hand-out path publishes that object: the helper
+// suite acquires with 32 distinct slots (three of them called and answering
+// the diagnosed refusal), the layer the production suite returns carries the
+// facade vtable and object graph with the host's comp dimensions, and the
+// facade's own contract (observed slots implemented, sampled unobserved slots
+// on each object trapping with their code) holds.
+bool verify_bee_scene_facade() {
+  namespace bee = aexcompat::worker_runtime::bee_facade;
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "bee_scene_facade: " << what << "\n" << std::flush;
+  };
+  const auto recorded = [](const char* name, int32_t version, uint32_t slot) {
+    std::ostringstream needle;
+    needle << "{\"name\":\"" << name << "\",\"version\":" << version
+           << ",\"slot\":" << slot << ",";
+    return aexcompat::worker_runtime::suite_registry()
+               .unsupported_suite_calls_report_json()
+               .find(needle.str()) != std::string::npos;
+  };
+  // The facade's own contract first (observed slots answer as recorded, every
+  // unobserved slot traps with its code on each object). It also proves the
+  // record half of a trap: the slots it takes must show up in the report list
+  // the workers emit, under the object's pseudo-suite name. The list is
+  // bounded (32 distinct entries per worker life), so this runs before the
+  // helper-suite probes below and those sample three slots instead of 32.
+  check(bee::selftest(), "facade contract self-test failed");
+  check(recorded("BEE_AVLayer vtable", 1, 0) &&
+            recorded("BEE_AVLayer vtable", 1,
+                     static_cast<uint32_t>(bee::kLayerVtableSlots - 1)) &&
+            recorded("BEE_CompItem vtable", 1, 3) &&
+            recorded("BEE_FootageItem vtable", 1, 3) &&
+            recorded("BEE_Project vtable", 1,
+                     static_cast<uint32_t>(bee::kProjectVtableSlots - 1)),
+        "trapped vtable slots are not in the unsupported_suite_calls report");
+  const void* helper = nullptr;
+  check(acquire_suite("AE Timecode Helper Suite", 1, &helper) == 0 && helper,
+        "AE Timecode Helper Suite v1 did not acquire");
+  if (helper) {
+    using Slot = int32_t(__cdecl*)();
+    const auto* slots = static_cast<void* const*>(helper);
+    for (std::size_t slot = 0; slot < 32; ++slot) {
+      check(slots[slot] != nullptr, "helper suite slot is null");
+      for (std::size_t earlier = 0; earlier < slot; ++earlier)
+        check(slots[earlier] != slots[slot], "helper suite slots are not distinct");
+    }
+    for (const std::size_t slot : {std::size_t{0}, std::size_t{15}, std::size_t{31}}) {
+      if (!slots[slot]) continue;
+      check(reinterpret_cast<Slot>(slots[slot])() == 4,
+            "helper suite slot did not answer the diagnosed refusal");
+      check(recorded("AE Timecode Helper Suite", 1, static_cast<uint32_t>(slot)),
+            "helper suite slot call is not in the unsupported_suite_calls report");
+    }
+    check(release_suite("AE Timecode Helper Suite", 1) == 0,
+          "AE Timecode Helper Suite v1 did not release");
+  }
+  // A render context for the dimension checks below (this route has none of
+  // its own); the same pattern the scene self-tests use, restored on exit.
+  constexpr int32_t kFacadeContextWidth = 640, kFacadeContextHeight = 360;
+  const int32_t saved_width = g_full_resolution_width;
+  const int32_t saved_height = g_full_resolution_height;
+  g_full_resolution_width = kFacadeContextWidth;
+  g_full_resolution_height = kFacadeContextHeight;
+  struct RestoreContext {
+    int32_t width, height;
+    ~RestoreContext() {
+      g_full_resolution_width = width;
+      g_full_resolution_height = height;
+    }
+  } restore_context{saved_width, saved_height};
+  const void* interface_suite = nullptr;
+  check(acquire_suite("AEGP PF Interface Suite", 1, &interface_suite) == 0 &&
+            interface_suite,
+        "AEGP PF Interface Suite v1 did not acquire");
+  if (interface_suite) {
+    using GetEffectLayer = int32_t(__cdecl*)(void*, void**);
+    const auto get_layer =
+        reinterpret_cast<GetEffectLayer>(static_cast<void* const*>(interface_suite)[0]);
+    void* layer = nullptr;
+    check(get_layer(&g_effect, &layer) == 0 && layer == &g_layer,
+          "AEGP_GetEffectLayer did not hand out the effect layer");
+    void* foreign = nullptr;
+    check(get_layer(&g_layer, &foreign) != 0 && foreign == nullptr,
+          "AEGP_GetEffectLayer accepted a non-effect handle");
+    if (layer == &g_layer) {
+      const auto* object = static_cast<const bee::LayerObject*>(layer);
+      check(object->vtable == bee::layer_vtable(), "layer handle lacks the facade vtable");
+      check(object->parent_comp_item == &bee::comp_item(), "layer+0x260 is not the comp item");
+      check(object->source_item == &bee::footage_item(), "layer+0x2720 is not the source item");
+      const bee::ItemObject& comp = bee::comp_item();
+      check(comp.tag == bee::kItemTag && comp.type == bee::kItemTypeComposition &&
+                comp.parent_project == &bee::project(),
+            "comp item header is not the observed BEE_Item shape");
+      // The comp dimensions are the ones the AEGP item suite reports for the
+      // configured render context (the item suite refuses without one, so
+      // one is configured for this check and restored afterwards).
+      int32_t width = 0, height = 0;
+      check(aegp_get_item_dimensions(aegp_comp_item_handle(), &width, &height) == 0 &&
+                width == kFacadeContextWidth && height == kFacadeContextHeight,
+            "AEGP item dimensions do not report the configured render context");
+      check(comp.width == kFacadeContextWidth && comp.height == kFacadeContextHeight &&
+                comp.width == width && comp.height == height,
+            "comp item dimensions differ from the AEGP item suite");
+      double fps = 0.0;
+      check(aegp_get_comp_framerate(aexcompat::scene_runtime::composition_handle(), &fps) == 0 &&
+                comp.frame_rate_fixed == static_cast<int32_t>(fps) << 16,
+            "comp item frame rate differs from the AEGP comp suite");
+      AegpTime duration{};
+      check(aegp_get_item_duration(aegp_comp_item_handle(), &duration) == 0 &&
+                comp.duration.value == duration.value &&
+                comp.duration.scale == duration.scale,
+            "comp item duration differs from the AEGP item suite");
+      // The effect layer's parent comp handle (AEGP Layer Suite
+      // AEGP_GetLayerParentComp) is the same comp item object the layer's
+      // +0x260 names, so a caller that reads its AEGP_CompH as a BEE_CompItem*
+      // (ShapeBlur, issue #1264) lands on the facade; the comp accessors
+      // resolve it as this worker's composition, and the project it names
+      // carries an empty shared_ptr<PF_ColorSettings> at +0xe8/+0xf0 (what
+      // BEE_CompItem::GetColorSettings copies out).
+      void* parent_comp = nullptr;
+      check(aegp_get_layer_parent_comp(layer, &parent_comp) == 0 &&
+                parent_comp == bee::comp_item_handle() &&
+                parent_comp == object->parent_comp_item,
+            "AEGP_GetLayerParentComp did not hand out the facade comp item");
+      check(scene_handle_is_composition(parent_comp),
+            "the facade comp item does not resolve as the composition");
+      void* item_from_comp = nullptr;
+      int32_t item_width = 0, item_height = 0;
+      check(aegp_get_item_from_comp(parent_comp, &item_from_comp) == 0 &&
+                item_from_comp != nullptr &&
+                aegp_get_item_dimensions(item_from_comp, &item_width, &item_height) == 0 &&
+                item_width == kFacadeContextWidth && item_height == kFacadeContextHeight,
+            "AEGP_GetItemFromComp did not resolve the facade comp handle to the comp item");
+      double parent_fps = 0.0;
+      check(aegp_get_comp_framerate(parent_comp, &parent_fps) == 0 && parent_fps == fps,
+            "AEGP_GetCompFramerate did not resolve the facade comp handle");
+      const auto* project_bytes = reinterpret_cast<const std::byte*>(&bee::project());
+      void* color_settings = nullptr;
+      void* color_settings_control = nullptr;
+      std::memcpy(&color_settings, project_bytes + 0xe8, sizeof(color_settings));
+      std::memcpy(&color_settings_control, project_bytes + 0xf0, sizeof(color_settings_control));
+      check(comp.parent_project == &bee::project() && color_settings == nullptr &&
+                color_settings_control == nullptr,
+            "project colour settings shared_ptr is not the empty one");
+    }
+    check(release_suite("AEGP PF Interface Suite", 1) == 0,
+          "AEGP PF Interface Suite v1 did not release");
+  }
+  check(suite_leases_balanced(), "suite leases did not balance");
+  return passed;
+}
+
+// The PF_ProgressInfo-shaped effect ref (issue #1275): the object the
+// production bootstrap installs at in_data->effect_ref (`g_effect`) carries
+// the published layout, and both function slots, read at their raw offsets
+// the way PF.dll's PF_TransferRect body and CannedWarp's RENDER read them,
+// forward to the host's abort / progress callbacks (the ones the inter table
+// carries). Then the module's own contract (republish after a plug-in edit).
+bool verify_pf_progress_info() {
+  namespace info = aexcompat::worker_runtime::pf_progress_info;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "pf_progress_info: " << what << "\n" << std::flush;
+  };
+  publish_effect_ref_object();
+  check(info::published(g_effect), "the production effect ref is not published");
+  // Through the installed in_data: the bootstrap writes &g_effect at
+  // IN_EFFECT_REF_OFFSET, and the inter table's abort / progress are the host
+  // callbacks the slots must forward to.
+  aexcompat::worker_runtime::effect_bootstrap::State state{};
+  aexcompat::worker_runtime::effect_bootstrap::install_callback_tables(
+      state, ::make_bootstrap_abi_hooks());
+  void* effect_ref = nullptr;
+  std::memcpy(&effect_ref, state.input.data() + contract::IN_EFFECT_REF_OFFSET,
+              sizeof(effect_ref));
+  check(effect_ref == &g_effect, "in_data->effect_ref is not the host effect ref");
+  if (!effect_ref) return false;
+  const auto* bytes = static_cast<const std::byte*>(effect_ref);
+  void* refcon = nullptr;
+  info::AbortFn abort_fn = nullptr;
+  info::ProgressFn progress_fn = nullptr;
+  std::memcpy(&refcon, bytes + 0x00, sizeof(refcon));
+  std::memcpy(&abort_fn, bytes + 0x08, sizeof(abort_fn));
+  std::memcpy(&progress_fn, bytes + 0x10, sizeof(progress_fn));
+  check(refcon == effect_ref, "effect_ref[0] (refcon) is not the effect ref itself");
+  check(abort_fn != nullptr && progress_fn != nullptr, "a function slot is null");
+  if (!abort_fn || !progress_fn) return false;
+  const auto& telemetry = aexcompat::worker_runtime::classic::host_callback_telemetry();
+  const uint32_t aborts = telemetry.abort_calls;
+  const uint32_t progresses = telemetry.progress_calls;
+  const uint32_t abort_slot = info::abort_slot_calls();
+  const uint32_t progress_slot = info::progress_slot_calls();
+  check(progress_fn(refcon, 7, 20) == 0, "progress slot did not answer 0");
+  check(abort_fn(refcon) == 0, "abort slot did not answer 0");
+  check(telemetry.abort_calls == aborts + 1 && telemetry.progress_calls == progresses + 1 &&
+            telemetry.last_progress_current == 7 && telemetry.last_progress_total == 20,
+        "slots did not forward to the host abort / progress callbacks");
+  check(info::abort_slot_calls() == abort_slot + 1 &&
+            info::progress_slot_calls() == progress_slot + 1,
+        "slot call counters did not advance");
+  // Echo's substitution: it writes effect_ref[2] = effect_ref[1] for its
+  // PF_TransferRect loop; PF.dll then calls that slot with the progress
+  // arguments. A republish (the next plug-in bootstrap) restores the layout.
+  std::memcpy(static_cast<std::byte*>(effect_ref) + 0x10, &abort_fn, sizeof(abort_fn));
+  info::ProgressFn substituted = nullptr;
+  std::memcpy(&substituted, bytes + 0x10, sizeof(substituted));
+  check(substituted(refcon, 3, 9) == 0 && telemetry.abort_calls == aborts + 2,
+        "the substituted slot did not act as the abort poll");
+  check(!info::published(g_effect), "an edited effect ref still reads as published");
+  publish_effect_ref_object();
+  check(info::published(g_effect), "republish did not restore the layout");
+  check(info::selftest(), "module contract self-test failed");
+  return passed;
+}
+
+// The PF_World facade behind reserved_long4 (issue #1276): a world registered
+// for dispatch the way the render paths register theirs carries the object,
+// PF_NewWorld's world carries one too and loses it on dispose, slot 1 answers
+// the registered depth, and a sampled unobserved slot traps into the report.
+bool verify_pf_world_facade() {
+  namespace facade = aexcompat::worker_runtime::pf_world_facade;
+  bool passed = true;
+  auto check = [&](bool condition, const char* what) {
+    if (condition) return;
+    passed = false;
+    std::cerr << "pf_world_facade: " << what << "\n" << std::flush;
+  };
+  const auto recorded = [](uint32_t slot) {
+    std::ostringstream needle;
+    needle << "{\"name\":\"PF_World vtable\",\"version\":1,\"slot\":" << slot << ",";
+    return aexcompat::worker_runtime::suite_registry()
+               .unsupported_suite_calls_report_json()
+               .find(needle.str()) != std::string::npos;
+  };
+  using Depth = int16_t (__cdecl*)(const void*);
+  check(facade::selftest(), "facade contract self-test failed");
+  // That self-test ends by filling the quarantine to its bound, so from here
+  // on every detach / dispose that actually retires an object evicts - freeing
+  // whichever object has been quarantined longest, not the one it just
+  // retired (a detach of something the pool never held retires nothing). Nothing
+  // below reads an object it has taken out of service, and nothing added below
+  // should; the property that a retired object stays readable is asserted
+  // inside `facade::selftest()`, before its churn section.
+  // The module self-test trapped slots 0, 10 and the last one; the worker's
+  // recorder must have put them in the report under the pseudo-suite name.
+  check(recorded(0) && recorded(10) &&
+            recorded(static_cast<uint32_t>(facade::kVtableSlots - 1)),
+        "trapped slots are not in the unsupported_suite_calls report");
+  // A world prepared and registered the way the classic / smart paths do it
+  // (EffectWorldStorage through prepare_world_layout, then register_world), at
+  // each depth: AE's embedded shape, vtable at world - 8, no pool object.
+  const struct { int32_t pixel_format; int16_t depth; } cases[] = {
+      {kPixelFormatArgb32, 8}, {kPixelFormatArgb64, 16}, {kPixelFormatArgb128, 32}};
+  for (const auto& entry : cases) {
+    world_safety::EffectWorldStorage world{};
+    std::array<std::byte, 16 * 4> pixels{};
+    std::array<std::byte, world_safety::kEffectWorldSize> bare{};
+    // Declared after every buffer it can register: the scope's destructor
+    // detaches the worlds it gave a pool object to (an embedded world never
+    // enters that list), and that must not run on storage whose lifetime has
+    // already ended.
+    aexcompat::world_safety::DispatchWorldFormatScope worlds;
+    const int32_t pixel_bytes = entry.depth / 8 * 4;
+    if (!aexcompat::render::prepare_world_layout(
+            world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, 4, 1, 4 * pixel_bytes},
+            pixels.data())) {
+      check(false, "world layout preparation failed");
+      continue;
+    }
+    check(worlds.register_world(world.data(), entry.pixel_format), "world registration failed");
+    void* reserved_long4 = nullptr;
+    std::memcpy(&reserved_long4, world.data() + 0x50, sizeof(reserved_long4));
+    check(reserved_long4 == world.data() - 8 && facade::embedded(world.data()) &&
+              facade::attached(world.data()) == nullptr,
+          "prepared world is not the embedded PF_World shape");
+    if (!reserved_long4) continue;
+    const void* const* vtable = *static_cast<const void* const* const*>(reserved_long4);
+    check(vtable == world.pf_world_vtable && vtable == facade::vtable_for(pixel_bytes) &&
+              reinterpret_cast<Depth>(vtable[facade::kSlotDepth])(reserved_long4) == entry.depth,
+          "slot 1 did not answer the registered depth");
+    // The LayerDef the plug-in sees is the object's own +8 (no mirror): its
+    // data pointer, and a write through the object reaches the LayerDef.
+    const auto* object = static_cast<const std::byte*>(reserved_long4);
+    void* object_data = nullptr;
+    std::memcpy(&object_data, object + 0x20, sizeof(object_data));
+    check(object_data == pixels.data(), "object +0x20 is not the LayerDef's data pointer");
+    // A bare 120-byte struct registered the same way gets the mirror object.
+    bare = world.layer_def;
+    void* null = nullptr;
+    std::memcpy(bare.data() + 0x50, &null, sizeof(null));
+    check(worlds.register_world(bare.data(), entry.pixel_format), "bare world registration failed");
+    std::memcpy(&reserved_long4, bare.data() + 0x50, sizeof(reserved_long4));
+    check(reserved_long4 != nullptr && reserved_long4 == facade::attached(bare.data()) &&
+              !facade::embedded(bare.data()),
+          "bare registered world did not get a mirror object");
+    if (reserved_long4) {
+      const void* const* bare_vtable = *static_cast<const void* const* const*>(reserved_long4);
+      check(reinterpret_cast<Depth>(bare_vtable[facade::kSlotDepth])(reserved_long4) == entry.depth,
+            "mirror object slot 1 did not answer the registered depth");
+      facade::detach(bare.data());
+    }
+  }
+  // PF_NewWorld: the world the World Suite fills carries the facade for the
+  // allocation's lifetime; dispose clears the struct with it.
+  {
+    std::array<std::byte, world_safety::kEffectWorldSize> world{};
+    check(aexcompat::world_registry::new_world(&g_effect, 3, 2, 1, kPixelFormatArgb64,
+                                               world.data()) == 0,
+          "PF_NewWorld failed");
+    void* reserved_long4 = nullptr;
+    std::memcpy(&reserved_long4, world.data() + 0x50, sizeof(reserved_long4));
+    check(reserved_long4 != nullptr, "PF_NewWorld left reserved_long4 null");
+    if (reserved_long4) {
+      const void* const* vtable = *static_cast<const void* const* const*>(reserved_long4);
+      check(vtable && reinterpret_cast<Depth>(vtable[facade::kSlotDepth])(reserved_long4) == 16,
+            "PF_NewWorld facade slot 1 did not answer 16");
+      // Channel Blur's write lands in the mirror's origin, not in host memory
+      // (issue #1090): the LayerDef itself keeps its origin.
+      auto* mirror = static_cast<std::byte*>(reserved_long4);
+      const int32_t origin_x = 5, origin_y = -6;
+      std::memcpy(mirror + 0x70, &origin_x, sizeof(origin_x));
+      std::memcpy(mirror + 0x74, &origin_y, sizeof(origin_y));
+      int32_t world_origin_x = 1;
+      std::memcpy(&world_origin_x, world.data() + 0x68, sizeof(world_origin_x));
+      check(world_origin_x == 0, "a mirror write reached the LayerDef");
+    }
+    check(aexcompat::world_registry::dispose_world(&g_effect, world.data()) == 0,
+          "PF_DisposeWorld failed");
+    std::memcpy(&reserved_long4, world.data() + 0x50, sizeof(reserved_long4));
+    check(reserved_long4 == nullptr, "dispose left reserved_long4 set");
+  }
+  return passed;
+}
 }  // namespace aexcompat::l2_detail
 
 aexcompat::worker_runtime::effect_bootstrap::RuntimeHooks make_bootstrap_runtime_hooks() {
@@ -711,6 +1688,7 @@ void reset_cluster_effect_state() {
     g_parameter_runtime.checkout.live.clear();
   }
   g_custom_ui_telemetry = aexcompat::worker_runtime::ui_event_execution::CustomUiTelemetry{};
+  aexcompat::worker_runtime::ui_event_execution::reset_info_text_telemetry();
   aexcompat::pf_state_runtime::reset_pf_state_statistics();
 }
 
@@ -834,8 +1812,10 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   // (issue #396), replacing the launch plug-in's table.
   activate_plugin_string_table(module, context.aex_string_table);
   // Legacy support libraries in the closure (U.dll allocator for PIN-era
-  // effects) get their one-time process init on first sight (issue #362).
+  // effects) get their init once per U.dll mapping, asked again for every
+  // member so a first member without U.dll decides nothing (#362, #1063).
   initialize_legacy_support_libraries();
+  publish_effect_ref_object();
   // GLOBAL_SETUP / PARAMS_SETUP through the launch bootstrap on fresh
   // buffers and fresh host records (ABOUT stays whatever the launch did).
   reset_cluster_effect_state();
@@ -1206,8 +2186,9 @@ int run_discovery_session(const std::wstring& manifest_argument,
         current_entry = nullptr;
       if (current_entry) {
         activate_plugin_string_table(current_module, aex_string_table);
-        // One-time U.dll process init for PIN-era closures (issue #362).
+        // U.dll init for PIN-era closures, once per mapping (#362, #1063).
         initialize_legacy_support_libraries();
+        publish_effect_ref_object();
         inspect_column();
       } else {
         current_global_error = -1;
@@ -1613,8 +2594,9 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 
   aexcompat::aex_strings::StringTable aex_string_table;
   load_aex_string_table(module, aex_string_table);
-  // One-time U.dll process init for PIN-era closures (issue #362).
+  // U.dll init for PIN-era closures, once per mapping (#362, #1063).
   initialize_legacy_support_libraries();
+  publish_effect_ref_object();
   const char* string_table_status =
       aex_string_table.status == aexcompat::aex_strings::ParseStatus::Valid
           ? "valid"

@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include "worker_pf_progress_info.hpp"
 #include "worker_mask_runtime.hpp"
 #include "worker_mask_runtime_internal.hpp"
 #include "worker_aegp_external_render_runtime.hpp"
@@ -2013,8 +2014,8 @@ int32_t __cdecl delete_mask_outline_feather(void* outline, int32_t index) {
 // the effect/layer identities stay in l2_main.
 namespace aexcompat::l2_detail {
 
-extern OpaqueHostObject g_effect;
-extern OpaqueHostObject g_layer;
+extern aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect;
+extern aexcompat::worker_runtime::bee_facade::LayerObject g_layer;
 using aexcompat::world_safety::bounded_typed_world;
 
 void raise_mask_access_violation() {
@@ -2152,12 +2153,16 @@ bool mask_lifetimes_balanced() {
       });
 }
 
-bool configure_mask_scene(const std::string& scene_id) {
+void configure_mask_runtime_hooks() {
   aexcompat::mask_runtime::configure_host_context(
       {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
        &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
   aexcompat::pf_path_runtime::configure(
       {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
+}
+
+bool configure_mask_scene(const std::string& scene_id) {
+  configure_mask_runtime_hooks();
   if (!g_stream_refs.empty() || !g_stream_values.empty() ||
       !g_add_keyframe_transactions.empty()) return false;
   try {

@@ -77,6 +77,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         HOST_ITERATE_FLOAT_CONTINUE,
         HOST_CRT_INITTERM_CONTINUE,
         HOST_FLS_FREE_CONTINUE,
+        HOST_CREATE_THREAD_CONTINUE,
     ] {
         unicorn.mem_write(address, &[0xc3]).unwrap();
     }
@@ -91,6 +92,16 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
             HOST_ACQUIRE_SUITE,
             HOST_ACQUIRE_SUITE,
             emulate_acquire_suite,
+        )
+        .unwrap();
+    unicorn
+        .mem_write(HOST_CREATE_THREAD_CONTINUE, &[0x41, 0xff, 0xe3])
+        .unwrap();
+    unicorn
+        .add_code_hook(
+            HOST_CREATE_THREAD_CONTINUE,
+            HOST_CREATE_THREAD_CONTINUE,
+            continue_windows_thread,
         )
         .unwrap();
     for (address, callback) in [
@@ -330,6 +341,9 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     install_pf_ansi_suite_v2(&mut unicorn).unwrap();
     install_gpu_device_suite(&mut unicorn).unwrap();
     install_windows_condition_variable_callbacks(&mut unicorn).unwrap();
+    install_dynamic_windows_import_callbacks(&mut unicorn).unwrap();
+    unicorn.get_data_mut().next_windows_thread_id = 2;
+    unicorn.get_data_mut().current_windows_thread_id = 1;
     unicorn
         .mem_write(
             HOST_COLOR_PARAM_SUITE,
@@ -2807,6 +2821,238 @@ fn dynamic_condition_variables_are_bounded_and_blocking_fails_closed() {
 }
 
 #[test]
+fn issue1398_wake_by_address_all_is_exact_bounded_and_preserves_void_abi() {
+    const WAKE_API_SET: u64 = STUB_BASE + 0x418;
+    const WAKE_KERNEL32: u64 = STUB_BASE + 0x420;
+    let api_set = "api-ms-win-core-synch-l1-2-0.dll";
+    assert_eq!(
+        dispatch_win64_import(api_set, "WakeByAddressAll"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WakeByAddressAll)
+    );
+    assert_eq!(
+        dispatch_win64_import("kernel32.dll", "WakeByAddressAll"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WakeByAddressAll)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "WakeByAddressAll"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        WAKE_API_SET,
+        api_set,
+        "WakeByAddressAll",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        WAKE_KERNEL32,
+        "kernel32.dll",
+        "WakeByAddressAll",
+    )
+    .unwrap();
+    let first = DATA_BASE + 0xc00;
+    let second = DATA_BASE + 0xc08;
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), first, 2).unwrap();
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), first, 3).unwrap();
+    record_windows_address_waiter(engine.unicorn.get_data_mut(), second, 4).unwrap();
+
+    let marker = 0x8877_6655_4433_2211;
+    engine.unicorn.reg_write(RegisterX86::RAX, marker).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(WAKE_API_SET, [first, 0, 0, 0, 0, 0])
+            .unwrap(),
+        marker
+    );
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_address_waiters
+            .contains_key(&first)
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_address_waiters
+            .get(&second),
+        Some(&BTreeSet::from([4]))
+    );
+
+    // No waiter means no retained address state and no guest-memory probe,
+    // including for NULL and otherwise unmapped pointer values.
+    for address in [first, 0, u64::MAX] {
+        engine.unicorn.reg_write(RegisterX86::RAX, marker).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(WAKE_KERNEL32, [address, 0, 0, 0, 0, 0])
+                .unwrap(),
+            marker
+        );
+    }
+    assert_eq!(engine.unicorn.get_data().windows_address_waiters.len(), 1);
+}
+
+#[test]
+fn issue1398_address_waiter_state_is_bounded_and_session_local() {
+    let mut first = test_engine(&[0xc3]);
+    let second = test_engine(&[0xc3]);
+    let address = DATA_BASE + 0xc80;
+    for thread_id in 0..MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION as u32 {
+        record_windows_address_waiter(first.unicorn.get_data_mut(), address, thread_id).unwrap();
+    }
+    let error = record_windows_address_waiter(
+        first.unicorn.get_data_mut(),
+        address,
+        MAX_WINDOWS_ADDRESS_WAITERS_PER_LOCATION as u32,
+    )
+    .unwrap_err();
+    assert!(error.contains("waiter count"), "{error}");
+    assert!(second.unicorn.get_data().windows_address_waiters.is_empty());
+
+    let mut bounded = test_engine(&[0xc3]);
+    for index in 0..MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS {
+        record_windows_address_waiter(
+            bounded.unicorn.get_data_mut(),
+            DATA_BASE + 0x1000 + index as u64 * 8,
+            1,
+        )
+        .unwrap();
+    }
+    let error = record_windows_address_waiter(
+        bounded.unicorn.get_data_mut(),
+        DATA_BASE + 0x1000 + MAX_WINDOWS_ADDRESS_WAIT_LOCATIONS as u64 * 8,
+        1,
+    )
+    .unwrap_err();
+    assert!(error.contains("location count"), "{error}");
+}
+
+#[test]
+fn get_proc_address_resolves_fls_alloc_to_a_stable_callable_guest_address() {
+    const GET_PROC: u64 = STUB_BASE + 0x408;
+    let name = DATA_BASE + 0xb00;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_PROC,
+        "kernel32.dll",
+        "GetProcAddress",
+    )
+    .unwrap();
+    engine.write(name, b"FlsAlloc\0").unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+
+    let first = engine
+        .call_win64(GET_PROC, [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0])
+        .unwrap();
+    let repeated = engine
+        .call_win64(GET_PROC, [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(first, HOST_DYNAMIC_FLS_ALLOC);
+    assert_ne!(first, HOST_INITIALIZE_CONDITION_VARIABLE);
+    assert_eq!(repeated, first);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(engine.call_win64(first, [0; 6]).unwrap(), 0);
+    assert_eq!(engine.call_win64(first, [0; 6]).unwrap(), 1);
+
+    let mut other = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut other.unicorn,
+        GET_PROC,
+        "kernel32.dll",
+        "GetProcAddress",
+    )
+    .unwrap();
+    other.write(name, b"FlsAlloc\0").unwrap();
+    let other_pointer = other
+        .call_win64(GET_PROC, [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(other_pointer, first);
+    assert_eq!(other.call_win64(other_pointer, [0; 6]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_fls_slots.len(), 2);
+    assert_eq!(other.unicorn.get_data().windows_fls_slots.len(), 1);
+}
+
+#[test]
+fn get_proc_address_rejects_foreign_modules_names_ordinals_and_unsafe_pointers() {
+    const GET_PROC: u64 = STUB_BASE + 0x408;
+    let name = DATA_BASE + 0xb00;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_PROC,
+        "kernel32.dll",
+        "GetProcAddress",
+    )
+    .unwrap();
+    engine.write(name, b"FlsAlloc\0").unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64(GET_PROC, [0x1234, name, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+
+    for symbol in [b"FlsGetValue\0".as_slice(), b"flsalloc\0".as_slice()] {
+        engine.write(name, symbol).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(GET_PROC, [WINDOWS_KERNEL32_MODULE_TOKEN, name, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_PROC_NOT_FOUND
+        );
+    }
+
+    for pointer in [1, 0xffff, 0xdead_beef] {
+        assert_eq!(
+            engine
+                .call_win64(
+                    GET_PROC,
+                    [WINDOWS_KERNEL32_MODULE_TOKEN, pointer, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_PROC_NOT_FOUND
+        );
+    }
+
+    let unterminated = DATA_BASE + PAGE_SIZE - 128;
+    engine.write(unterminated, &[b'A'; 128]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(
+                GET_PROC,
+                [WINDOWS_KERNEL32_MODULE_TOKEN, unterminated, 0, 0, 0, 0],
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_PROC_NOT_FOUND
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+    assert!(engine.unicorn.get_data().windows_fls_slots.is_empty());
+}
+
+#[test]
 fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
     const GET_MODULE_EX: u64 = STUB_BASE + 0x410;
     const PIN: u64 = 0x1;
@@ -3337,6 +3583,1096 @@ fn get_environment_variable_a_matches_win32_size_and_allowlist_contract() {
 }
 
 #[test]
+fn wide_char_to_multi_byte_converts_utf16_and_matches_size_query_contract() {
+    const CONVERT: u64 = STUB_BASE + 0x4e0;
+    const CP_OEMCP: u64 = 1;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            CONVERT,
+            "KERNEL32.DLL",
+            "WideCharToMultiByte",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WideCharToMultiByte)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "WideCharToMultiByte"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let source = DATA_BASE + 0xc40;
+    let output = DATA_BASE + 0xc80;
+    let utf16: Vec<u8> = "A日本"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    engine.write(source, &utf16).unwrap();
+    engine.write(output, &[0xaa; 16]).unwrap();
+
+    let required = engine
+        .call_win64_with_timeout(
+            CONVERT,
+            &[CP_OEMCP, 0, source, u32::MAX as u64, 0, 0, 0, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_eq!(required, 6);
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, u32::MAX as u64, output, required, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        required
+    );
+    let expected = vec![b'A', 0x93, 0xfa, 0x96, 0x7b, 0];
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(output, expected.len())
+            .unwrap(),
+        expected
+    );
+
+    engine.write(output, &[0xaa; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, 2, output, 16, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [b'A', 0x93, 0xfa, 0xaa]
+    );
+
+    engine.write(output, &[0xaa; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[65_001, 0x80, source, u32::MAX as u64, output, 16, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        8
+    );
+    let mut utf8 = "A日本".as_bytes().to_vec();
+    utf8.push(0);
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), utf8);
+}
+
+#[test]
+fn wide_char_to_multi_byte_substitutes_default_and_rejects_negative_output_size() {
+    const CONVERT: u64 = STUB_BASE + 0x4f0;
+    const CP_OEMCP: u64 = 1;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "WideCharToMultiByte",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xcc0;
+    let default = DATA_BASE + 0xce0;
+    let used_default = DATA_BASE + 0xcf0;
+    let output = DATA_BASE + 0xd00;
+    let utf16: Vec<u8> = "😀"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    engine.write(source, &utf16).unwrap();
+    engine.write(default, b"*").unwrap();
+    engine.write(used_default, &[0xaa]).unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[
+                    CP_OEMCP,
+                    0,
+                    source,
+                    u32::MAX as u64,
+                    0,
+                    0,
+                    default,
+                    used_default,
+                ],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(used_default, 1).unwrap(),
+        [1]
+    );
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[
+                    CP_OEMCP,
+                    0,
+                    source,
+                    u32::MAX as u64,
+                    output,
+                    2,
+                    default,
+                    used_default,
+                ],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 2).unwrap(), b"*\0");
+
+    let mut invalid = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut invalid.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "WideCharToMultiByte",
+    )
+    .unwrap();
+    invalid.write(source, &[b'A', 0]).unwrap();
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, 1, output, u32::MAX as u64, 0, 0,],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        invalid.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, u32::MAX as u64 - 1, 0, 0, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        invalid.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+
+    invalid.write(source, &[b'A', 0, b'B', 0]).unwrap();
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[CP_OEMCP, 0, source, 2, output, 1, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(invalid.unicorn.get_data().windows_last_error, 122);
+
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[65_001, 0, source, 1, output, 1, default, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        invalid.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+
+    invalid.write(source, &[0x00, 0xd8]).unwrap();
+    assert_eq!(
+        invalid
+            .call_win64_with_timeout(
+                CONVERT,
+                &[65_001, 0x80, source, 1, 0, 0, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(invalid.unicorn.get_data().windows_last_error, 1113);
+}
+
+#[test]
+fn multi_byte_to_wide_char_converts_cp932_and_utf8_with_win32_lengths() {
+    const CONVERT: u64 = STUB_BASE + 0x4f8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            CONVERT,
+            "KERNEL32.DLL",
+            "MultiByteToWideChar",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::MultiByteToWideChar)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "MultiByteToWideChar"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let source = DATA_BASE + 0xd40;
+    let output = DATA_BASE + 0xd80;
+    engine
+        .write(source, &[b'A', 0x93, 0xfa, 0x96, 0x7b, 0])
+        .unwrap();
+    engine.write(output, &[0xaa; 20]).unwrap();
+
+    let required = engine
+        .call_win64(CONVERT, [0, 0, source, u32::MAX as u64, 0, 0])
+        .unwrap();
+    assert_eq!(required, 4);
+    engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [932, 0, source, u32::MAX as u64, output, required])
+            .unwrap(),
+        required
+    );
+    let expected = "A日本"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), expected);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+
+    engine.write(source, "A😀Z".as_bytes()).unwrap();
+    engine.write(output, &[0xaa; 20]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [65_001, 0x08, source, 6, output, 8])
+            .unwrap(),
+        4
+    );
+    let expected = "A😀Z"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), expected);
+}
+
+#[test]
+fn multi_byte_to_wide_char_reports_validation_and_malformed_input_failures() {
+    const CONVERT: u64 = STUB_BASE + 0x4f8;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "MultiByteToWideChar",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xdc0;
+    let output = DATA_BASE + 0xde0;
+    engine.write(source, &[0xff, 0]).unwrap();
+    engine.write(output, &[0xaa; 8]).unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [65_001, 0x08, source, 1, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1113);
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [65_001, 0, source, 1, output, 2])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        0xfffdu16.to_le_bytes()
+    );
+
+    engine.write(source, &[0x81]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [932, 0x08, source, 1, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1113);
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [932, 0, source, 1, output, 2])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        0xfffdu16.to_le_bytes()
+    );
+    engine.write(source, &[0x82, 0xa0]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [932, 1, source, 2, output, 1])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        0x3042u16.to_le_bytes()
+    );
+    engine.write(source, &[0x82, 0xaa, 0x07]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [932, 2, source, 2, output, 2])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x4b, 0x30, 0x99, 0x30]
+    );
+    // CP932 is an ANSI code page and has no OEM glyph table, so
+    // MB_USEGLYPHCHARS leaves its C0 control mapping unchanged.
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [932, 4, source + 2, 1, output, 1])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        0x0007u16.to_le_bytes()
+    );
+
+    for arguments in [
+        [1_250, 0, source, 1, 0, 0],
+        [932, 3, source, 1, 0, 0],
+        [65_001, 1, source, 1, 0, 0],
+        [932, 0, 0, 1, 0, 0],
+        [932, 0, source, 0, 0, 0],
+        [932, 0, source, u32::MAX as u64 - 1, 0, 0],
+        [932, 0, source, 1, output, u32::MAX as u64],
+        [932, 0, source, 1, 0, 1],
+        [932, 0, source, 1, source, 1],
+    ] {
+        assert_eq!(engine.call_win64(CONVERT, arguments).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+    let overlap_start = source - 2;
+    let overlap_sentinel = [0x11, 0x22, b'A', b'B', 0x55, 0x66, 0x77, 0x88];
+    engine.write(overlap_start, &overlap_sentinel).unwrap();
+    for destination in [source + 1, source - 2] {
+        assert_eq!(
+            engine
+                .call_win64(CONVERT, [932, 0, source, 2, destination, 2])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(overlap_start, overlap_sentinel.len())
+                .unwrap(),
+            overlap_sentinel
+        );
+    }
+    engine.write(source, b"AB").unwrap();
+    engine.write(output, &[0xaa; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CONVERT, [932, 0, source, 2, output, 1])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 122);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0xaa; 8]
+    );
+}
+
+#[test]
+fn multi_byte_to_wide_char_preflights_the_entire_output_before_writing() {
+    const CONVERT: u64 = STUB_BASE + 0x4f8;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "MultiByteToWideChar",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xe20;
+    let crossing = DATA_BASE + PAGE_SIZE - 2;
+    engine.write(source, b"AB").unwrap();
+    engine.write(crossing, &[0x5a; 2]).unwrap();
+    let error = engine
+        .call_win64(CONVERT, [932, 0, source, 2, crossing, 2])
+        .unwrap_err();
+    assert!(error.to_string().contains("not fully writable"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(),
+        [0x5a; 2]
+    );
+}
+
+#[test]
+fn get_string_type_w_is_kernel32_scoped_and_classifies_ctype1() {
+    const CLASSIFY: u64 = STUB_BASE + 0x500;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            CLASSIFY,
+            "KERNEL32.DLL",
+            "GetStringTypeW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetStringTypeW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetStringTypeW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let source = DATA_BASE + 0xe40;
+    let output = DATA_BASE + 0xe80;
+    let units = [
+        'A' as u16,
+        'z' as u16,
+        '9' as u16,
+        ' ' as u16,
+        '!' as u16,
+        '\n' as u16,
+        0x3042,
+        0x0301,
+        0x0378,
+    ];
+    engine
+        .write(
+            source,
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [1, source, units.len() as u64, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    let words = engine
+        .unicorn
+        .mem_read_as_vec(output, units.len() * 2)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        words,
+        [
+            0x0181, 0x0102, 0x0084, 0x0048, 0x0010, 0x0028, 0x0100, 0x0200, 0
+        ]
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+}
+
+#[test]
+fn get_string_type_w_classifies_bidi_japanese_combining_and_utf16_units() {
+    const CLASSIFY: u64 = STUB_BASE + 0x500;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CLASSIFY,
+        "kernel32.dll",
+        "GetStringTypeW",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xea0;
+    let output = DATA_BASE + 0xee0;
+    let units = [
+        b'A' as u16,
+        b'7' as u16,
+        b'+' as u16,
+        b',' as u16,
+        0x05d0,
+        0x0661,
+        0x2029,
+        0x200b,
+        0x0301,
+    ];
+    engine
+        .write(
+            source,
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [2, source, 9, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    let words = engine
+        .unicorn
+        .mem_read_as_vec(output, 18)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    assert_eq!(words, [1, 3, 4, 7, 2, 6, 8, 0, 11]);
+
+    let units = [0x3042, 0x30a2, 0xff71, 0x6f22, 0x0301, 0xd83d, 0xde00];
+    engine
+        .write(
+            source,
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [3, source, 7, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    let words = engine
+        .unicorn
+        .mem_read_as_vec(output, 14)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        words,
+        [0x80a0, 0x8090, 0x8050, 0x8180, 0x0003, 0x0800, 0x1000]
+    );
+
+    let units = [
+        0x093e,
+        0x0941,
+        0x0a41,
+        0x09be,
+        0x0903,
+        0x0640,
+        b'!' as u16,
+        b'-' as u16,
+        b'=' as u16,
+        0x00aa,
+        0x00ba,
+        0x20ac,
+        0xffc0,
+    ];
+    engine
+        .write(
+            source,
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [3, source, 13, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    let words = engine
+        .unicorn
+        .mem_read_as_vec(output, 26)
+        .unwrap()
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        words,
+        [
+            0x8004, 0x8005, 0x8005, 0x8004, 0x8000, 0x8600, 0, 0x0400, 0x0408, 0x8400, 0x8400,
+            0x0008, 0,
+        ]
+    );
+}
+
+#[test]
+fn get_string_type_w_supports_minus_one_and_reports_validation_failures() {
+    const CLASSIFY: u64 = STUB_BASE + 0x500;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CLASSIFY,
+        "kernel32.dll",
+        "GetStringTypeW",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xf00;
+    let output = DATA_BASE + 0xf20;
+    engine.write(source, &[b'A', 0, 0, 0]).unwrap();
+    engine.write(output, &[0xaa; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [1, source, u32::MAX as u64, output, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x81, 0x01, 0x20, 0x00]
+    );
+
+    for arguments in [
+        [0, source, 1, output, 0, 0],
+        [4, source, 1, output, 0, 0],
+        [1, 0, 1, output, 0, 0],
+        [1, source, 0, output, 0, 0],
+        [1, source, 1, 0, 0, 0],
+        [1, source, 1, source, 0, 0],
+        [1, source, 2, source + 2, 0, 0],
+    ] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(engine.call_win64(CLASSIFY, arguments).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+
+    engine.write(output, &[0xaa; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CLASSIFY, [1, source, u32::MAX as u64 - 1, output, 0, 0],)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x81, 0x01, 0x20, 0x00]
+    );
+}
+
+#[test]
+fn get_string_type_w_preflights_the_entire_output_before_writing() {
+    const CLASSIFY: u64 = STUB_BASE + 0x500;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CLASSIFY,
+        "kernel32.dll",
+        "GetStringTypeW",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xf40;
+    let crossing = DATA_BASE + PAGE_SIZE - 2;
+    engine.write(source, &[b'A', 0, b'B', 0]).unwrap();
+    engine.write(crossing, &[0x5a; 2]).unwrap();
+    let error = engine
+        .call_win64(CLASSIFY, [1, source, 2, crossing, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("not fully writable"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(),
+        [0x5a; 2]
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CLASSIFY,
+        "kernel32.dll",
+        "GetStringTypeW",
+    )
+    .unwrap();
+    let output = DATA_BASE + 0xf80;
+    engine.write(output, &[0x5a; 4]).unwrap();
+    let error = engine
+        .call_win64(CLASSIFY, [1, DATA_BASE + PAGE_SIZE, 2, output, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("source read failed"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x5a; 4]
+    );
+}
+
+#[test]
+fn lc_map_string_w_is_kernel32_scoped_and_maps_case_with_win32_lengths() {
+    const MAP: u64 = STUB_BASE + 0x508;
+    const LOWERCASE: u64 = 0x100;
+    const UPPERCASE: u64 = 0x200;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(&mut engine.unicorn, MAP, "KERNEL32.DLL", "LCMapStringW").unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LCMapStringW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "LCMapStringW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let source = DATA_BASE + 0xfa0;
+    let output = DATA_BASE + 0xfc0;
+    let input = "aßあ😀\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    engine.write(source, &input).unwrap();
+    engine.write(output, &[0xaa; 32]).unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x411, UPPERCASE, source, u32::MAX as u64, 0, 0])
+            .unwrap(),
+        6
+    );
+    // Win32 treats any negative cchSrc as a request to scan through NUL.
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x411, UPPERCASE, source, u32::MAX as u64 - 1, 0, 0],)
+            .unwrap(),
+        6
+    );
+    engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x411, UPPERCASE, source, u32::MAX as u64, output, 6])
+            .unwrap(),
+        6
+    );
+    let expected = "Aßあ😀\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 12).unwrap(),
+        expected
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+
+    let explicit = "AZあ".encode_utf16().collect::<Vec<_>>();
+    engine
+        .write(
+            source,
+            &explicit
+                .iter()
+                .copied()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x7f, LOWERCASE, source, 3, output, 3])
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 6).unwrap(),
+        "azあ"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x7f, UPPERCASE, source, 3, source, 3])
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(source, 6).unwrap(),
+        "AZあ"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn lc_map_string_w_uses_locale_tailored_icu_sort_keys() {
+    const MAP: u64 = STUB_BASE + 0x508;
+    const SORTKEY_IGNORECASE: u64 = 0x401;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, MAP, "kernel32.dll", "LCMapStringW").unwrap();
+    let source = DATA_BASE + 0xf00;
+    let output = DATA_BASE + 0xf80;
+    let mut make_key = |locale: u64, flags: u64, value: &str| -> Vec<u8> {
+        let units = value.encode_utf16().collect::<Vec<_>>();
+        engine
+            .write(
+                source,
+                &units
+                    .iter()
+                    .copied()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let required = engine
+            .call_win64(MAP, [locale, flags, source, units.len() as u64, 0, 0])
+            .unwrap();
+        assert!(required > 1);
+        assert_eq!(
+            engine
+                .call_win64(
+                    MAP,
+                    [locale, flags, source, units.len() as u64, output, required]
+                )
+                .unwrap(),
+            required
+        );
+        let key = engine
+            .unicorn
+            .mem_read_as_vec(output, required as usize)
+            .unwrap();
+        assert_eq!(key.last(), Some(&0));
+        key
+    };
+
+    // Treat sort keys as opaque: verify their documented ordering/equivalence
+    // properties instead of freezing ICU's private byte representation.
+    assert!(make_key(0x409, 0x400, "apple") < make_key(0x409, 0x400, "banana"));
+    assert_eq!(
+        make_key(0x409, SORTKEY_IGNORECASE, "Signal"),
+        make_key(0x409, SORTKEY_IGNORECASE, "signal")
+    );
+    // Win32's default ja-JP key preserves kana type.
+    assert_ne!(make_key(0x411, 0x400, "あ"), make_key(0x411, 0x400, "ア"));
+    // NORM_IGNOREKANATYPE alone lowers the tailored kana distinction.
+    assert_eq!(
+        make_key(0x411, 0x0001_0400, "あ"),
+        make_key(0x411, 0x0001_0400, "ア")
+    );
+    assert_ne!(make_key(0x411, 0x400, "ア"), make_key(0x411, 0x400, "ｱ"));
+    assert_ne!(
+        make_key(0x411, 0x0001_0400, "ア"),
+        make_key(0x411, 0x0001_0400, "ｱ")
+    );
+    assert_eq!(
+        make_key(0x411, 0x0001_0400, "ヷヽ"),
+        make_key(0x411, 0x0001_0400, "わ\u{3099}ゝ")
+    );
+
+    drop(make_key);
+    let mut make_raw_key = |units: &[u16]| -> Vec<u8> {
+        engine
+            .write(
+                source,
+                &units
+                    .iter()
+                    .copied()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let required = engine
+            .call_win64(
+                MAP,
+                [0x409, SORTKEY_IGNORECASE, source, units.len() as u64, 0, 0],
+            )
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(
+                    MAP,
+                    [
+                        0x409,
+                        SORTKEY_IGNORECASE,
+                        source,
+                        units.len() as u64,
+                        output,
+                        required,
+                    ],
+                )
+                .unwrap(),
+            required
+        );
+        engine
+            .unicorn
+            .mem_read_as_vec(output, required as usize)
+            .unwrap()
+    };
+    assert_ne!(make_raw_key(&[0xd800]), make_raw_key(&[0xdc00]));
+    assert_ne!(
+        make_raw_key(&[0xd800, 0xfffd]),
+        make_raw_key(&[0xfffd, 0xd800])
+    );
+}
+
+#[test]
+fn lc_map_string_w_distinguishes_simple_and_linguistic_casing() {
+    const MAP: u64 = STUB_BASE + 0x508;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, MAP, "kernel32.dll", "LCMapStringW").unwrap();
+    let source = DATA_BASE + 0xf00;
+    let output = DATA_BASE + 0xf40;
+    let units = "ΟΣ".encode_utf16().collect::<Vec<_>>();
+    engine
+        .write(
+            source,
+            &units
+                .iter()
+                .copied()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x409, 0x100, source, 2, output, 2])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        "οσ"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+    // The linguistic table may expand a scalar, but mapping is still
+    // context-insensitive: the final sigma remains ordinary sigma.
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x409, 0x0100_0100, source, 2, output, 2])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        "οσ"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+
+    engine.write(source, &0x00dfu16.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x409, 0x0100_0200, source, 1, 0, 0])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine
+            .call_win64(MAP, [0x409, 0x0100_0200, source, 1, output, 2])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [b'S', 0, b'S', 0]
+    );
+}
+
+#[test]
+fn lc_map_string_w_reports_flags_lengths_buffers_locales_and_overlap() {
+    const MAP: u64 = STUB_BASE + 0x508;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, MAP, "kernel32.dll", "LCMapStringW").unwrap();
+    let source = DATA_BASE + 0xf40;
+    let output = DATA_BASE + 0xf60;
+    engine.write(source, &[b'A', 0, 0, 0]).unwrap();
+    engine.write(output, &[0xaa; 8]).unwrap();
+
+    for (arguments, error) in [
+        ([0x409, 0, source, 1, output, 1], 1004),
+        ([0x409, 0x300, source, 1, output, 1], 1004),
+        ([0x409, 0x0001_0100, source, 1, output, 1], 1004),
+        ([0x409, 0x0002_0400, source, 1, output, 64], 1004),
+        ([0x409, 0x100, 0, 1, output, 1], ERROR_INVALID_PARAMETER),
+        (
+            [0x409, 0x100, source, 0, output, 1],
+            ERROR_INVALID_PARAMETER,
+        ),
+        ([0x409, 0x100, source, 1, 0, 1], ERROR_INVALID_PARAMETER),
+        (
+            [0x9999, 0x100, source, 1, output, 1],
+            ERROR_INVALID_PARAMETER,
+        ),
+        ([0x409, 0x100, source, 2, output, 1], 122),
+        ([0x409, 0x100, source, 2, source + 2, 2], 1004),
+        ([0x409, 0x400, source, 1, source, 64], 1004),
+    ] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(engine.call_win64(MAP, arguments).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, error);
+    }
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0xaa; 8]
+    );
+}
+
+#[test]
+fn lc_map_string_w_preflights_complete_output_before_mutation() {
+    const MAP: u64 = STUB_BASE + 0x508;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, MAP, "kernel32.dll", "LCMapStringW").unwrap();
+    let source = DATA_BASE + 0xf80;
+    let crossing = DATA_BASE + PAGE_SIZE - 2;
+    engine.write(source, &[b'A', 0, b'B', 0]).unwrap();
+    engine.write(crossing, &[0x5a; 2]).unwrap();
+    let error = engine
+        .call_win64(MAP, [0x7f, 0x100, source, 2, crossing, 2])
+        .unwrap_err();
+    assert!(error.to_string().contains("not fully writable"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(),
+        [0x5a; 2]
+    );
+
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, MAP, "kernel32.dll", "LCMapStringW").unwrap();
+    let output = DATA_BASE + 0xfa0;
+    engine.write(output, &[0x5a; 4]).unwrap();
+    let error = engine
+        .call_win64(MAP, [0x7f, 0x100, DATA_BASE + PAGE_SIZE, 2, output, 2])
+        .unwrap_err();
+    assert!(error.to_string().contains("source read failed"), "{error}");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x5a; 4]
+    );
+}
+
+#[test]
 fn get_environment_variable_a_rejects_invalid_names_and_outputs() {
     let mut engine = test_engine(&[0xc3]);
     engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
@@ -3381,6 +4717,329 @@ fn get_environment_variable_a_rejects_invalid_names_and_outputs() {
             .as_deref()
             .is_some_and(|error| error == "GetEnvironmentVariableA output pointer is null")
     );
+}
+
+#[test]
+fn get_environment_variable_w_matches_size_write_and_not_found_contracts() {
+    const GET_ENVIRONMENT: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_ENVIRONMENT,
+            "kernel32.dll",
+            "GetEnvironmentVariableW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetEnvironmentVariableW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetEnvironmentVariableW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let name = DATA_BASE + 0xc00;
+    let output = DATA_BASE + 0xd00;
+    let mut encoded_name = Vec::new();
+    for unit in "OpenCv_For_Threads_Num"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
+        encoded_name.extend_from_slice(&unit.to_le_bytes());
+    }
+    engine.write(name, &encoded_name).unwrap();
+    engine.write(output, &[0xa5; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_ENVIRONMENT, [name, 0, 0, 0, 0, 0])
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine
+            .call_win64(GET_ENVIRONMENT, [name, output, 1, 0, 0, 0])
+            .unwrap(),
+        2
+    );
+    let mut unchanged = [0; 8];
+    engine.read(output, &mut unchanged).unwrap();
+    assert_eq!(unchanged, [0xa5; 8]);
+    assert_eq!(
+        engine
+            .call_win64(GET_ENVIRONMENT, [name, output, 2, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    let mut written = [0; 4];
+    engine.read(output, &mut written).unwrap();
+    assert_eq!(written, [b'1', 0, 0, 0]);
+
+    let mut missing = Vec::new();
+    for unit in "HOME".encode_utf16().chain(std::iter::once(0)) {
+        missing.extend_from_slice(&unit.to_le_bytes());
+    }
+    engine.write(name, &missing).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_ENVIRONMENT, [name, output, 2, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_ENVVAR_NOT_FOUND
+    );
+}
+
+#[test]
+fn get_environment_variable_w_rejects_invalid_guest_pointers() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_get_environment_variable_w(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("GetEnvironmentVariableW name pointer is null")
+    );
+
+    let name = DATA_BASE + 0xc00;
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.write(name, &vec![b'A'; 512]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, name).unwrap();
+    emulate_get_environment_variable_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("name exceeds 255 UTF-16 units"))
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.write(name, &[0x00, 0xd8, 0, 0]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, name).unwrap();
+    emulate_get_environment_variable_w(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("GetEnvironmentVariableW name is invalid UTF-16")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    let mut allowed = Vec::new();
+    for unit in "OPENCV_FOR_THREADS_NUM"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
+        allowed.extend_from_slice(&unit.to_le_bytes());
+    }
+    engine.write(name, &allowed).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, name).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, 0xdead_beef)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::R8, 2).unwrap();
+    emulate_get_environment_variable_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("output 0xdeadbeef is not writable"))
+    );
+}
+
+#[test]
+fn environment_strings_w_is_kernel32_scoped_sorted_writable_and_double_nul_terminated() {
+    const GET_STRINGS: u64 = STUB_BASE + 0x510;
+    const FREE_STRINGS: u64 = STUB_BASE + 0x520;
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, symbol, implementation) in [
+        (
+            GET_STRINGS,
+            "GetEnvironmentStringsW",
+            LegacyWin64Import::GetEnvironmentStringsW,
+        ),
+        (
+            FREE_STRINGS,
+            "FreeEnvironmentStringsW",
+            LegacyWin64Import::FreeEnvironmentStringsW,
+        ),
+    ] {
+        assert_eq!(
+            install_win64_import(&mut engine.unicorn, stub, "KERNEL32.DLL", symbol).unwrap(),
+            Win64ImportDispatch::LegacyImplemented(implementation)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+
+    engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
+    let pointer = engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
+    assert_ne!(pointer, 0);
+    let expected = "OPENCV_FOR_THREADS_NUM=1\0\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(pointer, expected.len())
+            .unwrap(),
+        expected
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+
+    // Windows returns caller-owned writable blocks, not a shared host buffer.
+    engine.unicorn.mem_write(pointer, &[b'X', 0]).unwrap();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(pointer, 2).unwrap(),
+        [b'X', 0]
+    );
+    assert_eq!(
+        engine
+            .call_win64(FREE_STRINGS, [pointer, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
+    assert!(engine.unicorn.mem_read_as_vec(pointer, 2).is_err());
+}
+
+#[test]
+fn environment_strings_w_allocations_are_independent_owned_and_reject_invalid_free() {
+    const GET_STRINGS: u64 = STUB_BASE + 0x510;
+    const FREE_STRINGS: u64 = STUB_BASE + 0x520;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_STRINGS,
+        "kernel32.dll",
+        "GetEnvironmentStringsW",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        FREE_STRINGS,
+        "kernel32.dll",
+        "FreeEnvironmentStringsW",
+    )
+    .unwrap();
+
+    let first = engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
+    let second = engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
+    assert_ne!(first, second);
+    engine.unicorn.mem_write(first, &[b'X', 0]).unwrap();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(second, 2).unwrap(),
+        [b'O', 0]
+    );
+
+    assert_eq!(
+        engine
+            .call_win64(FREE_STRINGS, [first, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    for invalid in [first, DATA_BASE, 0] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64(FREE_STRINGS, [invalid, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+    assert_eq!(
+        engine
+            .call_win64(FREE_STRINGS, [second, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn environment_strings_w_ownership_does_not_cross_guest_sessions() {
+    const GET_STRINGS: u64 = STUB_BASE + 0x510;
+    const FREE_STRINGS: u64 = STUB_BASE + 0x520;
+    let mut first = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut first.unicorn,
+        GET_STRINGS,
+        "kernel32.dll",
+        "GetEnvironmentStringsW",
+    )
+    .unwrap();
+    let mut second = test_engine(&[0xc3]);
+    for (stub, symbol) in [
+        (GET_STRINGS, "GetEnvironmentStringsW"),
+        (FREE_STRINGS, "FreeEnvironmentStringsW"),
+    ] {
+        install_win64_import(&mut second.unicorn, stub, "kernel32.dll", symbol).unwrap();
+    }
+    let stale = first.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
+    let live = second.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
+    assert_ne!(stale, live, "sessions must not reuse environment tokens");
+    assert_eq!(
+        second
+            .call_win64(FREE_STRINGS, [stale, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        second.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        second.unicorn.mem_read_as_vec(live, 2).unwrap(),
+        [b'O', 0],
+        "rejecting another session's token must preserve this session's allocation"
+    );
+    assert_eq!(
+        second
+            .call_win64(FREE_STRINGS, [live, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn environment_strings_w_respects_shared_guest_allocation_budget() {
+    const GET_STRINGS: u64 = STUB_BASE + 0x510;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_STRINGS,
+        "kernel32.dll",
+        "GetEnvironmentStringsW",
+    )
+    .unwrap();
+    // Two maximum-size allocations consume the allocator's 128 MiB aggregate
+    // budget without depending on the host process environment or allocator.
+    let _first = allocate_crt_region(
+        &mut engine.unicorn,
+        crate::crt_heap::MAX_CRT_ALLOCATION_BYTES,
+    )
+    .unwrap();
+    let _second = allocate_crt_region(
+        &mut engine.unicorn,
+        crate::crt_heap::MAX_CRT_ALLOCATION_BYTES,
+    )
+    .unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    assert_eq!(
+        engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 8);
 }
 
 #[test]
@@ -3455,6 +5114,362 @@ fn windows_last_error_is_session_local_and_tracks_missing_environment() {
 
     let other = test_engine(&[0xc3]);
     assert_eq!(other.unicorn.get_data().windows_last_error, 0);
+}
+
+#[test]
+fn set_thread_error_mode_is_stateful_validated_and_session_local() {
+    const SET_MODE: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            SET_MODE,
+            "kernel32.dll",
+            "SetThreadErrorMode",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::SetThreadErrorMode)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "SetThreadErrorMode"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let old_mode = DATA_BASE + 0xe00;
+    engine.write(old_mode, &[0xa5; 4]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(SET_MODE, [0x0003, old_mode, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(old_mode, 4).unwrap(),
+        0u32.to_le_bytes()
+    );
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x0003);
+
+    assert_eq!(
+        engine
+            .call_win64(SET_MODE, [0x8001, old_mode, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(old_mode, 4).unwrap(),
+        0x0003u32.to_le_bytes()
+    );
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x8001);
+
+    engine.write(old_mode, &[0x5a; 4]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(SET_MODE, [0x0004, old_mode, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(old_mode, 4).unwrap(),
+        vec![0x5a; 4]
+    );
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x8001);
+
+    assert_eq!(engine.call_win64(SET_MODE, [0, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0);
+    let other = test_engine(&[0xc3]);
+    assert_eq!(other.unicorn.get_data().windows_thread_error_mode, 0);
+}
+
+#[test]
+fn set_thread_error_mode_does_not_commit_after_an_unwritable_old_mode_output() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.get_data_mut().windows_thread_error_mode = 0x0001;
+    engine.unicorn.reg_write(RegisterX86::RCX, 0x0002).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, 0xdead_beef)
+        .unwrap();
+    emulate_set_thread_error_mode(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_thread_error_mode, 0x0001);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("old-mode output 0xdeadbeef is not writable"))
+    );
+}
+
+#[test]
+fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
+    const LOAD_LIBRARY: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            LOAD_LIBRARY,
+            "kernel32.dll",
+            "LoadLibraryExW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LoadLibraryExW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "LoadLibraryExW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let path = DATA_BASE + 0xe00;
+    let write_path = |engine: &mut GuestEngine<'static>, value: &str| {
+        let mut bytes = Vec::new();
+        for unit in value.encode_utf16().chain(std::iter::once(0)) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        engine.write(path, &bytes).unwrap();
+    };
+    write_path(&mut engine, r"C:\Windows\System32\KERNEL32.DLL");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x0800, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_KERNEL32_MODULE_TOKEN
+    );
+
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    write_path(&mut engine, "dxgi.dll");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x1000, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x8000_0000, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x0808, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    write_path(&mut engine, "kernel32.dll");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x0100, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0x2000, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_KERNEL32_MODULE_TOKEN
+    );
+    for non_executable_flag in [0x0002, 0x0020, 0x0040, 0x0062] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, non_executable_flag, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+    for malformed_absolute in [r"1:\kernel32.dll", r"\\kernel32.dll"] {
+        write_path(&mut engine, malformed_absolute);
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0x0100, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 1, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+
+    write_path(&mut engine, "");
+    engine.unicorn.get_data_mut().callback_error = None;
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+    write_path(&mut engine, r"C:\Windows\System32\");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+}
+
+#[test]
+fn load_library_ex_w_rejects_invalid_or_unterminated_utf16_without_host_loading() {
+    let mut engine = test_engine(&[0xc3]);
+    let path = DATA_BASE + 0xc00;
+    engine.write(path, &[0x00, 0xd8, 0, 0]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, path).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R8, 0).unwrap();
+    emulate_load_library_ex_w(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("LoadLibraryExW path is not valid UTF-16")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.write(path, &vec![b'A'; 520]).unwrap();
+    emulate_load_library_ex_w(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("LoadLibraryExW path exceeds 259 UTF-16 code units")
+    );
+}
+
+#[test]
+fn load_library_a_is_allowlisted_bounded_and_library_scoped() {
+    const LOAD_LIBRARY: u64 = STUB_BASE + 0x1a8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            LOAD_LIBRARY,
+            "KERNEL32.DLL",
+            "LoadLibraryA",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LoadLibraryA)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "LoadLibraryA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let path = DATA_BASE + 0xd00;
+    let write_path = |engine: &mut GuestEngine<'static>, value: &[u8]| {
+        let mut bytes = value.to_vec();
+        bytes.push(0);
+        engine.write(path, &bytes).unwrap();
+    };
+    write_path(&mut engine, br"C:\Windows\System32\KERNEL32.DLL");
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_KERNEL32_MODULE_TOKEN
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    write_path(&mut engine, b"dxgi.dll");
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    for ordinary_missing in [b"".as_slice(), br"C:\Windows\System32\".as_slice()] {
+        write_path(&mut engine, ordinary_missing);
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_MOD_NOT_FOUND
+        );
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+    assert_eq!(
+        engine.call_win64(LOAD_LIBRARY, [0, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+}
+
+#[test]
+fn load_library_a_rejects_unmapped_or_unterminated_paths_without_host_loading() {
+    let mut engine = test_engine(&[0xc3]);
+    let path = DATA_BASE + 0xc00;
+    engine.write(path, &vec![b'A'; 260]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, path).unwrap();
+    emulate_load_library_a(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("LoadLibraryA path exceeds 259 bytes")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_load_library_a(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("LoadLibraryA path read failed"))
+    );
 }
 
 #[test]
@@ -3562,9 +5577,272 @@ fn win64_import_dispatch_is_library_aware_and_case_normalized() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
     assert_eq!(
+        dispatch_win64_import("bcryptprimitives.dll", "ProcessPrng"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::ProcessPrng)
+    );
+    assert_eq!(
+        dispatch_win64_import("BCRYPTPRIMITIVES.DLL", "ProcessPrng"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::ProcessPrng)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "ProcessPrng"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        dispatch_win64_import("kernel32.dll", "ProcessPrng"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    for (symbol, implementation) in [
+        ("GetProcessHeap", LegacyWin64Import::GetProcessHeap),
+        ("HeapAlloc", LegacyWin64Import::HeapAlloc),
+        ("HeapFree", LegacyWin64Import::HeapFree),
+        ("HeapReAlloc", LegacyWin64Import::HeapReAlloc),
+    ] {
+        assert_eq!(
+            dispatch_win64_import("KERNEL32.DLL", symbol),
+            Win64ImportDispatch::LegacyImplemented(implementation)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+    assert_eq!(
         canonical_import_trace_label(r"C:\Windows\System32\OPENCL.DLL", "clCreateKernel"),
         "opencl.dll!clCreateKernel"
     );
+}
+
+#[test]
+fn process_prng_fills_a_reproducible_process_local_stream() {
+    let mut engine = test_engine(&[0xc3]);
+    let output = engine.allocate(32, 8).unwrap();
+    engine.unicorn.mem_write(output, &[0x11; 32]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 16).unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+    let first = engine.unicorn.mem_read_as_vec(output, 16).unwrap();
+    assert_ne!(first, vec![0x11; 16]);
+
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, output + 16)
+        .unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    let second = engine.unicorn.mem_read_as_vec(output + 16, 16).unwrap();
+    assert_ne!(second, first, "successive calls must advance the stream");
+
+    let mut replay = test_engine(&[0xc3]);
+    let replay_output = replay.allocate(16, 8).unwrap();
+    replay
+        .unicorn
+        .reg_write(RegisterX86::RCX, replay_output)
+        .unwrap();
+    replay.unicorn.reg_write(RegisterX86::RDX, 16).unwrap();
+    emulate_process_prng(&mut replay.unicorn);
+    assert_eq!(
+        replay.unicorn.mem_read_as_vec(replay_output, 16).unwrap(),
+        first,
+        "fresh guest processes must replay the deterministic stream"
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 8).unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error == "ProcessPrng buffer pointer is null")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, MAX_PROCESS_PRNG_BYTES + 1)
+        .unwrap();
+    emulate_process_prng(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("exceeds"))
+    );
+}
+
+#[test]
+fn process_heap_alloc_free_uses_an_opaque_handle_and_separate_ownership() {
+    const GET_PROCESS_HEAP: u64 = STUB_BASE + 0x600;
+    const HEAP_ALLOC: u64 = STUB_BASE + 0x610;
+    const HEAP_FREE: u64 = STUB_BASE + 0x620;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET_PROCESS_HEAP,
+        "kernel32.dll",
+        "GetProcessHeap",
+    )
+    .unwrap();
+    install_win64_import(&mut engine.unicorn, HEAP_ALLOC, "kernel32.dll", "HeapAlloc").unwrap();
+    install_win64_import(&mut engine.unicorn, HEAP_FREE, "kernel32.dll", "HeapFree").unwrap();
+
+    let heap = engine.call_win64(GET_PROCESS_HEAP, [0; 6]).unwrap();
+    assert_eq!(heap, PROCESS_HEAP_HANDLE);
+    let pointer = engine
+        .call_win64(HEAP_ALLOC, [heap, u64::from(HEAP_ZERO_MEMORY), 32, 0, 0, 0])
+        .unwrap();
+    assert_ne!(pointer, 0);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(pointer, 32).unwrap(),
+        vec![0; 32]
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .process_heap_allocation(pointer)
+            .is_ok()
+    );
+    assert_eq!(
+        engine.unicorn.get_data_mut().crt_heap.remove(pointer),
+        Err(CrtHeapError::AllocatorMismatch),
+        "CRT free must not own a process-heap allocation"
+    );
+    assert_eq!(
+        engine
+            .call_win64(HEAP_FREE, [heap, 0, pointer, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.call_win64(HEAP_FREE, [heap, 0, 0, 0, 0, 0]).unwrap(),
+        1,
+        "HeapFree accepts a null pointer"
+    );
+    assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+
+    let crt_pointer = allocate_crt_region(&mut engine.unicorn, 8).unwrap();
+    let error = engine
+        .call_win64(HEAP_FREE, [heap, 0, crt_pointer, 0, 0, 0])
+        .unwrap_err();
+    assert!(error.to_string().contains("CRT free API does not own"));
+}
+
+#[test]
+fn process_heap_realloc_preserves_bytes_zero_extends_and_keeps_old_on_failure() {
+    const HEAP_ALLOC: u64 = STUB_BASE + 0x630;
+    const HEAP_REALLOC: u64 = STUB_BASE + 0x640;
+    const HEAP_FREE: u64 = STUB_BASE + 0x650;
+    let mut engine = test_engine(&[0xc3]);
+    for (address, symbol) in [
+        (HEAP_ALLOC, "HeapAlloc"),
+        (HEAP_REALLOC, "HeapReAlloc"),
+        (HEAP_FREE, "HeapFree"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+
+    let first = engine
+        .call_win64(HEAP_ALLOC, [PROCESS_HEAP_HANDLE, 0, 8, 0, 0, 0])
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(first, &[1, 2, 3, 4, 5, 6, 7, 8])
+        .unwrap();
+    let in_place = engine
+        .call_win64(
+            HEAP_REALLOC,
+            [
+                PROCESS_HEAP_HANDLE,
+                u64::from(HEAP_ZERO_MEMORY),
+                first,
+                16,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+    assert_eq!(in_place, first);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(in_place, 16).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+
+    let moved = engine
+        .call_win64(HEAP_REALLOC, [PROCESS_HEAP_HANDLE, 0, in_place, 8192, 0, 0])
+        .unwrap();
+    assert_ne!(moved, 0);
+    assert_ne!(moved, in_place);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(moved, 16).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+
+    let refused = engine
+        .call_win64(
+            HEAP_REALLOC,
+            [
+                PROCESS_HEAP_HANDLE,
+                u64::from(HEAP_REALLOC_IN_PLACE_ONLY),
+                moved,
+                16_384,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+    assert_eq!(refused, 0);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .process_heap_allocation(moved)
+            .is_ok()
+    );
+
+    let oversized = engine
+        .call_win64(
+            HEAP_REALLOC,
+            [
+                PROCESS_HEAP_HANDLE,
+                0,
+                moved,
+                crate::crt_heap::MAX_CRT_ALLOCATION_BYTES + 1,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+    assert_eq!(oversized, 0);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(moved, 8).unwrap(),
+        vec![1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    assert_eq!(
+        engine
+            .call_win64(HEAP_FREE, [PROCESS_HEAP_HANDLE, 0, moved, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
 }
 
 #[test]
@@ -3588,6 +5866,1940 @@ fn system_time_import_writes_a_deterministic_validated_filetime() {
             .callback_error
             .as_deref()
             .is_some_and(|error| error.contains("output pointer is null"))
+    );
+}
+
+#[test]
+fn get_system_info_writes_the_deterministic_win64_layout() {
+    const GET_SYSTEM_INFO: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_SYSTEM_INFO,
+            "kernel32.dll",
+            "GetSystemInfo",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetSystemInfo)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetSystemInfo"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = engine.allocate(48, 8).unwrap();
+    engine
+        .call_win64(GET_SYSTEM_INFO, [output, 0, 0, 0, 0, 0])
+        .unwrap();
+    let info = engine.unicorn.mem_read_as_vec(output, 48).unwrap();
+    assert_eq!(u16::from_le_bytes(info[0..2].try_into().unwrap()), 9);
+    assert_eq!(u16::from_le_bytes(info[2..4].try_into().unwrap()), 0);
+    assert_eq!(u32::from_le_bytes(info[4..8].try_into().unwrap()), 4096);
+    assert_eq!(
+        u64::from_le_bytes(info[8..16].try_into().unwrap()),
+        0x1_0000
+    );
+    assert_eq!(
+        u64::from_le_bytes(info[16..24].try_into().unwrap()),
+        0x0000_7fff_fffe_ffff
+    );
+    assert_eq!(u64::from_le_bytes(info[24..32].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(info[32..36].try_into().unwrap()), 1);
+    assert_eq!(u32::from_le_bytes(info[36..40].try_into().unwrap()), 8664);
+    assert_eq!(u32::from_le_bytes(info[40..44].try_into().unwrap()), 65_536);
+    assert_eq!(u16::from_le_bytes(info[44..46].try_into().unwrap()), 6);
+    assert_eq!(u16::from_le_bytes(info[46..48].try_into().unwrap()), 0);
+}
+
+#[test]
+fn get_system_info_rejects_null_and_unwritable_outputs() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_get_system_info(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("GetSystemInfo output pointer is null")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_get_system_info(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("output 0xdeadbeef is not writable"))
+    );
+}
+
+#[test]
+fn get_startup_info_w_writes_the_deterministic_win64_layout() {
+    const GET_STARTUP_INFO: u64 = STUB_BASE + 0x1a8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_STARTUP_INFO,
+            "KERNEL32.DLL",
+            "GetStartupInfoW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetStartupInfoW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetStartupInfoW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = engine.allocate(104, 8).unwrap();
+    engine.write(output, &[0xa5; 104]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RAX, 0x1234).unwrap();
+    engine
+        .call_win64(GET_STARTUP_INFO, [output, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0x1234);
+    let startup_info = engine.unicorn.mem_read_as_vec(output, 104).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(startup_info[..4].try_into().unwrap()),
+        104
+    );
+    assert!(startup_info[4..].iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn get_startup_info_w_rejects_null_and_unwritable_outputs() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_get_startup_info_w(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("GetStartupInfoW output pointer is null")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_get_startup_info_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| {
+                error.contains("output 0xdeadbeef") && error.contains("not fully writable")
+            })
+    );
+
+    let boundary = DATA_BASE + PAGE_SIZE - 52;
+    let sentinel = [0x5a; 52];
+    engine.write(boundary, &sentinel).unwrap();
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, boundary)
+        .unwrap();
+    emulate_get_startup_info_w(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not fully writable"))
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 52).unwrap(),
+        sentinel
+    );
+}
+
+#[test]
+fn rtl_capture_context_writes_the_win64_caller_context() {
+    const RTL_CAPTURE_CONTEXT: u64 = STUB_BASE + 0x1b0;
+    const CONTEXT_SIZE: usize = 0x4d0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            RTL_CAPTURE_CONTEXT,
+            "kernel32.dll",
+            "RtlCaptureContext",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::RtlCaptureContext)
+    );
+    assert_eq!(
+        dispatch_win64_import("ntdll.dll", "RtlCaptureContext"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = engine.allocate(CONTEXT_SIZE, 16).unwrap();
+    engine.write(output, &vec![0xa5; CONTEXT_SIZE]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RAX, 0x1111).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RBX, 0x2222).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RBP, 0x3333).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RSI, 0x4444).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDI, 0x5555).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R10, 0xaaaa).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R11, 0xbbbb).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R12, 0xcccc).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R13, 0xdddd).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R14, 0xeeee).unwrap();
+    engine.unicorn.reg_write(RegisterX86::R15, 0xffff).unwrap();
+    let xmm0 = [0x5au8; 16];
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::XMM0, &xmm0)
+        .unwrap();
+    let xmm15 = [0xc3u8; 16];
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::XMM15, &xmm15)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::FPCW, 0x027f).unwrap();
+    engine.unicorn.reg_write(RegisterX86::FPSW, 0x1821).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FPTAG, 0x3fff)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::FOP, 0x0555).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FIP, 0x1234_5678)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::FCS, 0x0033).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::FDP, 0x8765_4321)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::FDS, 0x002b).unwrap();
+    let st4 = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::ST4, &st4)
+        .unwrap();
+    let expected_mxcsr = engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap() as u32;
+    let expected_eflags = engine.unicorn.reg_read(RegisterX86::EFLAGS).unwrap() as u32;
+    let expected_segments = [
+        RegisterX86::CS,
+        RegisterX86::DS,
+        RegisterX86::ES,
+        RegisterX86::FS,
+        RegisterX86::GS,
+        RegisterX86::SS,
+    ]
+    .map(|register| engine.unicorn.reg_read(register).unwrap() as u16);
+    engine
+        .call_win64(RTL_CAPTURE_CONTEXT, [output, 0x7777, 0x8888, 0x9999, 0, 0])
+        .unwrap();
+
+    let context = engine
+        .unicorn
+        .mem_read_as_vec(output, CONTEXT_SIZE)
+        .unwrap();
+    let qword = |offset: usize| u64::from_le_bytes(context[offset..offset + 8].try_into().unwrap());
+    assert_eq!(
+        u32::from_le_bytes(context[0x30..0x34].try_into().unwrap()),
+        0x0010_000f
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x34..0x38].try_into().unwrap()),
+        expected_mxcsr
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x44..0x48].try_into().unwrap()),
+        expected_eflags
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x100..0x102].try_into().unwrap()),
+        0x027f
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x102..0x104].try_into().unwrap()),
+        0x1821
+    );
+    assert_eq!(context[0x104], 0x80);
+    assert_eq!(
+        u16::from_le_bytes(context[0x106..0x108].try_into().unwrap()),
+        0x0555
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x108..0x10c].try_into().unwrap()),
+        0x1234_5678
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x10c..0x10e].try_into().unwrap()),
+        0x0033
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x110..0x114].try_into().unwrap()),
+        0x8765_4321
+    );
+    assert_eq!(
+        u16::from_le_bytes(context[0x114..0x116].try_into().unwrap()),
+        0x002b
+    );
+    assert_eq!(
+        u32::from_le_bytes(context[0x11c..0x120].try_into().unwrap()),
+        0x0000_ffff
+    );
+    assert_eq!(&context[0x160..0x16a], &st4);
+    for (index, expected) in expected_segments.into_iter().enumerate() {
+        let offset = 0x38 + index * 2;
+        assert_eq!(
+            u16::from_le_bytes(context[offset..offset + 2].try_into().unwrap()),
+            expected
+        );
+    }
+    assert_eq!(qword(0x78), 0x1111);
+    assert_eq!(qword(0x80), output);
+    assert_eq!(qword(0x88), 0x7777);
+    assert_eq!(qword(0x90), 0x2222);
+    assert_eq!(qword(0xa0), 0x3333);
+    assert_eq!(qword(0xa8), 0x4444);
+    assert_eq!(qword(0xb0), 0x5555);
+    assert_eq!(qword(0xb8), 0x8888);
+    assert_eq!(qword(0xc0), 0x9999);
+    assert_eq!(qword(0xc8), 0xaaaa);
+    assert_eq!(qword(0xd0), 0xbbbb);
+    assert_eq!(qword(0xd8), 0xcccc);
+    assert_eq!(qword(0xe0), 0xdddd);
+    assert_eq!(qword(0xe8), 0xeeee);
+    assert_eq!(qword(0xf0), 0xffff);
+    assert_eq!(qword(0xf8), RETURN_ADDRESS);
+    assert_eq!(qword(0x98), ((STACK_BASE + STACK_SIZE - 0x108) | 8) + 8);
+    assert_eq!(&context[0x1a0..0x1b0], &xmm0);
+    assert_eq!(&context[0x290..0x2a0], &xmm15);
+    assert!(context[0x48..0x78].iter().all(|byte| *byte == 0));
+    assert!(context[0x300..].iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn rtl_capture_context_rejects_null_and_partially_writable_outputs() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_rtl_capture_context(&mut engine.unicorn);
+    assert_eq!(
+        engine.unicorn.get_data().callback_error.as_deref(),
+        Some("RtlCaptureContext output pointer is null")
+    );
+
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_rtl_capture_context(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not fully writable"))
+    );
+
+    let boundary = DATA_BASE + PAGE_SIZE - 0x268;
+    let sentinel = vec![0x5a; 0x268];
+    engine.write(boundary, &sentinel).unwrap();
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, boundary)
+        .unwrap();
+    emulate_rtl_capture_context(&mut engine.unicorn);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("is not fully writable"))
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 0x268).unwrap(),
+        sentinel
+    );
+}
+
+#[test]
+fn get_std_handle_returns_deterministic_synthetic_handles_and_is_library_scoped() {
+    const GET_STD_HANDLE: u64 = STUB_BASE + 0x1b0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_STD_HANDLE,
+            "KERNEL32.DLL",
+            "GetStdHandle",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetStdHandle)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetStdHandle"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    for (selector, expected) in [
+        ((-10i32) as u32, WINDOWS_STANDARD_INPUT_TOKEN),
+        ((-11i32) as u32, WINDOWS_STANDARD_OUTPUT_TOKEN),
+        ((-12i32) as u32, WINDOWS_STANDARD_ERROR_TOKEN),
+    ] {
+        assert_eq!(
+            engine
+                .call_win64(GET_STD_HANDLE, [u64::from(selector), 0, 0, 0, 0, 0])
+                .unwrap(),
+            expected
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    }
+    assert_ne!(WINDOWS_STANDARD_INPUT_TOKEN, WINDOWS_STANDARD_OUTPUT_TOKEN);
+    assert_ne!(WINDOWS_STANDARD_OUTPUT_TOKEN, WINDOWS_STANDARD_ERROR_TOKEN);
+}
+
+#[test]
+fn get_std_handle_rejects_invalid_selector_without_host_handle_leakage() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_get_std_handle(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    let mut second = test_engine(&[0xc3]);
+    second
+        .unicorn
+        .reg_write(RegisterX86::RCX, u64::from((-11i32) as u32))
+        .unwrap();
+    emulate_get_std_handle(&mut second.unicorn);
+    assert_eq!(
+        second.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        WINDOWS_STANDARD_OUTPUT_TOKEN
+    );
+}
+
+#[test]
+fn get_console_mode_models_synthetic_standard_handles_as_redirected() {
+    const GET_CONSOLE_MODE: u64 = STUB_BASE + 0x1b8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_CONSOLE_MODE,
+            "KERNEL32.DLL",
+            "GetConsoleMode",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetConsoleMode)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetConsoleMode"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = DATA_BASE + 0xb00;
+    let sentinel = 0x1234_5678u32.to_le_bytes();
+    engine.write(output, &sentinel).unwrap();
+    for handle in [
+        WINDOWS_STANDARD_INPUT_TOKEN,
+        WINDOWS_STANDARD_OUTPUT_TOKEN,
+        WINDOWS_STANDARD_ERROR_TOKEN,
+    ] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64(GET_CONSOLE_MODE, [handle, output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_HANDLE
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), sentinel);
+    }
+}
+
+#[test]
+fn get_console_mode_rejects_foreign_handles_without_touching_guest_memory() {
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, 0xdead_beef)
+        .unwrap();
+    emulate_get_console_mode(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    for mode_output in [0, 0xdead_beef] {
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RCX, WINDOWS_STANDARD_OUTPUT_TOKEN)
+            .unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RDX, mode_output)
+            .unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        emulate_get_console_mode(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_HANDLE
+        );
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+
+    let boundary = DATA_BASE + PAGE_SIZE - 2;
+    let sentinel = [0x5a, 0xa5];
+    engine.write(boundary, &sentinel).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, WINDOWS_STANDARD_ERROR_TOKEN)
+        .unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, boundary)
+        .unwrap();
+    emulate_get_console_mode(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(boundary, 2).unwrap(),
+        sentinel
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn get_file_type_classifies_synthetic_standard_handles_as_pipes() {
+    const GET_FILE_TYPE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_FILE_TYPE,
+            "KERNEL32.DLL",
+            "GetFileType",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetFileType)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetFileType"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    for handle in [
+        WINDOWS_STANDARD_INPUT_TOKEN,
+        WINDOWS_STANDARD_OUTPUT_TOKEN,
+        WINDOWS_STANDARD_ERROR_TOKEN,
+    ] {
+        engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+        assert_eq!(
+            engine
+                .call_win64(GET_FILE_TYPE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            3
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    }
+}
+
+#[test]
+fn get_file_type_rejects_foreign_handles_without_host_descriptor_access() {
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_get_file_type(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    let mut second = test_engine(&[0xc3]);
+    second
+        .unicorn
+        .reg_write(RegisterX86::RCX, WINDOWS_STANDARD_INPUT_TOKEN)
+        .unwrap();
+    emulate_get_file_type(&mut second.unicorn);
+    assert_eq!(second.unicorn.reg_read(RegisterX86::RAX).unwrap(), 3);
+}
+
+fn call_test_nt_write_file(
+    engine: &mut GuestEngine<'static>,
+    stub: u64,
+    arguments: [u64; 9],
+) -> u64 {
+    engine
+        .call_win64_with_timeout(stub, &arguments, TIMEOUT_MICROSECONDS)
+        .unwrap()
+}
+
+#[test]
+fn nt_write_file_is_ntdll_scoped_and_sinks_stdout_and_stderr_synchronously() {
+    const NT_WRITE_FILE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            NT_WRITE_FILE,
+            "NTDLL.DLL",
+            "NtWriteFile"
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::NtWriteFile)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "NtWriteFile"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let payload = engine.allocate(5, 1).unwrap();
+    engine.write(payload, b"hello").unwrap();
+    let io_status = engine.allocate(16, 8).unwrap();
+    for handle in [WINDOWS_STANDARD_OUTPUT_TOKEN, WINDOWS_STANDARD_ERROR_TOKEN] {
+        engine.write(io_status, &[0xa5; 16]).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+        assert_eq!(
+            call_test_nt_write_file(
+                &mut engine,
+                NT_WRITE_FILE,
+                [handle, 0, 0, 0, io_status, payload, 0x1_0000_0005, 0, 0],
+            ),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(),
+            [0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+}
+
+#[test]
+fn nt_write_file_accepts_zero_length_null_buffer() {
+    const NT_WRITE_FILE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        NT_WRITE_FILE,
+        "ntdll.dll",
+        "NtWriteFile",
+    )
+    .unwrap();
+    let io_status = engine.allocate(16, 8).unwrap();
+    engine.write(io_status, &[0xa5; 16]).unwrap();
+    assert_eq!(
+        call_test_nt_write_file(
+            &mut engine,
+            NT_WRITE_FILE,
+            [WINDOWS_STANDARD_ERROR_TOKEN, 0, 0, 0, io_status, 0, 0, 0, 0],
+        ),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(),
+        [0; 16]
+    );
+}
+
+#[test]
+fn nt_write_file_rejects_handles_and_unsupported_modes_atomically() {
+    const NT_WRITE_FILE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        NT_WRITE_FILE,
+        "ntdll.dll",
+        "NtWriteFile",
+    )
+    .unwrap();
+    let payload = engine.allocate(1, 1).unwrap();
+    engine.write(payload, b"x").unwrap();
+    let io_status = engine.allocate(16, 8).unwrap();
+    let sentinel = [0x5a; 16];
+    for handle in [WINDOWS_STANDARD_INPUT_TOKEN, 0xdead_beef] {
+        engine.write(io_status, &sentinel).unwrap();
+        assert_eq!(
+            call_test_nt_write_file(
+                &mut engine,
+                NT_WRITE_FILE,
+                [handle, 0, 0, 0, io_status, payload, 1, 0, 0],
+            ),
+            0xc000_0008
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(),
+            sentinel
+        );
+    }
+    for arguments in [
+        [
+            WINDOWS_STANDARD_ERROR_TOKEN,
+            1,
+            0,
+            0,
+            io_status,
+            payload,
+            1,
+            0,
+            0,
+        ],
+        [
+            WINDOWS_STANDARD_ERROR_TOKEN,
+            0,
+            1,
+            0,
+            io_status,
+            payload,
+            1,
+            0,
+            0,
+        ],
+        [
+            WINDOWS_STANDARD_ERROR_TOKEN,
+            0,
+            0,
+            1,
+            io_status,
+            payload,
+            1,
+            0,
+            0,
+        ],
+        [
+            WINDOWS_STANDARD_ERROR_TOKEN,
+            0,
+            0,
+            0,
+            io_status,
+            payload,
+            1,
+            1,
+            0,
+        ],
+        [
+            WINDOWS_STANDARD_ERROR_TOKEN,
+            0,
+            0,
+            0,
+            io_status,
+            payload,
+            1,
+            0,
+            1,
+        ],
+        [
+            WINDOWS_STANDARD_ERROR_TOKEN,
+            0,
+            0,
+            0,
+            io_status,
+            payload,
+            1024 * 1024 + 1,
+            0,
+            0,
+        ],
+    ] {
+        engine.write(io_status, &sentinel).unwrap();
+        assert_eq!(
+            call_test_nt_write_file(&mut engine, NT_WRITE_FILE, arguments),
+            0xc000_000d
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(),
+            sentinel
+        );
+    }
+}
+
+#[test]
+fn nt_write_file_preflights_payload_and_io_status_ranges_atomically() {
+    const NT_WRITE_FILE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        NT_WRITE_FILE,
+        "ntdll.dll",
+        "NtWriteFile",
+    )
+    .unwrap();
+    let payload = engine.allocate(8, 1).unwrap();
+    engine.write(payload, b"payload!").unwrap();
+    let io_status = engine.allocate(16, 8).unwrap();
+    let sentinel = [0x7c; 16];
+    for bad_buffer in [0, 0xdead_beef, DATA_BASE + PAGE_SIZE - 4, u64::MAX] {
+        engine.write(io_status, &sentinel).unwrap();
+        assert_eq!(
+            call_test_nt_write_file(
+                &mut engine,
+                NT_WRITE_FILE,
+                [
+                    WINDOWS_STANDARD_ERROR_TOKEN,
+                    0,
+                    0,
+                    0,
+                    io_status,
+                    bad_buffer,
+                    8,
+                    0,
+                    0
+                ],
+            ),
+            0xc000_0005
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(io_status, 16).unwrap(),
+            sentinel
+        );
+    }
+    for bad_output in [0, 0xdead_beef, DATA_BASE + PAGE_SIZE - 8, u64::MAX - 7] {
+        assert_eq!(
+            call_test_nt_write_file(
+                &mut engine,
+                NT_WRITE_FILE,
+                [
+                    WINDOWS_STANDARD_ERROR_TOKEN,
+                    0,
+                    0,
+                    0,
+                    bad_output,
+                    payload,
+                    8,
+                    0,
+                    0
+                ],
+            ),
+            0xc000_0005
+        );
+    }
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+fn write_test_wide_path(engine: &mut GuestEngine<'static>, path: &str) -> u64 {
+    let units = path.encode_utf16().chain(std::iter::once(0));
+    let bytes = units.flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+    let pointer = engine.allocate(bytes.len(), 2).unwrap();
+    engine.write(pointer, &bytes).unwrap();
+    pointer
+}
+
+#[test]
+fn create_file_w_is_kernel32_scoped_and_returns_no_host_handle() {
+    const CREATE_FILE: u64 = STUB_BASE + 0x1c4;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            CREATE_FILE,
+            "KERNEL32.DLL",
+            "CreateFileW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CreateFileW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "CreateFileW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let path = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\model.bin");
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    let result = engine
+        .call_win64_with_timeout(
+            CREATE_FILE,
+            &[path, 0x8000_0000, 1, 0, 3, 0x80, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_eq!(result, u64::MAX);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_FILE_NOT_FOUND
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn create_file_w_denies_traversal_device_unc_and_write_paths() {
+    let mut engine = test_engine(&[0xc3]);
+    for (path, access, disposition) in [
+        (r"C:\AEXCompat\assets\..\..\secret.txt", 0x8000_0000, 3),
+        (r"\\server\share\secret.txt", 0x8000_0000, 3),
+        (r"\\.\PhysicalDrive0", 0x8000_0000, 3),
+        (r"C:\AEXCompat\assets\output.bin", 0x4000_0000, 3),
+        (r"C:\AEXCompat\assets\output.bin", 0x8000_0000, 2),
+    ] {
+        let pointer = write_test_wide_path(&mut engine, path);
+        engine.unicorn.reg_write(RegisterX86::RCX, pointer).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, access).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, 1).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R9, 0).unwrap();
+        let rsp = STACK_BASE + STACK_SIZE - 0x108 | 8;
+        engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+        for (index, value) in [disposition as u64, 0x80, 0].into_iter().enumerate() {
+            engine
+                .write(rsp + 0x28 + (index as u64 * 8), &value.to_le_bytes())
+                .unwrap();
+        }
+        emulate_create_file_w(&mut engine.unicorn);
+        assert_eq!(
+            engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            u64::MAX,
+            "{path}"
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_ACCESS_DENIED,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn create_file_w_validates_disposition_and_share() {
+    let mut engine = test_engine(&[0xc3]);
+    let pointer = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\model.bin");
+    for args in [[pointer, 0x8000_0000, 8, 0, 3, 0x80, 0]] {
+        engine.unicorn.reg_write(RegisterX86::RCX, args[0]).unwrap();
+        engine.unicorn.reg_write(RegisterX86::RDX, args[1]).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R8, args[2]).unwrap();
+        engine.unicorn.reg_write(RegisterX86::R9, args[3]).unwrap();
+        let rsp = STACK_BASE + STACK_SIZE - 0x108 | 8;
+        engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+        for (index, value) in args[4..].iter().copied().enumerate() {
+            engine
+                .write(rsp + 0x28 + index as u64 * 8, &value.to_le_bytes())
+                .unwrap();
+        }
+        emulate_create_file_w(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+    }
+}
+
+#[test]
+fn create_file_w_ignores_legal_optional_arguments_for_missing_open_existing_path() {
+    const CREATE_FILE: u64 = STUB_BASE + 0x1c4;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CREATE_FILE,
+        "kernel32.dll",
+        "CreateFileW",
+    )
+    .unwrap();
+    let pointer = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\missing.bin");
+    for (security_attributes, template_file) in [(0xdead_beef, 0), (0, 0xdead_beef), (1, 2)] {
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    CREATE_FILE,
+                    &[
+                        pointer,
+                        0x8000_0000,
+                        1,
+                        security_attributes,
+                        3,
+                        0x80,
+                        template_file,
+                    ],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_FILE_NOT_FOUND
+        );
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+}
+
+#[test]
+fn create_file_w_treats_null_as_api_failure_but_aborts_on_unreadable_non_null_path() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    emulate_create_file_w(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_PATH_NOT_FOUND
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_create_file_w(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not fully readable"))
+    );
+}
+
+#[test]
+fn create_file_w_distinguishes_maximum_and_over_limit_readable_paths() {
+    const CREATE_FILE: u64 = STUB_BASE + 0x1c4;
+    const MAX_PATH_UNITS: usize = 32_767;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CREATE_FILE,
+        "kernel32.dll",
+        "CreateFileW",
+    )
+    .unwrap();
+    engine
+        .unicorn
+        .mem_map(DATA_BASE + PAGE_SIZE, 0x1_0000, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let path = DATA_BASE + 0x800;
+
+    for (non_nul_units, expected_error) in [
+        (MAX_PATH_UNITS, ERROR_FILE_NOT_FOUND),
+        (MAX_PATH_UNITS + 1, ERROR_FILENAME_EXCED_RANGE),
+    ] {
+        let mut bytes = Vec::with_capacity((non_nul_units + 1) * 2);
+        for _ in 0..non_nul_units {
+            bytes.extend_from_slice(&u16::from(b'a').to_le_bytes());
+        }
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        engine.write(path, &bytes).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    CREATE_FILE,
+                    &[path, 0x8000_0000, 1, 0, 3, 0x80, 0],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap(),
+            u64::MAX
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, expected_error);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
+}
+
+#[test]
+fn get_command_line_a_returns_stable_writable_guest_owned_storage() {
+    const GET_COMMAND_LINE: u64 = STUB_BASE + 0x1c8;
+    const COMMAND_LINE: &[u8] = b"\"aex-guest-worker.exe\"\0";
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_COMMAND_LINE,
+            "KERNEL32.DLL",
+            "GetCommandLineA",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetCommandLineA)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetCommandLineA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    initialize_windows_command_line_a(&mut engine).unwrap();
+    let command_line = engine.unicorn.get_data().windows_command_line_a;
+    for _ in 0..2 {
+        assert_eq!(
+            engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(),
+            command_line
+        );
+    }
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(command_line, COMMAND_LINE.len())
+            .unwrap(),
+        COMMAND_LINE
+    );
+    engine.write(command_line + 1, b"A").unwrap();
+    assert_eq!(
+        engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(),
+        command_line
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(command_line + 1, 1).unwrap(),
+        b"A"
+    );
+}
+
+#[test]
+fn get_command_line_a_is_session_local_and_fails_closed_if_uninitialized() {
+    const COMMAND_LINE: &[u8] = b"\"aex-guest-worker.exe\"\0";
+    let mut first = test_engine(&[0xc3]);
+    initialize_windows_command_line_a(&mut first).unwrap();
+    let first_pointer = first.unicorn.get_data().windows_command_line_a;
+    first.write(first_pointer + 1, b"X").unwrap();
+
+    let mut second = test_engine(&[0xc3]);
+    initialize_windows_command_line_a(&mut second).unwrap();
+    let second_pointer = second.unicorn.get_data().windows_command_line_a;
+    emulate_get_command_line_a(&mut second.unicorn);
+    assert_eq!(
+        second.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        second_pointer
+    );
+    assert_eq!(
+        second
+            .unicorn
+            .mem_read_as_vec(second_pointer, COMMAND_LINE.len())
+            .unwrap(),
+        COMMAND_LINE
+    );
+
+    let mut uninitialized = test_engine(&[0xc3]);
+    emulate_get_command_line_a(&mut uninitialized.unicorn);
+    assert_eq!(uninitialized.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        uninitialized.unicorn.get_data().callback_error.as_deref(),
+        Some("GetCommandLineA process string is not initialized")
+    );
+}
+
+#[test]
+fn get_command_line_w_returns_stable_aligned_writable_guest_storage() {
+    const GET_COMMAND_LINE: u64 = STUB_BASE + 0x1d0;
+    let mut expected = Vec::new();
+    for unit in "\"aex-guest-worker.exe\""
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
+        expected.extend_from_slice(&unit.to_le_bytes());
+    }
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_COMMAND_LINE,
+            "KERNEL32.DLL",
+            "GetCommandLineW",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetCommandLineW)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetCommandLineW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    initialize_windows_command_line_w(&mut engine).unwrap();
+    let pointer = engine.unicorn.get_data().windows_command_line_w;
+    assert_eq!(pointer % 2, 0);
+    for _ in 0..2 {
+        assert_eq!(
+            engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(),
+            pointer
+        );
+    }
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(pointer, expected.len())
+            .unwrap(),
+        expected
+    );
+    engine
+        .write(pointer + 2, &('A' as u16).to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(),
+        pointer
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(pointer + 2, 2).unwrap(),
+        ('A' as u16).to_le_bytes()
+    );
+}
+
+#[test]
+fn get_command_line_w_is_session_local_and_fails_closed_if_uninitialized() {
+    let mut first = test_engine(&[0xc3]);
+    initialize_windows_command_line_w(&mut first).unwrap();
+    let first_pointer = first.unicorn.get_data().windows_command_line_w;
+    first
+        .write(first_pointer + 2, &('X' as u16).to_le_bytes())
+        .unwrap();
+
+    let mut second = test_engine(&[0xc3]);
+    initialize_windows_command_line_w(&mut second).unwrap();
+    let second_pointer = second.unicorn.get_data().windows_command_line_w;
+    emulate_get_command_line_w(&mut second.unicorn);
+    assert_eq!(
+        second.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        second_pointer
+    );
+    assert_eq!(
+        second
+            .unicorn
+            .mem_read_as_vec(second_pointer + 2, 2)
+            .unwrap(),
+        ('a' as u16).to_le_bytes()
+    );
+
+    let mut uninitialized = test_engine(&[0xc3]);
+    emulate_get_command_line_w(&mut uninitialized.unicorn);
+    assert_eq!(uninitialized.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        uninitialized.unicorn.get_data().callback_error.as_deref(),
+        Some("GetCommandLineW process string is not initialized")
+    );
+}
+
+#[test]
+fn get_acp_is_deterministic_cp932_and_matches_cp_acp_conversion() {
+    const GET_ACP: u64 = STUB_BASE + 0x1d8;
+    const CONVERT: u64 = STUB_BASE + 0x1e0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(&mut engine.unicorn, GET_ACP, "KERNEL32.DLL", "GetACP").unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetACP)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetACP"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RAX, u64::MAX)
+        .unwrap();
+    assert_eq!(engine.call_win64(GET_ACP, [u64::MAX; 6]).unwrap(), 932);
+    assert_eq!(engine.call_win64(GET_ACP, [0; 6]).unwrap(), 932);
+
+    install_win64_import(
+        &mut engine.unicorn,
+        CONVERT,
+        "kernel32.dll",
+        "WideCharToMultiByte",
+    )
+    .unwrap();
+    let source = DATA_BASE + 0xd00;
+    let output = DATA_BASE + 0xd20;
+    engine.write(source, &0x3042u16.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CONVERT,
+                &[0, 0, source, 1, output, 2, 0, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 2).unwrap(),
+        [0x82, 0xa0]
+    );
+
+    let mut second = test_engine(&[0xc3]);
+    install_win64_import(&mut second.unicorn, GET_ACP, "kernel32.dll", "GetACP").unwrap();
+    assert_eq!(second.call_win64(GET_ACP, [0; 6]).unwrap(), 932);
+}
+
+#[test]
+fn get_cp_info_reports_cp932_and_rejects_invalid_outputs_atomically() {
+    const GET_CP_INFO: u64 = STUB_BASE + 0x1e8;
+    const EXPECTED: [u8; 20] = [
+        2, 0, 0, 0, b'?', 0, 0x81, 0x9f, 0xe0, 0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_CP_INFO,
+            "KERNEL32.DLL",
+            "GetCPInfo",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetCPInfo)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetCPInfo"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = DATA_BASE + 0xe00;
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RAX, u64::MAX)
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [0, output, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    engine.write(output, &[0xaa; 20]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [932, output, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
+
+    engine.unicorn.get_data_mut().windows_last_error = 0;
+    assert_eq!(
+        engine
+            .call_win64(GET_CP_INFO, [65001, output, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 20).unwrap(),
+        EXPECTED
+    );
+
+    for bad_output in [0, 0xdead_beef] {
+        engine.unicorn.get_data_mut().callback_error = None;
+        engine.unicorn.reg_write(RegisterX86::RCX, 932).unwrap();
+        engine
+            .unicorn
+            .reg_write(RegisterX86::RDX, bad_output)
+            .unwrap();
+        emulate_get_cp_info(&mut engine.unicorn);
+        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+        assert!(engine.unicorn.get_data().callback_error.is_some());
+    }
+
+    let crossing = DATA_BASE + PAGE_SIZE - 10;
+    engine.write(crossing, &[0x5a; 10]).unwrap();
+    engine.unicorn.get_data_mut().callback_error = None;
+    engine.unicorn.reg_write(RegisterX86::RCX, 932).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RDX, crossing)
+        .unwrap();
+    emulate_get_cp_info(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 10).unwrap(),
+        [0x5a; 10]
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not fully writable"))
+    );
+}
+
+#[test]
+fn is_debugger_present_is_false_deterministic_and_library_scoped() {
+    const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            IS_DEBUGGER_PRESENT,
+            "kernel32.dll",
+            "IsDebuggerPresent",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::IsDebuggerPresent)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "IsDebuggerPresent"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        engine
+            .call_win64(IS_DEBUGGER_PRESENT, [u64::MAX; 6])
+            .unwrap(),
+        0
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn issue1347_create_thread_runs_bounded_guest_callback_and_completes_handle() {
+    const CREATE: u64 = STUB_BASE + 0x1a0;
+    const WAIT: u64 = STUB_BASE + 0x1b0;
+    const CLOSE: u64 = STUB_BASE + 0x1c0;
+    // mov [rcx], rsp; mov eax, 42; ret
+    let mut engine = test_engine(&[0x48, 0x89, 0x21, 0xb8, 42, 0, 0, 0, 0xc3]);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let mut caller_teb_stack = [0u8; 16];
+    caller_teb_stack[0..8].copy_from_slice(&(STACK_BASE + STACK_SIZE).to_le_bytes());
+    caller_teb_stack[8..16].copy_from_slice(&STACK_BASE.to_le_bytes());
+    engine.unicorn.mem_write(0x08, &caller_teb_stack).unwrap();
+    for (address, symbol) in [
+        (CREATE, "CreateThread"),
+        (WAIT, "WaitForSingleObject"),
+        (CLOSE, "CloseHandle"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    let parameter = DATA_BASE + 0x300;
+    let thread_id = DATA_BASE + 0x320;
+    engine
+        .unicorn
+        .get_data_mut()
+        .windows_tls_slots
+        .insert(3, 0xaaaa);
+    engine.unicorn.get_data_mut().windows_fls_slots.insert(
+        4,
+        WindowsFlsSlot {
+            callback: 0,
+            value: 0xbbbb,
+        },
+    );
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    let handle = engine
+        .call_win64_with_timeout(
+            CREATE,
+            &[0, STACK_SIZE, TEST_CODE, parameter, 0x1_0000, thread_id],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_ne!(handle, 0);
+    let callback_rsp = u64::from_le_bytes(
+        engine
+            .unicorn
+            .mem_read_as_vec(parameter, 8)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    assert!(
+        (WINDOWS_THREAD_STACK_BASE..WINDOWS_THREAD_STACK_BASE + STACK_SIZE).contains(&callback_rsp)
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(thread_id, 4).unwrap(),
+        2u32.to_le_bytes()
+    );
+    let thread = engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .unwrap();
+    assert!(thread.completed);
+    assert_eq!(thread.exit_code, 42);
+    assert!(!thread.stack_mapped);
+    assert!(engine.unicorn.mem_read_as_vec(callback_rsp, 1).is_err());
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(0x08, 16).unwrap(),
+        caller_teb_stack
+    );
+    assert_eq!(
+        engine.unicorn.reg_read(RegisterX86::RSP).unwrap(),
+        (((STACK_BASE + STACK_SIZE) - 0x108) | 8) + 8
+    );
+    assert_eq!(engine.unicorn.get_data().current_windows_thread_id, 1);
+    assert_eq!(
+        engine.unicorn.get_data().windows_tls_slots.get(&3),
+        Some(&0xaaaa)
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_fls_slots
+            .get(&4)
+            .unwrap()
+            .value,
+        0xbbbb
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(
+        engine
+            .call_win64(WAIT, [handle, u32::MAX as u64, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.call_win64(CLOSE, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .contains_key(&handle)
+    );
+}
+
+#[test]
+fn issue1347_suspended_thread_times_out_then_resume_runs_once() {
+    const CREATE: u64 = STUB_BASE + 0x1d0;
+    const RESUME: u64 = STUB_BASE + 0x1e0;
+    const WAIT_EX: u64 = STUB_BASE + 0x1f0;
+    // inc qword ptr [rcx]; mov eax, 7; ret
+    let mut engine = test_engine(&[0x48, 0xff, 0x01, 0xb8, 7, 0, 0, 0, 0xc3]);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (address, symbol) in [
+        (CREATE, "CreateThread"),
+        (RESUME, "ResumeThread"),
+        (WAIT_EX, "WaitForSingleObjectEx"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    let parameter = DATA_BASE + 0x340;
+    let handle = engine
+        .call_win64_with_timeout(
+            CREATE,
+            &[0, PAGE_SIZE * 3, TEST_CODE, parameter, 4 | 0x1_0000, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    let thread = engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .unwrap();
+    assert_eq!(thread.stack_size, PAGE_SIZE * 3);
+    assert!(thread.stack_mapped);
+    assert_eq!(
+        engine.call_win64(WAIT_EX, [handle, 0, 1, 0, 0, 0]).unwrap(),
+        258
+    );
+    assert_eq!(
+        engine.call_win64(RESUME, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(parameter, 8).unwrap(),
+        1u64.to_le_bytes()
+    );
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .get(&handle)
+            .unwrap()
+            .stack_mapped
+    );
+    assert_eq!(
+        engine.call_win64(RESUME, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(parameter, 8).unwrap(),
+        1u64.to_le_bytes()
+    );
+    assert_eq!(
+        engine.call_win64(WAIT_EX, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn issue1347_close_suspended_handle_succeeds_and_stack_is_session_owned() {
+    const CREATE: u64 = STUB_BASE + 0x210;
+    const CLOSE: u64 = STUB_BASE + 0x220;
+    const WAIT: u64 = STUB_BASE + 0x230;
+    let mut first = test_engine(&[0xc3]);
+    first
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (address, symbol) in [
+        (CREATE, "CreateThread"),
+        (CLOSE, "CloseHandle"),
+        (WAIT, "WaitForSingleObject"),
+    ] {
+        install_win64_import(&mut first.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    let handle = first
+        .call_win64_with_timeout(
+            CREATE,
+            &[0, PAGE_SIZE, TEST_CODE, 0, 4 | 0x1_0000, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_eq!(first.call_win64(CLOSE, [handle, 0, 0, 0, 0, 0]).unwrap(), 1);
+    let thread = first
+        .unicorn
+        .get_data()
+        .windows_threads
+        .get(&handle)
+        .unwrap();
+    assert!(!thread.handle_open);
+    assert!(thread.stack_mapped);
+    assert_eq!(
+        first.call_win64(WAIT, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        u32::MAX as u64
+    );
+    assert_eq!(
+        first.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+
+    drop(first);
+    let mut second = test_engine(&[0xc3]);
+    second
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    install_win64_import(&mut second.unicorn, CREATE, "kernel32.dll", "CreateThread").unwrap();
+    let second_handle = second
+        .call_win64_with_timeout(
+            CREATE,
+            &[0, PAGE_SIZE, TEST_CODE, 0, 4 | 0x1_0000, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_eq!(
+        second
+            .unicorn
+            .get_data()
+            .windows_threads
+            .get(&second_handle)
+            .unwrap()
+            .stack_base,
+        WINDOWS_THREAD_STACK_BASE
+    );
+}
+
+#[test]
+fn issue1347_thread_stack_slots_are_unique_bounded_and_report_exhaustion() {
+    const CREATE: u64 = STUB_BASE + 0x238;
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    install_win64_import(&mut engine.unicorn, CREATE, "kernel32.dll", "CreateThread").unwrap();
+    let mut bases = BTreeSet::new();
+    for _ in 0..32 {
+        let handle = engine
+            .call_win64_with_timeout(
+                CREATE,
+                &[0, PAGE_SIZE, TEST_CODE, 0, 4 | 0x1_0000, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap();
+        let thread = engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .get(&handle)
+            .unwrap();
+        assert_eq!(thread.stack_size, PAGE_SIZE);
+        assert!(thread.stack_mapped);
+        assert!(bases.insert(thread.stack_base));
+    }
+    assert_eq!(bases.len(), 32);
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                CREATE,
+                &[0, PAGE_SIZE, TEST_CODE, 0, 4 | 0x1_0000, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 8);
+}
+
+#[test]
+fn issue1347_thread_exit_runs_installed_fls_destructor_repeat_passes() {
+    const FLS_ALLOC: u64 = STUB_BASE + 0x240;
+    const FLS_SET: u64 = STUB_BASE + 0x250;
+    const CREATE: u64 = STUB_BASE + 0x260;
+    const DESTRUCTOR_OFFSET: usize = 0x80;
+    let value_output = DATA_BASE + 0x380;
+    let count_output = DATA_BASE + 0x388;
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, 0xb9, 0, 0, 0, 0, 0xba, 0x34, 0x12, 0, 0,
+    ];
+    push_mov_imm64(&mut code, [0x48, 0xb8], FLS_SET);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0x31, 0xc0, 0xc3]);
+    code.resize(DESTRUCTOR_OFFSET, 0x90);
+    push_mov_imm64(&mut code, [0x48, 0xb8], value_output);
+    code.extend_from_slice(&[0x48, 0x89, 0x08]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], count_output);
+    code.extend_from_slice(&[0x48, 0xff, 0x00, 0x48, 0x83, 0x38, 0x02, 0x73, 0]);
+    let jump_displacement = code.len() - 1;
+    code.extend_from_slice(&[
+        0x48, 0x83, 0xec, 0x28, 0xb9, 0, 0, 0, 0, 0xba, 0x78, 0x56, 0, 0,
+    ]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], FLS_SET);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28]);
+    let destructor_return = code.len();
+    code.push(0xc3);
+    code[jump_displacement] = u8::try_from(destructor_return - jump_displacement - 1).unwrap();
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (address, symbol) in [
+        (FLS_ALLOC, "FlsAlloc"),
+        (FLS_SET, "FlsSetValue"),
+        (CREATE, "CreateThread"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    let destructor = TEST_CODE + DESTRUCTOR_OFFSET as u64;
+    assert_eq!(
+        engine
+            .call_win64(FLS_ALLOC, [destructor, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let handle = engine
+        .call_win64_with_timeout(CREATE, &[0, 0, TEST_CODE, 0, 0, 0], TIMEOUT_MICROSECONDS)
+        .unwrap();
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .get(&handle)
+            .unwrap()
+            .completed
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(count_output, 8).unwrap(),
+        2u64.to_le_bytes()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(value_output, 8).unwrap(),
+        0x5678u64.to_le_bytes()
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_fls_slots
+            .get(&0)
+            .unwrap()
+            .value,
+        0
+    );
+}
+
+#[test]
+fn issue1347_create_thread_rejects_unbounded_or_non_image_execution() {
+    const CREATE: u64 = STUB_BASE + 0x200;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, CREATE, "kernel32.dll", "CreateThread").unwrap();
+    for args in [
+        [0, STACK_SIZE + 1, TEST_CODE, 0, 0, 0],
+        [0, 0, DATA_BASE, 0, 0, 0],
+        [1, 0, TEST_CODE, 0, 0, 0],
+        [0, 0, TEST_CODE, 0, 0x8000_0000, 0],
+        [0, 0, TEST_CODE, 0, 0, 0xdead_beef],
+    ] {
+        let error = engine
+            .call_win64_with_timeout(CREATE, &args, TIMEOUT_MICROSECONDS)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("CreateThread"), "{error}");
+        assert!(engine.unicorn.get_data().windows_threads.is_empty());
+    }
+}
+
+#[test]
+fn issue1347_create_thread_rejects_bad_caller_return_before_allocating() {
+    let mut engine = test_engine(&[0xc3]);
+    let rsp = STACK_BASE + 0x100;
+    let thread_id = DATA_BASE + 0x380;
+    engine
+        .unicorn
+        .mem_write(rsp, &0xdead_beefu64.to_le_bytes())
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(rsp + 0x28, &0u64.to_le_bytes())
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(rsp + 0x30, &thread_id.to_le_bytes())
+        .unwrap();
+    engine.unicorn.mem_write(thread_id, &[0xaa; 4]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::R8, TEST_CODE)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::R9, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+
+    emulate_create_thread(&mut engine.unicorn);
+
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("caller return"))
+    );
+    assert!(engine.unicorn.get_data().windows_threads.is_empty());
+    assert_eq!(engine.unicorn.get_data().next_windows_thread_id, 2);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(thread_id, 4).unwrap(),
+        [0xaa; 4]
+    );
+    assert!(
+        engine
+            .unicorn
+            .mem_read_as_vec(WINDOWS_THREAD_STACK_BASE, 1)
+            .is_err()
+    );
+}
+
+#[test]
+fn issue1347_create_thread_stack_map_failure_does_not_commit_outputs() {
+    let mut engine = test_engine(&[0xc3]);
+    let rsp = STACK_BASE + 0x100;
+    let thread_id = DATA_BASE + 0x380;
+    engine
+        .unicorn
+        .mem_map(
+            WINDOWS_THREAD_STACK_BASE,
+            PAGE_SIZE,
+            Prot::READ | Prot::WRITE,
+        )
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(rsp, &RETURN_ADDRESS.to_le_bytes())
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(rsp + 0x28, &0u64.to_le_bytes())
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(rsp + 0x30, &thread_id.to_le_bytes())
+        .unwrap();
+    engine.unicorn.mem_write(thread_id, &[0xaa; 4]).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::R8, TEST_CODE)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::R9, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+
+    emulate_create_thread(&mut engine.unicorn);
+
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("stack map failed"))
+    );
+    assert!(engine.unicorn.get_data().windows_threads.is_empty());
+    assert_eq!(engine.unicorn.get_data().next_windows_thread_id, 2);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(thread_id, 4).unwrap(),
+        [0xaa; 4]
+    );
+}
+
+#[test]
+fn issue1347_create_thread_does_not_validate_output_against_its_new_stack() {
+    let mut engine = test_engine(&[0xc3]);
+    let rsp = STACK_BASE + 0x100;
+    engine
+        .unicorn
+        .mem_write(rsp, &RETURN_ADDRESS.to_le_bytes())
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(rsp + 0x28, &0u64.to_le_bytes())
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(rsp + 0x30, &WINDOWS_THREAD_STACK_BASE.to_le_bytes())
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::R8, TEST_CODE)
+        .unwrap();
+    engine.unicorn.reg_write(RegisterX86::R9, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
+
+    emulate_create_thread(&mut engine.unicorn);
+
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not fully writable"))
+    );
+    assert!(engine.unicorn.get_data().windows_threads.is_empty());
+    assert_eq!(engine.unicorn.get_data().next_windows_thread_id, 2);
+    assert!(
+        engine
+            .unicorn
+            .mem_read_as_vec(WINDOWS_THREAD_STACK_BASE, 1)
+            .is_err()
     );
 }
 
@@ -3814,6 +8026,99 @@ fn fls_allocation_rejects_nonexecutable_callbacks_and_capacity_overflow() {
 }
 
 #[test]
+fn tls_lifecycle_is_bounded_stateful_and_library_scoped() {
+    const ALLOC: u64 = STUB_BASE + 0x540;
+    const GET: u64 = STUB_BASE + 0x550;
+    const SET: u64 = STUB_BASE + 0x560;
+    const FREE: u64 = STUB_BASE + 0x570;
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, symbol) in [
+        (ALLOC, "TlsAlloc"),
+        (GET, "TlsGetValue"),
+        (SET, "TlsSetValue"),
+        (FREE, "TlsFree"),
+    ] {
+        assert!(matches!(
+            install_win64_import(&mut engine.unicorn, stub, "KERNEL32.DLL", symbol).unwrap(),
+            Win64ImportDispatch::LegacyImplemented(_)
+        ));
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    let index = engine.call_win64(ALLOC, [0; 6]).unwrap();
+    assert_eq!(index, 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0);
+
+    let value = 0x1234_5678_9abc_def0;
+    engine.unicorn.get_data_mut().windows_last_error = 0x5678;
+    assert_eq!(
+        engine.call_win64(SET, [index, value, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x5678);
+    assert_eq!(
+        engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(),
+        value
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0);
+
+    engine.unicorn.get_data_mut().windows_last_error = 0x9abc;
+    assert_eq!(engine.call_win64(FREE, [index, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x9abc);
+    assert_eq!(engine.call_win64(GET, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(engine.call_win64(SET, [index, 1, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert_eq!(engine.call_win64(FREE, [index, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_PARAMETER
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn tls_allocation_reuses_indices_enforces_capacity_and_is_session_local() {
+    let mut first = test_engine(&[0xc3]);
+    for expected in 0..MAX_WINDOWS_TLS_SLOTS {
+        emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsAlloc);
+        assert_eq!(
+            first.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            u64::from(expected)
+        );
+    }
+    emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsAlloc);
+    assert_eq!(
+        first.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(first.unicorn.get_data().windows_last_error, 8);
+
+    first.unicorn.reg_write(RegisterX86::RCX, 5).unwrap();
+    emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsFree);
+    assert_eq!(first.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+    emulate_tls(&mut first.unicorn, LegacyWin64Import::TlsAlloc);
+    assert_eq!(first.unicorn.reg_read(RegisterX86::RAX).unwrap(), 5);
+
+    let mut second = test_engine(&[0xc3]);
+    emulate_tls(&mut second.unicorn, LegacyWin64Import::TlsAlloc);
+    assert_eq!(second.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(second.unicorn.get_data().windows_tls_slots.len(), 1);
+}
+
+#[test]
 fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
     let crt_math = "api-ms-win-crt-math-l1-1-0.dll";
     assert_eq!(
@@ -3916,6 +8221,70 @@ fn win64_crt_lround_uses_xmm0_f64_and_returns_a_windows_long_in_eax() {
             .iter()
             .any(|call| call.starts_with("lround("))
     );
+}
+
+#[test]
+fn win64_crt_round_floor_ceil_family_uses_xmm0_and_preserves_edges() {
+    const ROUND: u64 = STUB_BASE + 0x1a0;
+    const FLOOR: u64 = STUB_BASE + 0x1b0;
+    const CEIL: u64 = STUB_BASE + 0x1c0;
+    const ROUNDF: u64 = STUB_BASE + 0x1d0;
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, symbol, expected) in [
+        (ROUND, "round", LegacyWin64Import::Round),
+        (FLOOR, "floor", LegacyWin64Import::Floor),
+        (CEIL, "ceil", LegacyWin64Import::Ceil),
+        (ROUNDF, "roundf", LegacyWin64Import::RoundF),
+    ] {
+        engine.unicorn.mem_write(stub, &[0xc3]).unwrap();
+        assert_eq!(
+            install_win64_import(
+                &mut engine.unicorn,
+                stub,
+                "api-ms-win-crt-math-l1-1-0.dll",
+                symbol,
+            )
+            .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(expected)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+
+    let call_f64 = |engine: &mut GuestEngine<'static>, stub, value: f64| {
+        let mut xmm0 = [0xa5; 16];
+        xmm0[..8].copy_from_slice(&value.to_le_bytes());
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm0)
+            .unwrap();
+        engine.call_win64(stub, [0; 6]).unwrap();
+        let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        assert_eq!(&result[8..], &[0xa5; 8]);
+        f64::from_le_bytes(result[..8].try_into().unwrap())
+    };
+    assert_eq!(call_f64(&mut engine, ROUND, 1.5), 2.0);
+    assert_eq!(call_f64(&mut engine, ROUND, -1.5), -2.0);
+    assert_eq!(call_f64(&mut engine, FLOOR, -1.25), -2.0);
+    assert_eq!(call_f64(&mut engine, CEIL, -1.25), -1.0);
+    assert_eq!(
+        call_f64(&mut engine, ROUND, -0.0).to_bits(),
+        (-0.0f64).to_bits()
+    );
+    assert!(call_f64(&mut engine, ROUND, f64::NAN).is_nan());
+    assert_eq!(call_f64(&mut engine, FLOOR, f64::INFINITY), f64::INFINITY);
+
+    let mut xmm0 = [0x5a; 16];
+    xmm0[..4].copy_from_slice(&(-2.5f32).to_le_bytes());
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::XMM0, &xmm0)
+        .unwrap();
+    engine.call_win64(ROUNDF, [0; 6]).unwrap();
+    let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+    assert_eq!(f32::from_le_bytes(result[..4].try_into().unwrap()), -3.0);
 }
 
 #[test]
@@ -5769,6 +10138,61 @@ fn smart_checkout_resolves_declared_secondary_layer_definition_and_owns_token() 
     );
     assert!(!engine.finish_smart_checkout_scope());
     assert!(engine.unicorn.get_data().smart_checkout_ids.is_empty());
+}
+
+#[test]
+fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
+    let mut engine = test_engine(&[0xc3]);
+    let input_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let output_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let input_definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+    let layer_definition = engine.allocate(abi::PF_PARAM_DEF_SIZE, 8).unwrap();
+    let input_pixels = engine.allocate(4 * 3 * 4, 8).unwrap();
+    let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+    world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+        .copy_from_slice(&input_pixels.to_le_bytes());
+    world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+        .copy_from_slice(&16i32.to_le_bytes());
+    world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+        .copy_from_slice(&4i32.to_le_bytes());
+    world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+        .copy_from_slice(&3i32.to_le_bytes());
+    engine.write(input_world, &world).unwrap();
+    engine
+        .write(layer_definition, &vec![0; abi::PF_PARAM_DEF_SIZE])
+        .unwrap();
+    engine.unicorn.get_data_mut().params.push(GuestParam {
+        index: 1,
+        param_type: 0,
+        name: "Optional Map".into(),
+        bytes: vec![0; abi::PF_PARAM_DEF_SIZE],
+    });
+    engine
+        .configure_parameter_definitions(input_definition, vec![layer_definition])
+        .unwrap();
+    engine.configure_smart_render(
+        input_world,
+        output_world,
+        4,
+        3,
+        crate::pixel::PF_PIXEL_FORMAT_ARGB32,
+        0,
+        1,
+    );
+
+    assert_eq!(
+        smart_checkout_world(&engine.unicorn, 1).unwrap(),
+        (input_world, 4, 3)
+    );
+
+    engine
+        .write(
+            layer_definition + abi::PARAM_U_OFFSET as u64 + abi::LAYER_WORLD_FLAGS_OFFSET as u64,
+            &1i32.to_le_bytes(),
+        )
+        .unwrap();
+    let error = smart_checkout_world(&engine.unicorn, 1).unwrap_err();
+    assert!(error.contains("invalid smart checkout world"), "{error}");
 }
 
 #[test]

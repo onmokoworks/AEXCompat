@@ -80,14 +80,45 @@ class ForceGpuRetryScope {
   ForceGpuRetryScope& operator=(const ForceGpuRetryScope&) = delete;
 };
 
+// Premiere GPU-filter fallback (issue #1271): a plug-in that exports
+// xGPUFilterEntry and answers PF_Err 512 from CPU SMART_RENDER in an 8/16bpc
+// session only implements the GPU path (the VR family; the CPU path just draws
+// a "requires GPU acceleration" notice). The export alone does not separate
+// those from effects whose PF CPU path works (Levels2, Box_Blur, Lumetri and
+// others export it too), so the runtime 512 is the signal. When the frame loop
+// sees it, it sets this flag and re-runs the frame, which lets the smart
+// dispatch take the Premiere GPU-filter route at the session depth. Float32
+// sessions take that route first and never need the flag. Thread-local like
+// the GPU retry flag above, with the same RAII holder shape.
+void set_force_pr_gpu_retry(bool, int32_t cause);
+bool force_pr_gpu_retry_requested();
+// The PF CPU path's own refusal that sent this frame to the GPU route, or 0
+// when the route was offered for another reason (a float32 plan, a
+// gpu_*_float32 case). It rides on the route's `stage:pr_gpu_route_begin`
+// line so a `rendered` verdict still names the refusal it replaced: the
+// route's own `_end reason=committed` says the frame came from the GPU, and
+// nothing else in a default report would say the CPU path had been turned
+// away (issue #1283).
+int32_t pr_gpu_retry_cause();
+
+class ForcePrGpuRetryScope {
+ public:
+  explicit ForcePrGpuRetryScope(int32_t cause) {
+    set_force_pr_gpu_retry(true, cause);
+  }
+  ~ForcePrGpuRetryScope() { set_force_pr_gpu_retry(false, 0); }
+  ForcePrGpuRetryScope(const ForcePrGpuRetryScope&) = delete;
+  ForcePrGpuRetryScope& operator=(const ForcePrGpuRetryScope&) = delete;
+};
+
 struct WorldBuffers {
   render_safety::InputPixelBuffer* source{};
   render_safety::OutputPixelBuffer* output{};
   unsigned char** destination{};
-  std::array<std::byte, 120>* input_world{};
-  std::array<std::byte, 120>* output_world{};
-  std::array<std::byte, 120>* input_checkout_view{};
-  std::array<std::byte, 120>* map_checkout_view{};
+  aexcompat::world_safety::EffectWorldStorage* input_world{};
+  aexcompat::world_safety::EffectWorldStorage* output_world{};
+  aexcompat::world_safety::EffectWorldStorage* input_checkout_view{};
+  aexcompat::world_safety::EffectWorldStorage* map_checkout_view{};
   world_safety::DispatchWorldFormatScope* formats{};
   render::MapWorld* map{};
 };
@@ -108,8 +139,8 @@ struct ParameterState {
   ~ParameterState();
   parameter_execution::Definitions definitions;
   std::vector<std::vector<unsigned char>> hosted_pixels;
-  std::vector<std::array<std::byte, 120>> hosted_worlds;
-  std::vector<std::array<std::byte, 120>> hosted_view_worlds;
+  std::vector<aexcompat::world_safety::EffectWorldStorage> hosted_worlds;
+  std::vector<aexcompat::world_safety::EffectWorldStorage> hosted_view_worlds;
   std::vector<void*> params;
   std::vector<unsigned char> pre_render_source;
 };
@@ -129,7 +160,7 @@ struct ParameterRequest {
   int32_t full_resolution_width{};
   int32_t full_resolution_height{};
   int32_t dispatch_pixel_format{};
-  std::array<std::byte, 120>* input_world{};
+  aexcompat::world_safety::EffectWorldStorage* input_world{};
   world_safety::DispatchWorldFormatScope* formats{};
   render_safety::InputPixelBuffer* source{};
 };

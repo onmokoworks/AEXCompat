@@ -48,11 +48,30 @@ void write_world_extent_hint(void* world, const std::array<int32_t, 4>& rect) {
   if (world) std::memcpy(static_cast<std::byte*>(world) + 44, rect.data(), sizeof(rect));
 }
 
+// The `extended_diag:pre_checkout_layer` line carried only the index, the
+// checkout id and the time. Which rect the plug-in asked for and which one the
+// host answered is what actually decides a SmartFX output extent, and having to
+// infer it from the two `input_checkout_*` report fields (each holding only the
+// last index-0 call) is how a multi-checkout PreRender stayed unreadable
+// (issue #1285).
+void trace_checkout_rect(const char* label, const std::array<int32_t, 4>& rect) {
+  if (!aexcompat::l2_detail::extended_diag_enabled()) return;
+  std::cerr << ' ' << label << "=[" << rect[0] << ',' << rect[1] << ','
+            << rect[2] << ',' << rect[3] << ']';
+}
+
 void write_checkout_result(void* destination,
                            const std::array<int32_t, 4>& result_rect,
                            const std::array<int32_t, 4>& max_result_rect,
                            int32_t reference_width,
                            int32_t reference_height) {
+  if (aexcompat::l2_detail::extended_diag_enabled()) {
+    std::cerr << "extended_diag:pre_checkout_answer";
+    trace_checkout_rect("result", result_rect);
+    trace_checkout_rect("max_result", max_result_rect);
+    std::cerr << " reference=" << reference_width << 'x' << reference_height
+              << "\n" << std::flush;
+  }
   auto* bytes = static_cast<unsigned char*>(destination);
   std::memset(bytes, 0, kCheckoutResultBytes);
   std::memcpy(bytes, result_rect.data(), sizeof(result_rect));
@@ -196,9 +215,17 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   // made on a thread other than the selector thread cannot be bound safely.
   using callback_diagnostics::Callback;
   using callback_diagnostics::Reason;
+  if (aexcompat::l2_detail::extended_diag_enabled())
+    std::cerr << "extended_diag:pre_checkout_layer index=" << index
+              << " id=" << checkout_id << " time=" << what_time << "/"
+              << time_scale << " step=" << time_step << "\n" << std::flush;
   if (!g_active_state)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::NoActiveState);
-  if (time_step <= 0 || time_scale == 0)
+  // time_step == 0 is accepted, same acceptance as checkout_param: ForceMB and
+  // WideTime (AE-shipped) request their input layer with a zero step and
+  // render in AE (the #777 inference form). The step is recorded for
+  // diagnostics only; negative stays refused.
+  if (time_step < 0 || time_scale == 0)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::InvalidArguments);
   auto& runtime = *g_active_state;
   const bool current_time =
@@ -222,6 +249,15 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
       [index](const auto& layer) { return layer.slot == index && layer.timed; });
   std::array<int32_t, 4> request_rect{};
   const CheckoutRequestState request_state = parse_checkout_request(request, request_rect);
+  if (aexcompat::l2_detail::extended_diag_enabled()) {
+    std::cerr << "extended_diag:pre_checkout_request state="
+              << (request_state == CheckoutRequestState::Full ? "full"
+                  : request_state == CheckoutRequestState::Rect ? "rect"
+                                                                : "malformed");
+    if (request_state != CheckoutRequestState::Full)
+      trace_checkout_rect("rect", request_rect);
+    std::cerr << "\n" << std::flush;
+  }
   if (request_state == CheckoutRequestState::Malformed) {
     ++runtime.malformed_checkout_requests;
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::MalformedRequest);
@@ -523,7 +559,7 @@ bool checkout_intersection_self_test() {
   runtime.height = 360;
   runtime.current_time = 7;
   runtime.current_time_scale = 30;
-  std::array<std::byte, 120> input_world{}, input_view{};
+  aexcompat::world_safety::EffectWorldStorage input_world{}, input_view{};
   runtime.input_world = input_world.data();
   runtime.input_checkout_view_world = input_view.data();
   const auto verify = [&](const std::array<int32_t, 4>* requested,
@@ -559,7 +595,7 @@ bool checkout_intersection_self_test() {
   const uint32_t malformed_before = runtime.malformed_checkout_requests;
   passed = verify(&inverted, 4, {}) &&
       runtime.malformed_checkout_requests == malformed_before + 1 && passed;
-  std::array<std::byte, 120> hosted_world{}, hosted_view{};
+  aexcompat::world_safety::EffectWorldStorage hosted_world{}, hosted_view{};
   runtime.hosted_layers.push_back({3, 0, 1, false, 50, 40, -1,
       hosted_world.data(), hosted_view.data(), {-1, -1, -1, -1}});
   const std::array<int32_t, 4> hosted_request_rect{10, 10, 60, 60};

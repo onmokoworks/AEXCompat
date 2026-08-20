@@ -18,6 +18,8 @@ pub(crate) struct CrtAllocation {
 enum CrtAllocationKind {
     Regular,
     Aligned,
+    ProcessHeap,
+    EnvironmentStrings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +80,20 @@ impl CrtHeap {
         requested_size: u64,
     ) -> Result<CrtAllocation, CrtHeapError> {
         self.prepare_allocation_kind(requested_size, CrtAllocationKind::Aligned)
+    }
+
+    pub(crate) fn prepare_process_heap_allocation(
+        &self,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.prepare_allocation_kind(requested_size, CrtAllocationKind::ProcessHeap)
+    }
+
+    pub(crate) fn prepare_environment_strings_allocation(
+        &self,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.prepare_allocation_kind(requested_size, CrtAllocationKind::EnvironmentStrings)
     }
 
     fn prepare_allocation_kind(
@@ -165,8 +181,94 @@ impl CrtHeap {
         self.remove_kind(pointer, CrtAllocationKind::Regular)
     }
 
+    pub(crate) fn process_heap_allocation(
+        &self,
+        pointer: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let allocation = *self
+            .allocations
+            .get(&pointer)
+            .ok_or(CrtHeapError::ForeignOrFreedPointer)?;
+        if allocation.kind != CrtAllocationKind::ProcessHeap {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        Ok(allocation)
+    }
+
+    pub(crate) fn prepare_process_heap_reallocation(
+        &self,
+        pointer: u64,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.process_heap_allocation(pointer)?;
+        let requested_size = requested_size.max(1);
+        if requested_size > MAX_CRT_ALLOCATION_BYTES {
+            return Err(CrtHeapError::AllocationTooLarge);
+        }
+        let retained_bytes = self.live_bytes - old.requested_size;
+        if retained_bytes > MAX_CRT_HEAP_BYTES - requested_size {
+            return Err(CrtHeapError::AggregateBudgetExceeded);
+        }
+        let backing_size = align_up(requested_size, CRT_HEAP_PAGE_SIZE)?;
+        Ok(CrtAllocation {
+            requested_size,
+            backing_size,
+            kind: CrtAllocationKind::ProcessHeap,
+        })
+    }
+
+    pub(crate) fn prepare_process_heap_in_place_reallocation(
+        &self,
+        pointer: u64,
+        requested_size: u64,
+    ) -> Result<Option<CrtAllocation>, CrtHeapError> {
+        let old = self.process_heap_allocation(pointer)?;
+        let mut replacement = self.prepare_process_heap_reallocation(pointer, requested_size)?;
+        if replacement.backing_size > old.backing_size {
+            return Ok(None);
+        }
+        replacement.backing_size = old.backing_size;
+        Ok(Some(replacement))
+    }
+
+    pub(crate) fn commit_process_heap_reallocation(
+        &mut self,
+        old_pointer: u64,
+        new_pointer: u64,
+        allocation: CrtAllocation,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.process_heap_allocation(old_pointer)?;
+        if allocation.kind != CrtAllocationKind::ProcessHeap {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        if new_pointer == 0 || new_pointer % CRT_HEAP_ALIGNMENT != 0 {
+            return Err(CrtHeapError::InvalidPointer);
+        }
+        if new_pointer != old_pointer && self.allocations.contains_key(&new_pointer) {
+            return Err(CrtHeapError::DuplicatePointer);
+        }
+        self.allocations.remove(&old_pointer);
+        self.allocations.insert(new_pointer, allocation);
+        self.live_bytes = self.live_bytes - old.requested_size + allocation.requested_size;
+        Ok(old)
+    }
+
     pub(crate) fn remove_aligned(&mut self, pointer: u64) -> Result<CrtAllocation, CrtHeapError> {
         self.remove_kind(pointer, CrtAllocationKind::Aligned)
+    }
+
+    pub(crate) fn remove_process_heap(
+        &mut self,
+        pointer: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.remove_kind(pointer, CrtAllocationKind::ProcessHeap)
+    }
+
+    pub(crate) fn remove_environment_strings(
+        &mut self,
+        pointer: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        self.remove_kind(pointer, CrtAllocationKind::EnvironmentStrings)
     }
 
     fn remove_kind(
@@ -320,6 +422,47 @@ mod tests {
         assert_eq!(
             heap.remove(0x1000),
             Err(CrtHeapError::ForeignOrFreedPointer)
+        );
+    }
+
+    #[test]
+    fn reallocation_replaces_ownership_and_accounts_only_the_size_delta() {
+        let mut heap = CrtHeap::default();
+        let old = heap
+            .prepare_process_heap_allocation(MAX_CRT_ALLOCATION_BYTES)
+            .unwrap();
+        heap.insert(0x1000, old).unwrap();
+        let peer = heap.prepare_allocation(MAX_CRT_ALLOCATION_BYTES).unwrap();
+        heap.insert(0x2000, peer).unwrap();
+
+        let replacement = heap.prepare_process_heap_reallocation(0x1000, 16).unwrap();
+        assert_eq!(
+            heap.commit_process_heap_reallocation(0x1000, 0x3000, replacement),
+            Ok(old)
+        );
+        assert_eq!(
+            heap.process_heap_allocation(0x1000),
+            Err(CrtHeapError::ForeignOrFreedPointer)
+        );
+        assert_eq!(heap.process_heap_allocation(0x3000), Ok(replacement));
+        assert_eq!(heap.live_bytes(), MAX_CRT_ALLOCATION_BYTES + 16);
+    }
+
+    #[test]
+    fn in_place_reallocation_preserves_the_existing_mapping_extent() {
+        let mut heap = CrtHeap::default();
+        let old = heap.prepare_process_heap_allocation(4096).unwrap();
+        heap.insert(0x1000, old).unwrap();
+
+        let smaller = heap
+            .prepare_process_heap_in_place_reallocation(0x1000, 8)
+            .unwrap()
+            .unwrap();
+        assert_eq!(smaller.requested_size, 8);
+        assert_eq!(smaller.backing_size, old.backing_size);
+        assert_eq!(
+            heap.prepare_process_heap_in_place_reallocation(0x1000, old.backing_size + 1),
+            Ok(None)
         );
     }
 }

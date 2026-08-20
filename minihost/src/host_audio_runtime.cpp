@@ -38,7 +38,12 @@ int Runtime::checkout(void* effect_ref, std::int32_t index, std::int32_t start_t
   telemetry_.last_output_bytes_per_sample = bytes_per_sample;
   telemetry_.last_output_channels = channels;
   telemetry_.last_output_format = format;
-  if (!effect_ref || !audio || *audio ||
+  // `*audio` is an out parameter: what it holds on entry is never read by the
+  // host, so its value cannot name host state and is not checked. AudWave
+  // passes an uninitialised stack slot (0x00003fe0.... on the trace, issue
+  // #1253) and AE services the call; refusing it here made SMART_RENDER answer
+  // PF_Err_OUT_OF_MEMORY with every audio counter at zero.
+  if (!effect_ref || !audio ||
       std::find(layer_indices_.begin(), layer_indices_.end(), index) ==
           layer_indices_.end() ||
       duration < 0 || time_scale == 0) { ++telemetry_.invalid_operations; return kCallbackFailure; }

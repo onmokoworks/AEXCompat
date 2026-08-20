@@ -1,5 +1,7 @@
 #include "worker_world_registry.hpp"
 
+#include "worker_pf_world_facade.hpp"
+
 #include "gpu_memory_world_transport.hpp"
 #include "trace_writer.hpp"
 #include "worker_extended_diag.hpp"
@@ -46,27 +48,19 @@ const char* trace_pixel_format(int32_t pixel_format) {
 
 constexpr uint64_t kMaxWorldBytes = 256ULL * 1024 * 1024;
 constexpr std::size_t kMaxWorldCount = 64;
-// AE's PF_NewWorld leaves a non-null pointer in the world's reserved_long4
-// (offset 0x50), and some effects dereference it without a null check: Channel
-// Blur's SMART_RENDER writes the scratch world's origin to
-// *(reserved_long4 + 0x70 / 0x74) right after creating it (issue #1090, found by
-// disassembly). The host never reads reserved_long4 - every callback resolves a
-// world by its pixel pointer - so this companion is inert bookkeeping that only
-// receives the plug-in's own writes; it exists so that dereference lands on real
-// memory instead of null. The observed reach is 0x78 bytes; a full page is
-// allocated so an effect outside the corpus that touches more of AE's internal
-// structure than Channel Blur does still lands in bounds (the size is a guess
-// about an AE-internal layout, so the margin is deliberate). Bounded by
-// kMaxWorldCount the total is at most 256 KiB. The full-corpus sweep is what
-// vouches that nothing needs a specific layout here, only presence.
-constexpr std::size_t kReservedLong4Offset = 0x50;
-constexpr std::size_t kNewWorldCompanionBytes = 4096;
+// AE's PF_NewWorld hands out a PF_LayerDef embedded in PF.dll's PF_World and
+// leaves that object's address in the world's reserved_long4 (offset 0x50);
+// Channel Blur writes the scratch world's origin through it (issue #1090) and
+// Glow calls its vtable (issue #1276). The companion is the host's PF_World
+// facade (worker_pf_world_facade), owned here for the world's lifetime and
+// published into the caller's struct at creation. The host never reads it.
+using WorldFacade = aexcompat::worker_runtime::pf_world_facade::WorldObject;
 
 struct OwnedWorld {
   void* pixels{};
   uint64_t size{};
   int32_t pixel_format{};
-  void* companion{};
+  WorldFacade* companion{};
 };
 
 struct AegpWorldView {
@@ -82,7 +76,19 @@ struct PlatformWorldEntry {
   std::shared_ptr<PlatformWorldBacking> backing;
 };
 
-std::mutex g_mutex;
+// The PF_World facade's resolver callback is noexcept and reaches this
+// registry before the dispatch-world registry. std::mutex::lock may throw a
+// system_error, which would turn that callback contract into std::terminate.
+// SRW acquisition does not throw; keep the previous single exclusive lock
+// semantics for every registry operation.
+SRWLOCK g_registry_lock = SRWLOCK_INIT;
+class RegistryLock {
+ public:
+  RegistryLock() noexcept { AcquireSRWLockExclusive(&g_registry_lock); }
+  ~RegistryLock() noexcept { ReleaseSRWLockExclusive(&g_registry_lock); }
+  RegistryLock(const RegistryLock&) = delete;
+  RegistryLock& operator=(const RegistryLock&) = delete;
+};
 // Keyed by the pixel buffer, not by the `PF_EffectWorld` the caller happened to
 // pass. `PF_NewWorld` fills a caller-owned value struct and AE never treats that
 // struct's address as the world's identity, so a plug-in may allocate twice
@@ -138,7 +144,7 @@ world_safety::OwnedWorldResolution resolve_owned_world(
     const void* world, void* data, int32_t rowbytes, int32_t width,
     int32_t height, world_safety::DispatchWorldFormat& result) {
   using world_safety::OwnedWorldResolution;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   // The pixel buffer is the identity, so a struct copy resolves exactly like the
   // struct `PF_NewWorld` filled; the geometry the caller read out of that struct
   // still has to describe the allocation.
@@ -162,7 +168,7 @@ bool resolve_dispatch_world_format(
 int32_t __cdecl new_world(void*, int32_t width, int32_t height,
                           int32_t clear_pixels, int32_t pixel_format,
                           void* world) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const int32_t pixel_bytes = bytes_per_pixel(pixel_format);
   // No check on the destination struct: reusing one local for a second
   // allocation is legal, and rejecting it made a plug-in that builds a pyramid
@@ -183,13 +189,12 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   }
   void* pixels = ::operator new(static_cast<std::size_t>(size), std::nothrow);
   if (!pixels) return 1;
-  void* companion = ::operator new(kNewWorldCompanionBytes, std::nothrow);
+  auto* companion = new (std::nothrow) WorldFacade{};
   if (!companion) {
     ::operator delete(pixels);
     return 1;
   }
   std::memset(pixels, clear_pixels ? 0 : 0xcd, static_cast<std::size_t>(size));
-  std::memset(companion, 0, kNewWorldCompanionBytes);
   std::memset(world, 0, world_safety::kEffectWorldSize);
   auto* bytes = static_cast<std::byte*>(world);
   const int32_t flags = 2 | (pixel_format == kPixelFormatArgb32 ? 0 : 1);
@@ -205,8 +210,34 @@ int32_t __cdecl new_world(void*, int32_t width, int32_t height,
   std::memcpy(bytes + 44, extent.data(), sizeof(extent));
   std::memcpy(bytes + 88, &aspect_num, sizeof(aspect_num));
   std::memcpy(bytes + 92, &aspect_den, sizeof(aspect_den));
-  std::memcpy(bytes + kReservedLong4Offset, &companion, sizeof(companion));
-  g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
+  // Registered before the facade is published: the map insert is the one step
+  // here that can throw, and a throw after publishing would leave the caller
+  // holding a world that names a companion this registry no longer knows about
+  // (dispose could never retire it).
+  try {
+    g_worlds.emplace(pixels, OwnedWorld{pixels, size, pixel_format, companion});
+  } catch (...) {
+    // The struct was already filled in above, so it has to be cleared with the
+    // allocation: `g_worlds` is keyed by the pixel pointer, and a caller left
+    // holding a struct that names a freed buffer would resolve - once the
+    // allocator hands that address to the next world - to somebody else's live
+    // allocation, and could dispose it out from under its owner.
+    ::operator delete(pixels);
+    delete companion;
+    std::memset(world, 0, world_safety::kEffectWorldSize);
+    return 1;
+  }
+  // Publishes the facade (vtable, LayerDef mirror) and writes reserved_long4.
+  // Failing closed rather than handing back a world whose reserved_long4 is
+  // null - that null is exactly what issue #1276's plug-ins dereference.
+  if (!aexcompat::worker_runtime::pf_world_facade::publish(*companion, world,
+                                                            pixel_bytes)) {
+    g_worlds.erase(pixels);
+    ::operator delete(pixels);
+    delete companion;
+    std::memset(world, 0, world_safety::kEffectWorldSize);
+    return 1;
+  }
   ++g_created;
   g_live_bytes += size;
   if (aexcompat::l2_detail::g_trace_writer &&
@@ -226,7 +257,7 @@ int32_t __cdecl legacy_new_world(void* effect_ref, int32_t width,
 }
 
 int32_t __cdecl dispose_world(void*, void* world) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   // Resolved through the pixel pointer the struct carries, so a copy of the
   // struct disposes the same allocation. Fail-closed is unchanged: a cleared
   // struct carries a null pointer, a second dispose finds nothing, and a world
@@ -241,7 +272,12 @@ int32_t __cdecl dispose_world(void*, void* world) {
     return 4;
   }
   ::operator delete(found->second.pixels);
-  ::operator delete(found->second.companion);
+  // Not deleted: a plug-in may still hold a copy of the disposed struct whose
+  // reserved_long4 names this object (the registry resolves a dispose through
+  // any copy, by pixel pointer). Retiring it leaves that pointer aimed at an
+  // inert object with a null vtable instead of at freed memory that may later
+  // hold something callable (issue #1276 review).
+  aexcompat::worker_runtime::pf_world_facade::retire(found->second.companion);
   g_live_bytes -= found->second.size;
   g_worlds.erase(found);
   ++g_disposed;
@@ -258,7 +294,7 @@ int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
   };
   if (!world || !pixel_format) return finish(4, 0);
   {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    RegistryLock lock;
     const auto found = g_worlds.find(world_pixels(world));
     if (found != g_worlds.end()) {
       *pixel_format = found->second.pixel_format;
@@ -272,7 +308,7 @@ int32_t __cdecl get_pixel_format(const void* world, int32_t* pixel_format) {
 }
 
 bool owns_world(void* world) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   return world && g_worlds.count(world_pixels(world)) != 0;
 }
 
@@ -290,7 +326,7 @@ bool owns_world(void* world) {
 bool hosts_world_pixels(void* world) {
   void* pixels = world_pixels(world);
   if (!pixels) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   if (g_worlds.count(pixels) != 0) return true;
   for (const auto& [handle, entry] : g_platform_worlds) {
     (void)handle;
@@ -305,7 +341,7 @@ bool hosts_world_pixels(void* world) {
 }
 
 bool owned_world_matches(void* world, int32_t pixel_format) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_worlds.find(world_pixels(world));
   return found != g_worlds.end() && found->second.pixel_format == pixel_format;
 }
@@ -361,7 +397,7 @@ std::shared_ptr<PlatformWorldBacking> allocate_platform_backing(
 bool snapshot_aegp_view(void** handle, AegpWorldView& view,
                         world_safety::LocalEffectWorld& world) {
   if (!handle) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_aegp_views.find(handle);
   if (found == g_aegp_views.end() || !found->second.pf_world) return false;
   if (!found->second.borrowed &&
@@ -402,7 +438,7 @@ bool snapshot_aegp_view(void** handle, AegpWorldView& view,
 bool snapshot_owned_world(void* world, OwnedWorldSnapshot& snapshot) {
   snapshot = {};
   if (!world) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_worlds.find(world_pixels(world));
   if (found == g_worlds.end() || !found->second.pixels) return false;
   world_safety::LocalEffectWorld descriptor{};
@@ -435,7 +471,7 @@ bool register_borrowed_view(void** handle, void* pf_world,
                             int32_t pixel_format, bool borrowed) {
   if (!handle || !pf_world || !aegp_world_type_from_format(pixel_format))
     return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   try {
     return g_aegp_views.emplace(handle, AegpWorldView{
         pf_world, pixel_format, borrowed}).second;
@@ -446,7 +482,7 @@ bool register_borrowed_view(void** handle, void* pf_world,
 
 UnregisterBorrowedViewResult unregister_borrowed_view(void** handle) {
   if (!handle) return UnregisterBorrowedViewResult::already_absent;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_aegp_views.find(handle);
   if (found == g_aegp_views.end())
     return UnregisterBorrowedViewResult::already_absent;
@@ -470,7 +506,7 @@ bool snapshot_platform_world(
     void* handle, std::shared_ptr<PlatformWorldBacking>& backing) {
   backing.reset();
   if (!handle) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_platform_worlds.find(handle);
   if (found == g_platform_worlds.end() || !found->second.backing) return false;
   backing = found->second.backing;
@@ -481,7 +517,7 @@ bool adopt_platform_world(
     void* handle, std::shared_ptr<PlatformWorldBacking>& backing) {
   backing.reset();
   if (!handle) return false;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_platform_worlds.find(handle);
   if (found == g_platform_worlds.end() || !found->second.backing) return false;
   backing = found->second.backing;
@@ -491,7 +527,7 @@ bool adopt_platform_world(
 }
 
 AegpStatistics aegp_statistics() {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   return {g_platform_worlds_created, g_platform_worlds_disposed,
           g_platform_worlds_adopted, g_platform_references_created,
           g_platform_references_disposed, g_owned_aegp_worlds_created,
@@ -530,7 +566,7 @@ int32_t __cdecl aegp_world_new_owned(int32_t plugin_id, int32_t type,
   if (!claim_opaque_generation(g_owned_aegp_world_generation, generation)) return 4;
   auto* handle = reinterpret_cast<void**>(
       static_cast<uintptr_t>((generation << 3) | 5));
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   if (g_live_owned_aegp_worlds >= kMaxOwnedAegpWorlds ||
       g_live_owned_aegp_backings.load() >= kMaxOwnedAegpWorlds ||
       g_platform_world_bytes.load() > kMaxPlatformWorldBytes - size) return 4;
@@ -552,7 +588,7 @@ int32_t __cdecl aegp_world_new_owned(int32_t plugin_id, int32_t type,
 
 int32_t __cdecl aegp_world_dispose(void** handle) {
   if (!handle) return finish_aegp_world_call("dispose", 4);
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_aegp_views.find(handle);
   if (found == g_aegp_views.end() || !found->second.disposable)
     return finish_aegp_world_call("dispose", 4);
@@ -761,7 +797,7 @@ int32_t __cdecl aegp_world_new_platform(int32_t plugin_id, int32_t type,
   if (!claim_opaque_generation(g_platform_world_generation, generation)) return 4;
   auto* handle = reinterpret_cast<void*>(
       static_cast<uintptr_t>((generation << 3) | 2));
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   if (g_platform_worlds.size() >= kMaxPlatformWorlds ||
       g_platform_world_bytes.load() > kMaxPlatformWorldBytes - size) return 4;
   auto backing = allocate_platform_backing(
@@ -780,7 +816,7 @@ int32_t __cdecl aegp_world_new_platform(int32_t plugin_id, int32_t type,
 
 int32_t __cdecl aegp_world_dispose_platform(void* handle) {
   if (!handle) return 4;
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_platform_worlds.find(handle);
   if (found == g_platform_worlds.end()) return 4;
   g_platform_worlds.erase(found);
@@ -798,7 +834,7 @@ int32_t __cdecl aegp_world_reference_platform(int32_t plugin_id,
     return 4;
   auto* handle = reinterpret_cast<void**>(
       static_cast<uintptr_t>((generation << 3) | 7));
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   const auto found = g_platform_worlds.find(platform);
   if (!platform || found == g_platform_worlds.end() ||
       g_live_platform_references >= kMaxPlatformReferences) return 4;
@@ -817,12 +853,12 @@ int32_t __cdecl aegp_world_reference_platform(int32_t plugin_id,
 }
 
 bool lifetimes_balanced() {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   return g_worlds.empty() && g_created == g_disposed && g_live_bytes == 0;
 }
 
 Statistics statistics() {
-  std::lock_guard<std::mutex> lock(g_mutex);
+  RegistryLock lock;
   return {g_created, g_disposed, g_invalid_operations, g_worlds.size(),
           g_live_bytes};
 }

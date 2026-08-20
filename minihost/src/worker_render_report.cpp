@@ -329,6 +329,8 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"extra_pixels_contract_violation\":"
       << (v.extra_pixels_contract_violation ? "true" : "false")
       << ",\"empty_result_rect\":" << (v.empty_result_rect ? "true" : "false")
+      << ",\"empty_result_passthrough\":"
+      << (v.empty_result_passthrough ? "true" : "false")
       << ",\"global_setdown_error\":" << v.global_setdown_error
       << ",\"case_id\":\"" << v.case_id << "\",\"pixel_format\":\"" << v.pixel_format
       << "\",\"width\":" << v.dimensions[0] << ",\"height\":" << v.dimensions[1]
@@ -558,6 +560,8 @@ void append_classic_subsystems(
       << ",\"pf_path_preps_disposed\":" << value.path_counts[4]
       << ",\"invalid_pf_path_operations\":" << value.path_counts[5]
       << ",\"pf_path_reject_reason\":" << value.path_counts[6]
+      << ",\"pf_path_absent_checkouts\":" << value.path_counts[8]
+      << ",\"pf_path_absent_checkins\":" << value.path_counts[9]
       << ",\"pf_path_last_feather\":[" << value.path_feather[0] << ',' << value.path_feather[1] << ']'
       << ",\"pf_path_last_opacity\":" << value.path_opacity
       << ",\"pf_path_last_quality\":" << value.path_quality
@@ -685,7 +689,8 @@ ClassicSubsystemDiagnostics capture_classic_subsystems() {
       aexcompat::pf_path_runtime::lifetimes_balanced(),
       {i64(path.checkout_calls), i64(path.checkin_calls), i64(path.mask_calls),
        i64(path.preps_created), i64(path.preps_disposed),
-       i64(path.invalid_operations), i64(path.reject_reason), i64(path.live_preps)},
+       i64(path.invalid_operations), i64(path.reject_reason), i64(path.live_preps),
+       i64(path.absent_checkouts), i64(path.absent_checkins)},
       {path.last_feather_x, path.last_feather_y}, path.last_opacity,
       i64(path.last_quality),
       {i64(path.last_bounds[0]), i64(path.last_bounds[1]),

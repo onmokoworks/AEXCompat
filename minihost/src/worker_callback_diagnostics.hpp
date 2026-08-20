@@ -27,6 +27,8 @@ enum class Callback : std::size_t {
   Copy,
   Fill,
   Premultiply,
+  CompositeRect,
+  GaussianKernel,
   TransferRect,
   TransformWorld,
   NewWorld,
@@ -66,6 +68,14 @@ enum class Reason : std::size_t {
   AbortCallback,
   Unsupported,
   CallbackError,
+  // A numeric ANSI callback returned the host's finite 0.0 fallback because
+  // its input, domain, or computed result was non-finite.
+  Clamped,
+  // Not a refusal: checkout_param answered a slot past the published table
+  // with an empty layer definition, the AE-observed shape (issue #1251). It
+  // rides on a result-0 history entry so the report shows which checkouts
+  // resolved to nothing.
+  BeyondParamTable,
   Count,
 };
 
@@ -73,7 +83,7 @@ inline constexpr std::array<const char*, static_cast<std::size_t>(Callback::Coun
     CALLBACK_NAMES{{"pre_checkout_layer", "checkout_pixels", "checkin_pixels",
                     "checkout_output", "iterate", "iterate_origin", "sampling",
                     "begin_sampling", "end_sampling", "get_callback_addr", "blend", "convolve", "copy",
-                    "fill", "premultiply", "transfer_rect", "transform_world",
+                    "fill", "premultiply", "composite_rect", "gaussian_kernel", "transfer_rect", "transform_world",
                     "new_world", "dispose_world", "handle", "platform_data", "pixel_data",
                     "app", "ansi", "checkout_param", "checkin_param",
                     "iterate_generic", "effect_sequence_data"}};
@@ -83,7 +93,8 @@ inline constexpr std::array<const char*, static_cast<std::size_t>(Reason::Count)
                   "unknown_layer", "unknown_checkout", "missing_world",
                   "already_checked_out", "not_checked_out", "empty_result",
                   "invalid_area", "pixel_callback", "progress_callback",
-                  "abort_callback", "unsupported", "callback_error"}};
+                  "abort_callback", "unsupported", "callback_error",
+                  "clamped", "beyond_param_table"}};
 
 struct Entry {
   std::atomic<uint32_t> calls{};
@@ -136,7 +147,8 @@ inline void increment_saturating(std::atomic<uint32_t>& value) noexcept {
                                       std::memory_order_relaxed)) {}
 }
 
-inline int32_t record(Callback callback, int32_t result, Reason reason = Reason::None) noexcept {
+inline int32_t record_counters(Callback callback, int32_t result,
+                               Reason reason = Reason::None) noexcept {
   auto& entry = entries()[static_cast<std::size_t>(callback)];
   increment_saturating(entry.calls);
   entry.last_result.store(result, std::memory_order_relaxed);
@@ -146,6 +158,11 @@ inline int32_t record(Callback callback, int32_t result, Reason reason = Reason:
     increment_saturating(entry.failures);
     increment_saturating(entry.reasons[static_cast<std::size_t>(reason)]);
   }
+  return result;
+}
+
+inline int32_t record(Callback callback, int32_t result, Reason reason = Reason::None) noexcept {
+  record_counters(callback, result, reason);
   {
     std::lock_guard<std::mutex> lock(history_mutex());
     const uint64_t sequence = history_next_sequence()++;

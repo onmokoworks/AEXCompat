@@ -99,6 +99,26 @@ fn inspect_experimental_impl(
         if let Some(summary) = module_audit_failure_summary(report, selector_phase.as_deref()) {
             diagnostics["module_audit_failure"] = summary;
         }
+        // The selector outcome travels with the failure too (issue #1063):
+        // an exit-20 inspect (a selector refused) is otherwise a bare exit
+        // code, and which selector answered what is the evidence a fix
+        // starts from.
+        if let Some(status) = report.get("status").and_then(Value::as_str) {
+            diagnostics["inspection_status"] = json!(status);
+        }
+        for field in [
+            "global_setup_error",
+            "params_setup_error",
+            "global_setdown_error",
+            "reported_num_params",
+        ] {
+            if let Some(value) = report.get(field).and_then(Value::as_i64) {
+                diagnostics[field] = json!(value);
+            }
+        }
+        if let Some(parameters) = report.get("parameters").and_then(Value::as_array) {
+            diagnostics["parameter_count"] = json!(parameters.len());
+        }
     }
     if isolated.classification.as_str() != "ok" {
         if diagnostics.get("module_audit_failure").is_none()
@@ -111,18 +131,6 @@ fn inspect_experimental_impl(
         )));
     }
     let report = worker_report.ok_or_else(|| invalid("inspection worker report is invalid"))?;
-    if let Some(status) = report.get("status").and_then(Value::as_str) {
-        diagnostics["inspection_status"] = json!(status);
-    }
-    for field in [
-        "global_setup_error",
-        "params_setup_error",
-        "global_setdown_error",
-    ] {
-        if let Some(value) = report.get(field).and_then(Value::as_i64) {
-            diagnostics[field] = json!(value);
-        }
-    }
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }

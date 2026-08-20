@@ -341,6 +341,22 @@ bool verify_parameter_registry_capacity() {
        accepted.user_changed_param_slot == 1265 &&
        worker_runtime::invocation::parse_l2_modes(
            5, rejected_argv, rejected, mode_hooks) == 3;
+
+  // Popup defaults are 1-based (issue #1253): a declared dephault of 0
+  // (Reshape's Elasticity / Interpolation Method) registers as the first
+  // choice, the way AE materializes it; a declared in-range default is kept.
+  records.clear();
+  Definition popup{};
+  std::memcpy(popup.data() + kParamName, "popup", 6);
+  write<int32_t>(popup, kParamType, 7);
+  write<int16_t>(popup, 56 + 4, 3);
+  write<int16_t>(popup, 56 + 6, 0);
+  ok = ok && aexcompat::l2_detail::add_param(nullptr, -1, popup.data()) == 0;
+  write<int16_t>(popup, 56 + 6, 2);
+  ok = ok && aexcompat::l2_detail::add_param(nullptr, -1, popup.data()) == 0;
+  ok = ok && records.size() == 2 && records[0].type == 7 &&
+       records[0].default_value == 1.0 && records[0].valid_max == 3.0 &&
+       records[1].default_value == 2.0;
   records = saved_params;
   return ok;
 }

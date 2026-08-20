@@ -209,6 +209,9 @@ struct SmartReport {
     // every value after it.
     uint32_t empty_layer_param_checkouts{};
     uint32_t empty_layer_param_pixel_checkouts{};
+    // Appended for the same reason (issue #1285). The empty result the host
+    // answered with the effect's input instead of an empty frame.
+    bool empty_result_passthrough{};
   } head;
   struct Context {
     std::array<int32_t, 4> result_rect{};
@@ -309,7 +312,9 @@ struct ClassicSubsystemDiagnostics {
   bool suite_fault{};
   bool handle_balanced{};
   bool path_balanced{};
-  std::array<int64_t, 8> path_counts{};
+  // checkouts, checkins, mask calls, preps created/disposed, invalid ops,
+  // reject reason, live preps, absent checkouts, absent checkins (#1253)
+  std::array<int64_t, 10> path_counts{};
   std::array<double, 2> path_feather{};
   double path_opacity{};
   int64_t path_quality{};

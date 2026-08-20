@@ -13,8 +13,10 @@ violation in RENDER that way, which masked the FRAME_SETUP fault underneath:
 `last_seh_selector` reported RENDER because the second crash overwrote the
 first. Issue #725.
 
-The native self-test drives the same functions with counting fakes, so it needs
-no plug-in and no AEX - only the build.
+It also pins the classic custom-UI draw/teardown stage ordering and the rule
+that a teardown failure is reported only when it becomes the frame error
+(issue #735). The native self-test drives the same functions with counting
+fakes, so it needs no plug-in and no AEX - only the build.
 """
 
 from _native_selftest import run

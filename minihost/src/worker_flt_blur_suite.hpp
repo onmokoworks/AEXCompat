@@ -22,6 +22,16 @@ using ResolveWorld = bool (*)(
     const void*, world_safety::DispatchWorldFormat&);
 using AcquireSuite = int32_t (__cdecl *)(const char*, int32_t, const void**);
 using ReleaseSuite = int32_t (__cdecl *)(const char*, int32_t);
+// The foreign-operand admission hooks (issue #1069, the copy_world8 pattern
+// from issue #1037): the declared-stride bounds check, the "registry already
+// knows this reference" refusal, the "host allocated this pixel base" refusal,
+// and the session's negotiated pixel format ("argb8"/"argb16"/"argb32f") as
+// the format anchor when neither operand resolves.
+using BoundedWorld = bool (*)(void*, int32_t, unsigned char*&, int32_t&,
+                              int32_t&, int32_t&);
+using WorldReferenceKnown = bool (*)(const void*);
+using WorldPixelsOwned = bool (*)(void*);
+using SessionPixelFormat = const char* (*)();
 
 // ABI recovered from the four AE 2026 callers tracked by issue #737. Both
 // worlds are borrowed for the duration of the call: source is read-only and
@@ -36,6 +46,13 @@ struct Hooks {
   ResolveWorld resolve_world{};
   AcquireSuite acquire_suite{};
   ReleaseSuite release_suite{};
+  // Optional as a group: with any of the four unset the suite keeps the
+  // registry-only resolution (foreign operands stay refused), so a caller that
+  // wires only the original four hooks keeps the pre-#1069 behaviour.
+  BoundedWorld bounded_world{};
+  WorldReferenceKnown world_reference_known{};
+  WorldPixelsOwned world_pixels_owned{};
+  SessionPixelFormat session_pixel_format{};
 };
 
 using GaussianBlur = int32_t (__cdecl *)(
@@ -91,5 +108,9 @@ static_assert(offsetof(Suite1, directional_blur) == 3 * sizeof(void*));
 bool configure(const Hooks&) noexcept;
 const Suite1* suite1() noexcept;
 bool selftest();
+// The suite's operand admission for one world blurred in place (registered, or
+// foreign under the issue #1069 rules), for AE's private id -2 blur
+// (worker_pf_private_callbacks.hpp), which takes a single PF_LayerDef.
+bool resolve_in_place_world(void* world, world_safety::DispatchWorldFormat& format);
 
 }  // namespace aexcompat::flt_blur

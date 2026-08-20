@@ -169,6 +169,8 @@ impl GuestEngine<'static> {
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
         unicorn.get_data_mut().next_aegp_memory_handle = AEGP_MEMORY_HANDLE_BASE;
         unicorn.get_data_mut().next_pf_handle_data = PF_HANDLE_DATA_BASE;
+        unicorn.get_data_mut().next_windows_thread_id = 2;
+        unicorn.get_data_mut().current_windows_thread_id = 1;
         let image_size =
             u64::try_from(image.mapped_bytes().len()).map_err(|_| GuestError::ImageAlignment)?;
         unicorn.get_data_mut().image_region = Some((
@@ -217,9 +219,12 @@ impl GuestEngine<'static> {
             "map minimal TEB page",
             unicorn.mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE),
         )?;
+        let mut teb_stack = [0u8; 16];
+        teb_stack[0..8].copy_from_slice(&(STACK_BASE + STACK_SIZE).to_le_bytes());
+        teb_stack[8..16].copy_from_slice(&STACK_BASE.to_le_bytes());
         uc(
-            "write TEB stack limit",
-            unicorn.mem_write(0x10, &STACK_BASE.to_le_bytes()),
+            "write TEB stack bounds",
+            unicorn.mem_write(0x08, &teb_stack),
         )?;
         uc(
             "map guest data",
@@ -291,7 +296,20 @@ impl GuestEngine<'static> {
                 continue_fls_free,
             ),
         )?;
+        uc(
+            "write CreateThread continuation",
+            unicorn.mem_write(HOST_CREATE_THREAD_CONTINUE, &[0x41, 0xff, 0xe3]),
+        )?;
+        uc(
+            "install CreateThread continuation",
+            unicorn.add_code_hook(
+                HOST_CREATE_THREAD_CONTINUE,
+                HOST_CREATE_THREAD_CONTINUE,
+                continue_windows_thread,
+            ),
+        )?;
         install_windows_condition_variable_callbacks(&mut unicorn)?;
+        install_dynamic_windows_import_callbacks(&mut unicorn)?;
         uc(
             "write add_param callback",
             unicorn.mem_write(HOST_ADD_PARAM, &[0xc3]),
@@ -851,6 +869,7 @@ impl GuestEngine<'static> {
                 HOST_WAKE_ALL_CONDITION_VARIABLE,
                 "wake_all_condition_variable",
             ),
+            (HOST_DYNAMIC_FLS_ALLOC, "dynamic_fls_alloc"),
             (HOST_GPU_GET_DEVICE_COUNT, "gpu_get_device_count"),
             (HOST_GPU_GET_DEVICE_INFO, "gpu_get_device_info"),
             (HOST_GPU_ACQUIRE_EXCLUSIVE, "gpu_acquire_exclusive"),
@@ -894,6 +913,8 @@ impl GuestEngine<'static> {
             entry_export: image_report.entry_export,
             trace_modules,
         };
+        initialize_windows_command_line_a(&mut engine)?;
+        initialize_windows_command_line_w(&mut engine)?;
         if let Some(table) = image.string_table() {
             let empty = engine.allocate(1, 1)?;
             engine.write(empty, &[0])?;
@@ -2068,4 +2089,27 @@ impl GuestEngine<'static> {
     pub fn parameters(&self) -> &[GuestParam] {
         &self.unicorn.get_data().params
     }
+}
+
+fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
+    const WINDOWS_COMMAND_LINE_A: &[u8] = b"\"aex-guest-worker.exe\"\0";
+    let command_line = engine.allocate(WINDOWS_COMMAND_LINE_A.len(), 1)?;
+    engine.write(command_line, WINDOWS_COMMAND_LINE_A)?;
+    engine.unicorn.get_data_mut().windows_command_line_a = command_line;
+    Ok(())
+}
+
+fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
+    const WINDOWS_COMMAND_LINE: &str = "\"aex-guest-worker.exe\"";
+    let mut bytes = Vec::with_capacity((WINDOWS_COMMAND_LINE.encode_utf16().count() + 1) * 2);
+    for unit in WINDOWS_COMMAND_LINE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    let command_line = engine.allocate(bytes.len(), 2)?;
+    engine.write(command_line, &bytes)?;
+    engine.unicorn.get_data_mut().windows_command_line_w = command_line;
+    Ok(())
 }

@@ -852,10 +852,19 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
   std::memcpy(bytes.data(), definition, bytes.size());
   const char* name = reinterpret_cast<const char*>(bytes.data() + kParamName);
   const auto length = strnlen_s(name, kParamNameSize);
-  if (extended_diag_enabled())
+  if (extended_diag_enabled()) {
     std::cerr << "extended_diag:add_param index=" << index
               << " type=" << read<int32_t>(bytes, kParamType) << " name=\""
-              << std::string(name, length) << "\"\n" << std::flush;
+              << std::string(name, length) << "\"";
+    // A layer parameter carries its `PF_LayerDefault` in the `dephault` field
+    // that ends the `PF_LayerDef` sitting in the union (SDK AE_Effect.h:
+    // MYSELF = -1, NONE = 0). Which of the two a plug-in declared decides
+    // whether an unconnected slot is transparent or is the effect's own input,
+    // and the trace had no way to show it (issue #1285).
+    if (read<int32_t>(bytes, kParamType) == 0)
+      std::cerr << " layer_dephault=" << read<int32_t>(bytes, 56 + 116);
+    std::cerr << "\n" << std::flush;
+  }
   const int32_t host_index = index < 0 ? static_cast<int32_t>(g_params.size() + 1) : index;
   if (host_index <= 0 || host_index > static_cast<int32_t>(kMaxParams) ||
       std::any_of(g_params.begin(), g_params.end(),
@@ -886,7 +895,19 @@ int32_t __cdecl add_param(void*, int32_t index, void* definition) {
     record.valid_max = read<int16_t>(bytes, u + 4);
     record.slider_min = record.valid_min;
     record.slider_max = record.valid_max;
-    record.default_value = read<int16_t>(bytes, u + 6);
+    // A PF popup value is 1-based (SDK PF_PopupDef). Reshape declares its
+    // Elasticity (9 choices) and Interpolation Method (3 choices) popups with
+    // dephault = value = 0; AE 2026 reads both back as 1 through ExtendScript
+    // with no user edit and renders the effect (issue #1253,
+    // docs/MASKLESS_PATH_EFFECTS_OBSERVATION_2026-08-17.md; that RENDER
+    // receives 1 is inferred from that render passing through). Handing the
+    // plug-in the raw 0 made its RENDER map "Interpolation Method - 1" to a
+    // mode its grid generator rejects, and FLO_DoDistortion answered
+    // PF_Err_OUT_OF_MEMORY. Lift a non-positive declared default to the first
+    // choice; a default above num_choices is not an observed case and is left
+    // as declared.
+    const int16_t declared_default = read<int16_t>(bytes, u + 6);
+    record.default_value = declared_default < 1 ? 1 : declared_default;
     const char* choices = read<const char*>(bytes, u + 8);
     if (choices) record.choices.assign(choices, strnlen_s(choices, 4096));
   } else if (record.type == 4) {

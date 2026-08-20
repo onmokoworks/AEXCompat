@@ -69,17 +69,30 @@ int main() {
       values[3] == 0.0f;
 
   runtime.automatic_checkin();
+  // The out pointer's incoming value is not a precondition (issue #1253:
+  // AudWave hands over an uninitialised slot and AE services the call); a
+  // garbage value is overwritten, not refused. Negative start times are the
+  // plug-in's window (AudWave asks from -offset), answered as silence.
+  void* garbage_audio{reinterpret_cast<void*>(0x00003fe020bbaec3)};
+  const int garbage_checkout = runtime.checkout(
+      reinterpret_cast<void*>(1), 2, -2, 4, 30, 44100u << 16, 2, 2, 1,
+      &garbage_audio);
+  const bool garbage_overwritten = garbage_checkout == 0 &&
+      garbage_audio != reinterpret_cast<void*>(0x00003fe020bbaec3) &&
+      garbage_audio != nullptr;
+  runtime.automatic_checkin();
   void* invalid_audio{};
   const int invalid_index = runtime.checkout(
       reinterpret_cast<void*>(1), 1, 0, 2, 30000, 44100u << 16, 4, 1, 2,
       &invalid_audio);
   const auto& telemetry = runtime.telemetry();
-  const bool passed = checkout == 0 && silent && invalid_index != 0 &&
+  const bool passed = checkout == 0 && silent && garbage_overwritten &&
+      invalid_index != 0 &&
       telemetry.usage_advertised == false &&
-      telemetry.unadvertised_checkout_calls == 1 &&
+      telemetry.unadvertised_checkout_calls == 2 &&
       telemetry.rejected_unadvertised_checkouts == 0 &&
-      telemetry.checkout_calls == 1 && telemetry.checkin_calls == 0 &&
-      telemetry.automatic_checkins == 1 && telemetry.invalid_operations == 1 &&
+      telemetry.checkout_calls == 2 && telemetry.checkin_calls == 0 &&
+      telemetry.automatic_checkins == 2 && telemetry.invalid_operations == 1 &&
       runtime.lifetimes_balanced();
 
   bootstrap::State state{};

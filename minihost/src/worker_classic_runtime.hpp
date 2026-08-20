@@ -49,6 +49,10 @@ class Context final {
   void set_definition(int32_t slot, const ParameterDefinition& definition);
   bool copy_definition(int32_t slot, void* destination,
                        std::size_t destination_size) const;
+  // True when a definition table has been published (slots 0..N) and `slot`
+  // lies past its last entry. Negative slots and gaps inside the table are
+  // not "beyond": those stay refusals in checkout_param.
+  bool beyond_definition_table(int32_t slot) const;
   void set_fallback_definition(int32_t slot,
                                const ParameterDefinition& definition);
   bool copy_fallback_definition(int32_t slot, void* destination,

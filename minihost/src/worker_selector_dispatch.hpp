@@ -15,6 +15,10 @@ using SelectorDispatchTrace = void(*)(const char* selector);
 
 constexpr std::size_t kMaxSelectorInvocationDiagnostics = 64;
 constexpr std::size_t kMaxSelectorStackValues = 6;
+// Frames kept from the faulting context's unwind (innermost first, frame 0 is
+// the fault site). Bounded because it is captured inside an SEH filter on a
+// stack a malformed plug-in may have corrupted.
+constexpr std::size_t kMaxSelectorUnwindFrames = 12;
 constexpr std::size_t kMaxHostCallbackTimelineRecords = 128;
 constexpr std::size_t kMaxExtendedLookupTimelineRecords = 128;
 constexpr std::size_t kMaxExtendedAllocationTimelineRecords = 128;
@@ -143,6 +147,49 @@ struct SpecVersionEntryDiagnostic {
   bool same_value_as_global_setup_entry{};
 };
 
+/// Why the faulting context's unwind stopped. A capped or aborted walk must not
+/// read like a complete chain: the cap is the ordinary outcome (a fault deep in
+/// a plug-in reaches it every time), so the outermost frame printed is normally
+/// not the top of the stack.
+enum class SelectorUnwindStop : uint8_t {
+  /// The walk was not attempted.
+  not_attempted,
+  /// Reached the outermost frame: the unwind produced a null instruction
+  /// pointer, which is where a Windows thread's frame chain ends.
+  end_of_chain,
+  /// The walk stopped making table-backed progress, so the chain was lost
+  /// part-way: either the unwind stopped moving toward the stack base, or the
+  /// fault site's return slot held null. A malformed plug-in's unwind data and
+  /// a smashed return slot both land here, and the outermost frame printed is
+  /// NOT the top of the stack - which is why this does not share a name with
+  /// end_of_chain.
+  chain_lost,
+  /// Stopped at kMaxSelectorUnwindFrames with frames left above.
+  frame_cap,
+  /// A frame behind the fault site had no unwind entry, so the chain was lost.
+  no_unwind_entry,
+  /// The fault site had no unwind entry and the return address it pushed could
+  /// not be read back at all (a null that reads back fine is chain_lost).
+  return_slot_unreadable,
+  /// Reading the stack faulted; the frames recorded before that still stand.
+  walk_faulted,
+  /// Skipped: the faulting frame sat too close to the thread's stack limit for
+  /// the walk to run without risking a second, uncontainable fault.
+  low_stack,
+};
+
+const char* selector_unwind_stop_name(SelectorUnwindStop stop) noexcept;
+
+/// One frame of the faulting context's unwind. `from_return_slot` marks the
+/// single frame that is not table-derived: when the fault site itself has no
+/// unwind entry (a call through a null or garbage slot), the frame behind it is
+/// the return address read off RSP, which is a caller only if the fault really
+/// was a call.
+struct UnwindFrameDiagnostic {
+  PointerClassificationDiagnostic site;
+  bool from_return_slot{};
+};
+
 struct SelectorInvocationDiagnostic {
   std::string selector;
   bool invocation_completed_normally{};
@@ -161,6 +208,10 @@ struct SelectorInvocationDiagnostic {
   std::vector<RegisterClassificationDiagnostic> registers;
   std::array<StackValueClassificationDiagnostic,
              kMaxSelectorStackValues> stack_values{};
+  std::array<UnwindFrameDiagnostic,
+             kMaxSelectorUnwindFrames> unwind_frames{};
+  std::size_t unwind_frame_count{};
+  SelectorUnwindStop unwind_stop{SelectorUnwindStop::not_attempted};
   bool has_register_snapshot{};
   GlobalDataHandoffDiagnostic global_data_handoff;
   EffectRefEntryDiagnostic effect_ref_at_entry;
@@ -183,6 +234,22 @@ struct SelectorReturnMessage {
 };
 
 struct SelectorDispatchTelemetry {
+  // Selector return codes this host substituted for the plug-in's own since
+  // the worker started, all selectors together: a fault the SEH boundary
+  // caught, a C++ exception that escaped the entry point, a module audit the
+  // call did not pass, and the guards that refuse to dispatch at all. Every
+  // one of them surfaces as `kAuditFailure` (512), which is indistinguishable
+  // from a plug-in that returned 512 itself. Monotonic
+  // and never reset, so a caller snapshots it around a single selector call
+  // and compares afterwards to know which of the two it got (the invocation
+  // list below is capped and cannot answer that once the cap is reached).
+  // Not atomic, and neither are this struct's other fields: smart selector
+  // dispatch is driven serially from one frame loop, so the snapshot and the
+  // increments it is compared against are the same thread's. A second thread
+  // incrementing inside somebody's snapshot window can only make that window
+  // look substituted when it was not, which suppresses a fallback route - it
+  // can never present a faulted selector's 512 as the plug-in's own.
+  uint64_t substituted_selector_failures{};
   uint32_t seh_code{};
   uint64_t seh_address{};
   std::string seh_module;
@@ -193,6 +260,29 @@ struct SelectorDispatchTelemetry {
   std::vector<SelectorInvocationDiagnostic> invocations;
   bool invocations_truncated{};
 };
+
+/// What the unwind self-test observed.
+struct SelectorFaultUnwindProbe {
+  bool passed{};
+  /// Frames the capture recorded for the injected fault.
+  std::size_t frame_count{};
+  /// Frame 0 was the null fault site.
+  bool fault_site_is_null{};
+  /// Frame 1 resolved to the function that made the null call, and frame 2 to
+  /// its caller - identified by unwind-table entry, not merely by module.
+  bool call_site_frame_identified{};
+  bool caller_frame_identified{};
+  /// Both reference functions resolved to an unwind-table entry. False means
+  /// the comparison could not be made (an incremental-link thunk, say), not
+  /// that the walk was wrong.
+  bool reference_identities_resolved{};
+};
+
+/// Behavioural check that the faulting-context unwind recovers a caller chain
+/// through a call to a null slot - the shape a plug-in reaching an
+/// uninitialised Adobe-library dispatch table produces (issue #1264). Raises
+/// the fault behind the same SEH capture the selector dispatch uses.
+SelectorFaultUnwindProbe verify_selector_fault_unwind() noexcept;
 
 void configure_selector_dispatch_audit(AuditCapture capture,
                                        AuditPassed passed) noexcept;

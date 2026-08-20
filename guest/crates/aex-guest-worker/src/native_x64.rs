@@ -2003,7 +2003,7 @@ unsafe extern "win64" fn iterate_generic(iterations: i32, refcon: u64, callback:
 }
 
 fn native_smart_checkout_world(state: &NativeState, index: i32) -> Option<(u64, i32, i32)> {
-    let world = if index == 0 {
+    let mut world = if index == 0 {
         state.smart_input_world
     } else {
         let offset = usize::try_from(index).ok()?.checked_sub(1)?;
@@ -2017,6 +2017,14 @@ fn native_smart_checkout_world(state: &NativeState, index: i32) -> Option<(u64, 
             .filter(|definition| *definition != 0)?
             .checked_add(abi::PARAM_U_OFFSET as u64)?
     };
+    if index != 0
+        && native_guest_range_valid(state, world, abi::PF_LAYER_DEF_SIZE as u64)
+        && unsafe { std::slice::from_raw_parts(world as *const u8, abi::PF_LAYER_DEF_SIZE) }
+            .iter()
+            .all(|byte| *byte == 0)
+    {
+        world = state.smart_input_world;
+    }
     if !native_world_descriptor_valid(state, world) {
         return None;
     }

@@ -3,6 +3,7 @@
 #include "generated/aex_abi_contract.hpp"
 #include "gpu_memory_world_transport.hpp"
 #include "premiere_gpu_filter_abi.hpp"
+#include "render_pixel_transport.hpp"
 #include "render_subsystem.h"
 #include "worker_active_plugin_context.hpp"
 #include "worker_parameter_runtime.hpp"
@@ -11,11 +12,13 @@
 #include "worker_world_registry.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <vector>
 #include <windows.h>
 
 namespace aexcompat::worker_runtime::smart_dispatch {
@@ -247,7 +250,12 @@ inline bool gpu_frame_device_memory(void* mapping, void** out_ptr, int32_t* out_
 // their world lifecycle exports, and expose no guessed PPix layout here.
 class VideoFrameCpuWorlds {
  public:
+  // VideoFrame owns these LayerDefs (VF::NewPF_WorldWithNewVideoFrame /
+  // CreateGPUVideoFrame fill and free them); they are not the host's
+  // EffectWorldStorage and carry no PF_World facade prefix. The host worlds
+  // this adapter copies to/from are EffectWorldStorage (HostWorld).
   using World = std::array<std::byte, 120>;
+  using HostWorld = aexcompat::world_safety::EffectWorldStorage;
 
   bool available() {
     // Cache the full resolution result, not a re-derived subset: an earlier
@@ -376,7 +384,7 @@ class VideoFrameCpuWorlds {
     return available_;
   }
 
-  bool create_input(int32_t width, int32_t height, const World& source,
+  bool create_input(int32_t width, int32_t height, const HostWorld& source,
     bool gpu, int32_t framework) {
     if (gpu) {
       input_gpu_ = create_gpu(input_, input_live_, width, height, framework);
@@ -475,7 +483,7 @@ class VideoFrameCpuWorlds {
                                                                       : nullptr;
   }
 
-  bool copy_output_to(World& destination) {
+  bool copy_output_to(HostWorld& destination) {
     if (!output_live_) return false;
     if (!output_gpu_) return copy_pixels(output_, destination);
     // #1072:transfer_gpu_to_cpu does the CUDA
@@ -543,13 +551,15 @@ class VideoFrameCpuWorlds {
                                      const int32_t*, int32_t);
   using DisposePpix = void(__cdecl*)(void**);
 
-  static int32_t world_i32(const World& world, std::size_t offset) {
+  template <typename AnyWorld>
+  static int32_t world_i32(const AnyWorld& world, std::size_t offset) {
     int32_t value{};
     std::memcpy(&value, world.data() + offset, sizeof(value));
     return value;
   }
 
-  static void* world_pixels(const World& world) {
+  template <typename AnyWorld>
+  static void* world_pixels(const AnyWorld& world) {
     void* value{};
     std::memcpy(&value, world.data() + 24, sizeof(value));
     return value;
@@ -577,7 +587,8 @@ class VideoFrameCpuWorlds {
     return pointer;
   }
 
-  static bool copy_pixels(const World& source, World& destination) {
+  template <typename SourceWorld, typename DestinationWorld>
+  static bool copy_pixels(const SourceWorld& source, DestinationWorld& destination) {
     const int32_t width = world_i32(source, 36);
     const int32_t height = world_i32(source, 40);
     const int32_t source_rowbytes = world_i32(source, 32);
@@ -834,7 +845,8 @@ class VideoFrameCpuWorlds {
     return ok && popped_ok;
   }
 
-  bool transfer_gpu_to_cpu(const World& gpu, World& destination) {
+  template <typename DestinationWorld>
+  bool transfer_gpu_to_cpu(const World& gpu, DestinationWorld& destination) {
     return gpu_memcpy_frame(gpu, world_pixels(destination), world_i32(destination, 32),
                             world_i32(destination, 36), world_i32(destination, 40),
                             /*to_gpu=*/false);
@@ -897,6 +909,16 @@ T read(const std::array<std::byte, N>& buffer, std::size_t offset) {
   T value{};
   std::memcpy(&value, buffer.data() + offset, sizeof(value));
   return value;
+}
+
+// The same accessors on a world storage (the LayerDef part).
+template <typename T>
+T read(const aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset) {
+  return read<T>(world.layer_def, offset);
+}
+template <typename T>
+void write(aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset, T value) {
+  write(world.layer_def, offset, value);
 }
 
 void write_render_request(std::byte* destination,
@@ -1342,7 +1364,76 @@ struct PrRenderCrash {
   void* address{};
   void* access{};
   bool crashed{};
+  // A C++ exception that escaped the plug-in call. Caught at a C++ boundary
+  // inside the SEH leaf (the selector dispatch's invoke_audited_effect_call_seh
+  // shape) so the exception object is destroyed and the trace tells a throw
+  // apart from a fault; either one declines the route.
+  bool cpp_exception{};
 };
+bool pr_faulted(const PrRenderCrash& crash) {
+  return crash.crashed || crash.cpp_exception;
+}
+void report_pr_fault(const char* phase, const PrRenderCrash& crash,
+                     HMODULE module) {
+  if (crash.cpp_exception) {
+    std::cerr << "stage:pr_gpu_crash phase=" << phase
+              << " kind=cpp_exception base=" << static_cast<void*>(module)
+              << "\n" << std::flush;
+    return;
+  }
+  std::cerr << "stage:pr_gpu_crash phase=" << phase << " kind=seh code="
+            << std::hex << crash.code << " addr=" << crash.address
+            << " access=" << crash.access << std::dec
+            << " base=" << static_cast<void*>(module) << "\n"
+            << std::flush;
+}
+abi::prSuiteError entry_cpp_boundary(abi::PrGPUFilterEntryFn entry,
+                                     abi::csSDK_uint32 version,
+                                     abi::csSDK_int32* index,
+                                     abi::prBool in_startup,
+                                     abi::piSuites* suites,
+                                     abi::PrGPUFilter* filter,
+                                     abi::PrGPUFilterInfo* info,
+                                     PrRenderCrash* crash) {
+  try {
+    return entry(version, index, in_startup, suites, filter, info);
+  } catch (...) {
+    crash->cpp_exception = true;
+    return -1;
+  }
+}
+abi::prSuiteError create_instance_cpp_boundary(abi::PrGPUFilter* filter,
+                                               abi::PrGPUFilterInstance* instance,
+                                               PrRenderCrash* crash) {
+  try {
+    return filter->CreateInstance(instance);
+  } catch (...) {
+    crash->cpp_exception = true;
+    return -1;
+  }
+}
+abi::prSuiteError dispose_instance_cpp_boundary(abi::PrGPUFilter* filter,
+                                                abi::PrGPUFilterInstance* instance,
+                                                PrRenderCrash* crash) {
+  try {
+    return filter->DisposeInstance(instance);
+  } catch (...) {
+    crash->cpp_exception = true;
+    return -1;
+  }
+}
+abi::prSuiteError render_cpp_boundary(
+    abi::PrGPUFilter* filter, abi::PrGPUFilterInstance* instance,
+    const abi::PrGPUFilterRenderParams* render_params,
+    const abi::PPixHand* in_frames, abi::PPixHand* out_frame,
+    PrRenderCrash* crash) {
+  try {
+    return filter->Render(instance, render_params, in_frames, 1, out_frame);
+  } catch (...) {
+    crash->cpp_exception = true;
+    return -1;
+  }
+}
 LONG pr_seh_filter(uint32_t code, _EXCEPTION_POINTERS* info, PrRenderCrash* crash) {
   crash->code = code;
   crash->address = info ? info->ExceptionRecord->ExceptionAddress : nullptr;
@@ -1353,11 +1444,38 @@ LONG pr_seh_filter(uint32_t code, _EXCEPTION_POINTERS* info, PrRenderCrash* cras
   crash->crashed = true;
   return EXCEPTION_EXECUTE_HANDLER;
 }
+// The plug-in's xGPUFilterEntry startup/shutdown runs plug-in code too (its
+// static filter registration and GF device lookups), so it gets the same
+// containment as CreateInstance / Render: a crash there declines the route
+// with its fault site on stderr instead of taking the worker down.
+abi::prSuiteError guarded_entry(abi::PrGPUFilterEntryFn entry,
+                                abi::csSDK_uint32 version, abi::csSDK_int32* index,
+                                abi::prBool in_startup,
+                                abi::piSuites* suites, abi::PrGPUFilter* filter,
+                                abi::PrGPUFilterInfo* info, PrRenderCrash* crash) {
+  __try {
+    return entry_cpp_boundary(entry, version, index, in_startup, suites, filter,
+                              info, crash);
+  } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
+                            crash)) {
+    return -1;
+  }
+}
 abi::prSuiteError guarded_create_instance(abi::PrGPUFilter* filter,
                                           abi::PrGPUFilterInstance* instance,
                                           PrRenderCrash* crash) {
   __try {
-    return filter->CreateInstance(instance);
+    return create_instance_cpp_boundary(filter, instance, crash);
+  } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
+                            crash)) {
+    return -1;
+  }
+}
+abi::prSuiteError guarded_dispose_instance(abi::PrGPUFilter* filter,
+                                           abi::PrGPUFilterInstance* instance,
+                                           PrRenderCrash* crash) {
+  __try {
+    return dispose_instance_cpp_boundary(filter, instance, crash);
   } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
                             crash)) {
     return -1;
@@ -1369,7 +1487,8 @@ abi::prSuiteError guarded_render(abi::PrGPUFilter* filter,
                                  const abi::PPixHand* in_frames,
                                  abi::PPixHand* out_frame, PrRenderCrash* crash) {
   __try {
-    return filter->Render(instance, render_params, in_frames, 1, out_frame);
+    return render_cpp_boundary(filter, instance, render_params, in_frames,
+                               out_frame, crash);
   } __except (pr_seh_filter(GetExceptionCode(), GetExceptionInformation(),
                             crash)) {
     return -1;
@@ -1431,19 +1550,59 @@ void force_gpu_acceleration_available(HMODULE module) {
 // this route existed).
 bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
                        smart_execution::Result& result) {
+  // Every exit from this function names itself on stderr as a stage pair the
+  // broker records without AEXCOMPAT_EXTENDED_DIAG (issue #1271 review). The
+  // lifecycle containment above turned faults that used to take the worker
+  // down - a loud record with a classification, an exit code and a minidump -
+  // into a quiet fall-through to the PF path, and a plug-in that lands in
+  // `rendered` with nothing saying the GPU route was tried and declined is the
+  // silent success this project does not allow. Each `reason` is a fixed
+  // lower-case identifier chosen here, which is the shape the broker's parser
+  // admits - that check is what keeps plug-in authored text out of a report,
+  // since the plug-in shares this stderr and can print `stage:` lines too.
+  const char* outcome = "entered";
+  // The `_begin` line names why the route was entered when the PF CPU path
+  // was turned away first (issue #1283). Without it a `rendered` record whose
+  // `_end` says `committed` cannot be told from one whose CPU path worked and
+  // never needed the route, so a host callback refusal that the GPU route then
+  // papered over would leave no trace in the sweep record a corpus comparison
+  // reads - which needs no `AEXCOMPAT_EXTENDED_DIAG`, so this cannot be a
+  // trace-only line. `render_sweep` lifts it to `worker.pr_gpu_route_entered_from`.
+  // Same lower-case identifier shape as the `_end` reason, for the same parser.
+  const char* const retry_cause = [] {
+    switch (smart_setup::pr_gpu_retry_cause()) {
+      case 512: return "cpu_internal_struct_damaged";
+      case 516: return "cpu_bad_callback_param";
+      default: return static_cast<const char*>(nullptr);
+    }
+  }();
+  std::cerr << "stage:pr_gpu_route_begin";
+  if (retry_cause) std::cerr << " reason=" << retry_cause;
+  std::cerr << "\n" << std::flush;
+  struct RouteOutcome {
+    const char** reason;
+    ~RouteOutcome() {
+      std::cerr << "stage:pr_gpu_route_end reason=" << *reason << "\n"
+                << std::flush;
+    }
+  } route_outcome{&outcome};
+  const auto decline = [&outcome](const char* reason) {
+    outcome = reason;
+    return false;
+  };
   const auto& plan = *request.plan;
   const int32_t width = plan.width;
   const int32_t height = plan.height;
-  if (width <= 0 || height <= 0) return false;
+  if (width <= 0 || height <= 0) return decline("bad_extent");
   const HMODULE module = active_plugin::effect_module;
-  if (!module) return false;
+  if (!module) return decline("no_module");
   const auto entry = reinterpret_cast<abi::PrGPUFilterEntryFn>(
       GetProcAddress(module, abi::kGPUFilterEntryExport));
   if (!entry) {
-    return false;
+    return decline("no_entry_export");
   }
   if (!frames.pr_gpu_ready()) {
-    return false;
+    return decline("gpu_unavailable");
   }
   ensure_suite_tables();
 
@@ -1454,7 +1613,7 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   namespace transport = gpu_runtime::memory_world_transport;
   if (!transport::begin_backend_context(/*framework=*/3, /*device_index=*/0,
                                         frames.cuda_context())) {
-    return false;
+    return decline("no_backend_context");
   }
 
   force_gpu_acceleration_available(module);
@@ -1481,36 +1640,111 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   abi::PrGPUFilter filter{};
   abi::PrGPUFilterInfo info{};
   int32_t startup_index = 0;
-  const abi::prSuiteError startup_error = entry(
-      abi::kPrSDKGPUFilterInterfaceVersion, &startup_index, /*inStartup=*/1,
-      &suites, &filter, &info);
-  if (!abi::suite_ok(startup_error) || !filter.CreateInstance || !filter.Render) {
-    return false;
+  PrRenderCrash crash;
+  const abi::prSuiteError startup_error = guarded_entry(
+      entry, abi::kPrSDKGPUFilterInterfaceVersion, &startup_index,
+      /*inStartup=*/1, &suites, &filter, &info, &crash);
+  if (pr_faulted(crash)) {
+    report_pr_fault("startup", crash, module);
+    return decline("startup_fault");
   }
+  std::cerr << "stage:pr_gpu_startup_end error=" << startup_error << "\n"
+            << std::flush;
+  if (!abi::suite_ok(startup_error)) return decline("startup_error");
+  bool shutdown_done = false;
   const auto shutdown = [&] {
+    if (shutdown_done) return;
+    shutdown_done = true;
     int32_t shutdown_index = 0;
-    entry(abi::kPrSDKGPUFilterInterfaceVersion, &shutdown_index, /*inStartup=*/0,
-          &suites, &filter, &info);
+    PrRenderCrash shutdown_crash;
+    guarded_entry(entry, abi::kPrSDKGPUFilterInterfaceVersion, &shutdown_index,
+                  /*inStartup=*/0, &suites, &filter, &info, &shutdown_crash);
+    if (pr_faulted(shutdown_crash))
+      report_pr_fault("shutdown", shutdown_crash, module);
   };
+  // Startup is balanced by shutdown on every exit. Each one below calls it
+  // explicitly - the success path has to shut the filter down before the
+  // readback, so the call cannot simply be deferred to scope exit - and this
+  // guard is the net for an exit that forgets to: with the lambda idempotent
+  // it fires only when nothing else did. It is a maintenance net, not a
+  // throw-safety property: no C++ handler exists above this frame, so MSVC
+  // terminates at the throw point without unwinding, and an allocation failure
+  // in the region below would take the worker rather than reach this
+  // destructor. Declared after `context_guard`, so it runs first and the
+  // filter shuts down while the GPU backend context is still current.
+  struct ShutdownGuard {
+    const decltype(shutdown)* run;
+    ~ShutdownGuard() { (*run)(); }
+  } shutdown_guard{&shutdown};
+  // Startup succeeded, so it is balanced by shutdown from here on, including
+  // when the filter table it filled in is unusable.
+  if (!filter.CreateInstance || !filter.Render) {
+    shutdown();
+    return decline("no_filter_table");
+  }
 
-  // Build the input GPU PPix and upload the host's float32 input pixels into it.
+  // Build the input GPU PPix and upload the host's input pixels into it as
+  // float32 ARGB. A float32 session's world uploads as-is; an 8/16bpc session
+  // (issue #1271: every VR effect was 512 at depth 8/16 because this route was
+  // float32-only and the PF CPU path is GPU-only) widens its world into a
+  // float32 staging copy first, so the plug-in sees the 32f frame it renders.
+  const int32_t session_pixel_bytes = plan.pixel_bytes;
+  if (session_pixel_bytes != 4 && session_pixel_bytes != 8 &&
+      session_pixel_bytes != 16) {
+    shutdown();
+    return decline("unsupported_depth");
+  }
+  void* input_pixels{};
+  std::memcpy(&input_pixels, request.input_world->data() + 24,
+              sizeof(input_pixels));
+  const int32_t input_rowbytes = read<int32_t>(*request.input_world, 32);
+  const int32_t float_rowbytes = width * 16;
+  // Fail closed on a stride that cannot hold the row (mirrors
+  // gpu_memcpy_frame's own check on the float32 side) rather than over-read.
+  // Checked before any GPU frame exists so nothing is left to dispose.
+  if (input_pixels &&
+      (input_rowbytes < 0 ||
+       static_cast<std::size_t>(input_rowbytes) <
+           static_cast<std::size_t>(width) * session_pixel_bytes)) {
+    shutdown();
+    return decline("bad_input_stride");
+  }
+  std::vector<float> input_float32;
+  const void* upload_pixels = input_pixels;
+  int32_t upload_rowbytes = input_rowbytes;
+  if (input_pixels && session_pixel_bytes != 16) {
+    try {
+      input_float32.resize(static_cast<std::size_t>(width) * height * 4);
+    } catch (const std::exception&) {
+      shutdown();
+      return decline("input_staging_alloc");
+    }
+    for (int32_t y = 0; y < height; ++y) {
+      const auto* row = static_cast<const unsigned char*>(input_pixels) +
+                        static_cast<std::size_t>(y) * input_rowbytes;
+      float* out_row = input_float32.data() + static_cast<std::size_t>(y) * width * 4;
+      for (int32_t x = 0; x < width; ++x)
+        render_pixel_transport::argb_to_argb32f(
+            out_row + static_cast<std::size_t>(x) * 4,
+            row + static_cast<std::size_t>(x) * session_pixel_bytes,
+            session_pixel_bytes);
+    }
+    upload_pixels = input_float32.data();
+    upload_rowbytes = float_rowbytes;
+  }
   auto input_record = std::make_unique<FrameRecord>();
   input_record->width = width;
   input_record->height = height;
   if (!frames.pr_make_gpu_ppix(input_record->world, input_record->live, width,
                                height)) {
     shutdown();
-    return false;
+    return decline("input_frame_alloc");
   }
-  void* input_pixels{};
-  std::memcpy(&input_pixels, request.input_world->data() + 24,
-              sizeof(input_pixels));
-  const int32_t input_rowbytes = read<int32_t>(*request.input_world, 32);
-  if (input_pixels &&
-      !frames.pr_upload(input_record->world, input_pixels, input_rowbytes, width,
-                        height)) {
+  if (upload_pixels &&
+      !frames.pr_upload(input_record->world, upload_pixels, upload_rowbytes,
+                        width, height)) {
     shutdown();
-    return false;
+    return decline("input_upload");
   }
   const abi::PPixHand input_ppix =
       reinterpret_cast<abi::PPixHand>(frames.pr_ppix(input_record->world));
@@ -1522,20 +1756,30 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   instance.inTimelineID = 1;
   instance.inNodeID = context.node_id;
   instance.ioPrivatePluginData = nullptr;
-  PrRenderCrash crash;
+  // DisposeInstance is plug-in code as well; a fault there is contained and
+  // recorded like the other three lifecycle calls, and never stops the shutdown
+  // that follows it.
+  const auto dispose_instance = [&] {
+    if (!filter.DisposeInstance) return;
+    PrRenderCrash dispose_crash;
+    guarded_dispose_instance(&filter, &instance, &dispose_crash);
+    if (pr_faulted(dispose_crash))
+      report_pr_fault("dispose_instance", dispose_crash, module);
+  };
   const abi::prSuiteError create_error =
       guarded_create_instance(&filter, &instance, &crash);
-  if (crash.crashed) {
-    std::cerr << "stage:pr_gpu_crash phase=create_instance code=" << std::hex
-              << crash.code << " addr=" << crash.address << std::dec
-              << " base=" << static_cast<void*>(module) << "\n"
-              << std::flush;
+  if (pr_faulted(crash)) {
+    report_pr_fault("create_instance", crash, module);
     shutdown();
-    return false;
+    return decline("create_instance_fault");
   }
   if (!abi::suite_ok(create_error)) {
+    // Deliberately not disposed: the plug-in reported that it did not create
+    // the instance, so handing it back for disposal would be a call it never
+    // agreed to take. Anything it allocated before deciding to fail is its own
+    // to release at shutdown.
     shutdown();
-    return false;
+    return decline("create_instance_error");
   }
 
   abi::PrGPUFilterRenderParams render_params{};
@@ -1557,9 +1801,9 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   output_record->height = height;
   if (!frames.pr_make_gpu_ppix(output_record->world, output_record->live, width,
                                height)) {
-    if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+    dispose_instance();
     shutdown();
-    return false;
+    return decline("output_frame_alloc");
   }
   abi::PPixHand host_output_ppix =
       reinterpret_cast<abi::PPixHand>(frames.pr_ppix(output_record->world));
@@ -1572,15 +1816,11 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
       &filter, &instance, &render_params, in_frames, &out_frame, &crash);
   std::cerr << "stage:pr_gpu_render_end error=" << render_error << "\n"
             << std::flush;
-  if (crash.crashed) {
-    std::cerr << "stage:pr_gpu_crash phase=render code=" << std::hex
-              << crash.code << " addr=" << crash.address
-              << " access=" << crash.access << std::dec
-              << " base=" << static_cast<void*>(module) << "\n"
-              << std::flush;
-    if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+  if (pr_faulted(crash)) {
+    report_pr_fault("render", crash, module);
+    dispose_instance();
     shutdown();
-    return false;
+    return decline("render_fault");
   }
 
   // Locate the rendered frame, in order of how reliably it names the output:
@@ -1629,7 +1869,7 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
       out_record = find_frame(host_output_ppix);
   }
 
-  if (filter.DisposeInstance) filter.DisposeInstance(&instance);
+  dispose_instance();
   shutdown();
 
   // Read back the plug-in's own output extent, not the requested plan size. A
@@ -1647,22 +1887,78 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   int32_t out_frame_w = 0, out_frame_h = 0;
   if (out_record)
     frames.pr_world_dims(out_record->world, out_frame_w, out_frame_h);
+  if (!abi::suite_ok(render_error)) return decline("render_error");
   if (!out_record || out_frame_w <= 0 || out_frame_h <= 0)
-    return false;
+    return decline("no_output_frame");
 
-  const int32_t rowbytes = out_frame_w * 16;
+  // The plug-in's frame is float32 ARGB. A float32 session downloads it
+  // straight into the guarded output; an 8/16bpc session downloads into a
+  // float32 staging copy and narrows it into the guarded output at the session
+  // depth, so what leaves this route is a world of the depth the session
+  // registered (the finalize copy, the hash and the pixel validation all read
+  // it at `plan.pixel_bytes`). The output extent stays the plug-in's own.
+  const int32_t out_float_rowbytes = out_frame_w * 16;
+  const int32_t rowbytes = out_frame_w * session_pixel_bytes;
   if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * out_frame_h))
-    return false;
+    return decline("output_buffer_alloc");
   *request.destination = request.guarded->data();
-  if (!frames.pr_download(out_record->world, request.guarded->data(), rowbytes,
+  std::vector<float> output_float32;
+  void* download_pixels = request.guarded->data();
+  if (session_pixel_bytes != 16) {
+    // The extent is the plug-in's own; a staging copy the host cannot allocate
+    // is a refused frame, the same shape as `guarded->reset` failing above.
+    try {
+      output_float32.resize(static_cast<std::size_t>(out_frame_w) * out_frame_h * 4);
+    } catch (const std::exception&) {
+      return decline("output_staging_alloc");
+    }
+    download_pixels = output_float32.data();
+  }
+  if (!frames.pr_download(out_record->world, download_pixels, out_float_rowbytes,
                           out_frame_w, out_frame_h))
-    return false;
+    return decline("download_failed");
+  // The float32 session's finalize rejects a non-finite output
+  // (output_pixels_valid false, -6). Narrowing would silently turn NaN into 0
+  // and +-inf into the bounds, so the check is taken here on the float frame
+  // the plug-in produced, before the narrowing, and handed to finalize as
+  // `output_non_finite` so it lands in the same verdict: the depth a session
+  // renders at must not decide whether a broken output is a diagnostic.
+  // Held locally until the route commits: every field this function publishes
+  // into `result` is written on the success path below, because a declined
+  // route falls through to the ordinary PF render and must not colour its
+  // verdict with what the GPU frame contained. That applies to `result` only -
+  // the guarded buffer, `*request.destination` and the output world are
+  // rewritten before the last failure returns and are not restored. The PF
+  // path re-establishes all three before it renders, so the values a declined
+  // route leaves behind describe this session's own depth and the plug-in's
+  // extent rather than a foreign layout (before issue #1271 they described a
+  // 16-byte float32 pixel in an 8-bit session).
+  bool output_non_finite = false;
+  if (session_pixel_bytes != 16) {
+    output_non_finite =
+        !std::all_of(output_float32.begin(), output_float32.end(),
+                     [](float value) { return std::isfinite(value); });
+    if (output_non_finite)
+      std::cerr << "stage:pr_gpu_output_non_finite\n" << std::flush;
+    for (int32_t y = 0; y < out_frame_h; ++y) {
+      const float* row =
+          output_float32.data() + static_cast<std::size_t>(y) * out_frame_w * 4;
+      auto* out_row = request.guarded->data() + static_cast<std::size_t>(y) * rowbytes;
+      for (int32_t x = 0; x < out_frame_w; ++x)
+        render_pixel_transport::argb32f_to_argb(
+            out_row + static_cast<std::size_t>(x) * session_pixel_bytes,
+            row + static_cast<std::size_t>(x) * 4, session_pixel_bytes);
+    }
+  }
 
   // TEMP (#1058 correctness): dump the input and rendered output as raw float32
-  // ARGB so an AE-oracle comparison can settle the channel order. Env-gated.
+  // ARGB (the frames the plug-in saw and produced, before any session-depth
+  // narrowing) so an AE-oracle comparison can settle the channel order.
+  // Env-gated.
   if (const char* dump_path = std::getenv("AEXCOMPAT_PR_GPU_DUMP")) {
     const auto write_raw = [&](const std::string& path, const void* pixels,
                                int32_t w, int32_t h, int32_t src_rowbytes) {
+      if (!pixels) return;
       std::ofstream file(path, std::ios::binary);
       const int32_t header[2] = {w, h};
       file.write(reinterpret_cast<const char*>(header), sizeof(header));
@@ -1671,24 +1967,26 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
                        static_cast<std::size_t>(y) * src_rowbytes,
                    static_cast<std::size_t>(w) * 16);
     };
-    write_raw(std::string(dump_path) + ".in", input_pixels, width, height,
-              input_rowbytes);
-    write_raw(std::string(dump_path) + ".out", request.guarded->data(),
-              out_frame_w, out_frame_h, rowbytes);
+    write_raw(std::string(dump_path) + ".in", upload_pixels, width, height,
+              upload_rowbytes);
+    write_raw(std::string(dump_path) + ".out", download_pixels, out_frame_w,
+              out_frame_h, out_float_rowbytes);
   }
 
   if (!render::prepare_world_layout(
           *request.output_world,
-          {1, plan.pixel_bytes, out_frame_w, out_frame_h, rowbytes},
+          {session_pixel_bytes == 4 ? 0 : 1, session_pixel_bytes, out_frame_w,
+           out_frame_h, rowbytes},
           *request.destination) ||
       !request.formats->register_world(request.output_world->data(),
                                        request.dispatch_pixel_format))
-    return false;
+    return decline("world_publish_failed");
 
   result.gpu_setup_error = 0;
   result.pre_error = 0;
   result.selector_error = 0;
   result.render_error = 0;
+  result.output_non_finite = output_non_finite;
   result.rects_valid = true;
   result.empty_result_rect = false;
   result.result_rect = {0, 0, out_frame_w, out_frame_h};
@@ -1697,6 +1995,7 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   result.output_width = out_frame_w;
   result.output_height = out_frame_h;
   result.output_rowbytes = rowbytes;
+  outcome = output_non_finite ? "committed_non_finite" : "committed";
   return true;
 }
 
@@ -1761,6 +2060,34 @@ bool verify_selector_inputs() {
   return true;
 }
 
+namespace {
+bool reset_smart_output(render_safety::OutputPixelBuffer& guarded,
+                        std::size_t requested_size,
+                        unsigned char*& destination,
+                        smart_execution::Result& result) {
+  if (guarded.reset(requested_size)) {
+    destination = guarded.data();
+    return true;
+  }
+  result.rects_valid = false;
+  result.pre_error = -3;
+  result.output_allocation_failed = true;
+  result.empty_result_passthrough = false;
+  result.output_width = 0;
+  result.output_height = 0;
+  result.output_rowbytes = 0;
+  result.output_origin_x = 0;
+  result.output_origin_y = 0;
+  return false;
+}
+}  // namespace
+
+bool pr_gpu_filter_route_available() {
+  return active_plugin::effect_module &&
+      GetProcAddress(active_plugin::effect_module,
+                     pr_gpu::kGPUFilterEntryExport) != nullptr;
+}
+
 bool dispatch(const Request& request, const Hooks& hooks,
               smart_execution::Result& result, State& dispatch_state) {
   if (!request.entry || !request.input || !request.output || !request.plan ||
@@ -1779,14 +2106,19 @@ bool dispatch(const Request& request, const Hooks& hooks,
   // Premiere GPU-filter route (issue #1058): the VR / Immersive effect family
   // exports xGPUFilterEntry and is GPU-only - its PF SmartFX CPU path only draws
   // a "requires GPU acceleration" warning and returns 512. Drive the Premiere
-  // GPU filter directly instead. Only float32 renders qualify (these effects are
-  // 32f GPU); any failure falls through to the ordinary PF path below, so a
-  // genuine GPU-only effect is never made worse than its pre-existing 512.
-  const bool pr_gpu_filter_export =
-      active_plugin::effect_module &&
-      GetProcAddress(active_plugin::effect_module,
-                     pr_gpu::kGPUFilterEntryExport) != nullptr;
-  if (plan.float32 && pr_gpu_filter_export) {
+  // GPU filter directly instead. The filter renders 32f frames: a float32
+  // session takes this route first, as before. An 8/16bpc session takes it
+  // only on the frame loop's retry after the PF CPU path answered 512 (issue
+  // #1271; the input is widened to 32f and the output narrowed back inside
+  // run_pr_gpu_filter). Not export-first at 8/16: other AE effects export
+  // xGPUFilterEntry with a working PF CPU path (Levels2, Box_Blur, Lumetri,
+  // DirectionalBlur, ...) and routing them here first at the default depth
+  // measured as crashes and changed pixels against their PF renders. Any
+  // failure falls through to the ordinary PF path below, so a genuine
+  // GPU-only effect is never made worse than its pre-existing 512.
+  if (pr_gpu_filter_route_available() &&
+      (plan.float32 || smart_setup::force_pr_gpu_retry_requested())) {
+    result.pr_gpu_route_attempted = true;
     VideoFrameCpuWorlds pr_filter_frames;
     if (pr_host::run_pr_gpu_filter(request, pr_filter_frames, result))
       return true;
@@ -1929,66 +2261,168 @@ bool dispatch(const Request& request, const Hooks& hooks,
             << std::flush;
   hooks.automatic_checkin();
 
-  const render::SmartOutputBounds smart_bounds = render::prepare_smart_output_bounds(
+  render::SmartOutputBounds smart_bounds = render::prepare_smart_output_bounds(
       dispatch_state.pre_output.data(), dispatch_state.pre_output.size(), plan.pixel_bytes);
   result.result_rect = smart_bounds.result_rect;
   result.max_result_rect = smart_bounds.max_result_rect;
   result.rects_valid = result.pre_error == 0 && smart_bounds.valid;
   result.empty_result_rect = result.rects_valid && smart_bounds.empty_result;
+  // AE-equivalence for a SmartFX PreRender that promises nothing (issue #1285).
+  //
+  // An empty `result_rect` says the effect contributes no pixels to this
+  // frame. AE does not turn that into an empty frame: the frame that reaches
+  // the output is the effect's input, unchanged. Two AE 26.3x87 captures with
+  // verified loaded-module identity, on the same 256x144 solid input this
+  // sweep renders, both came back byte-identical to that input:
+  //
+  //  - Grow_Bounds.aex (`ADBE GROW BOUNDS`) advertises
+  //    PF_OutFlag2_SUPPORTS_SMART_RENDER and its only entry export
+  //    (`FilterMain`) has no case for PF_Cmd_SMART_PRE_RENDER (23) or
+  //    PF_Cmd_SMART_RENDER (24) at all -- both fall through its `default` and
+  //    return PF_Err_NONE without touching `extra`. Nothing the plug-in wrote
+  //    can explain AE's frame, and AE cannot have dispatched SMART_RENDER
+  //    either -- at least not consistently with anything observable here: the
+  //    plug-in writes no output world, so a dispatched render would have left
+  //    an unwritten buffer rather than the exact input. What that argument
+  //    cannot rule out is an AE that seeds the output world with the input
+  //    before the selector; the alternatives, and what would still separate
+  //    them, are in `docs/TAIL_COHORT_2026-08-18.md` section 3.
+  //  - Set_Channels.aex (`ADBE Set Channels`) sets `result_rect` empty
+  //    explicitly, with `max_result_rect` at the full frame.
+  //
+  // So the host keeps skipping the render selector (below) and emits the
+  // input in place of the promised-nothing frame. This is not a Classic
+  // fallback: no second route runs and no selector is re-dispatched. It is
+  // recorded on the frame (`empty_result_passthrough`) so a reader can never
+  // mistake it for pixels the plug-in produced.
+  //
+  // What the copy reads is the input world this dispatch built, so `plan` --
+  // host-owned, and not reachable from the plug-in -- is what describes it.
+  // `plan.missing_input` is the one dispatch shape with no such buffer; GPU
+  // negotiation is excluded because the pixels then live on the device rather
+  // than in this world. Note that a generator-shaped effect applied to a layer
+  // still has an input here (the layer), and emitting it is what AE does.
+  //
+  // The pixel pointer is the one field `plan` cannot vouch for: PreRender has
+  // already run, and the layer ParamDef the plug-in was handed aliases this
+  // world's prefix (`copy_world_into_param_def` does not re-point
+  // `reserved_long4`), so a plug-in that writes through it writes the live
+  // world's fields -- the #1090 shape. Resolving through the dispatch-world
+  // registry is what refuses that: `register_world` captured data, rowbytes,
+  // width and height when the host handed the world over, and the resolve
+  // fails closed when any of them no longer match. A raw read of +24 would
+  // have pointed `plan.height` rows of memcpy wherever the plug-in wanted.
+  aexcompat::world_safety::DispatchWorldFormat passthrough_world{};
+  const bool passthrough_world_intact =
+      request.input_world &&
+      aexcompat::world_safety::resolve_registered_dispatch_world(
+          request.input_world->data(), passthrough_world);
+  const unsigned char* passthrough_source = passthrough_world_intact
+      ? static_cast<const unsigned char*>(passthrough_world.data) : nullptr;
+  // The emitted frame is exactly the rect AE asked for. Width/height/rowbytes
+  // and the world origin come off that rect the same way
+  // `prepare_smart_output_bounds` derives them for a rendered result, so one
+  // layout path serves both.
+  const std::array<int32_t, 4> passthrough_rect = expected_request;
+  const int32_t passthrough_width = passthrough_rect[2] - passthrough_rect[0];
+  const int32_t passthrough_height = passthrough_rect[3] - passthrough_rect[1];
+  // Bound the copy with what the registry captured, not with `plan`: the two
+  // agree for an intact world, and if they ever disagree the resolve above has
+  // already refused. The non-negative top-left is belt-and-braces -- a
+  // non-empty rect contained in one anchored at the origin already has one --
+  // kept because it is what makes the unsigned row arithmetic below safe to
+  // read locally rather than by following `smart_rect_contained`.
+  const int32_t passthrough_rowbytes = passthrough_world.rowbytes;
+  result.empty_result_passthrough = result.empty_result_rect && !plan.missing_input &&
+      !plan.gpu_negotiation && passthrough_source &&
+      passthrough_world.rowbytes >= passthrough_world.width * plan.pixel_bytes &&
+      passthrough_rect[0] >= 0 && passthrough_rect[1] >= 0 &&
+      passthrough_width > 0 && passthrough_height > 0 &&
+      render::smart_rect_contained(
+          passthrough_rect,
+          {0, 0, passthrough_world.width, passthrough_world.height});
+  if (result.empty_result_passthrough) {
+    // `max_result_rect` is deliberately left alone. `result.max_result_rect`
+    // was already copied above and keeps the plug-in's own envelope, which is
+    // what the report should show; nothing downstream reads the local copy.
+    smart_bounds.empty_result = false;
+    smart_bounds.result_rect = passthrough_rect;
+    smart_bounds.width = passthrough_width;
+    smart_bounds.height = passthrough_height;
+    smart_bounds.rowbytes = passthrough_width * plan.pixel_bytes;
+    smart_bounds.origin_x = passthrough_rect[0];
+    smart_bounds.origin_y = passthrough_rect[1];
+  }
   result.returns_extra_pixels =
       (read<uint16_t>(dispatch_state.pre_output, 34) & 0x1u) != 0;
   // Without RETURNS_EXTRA_PIXELS the SDK does not admit result > request. The
   // overrun is surfaced as an explicit diagnostic rather than a render
   // failure: AE silently clips, and blocking here would turn an observable
   // compatibility gap into a dead end for real-AEX observation.
+  // The plug-in's own rect, not the emitted one: `result.result_rect` was
+  // copied before the passthrough could overwrite `smart_bounds`, and this
+  // field is about what the plug-in answered (issue #1285).
   result.result_within_request =
-      render::smart_rect_contained(smart_bounds.result_rect, expected_request);
+      render::smart_rect_contained(result.result_rect, expected_request);
   result.extra_pixels_contract_violation = result.rects_valid &&
       !result.returns_extra_pixels && !result.result_within_request;
-  if (result.rects_valid && !result.empty_result_rect) {
-    if (!request.guarded->reset(
-            static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height)) {
-      result.rects_valid = false;
-      result.pre_error = -3;
-    }
-    *request.destination = request.guarded->data();
-    if (!render::prepare_world_layout(
+  if (result.rects_valid &&
+      (!result.empty_result_rect || result.empty_result_passthrough)) {
+    const bool output_reset = reset_smart_output(
+        *request.guarded,
+        static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height,
+        *request.destination, result);
+    // `OutputPixelBuffer::reset` preserves the previous allocation on
+    // failure. The helper clears its report geometry; only a successful reset
+    // may republish the destination or lay out an output world around it.
+    if (output_reset) {
+      if (!render::prepare_world_layout(
             *request.output_world,
             {(plan.deep16 || plan.float32) ? 1 : 0, plan.pixel_bytes,
              smart_bounds.width, smart_bounds.height, smart_bounds.rowbytes},
             *request.destination) ||
-        !request.formats->register_world(request.output_world->data(),
-                                         request.dispatch_pixel_format))
-      result.rects_valid = false;
-    // AE 25.3 observation (issue #102): the output world carries the
-    // result_rect top-left as PF_LayerDef::origin_x/origin_y (offset 104/108),
-    // and in_data.output_origin (276/280) is the position of the layer origin
-    // inside that buffer, i.e. the negated result_rect top-left.
-    write<int32_t>(*request.output_world, 104, smart_bounds.origin_x);
-    write<int32_t>(*request.output_world, 108, smart_bounds.origin_y);
-    write<int32_t>(*request.input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET,
-                   -smart_bounds.result_rect[0]);
-    write<int32_t>(*request.input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET,
-                   -smart_bounds.result_rect[1]);
-    result.output_width = smart_bounds.width;
-    result.output_height = smart_bounds.height;
-    result.output_rowbytes = smart_bounds.rowbytes;
-    if (video_frame_adapter_ready && !plan.gpu_negotiation) {
-      if (!video_frame_worlds.create_output(smart_bounds.width,
-                                            smart_bounds.height,
-                                            plan.gpu_negotiation,
-                                            gpu_framework) ||
-          !(plan.gpu_negotiation
-                ? request.formats->register_gpu_world(
-                      video_frame_worlds.output().data(),
-                      world_registry::kPixelFormatGpuBgra128)
-                : request.formats->register_world(
-                      video_frame_worlds.output().data(),
-                      world_registry::kPixelFormatArgb128))) {
+          !request.formats->register_world(request.output_world->data(),
+                                           request.dispatch_pixel_format))
         result.rects_valid = false;
-      } else {
-        write<int32_t>(video_frame_worlds.output(), 104, smart_bounds.origin_x);
-        write<int32_t>(video_frame_worlds.output(), 108, smart_bounds.origin_y);
+      // AE 25.3 observation (issue #102): the output world carries the
+      // result_rect top-left as PF_LayerDef::origin_x/origin_y (offset 104/108),
+      // and in_data.output_origin (276/280) is the position of the layer origin
+      // inside that buffer, i.e. the negated result_rect top-left.
+      write<int32_t>(*request.output_world, 104, smart_bounds.origin_x);
+      write<int32_t>(*request.output_world, 108, smart_bounds.origin_y);
+      write<int32_t>(*request.input,
+                     aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET,
+                     -smart_bounds.result_rect[0]);
+      write<int32_t>(*request.input,
+                     aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET,
+                     -smart_bounds.result_rect[1]);
+      result.output_width = smart_bounds.width;
+      result.output_height = smart_bounds.height;
+      result.output_rowbytes = smart_bounds.rowbytes;
+      // Where the emitted buffer sits in layer coordinates. For a rendered
+      // result this is the plug-in's own `result_rect` top-left, which is what
+      // the session already reported; for the empty-result passthrough it is the
+      // request rect, and the plug-in's rect is empty and says nothing about
+      // where the frame is (issue #1285).
+      result.output_origin_x = smart_bounds.origin_x;
+      result.output_origin_y = smart_bounds.origin_y;
+      if (video_frame_adapter_ready && !plan.gpu_negotiation) {
+        if (!video_frame_worlds.create_output(smart_bounds.width,
+                                              smart_bounds.height,
+                                              plan.gpu_negotiation,
+                                              gpu_framework) ||
+            !(plan.gpu_negotiation
+                  ? request.formats->register_gpu_world(
+                        video_frame_worlds.output().data(),
+                        world_registry::kPixelFormatGpuBgra128)
+                  : request.formats->register_world(
+                        video_frame_worlds.output().data(),
+                        world_registry::kPixelFormatArgb128))) {
+          result.rects_valid = false;
+        } else {
+          write<int32_t>(video_frame_worlds.output(), 104, smart_bounds.origin_x);
+          write<int32_t>(video_frame_worlds.output(), 108, smart_bounds.origin_y);
+        }
       }
     }
   }
@@ -2098,16 +2532,71 @@ bool dispatch(const Request& request, const Hooks& hooks,
             << "_begin\n" << std::flush;
   if (result.empty_result_rect && result.pre_error == 0) {
     // A legally empty result_rect renders nothing; the selector is skipped.
+    // What reaches the frame is the input, copied row by row into the output
+    // buffer sized above, when the passthrough conditions held (see the
+    // AE-equivalence note at `empty_result_passthrough`). Both worlds are the
+    // host's own guarded allocations at `plan.pixel_bytes`, and the rect was
+    // checked to lie inside the input, so each row copy stays in bounds.
     result.render_error = 0;
+    // The `_begin` / `_end` pair is the shape the broker turns into a stage
+    // event, so the copy is on the record of an ordinary sweep and not only in
+    // a close report. Every reason is a lower-case identifier, which is all the
+    // broker's stage parser admits. Emitted only where a copy was on the table:
+    // a frame the passthrough was never eligible for stays empty, which the
+    // bucket already says, and the session's event list is capped.
+    if (result.empty_result_passthrough) {
+      std::cerr << "stage:smart_empty_result_passthrough_begin\n" << std::flush;
+      const char* passthrough_reason = "input_copied";
+      if (!result.rects_valid || !*request.destination) {
+        // The output world was not laid out after all (a failed layout or
+        // world registration above). Put the frame back to the answer an
+        // empty result had before this passthrough existed rather than
+        // reporting a size for a buffer nothing filled.
+        result.empty_result_passthrough = false;
+        result.output_width = 0;
+        result.output_height = 0;
+        result.output_rowbytes = 0;
+        result.output_origin_x = 0;
+        result.output_origin_y = 0;
+        // The host failed to lay out or register the output world. That is not
+        // the effect legitimately producing no pixels, and reporting it as one
+        // would hand the session a clean empty frame for a host fault. The
+        // non-empty path answers -6 for the same failure; so does this one.
+        result.render_error = -6;
+        passthrough_reason = "output_world_unavailable";
+      } else {
+        const std::size_t row = static_cast<std::size_t>(smart_bounds.width) *
+            static_cast<std::size_t>(plan.pixel_bytes);
+        for (int32_t y = 0; y < smart_bounds.height; ++y) {
+          std::memcpy(*request.destination +
+                          static_cast<std::size_t>(y) * smart_bounds.rowbytes,
+                      passthrough_source +
+                          static_cast<std::size_t>(smart_bounds.origin_y + y) *
+                              passthrough_rowbytes +
+                          static_cast<std::size_t>(smart_bounds.origin_x) *
+                              plan.pixel_bytes,
+                      row);
+        }
+      }
+      std::cerr << "stage:smart_empty_result_passthrough_end reason="
+                << passthrough_reason << "\n" << std::flush;
+    }
   } else if (will_dispatch && transport_ready) {
     if (plan.gpu_negotiation) hooks.capture_module_audit();
     runtime.gpu_render_dispatched = result.gpu_render_dispatched;
     result.selector_dispatched = true;
     if (gpu_framework == 3 && result.gpu_render_dispatched)
       preload_staged_cuda_kernel();
+    // Snapshot around this one call so `selector_failure_substituted` names
+    // the Smart Render selector and nothing else in the frame (issue #1271).
+    const uint64_t substitutions_before =
+        selector_dispatch_telemetry().substituted_selector_failures;
     result.selector_error = hooks.guarded_call(request.entry, render_selector,
         request.input->data(), request.output->data(), params.data(), nullptr,
         smart_extra.data());
+    result.selector_failure_substituted =
+        selector_dispatch_telemetry().substituted_selector_failures !=
+        substitutions_before;
     // A plug-in may use PF_CHECKOUT_PARAM from SMART_RENDER as well as from
     // SMART_PRE_RENDER. Those selector-local values are host-owned and must be
     // checked back in when the selector returns, just like the pre-render set.

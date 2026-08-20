@@ -177,3 +177,159 @@ def test_utility_callback_table_has_no_unwired_slot_on_all_workers() -> None:
         "--self-test-utility-callback-table", "utility_callback_table"
     ):
         pass
+
+
+def test_pf_utils_composite_rect_is_reachable_through_in_data_utils() -> None:
+    """`PF_UtilCallbacks.composite_rect` on every worker, called the way a
+    plug-in calls it: the pointer is read back out of the installed
+    `in_data->utils` block and invoked (issue #1252, Write_on's RENDER jumped
+    to address 0 through the slot). The route checks BEHIND / COPY / IN_FRONT
+    against known pixels and that malformed calls fail closed with the
+    destination untouched; the verdict is what is asserted here (the route's
+    metadata is a constant and would only be compared against itself).
+    """
+    for _ in _all_workers(
+        "--self-test-pf-utils-composite-rect", "pf_utils_composite_rect"
+    ):
+        pass
+
+
+def test_pf_utils_gaussian_kernel_is_reachable_through_in_data_utils() -> None:
+    """`PF_UtilCallbacks.gaussian_kernel` on every worker, called the way a
+    plug-in calls it: the pointer is read back out of the installed
+    `in_data->utils` block and invoked (issue #1253, Inner/Outer Key's RENDER
+    jumped to address 0 through the slot once its mask checkout succeeded).
+    The route checks AE's PF_GaussianKernel values for the 1D NORMALIZED and
+    2D kernels and that malformed calls fail closed with the buffer untouched;
+    the verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-pf-utils-gaussian-kernel", "pf_utils_gaussian_kernel"
+    ):
+        pass
+
+
+def test_checkout_param_beyond_table_answers_like_ae_on_all_workers() -> None:
+    """`PF_InteractCallbacks.checkout_param` on every worker, called through the
+    installed `in_data->inter` block for slots past the published parameter
+    table (issue #1251: Pixel Motion Blur checks out Timewarp's slots 29/31
+    against its own 5-slot table). AE 2026 answers those with PF_Err_NONE and
+    an empty layer definition and takes the checkin
+    (instruments/pf-checkout-index-probe, docs/CHECKOUT_PARAM_INDEX_OBSERVATION_2026-08-17.md);
+    the route checks that both the classic-context and the hosted-table path
+    do the same, that the checkin balances, that an in-table slot still comes
+    back with its definition, and that a negative slot and an unpublished table
+    stay refused. The verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-checkout-param-beyond-table", "checkout_param_beyond_table"
+    ):
+        pass
+
+
+def test_pf_private_callbacks_answer_like_ae_on_all_workers() -> None:
+    """AE's private `get_callback_addr` ids on every worker, obtained the way a
+    plug-in obtains them, through the slot in the installed `in_data->utils`
+    block (issue #985: Bulge asks for -5, Compound Blur / CC Cross Blur / Matte
+    Choker for -2). AE 2026 answers -5 with PF.dll's PFp_GaussianValue and -2
+    with FLT.dll's in-place blur, straight-alpha for request mode 1 and
+    premultiplied otherwise (docs/PRIVATE_CALLBACK_IDS_OBSERVATION_2026-08-17.md,
+    Frida capture of the live dispatcher); the route checks the curve values,
+    the 8-bit impulse responses of both kernels and both alpha treatments
+    against those captures, that an unread private id stays refused, and that
+    malformed blur calls fail closed with the world untouched. The verdict is
+    what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-pf-private-callbacks", "pf_private_callbacks"
+    ):
+        pass
+
+
+def test_bee_scene_facade_is_published_behind_the_effect_layer_on_all_workers() -> None:
+    """The BEE.dll-compatible scene object behind the effect layer handle
+    (issue #1210). Adobe-bundled Timecode.aex acquires "AE Timecode Helper
+    Suite" v1 as a host-presence gate and then reads the AEGP_LayerH from
+    AEGP PF Interface Suite::AEGP_GetEffectLayer as a `BEE_AVLayer*` (parent
+    comp item at +0x260, its project at item+0x38, the item tag/type/flags, and
+    the vtable slots BEE.dll's exports call; docs/BEE_SCENE_OBJECT_ABI_2026-08-17.md).
+    The route checks on every worker that the gate suite acquires with 32
+    distinct slots (three of them called and answering the diagnosed refusal),
+    that the production hand-out returns the facade object whose comp values
+    match the AEGP item/comp suites, that the observed vtable slots answer as
+    recorded, and that sampled unobserved slots on each object trap with a
+    code naming the slot and record the calling frame. The verdict is what is
+    asserted here.
+    """
+    for _ in _all_workers("--self-test-bee-scene-facade", "bee_scene_facade"):
+        pass
+
+
+def test_selector_fault_unwind_recovers_the_caller_of_a_null_call() -> None:
+    """The faulting-context unwind behind ``stage:selector_seh unwind=``
+    (issue #1312). A plug-in that calls through an uninitialised Adobe-library
+    dispatch slot faults at instruction pointer 0, where no unwind entry
+    exists, so the caller is only recoverable by reading the return address the
+    CALL pushed. The route raises exactly that shape behind the production SEH
+    capture and identifies the two frames behind the fault by their unwind-table
+    entry, not merely by module, so a frame the walk invented or shifted by one
+    fails instead of passing.
+    """
+    for name, report in _all_workers(
+        "--self-test-selector-fault-unwind", "selector_fault_unwind"
+    ):
+        assert report["reference_identities_resolved"] is True, name
+        assert report["fault_site_is_null"] is True, name
+        assert report["call_site_frame_identified"] is True, name
+        assert report["caller_frame_identified"] is True, name
+        assert report["frames"] >= 3, name
+
+
+def test_pf_progress_info_is_installed_behind_effect_ref_on_all_workers() -> None:
+    """The PF_ProgressInfo-shaped object behind ``in_data->effect_ref``
+    (issue #1275). Adobe-bundled effects and PF.dll read the effect ref as
+    ``{refcon, abort, progress}`` and call the two function slots (CannedWarp's
+    RENDER and PF.dll's PF_TransferRect body call the +0x10 progress slot once
+    per row; Echo substitutes the +8 slot for it). The route checks on every
+    worker that the production bootstrap installs the published layout at the
+    effect ref the in_data carries, that both slots read at their raw offsets
+    forward to the host's abort / progress callbacks, and that a plug-in edit
+    (Echo's substitution) is restored at the next hand-out. The verdict is what
+    is asserted here.
+    """
+    for _ in _all_workers("--self-test-pf-progress-info", "pf_progress_info"):
+        pass
+
+
+def test_pf_world_facade_is_behind_reserved_long4_on_all_workers() -> None:
+    """The PF_World-compatible object around / behind every handed-out world's
+    ``reserved_long4`` (issue #1276). Adobe-bundled effects and PF.dll read the
+    world as AE's PF_World: Glow calls vtable slot 1 for the depth, Spill2 and
+    Curl_Noise take ``world - 8`` as a PF_World and call PF_World::CopyWorld
+    (slot 14), and Channel Blur writes the world's origin through
+    ``reserved_long4``. The route checks on every worker that a world prepared
+    and registered the way the render paths do it carries AE's embedded shape
+    (vtable at ``world - 8``), that slot 1 answers the registered depth and
+    slot 14 copies pixels with the bounded, same-depth semantics PF.dll
+    describes, that a bare struct gets an equivalent mirror object, and that
+    sampled unobserved slots trap with a code naming the slot and record it in
+    the report. The verdict is what is asserted here.
+    """
+    for _ in _all_workers("--self-test-pf-world-facade", "pf_world_facade"):
+        pass
+
+
+def test_argb32f_depth_conversion_round_trips_on_all_workers() -> None:
+    """The 8/16bpc <-> float32 ARGB conversion the Premiere GPU-filter route
+    (VR family, ``xGPUFilterEntry``) widens its input through and narrows its
+    output through when the session is not float32 (issue #1271: with the
+    route gated on float32 sessions, every VR effect answered 512 at depth 8
+    and 16). The route checks that every 8-bit and every 16-bit channel value
+    survives the round trip exactly, that out-of-range and non-finite floats
+    narrow to the depth's bounds, and that float32 passes through unchanged;
+    the verdict is what is asserted here.
+    """
+    for _ in _all_workers(
+        "--self-test-argb32f-depth-conversion", "argb32f_depth_conversion"
+    ):
+        pass

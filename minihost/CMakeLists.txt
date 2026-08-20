@@ -201,7 +201,9 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_suite_call_slot_probe.cpp
     src/worker_suite_registry.cpp
     src/worker_flt_blur_suite.cpp
+    src/worker_pf_private_callbacks.cpp
     src/worker_aefx_ace_suite.cpp
+    src/worker_pf_private_effect_suite.cpp
     src/worker_runtime_admission.cpp
     src/worker_entry_admission.cpp
     src/worker_session.cpp
@@ -218,6 +220,9 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_pf_pixel_format_registry.cpp
     src/worker_pf_param_suites.cpp
     src/worker_aegp_pf_interface_suite.cpp
+    src/worker_bee_scene_facade.cpp
+    src/worker_pf_progress_info.cpp
+    src/worker_pf_world_facade.cpp
     src/worker_aegp_command_suites.cpp
     src/worker_mask_suite_tables.cpp
     src/worker_l2_render_abi.cpp
@@ -234,6 +239,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_minidump_runtime.cpp
     src/worker_pf_helper_runtime.cpp
     src/worker_mask_runtime_callbacks.cpp
+    src/worker_pf_gaussian_kernel.cpp
     src/worker_pf_path_runtime.cpp
     src/worker_pf_path_selftests.cpp
     src/worker_aegp_render_options.cpp
@@ -282,6 +288,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/worker_dynamic_suite_registry.cpp
     src/worker_companion_manifest.cpp
     src/worker_companion_runtime.cpp
+    src/worker_cor_ace_profile.cpp
     src/worker_pf_suites.cpp
     src/worker_pf_sampling_runtime.cpp
     src/worker_pf_effect_sequence_selftests.cpp
@@ -358,6 +365,14 @@ add_executable(worker_temporal_checkout_report_selftest
     ../tests/native/worker_temporal_checkout_report_selftest.cpp)
 target_compile_features(worker_temporal_checkout_report_selftest PRIVATE cxx_std_17)
 target_include_directories(worker_temporal_checkout_report_selftest PRIVATE src)
+
+add_executable(worker_pf_ansi_diagnostics_selftest
+    ../tests/native/worker_pf_ansi_diagnostics_selftest.cpp
+    src/worker_pf_ansi_runtime.cpp)
+target_compile_features(worker_pf_ansi_diagnostics_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_pf_ansi_diagnostics_selftest PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_pf_ansi_diagnostics_selftest PRIVATE src)
 
 add_executable(aex_render_worker src/worker_render_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
 target_compile_features(aex_render_worker PRIVATE cxx_std_17)
@@ -510,6 +525,8 @@ add_executable(worker_pf_sampling_wiring_selftest
   # DispatchWorldFormatScope. Without both TUs the target fails to link (#892).
   src/worker_pf_world_transform_runtime.cpp
   src/worker_world_safety.cpp
+  # world_safety's register_world attaches the PF_World facade (#1276).
+  src/worker_pf_world_facade.cpp
   src/worker_effect_bootstrap.cpp
 )
 target_compile_features(worker_pf_sampling_wiring_selftest PRIVATE cxx_std_17)
@@ -517,10 +534,23 @@ target_compile_definitions(worker_pf_sampling_wiring_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_pf_sampling_wiring_selftest PRIVATE src)
 
+add_executable(worker_cross_thread_dispatch_world_selftest
+  ../tests/native/worker_cross_thread_dispatch_world_selftest.cpp
+  src/worker_world_safety.cpp
+  # world_safety's register_world gives each handed-out world AE's PF_World
+  # shape behind reserved_long4 (#1276).
+  src/worker_pf_world_facade.cpp
+)
+target_compile_features(worker_cross_thread_dispatch_world_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_cross_thread_dispatch_world_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_cross_thread_dispatch_world_selftest PRIVATE src)
+
 add_executable(worker_pf_bad_callback_param_selftest
   ../tests/native/worker_pf_bad_callback_param_selftest.cpp
   src/worker_pf_world_transform_runtime.cpp
   src/worker_world_safety.cpp
+  src/worker_pf_world_facade.cpp
 )
 target_compile_features(worker_pf_bad_callback_param_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_pf_bad_callback_param_selftest PRIVATE
@@ -540,6 +570,8 @@ add_executable(host_audio_runtime_selftest
   ../tests/native/host_audio_runtime_selftest.cpp
   src/host_audio_runtime.cpp
   src/render_subsystem.cpp
+  # render_subsystem's prepare_world_layout embeds the PF_World facade (#1276).
+  src/worker_pf_world_facade.cpp
   src/worker_effect_bootstrap.cpp
 )
 target_compile_features(host_audio_runtime_selftest PRIVATE cxx_std_17)
@@ -560,6 +592,7 @@ add_executable(worker_render_lifecycle_selftest
   ../tests/native/worker_render_lifecycle_selftest.cpp
   src/render_lifecycle.cpp
   src/render_subsystem.cpp
+  src/worker_pf_world_facade.cpp
 )
 target_compile_features(worker_render_lifecycle_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_render_lifecycle_selftest PRIVATE
@@ -596,6 +629,22 @@ target_compile_features(worker_openmp_policy_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_openmp_policy_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_openmp_policy_selftest PRIVATE src)
+
+add_executable(worker_legacy_support_init_selftest
+  ../tests/native/worker_legacy_support_init_selftest.cpp
+)
+target_compile_features(worker_legacy_support_init_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_legacy_support_init_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_legacy_support_init_selftest PRIVATE src)
+
+add_executable(worker_sweetpea_bootstrap_selftest
+  ../tests/native/worker_sweetpea_bootstrap_selftest.cpp
+)
+target_compile_features(worker_sweetpea_bootstrap_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_sweetpea_bootstrap_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_sweetpea_bootstrap_selftest PRIVATE src)
 
 add_executable(worker_aegp_init_runtime_selftest
   ../tests/native/worker_aegp_init_runtime_selftest.cpp

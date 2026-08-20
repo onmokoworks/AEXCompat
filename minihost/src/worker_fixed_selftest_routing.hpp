@@ -49,12 +49,21 @@ struct SimpleHooks {
   bool (*aegp_layer_render_options_suite2)(){};
   bool (*pf_utils_handle_callbacks)(){};
   bool (*utility_callback_table)(){};
+  bool (*pf_utils_composite_rect)(){};
+  bool (*pf_utils_gaussian_kernel)(){};
+  bool (*checkout_param_beyond_table)(){};
+  bool (*pf_private_callbacks)(){};
+  bool (*bee_scene_facade)(){};
+  bool (*pf_progress_info)(){};
+  bool (*pf_world_facade)(){};
   bool (*flt_blur_suite1)(){};
   bool (*aefx_ace_suite1)(){};
+  bool (*pf_private_effect_suite)(){};
   bool (*aegp_persistent_data_suite3)(){};
   bool (*native_stdout_routing)(){};
   bool (*aegp_persistent_data_suite4)(){};
   bool (*headless_system_sound_suppression)(){};
+  bool (*argb32f_depth_conversion)(){};
 };
 
 struct Hooks {

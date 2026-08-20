@@ -969,37 +969,33 @@ int32_t __cdecl host_extended_alloc(void** out, std::size_t size) {
               << " size=0x" << std::hex << size << std::dec << "\n"
               << std::flush;
   }
-  if (!out || size == 0 || size > (size_t{1} << 24)) {
-    record_host_callback_invocation(
-        "inter.extended_alloc", 4,
-        HostCallbackClassification::implemented);
-    return 4;
-  }
-  void* buffer = std::calloc(1, size);
-  if (!buffer) {
-    record_host_callback_invocation(
-        "inter.extended_alloc", 4,
-        HostCallbackClassification::implemented);
-    return 4;
-  }
-  *out = buffer;
-  observe_extended_allocation(buffer);
+  // Ownership and the zero-size contract live in one place
+  // (extended_inter_memory.cpp): a zero-size request succeeds with a releasable
+  // one-byte token, `*out` is always written before the allocator can fail so a
+  // rejected request leaves the plug-in holding nullptr rather than whatever
+  // its uninitialized local held, and the release below refuses any pointer
+  // this host did not hand out. Upscale.aex asks for size 0 first thing in
+  // GLOBAL_SETUP; the old code rejected that without clearing `*out`, so the
+  // plug-in released a stack-garbage pointer and free()ing that unowned pointer
+  // took the worker down with STATUS_HEAP_CORRUPTION (issue #1285).
+  const int32_t status = aexcompat::extended_inter::allocate(out, size);
+  if (status == 0 && out) observe_extended_allocation(*out);
   record_host_callback_invocation(
-      "inter.extended_alloc", 0,
+      "inter.extended_alloc", status,
       HostCallbackClassification::implemented);
-  return 0;
+  return status;
 }
 int32_t __cdecl host_extended_free(void** ptr) {
   // The plug-in passes the address of its buffer pointer (lea rcx,[local]),
-  // not the buffer itself.
-  if (ptr) {
-    observe_extended_free(*ptr);
-    std::free(*ptr);
-  }
+  // not the buffer itself. `observe_extended_free` only counts what the
+  // diagnostics saw; `release` is what decides whether free() may run, and it
+  // fails closed on a foreign, stale, or already-released pointer.
+  if (ptr) observe_extended_free(*ptr);
+  const int32_t status = aexcompat::extended_inter::release(ptr);
   record_host_callback_invocation(
-      "inter.extended_free", 0,
+      "inter.extended_free", status,
       HostCallbackClassification::implemented);
-  return 0;
+  return status;
 }
 
 constexpr std::uintmax_t kMaxAexStringTableFileBytes = 256u * 1024u * 1024u;
@@ -1301,33 +1297,57 @@ auto& g_parameter_timelines = g_parameter_runtime.timelines;
 std::wstring g_plugin_file_path;
 
 // Legacy-support-library process initialization (issue #362 selector
-// families): PIN-era bundled effects (Curves, FILE.dll-based classics)
-// allocate through U.dll's process-wide allocator, which real AE initializes
-// at process start by calling U_Birth. Nothing in the plug-in closure calls
-// it (verified: no staged DLL imports U_Birth), so the host must, once per
-// process, the first time a closure containing U.dll is loaded. Failures
-// leave the plug-in no worse off than before (its U_AllocateHandle calls
-// keep failing as they already did).
+// families): PIN-era bundled effects (Curves, Reshape, FILE.dll-based
+// classics) allocate through U.dll's process-wide allocator, which real AE
+// initializes at process start by calling U_Birth. Nothing in the plug-in
+// closure calls it (verified: no staged DLL imports U_Birth), so the host
+// must, once per U.dll mapping. Failures leave the plug-in no worse off than
+// before (its U_AllocateHandle calls keep failing as they already did).
+//
+// Called before every plug-in's inspect/bootstrap, one-shot and session alike.
+// The latch (worker_legacy_support_init.hpp) keys on the U.dll mapping, not on
+// "already tried": a session whose first member has no U.dll must still birth
+// the allocator when a later member maps it (issue #1063; the former
+// once-per-process `attempted` flag left Reshape_New failing PARAMS_SETUP with
+// 4 (PF_Err_OUT_OF_MEMORY) whenever it followed a U.dll-free plug-in in the
+// same discovery session).
 int u_birth_seh_filter(EXCEPTION_POINTERS*) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
-void initialize_legacy_support_libraries() {
-  static bool attempted = false;
-  if (attempted) return;
-  attempted = true;
+void initialize_u_dll_allocator() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  // The absent/no-export markers are logged once per process: the decision is
+  // re-asked for every member, but a 300-member session must not fill the
+  // bounded stderr tail the broker keeps with the same line.
+  static bool absent_logged = false;
+  static bool no_birth_logged = false;
   const HMODULE u_module = GetModuleHandleW(L"U.dll");
-  if (!u_module) {
-    std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
-    return;
-  }
   using UBirth = int(__cdecl*)(void*, uint8_t);
-  const auto u_birth =
-      reinterpret_cast<UBirth>(GetProcAddress(u_module, "U_Birth"));
-  if (!u_birth) {
-    std::cerr << "stage:legacy_support_init status=no_u_birth\n" << std::flush;
-    return;
+  const auto u_birth = u_module
+      ? reinterpret_cast<UBirth>(GetProcAddress(u_module, "U_Birth"))
+      : nullptr;
+  switch (legacy::decide(state, u_module, u_birth != nullptr)) {
+    case legacy::Decision::Absent:
+      if (!absent_logged) {
+        absent_logged = true;
+        std::cerr << "stage:legacy_support_init status=absent\n" << std::flush;
+      }
+      return;
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      if (!no_birth_logged) {
+        no_birth_logged = true;
+        std::cerr << "stage:legacy_support_init status=no_u_birth\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::Call:
+      break;
   }
+  legacy::note_called(state, u_module);
   int result = -1;
   __try {
     // The first argument is an optional host context block; a zeroed buffer
@@ -1340,6 +1360,408 @@ void initialize_legacy_support_libraries() {
   }
   std::cerr << "stage:legacy_support_init status=called result=" << result
             << "\n" << std::flush;
+}
+
+// The rest of the process-wide support-library births (issue #1279). U.dll is
+// not the only library real AE births at process start, and a plug-in closure
+// imports only their working entry points, never the birth. Two of the
+// discovery failures in that issue are exactly this gap:
+//
+//   * Particle_Playground, once past U's Sweet Pea gate, faults during
+//     GLOBAL_SETUP on a null read inside VAL.dll (observed:
+//     `stage:selector_seh selector=GLOBAL_SETUP code=0xc0000005
+//     site=other_module module=VAL.dll access=read fault=null`), and it
+//     stops faulting once VAL_Birth runs. That VAL's global value-type
+//     list is what was missing is the reading of VAL_Birth's
+//     disassembly, not something the trace shows directly.
+//   * PSL_Adjustments returns 21249 from GLOBAL_SETUP. That is COR.dll's
+//     0x5301, returned by `COR_GetBIBAddressProc` ("BIB is uninitialized.")
+//     when COR's cached BIB resolver is null - and that global is set by
+//     `COR_Conception`, which nothing but the host's birth sequence calls.
+//
+// The entries below are the part of AE's own startup sequence that this host
+// runs, in AE's order and with AE's arguments. The sequence was read out of
+// `aelib.dll` and is transcribed in
+// docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md:
+// BEZ_Birth() / FILE_Birth() / M_Birth(3, 0) / RND_Birth() / VAL_Birth() /
+// COR_Conception(quiet_bib_errors), where `quiet_bib_errors` is AE's
+// "flags & 1" and is false for a host that does not set that flag, so this is
+// what AE's own code produces rather than a guessed shape. Signatures come
+// from each library's disassembly: `void VAL_Birth(void)`,
+// `int FILE_Birth(void)`, `int BEZ_Birth(void)`, `int RND_Birth(void)`,
+// `int M_Birth(unsigned, void*)`, `int COR_Conception(bool)`.
+//
+// It is a subset, not the whole sequence. What AE also does and this does not,
+// and why:
+//
+//   * `FILE_AddExtensionMap(...)` x9 before FILE_Birth: registers AE's own
+//     document extensions, which no effect plug-in needs to inspect or render.
+//   * `PREF_Birth(...)` (between RND and VAL) and `MC_Birth(...)` (between VAL
+//     and COR_Conception): AE's preferences file and media core. Neither is
+//     needed by anything measured here, and both take AE-mode arguments and
+//     touch user state, so they stay out until something demonstrably needs
+//     them.
+//   * `COR_Birth(a, quiet_bib_errors, b)`, two steps after COR_Conception:
+//     it does not return in this worker (observed: the l2 worker was still
+//     inside it after 60 seconds, while COR_Conception returns 0), and
+//     COR_Conception is
+//     the step that sets the BIB resolver the 21249 comes from. Whatever
+//     COR_Birth waits for is recorded as its own follow-up rather than worked
+//     around.
+//   * TDB_Birth, TXT_Birth, BEE_Birth and the rest of the tail: not reached
+//     by any failure measured so far. `PF_Birth`, which sits in that tail, is
+//     run by initialize_pf_dll_host_layer below (issue #1212 / PR #1284) -
+//     after this step, matching AE's order. `PLUG_Birth`, also in that tail
+//     and ahead of PF_Birth in AE's order, is the last entry of the table
+//     below (issue #1280).
+//
+// VAL_Birth allocates through U (U_CopyString) and LIST, so U has to be
+// birthed first, which is why this runs after initialize_u_dll_allocator.
+// Same latch shape as U_Birth: keyed on the mapping, so a session whose first
+// member maps none of these still births them for a later member that does,
+// and a failed attempt is not retried on the same mapping.
+void initialize_process_support_libraries() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  enum class BirthShape {
+    // int (*)()
+    no_arguments,
+    // void (*)(), reported as result 0 when it returns: VAL_Birth has no
+    // return value, so reading one would report whatever is left in eax.
+    no_arguments_void,
+    // int (*)(unsigned, void*), called as AE calls M_Birth: (3, nullptr)
+    m_birth,
+    // int (*)(bool), called with AE's non-quiet value
+    cor_conception,
+    // int (*)(const boost::function<bool(const StdString16&)>&), called with
+    // a reference to an empty function object (see the PLUG.dll entry below).
+    // `?PLUG_Birth@@YAH...` mangles as `YAH` = `int __cdecl`, and `AEBV` = a
+    // reference, which on x86-64 arrives as a pointer in rcx.
+    plug_birth,
+  };
+  struct SupportLibrary {
+    const wchar_t* module;
+    // `name` is the narrow spelling of `module` for the trace (std::cerr
+    // takes no wide strings); `birth` is the exported symbol, which for
+    // COR is a C++ mangled name.
+    const char* name;
+    const char* birth;
+    BirthShape shape;
+  };
+  static constexpr SupportLibrary kLibraries[] = {
+      {L"BEZ.dll", "BEZ.dll", "BEZ_Birth",
+       BirthShape::no_arguments},
+      {L"FILE.dll", "FILE.dll", "FILE_Birth",
+       BirthShape::no_arguments},
+      {L"U.dll", "U.dll", "M_Birth",
+       BirthShape::m_birth},
+      {L"U.dll", "U.dll", "RND_Birth",
+       BirthShape::no_arguments},
+      {L"VAL.dll", "VAL.dll", "VAL_Birth",
+       BirthShape::no_arguments_void},
+      {L"COR.dll", "COR.dll", "?COR_Conception@@YAH_N@Z",
+       BirthShape::cor_conception},
+      // PLUG.dll's static-routine registry (issue #1280). Its guard is two
+      // words that only PLUG_Birth writes: `PLUG_RegisterStaticRoutine`
+      // (PLUG.dll+0x1ca80) compares PLUG.dll+0x6df90 and +0x6e098 against
+      // 0x910ba1 and, when either differs, reports through
+      // `Up_ReportError(0x30002a, 0x10)` and throws the C++ integer 2 instead
+      // of registering. PLUG_Birth (PLUG.dll+0x19810) is what stores both
+      // words (`mov` at PLUG.dll+0x19940 and +0x1994a). Scanning the module
+      // for that immediate finds 26 sites: those two `mov`s and 24 `cmp`s,
+      // which reads as twelve guard pairs. What the scan establishes is that
+      // no other instruction writes the *immediate*; a computed or copied
+      // write would not show up in it, so both "only PLUG_Birth opens the
+      // gate" and "the twelve pairs are twelve separate entry points" are
+      // inferences from the scan plus the disassembly around each site.
+      // Particle_Playground's GLOBAL_SETUP registers each of its 14 particle
+      // action types through that entry, catches the throw and returns 2
+      // (observed under cdb: the throw stack is
+      // `PLUG!PLUG_RegisterStaticRoutine+0x211` <- Particle_Playground, and
+      // the catch block at Particle_Playground+0x2e50f then sets the
+      // selector result to 2).
+      //
+      // Two things this entry needs that the stateless births above do not:
+      //
+      //   * The latch is load-bearing, not an optimization. PLUG_Birth is not
+      //     idempotent: it replaces PLUG.dll+0x6df98 with a fresh
+      //     `U_AllocateHandleClear` handle and two new LIST objects and frees
+      //     none of the previous ones (only PLUG_Death does, which this host
+      //     does not call - see the teardown note in
+      //     docs/SUPPORT_LIBRARY_BIRTH_SEQUENCE_2026-08-18.md §3 and #1282).
+      //     Per-mapping latching is what keeps that to once.
+      //   * A non-zero `result=` here is not the harmless "the library
+      //     answered with a code" it is elsewhere. PLUG_Birth writes both
+      //     sentinels unconditionally, after the allocation step and without
+      //     touching eax again, so a failed allocation leaves the gate open
+      //     with a null scan cache and still reports its error. The host
+      //     records that and does not act on it; the trace line is the only
+      //     place it shows.
+      //
+      // Dependencies, from the disassembly: U.dll (`ALOG_Log`,
+      // `U_ZLookupLStrCache`, `U_AllocateHandleClear`) and LIST.dll
+      // (`LIST_New`), both of which PLUG.dll imports, so both are mapped
+      // whenever it is, and `initialize_u_dll_allocator` has already run. It
+      // also reads the exported data slot `?PLUG_G_zref@@...`
+      // (PLUG.dll+0x6b060), which this host never sets; that only affects the
+      // text of a PLUG error report. No file or registry I/O, no threads, no
+      // TLS, no atexit registration. PLUG_Birth is also the one PLUG entry
+      // that does not take the module's recursive mutex (PLUG.dll+0x6dfc8),
+      // which is safe here because this runs on the dispatch thread between
+      // LoadLibrary and GLOBAL_SETUP, with no other PLUG call in flight.
+      {L"PLUG.dll", "PLUG.dll",
+       "?PLUG_Birth@@YAHAEBV?$function@$$A6A_NAEBV?$basic_string@_WU?$char_"
+       "traits@_W@std@@U?$STLAllocator@_W@allocator@dvacore@@@std@@@Z@boost@@@Z",
+       BirthShape::plug_birth},
+  };
+  static legacy::State states[std::size(kLibraries)];
+  // A mapped library whose birth export is missing is reported once per
+  // library: it means this AE build moved or renamed the entry, which must
+  // not look the same as "the library is not in this closure".
+  static bool no_export_logged[std::size(kLibraries)]{};
+  for (std::size_t index = 0; index < std::size(kLibraries); ++index) {
+    const SupportLibrary& library = kLibraries[index];
+    const HMODULE module = GetModuleHandleW(library.module);
+    const FARPROC birth =
+        module ? GetProcAddress(module, library.birth) : nullptr;
+    const legacy::Decision decision =
+        legacy::decide(states[index], module, birth != nullptr);
+    if (decision == legacy::Decision::NoBirthExport &&
+        !no_export_logged[index]) {
+      no_export_logged[index] = true;
+      std::cerr << "stage:legacy_support_init library=" << library.name
+                << " entry=" << library.birth << " status=no_export\n"
+                << std::flush;
+    }
+    if (decision != legacy::Decision::Call) continue;
+    legacy::note_called(states[index], module);
+    int result = -1;
+    __try {
+      switch (library.shape) {
+        case BirthShape::no_arguments:
+          result = reinterpret_cast<int(__cdecl*)()>(birth)();
+          break;
+        case BirthShape::no_arguments_void:
+          reinterpret_cast<void(__cdecl*)()>(birth)();
+          result = 0;
+          break;
+        case BirthShape::m_birth:
+          result = reinterpret_cast<int(__cdecl*)(uint32_t, void*)>(birth)(
+              3, nullptr);
+          break;
+        case BirthShape::cor_conception:
+          result = reinterpret_cast<int(__cdecl*)(bool)>(birth)(false);
+          break;
+        case BirthShape::plug_birth: {
+          // AE hands PLUG_Birth a `boost::function<bool(const StdString16&)>`
+          // that decides which scanned plug-in files to skip. This host does
+          // not use PLUG's file scan at all - it needs only the registry the
+          // birth initializes - so it passes an empty function.
+          //
+          // Verified against AE 2026's PLUG.dll (PLUG_Birth at +0x19810): the
+          // first thing it reads is the function object's vtable pointer at
+          // offset 0, and the `test rax,rax / jz` at +0x19832 takes the empty
+          // path when that word is zero, leaving the remaining bytes unread.
+          // A zeroed buffer is safe because that early-out is taken, not
+          // because of its size: the non-empty paths either copy through
+          // offset 0x28 or call the vtable's own manager
+          // (`and rax,~1` / `call qword ptr [rax]` at +0x19864..+0x19870),
+          // and how much that reads is the caller's business, not PLUG's.
+          // The empty object is then installed as PLUG's global skip
+          // predicate (PLUG.dll+0x6e0a0), where its only consumer tests the
+          // same word and answers "skip nothing" - the right answer for a
+          // host that never scans.
+          static alignas(std::max_align_t) std::byte empty_skip_predicate[64]{};
+          result = reinterpret_cast<int(__cdecl*)(const void*)>(birth)(
+              empty_skip_predicate);
+          break;
+        }
+      }
+    } __except (u_birth_seh_filter(GetExceptionInformation())) {
+      // COR_Conception reports failures by throwing, which arrives here as
+      // SEH. The sequence continues after a fault rather than stopping:
+      // each entry initializes its own library, a faulted one leaves that
+      // library exactly as unusable as it was before this step existed,
+      // and stopping would deny the later libraries an initialization they
+      // do not depend on the faulted one for. The one real dependency in
+      // this table (VAL needs U) is satisfied by initialize_u_dll_allocator
+      // running first, not by an earlier entry here. The result is not
+      // reported for a faulted entry: the trace says `status=faulted`, and a
+      // number there would look like the library answered.
+      std::cerr << "stage:legacy_support_init library=" << library.name
+                << " entry=" << library.birth << " status=faulted\n"
+                << std::flush;
+      continue;
+    }
+    // A void birth has no result: printing one would be
+    // indistinguishable from a library that answered with that value.
+    std::cerr << "stage:legacy_support_init library=" << library.name
+              << " entry=" << library.birth << " status=called";
+    if (library.shape != BirthShape::no_arguments_void)
+      std::cerr << " result=" << result;
+    std::cerr << "\n" << std::flush;
+  }
+}
+
+// PF.dll (AE's PF host layer) keeps its own dispatch table (`PFp_G_OverFuncs`,
+// PF.dll+0x44d9b0..) that its exported entry points jump through:
+// `PF_TransferRect` is `jmp [PFp_G_OverFuncs+0xe8]`, `PF_TransformWorld` calls
+// through +0xf0, `PF_Blend` reads the block, and so on. Real AE fills the table
+// at startup by calling the exported `PF_Birth` (which reads U.dll's CPU
+// feature block, so U_Birth has to have run first; PF.dll imports U.dll, so it
+// is mapped whenever PF.dll is). Adobe-bundled effects import those exports
+// directly (Echo: PF_TransferRect, Transform: PF_TransformWorld, Spill2:
+// PF_Blend, CannedWarp: PFp_G_fcd_table) and nothing in a plug-in closure
+// calls PF_Birth, so without this step every such call jumps to address 0
+// (observed as `stage:selector_seh ... access=execute fault=null` with the
+// return address in the plug-in or PF.dll; issue #1212's Echo / Transform /
+// Spill2 rows). Same latch as the U.dll step: once per PF.dll mapping.
+void initialize_pf_dll_host_layer() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  static bool no_birth_logged = false;
+  const HMODULE pf_module = GetModuleHandleW(L"PF.dll");
+  using PfBirth = uint32_t(__cdecl*)();
+  const auto pf_birth = pf_module
+      ? reinterpret_cast<PfBirth>(GetProcAddress(pf_module, "PF_Birth"))
+      : nullptr;
+  switch (legacy::decide(state, pf_module, pf_birth != nullptr)) {
+    case legacy::Decision::Absent:
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      if (!no_birth_logged) {
+        no_birth_logged = true;
+        std::cerr << "stage:pf_host_layer_init status=no_pf_birth\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::Call:
+      break;
+  }
+  legacy::note_called(state, pf_module);
+  uint32_t result = 0xffffffffu;
+  bool faulted = false;
+  __try {
+    result = pf_birth();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    faulted = true;
+  }
+  std::cerr << "stage:pf_host_layer_init status=called result=" << result
+            << (faulted ? " faulted=1" : "") << "\n" << std::flush;
+}
+
+// dvacore's localization singleton (issue #1283). AE installs one at process
+// start as part of its dvacore configuration; nothing in a plug-in closure
+// does. Without it `dvacore.dll!?Get@Localizer@config@dvacore@@SAPEAV123@XZ`
+// (dvacore+0x105640) throws
+// "dvacore::config::Localizer not initialized. Check dvacore/config" the
+// moment a plug-in asks for a localized string, which is what stopped
+// `3D Camera Tracker.aex` and `Stabilizer.aex`: both build every parameter
+// name from a `$$$/apd/analysis/parameter/name/...` ZString, so PARAMS_SETUP
+// throws on the first one and comes back as 13 (observed under cdb: the throw
+// stack is `dvacore!Localizer::Get+0x61` under the plug-in's own selector
+// dispatcher).
+//
+// `Get` tests one global, `Localizer::S_localizerP`, and `Initialized()`
+// exports the same test. The installed object is dvacore's own
+// `DummyLocalizerImpl`, whose `GetLocalizedString` returns the default text
+// embedded in the ZString key ("$$$/path=Default" -> "Default"), i.e. what an
+// English AE shows. Loading real `.dat` dictionaries is a separate, larger
+// step and is not needed for discovery.
+//
+// The object is a single vtable pointer (its constructor, dvacore+0xd8bb0,
+// runs the base constructor and stores the vptr and nothing else), so a
+// static, suitably aligned buffer holds it. It is never destroyed: this host
+// does not tear the localizer down, exactly as it does not run any of the
+// other libraries' `*_Death` entries, and nothing in dvacore deletes what
+// `Set` was given - `Set` is the only writer of `Localizer::S_localizerP` and
+// it stores unconditionally without releasing the previous value.
+//
+// This is also what Adobe's own non-UI hosts do: `AfterFXLib.dll` constructs
+// a `DummyLocalizerImpl` on a static (0x1823c63e8, under a magic-static
+// guard) and calls `Set(thatStatic, nullptr)` at +0x9e9ff4 with `xor edx,edx`.
+//
+// The latch keys on the dvacore.dll mapping, which carries the assumption
+// worker_legacy_support_init.hpp states for U.dll: the worker retires plug-in
+// images rather than freeing them (#474), so a mapping does not come back at
+// the same base with its statics re-zeroed. If that ever stopped holding for
+// dvacore, `S_localizerP` would be zero again while the latch still said
+// AlreadyInitialized, and 13 would come back silently. `Initialized()` is
+// re-checked inside the call for the same reason.
+void initialize_dvacore_localizer() {
+  namespace legacy = aexcompat::worker_runtime::legacy_support;
+  static legacy::State state;
+  static bool no_export_logged = false;
+  static bool absent_logged = false;
+  const HMODULE dvacore = GetModuleHandleW(L"dvacore.dll");
+  using ConstructDummy = void*(__cdecl*)(void*);
+  using SetLocalizer = void(__cdecl*)(void*, const void*);
+  using LocalizerInitialized = bool(__cdecl*)();
+  const auto construct = dvacore
+      ? reinterpret_cast<ConstructDummy>(GetProcAddress(
+            dvacore, "??0DummyLocalizerImpl@config@dvacore@@QEAA@XZ"))
+      : nullptr;
+  const auto set = dvacore
+      ? reinterpret_cast<SetLocalizer>(GetProcAddress(
+            dvacore,
+            "?Set@Localizer@config@dvacore@@SAXPEAV123@PEBVDir@filesupport@3@@Z"))
+      : nullptr;
+  const auto initialized = dvacore
+      ? reinterpret_cast<LocalizerInitialized>(GetProcAddress(
+            dvacore, "?Initialized@Localizer@config@dvacore@@SA_NXZ"))
+      : nullptr;
+  switch (legacy::decide(state, dvacore,
+                         construct && set && initialized)) {
+    case legacy::Decision::Absent:
+      // Logged once per process like initialize_u_dll_allocator's, so a
+      // closure without dvacore is distinguishable from one this never ran
+      // for. The decision is still re-asked for every member.
+      if (!absent_logged) {
+        absent_logged = true;
+        std::cerr << "stage:dvacore_localizer_init status=absent\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::AlreadyInitialized:
+      return;
+    case legacy::Decision::NoBirthExport:
+      if (!no_export_logged) {
+        no_export_logged = true;
+        std::cerr << "stage:dvacore_localizer_init status=no_export\n"
+                  << std::flush;
+      }
+      return;
+    case legacy::Decision::Call:
+      break;
+  }
+  legacy::note_called(state, dvacore);
+  const char* status = "called";
+  __try {
+    if (initialized()) {
+      // Something in this process already installed one - AE's own dvacore
+      // configuration, were this host ever hosted inside it. Replacing it
+      // would take a working localizer away.
+      status = "already_initialized";
+    } else {
+      // The `Dir*` is AE's dictionary directory; `Set` handles a null by
+      // constructing a default one, which is the "no dictionaries" case this
+      // host wants.
+      static alignas(std::max_align_t) std::byte storage[64]{};
+      set(construct(storage), nullptr);
+      status = initialized() ? "called" : "call_had_no_effect";
+    }
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    status = "faulted";
+  }
+  std::cerr << "stage:dvacore_localizer_init status=" << status << "\n"
+            << std::flush;
+}
+
+void initialize_legacy_support_libraries() {
+  initialize_dvacore_localizer();
+  initialize_u_dll_allocator();
+  initialize_process_support_libraries();
+  initialize_pf_dll_host_layer();
 }
 
 const aexcompat::host_audio::Telemetry& audio_telemetry() {
@@ -1460,8 +1882,24 @@ OutlineData* sampled_outline(HostStreamRef* stream, const HostTime* time,
 // and layer refs every suite callback validates against. They are the
 // dispatch-boundary identity the suites pin, so they stay owned beside the
 // callback ABI in this TU. Lifetime: process-lifetime constants.
-OpaqueHostObject g_effect{0x45464658};
-OpaqueHostObject g_layer{0x4c415952};
+// The effect ref is a PF_ProgressInfo-shaped object (issue #1212): its
+// identity is still this address, but a plug-in (or PF.dll) that reads it as
+// AE's `PF_ProgressInfo` finds the refcon / abort / progress slots instead of a
+// 4-byte tag. The slots are published by publish_effect_ref_object() before
+// every plug-in bootstrap (worker_pf_progress_info).
+aexcompat::worker_runtime::pf_progress_info::EffectRefObject g_effect{};
+// Called before every plug-in bootstrap (one-shot, cluster member, swap):
+// republishes the effect-ref layout in case the previous member left a slot
+// edited.
+void publish_effect_ref_object() {
+  aexcompat::worker_runtime::pf_progress_info::publish(g_effect);
+}
+// The effect layer handle is a BEE.dll-compatible object (issue #1210): its
+// identity is still this address, but a plug-in that reads it as a
+// `BEE_AVLayer*` finds the observed layout instead of a 4-byte tag. The
+// vtable and object graph behind it are installed at hand-out time by
+// AEGP_GetEffectLayer (worker_bee_scene_facade).
+aexcompat::worker_runtime::bee_facade::LayerObject g_layer{};
 
 // The mask scene helpers and configure_mask_scene moved to their state
 // owner, worker_mask_runtime_callbacks.cpp (issue #170); worker_main keeps
@@ -1841,7 +2279,7 @@ int32_t& g_aegp_active_camera_layer_index =
 // layer/effect/collection/stream/keyframe callbacks are compiled in
 // worker_aegp_scene.cpp.
 bool __cdecl validate_render_options_item(int32_t plugin_id, void* item) {
-  return plugin_id == 1 && item == &g_aegp_comp_item;
+  return plugin_id == 1 && valid_scene_item_handle(item);
 }
 bool __cdecl initialize_layer_render_options(
     int32_t plugin_id, void* source, AegpLayerEffectBoundary boundary,
@@ -1851,8 +2289,11 @@ bool __cdecl initialize_layer_render_options(
   initialized.owner_plugin_id = plugin_id;
   initialized.effect_boundary = boundary;
   if (boundary == AegpLayerEffectBoundary::all) {
-    if (aegp_layer_index(source) < 0) return false;
-    initialized.layer = source;
+    const int32_t layer_index = aegp_layer_index(source);
+    if (layer_index < 0) return false;
+    initialized.layer = static_cast<std::size_t>(layer_index) < g_aegp_layers.size()
+        ? &g_aegp_layers[static_cast<std::size_t>(layer_index)]
+        : source;
   } else {
     const auto* instance = resolve_effect_instance(source, plugin_id);
     if (!instance) return false;
@@ -1957,6 +2398,16 @@ T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
 template <typename T, std::size_t N>
 void write(std::array<std::byte, N>& bytes, std::size_t offset, T value) {
   std::memcpy(bytes.data() + offset, &value, sizeof(value));
+}
+
+// The same accessors on a world storage (the LayerDef part).
+template <typename T>
+T read(const aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset) {
+  return read<T>(world.layer_def, offset);
+}
+template <typename T>
+void write(aexcompat::world_safety::EffectWorldStorage& world, std::size_t offset, T value) {
+  write(world.layer_def, offset, value);
 }
 
 // The render-worker click/draw probes and close_render_ui_context moved to

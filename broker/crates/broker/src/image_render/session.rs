@@ -722,8 +722,13 @@ fn render_classic_via_length_one_session(
         // Invalidation (worker crash, deadline, or a host-protection invariant).
         Err(error) => {
             let reason = format!("the render session was invalidated: {error}");
-            let _ = session.close();
-            return SessionWrapperOutcome::Fallback(reason);
+            let close = session.close();
+            let diagnostics = close
+                .get("worker")
+                .and_then(|worker| worker.get("diagnostics"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            return SessionWrapperOutcome::Fallback(format!("{reason}, diagnostics={diagnostics}"));
         }
     };
     // An expand-output effect that overran the launch slot no longer surfaces
@@ -812,7 +817,7 @@ fn render_classic_via_length_one_session(
             // The gate above rejects any final report carrying a render
             // error, so this arm is defensive only.
             return SessionWrapperOutcome::Failure(invalid(format!(
-                "session frame reported error {render_error} past a clean final report"
+                "session frame reported error {render_error} past a clean final report: diagnostics={diagnostics}, report={final_report}"
             )));
         }
         FrameStatus::SmartOutputUntouched => {
@@ -1738,6 +1743,7 @@ pub(crate) fn build_interactive_image_report(
         ("output_world", "output_world"),
         ("suite_timeline", "suite_timeline"),
         ("empty_result_rect", "empty_result_rect"),
+        ("empty_result_passthrough", "empty_result_passthrough"),
         ("returns_extra_pixels", "returns_extra_pixels"),
         ("result_within_request", "result_within_request"),
         (
@@ -1925,6 +1931,8 @@ pub(crate) fn build_interactive_image_report(
         "pf_path_preps_disposed",
         "invalid_pf_path_operations",
         "pf_path_reject_reason",
+        "pf_path_absent_checkouts",
+        "pf_path_absent_checkins",
     ] {
         report_object.insert(field.into(), worker_report[field].clone());
     }
