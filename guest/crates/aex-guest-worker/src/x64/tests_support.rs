@@ -6149,9 +6149,7 @@ fn get_file_type_rejects_foreign_handles_without_host_descriptor_access() {
 
 fn write_test_wide_path(engine: &mut GuestEngine<'static>, path: &str) -> u64 {
     let units = path.encode_utf16().chain(std::iter::once(0));
-    let bytes = units
-        .flat_map(u16::to_le_bytes)
-        .collect::<Vec<_>>();
+    let bytes = units.flat_map(u16::to_le_bytes).collect::<Vec<_>>();
     let pointer = engine.allocate(bytes.len(), 2).unwrap();
     engine.write(pointer, &bytes).unwrap();
     pointer
@@ -6185,7 +6183,10 @@ fn create_file_w_is_kernel32_scoped_and_returns_no_host_handle() {
         )
         .unwrap();
     assert_eq!(result, u64::MAX);
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_FILE_NOT_FOUND);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_FILE_NOT_FOUND
+    );
     assert!(engine.unicorn.get_data().callback_error.is_none());
 }
 
@@ -6206,17 +6207,22 @@ fn create_file_w_denies_traversal_device_unc_and_write_paths() {
         engine.unicorn.reg_write(RegisterX86::R9, 0).unwrap();
         let rsp = STACK_BASE + STACK_SIZE - 0x108 | 8;
         engine.unicorn.reg_write(RegisterX86::RSP, rsp).unwrap();
-        for (index, value) in [disposition as u64, 0x80, 0]
-            .into_iter()
-            .enumerate()
-        {
+        for (index, value) in [disposition as u64, 0x80, 0].into_iter().enumerate() {
             engine
                 .write(rsp + 0x28 + (index as u64 * 8), &value.to_le_bytes())
                 .unwrap();
         }
         emulate_create_file_w(&mut engine.unicorn);
-        assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX, "{path}");
-        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_ACCESS_DENIED, "{path}");
+        assert_eq!(
+            engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            u64::MAX,
+            "{path}"
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_ACCESS_DENIED,
+            "{path}"
+        );
     }
 }
 
@@ -6224,9 +6230,7 @@ fn create_file_w_denies_traversal_device_unc_and_write_paths() {
 fn create_file_w_validates_disposition_and_share() {
     let mut engine = test_engine(&[0xc3]);
     let pointer = write_test_wide_path(&mut engine, r"C:\AEXCompat\assets\model.bin");
-    for args in [
-        [pointer, 0x8000_0000, 8, 0, 3, 0x80, 0],
-    ] {
+    for args in [[pointer, 0x8000_0000, 8, 0, 3, 0x80, 0]] {
         engine.unicorn.reg_write(RegisterX86::RCX, args[0]).unwrap();
         engine.unicorn.reg_write(RegisterX86::RDX, args[1]).unwrap();
         engine.unicorn.reg_write(RegisterX86::R8, args[2]).unwrap();
@@ -6240,7 +6244,10 @@ fn create_file_w_validates_disposition_and_share() {
         }
         emulate_create_file_w(&mut engine.unicorn);
         assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
-        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_INVALID_PARAMETER);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
     }
 }
 
@@ -6276,7 +6283,10 @@ fn create_file_w_ignores_legal_optional_arguments_for_missing_open_existing_path
                 .unwrap(),
             u64::MAX
         );
-        assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_FILE_NOT_FOUND);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_FILE_NOT_FOUND
+        );
         assert!(engine.unicorn.get_data().callback_error.is_none());
     }
 }
@@ -6287,18 +6297,26 @@ fn create_file_w_treats_null_as_api_failure_but_aborts_on_unreadable_non_null_pa
     engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
     emulate_create_file_w(&mut engine.unicorn);
     assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
-    assert_eq!(engine.unicorn.get_data().windows_last_error, ERROR_PATH_NOT_FOUND);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_PATH_NOT_FOUND
+    );
     assert!(engine.unicorn.get_data().callback_error.is_none());
 
-    engine.unicorn.reg_write(RegisterX86::RCX, 0xdead_beef).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
     emulate_create_file_w(&mut engine.unicorn);
     assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), u64::MAX);
-    assert!(engine
-        .unicorn
-        .get_data()
-        .callback_error
-        .as_deref()
-        .is_some_and(|error| error.contains("not fully readable")));
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .callback_error
+            .as_deref()
+            .is_some_and(|error| error.contains("not fully readable"))
+    );
 }
 
 #[test]
@@ -6315,11 +6333,7 @@ fn create_file_w_distinguishes_maximum_and_over_limit_readable_paths() {
     .unwrap();
     engine
         .unicorn
-        .mem_map(
-            DATA_BASE + PAGE_SIZE,
-            0x1_0000,
-            Prot::READ | Prot::WRITE,
-        )
+        .mem_map(DATA_BASE + PAGE_SIZE, 0x1_0000, Prot::READ | Prot::WRITE)
         .unwrap();
     let path = DATA_BASE + 0x800;
 
