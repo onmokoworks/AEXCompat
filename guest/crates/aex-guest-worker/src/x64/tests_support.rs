@@ -8760,7 +8760,11 @@ fn win64_crt_fmodf_uses_scalar_xmm_abi_and_deterministic_c_edges() {
         let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
         assert_eq!(&result[4..], &XMM0_UPPER);
         assert_eq!(
-            engine.unicorn.reg_read_long(RegisterX86::XMM1).unwrap().as_ref(),
+            engine
+                .unicorn
+                .reg_read_long(RegisterX86::XMM1)
+                .unwrap()
+                .as_ref(),
             &xmm1
         );
         u32::from_le_bytes(result[..4].try_into().unwrap())
@@ -8792,7 +8796,10 @@ fn win64_crt_fmodf_uses_scalar_xmm_abi_and_deterministic_c_edges() {
     assert_eq!(call_fmodf(&mut engine, 5.5, -2.0), 1.5f32.to_bits());
     assert_eq!(call_fmodf(&mut engine, -4.0, 2.0), (-0.0f32).to_bits());
     assert_eq!(call_fmodf(&mut engine, -0.0, 3.0), (-0.0f32).to_bits());
-    assert_eq!(call_fmodf(&mut engine, 3.0, f32::INFINITY), 3.0f32.to_bits());
+    assert_eq!(
+        call_fmodf(&mut engine, 3.0, f32::INFINITY),
+        3.0f32.to_bits()
+    );
     assert_eq!(call_fmodf(&mut engine, f32::INFINITY, 3.0), 0x7fc0_0000);
     assert_eq!(call_fmodf(&mut engine, 3.0, 0.0), 0x7fc0_0000);
 
@@ -8806,12 +8813,14 @@ fn win64_crt_fmodf_uses_scalar_xmm_abi_and_deterministic_c_edges() {
         call_fmodf(&mut engine, f32::from_bits(3), f32::from_bits(2)),
         1
     );
-    assert!(engine
-        .unicorn
-        .get_data()
-        .math_calls
-        .iter()
-        .any(|call| call.starts_with("fmodf(")));
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .math_calls
+            .iter()
+            .any(|call| call.starts_with("fmodf("))
+    );
 }
 
 #[test]
