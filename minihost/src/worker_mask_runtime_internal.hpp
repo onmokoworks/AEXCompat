@@ -109,6 +109,7 @@ bool ensure_keyframe_identity(HostStreamRef*, HostKeyframe*, int32_t);
 AddKeyframesTransaction* find_add_transaction(void*);
 void inject_keyframe_apply_failure_after(int32_t applied_count) noexcept;
 uint64_t mask_scene_fingerprint() noexcept;
+void configure_mask_runtime_hooks();
 bool valid_time_mode(int16_t mode);
 bool valid_stream_plugin(int32_t plugin_id);
 int32_t __cdecl get_mask_outline_vertex_info(void*, int32_t, MaskVertex*);
