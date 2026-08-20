@@ -1637,12 +1637,20 @@ fn version_key(version: &str) -> Vec<u64> {
 /// filter name, so that renaming drops them from saved projects for good
 /// (issues #307, #321).
 ///
-/// A name still depends on which same-stem plug-ins exist, so installing or
-/// uninstalling one renames the others — the trade-off recorded in issue #662.
 /// The final numeric pass is global, so a plug-in whose own stem already reads
 /// like a generated name (`Threshold (Effects).aex`) can be renamed by an
 /// unrelated collision too.
+#[cfg(test)]
 fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<String> {
+    stable_filter_names(plugins, also_known, &vec![None; plugins.len()])
+}
+
+fn stable_filter_names(
+    plugins: &[PathBuf],
+    also_known: &[PathBuf],
+    remembered: &[Option<String>],
+) -> Vec<String> {
+    debug_assert_eq!(plugins.len(), remembered.len());
     let mut counted = HashSet::<String>::new();
     let mut counts = HashMap::<String, usize>::new();
     for plugin in plugins.iter().chain(also_known) {
@@ -1659,9 +1667,22 @@ fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<Strin
     }
 
     let mut used = HashSet::<String>::new();
+    let mut names = vec![None; plugins.len()];
+    for (index, name) in remembered.iter().enumerate() {
+        let Some(name) = name.as_deref().filter(|name| valid_registered_name(name)) else {
+            continue;
+        };
+        if used.insert(name.to_lowercase()) {
+            names[index] = Some(name.to_owned());
+        }
+    }
     plugins
         .iter()
-        .map(|plugin| {
+        .enumerate()
+        .map(|(index, plugin)| {
+            if let Some(name) = names[index].take() {
+                return name;
+            }
             let stem = filter_stem(plugin);
             let collides = counts
                 .get(&stem.to_lowercase())
@@ -1687,6 +1708,55 @@ fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<Strin
             candidate
         })
         .collect()
+}
+
+fn valid_registered_name(name: &str) -> bool {
+    !name.is_empty() && name.encode_utf16().count() <= 255 && !name.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+fn remembered_filter_names(
+    plugins: &[PathBuf],
+    cache: &HashMap<String, CacheEntry>,
+) -> Vec<Option<String>> {
+    plugins
+        .iter()
+        .map(|plugin| {
+            let key = plugin.to_string_lossy();
+            cache
+                .get(key.as_ref())
+                .or_else(|| {
+                    let folded = key.to_lowercase();
+                    cache.iter().find_map(|(cached_key, entry)| {
+                        let targets_plugin = cached_key.to_lowercase() == folded
+                            || entry
+                                .alias_target
+                                .as_deref()
+                                .is_some_and(|target| target.to_lowercase() == folded);
+                        targets_plugin.then_some(entry)
+                    })
+                })
+                .and_then(|entry| entry.registered_name.clone())
+        })
+        .collect()
+}
+
+fn remember_filter_names(
+    cache: &mut HashMap<String, CacheEntry>,
+    plugins: &[PathBuf],
+    names: &[String],
+) -> bool {
+    let mut changed = false;
+    for (plugin, name) in plugins.iter().zip(names) {
+        let Some(entry) = cache.get_mut(plugin.to_string_lossy().as_ref()) else {
+            continue;
+        };
+        if is_registerable_effect(entry) && entry.registered_name.as_deref() != Some(name) {
+            entry.registered_name = Some(name.clone());
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// The plug-in's file stem, or `AEX` when it has none or is not UTF-8.

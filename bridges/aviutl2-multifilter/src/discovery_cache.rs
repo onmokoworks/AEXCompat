@@ -260,29 +260,50 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
     // be read this launch does not rename a filter that did register. This
     // narrows the hazard rather than closing it: a peer the cache has never seen
     // (a first launch that misses a folder) still cannot be counted.
-    let filter_names = unique_filter_names(
-        &plugins,
-        &cached_naming_peers(&cache, &dirs, scan_complete, !dirs_complete, &config.ignore),
-    );
-    report_qualified_names(&plugins, &filter_names);
-    let mut pending: Vec<PathBuf> = Vec::new();
-    let mut registered: usize = 0;
-    let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
-    let mut rekey: Vec<(String, String)> = Vec::new();
-    // Whether any cached key under the scan roots is a spelling this scan did not
-    // walk. If none is, no other spelling exists and the alias lookup — which
-    // touches the filesystem, on the thread AviUtl2 is loading from — is skipped.
+    // Resolve alternate path spellings before assigning names. Registration
+    // already admits the same file through a junction/alias; naming must use
+    // that exact cache entry too, or the first launch under a new spelling can
+    // rename a saved-project filter before `apply_rekey` copies the entry.
     let walked: std::collections::HashSet<String> = scan
         .seen
         .iter()
         .map(|plugin| plugin.to_string_lossy().into_owned())
         .collect();
     let alias_possible = alias_possible(&cache, &walked, &dirs);
-
+    let mut aliases: Option<HashMap<PathBuf, Vec<String>>> = None;
+    let mut rekey: Vec<(String, String)> = Vec::new();
+    let remembered_names = plugins
+        .iter()
+        .map(|plugin| {
+            let key = plugin.to_string_lossy().into_owned();
+            let (cached, alias) = resolve_cached(
+                &cache,
+                &key,
+                plugin,
+                file_meta(plugin),
+                build,
+                &dirs,
+                alias_possible,
+                &mut aliases,
+            );
+            if let Some(alias) = alias {
+                rekey.push((alias, key));
+            }
+            cached.and_then(|entry| entry.registered_name.clone())
+        })
+        .collect::<Vec<_>>();
+    let filter_names = stable_filter_names(
+        &plugins,
+        &cached_naming_peers(&cache, &dirs, scan_complete, !dirs_complete, &config.ignore),
+        &remembered_names,
+    );
+    report_qualified_names(&plugins, &filter_names);
+    let mut pending: Vec<PathBuf> = Vec::new();
+    let mut registered: usize = 0;
     for (plugin, filter_name) in plugins.iter().zip(&filter_names) {
         let key = plugin.to_string_lossy().into_owned();
         let meta = file_meta(plugin);
-        let (cached, alias) = resolve_cached(
+        let (cached, _) = resolve_cached(
             &cache,
             &key,
             plugin,
@@ -292,9 +313,6 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
             alias_possible,
             &mut aliases,
         );
-        if let Some(alias) = alias {
-            rekey.push((alias, key));
-        }
         let mut decision = classify(cached, meta, build);
         // A closure that would now resolve differently (issue #304) joins the same
         // queue rather than unregistering the filter: the dependency DLLs decide
@@ -352,14 +370,15 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
 
     let rekeyed = !rekey.is_empty();
     apply_rekey(&mut cache, rekey);
+    let names_remembered = remember_filter_names(&mut cache, &plugins, &filter_names);
 
     if pending.is_empty() {
         // Nothing to discover, so the background pass (the only other writer)
         // will not run. Persist the re-key here or it is recomputed every launch.
-        if rekeyed && !save_cache(&cache) {
+        if (rekeyed || names_remembered) && !save_cache(&cache) {
             log_warn(
                 "the discovery cache could not be written; the plug-in paths it \
-                 re-keyed this launch are resolved again on the next one",
+                 re-keyed or named this launch are resolved again on the next one",
             );
         }
         return;
@@ -2087,6 +2106,12 @@ struct CacheEntry {
     /// change that ships the field re-verifies it in the background.
     #[serde(default)]
     category: Option<String>,
+    /// The AviUtl2 registration name first assigned to this plug-in. Saved
+    /// projects resolve filters by this string, so recomputing it after a
+    /// same-stem plug-in is installed or removed would discard their objects
+    /// (issue #662).
+    #[serde(default)]
+    registered_name: Option<String>,
     /// Structured record of a cluster-session fallback (issue #405, design
     /// §6): present when this entry was produced after a cluster discovery
     /// session failed — never silently rounded into a plain success.
@@ -2914,12 +2939,15 @@ fn keep_best(
     // the previous bytes. Take the meta just read (so the entry keeps matching the
     // file and stays registered) but mark it for one more pass.
     let stale = discovered.mtime != mtime || discovered.len != len;
-    let discovered = CacheEntry {
+    let mut discovered = CacheEntry {
         mtime,
         len,
         stale,
         ..discovered
     };
+    if discovered.registered_name.is_none() {
+        discovered.registered_name = cached.and_then(|entry| entry.registered_name.clone());
+    }
     match cached {
         Some(old)
             if old.ok
@@ -3024,6 +3052,7 @@ fn negative_entry(plugin: &Path, build: BuildFingerprint) -> CacheEntry {
         closure_identity: None,
         cluster_fallback: None,
         category: None,
+        registered_name: None,
     }
 }
 
@@ -3062,7 +3091,43 @@ fn merge_cache_entries(
     local: &mut HashMap<String, CacheEntry>,
     on_disk: &HashMap<String, CacheEntry>,
 ) {
+    let mut disk_name_owners = HashMap::<String, HashSet<String>>::new();
+    for (key, entry) in on_disk {
+        let Some(name) = entry
+            .registered_name
+            .as_deref()
+            .filter(|name| valid_registered_name(name))
+        else {
+            continue;
+        };
+        // apply_rekey deliberately retains an alias fallback and its walked
+        // copy. They are one plug-in and therefore one owner of the name.
+        let owner = entry
+            .alias_fallback
+            .then(|| entry.alias_target.as_deref())
+            .flatten()
+            .filter(|target| on_disk.contains_key(*target))
+            .unwrap_or(key)
+            .to_lowercase();
+        disk_name_owners
+            .entry(name.to_lowercase())
+            .or_default()
+            .insert(owner);
+    }
     for (key, disk_entry) in on_disk {
+        if let Some(local_entry) = local.get_mut(key) {
+            let stable_disk_name = disk_entry.registered_name.as_deref().filter(|name| {
+                valid_registered_name(name)
+                    && disk_name_owners
+                        .get(&name.to_lowercase())
+                        .is_some_and(|owners| owners.len() == 1)
+            });
+            if let Some(name) = stable_disk_name {
+                // The disk snapshot won the race to persist a valid, unique
+                // project identity. A later stale launch must not replace it.
+                local_entry.registered_name = Some(name.to_owned());
+            }
+        }
         match local.get(key) {
             None => {
                 local.insert(key.clone(), disk_entry.clone());
