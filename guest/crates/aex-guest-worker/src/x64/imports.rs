@@ -1039,7 +1039,10 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::GetCommandLineA => {
-                uc("write GetCommandLineA return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "write GetCommandLineA return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
                 uc(
                     "install GetCommandLineA import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {

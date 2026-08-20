@@ -4798,7 +4798,10 @@ fn get_command_line_a_returns_stable_writable_guest_owned_storage() {
     initialize_windows_command_line_a(&mut engine).unwrap();
     let command_line = engine.unicorn.get_data().windows_command_line_a;
     for _ in 0..2 {
-        assert_eq!(engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(), command_line);
+        assert_eq!(
+            engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(),
+            command_line
+        );
     }
     assert_eq!(
         engine
@@ -4808,7 +4811,10 @@ fn get_command_line_a_returns_stable_writable_guest_owned_storage() {
         COMMAND_LINE
     );
     engine.write(command_line + 1, b"A").unwrap();
-    assert_eq!(engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(), command_line);
+    assert_eq!(
+        engine.call_win64(GET_COMMAND_LINE, [0; 6]).unwrap(),
+        command_line
+    );
     assert_eq!(
         engine.unicorn.mem_read_as_vec(command_line + 1, 1).unwrap(),
         b"A"
@@ -4827,7 +4833,10 @@ fn get_command_line_a_is_session_local_and_fails_closed_if_uninitialized() {
     initialize_windows_command_line_a(&mut second).unwrap();
     let second_pointer = second.unicorn.get_data().windows_command_line_a;
     emulate_get_command_line_a(&mut second.unicorn);
-    assert_eq!(second.unicorn.reg_read(RegisterX86::RAX).unwrap(), second_pointer);
+    assert_eq!(
+        second.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+        second_pointer
+    );
     assert_eq!(
         second
             .unicorn
