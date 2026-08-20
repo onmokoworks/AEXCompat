@@ -6092,6 +6092,138 @@ fn load_library_ex_w_rejects_invalid_or_unterminated_utf16_without_host_loading(
 }
 
 #[test]
+fn wsa_startup_ordinal_writes_deterministic_x64_wsadata() {
+    const STARTUP: u64 = STUB_BASE + 0x1a8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(&mut engine.unicorn, STARTUP, "WS2_32.DLL", "ORDINAL 115").unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WsaStartup)
+    );
+    assert_eq!(
+        dispatch_win64_import("ws2_32.dll", "WSAStartup"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WsaStartup)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "ORDINAL 115"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    let output = DATA_BASE + 0xc00;
+    engine.write(output, &[0xaa; 408]).unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(STARTUP, [0x0002, output, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut data = vec![0; 408];
+    engine.read(output, &mut data).unwrap();
+    assert_eq!(&data[0..4], &[0x02, 0x00, 0x02, 0x02]);
+    assert_eq!(&data[4..45], b"AEXCompat deterministic Winsock 2.2 guest");
+    assert_eq!(&data[261..268], b"Running");
+    assert!(data[45..261].iter().all(|byte| *byte == 0));
+    assert!(data[268..].iter().all(|byte| *byte == 0));
+    assert_eq!(engine.unicorn.get_data().windows_socket_startups, 1);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+}
+
+#[test]
+fn wsa_startup_rejects_versions_and_invalid_outputs_atomically() {
+    const STARTUP: u64 = STUB_BASE + 0x1a8;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, STARTUP, "ws2_32.dll", "WSAStartup").unwrap();
+    let output = DATA_BASE + 0xc00;
+    for version in [0x0001, 0x0101, 0x0002, 0x0102, 0x0202] {
+        assert_eq!(
+            engine
+                .call_win64(STARTUP, [version, output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+    let count = engine.unicorn.get_data().windows_socket_startups;
+    engine.write(output, &[0x5a; 408]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STARTUP, [0x0302, output, 0, 0, 0, 0])
+            .unwrap(),
+        u64::from(WINDOWS_WSAVERNOTSUPPORTED)
+    );
+    let mut unchanged = vec![0; 408];
+    engine.read(output, &mut unchanged).unwrap();
+    assert_eq!(unchanged, vec![0x5a; 408]);
+    for invalid in [0, DATA_BASE + DATA_SIZE - 407, u64::MAX - 200] {
+        assert_eq!(
+            engine
+                .call_win64(STARTUP, [0x0202, invalid, 0, 0, 0, 0])
+                .unwrap(),
+            u64::from(WINDOWS_WSAEFAULT)
+        );
+    }
+    let readonly = TEST_CODE;
+    engine
+        .unicorn
+        .mem_protect(readonly, PAGE_SIZE, Prot::READ | Prot::EXEC)
+        .unwrap();
+    let before = engine.unicorn.mem_read_as_vec(readonly, 408).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STARTUP, [0x0202, readonly, 0, 0, 0, 0])
+            .unwrap(),
+        u64::from(WINDOWS_WSAEFAULT)
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(readonly, 408).unwrap(),
+        before
+    );
+    assert_eq!(engine.unicorn.get_data().windows_socket_startups, count);
+}
+
+#[test]
+fn wsa_startup_cleanup_balance_and_session_state_are_bounded() {
+    const STARTUP: u64 = STUB_BASE + 0x1a8;
+    const CLEANUP: u64 = STUB_BASE + 0x1b0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, STARTUP, "ws2_32.dll", "ORDINAL 115").unwrap();
+    install_win64_import(&mut engine.unicorn, CLEANUP, "ws2_32.dll", "ORDINAL 116").unwrap();
+    let output = DATA_BASE + 0xc00;
+    for _ in 0..2 {
+        assert_eq!(
+            engine
+                .call_win64(STARTUP, [0x0202, output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+    assert_eq!(engine.unicorn.get_data().windows_socket_startups, 2);
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(engine.call_win64(CLEANUP, [0; 6]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(engine.call_win64(CLEANUP, [0; 6]).unwrap(), 0);
+    assert_eq!(
+        engine.call_win64(CLEANUP, [0; 6]).unwrap(),
+        u64::from(u32::MAX)
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        WINDOWS_WSANOTINITIALISED
+    );
+    engine.unicorn.get_data_mut().windows_socket_startups = MAX_WINDOWS_SOCKET_STARTUPS;
+    assert_eq!(
+        engine
+            .call_win64(STARTUP, [0x0202, output, 0, 0, 0, 0])
+            .unwrap(),
+        u64::from(WINDOWS_WSAEPROCLIM)
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_socket_startups,
+        MAX_WINDOWS_SOCKET_STARTUPS
+    );
+    let second_session = test_engine(&[0xc3]);
+    assert_eq!(second_session.unicorn.get_data().windows_socket_startups, 0);
+}
+
+#[test]
 fn load_library_a_is_allowlisted_bounded_and_library_scoped() {
     const LOAD_LIBRARY: u64 = STUB_BASE + 0x1a8;
     let mut engine = test_engine(&[0xc3]);
