@@ -297,7 +297,12 @@ jobs:
       # 誰も照合しない。ビルドしてさらに実行することで、
       # test_abi_layout_observation_matches_probe.py が
       # analysis/AE_ABI_LAYOUT_OBSERVATION_2026-07-13.json を probe の出力に
-      # 突き合わせる (#981)。configure は上のステップが済ませてある。
+      # 突き合わせる (#981)。
+      #
+      # instruments の configure もここで済ませる。分割前は trace writer の
+      # ステップが同じ runner で先に configure していたが、あちらは SDK を
+      # 要らないので native-workers に移っており、この job の target\ は空で
+      # 始まる。
       - name: Build ABI layout probe (Ninja)
         if: steps.sdk.outcome == 'success'
         shell: cmd
@@ -305,6 +310,7 @@ jobs:
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
           if not defined VSROOT exit /b 1
           call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
           cmake --build target\instruments-build --target abi_layout_probe || exit /b 1
           dir /b target\instruments-build\abi_layout_probe.exe
 
