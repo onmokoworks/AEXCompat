@@ -222,7 +222,10 @@ impl GuestEngine<'static> {
         let mut teb_stack = [0u8; 16];
         teb_stack[0..8].copy_from_slice(&(STACK_BASE + STACK_SIZE).to_le_bytes());
         teb_stack[8..16].copy_from_slice(&STACK_BASE.to_le_bytes());
-        uc("write TEB stack bounds", unicorn.mem_write(0x08, &teb_stack))?;
+        uc(
+            "write TEB stack bounds",
+            unicorn.mem_write(0x08, &teb_stack),
+        )?;
         uc(
             "map guest data",
             unicorn.mem_map(DATA_BASE, DATA_SIZE, Prot::READ | Prot::WRITE),
@@ -1593,14 +1596,25 @@ impl GuestEngine<'static> {
             )?;
         }
         const MAX_SCHEDULER_SWITCHES: usize = 256;
+        let timeout = Duration::from_micros(timeout_microseconds);
+        let started = Instant::now();
         let mut begin = address;
         for scheduler_switch in 0..=MAX_SCHEDULER_SWITCHES {
             self.unicorn.get_data_mut().scheduler_switches_remaining =
                 (MAX_SCHEDULER_SWITCHES - scheduler_switch) as u64;
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(self.execution_crash(format!(
+                    "execution exceeded the total timeout of {timeout_microseconds} microseconds"
+                )));
+            }
+            let remaining_timeout_microseconds = u64::try_from((timeout - elapsed).as_micros())
+                .unwrap_or(u64::MAX)
+                .max(1);
             if let Err(error) = self.unicorn.emu_start(
                 begin,
                 RETURN_ADDRESS,
-                timeout_microseconds,
+                remaining_timeout_microseconds,
                 MAX_INSTRUCTIONS,
             ) {
                 return Err(self.execution_crash(format!("emulation error: {error}")));
@@ -2555,7 +2569,10 @@ fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Resul
 fn initialize_windows_command_line_w(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {
     const WINDOWS_COMMAND_LINE: &str = "\"aex-guest-worker.exe\"";
     let mut bytes = Vec::with_capacity((WINDOWS_COMMAND_LINE.encode_utf16().count() + 1) * 2);
-    for unit in WINDOWS_COMMAND_LINE.encode_utf16().chain(std::iter::once(0)) {
+    for unit in WINDOWS_COMMAND_LINE
+        .encode_utf16()
+        .chain(std::iter::once(0))
+    {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
     let command_line = engine.allocate(bytes.len(), 2)?;
