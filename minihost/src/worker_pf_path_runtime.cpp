@@ -181,13 +181,10 @@ int32_t __cdecl path_info(void* effect,int32_t index,int32_t* id){auto p=paths()
 // counted, exactly as before.
 int32_t __cdecl checkout_path(void* effect,int32_t id,int32_t,int32_t step,uint32_t scale,void** out){
   auto p=paths();auto* found=find(p,id);std::lock_guard lock(g_mutex);
-  // The enumeration hook is installed only by `configure_mask_scene` (the
-  // fixed-scene smart request modes, the AEGP idle-roundtrip mode, the
-  // flattened-sequence routes and selftests); an ordinary session render
-  // never runs it, so an unhooked runtime is the everyday "no masks" state,
-  // not a misconfiguration, and answers like any absent path. Whether the
-  // `v2|` mask-trailer routes install it before PF Path Query is asked is
-  // tracked in issue #1269.
+  // An invocation carrying a fixed scene or a `v2|` mask trailer installs the
+  // enumeration hook before PF Path Query is asked. An ordinary render with no
+  // mask context leaves the runtime unhooked; that is the everyday "no masks"
+  // state, not a misconfiguration, and answers like any absent path.
   if(!effect||!out||step<=0||!scale){++g_report.invalid_operations;diag_paths("checkout",effect,id,step,4);return 4;}
   if(!found){*out=nullptr;++g_report.absent_checkouts;diag_paths("checkout_absent",effect,id,step,0);return 0;}
   ++g_checkouts[found->handle];++g_report.checkout_calls;*out=found->handle;diag_paths("checkout",effect,id,step,0);return 0;}
