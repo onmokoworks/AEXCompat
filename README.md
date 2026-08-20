@@ -167,6 +167,8 @@ SDK、build artifact、machine-bound evidenceを使う検証は明示opt-inで�
 
 AEXCompatの開発者が権利を持つソースコード、文書、仕様、テスト、検証用ツールは、下記の除外対象を除き[Mozilla Public License 2.0](LICENSE)で提供します。Adobe、After Effectsおよび関連製品名は各権利者の商標であり、本プロジェクトはAdobe公式ではありません。
 
+デスクトップUIの「ライセンス」から、AEXCompat自身のライセンスと、Windows/macOS版UIに組み込まれるCargo依存関係のライセンス告知をオフラインで確認できます。配布物には [`LICENSE`](LICENSE)、[`THIRD_PARTY_LICENSES.txt`](THIRD_PARTY_LICENSES.txt)、[`THIRD_PARTY_LICENSES.html`](THIRD_PARTY_LICENSES.html) を同梱してください。依存関係を更新した場合は `python tools/generate-third-party-licenses.py --refresh` で告知を更新し、通常実行（`--refresh`なし）でlocked graphとの一致を検証します。
+
 <details>
 <summary>第三者の成果物とUnicorn Engineを含む実行ファイルについて</summary>
 
