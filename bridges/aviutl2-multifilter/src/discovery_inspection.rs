@@ -564,10 +564,16 @@ fn inspect_report_failure_fields(
             diagnostics.insert(field.to_owned(), value.into());
         }
     }
-    if let Some(parameters) = report.get("parameters").and_then(serde_json::Value::as_array) {
+    if let Some(parameters) = report
+        .get("parameters")
+        .and_then(serde_json::Value::as_array)
+    {
         diagnostics.insert("parameter_count".to_owned(), parameters.len().into());
     }
-    if let Some(missing) = report.get("missing_suites").and_then(serde_json::Value::as_array) {
+    if let Some(missing) = report
+        .get("missing_suites")
+        .and_then(serde_json::Value::as_array)
+    {
         diagnostics.insert(
             "missing_suites".to_owned(),
             serde_json::Value::Array(missing.clone()),

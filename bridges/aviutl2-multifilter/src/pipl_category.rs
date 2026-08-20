@@ -16,15 +16,11 @@ const MAX_PIPL_PROPERTIES: u32 = 1024;
 const MAX_PIPL_PROPERTY_BYTES: u32 = 65536;
 
 fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(
-        bytes.get(at..at + 2)?.try_into().ok()?,
-    ))
+    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(at..at + 4)?.try_into().ok()?,
-    ))
+    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// One PE section header's mapping input: where its RVA range sits in the file.
