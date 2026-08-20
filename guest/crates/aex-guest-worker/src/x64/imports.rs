@@ -2160,9 +2160,9 @@ fn emulate_get_string_type_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 let address = source
                     .checked_add(index * 2)
                     .ok_or_else(|| "GetStringTypeW source address overflow".to_string())?;
-                let bytes = unicorn.mem_read_as_vec(address, 2).map_err(|error| {
-                    format!("GetStringTypeW source read failed: {error}")
-                })?;
+                let bytes = unicorn
+                    .mem_read_as_vec(address, 2)
+                    .map_err(|error| format!("GetStringTypeW source read failed: {error}"))?;
                 let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
                 units.push(unit);
                 if unit == 0 {
@@ -2178,10 +2178,14 @@ fn emulate_get_string_type_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 .and_then(|length| length.checked_mul(2))
                 .filter(|length| *length <= MAX_CRT_STRING_BYTES)
                 .ok_or_else(|| "GetStringTypeW source is too large".to_string())?;
-            let bytes = unicorn.mem_read_as_vec(source, byte_length as usize).map_err(|error| {
-                format!("GetStringTypeW source read failed: {error}")
-            })?;
-            units.extend(bytes.chunks_exact(2).map(|pair| u16::from_le_bytes([pair[0], pair[1]])));
+            let bytes = unicorn
+                .mem_read_as_vec(source, byte_length as usize)
+                .map_err(|error| format!("GetStringTypeW source read failed: {error}"))?;
+            units.extend(
+                bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+            );
         }
 
         let output_size = units
@@ -2207,7 +2211,7 @@ fn emulate_get_string_type_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 .find(|region| {
                     region.begin <= cursor
                         && cursor <= region.end
-                        && region.perms & Prot::WRITE.0 != 0
+                        && region.perms & Prot::WRITE.0 as u32 != 0
                 })
                 .ok_or_else(|| {
                     format!(
@@ -2256,7 +2260,7 @@ fn emulate_get_string_type_w(unicorn: &mut Unicorn<'_, GuestState>) {
 // surrogate halves remain visible and receive only their documented C3 flags.
 fn classify_utf16_unit(info_type: u32, unit: u16) -> u16 {
     use unicode_bidi::BidiClass;
-    use unicode_general_category::{get_general_category, GeneralCategory};
+    use unicode_general_category::{GeneralCategory, get_general_category};
     use unicode_script::{Script, UnicodeScript};
     use unicode_width::UnicodeWidthChar;
 
@@ -2466,7 +2470,7 @@ fn is_windows_lexical_character(
 }
 
 fn is_dependent_vowel_mark(character: char) -> bool {
-    use icu_properties::{props::IndicSyllabicCategory, CodePointMapData};
+    use icu_properties::{CodePointMapData, props::IndicSyllabicCategory};
 
     CodePointMapData::<IndicSyllabicCategory>::new().get(character)
         == IndicSyllabicCategory::VowelDependent

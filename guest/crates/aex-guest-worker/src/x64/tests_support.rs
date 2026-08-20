@@ -3616,8 +3616,10 @@ fn multi_byte_to_wide_char_preflights_the_entire_output_before_writing() {
         .call_win64(CONVERT, [932, 0, source, 2, crossing, 2])
         .unwrap_err();
     assert!(error.to_string().contains("not fully writable"), "{error}");
-    assert_eq!(engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(), [0x5a; 2]);
-
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(),
+        [0x5a; 2]
+    );
 }
 
 #[test]
@@ -3654,7 +3656,10 @@ fn get_string_type_w_is_kernel32_scoped_and_classifies_ctype1() {
     engine
         .write(
             source,
-            &units.into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>(),
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
         )
         .unwrap();
     engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
@@ -3673,7 +3678,9 @@ fn get_string_type_w_is_kernel32_scoped_and_classifies_ctype1() {
         .collect::<Vec<_>>();
     assert_eq!(
         words,
-        [0x0181, 0x0102, 0x0084, 0x0048, 0x0010, 0x0028, 0x0100, 0x0200, 0]
+        [
+            0x0181, 0x0102, 0x0084, 0x0048, 0x0010, 0x0028, 0x0100, 0x0200, 0
+        ]
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0xdead_beef);
 }
@@ -3705,11 +3712,16 @@ fn get_string_type_w_classifies_bidi_japanese_combining_and_utf16_units() {
     engine
         .write(
             source,
-            &units.into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>(),
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
         )
         .unwrap();
     assert_eq!(
-        engine.call_win64(CLASSIFY, [2, source, 9, output, 0, 0]).unwrap(),
+        engine
+            .call_win64(CLASSIFY, [2, source, 9, output, 0, 0])
+            .unwrap(),
         1
     );
     let words = engine
@@ -3725,11 +3737,16 @@ fn get_string_type_w_classifies_bidi_japanese_combining_and_utf16_units() {
     engine
         .write(
             source,
-            &units.into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>(),
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
         )
         .unwrap();
     assert_eq!(
-        engine.call_win64(CLASSIFY, [3, source, 7, output, 0, 0]).unwrap(),
+        engine
+            .call_win64(CLASSIFY, [3, source, 7, output, 0, 0])
+            .unwrap(),
         1
     );
     let words = engine
@@ -3739,7 +3756,10 @@ fn get_string_type_w_classifies_bidi_japanese_combining_and_utf16_units() {
         .chunks_exact(2)
         .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
         .collect::<Vec<_>>();
-    assert_eq!(words, [0x80a0, 0x8090, 0x8050, 0x8180, 0x0003, 0x0800, 0x1000]);
+    assert_eq!(
+        words,
+        [0x80a0, 0x8090, 0x8050, 0x8180, 0x0003, 0x0800, 0x1000]
+    );
 
     let units = [
         0x093e,
@@ -3759,11 +3779,16 @@ fn get_string_type_w_classifies_bidi_japanese_combining_and_utf16_units() {
     engine
         .write(
             source,
-            &units.into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>(),
+            &units
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
         )
         .unwrap();
     assert_eq!(
-        engine.call_win64(CLASSIFY, [3, source, 13, output, 0, 0]).unwrap(),
+        engine
+            .call_win64(CLASSIFY, [3, source, 13, output, 0, 0])
+            .unwrap(),
         1
     );
     let words = engine
@@ -3776,8 +3801,8 @@ fn get_string_type_w_classifies_bidi_japanese_combining_and_utf16_units() {
     assert_eq!(
         words,
         [
-            0x8004, 0x8005, 0x8005, 0x8004, 0x8000, 0x8600, 0, 0x0400, 0x0408, 0x8400,
-            0x8400, 0x0008, 0,
+            0x8004, 0x8005, 0x8005, 0x8004, 0x8000, 0x8600, 0, 0x0400, 0x0408, 0x8400, 0x8400,
+            0x0008, 0,
         ]
     );
 }
@@ -3828,10 +3853,7 @@ fn get_string_type_w_supports_minus_one_and_reports_validation_failures() {
     engine.write(output, &[0xaa; 8]).unwrap();
     assert_eq!(
         engine
-            .call_win64(
-                CLASSIFY,
-                [1, source, u32::MAX as u64 - 1, output, 0, 0],
-            )
+            .call_win64(CLASSIFY, [1, source, u32::MAX as u64 - 1, output, 0, 0],)
             .unwrap(),
         1
     );
@@ -3860,7 +3882,10 @@ fn get_string_type_w_preflights_the_entire_output_before_writing() {
         .call_win64(CLASSIFY, [1, source, 2, crossing, 0, 0])
         .unwrap_err();
     assert!(error.to_string().contains("not fully writable"), "{error}");
-    assert_eq!(engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(), [0x5a; 2]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(crossing, 2).unwrap(),
+        [0x5a; 2]
+    );
 
     let mut engine = test_engine(&[0xc3]);
     install_win64_import(
@@ -3876,7 +3901,10 @@ fn get_string_type_w_preflights_the_entire_output_before_writing() {
         .call_win64(CLASSIFY, [1, DATA_BASE + PAGE_SIZE, 2, output, 0, 0])
         .unwrap_err();
     assert!(error.to_string().contains("source read failed"), "{error}");
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), [0x5a; 4]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        [0x5a; 4]
+    );
 }
 
 #[test]
