@@ -1362,10 +1362,10 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
     }
 }
 
-fn finish_msvcp_mutex_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<(), String>) {
+fn finish_msvcp_mutex_callback(unicorn: &mut Unicorn<'_, GuestState>, result: Result<u32, String>) {
     match result {
-        Ok(()) => {
-            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        Ok(return_value) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, return_value as u64);
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -1384,9 +1384,11 @@ fn read_msvcp_mutex_object(
     if object == 0 {
         return Err(format!("MSVCP mutex {operation} object is null"));
     }
-    unicorn
-        .mem_read_as_vec(object, 1)
-        .map_err(|error| format!("MSVCP mutex {operation} object is not mapped: {error}"))?;
+    if !guest_range_has_permission(unicorn, object, MSVCP_MUTEX_BYTES as u64, Prot::WRITE)? {
+        return Err(format!(
+            "MSVCP mutex {operation} object {object:#x} is not fully writable"
+        ));
+    }
     Ok(object)
 }
 
@@ -1394,9 +1396,9 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "init")?;
         let mutex_type = read_win64_import_argument(unicorn, 1)? as u32;
-        if mutex_type != OBSERVED_MSVCP_MUTEX_TYPE {
+        if mutex_type != OBSERVED_MSVCP_MUTEX_TYPE && mutex_type != MSVCP_MUTEX_TRY {
             return Err(format!(
-                "MSVCP mutex type {mutex_type:#x} is unsupported; expected {OBSERVED_MSVCP_MUTEX_TYPE:#x}"
+                "MSVCP mutex type {mutex_type:#x} is unsupported; expected {MSVCP_MUTEX_TRY:#x} or {OBSERVED_MSVCP_MUTEX_TYPE:#x}"
             ));
         }
         let state = unicorn.get_data_mut();
@@ -1410,10 +1412,11 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
             object,
             MsvcpMutex {
                 mutex_type,
+                owner_thread_id: None,
                 lock_count: 0,
             },
         );
-        Ok(())
+        Ok(0)
     })();
     finish_msvcp_mutex_callback(unicorn, result);
 }
@@ -1421,18 +1424,32 @@ fn emulate_msvcp_mutex_init(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_msvcp_mutex_lock(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "lock")?;
+        let current_thread_id = unicorn.get_data().current_windows_thread_id;
         let mutex = unicorn
             .get_data_mut()
             .msvcp_mutexes
             .get_mut(&object)
             .ok_or_else(|| format!("MSVCP mutex {object:#x} is not initialized"))?;
+        if mutex.lock_count == 0 {
+            mutex.owner_thread_id = Some(current_thread_id);
+            mutex.lock_count = 1;
+            return Ok(0);
+        }
+        if mutex.owner_thread_id != Some(current_thread_id) {
+            return Err(format!(
+                "MSVCP mutex {object:#x} would block guest thread {current_thread_id}; cooperative mutex waiting is unsupported"
+            ));
+        }
+        if mutex.mutex_type & MSVCP_MUTEX_RECURSIVE == 0 {
+            return Ok(MSVCP_THRD_BUSY);
+        }
         if mutex.lock_count >= MAX_MSVCP_MUTEX_RECURSION {
             return Err(format!(
                 "MSVCP mutex {object:#x} recursion exceeds {MAX_MSVCP_MUTEX_RECURSION}"
             ));
         }
         mutex.lock_count += 1;
-        Ok(())
+        Ok(0)
     })();
     finish_msvcp_mutex_callback(unicorn, result);
 }
@@ -1440,6 +1457,7 @@ fn emulate_msvcp_mutex_lock(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_msvcp_mutex_unlock(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let object = read_msvcp_mutex_object(unicorn, "unlock")?;
+        let current_thread_id = unicorn.get_data().current_windows_thread_id;
         let mutex = unicorn
             .get_data_mut()
             .msvcp_mutexes
@@ -1448,8 +1466,16 @@ fn emulate_msvcp_mutex_unlock(unicorn: &mut Unicorn<'_, GuestState>) {
         if mutex.lock_count == 0 {
             return Err(format!("MSVCP mutex {object:#x} unlock is unbalanced"));
         }
+        if mutex.owner_thread_id != Some(current_thread_id) {
+            return Err(format!(
+                "MSVCP mutex {object:#x} is not owned by guest thread {current_thread_id}"
+            ));
+        }
         mutex.lock_count -= 1;
-        Ok(())
+        if mutex.lock_count == 0 {
+            mutex.owner_thread_id = None;
+        }
+        Ok(0)
     })();
     finish_msvcp_mutex_callback(unicorn, result);
 }
@@ -1469,7 +1495,7 @@ fn emulate_msvcp_mutex_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
             ));
         }
         state.msvcp_mutexes.remove(&object);
-        Ok(())
+        Ok(0)
     })();
     finish_msvcp_mutex_callback(unicorn, result);
 }

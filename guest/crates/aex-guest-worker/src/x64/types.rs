@@ -180,6 +180,7 @@ struct VcompDynamicLoop {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MsvcpMutex {
     mutex_type: u32,
+    owner_thread_id: Option<u32>,
     lock_count: u32,
 }
 
