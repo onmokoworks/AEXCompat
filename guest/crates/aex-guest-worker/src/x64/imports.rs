@@ -5119,34 +5119,6 @@ fn valid_fopen_mode(mode: &[u8]) -> bool {
         return false;
     }
 
-    // UCRT treats a comma as the terminal ccs introducer.  Also accept the
-    // comma-separated extension spelling observed in compatibility manifests
-    // (for example `r,D`), with an optional terminal ccs specification.
-    let mut parsed_comma_flag = false;
-    let mut separator_after_flags = false;
-    while !options.is_empty() && !options.starts_with(b"ccs") {
-        let byte = options[0];
-        if !matches!(byte, b' ' | b'x' | b'c' | b'n' | b'N' | b'S' | b'R' | b'T' | b'D')
-            || !parse_flag(byte)
-        {
-            return false;
-        }
-        if byte != b' ' {
-            parsed_comma_flag = true;
-            separator_after_flags = false;
-        } else if parsed_comma_flag {
-            separator_after_flags = true;
-        }
-        options = &options[1..];
-    }
-    options = trim_leading_crt_mode_spaces(options);
-    if options.is_empty() {
-        return parsed_comma_flag;
-    }
-    if parsed_comma_flag && !separator_after_flags {
-        return false;
-    }
-
     let Some(mut encoding) = options.strip_prefix(b"ccs") else {
         return false;
     };

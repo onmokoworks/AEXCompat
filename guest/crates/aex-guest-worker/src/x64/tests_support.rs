@@ -2088,12 +2088,10 @@ fn fopen_s_validates_arguments_modes_and_result_atomicity() {
         b"rD+",
         b" r D + ",
         b"wxxNN",
-        b"r,D",
         b"w, ccs=UTF-16LE",
         b"rt+, ccs=UTF-8",
         b"a,ccs=UNICODE",
         b" rt + , ccs = utf-8   ",
-        b"w+,DN ccs=UTF-8",
     ] {
         engine.unicorn.mem_write(mode, valid).unwrap();
         engine
@@ -2131,11 +2129,13 @@ fn fopen_s_validates_arguments_modes_and_result_atomicity() {
         b"rx",
         b"ax",
         b"r,,D",
+        b"r,D",
         b"r,+",
         b"r,b",
         b"r,D,D",
         b"r,Dccs=UTF-8",
         b"r,D ccs=bogus",
+        b"w+,DN ccs=UTF-8",
         b"r,ccs=UTF-8D",
         b"r,CCS=UTF-8",
         b"\tr",
