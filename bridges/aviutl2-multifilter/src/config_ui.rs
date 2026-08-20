@@ -19,9 +19,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::UI::Controls::{
     ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LVCF_WIDTH, LVCOLUMNW,
-    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMCOUNT, LVM_GETITEMSTATE,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE,
-    LVS_EX_CHECKBOXES,
+    LVIF_TEXT, LVIS_STATEIMAGEMASK, LVITEMW, LVM_GETITEMCOUNT, LVM_GETITEMSTATE, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMSTATE, LVS_EX_CHECKBOXES,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DialogBoxIndirectParamW, EndDialog, GetClientRect, GetDlgItem, GetSystemMetrics,
@@ -186,7 +185,10 @@ fn parse_form(form: &ConfigForm) -> Result<ConfigEdit, String> {
     // whole file — a "saved" config that ignores every setting (issue #655's
     // shape, created by the dialog itself).
     if module_limit.is_some_and(|limit| limit as u64 > i64::MAX as u64) {
-        return Err(format!("依存 DLL 数の上限が大きすぎます ({} 以下)", i64::MAX));
+        return Err(format!(
+            "依存 DLL 数の上限が大きすぎます ({} 以下)",
+            i64::MAX
+        ));
     }
     if byte_limit.is_some_and(|limit| limit > i64::MAX as u64) {
         return Err(format!(
@@ -608,7 +610,12 @@ fn fill_ignore_list(dialog: WsHWND, rows: &[IgnoreRow]) {
         let mut column: LVCOLUMNW = std::mem::zeroed();
         column.mask = LVCF_WIDTH;
         column.cx = client.right - client.left - GetSystemMetrics(SM_CXVSCROLL);
-        SendMessageW(list, LVM_INSERTCOLUMNW, 0, &column as *const LVCOLUMNW as LPARAM);
+        SendMessageW(
+            list,
+            LVM_INSERTCOLUMNW,
+            0,
+            &column as *const LVCOLUMNW as LPARAM,
+        );
         for (index, row) in rows.iter().enumerate() {
             let mut name: Vec<u16> = row.name.encode_utf16().chain([0]).collect();
             let mut item: LVITEMW = std::mem::zeroed();
@@ -747,7 +754,10 @@ fn build_dialog_template() -> Vec<u32> {
 
     // Header: style, exstyle, item count (patched below), x, y, cx, cy,
     // no menu, default dialog class, title, then DS_SETFONT's point size + face.
-    push_u32(&mut words, DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU);
+    push_u32(
+        &mut words,
+        DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU,
+    );
     push_u32(&mut words, 0);
     let count_at = words.len();
     words.push(0);
@@ -777,7 +787,13 @@ fn build_dialog_template() -> Vec<u32> {
         ItemClass::Atom(ATOM_STATIC),
         "スキャンフォルダ (1行に1つ / 空欄なら After Effects と MediaCore の既定フォルダ)",
     );
-    item(multiline, [7, 17, 326, 38], IDC_DIRS, ItemClass::Atom(ATOM_EDIT), "");
+    item(
+        multiline,
+        [7, 17, 326, 38],
+        IDC_DIRS,
+        ItemClass::Atom(ATOM_EDIT),
+        "",
+    );
 
     item(
         SS_NOPREFIX,

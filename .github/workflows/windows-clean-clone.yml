@@ -58,22 +58,19 @@ jobs:
           cache-key: broker
           save-cache: ${{ github.event_name == 'push' }}
 
-      # 整形ゲートは変更されたファイル単位で rustfmt を掛ける。cargo fmt が
-      # 辿らない include! 配下のファイルも対象になる (#1460)。
+      # 追跡している .rs を全部見る。変更されたファイルだけに絞っていたときは、
+      # `cargo fmt` が辿れないファイル (guest の x64.rs と multifilter の lib.rs
+      # が `include!` で取り込む 20 ファイル) の未整形が誰にも見えないまま溜まり、
+      # そこに 1 行触れた PR が既存分ごと落ちるようになっていた (#1460)。
+      #
+      # 全体を見ておけば、溜まる前にそれを入れた PR で落ちる。181 ファイルを
+      # 1 回の呼び出しに渡して実測 3.3 秒なので、範囲を絞る意味はない。
       - name: Check Rust formatting
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         shell: pwsh
         run: |
-          $base = $env:BASE_SHA
-          if (-not $base -or $base -match '^0+$') {
-            $base = 'HEAD^'
-          }
-          $files = @(git diff --name-only --diff-filter=ACMR $base $env:GITHUB_SHA -- '*.rs')
-          if (-not $files) {
-            Write-Host 'No changed Rust files to format-check.'
-            exit 0
-          }
+          $files = @(git ls-files '*.rs')
+          if (-not $files) { throw 'no tracked Rust files found' }
+          Write-Host "format-checking $($files.Count) tracked Rust files"
           rustfmt --edition 2024 --check --config skip_children=true @files
 
       # ここを `cargo check` に戻さない: rmeta は codegen に使い回されず、後続の
