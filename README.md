@@ -65,6 +65,23 @@ AEXCompatは、Adobe After EffectsのEffect AEXをAfter Effects本体の外で�
 
 Apple Siliconではarm64 Unicorn workerがWindows x64 AEXをguestとして実行します。`AEXCOMPAT_NATIVE_CARRIER=1`を設定すると、Rosettaが利用可能な環境ではx86_64 native carrierを試します。このcarrierは明示opt-inの高速経路であり、未信頼AEX向けsandboxではないためtrusted plug-insにのみ使用してください。After Effects本体は通常のharness実行には不要ですが、AE oracleの取得とpixel一致検証には必要です。
 
+### 実AEX互換性スナップショット
+
+2026-08-20時点で、local inventory 969本のうちstatic PE解析でこの実行経路へ
+投入できることを確認した39本のWindows x64 AEX trancheを、Apple Silicon上の
+arm64 Unicorn workerで再現実行しています。source baseline
+`b99dc6bad11d8dd38fd4ed54f6ba020c431dc614`、worker SHA-256
+`6581854c2d8eaa015f7c79146b424e29818c91ed4cc1db478124fb75f4b1213d`の結果は、
+`27 rendered / 4 unsupported_import / 8 worker_exit`です。private-local structured
+reportのSHA-256は
+`53221497a11227f2f5df7db6afdc245ccba08a91e3f437620107d0bd2f68253d`です。
+
+この39本は全969本の達成率を表しません。残る930本はこのrunへ含まれておらず、
+この数値だけを理由にfailedまたはskippedへ分類していません。また`rendered`は
+workerが出力画像を生成したことを表し、After Effectsとのpixel一致、全selector、
+全parameter、GPU経路、または一般的な製品対応を意味しません。commercial/private
+AEX本体とcorpusはrepositoryへ同梱しません。
+
 ### クイックスタート
 
 #### Apple Silicon Mac（Windows・Rosetta・証明書不要）
@@ -151,6 +168,12 @@ uv run python -m pytest -q
 ローカル成果物を要するテストは2つに分かれます。この checkout からビルドした worker / probe を自己計算の期待値で検証するテストは `--run-built-artifact-tests` (CIでも実行)、記録済み evidence をローカル現物と照合する machine-bound テストは `--run-local-artifact-tests` (ローカル専用) を付けて実行します。通常のclean cloneではどちらも理由付きでskipします。
 
 SDK、checkoutからbuildしたartifact、machine-bound evidenceを使う検証は、それぞれ`--run-sdk-tests`、`--run-built-artifact-tests`、`--run-local-artifact-tests`で明示的にopt-inします。SDKなしのsource-only実行でも、一部のprobe/fixture buildテストはSDK解決でfailするのが現在の既知状態です。期待結果とCI matrixは[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
+
+private repositoryの同一repository PR、main push、scheduleでは、CIがread-only
+credentialを使って非公開Cloudflare R2からhash-pinned AE SDKを取得します。
+public repositoryとfork PRにはcredentialを渡さず、SDK依存stepをskipして
+source-only範囲を検証します。Adobe SDKをrepositoryや公開artifactとして再配布は
+しません。
 
 ### アーキテクチャ
 
@@ -293,6 +316,25 @@ This project is experimental and pre-alpha. The optional Apple Silicon x86_64 na
 
 On Apple Silicon, the arm64 Unicorn worker executes Windows x64 AEX code as a guest. Setting `AEXCOMPAT_NATIVE_CARRIER=1` tries the Rosetta x86_64 native carrier where available. This is an explicit opt-in acceleration path, not a sandbox for untrusted AEX, and must only be used with trusted plug-ins. After Effects itself is not required for ordinary harness runs, but it is required to capture AE oracles and establish pixel equivalence.
 
+### Real-AEX compatibility snapshot
+
+As of 2026-08-20, the reproducible Apple Silicon run covers a 39-plugin
+Windows x64 tranche selected by static PE discovery from a local inventory of
+969 AEX files. At source baseline
+`b99dc6bad11d8dd38fd4ed54f6ba020c431dc614`, worker SHA-256
+`6581854c2d8eaa015f7c79146b424e29818c91ed4cc1db478124fb75f4b1213d`,
+the result is `27 rendered / 4 unsupported_import / 8 worker_exit`. The
+SHA-256 of the private-local structured report is
+`53221497a11227f2f5df7db6afdc245ccba08a91e3f437620107d0bd2f68253d`.
+
+This 39-plugin tranche is not a success rate for all 969 inventory entries.
+The other 930 entries are outside this run and are not classified as failed or
+skipped merely because they are absent. `rendered` means that the worker
+produced an output image; it does not imply After Effects pixel equivalence,
+coverage of every selector or parameter, GPU compatibility, or general product
+support. Commercial/private AEX binaries and the corpus are not distributed in
+this repository.
+
 ### Quick Start
 
 #### Apple Silicon Mac (no Windows, Rosetta, or certificate required)
@@ -360,6 +402,13 @@ uv run python -m pytest -q
 Tests that need local artifacts are split in two: `--run-built-artifact-tests` runs tests that execute workers / probes built from this checkout against self-computed expectations (CI runs these too), while `--run-local-artifact-tests` runs machine-bound tests that authenticate recorded evidence against local files (local-only). A normal clean clone skips both with an explicit reason.
 
 Opt in to SDK, checkout-built artifact, or machine-bound evidence tests with `--run-sdk-tests`, `--run-built-artifact-tests`, or `--run-local-artifact-tests`, respectively. In the current source-only run, some probe/fixture build tests still fail while resolving an absent SDK rather than skipping. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for the expected result, prerequisites, and CI matrix.
+
+For same-repository pull requests, main pushes, and schedules while the
+repository is private, CI uses read-only credentials to fetch the hash-pinned
+AE SDK from a private Cloudflare R2 bucket. Public-repository and fork runs do
+not receive those credentials; they skip SDK-dependent steps and validate the
+source-only scope. The Adobe SDK is not redistributed through the repository
+or public artifacts.
 
 ### DirectX SDK fixture
 

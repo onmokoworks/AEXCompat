@@ -309,8 +309,9 @@ scheduleでWindows runner上を走り、SDKを取得できるかで検証範囲�
   minihost workerのNinja build、`uv run python -m pytest -q`を行う。
 - fork PRなどSDK配布元へアクセスできない実行ではSDK依存stepをskipし、
   上記のsource-only範囲を検証する。
-- 同一repositoryのPR、main push、scheduleでは非公開のR2バケット
-  `aexcompat-ci` からhash-pinnedな `sdk/AfterEffectsSDK-ae25.2-win.zip` を
+- private repositoryにおける同一repositoryのPR、main push、scheduleでは、
+  非公開のR2バケット `aexcompat-ci` からhash-pinnedな
+  `sdk/AfterEffectsSDK-ae25.2-win.zip` を
   取得する (#1445)。取得成功時だけprobe AEXとSDK fixtureを追加buildし、
   pytestへ`--run-sdk-tests`と`--run-built-artifact-tests`を追加する。
   SDK/成果物不足によるskipが残ればworkflowをfailさせ、silent successを防ぐ。
@@ -438,7 +439,8 @@ Per-component prerequisites on Windows x64:
   for main pushes, pull requests, and schedules. Fork PRs, which receive no
   repository secrets and therefore cannot reach the SDK, still build/test the
   Cargo workspaces and bridges, build the minihost workers, and run
-  source-only pytest. Runs that do get the secrets additionally fetch the
+  source-only pytest. Same-repository runs while the repository is private
+  receive the secrets and additionally fetch the
   hash-pinned AE 25.2 SDK from the private R2 bucket via
   `tools/fetch-r2-object.ps1`, build the probe AEX and SDK fixtures, and add
   `--run-sdk-tests` and `--run-built-artifact-tests` to pytest; missing-SDK or
