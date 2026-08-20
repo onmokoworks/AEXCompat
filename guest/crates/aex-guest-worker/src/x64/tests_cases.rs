@@ -1734,21 +1734,48 @@ fn exemplar_fingerprint_tracking_is_bounded_and_explicitly_truncated() {
 #[test]
 fn execution_trace_reports_fingerprint_budget_truncation() {
     const CODE: u64 = 0x1000_0000;
-    let iterations = TRACE_DISTINCT_FINGERPRINTS as u32 + 4;
-    let mut code = vec![0xb9];
-    code.extend_from_slice(&iterations.to_le_bytes());
-    code.extend_from_slice(&[0xe8, 0x04, 0, 0, 0, 0xff, 0xc9, 0x75, 0xf7, 0xc3]);
-    let mut engine = test_engine(&code);
+    let observations = TRACE_DISTINCT_FINGERPRINTS + 4;
+    let mut engine = test_engine(&[0xc3]);
     engine.begin_execution_trace("RENDER", CODE).unwrap();
-    let result = engine.call_win64(CODE, [0; 6]).unwrap();
-    let trace = engine.finish_execution_trace(result).unwrap();
+    let capture = engine.unicorn.get_data_mut().trace.as_mut().unwrap();
+    for observation in 1..=observations {
+        push_trace_event(
+            capture,
+            TraceEvent {
+                sequence: 0,
+                observed_count: 1,
+                depth: 1,
+                kind: "guest_call",
+                call_id: Some(observation as u64),
+                function_rva: Some(0),
+                pc_rva: Some(5),
+                target_rva: Some(10),
+                name: None,
+                arguments: vec![TraceArgument {
+                    register: "rcx",
+                    value: TraceValue {
+                        raw: observation as u64,
+                        classification: "integer",
+                        offset: None,
+                    },
+                }],
+                xmm_arguments: Vec::new(),
+                stack_arguments: Vec::new(),
+                return_value: None,
+                exemplars: TraceExemplars::default(),
+                call_kind: Some("direct"),
+                instruction_bytes: Some("e800000000".into()),
+            },
+        );
+    }
+    let trace = engine.finish_execution_trace(0).unwrap();
 
     let call = trace
         .events
         .iter()
         .find(|event| event.kind == "guest_call")
         .unwrap();
-    assert_eq!(call.observed_count, iterations as u64);
+    assert_eq!(call.observed_count, observations as u64);
     assert!(call.exemplars.fingerprint_tracking_truncated);
     assert_eq!(call.exemplars.untracked_fingerprint_observations, 4);
     assert!(trace.truncation.iter().any(|item| {
