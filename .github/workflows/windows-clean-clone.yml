@@ -16,12 +16,28 @@ concurrency:
   group: windows-clean-clone-${{ github.ref }}
   cancel-in-progress: true
 
+# 単一 job だったものを 4 つに割ってある (#720)。判断待ちだった「課金
+# runner-minutes が 1.5-2 倍」は public repository の standard runner が無料に
+# なったことで消えた。hosted (windows-latest, 4 vCPU) は self-hosted の
+# ワークステーションより CPU バウンドが 3-4 倍遅いので、横に広げる以外に
+# 縮める手が無い (larger runner は public でも課金)。
+#
+# rust-broker / bridges / native は互いに依存しないので同時に走る。
+# python-tests だけが両方の成果物を要る。critical path は
+# max(rust-broker, native) + python-tests。
+env:
+  SDK_BUCKET: aexcompat-ci
+  SDK_OBJECT_KEY: sdk/AfterEffectsSDK-ae25.2-win.zip
+  SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
+  SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
+
 jobs:
-  source-reproducible:
+  # broker workspace のビルドとテスト。実測でここが一番長いので critical path。
+  rust-broker:
     # self-hosted は使わない (#1457)。public repository では fork PR が任意の
     # コードを持ち込むので、物理ワークステーションに届く経路自体を残さない。
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     env:
       PYTHONUTF8: "1"
       # built_artifact テストの broker/harness を、下の `cargo build --workspace`
@@ -31,32 +47,18 @@ jobs:
       # 内容ハッシュで吸収する (#664)。
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
-      # SDK zip は private な R2 バケットから取る (#1445)。公開バケットにしない
-      # 理由は tools/fetch-r2-object.ps1 の冒頭にある。
-      SDK_BUCKET: aexcompat-ci
-      SDK_OBJECT_KEY: sdk/AfterEffectsSDK-ae25.2-win.zip
-      SDK_ASSET: AfterEffectsSDK-ae25.2-win.zip
-      SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: Read repository Rust toolchain
-        id: repository-rust
-        shell: pwsh
-        run: |
-          $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
-          if (-not $match -or $match.Matches.Count -ne 1) {
-            throw 'rust-toolchain.toml must declare exactly one channel'
-          }
-          "channel=$($match.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: ./.github/actions/ci-setup
         with:
-          toolchain: ${{ steps.repository-rust.outputs.channel }}
-          components: rustfmt
-      - uses: mozilla/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: v0.17.0
+          rust-workspaces: broker
+          cache-key: broker
+          save-cache: ${{ github.event_name == 'push' }}
+
+      # 整形ゲートは変更されたファイル単位で rustfmt を掛ける。cargo fmt が
+      # 辿らない include! 配下のファイルも対象になる (#1460)。
       - name: Check Rust formatting
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -72,25 +74,106 @@ jobs:
             exit 0
           }
           rustfmt --edition 2024 --check --config skip_children=true @files
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      # ここを `cargo check` に戻さない: rmeta は codegen に使い回されず、後続の
+      # build/test と同じコードを二度検査するだけになる (#940)。テスト実行と同じ
+      # feature 解決で fixture を作るので、テスト側が `cargo build -p ...` を
+      # 起動して fingerprint を奪い合わない (#937)。
+      - name: Build the workspace fixtures
+        working-directory: broker
+        run: cargo build --workspace --locked
+
+      - name: Test Rust workspace
+        working-directory: broker
+        shell: pwsh
+        run: cargo test --workspace --locked
+
+      # python-tests が使う実行ファイルだけを渡す。target 全体は数 GB あるうえ、
+      # 向こうは deps を要らない。
+      - name: Publish broker binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          workspaces: |
-            broker
-            bridges/aviutl2-multifilter
-            bridges/ymm4-native
-            guest
-      # Python 版は .python-version (3.12) に従う。
-      # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+          name: broker-debug-bins
+          path: |
+            broker/target/debug/*.exe
+            broker/target/debug/*.dll
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # broker 外の Cargo ルート (#899, #917)。互いに独立なので matrix で横に並べる。
+  bridges:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # args は分割前の workflow が root ごとに使っていたものをそのまま
+          # 持ってきている。guest だけ --workspace が付くのは元からで、
+          # 揃えると走るテストが変わる。
+          - name: aviutl2-multifilter
+            args: --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
+            workspace: bridges/aviutl2-multifilter
+            libclang: 'false'
+          - name: ymm4-native
+            args: --manifest-path bridges/ymm4-native/Cargo.toml --locked
+            workspace: bridges/ymm4-native
+            libclang: 'false'
+          - name: guest
+            args: --manifest-path guest/Cargo.toml --workspace --locked
+            workspace: guest
+            libclang: 'true'
+    env:
+      PYTHONUTF8: "1"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          enable-cache: true
-      - name: Install Python test dependencies
-        run: uv sync --locked
-      # Runs after the cache restore, so the restored target/ stays newer than
-      # every source cargo does not need to rebuild, and before the first cargo
-      # invocation below (#935).
-      - name: Restore source timestamps from git
-        run: uv run python tools/restore-mtime.py
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust-workspaces: ${{ matrix.workspace }}
+          cache-key: bridge-${{ matrix.name }}
+          save-cache: ${{ github.event_name == 'push' }}
+          resolve-libclang: ${{ matrix.libclang }}
+
+      - name: Test ${{ matrix.name }}
+        run: cargo test ${{ matrix.args }}
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
+  # C++ 側の成果物。broker のビルドとは無関係なので同時に走る。
+  #
+  # 旧 workflow にあった「Rebuild native AEX artifacts after the runtime
+  # harness」はここには無い。あれは同一 runner 上で `cargo test --workspace` が
+  # probe の出力を踏むのを取り消すためのもので、job が分かれた今は起こり得ない。
+  # assert_artifact_fresh (tests/_render_session.py) が要求する mtime 順序は
+  # python-tests 側で作り直す。
+  native:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+    outputs:
+      sdk: ${{ steps.sdk.outcome }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      # この job は cmake しか呼ばない。probe の build スクリプトも
+      # resolve-cmake-generator / resolve-build-cmake 経由で cmake を叩くだけで
+      # cargo を使わない。
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust: 'false'
 
       # SDK zip を置いた R2 バケットは非公開で、資格情報は secrets にしかない。
       # fork PR は secrets を受け取れないので、fork PR はここから下の SDK 依存
@@ -99,85 +182,20 @@ jobs:
       #
       # 条件は repository の可視性ではなく secrets が渡るかどうかで書く。
       # `github.event.repository.private` で書くと public 化した時点で常に false
-      # になり、SDK 取得と下流 (probe AEX、fixture、artifact 公開、
-      # --run-sdk-tests) が丸ごと skip され、それを検出するはずの
-      # 「Fail if SDK or built-artifact tests were skipped」まで同じ条件で
-      # skip されて、中身の抜けた CI が緑になる (#1457)。
+      # になり、SDK 取得と下流が丸ごと skip され、それを検出するはずのガードまで
+      # 同じ条件で skip されて、中身の抜けた CI が緑になる (#1457)。
       - name: Fetch After Effects SDK
         id: sdk
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        shell: pwsh
-        env:
-          R2_S3_ENDPOINT: ${{ secrets.R2_SDK_ENDPOINT }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_SDK_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SDK_SECRET_ACCESS_KEY }}
-        run: |
-          $zip = Join-Path $env:RUNNER_TEMP $env:SDK_ASSET
-          # hash 照合はスクリプト側で行い、一致しない限り $zip は作られない。
-          & .\tools\fetch-r2-object.ps1 -Bucket $env:SDK_BUCKET -Key $env:SDK_OBJECT_KEY -OutFile $zip -ExpectedSha256 $env:SDK_SHA256
-          $dest = Join-Path $env:RUNNER_TEMP 'aesdk'
-          Expand-Archive -Path $zip -DestinationPath $dest -Force
-          $root = Join-Path $dest 'AfterEffectsSDK'
-          if (-not (Test-Path (Join-Path $root 'Examples\Headers\AE_Effect.h'))) {
-            throw 'extracted SDK is missing Examples\Headers\AE_Effect.h'
-          }
-          "AFTER_EFFECTS_SDK_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      # ここを `cargo check` に戻さない: rmeta は codegen に使い回されず、後続の
-      # build/test と同じコードを二度検査するだけになる (#940)。テスト実行と同じ
-      # feature 解決で fixture を作るので、テスト側が `cargo build -p ...` を
-      # 起動して fingerprint を奪い合わない (#937)。SDK 取得・probe ビルドより
-      # 前に置くのはコンパイルエラーを先に出すため。
-      - name: Build the workspace fixtures
-        working-directory: broker
-        run: cargo build --workspace --locked
-
-      # broker 外の Cargo ルートもテストを実行する (#899, #917)。
-      - name: Test AviUtl2 multifilter bridge
-        run: cargo test --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked
-      - name: Test YMM4 native bridge
-        run: cargo test --manifest-path bridges/ymm4-native/Cargo.toml --locked
-      # guest workspace の bindgen が libclang.dll をロードする。runner image の
-      # LLVM の位置をハードコードすると、image 更新で黙って別物を掴んだり
-      # 見失ったりする。clang.exe と libclang.dll が揃っているディレクトリを
-      # 実際に探して LIBCLANG_PATH を決め、掴んだ版を記録する。VS 同梱の
-      # clang toolset のように libclang.dll を持たない候補は落とす。
-      # 版そのものを固定する必要が出たら、その時点で install-llvm-action を
-      # 足す (毎 run 数百 MB のダウンロードになるので、必要と分かるまで入れない)。
-      - name: Resolve guest libclang
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $candidates = @(
-            Get-Command clang.exe -All -CommandType Application -ErrorAction SilentlyContinue |
-              ForEach-Object { Split-Path -Parent $_.Source }
-          )
-          $candidates += 'C:\Program Files\LLVM\bin'
-          $resolved = $null
-          foreach ($candidate in ($candidates | Select-Object -Unique)) {
-            $clang = Join-Path $candidate 'clang.exe'
-            $library = Join-Path $candidate 'libclang.dll'
-            if ((Test-Path -LiteralPath $clang -PathType Leaf) -and
-                (Test-Path -LiteralPath $library -PathType Leaf)) {
-              $resolved = $candidate
-              break
-            }
-            Write-Host "libclang candidate rejected (needs both clang.exe and libclang.dll): $candidate"
-          }
-          if (-not $resolved) {
-            throw "no directory on this runner holds both clang.exe and libclang.dll (checked: $($candidates -join '; '))"
-          }
-          $version = & (Join-Path $resolved 'clang.exe') --version
-          if ($LASTEXITCODE -ne 0) {
-            throw "clang --version failed with exit code $LASTEXITCODE"
-          }
-          $file = Get-Item -LiteralPath (Join-Path $resolved 'libclang.dll')
-          Write-Host "guest_libclang_path=$resolved"
-          Write-Host "guest_libclang_size=$($file.Length)"
-          Write-Host "guest_libclang_version=$($version[0])"
-          "LIBCLANG_PATH=$resolved" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Test guest workspace
-        run: cargo test --manifest-path guest/Cargo.toml --workspace --locked
+        uses: ./.github/actions/fetch-ae-sdk
+        with:
+          bucket: ${{ env.SDK_BUCKET }}
+          object-key: ${{ env.SDK_OBJECT_KEY }}
+          asset-name: ${{ env.SDK_ASSET }}
+          expected-sha256: ${{ env.SDK_SHA256 }}
+          r2-endpoint: ${{ secrets.R2_SDK_ENDPOINT }}
+          r2-access-key-id: ${{ secrets.R2_SDK_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SDK_SECRET_ACCESS_KEY }}
 
       # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。
@@ -190,6 +208,7 @@ jobs:
           cmake -S minihost -B target\minihost-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
           cmake --build target\minihost-build || exit /b 1
           dir /b target\minihost-build\aex_*.exe
+
       # ヘッダ依存が実際に記録されているかを確認する (#657)。cl の /showIncludes
       # はローカライズされるため、configure 時と build 時で言語が食い違うと
       # ninja は依存を 0 件記録し、以後ヘッダを変えても再ビルドされない (#651)。
@@ -225,16 +244,6 @@ jobs:
           call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           cmake --build target\instruments-build --target abi_layout_probe || exit /b 1
           dir /b target\instruments-build\abi_layout_probe.exe
-
-      # 一部の built_artifact テストは worker を multi-config 時代の固定パスから
-      # 探す。frozen hash を照合しないので同一バイナリの複製で満たせる。
-      - name: Mirror workers into expected build layouts
-        shell: cmd
-        run: |
-          for %%d in ("target\minihost-build-v18" "target\minihost-build-v18\Release" "target\minihost-build\Release" "target\minihost-timed-layers\Release") do (
-            mkdir %%d 2>nul
-            copy /y target\minihost-build\aex_*.exe %%d\ >nul || exit /b 1
-          )
 
       # probe テストの入力 fixture (37x23 raw RGBA)。内容は決定論的に生成され、
       # built_artifact テストは期待値を実行時に自己計算するため内容非依存。
@@ -311,14 +320,109 @@ jobs:
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
 
+      # 成果物だけを渡す。CMake の build ディレクトリごと送ると数百 MB になり、
+      # python-tests 側では使わない。列挙したパスの共通祖先が target なので、
+      # 受け側は path: target で元の配置に戻る。
+      - name: Publish native artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-artifacts
+          path: |
+            target/minihost-build/aex_*.exe
+            target/instruments-build/*.exe
+            target/*-probe-build/**/*.aex
+            target/sdk-fixtures/**
+            target/gpu-effects/**
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  python-tests:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    needs: [rust-broker, native]
+    env:
+      PYTHONUTF8: "1"
+      AEXCOMPAT_CARGO_PROFILE: debug
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ci-setup
+        with:
+          rust-workspaces: broker
+          cache-key: python-tests
+          save-cache: 'false'
+
+      # pytest が起動するテストの一部は SDK ヘッダを要るビルドを自前で走らせる。
+      # native job が取ったのと同じ zip を取り直す (4.6 MiB、実測 4 秒)。
+      - name: Fetch After Effects SDK
+        id: sdk
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: ./.github/actions/fetch-ae-sdk
+        with:
+          bucket: ${{ env.SDK_BUCKET }}
+          object-key: ${{ env.SDK_OBJECT_KEY }}
+          asset-name: ${{ env.SDK_ASSET }}
+          expected-sha256: ${{ env.SDK_SHA256 }}
+          r2-endpoint: ${{ secrets.R2_SDK_ENDPOINT }}
+          r2-access-key-id: ${{ secrets.R2_SDK_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.R2_SDK_SECRET_ACCESS_KEY }}
+
+      - name: Download broker binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: broker-debug-bins
+          path: broker/target/debug
+
+      - name: Download native artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: native-artifacts
+          path: target
+
+      # 一部の built_artifact テストは worker を multi-config 時代の固定パスから
+      # 探す。frozen hash を照合しないので同一バイナリの複製で満たせる。
+      - name: Mirror workers into expected build layouts
+        shell: cmd
+        run: |
+          for %%d in ("target\minihost-build-v18" "target\minihost-build-v18\Release" "target\minihost-build\Release" "target\minihost-timed-layers\Release") do (
+            mkdir %%d 2>nul
+            copy /y target\minihost-build\aex_*.exe %%d\ >nul || exit /b 1
+          )
+
+      # assert_artifact_fresh (tests/_render_session.py) は probe AEX が harness
+      # や worker より新しいことを要求する。ローカル開発で「harness を作り直した
+      # のに probe が古いまま」を弾くための規則で、判定は mtime。
+      #
+      # artifact の転送は mtime を保たないので、この順序は download の順で決まる
+      # 偶然になる。同じ commit から同じ run で作られたことは job の DAG が
+      # 保証しているので、規則が見たい実体 (この checkout の産物か) は満たして
+      # いる。転送で失われた順序だけをここで作り直す。
+      - name: Restore built-artifact freshness ordering
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Get-Date
+          $inputs = @()
+          $inputs += Get-ChildItem 'broker\target\debug' -File -ErrorAction SilentlyContinue
+          $inputs += Get-ChildItem 'target' -Recurse -File -Include '*.exe' -ErrorAction SilentlyContinue
+          if ($inputs.Count -eq 0) { throw 'no runtime inputs were downloaded' }
+          foreach ($item in $inputs) { $item.LastWriteTime = $base }
+          $artifacts = @(Get-ChildItem 'target' -Recurse -File -Include '*.aex' -ErrorAction SilentlyContinue)
+          $later = $base.AddSeconds(5)
+          foreach ($item in $artifacts) { $item.LastWriteTime = $later }
+          Write-Host "freshness_runtime_inputs=$($inputs.Count) freshness_artifacts=$($artifacts.Count)"
+          if ('${{ needs.native.outputs.sdk }}' -eq 'success' -and $artifacts.Count -eq 0) {
+            throw 'the native job built probe AEX artifacts but none arrived here'
+          }
+
       # #356: parameter-animation の統合テストは native worker と AEX fixture を
       # これらの正確なパスから探し、無ければ黙って return する。成果物の不在を
-      # カバレッジと取り違えないよう、下の workspace テストより前に fail-closed で
-      # 検査する。ここに `-p` 指定のテスト実行を足さない: test target は
-      # `cargo test --workspace` に含まれており、`-p` の狭い選択は feature 解決が
-      # 違うので aexcompat-broker と host-core を作り直す (#948)。
+      # カバレッジと取り違えないよう fail-closed で検査する。job 分割後は
+      # artifact の転送漏れもここで捕まる。
       - name: Check native parameter-animation coverage inputs
-        if: steps.sdk.outcome == 'success'
+        if: needs.native.outputs.sdk == 'success'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -340,7 +444,7 @@ jobs:
           Write-Host "coverage_source_commit=$commit"
 
       - name: Check audio-only passthrough coverage inputs
-        if: steps.sdk.outcome == 'success'
+        if: needs.native.outputs.sdk == 'success'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -360,79 +464,6 @@ jobs:
           $commit = git -C $root rev-parse HEAD
           Write-Host "audio_only_coverage_source_commit=$commit"
 
-      - name: Test Rust workspace
-        working-directory: broker
-        shell: pwsh
-        run: cargo test --workspace --locked
-
-      - name: Rebuild native AEX artifacts after the runtime harness
-        if: steps.sdk.outcome == 'success'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $workspaceRoot = (Resolve-Path $env:GITHUB_WORKSPACE).Path
-          $targetRoot = (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE 'target')).Path
-          $targetRelative = [IO.Path]::GetRelativePath($workspaceRoot, $targetRoot)
-          if ([IO.Path]::IsPathRooted($targetRelative) -or $targetRelative -eq '..' -or $targetRelative.StartsWith("..$([IO.Path]::DirectorySeparatorChar)")) {
-            throw "native artifact root escaped the workspace: $targetRoot"
-          }
-          if ((Get-Item -LiteralPath $targetRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw "native artifact root is a reparse point: $targetRoot"
-          }
-          $artifacts = @(Get-ChildItem $targetRoot -Recurse -Filter *.aex -File | Where-Object {
-            $relative = [IO.Path]::GetRelativePath($targetRoot, $_.FullName)
-            $relative.Split([IO.Path]::DirectorySeparatorChar)[0] -like '*-probe-build'
-          })
-          if ($artifacts.Count -eq 0) { throw 'no generated probe AEX artifacts were found after workspace tests' }
-          $candidateBuildDirs = @($artifacts | ForEach-Object {
-            $candidate = $_.Directory
-            while ($candidate.FullName -ne $targetRoot -and -not (Test-Path -LiteralPath (Join-Path $candidate.FullName 'CMakeCache.txt') -PathType Leaf)) {
-              $candidate = $candidate.Parent
-            }
-            if ($candidate.FullName -eq $targetRoot) {
-              throw "generated AEX has no containing CMake build root: $($_.FullName)"
-            }
-            $candidate.FullName
-          } | Sort-Object -Unique)
-          $buildDirs = @($candidateBuildDirs | ForEach-Object {
-            $resolved = (Resolve-Path $_).Path
-            $relative = [IO.Path]::GetRelativePath($targetRoot, $resolved)
-            if ([IO.Path]::IsPathRooted($relative) -or $relative -eq '..' -or $relative.StartsWith("..$([IO.Path]::DirectorySeparatorChar)")) {
-              throw "AEX build directory escaped target: $resolved"
-            }
-            $cursor = Get-Item -LiteralPath $resolved
-            while ($null -ne $cursor -and $cursor.FullName -ne $targetRoot) {
-              if ($cursor.Attributes -band [IO.FileAttributes]::ReparsePoint) {
-                throw "AEX build directory traverses a reparse point: $($cursor.FullName)"
-              }
-              $cursor = $cursor.Parent
-            }
-            if ($null -eq $cursor -or -not (Test-Path -LiteralPath (Join-Path $resolved 'CMakeCache.txt') -PathType Leaf)) {
-              throw "AEX build directory is not a verified CMake root: $resolved"
-            }
-            $resolved
-          })
-          $results = $buildDirs | ForEach-Object -Parallel {
-            $output = & cmake --build $_ --config Release --clean-first 2>&1 | Out-String
-            [pscustomobject]@{ BuildDir = $_; ExitCode = $LASTEXITCODE; Output = $output }
-          } -ThrottleLimit ([Math]::Min([Environment]::ProcessorCount, $buildDirs.Count))
-          $failed = @($results | Where-Object { $_.ExitCode -ne 0 })
-          foreach ($failure in $failed) {
-            Write-Host "::group::AEX rebuild failed: $($failure.BuildDir) (exit $($failure.ExitCode))"
-            Write-Host $failure.Output
-            Write-Host '::endgroup::'
-          }
-          if ($failed.Count -gt 0) { throw 'one or more generated AEX artifacts failed to rebuild' }
-          $harnessTime = (Get-Item (Join-Path $env:GITHUB_WORKSPACE 'broker\target\debug\aexcompat-harness.exe')).LastWriteTimeUtc
-          foreach ($artifact in $artifacts) {
-            if (-not (Test-Path -LiteralPath $artifact.FullName -PathType Leaf)) {
-              throw "rebuilt AEX artifact is missing: $($artifact.FullName)"
-            }
-            if ((Get-Item -LiteralPath $artifact.FullName).LastWriteTimeUtc -lt $harnessTime) {
-              throw "rebuilt AEX artifact is older than the runtime harness: $($artifact.FullName)"
-            }
-          }
-
       - name: Validate Python collection and local-artifact manifest
         run: uv run python -m pytest --collect-only -q --validate-local-artifact-manifest
 
@@ -443,10 +474,10 @@ jobs:
       - name: Run Python tests
         shell: cmd
         env:
-          # 前段の Build minihost workers がビルド済みの worker を
-          # canonical_release_worker fixture に渡し、二重ビルドを避ける (#681)。
+          # native job がビルド済みの worker を canonical_release_worker fixture に
+          # 渡し、二重ビルドを避ける (#681)。
           AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\minihost-build\aex_render_worker.exe
-          SDK_READY: ${{ steps.sdk.outcome }}
+          SDK_READY: ${{ needs.native.outputs.sdk }}
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           set "SDK_FLAGS="
@@ -460,7 +491,7 @@ jobs:
       # 同様に、worker/probe をビルド済みなので built_artifact テストが成果物
       # 不在の inline skip で黙って skip されたら fail。
       - name: Fail if SDK or built-artifact tests were skipped
-        if: steps.sdk.outcome == 'success'
+        if: needs.native.outputs.sdk == 'success'
         shell: pwsh
         run: |
           $leaks = Select-String -Path pytest-output.txt -Pattern 'SKIPPED' |
@@ -471,7 +502,7 @@ jobs:
           }
 
       - name: Record public PF layer parameter probe identity
-        if: success() && steps.sdk.outcome == 'success'
+        if: success() && needs.native.outputs.sdk == 'success'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -490,7 +521,7 @@ jobs:
           Write-Host "published_probe_sha256=$hash"
 
       - name: Publish verified public PF layer parameter probe
-        if: success() && steps.sdk.outcome == 'success'
+        if: success() && needs.native.outputs.sdk == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pf-layer-param-probe-windows-x86_64-${{ github.sha }}
@@ -500,7 +531,3 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
-
-      - name: Show sccache stats
-        if: always()
-        run: sccache --show-stats

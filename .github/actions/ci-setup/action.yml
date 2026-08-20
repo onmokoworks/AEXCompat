@@ -1,0 +1,128 @@
+name: AEXCompat CI setup
+description: >
+  windows-clean-clone の各 job が共通で必要とするツールチェインとキャッシュを
+  用意する。job 分割 (#720) で同じ 10 行を 4 箇所に複製しないためにまとめてある。
+
+inputs:
+  rust:
+    description: >
+      Cargo を使う job だけ 'true'。native job は cmake しか呼ばないので、
+      ツールチェイン導入も rust-cache の復元も無駄になる (Actions Cache は
+      repository 全体で 10 GB / LRU なので、読まないキャッシュを復元するのは
+      他の job のヒット率を削るだけ)。
+    required: false
+    default: 'true'
+  rust-workspaces:
+    description: >
+      Swatinem/rust-cache に渡す workspaces。job が触る Cargo ルートだけを
+      書くこと。全 job で同じ値にすると、その job が使わない target まで
+      復元・保存して Actions Cache (repository 全体で 10 GB, LRU) を無駄に
+      食い、他の job のヒット率を落とす。
+    required: false
+    default: ''
+  cache-key:
+    description: >
+      rust-cache のキー接尾辞。job ごとに変えて、別 job の target が混ざらない
+      ようにする。
+    required: false
+    default: ''
+  save-cache:
+    description: >
+      キャッシュを保存するか。PR job は復元だけにして、保存は main への push に
+      任せる。保存は実測で 2 分かかり (self-hosted の run 32337215244 で 128 秒)、
+      job 分割ではその費用を job 数だけ払うことになるため。
+    required: false
+    default: 'false'
+  resolve-libclang:
+    description: guest workspace を触る job だけ 'true'。
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Read repository Rust toolchain
+      id: repository-rust
+      shell: pwsh
+      run: |
+        $match = Select-String -Path rust-toolchain.toml -Pattern '^\s*channel\s*=\s*"([^"]+)"\s*$'
+        if (-not $match -or $match.Matches.Count -ne 1) {
+          throw 'rust-toolchain.toml must declare exactly one channel'
+        }
+        "channel=$($match.Matches[0].Groups[1].Value)" >> $env:GITHUB_OUTPUT
+
+    - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      if: inputs.rust == 'true'
+      with:
+        toolchain: ${{ steps.repository-rust.outputs.channel }}
+        components: rustfmt
+
+    - uses: mozilla/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      if: inputs.rust == 'true'
+      with:
+        version: v0.17.0
+
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      if: inputs.rust == 'true'
+      with:
+        workspaces: ${{ inputs.rust-workspaces }}
+        key: ${{ inputs.cache-key }}
+        save-if: ${{ inputs.save-cache == 'true' }}
+
+    # Python 版は .python-version (3.12) に従う。
+    # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
+    - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      with:
+        enable-cache: true
+
+    - name: Install Python test dependencies
+      shell: pwsh
+      run: uv sync --locked
+
+    # Runs after the cache restore, so the restored target/ stays newer than
+    # every source cargo does not need to rebuild (#935).
+    - name: Restore source timestamps from git
+      if: inputs.rust == 'true'
+      shell: pwsh
+      run: uv run python tools/restore-mtime.py
+
+    # guest workspace の bindgen が libclang.dll をロードする。runner image の
+    # LLVM の位置をハードコードすると、image 更新で黙って別物を掴んだり
+    # 見失ったりする。clang.exe と libclang.dll が揃っているディレクトリを
+    # 実際に探して LIBCLANG_PATH を決め、掴んだ版を記録する。VS 同梱の
+    # clang toolset のように libclang.dll を持たない候補は落とす。
+    # 版そのものを固定する必要が出たら、その時点で install-llvm-action を
+    # 足す (毎 run 数百 MB のダウンロードになるので、必要と分かるまで入れない)。
+    - name: Resolve guest libclang
+      if: inputs.resolve-libclang == 'true'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $candidates = @(
+          Get-Command clang.exe -All -CommandType Application -ErrorAction SilentlyContinue |
+            ForEach-Object { Split-Path -Parent $_.Source }
+        )
+        $candidates += 'C:\Program Files\LLVM\bin'
+        $resolved = $null
+        foreach ($candidate in ($candidates | Select-Object -Unique)) {
+          $clang = Join-Path $candidate 'clang.exe'
+          $library = Join-Path $candidate 'libclang.dll'
+          if ((Test-Path -LiteralPath $clang -PathType Leaf) -and
+              (Test-Path -LiteralPath $library -PathType Leaf)) {
+            $resolved = $candidate
+            break
+          }
+          Write-Host "libclang candidate rejected (needs both clang.exe and libclang.dll): $candidate"
+        }
+        if (-not $resolved) {
+          throw "no directory on this runner holds both clang.exe and libclang.dll (checked: $($candidates -join '; '))"
+        }
+        $version = & (Join-Path $resolved 'clang.exe') --version
+        if ($LASTEXITCODE -ne 0) {
+          throw "clang --version failed with exit code $LASTEXITCODE"
+        }
+        $file = Get-Item -LiteralPath (Join-Path $resolved 'libclang.dll')
+        Write-Host "guest_libclang_path=$resolved"
+        Write-Host "guest_libclang_size=$($file.Length)"
+        Write-Host "guest_libclang_version=$($version[0])"
+        "LIBCLANG_PATH=$resolved" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
