@@ -1635,9 +1635,8 @@ int32_t __cdecl aegp_dispose_effect(void* effect) {
     // still live - `legacy_effect_stream_parent_live` asks only those two -
     // and they would go on being answered, out of the probe fixture's table
     // instead of the plug-in's, if the flag went away with the handle. The
-    // paths that do reuse slot 0 (`aegp_apply_effect`,
-    // `aegp_delete_layer_effect`) assign a whole instance and clear it that
-    // way.
+    // `aegp_delete_layer_effect` clears the whole instance when it retires
+    // this reserved slot.
     ++g_aegp_effect_disposes;
     return 0;
   }
@@ -1660,7 +1659,11 @@ int32_t __cdecl aegp_apply_effect(
       !effect || !find_installed_effect(installed_key) ||
       g_aegp_effect_lease_generation == UINT32_MAX)
     return 4;
-  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin(),
+  // Slot 0 belongs exclusively to the PF loaded-plugin handle returned by
+  // `AEGP_GetNewEffectForEffect`. Sharing it with ApplyEffect lets that later
+  // call turn an already-published installed effect into the loaded plug-in
+  // and answer its parameter streams from the wrong table (issue #922).
+  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin() + 1,
       g_aegp_effect_instances.end(), [](const auto& instance) { return !instance.occupied; });
   const auto lease_slot = std::find_if(g_aegp_effect_leases.begin(),
       g_aegp_effect_leases.end(), [](const auto& lease) { return !lease.live; });
@@ -1789,7 +1792,10 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
           original, ObjectKind::effect, source_identity) ||
       g_aegp_effect_lease_generation == UINT32_MAX)
     return 4;
-  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin(),
+  // Slot 0 is reserved for the PF loaded-plugin handle just as it is in
+  // ApplyEffect. A duplicate published there would be reclassified by a later
+  // `AEGP_GetNewEffectForEffect` call (issue #922).
+  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin() + 1,
       g_aegp_effect_instances.end(), [](const auto& value) { return !value.occupied; });
   const auto lease_slot = std::find_if(g_aegp_effect_leases.begin(),
       g_aegp_effect_leases.end(), [](const auto& value) { return !value.live; });

@@ -720,8 +720,6 @@ bool verify_aegp_apply_effect() {
   const uint32_t timestamp_before =
       aexcompat::aegp_external_render_runtime::project_generation();
   g_aegp_effect_instances = {};
-  g_aegp_effect_instances[0] = {
-      &g_aegp_layers[0], kAegpInstalledEffects[0].key, 0, 1, 1, true};
   g_aegp_effect_leases = {};
   g_aegp_effect_live = false;
   g_aegp_comp_idle_roundtrip_mode = true;
@@ -745,7 +743,7 @@ bool verify_aegp_apply_effect() {
   int32_t layer1_count = -1;
   void* applied = reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
   ok = ok && aegp_get_layer_num_effects(&g_aegp_layers[0], &layer0_count) == 0 &&
-      layer0_count == 1 && aegp_get_layer_num_effects(&g_aegp_layers[1], &layer1_count) == 0 &&
+      layer0_count == 0 && aegp_get_layer_num_effects(&g_aegp_layers[1], &layer1_count) == 0 &&
       layer1_count == 0 && aegp_apply_effect(7, &g_aegp_layers[1],
           kAegpInstalledEffects[0].key, &applied) == 0 && applied &&
       applied != reinterpret_cast<void*>(static_cast<uintptr_t>(0x1234));
@@ -759,6 +757,29 @@ bool verify_aegp_apply_effect() {
       g_aegp_transform_stream.effect_instance_generation ==
           g_aegp_effect_instances[1].generation &&
       aegp_dispose_stream(stream) == 0;
+
+  void* duplicate = nullptr;
+  ok = ok && aegp_duplicate_effect(applied, &duplicate) == 0 && duplicate &&
+      duplicate != applied && g_aegp_effect_instances[2].occupied &&
+      !g_aegp_effect_instances[2].loaded_plugin;
+
+  // Acquiring the loaded plug-in handle after ApplyEffect (or its duplicate)
+  // used to reuse slot 0 and turn that Levels instance into a loaded-plugin
+  // instance.
+  // The installed key then still said Levels while its parameter count came
+  // from the loaded plug-in. Slot 0 is now reserved even when initially empty.
+  void* loaded = nullptr;
+  int32_t applied_key = -1;
+  int32_t applied_param_count = -1;
+  ok = ok && get_new_effect_for_effect(7, g_hooks.effect, &loaded) == 0 &&
+      loaded && loaded != applied && g_aegp_effect_instances[0].loaded_plugin &&
+      !g_aegp_effect_instances[1].loaded_plugin &&
+      !g_aegp_effect_instances[2].loaded_plugin &&
+      aegp_get_installed_key_from_layer_effect(applied, &applied_key) == 0 &&
+      applied_key == kAegpInstalledEffects[0].key &&
+      aegp_get_effect_num_param_streams_v2(applied, &applied_param_count) == 0 &&
+      applied_param_count == kAegpInstalledEffects[0].parameter_count &&
+      aegp_dispose_effect(loaded) == 0;
   void* unchanged = reinterpret_cast<void*>(static_cast<uintptr_t>(0x5678));
   const auto scene_before_failures = g_aegp_effect_instances;
   const uint32_t timestamp_after_apply =
@@ -773,7 +794,7 @@ bool verify_aegp_apply_effect() {
                   sizeof(g_aegp_effect_instances)) == 0 &&
       aexcompat::aegp_external_render_runtime::project_generation() == timestamp_after_apply;
 
-  std::array<void*, kAegpEffectInstanceCapacity - 2> more{};
+  std::array<void*, kAegpEffectInstanceCapacity - 3> more{};
   for (std::size_t i = 0; ok && i < more.size(); ++i)
     ok = aegp_apply_effect(7, &g_aegp_layers[2], kAegpInstalledEffects[0].key,
                           &more[i]) == 0;
@@ -787,7 +808,8 @@ bool verify_aegp_apply_effect() {
 
   const void* stale = applied;
   int32_t key = -1;
-  ok = ok && aegp_dispose_effect(applied) == 0 &&
+  ok = ok && aegp_dispose_effect(duplicate) == 0 &&
+      aegp_dispose_effect(applied) == 0 &&
       aegp_get_installed_key_from_layer_effect(const_cast<void*>(stale), &key) == 4 &&
       aegp_dispose_effect(const_cast<void*>(stale)) == 4 &&
       aegp_dispose_effect(g_hooks.effect) == 4;
@@ -796,6 +818,23 @@ bool verify_aegp_apply_effect() {
       reacquired != stale && aegp_get_installed_key_from_layer_effect(reacquired, &key) == 0 &&
       key == kAegpInstalledEffects[0].key && aegp_dispose_effect(reacquired) == 0;
   for (void* lease : more) if (lease) ok = aegp_dispose_effect(lease) == 0 && ok;
+
+  // The opposite acquisition order must preserve the same partition.
+  g_aegp_effect_instances = {};
+  g_aegp_effect_leases = {};
+  g_aegp_effect_live = false;
+  void* loaded_first = nullptr;
+  void* applied_second = nullptr;
+  ok = ok && get_new_effect_for_effect(7, g_hooks.effect, &loaded_first) == 0 &&
+      loaded_first && aegp_apply_effect(7, &g_aegp_layers[2],
+                          kAegpInstalledEffects[0].key, &applied_second) == 0 &&
+      applied_second && applied_second != loaded_first &&
+      g_aegp_effect_instances[0].occupied &&
+      g_aegp_effect_instances[0].loaded_plugin &&
+      g_aegp_effect_instances[1].occupied &&
+      !g_aegp_effect_instances[1].loaded_plugin &&
+      aegp_dispose_effect(applied_second) == 0 &&
+      aegp_dispose_effect(loaded_first) == 0;
 
   ok = release_suite("AEGP Effect Suite", 4) == 0 && ok;
   ok = release_suite("AEGP Effect Suite", 3) == 0 && ok;
