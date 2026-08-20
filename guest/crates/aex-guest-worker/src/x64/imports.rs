@@ -74,6 +74,7 @@ enum LegacyWin64Import {
     GetStartupInfoW,
     GetStdHandle,
     GetConsoleMode,
+    GetFileType,
     IsDebuggerPresent,
     GetCurrentThreadId,
     GetCurrentProcessId,
@@ -307,6 +308,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetStdHandle") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetConsoleMode") => LegacyWin64Import::GetConsoleMode,
         (_, "GetConsoleMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetFileType") => LegacyWin64Import::GetFileType,
+        (_, "GetFileType") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
@@ -1020,6 +1023,15 @@ fn install_win64_import(
                     "install GetConsoleMode import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_get_console_mode(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::GetFileType => {
+                uc("write GetFileType return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install GetFileType import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_file_type(unicorn);
                     }),
                 )?;
             }
@@ -2857,6 +2869,22 @@ fn emulate_get_console_mode(unicorn: &mut Unicorn<'_, GuestState>) {
     // caller's mode storage untouched.
     unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
+    const FILE_TYPE_UNKNOWN: u64 = 0;
+    const FILE_TYPE_PIPE: u64 = 3;
+    let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+    let returned = if matches!(
+        handle,
+        WINDOWS_STANDARD_INPUT_TOKEN | WINDOWS_STANDARD_OUTPUT_TOKEN | WINDOWS_STANDARD_ERROR_TOKEN
+    ) {
+        FILE_TYPE_PIPE
+    } else {
+        unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+        FILE_TYPE_UNKNOWN
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, returned);
 }
 
 fn emulate_process_prng(unicorn: &mut Unicorn<'_, GuestState>) {

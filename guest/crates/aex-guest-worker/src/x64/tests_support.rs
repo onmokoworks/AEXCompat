@@ -4719,6 +4719,64 @@ fn get_console_mode_rejects_foreign_handles_without_touching_guest_memory() {
 }
 
 #[test]
+fn get_file_type_classifies_synthetic_standard_handles_as_pipes() {
+    const GET_FILE_TYPE: u64 = STUB_BASE + 0x1c0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_FILE_TYPE,
+            "KERNEL32.DLL",
+            "GetFileType",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetFileType)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetFileType"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    for handle in [
+        WINDOWS_STANDARD_INPUT_TOKEN,
+        WINDOWS_STANDARD_OUTPUT_TOKEN,
+        WINDOWS_STANDARD_ERROR_TOKEN,
+    ] {
+        engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+        assert_eq!(
+            engine
+                .call_win64(GET_FILE_TYPE, [handle, 0, 0, 0, 0, 0])
+                .unwrap(),
+            3
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    }
+}
+
+#[test]
+fn get_file_type_rejects_foreign_handles_without_host_descriptor_access() {
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, 0xdead_beef)
+        .unwrap();
+    emulate_get_file_type(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+
+    let mut second = test_engine(&[0xc3]);
+    second
+        .unicorn
+        .reg_write(RegisterX86::RCX, WINDOWS_STANDARD_INPUT_TOKEN)
+        .unwrap();
+    emulate_get_file_type(&mut second.unicorn);
+    assert_eq!(second.unicorn.reg_read(RegisterX86::RAX).unwrap(), 3);
+}
+
+#[test]
 fn is_debugger_present_is_false_deterministic_and_library_scoped() {
     const IS_DEBUGGER_PRESENT: u64 = STUB_BASE + 0x1a0;
     let mut engine = test_engine(&[0xc3]);
