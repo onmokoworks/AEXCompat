@@ -626,6 +626,43 @@ fn install_lround_import(
     .map(|_| ())
 }
 
+fn windows_lroundf(value: f32) -> i32 {
+    let rounded = value.round();
+    // `LONG_MAX` is not exactly representable as f32: both it and the first
+    // positive out-of-range value encode as 2^31.  Keep LONG_MIN itself valid
+    // while rejecting that positive boundary and every non-finite input.
+    if !rounded.is_finite() || rounded < -2_147_483_648.0 || rounded >= 2_147_483_648.0 {
+        i32::MIN
+    } else {
+        rounded as i32
+    }
+}
+
+fn install_lroundf_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc("write lroundf return", unicorn.mem_write(address, &[0xc3]))?;
+    uc(
+        "install lroundf import",
+        unicorn.add_code_hook(address, address, |unicorn, _, _| {
+            if let Ok(bits) = unicorn.reg_read(RegisterX86::XMM0) {
+                let value = f32::from_bits(bits as u32);
+                let output = windows_lroundf(value);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("lroundf({value})={output}"));
+                }
+                // Win64 `long` is 32-bit and an EAX return zero-extends RAX.
+                let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(output as u32));
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
 fn install_double_binary_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,

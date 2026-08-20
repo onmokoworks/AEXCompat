@@ -2048,7 +2048,11 @@ fn strncpy_s_copies_counted_and_terminated_strings_without_debug_fill() {
     engine.unicorn.mem_write(destination, &[0xcc; 8]).unwrap();
     assert_eq!(
         engine
-            .call_win64_with_timeout(STRNCPY_S, &[destination, 8, source, 3], TIMEOUT_MICROSECONDS)
+            .call_win64_with_timeout(
+                STRNCPY_S,
+                &[destination, 8, source, 3],
+                TIMEOUT_MICROSECONDS
+            )
             .unwrap(),
         0
     );
@@ -2060,7 +2064,11 @@ fn strncpy_s_copies_counted_and_terminated_strings_without_debug_fill() {
     engine.unicorn.mem_write(destination, &[0xcc; 8]).unwrap();
     assert_eq!(
         engine
-            .call_win64_with_timeout(STRNCPY_S, &[destination, 8, source, 7], TIMEOUT_MICROSECONDS)
+            .call_win64_with_timeout(
+                STRNCPY_S,
+                &[destination, 8, source, 7],
+                TIMEOUT_MICROSECONDS
+            )
             .unwrap(),
         0
     );
@@ -2083,20 +2091,17 @@ fn strncpy_s_copies_counted_and_terminated_strings_without_debug_fill() {
             .unwrap(),
         0
     );
-    assert_eq!(engine.unicorn.mem_read_as_vec(destination, 2).unwrap(), b"x\0");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(destination, 2).unwrap(),
+        b"x\0"
+    );
 }
 
 #[test]
 fn strncpy_s_truncate_is_nul_terminated_and_preserves_errno() {
     const STRNCPY_S: u64 = STUB_BASE + 0x220;
     let mut engine = test_engine(&[0xc3]);
-    install_win64_import(
-        &mut engine.unicorn,
-        STRNCPY_S,
-        "ucrtbase.dll",
-        "strncpy_s",
-    )
-    .unwrap();
+    install_win64_import(&mut engine.unicorn, STRNCPY_S, "ucrtbase.dll", "strncpy_s").unwrap();
     let destination = DATA_BASE + 0x100;
     let source = DATA_BASE + 0x200;
     engine.unicorn.mem_write(source, b"abcdef\0").unwrap();
@@ -2178,14 +2183,24 @@ fn strncpy_s_range_and_invalid_parameters_clear_only_the_first_byte() {
             .unwrap(),
         22
     );
-    assert_eq!(engine.unicorn.mem_read_as_vec(destination, 4).unwrap(), [0xaa; 4]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
+        [0xaa; 4]
+    );
     assert_eq!(
         engine
-            .call_win64_with_timeout(STRNCPY_S, &[destination, 0, source, 3], TIMEOUT_MICROSECONDS)
+            .call_win64_with_timeout(
+                STRNCPY_S,
+                &[destination, 0, source, 3],
+                TIMEOUT_MICROSECONDS
+            )
             .unwrap(),
         22
     );
-    assert_eq!(engine.unicorn.mem_read_as_vec(destination, 4).unwrap(), [0xaa; 4]);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
+        [0xaa; 4]
+    );
 }
 
 #[test]
@@ -2209,7 +2224,10 @@ fn strncpy_s_fails_closed_before_mutation_on_bad_memory_and_rejects_overlap() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("source at"), "{error}");
-    assert_eq!(engine.unicorn.mem_read_as_vec(destination, 8).unwrap(), b"sentinel");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(destination, 8).unwrap(),
+        b"sentinel"
+    );
 
     let mut engine = test_engine(&[0xc3]);
     install_win64_import(
@@ -2231,7 +2249,10 @@ fn strncpy_s_fails_closed_before_mutation_on_bad_memory_and_rejects_overlap() {
             .unwrap(),
         22
     );
-    assert_eq!(engine.unicorn.mem_read_as_vec(overlap, 8).unwrap(), b"\0bcdef\0x");
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(overlap, 8).unwrap(),
+        b"\0bcdef\0x"
+    );
 
     let mut engine = test_engine(&[0xc3]);
     install_win64_import(
@@ -2322,7 +2343,10 @@ fn fopen_s_validates_arguments_modes_and_result_atomicity() {
     let result_pointer = DATA_BASE + 0x100;
     let filename = DATA_BASE + 0x200;
     let mode = DATA_BASE + 0x300;
-    engine.unicorn.mem_write(filename, b"diagnostic.log\0").unwrap();
+    engine
+        .unicorn
+        .mem_write(filename, b"diagnostic.log\0")
+        .unwrap();
 
     for valid in [
         b"r".as_slice(),
@@ -2421,7 +2445,10 @@ fn fopen_s_validates_arguments_modes_and_result_atomicity() {
             .unwrap(),
         22
     );
-    for arguments in [[result_pointer, 0, mode, 0], [result_pointer, filename, 0, 0]] {
+    for arguments in [
+        [result_pointer, 0, mode, 0],
+        [result_pointer, filename, 0, 0],
+    ] {
         engine
             .unicorn
             .mem_write(result_pointer, &u64::MAX.to_le_bytes())
@@ -2445,7 +2472,10 @@ fn fopen_s_validates_arguments_modes_and_result_atomicity() {
 
 #[test]
 fn fopen_s_errno_is_thread_local_and_preserves_win32_last_error() {
-    use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
 
     const CREATE: u64 = STUB_BASE + 0x260;
     const FOPEN_S: u64 = STUB_BASE + 0x270;
@@ -2483,7 +2513,10 @@ fn fopen_s_errno_is_thread_local_and_preserves_win32_last_error() {
         .unicorn
         .mem_write(result_pointer, &u64::MAX.to_le_bytes())
         .unwrap();
-    engine.unicorn.mem_write(filename, b"C:\\Temp\\esc_gpu.log\0").unwrap();
+    engine
+        .unicorn
+        .mem_write(filename, b"C:\\Temp\\esc_gpu.log\0")
+        .unwrap();
     engine.unicorn.mem_write(mode, b"a\0").unwrap();
 
     let child_entry_errno = Arc::new(AtomicU32::new(u32::MAX));
@@ -2598,10 +2631,7 @@ fn fopen_s_fails_closed_on_unmapped_or_unterminated_guest_memory() {
         .unwrap();
     engine
         .unicorn
-        .mem_write(
-            LARGE_STRING,
-            &vec![b'X'; MAX_CRT_STRING_BYTES as usize],
-        )
+        .mem_write(LARGE_STRING, &vec![b'X'; MAX_CRT_STRING_BYTES as usize])
         .unwrap();
     engine.unicorn.mem_write(mode, b"a\0").unwrap();
     engine
@@ -4394,7 +4424,10 @@ fn output_debug_string_a_fails_closed_on_unreadable_or_unterminated_non_null_inp
     let error = engine
         .call_win64(OUTPUT_DEBUG, [LARGE_STRING, 0, 0, 0, 0, 0])
         .unwrap_err();
-    assert!(error.to_string().contains("without a terminator"), "{error}");
+    assert!(
+        error.to_string().contains("without a terminator"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -11095,6 +11128,18 @@ fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
     assert_eq!(
+        dispatch_win64_import(crt_math, "lroundf"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LRoundF)
+    );
+    assert_eq!(
+        dispatch_win64_import("ucrtbase.dll", "lroundf"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LRoundF)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "lroundf"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
         dispatch_win64_import(crt_math, "cos"),
         Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Cos)
     );
@@ -11265,6 +11310,86 @@ fn win64_crt_lround_uses_xmm0_f64_and_returns_a_windows_long_in_eax() {
             .math_calls
             .iter()
             .any(|call| call.starts_with("lround("))
+    );
+}
+
+#[test]
+fn win64_crt_lroundf_uses_scalar_xmm0_bits_and_windows_long_boundaries() {
+    const LROUNDF_IMPORT: u64 = STUB_BASE + 0x1ac;
+    // BlobTrack SHA 8eb82e8d... made one lroundf call in the SMART_RENDER
+    // Release render-trace-png capture with this exact scalar XMM0 bit pattern.
+    const OBSERVED_BLOBTRACK_XMM0_LOW_BITS: u32 = 0x0000_0000;
+
+    fn call_lroundf(engine: &mut GuestEngine<'static>, input_bits: u32) -> (u64, [u8; 16]) {
+        let mut xmm0 = [0xa5; 16];
+        xmm0[..4].copy_from_slice(&input_bits.to_le_bytes());
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::XMM0, &xmm0)
+            .unwrap();
+        engine.call_win64(LROUNDF_IMPORT, [0; 6]).unwrap();
+        let output_xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+        let mut output_xmm0_bytes = [0u8; 16];
+        output_xmm0_bytes.copy_from_slice(&output_xmm0);
+        (
+            engine.unicorn.reg_read(RegisterX86::RAX).unwrap(),
+            output_xmm0_bytes,
+        )
+    }
+
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .mem_write(LROUNDF_IMPORT, &[0x31, 0xc0, 0xc3])
+        .unwrap();
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            LROUNDF_IMPORT,
+            "api-ms-win-crt-math-l1-1-0.dll",
+            "lroundf",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LRoundF)
+    );
+    engine.unicorn.get_data_mut().crt_errno = 73;
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+
+    for (input, expected) in [
+        (f32::from_bits(OBSERVED_BLOBTRACK_XMM0_LOW_BITS), 0i32),
+        (f32::from_bits(0x0000_0001), 0),
+        (f32::from_bits(0x8000_0001), 0),
+        (-0.0, 0),
+        (1.4, 1),
+        (1.5, 2),
+        (-1.5, -2),
+        (f32::from_bits(0x4eff_ffff), 2_147_483_520),
+        (-2_147_483_648.0, i32::MIN),
+        (2_147_483_648.0, i32::MIN),
+        (f32::INFINITY, i32::MIN),
+        (f32::NEG_INFINITY, i32::MIN),
+        (f32::from_bits(0x7fc1_2345), i32::MIN),
+    ] {
+        let (rax, xmm0) = call_lroundf(&mut engine, input.to_bits());
+        assert_eq!(
+            rax,
+            u64::from(expected as u32),
+            "input bits {:#010x}",
+            input.to_bits()
+        );
+        let mut original = [0xa5; 16];
+        original[..4].copy_from_slice(&input.to_bits().to_le_bytes());
+        assert_eq!(xmm0, original, "lroundf must not mutate XMM0");
+    }
+    assert_eq!(engine.unicorn.get_data().crt_errno, 73);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .math_calls
+            .iter()
+            .any(|call| call.starts_with("lroundf("))
     );
 }
 
