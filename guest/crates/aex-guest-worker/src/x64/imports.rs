@@ -4408,12 +4408,13 @@ fn guest_range_has_permission(
     let regions = unicorn
         .mem_regions()
         .map_err(|error| format!("guest memory-map query failed: {error}"))?;
+    let permission = permission.0 as u32;
     let mut cursor = address;
     while cursor <= end {
         let Some(region) = regions.iter().find(|region| {
             region.begin <= cursor
                 && cursor <= region.end
-                && region.perms & permission.0 == permission.0
+                && region.perms & permission == permission
         }) else {
             return Ok(false);
         };
@@ -4479,12 +4480,7 @@ fn emulate_nt_write_file(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         if length != 0
             && (buffer == 0
-                || !guest_range_has_permission(
-                    unicorn,
-                    buffer,
-                    u64::from(length),
-                    Prot::READ,
-                )?)
+                || !guest_range_has_permission(unicorn, buffer, u64::from(length), Prot::READ)?)
         {
             return Ok(STATUS_ACCESS_VIOLATION);
         }
