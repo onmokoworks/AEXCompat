@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -10,6 +11,37 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = ROOT / "analysis" / "AE_REFERENCE_CAPTURE_AUTOMATION_RESULT_2026-07-15.json"
 RUNNER = ROOT / "tools" / "capture-ae-reference.ps1"
+
+
+def _running_ae_processes() -> tuple[str, ...]:
+    command = (
+        "$names = @('AfterFX','AfterFX.com','aerender','aerendercore'); "
+        "@(Get-Process -Name $names -ErrorAction SilentlyContinue) | "
+        "ForEach-Object { '{0}:{1}' -f $_.ProcessName,$_.Id }"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"failed to inspect running After Effects processes: {result.stderr}")
+    return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+def _require_no_running_ae_session(running: tuple[str, ...]) -> None:
+    if running:
+        pytest.skip(
+            "mock capture requires no existing After Effects session: "
+            + ", ".join(running)
+        )
+
+
+@pytest.fixture
+def no_running_ae_session() -> None:
+    _require_no_running_ae_session(_running_ae_processes())
 
 
 def _wait_for_staged_input(marker: bytes, process, timeout: float = 60.0) -> None:
@@ -67,7 +99,8 @@ def test_reference_capture_is_fail_closed_while_user_ae_session_is_running():
 @pytest.mark.skipif(
     sys.platform != "win32" or shutil.which("powershell") is None,
     reason="mock capture run requires Windows PowerShell and a Windows executable")
-def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
+def test_reference_capture_result_records_prelaunch_input_identities(
+        tmp_path, no_running_ae_session):
     # Behavioral check (no After Effects needed): the runner is executed with
     # a mock AE binary; while the "capture" is in flight the input image is
     # replaced, and the JSX side effects (result JSON + PNG) are simulated.
@@ -114,7 +147,8 @@ def test_reference_capture_result_records_prelaunch_input_identities(tmp_path):
 @pytest.mark.skipif(
     sys.platform != "win32" or shutil.which("powershell") is None,
     reason="mock capture run requires Windows PowerShell and a Windows executable")
-def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(tmp_path):
+def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(
+        tmp_path, no_running_ae_session):
     # Counterexample for the shutdown path: an AE-named process that appears
     # AFTER the startup gate (a user launching After Effects mid-capture) must
     # survive the runner's post-result shutdown handling. The runner may only
@@ -164,7 +198,8 @@ def test_reference_capture_shutdown_never_touches_unrelated_ae_named_processes(t
 @pytest.mark.skipif(
     sys.platform != "win32" or shutil.which("powershell") is None,
     reason="mock capture run requires Windows PowerShell and a Windows executable")
-def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path):
+def test_reference_capture_fails_closed_without_loaded_module_identity(
+        tmp_path, no_running_ae_session):
     import subprocess
 
     aex = tmp_path / "fixture.aex"
@@ -205,6 +240,42 @@ def test_reference_capture_fails_closed_without_loaded_module_identity(tmp_path)
     assert recorded["status"] == "identity_unverified"
     assert recorded["loaded_aex_identity"] == {
         "state": "unverified", "reason": "loaded_module_not_observed"}
+
+
+def test_running_ae_session_gate_allows_an_idle_machine():
+    _require_no_running_ae_session(())
+
+
+def test_running_ae_session_gate_skips_with_process_identity():
+    with pytest.raises(pytest.skip.Exception, match=r"AfterFX:1234"):
+        _require_no_running_ae_session(("AfterFX:1234",))
+
+
+def test_running_ae_process_detection_returns_process_identities(monkeypatch):
+    def completed_run(command, **kwargs):
+        assert command[:3] == ["powershell", "-NoProfile", "-Command"]
+        assert all(name in command[3] for name in (
+            "AfterFX", "AfterFX.com", "aerender", "aerendercore"))
+        assert kwargs == {
+            "capture_output": True,
+            "text": True,
+            "errors": "replace",
+            "check": False,
+        }
+        return subprocess.CompletedProcess(
+            command, 0, "AfterFX:1234\naerendercore:5678\n", "")
+
+    monkeypatch.setattr(subprocess, "run", completed_run)
+    assert _running_ae_processes() == ("AfterFX:1234", "aerendercore:5678")
+
+
+def test_running_ae_process_detection_fails_closed(monkeypatch):
+    def failed_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 1, "", "access denied")
+
+    monkeypatch.setattr(subprocess, "run", failed_run)
+    with pytest.raises(pytest.fail.Exception, match=r"access denied"):
+        _running_ae_processes()
 
 
 @pytest.mark.skipif(
