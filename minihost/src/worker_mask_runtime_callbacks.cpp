@@ -2153,12 +2153,16 @@ bool mask_lifetimes_balanced() {
       });
 }
 
-bool configure_mask_scene(const std::string& scene_id) {
+void configure_mask_runtime_hooks() {
   aexcompat::mask_runtime::configure_host_context(
       {&g_layer, &raise_mask_access_violation, &mask_runtime_snapshot,
        &snapshot_mask_curve, &mask_lifetimes_balanced, &install_synthetic_mask_scene});
   aexcompat::pf_path_runtime::configure(
       {&g_effect, &enumerate_pf_paths, &snapshot_pf_path, &bounded_pf_path_world});
+}
+
+bool configure_mask_scene(const std::string& scene_id) {
+  configure_mask_runtime_hooks();
   if (!g_stream_refs.empty() || !g_stream_values.empty() ||
       !g_add_keyframe_transactions.empty()) return false;
   try {
