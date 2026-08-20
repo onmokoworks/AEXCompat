@@ -37,7 +37,12 @@ from _native_selftest import ROOT, locate, run
         pytest.param(
             "worker_report_json_selftest.exe",
             "worker_report_json",
-            {"nonfinite_values": "null"},
+            {
+                "nonfinite_values": "null",
+                "protocol_bytes": 16427,
+                "protocol_fail_closed": True,
+                "protocol_flushes": 1,
+            },
             id="worker-report-json",
         ),
         pytest.param(

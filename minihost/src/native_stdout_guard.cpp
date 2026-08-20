@@ -51,6 +51,11 @@ void restore_native_stdout() {
   g_saved_stdout_fd = g_native_stdout_sink_fd = -1;
 }
 
+bool emit_protocol_stdout(std::string_view report) {
+  std::cout << report << std::flush;
+  return std::cout.good();
+}
+
 bool selftest_native_stdout_routing() {
   if (!redirect_native_stdout()) return false;
   std::printf("native-stdout-marker%c", 10);

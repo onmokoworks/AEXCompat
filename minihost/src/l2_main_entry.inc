@@ -1938,11 +1938,13 @@ int run_discovery_session(const std::wstring& manifest_argument,
     runtime_hooks.restore_native_stdout();
     const bool audit_ok = !audit.required ||
         (audit.pre_unload.status == "passed" && wr::module_audit_passed());
-    std::cout << "{\"schema_version\":1,\"stage\":\"discovery_session\",\"status\":\""
-              << (exit_code == 0 && !bib_teardown_failed
-                      ? "discovery_session_completed" : "discovery_session_failed")
-              << "\",\"bib_terminations\":" << bib_termination_attempt_count()
-              << ",\"module_audit\":" << wr::module_audit_json() << "}\n";
+    std::ostringstream report;
+    report << "{\"schema_version\":1,\"stage\":\"discovery_session\",\"status\":\""
+           << (exit_code == 0 && !bib_teardown_failed
+                   ? "discovery_session_completed" : "discovery_session_failed")
+           << "\",\"bib_terminations\":" << bib_termination_attempt_count()
+           << ",\"module_audit\":" << wr::module_audit_json() << "}\n";
+    if (!wr::emit_protocol_stdout(report.str())) return 23;
     if (!audit_ok && exit_code == 0) return 14;
     if (bib_teardown_failed && exit_code == 0) return 25;
     return exit_code;
