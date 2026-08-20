@@ -2,7 +2,6 @@ import subprocess
 from pathlib import Path
 
 from _render_session import HARNESS, assert_artifact_fresh, run_session_render
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-platform-world-probe" / "pf_aegp_platform_world_probe.cpp"
@@ -20,7 +19,6 @@ def test_probe_builds_with_exact_sdk_tables():
     assert PROBE.is_file()
 
 
-@pytest.mark.xfail(strict=True, reason="the host serves AEGP Render Options Suite v4 as an all-null table (#932)")
 def test_real_probe_adopts_platform_world_and_rejects_stale_handles(tmp_path):
     assert WORKER.is_file()
     assert PROBE.is_file()
