@@ -1,4 +1,5 @@
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -89,7 +90,8 @@ def test_each_cargo_test_surface_is_planned_once_across_both_partitions() -> Non
         calls.append((arguments, options))
 
     runner.cargo_test = record
-    runner.run_independent(independent)
+    runner.run_independent_core()
+    runner.run_independent_integrations(independent)
     independent_calls = list(calls)
     calls.clear()
     runner.SILENT_SKIP_PREREQUISITES = ()
@@ -157,3 +159,30 @@ def test_each_cargo_test_surface_is_planned_once_across_both_partitions() -> Non
             {"reject_skip": True},
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("partition", "expected"),
+    [
+        ("independent-core", "core"),
+        ("independent-integrations", "integrations"),
+        ("native", "native"),
+    ],
+)
+def test_cli_dispatches_each_partition(monkeypatch, partition, expected) -> None:
+    runner = load_runner()
+    independent, native = runner.partitions(metadata(runner))
+    calls = []
+    monkeypatch.setattr(runner, "cargo_metadata", lambda: metadata(runner))
+    monkeypatch.setattr(runner, "partitions", lambda _metadata: (independent, native))
+    monkeypatch.setattr(runner, "run_independent_core", lambda: calls.append("core"))
+    monkeypatch.setattr(
+        runner,
+        "run_independent_integrations",
+        lambda _independent: calls.append("integrations"),
+    )
+    monkeypatch.setattr(runner, "run_native", lambda _native: calls.append("native"))
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), partition])
+
+    assert runner.main() == 0
+    assert calls == [expected]

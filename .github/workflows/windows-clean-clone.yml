@@ -114,6 +114,10 @@ jobs:
   rust-test-independent:
     runs-on: windows-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [core, integrations]
     env:
       PYTHONUTF8: "1"
       AEXCOMPAT_CARGO_PROFILE: debug
@@ -126,11 +130,11 @@ jobs:
       - uses: ./.github/actions/ci-setup
         with:
           rust-workspaces: broker
-          cache-key: broker-independent-tests
+          cache-key: broker-independent-tests-${{ matrix.shard }}
           save-cache: 'false'
 
-      - name: Test native-independent Rust partition
-        run: uv run python tools/run-broker-rust-tests.py independent
+      - name: Test native-independent Rust partition (${{ matrix.shard }})
+        run: uv run python tools/run-broker-rust-tests.py independent-${{ matrix.shard }}
 
       - name: Show sccache stats
         if: always()

@@ -148,11 +148,14 @@ def unexpected_skip_lines(output: str) -> list[str]:
     ]
 
 
-def run_independent(independent: dict[str, set[str]]) -> None:
+def run_independent_core() -> None:
     cargo_test("--workspace", "--exclude", BROKER, "--exclude", HARNESS)
     cargo_test("-p", BROKER, "--lib", "--", "--skip", NATIVE_LIB_TEST)
     cargo_test("-p", BROKER, "--doc")
     cargo_test("-p", BROKER, "--bins")
+
+
+def run_independent_integrations(independent: dict[str, set[str]]) -> None:
     broker_targets = [
         argument
         for target in sorted(independent[BROKER])
@@ -190,11 +193,15 @@ def run_native(native: dict[str, set[str]]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("partition", choices=("independent", "native"))
+    parser.add_argument(
+        "partition", choices=("independent-core", "independent-integrations", "native")
+    )
     args = parser.parse_args()
     independent, native = partitions(cargo_metadata())
-    if args.partition == "independent":
-        run_independent(independent)
+    if args.partition == "independent-core":
+        run_independent_core()
+    elif args.partition == "independent-integrations":
+        run_independent_integrations(independent)
     else:
         run_native(native)
     return 0
