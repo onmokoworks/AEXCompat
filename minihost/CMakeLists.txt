@@ -638,6 +638,14 @@ target_compile_definitions(worker_legacy_support_init_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_legacy_support_init_selftest PRIVATE src)
 
+add_executable(worker_bee_bib_installer_selftest
+  ../tests/native/worker_bee_bib_installer_selftest.cpp
+)
+target_compile_features(worker_bee_bib_installer_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_bee_bib_installer_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_bee_bib_installer_selftest PRIVATE src)
+
 add_executable(worker_sweetpea_bootstrap_selftest
   ../tests/native/worker_sweetpea_bootstrap_selftest.cpp
 )
