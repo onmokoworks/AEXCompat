@@ -371,6 +371,9 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     }
     GuestEngine {
         unicorn,
+        scheduled_windows_threads: BTreeMap::new(),
+        scheduler_ready: VecDeque::new(),
+        parked_main_context: None,
         next_data: DATA_BASE,
         image_base: TEST_CODE,
         image_end: TEST_CODE + PAGE_SIZE,
@@ -7195,6 +7198,275 @@ fn issue1347_create_thread_runs_bounded_guest_callback_and_completes_handle() {
             .windows_threads
             .contains_key(&handle)
     );
+}
+
+#[test]
+fn issue1404_yielding_child_parks_then_parent_resumes_and_runs_child_to_completion() {
+    const CREATE: u64 = STUB_BASE + 0x2a0;
+    const SWITCH: u64 = STUB_BASE + 0x2b0;
+    const CHILD_OFFSET: usize = 0x100;
+    let parameter = DATA_BASE + 0x500;
+    let mut code = vec![0x48, 0x83, 0xec, 0x38]; // sub rsp, 38h
+    // CreateThread(NULL, 0, child, parameter, 0, NULL)
+    code.extend_from_slice(&[0x31, 0xc9, 0x31, 0xd2]);
+    push_mov_imm64(&mut code, [0x49, 0xb8], TEST_CODE + CHILD_OFFSET as u64);
+    push_mov_imm64(&mut code, [0x49, 0xb9], parameter);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], CREATE);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x89, 0xc3]); // call; mov rbx, rax
+    push_mov_imm64(&mut code, [0x48, 0xb8], parameter);
+    code.extend_from_slice(&[0x48, 0xc7, 0x00, 7, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x89, 0xd8, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    code.resize(CHILD_OFFSET, 0x90);
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], parameter);
+    code.extend_from_slice(&[0x8b, 0x00, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (address, symbol) in [(CREATE, "CreateThread"), (SWITCH, "SwitchToThread")] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    let handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
+    let thread = engine.unicorn.get_data().windows_threads.get(&handle).unwrap();
+    assert!(thread.completed);
+    assert_eq!(thread.exit_code, 7);
+    assert_eq!(engine.unicorn.mem_read_as_vec(parameter, 8).unwrap(), 7u64.to_le_bytes());
+    assert!(engine.scheduled_windows_threads.is_empty());
+    assert!(engine.scheduler_ready.is_empty());
+    assert!(engine.parked_main_context.is_none());
+    assert_eq!(engine.unicorn.get_data().current_windows_thread_id, 1);
+}
+
+#[test]
+fn issue1404_repeated_yields_share_one_total_timeout() {
+    const SWITCH: u64 = STUB_BASE + 0x2b8;
+    const SLOW: u64 = STUB_BASE + 0x2c8;
+    const TIMEOUT_US: u64 = 12_000;
+    let mut code = vec![0x48, 0x83, 0xec, 0x28];
+    for _ in 0..3 {
+        push_mov_imm64(&mut code, [0x48, 0xb8], SLOW);
+        code.extend_from_slice(&[0xff, 0xd0]);
+        push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    }
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    install_win64_import(
+        &mut engine.unicorn,
+        SWITCH,
+        "kernel32.dll",
+        "SwitchToThread",
+    )
+    .unwrap();
+    engine.unicorn.mem_write(SLOW, &[0xc3]).unwrap();
+    engine
+        .unicorn
+        .add_code_hook(SLOW, SLOW, |_, _, _| {
+            std::thread::sleep(Duration::from_millis(8));
+        })
+        .unwrap();
+
+    let started = Instant::now();
+    let error = engine
+        .call_win64_with_timeout(TEST_CODE, &[0; 6], TIMEOUT_US)
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    let error = error.to_string();
+    assert!(
+        error.contains("total timeout") || error.contains("before the guest returned"),
+        "unexpected error after {elapsed:?}: {error}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "repeated yields exceeded the bounded total timeout: {elapsed:?}"
+    );
+}
+
+#[test]
+fn issue1404_two_children_queue_fifo_and_complete_once() {
+    const CREATE: u64 = STUB_BASE + 0x2c0;
+    const SWITCH: u64 = STUB_BASE + 0x2d0;
+    const CHILD_OFFSET: usize = 0x180;
+    let first_output = DATA_BASE + 0x540;
+    let second_output = DATA_BASE + 0x548;
+    let mut code = vec![0x48, 0x83, 0xec, 0x38];
+    let append_create = |code: &mut Vec<u8>, parameter: u64| {
+        code.extend_from_slice(&[0x31, 0xc9, 0x31, 0xd2]);
+        push_mov_imm64(code, [0x49, 0xb8], TEST_CODE + CHILD_OFFSET as u64);
+        push_mov_imm64(code, [0x49, 0xb9], parameter);
+        code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+        code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0]);
+        push_mov_imm64(code, [0x48, 0xb8], CREATE);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    };
+    append_create(&mut code, first_output);
+    append_create(&mut code, second_output);
+    code.extend_from_slice(&[0x48, 0x89, 0xc3]);
+    for _ in 0..2 {
+        push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    }
+    code.extend_from_slice(&[0x48, 0x89, 0xd8, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    code.resize(CHILD_OFFSET, 0x90);
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28]);
+    code.extend_from_slice(&[0x48, 0xff, 0x01, 0xb8, 9, 0, 0, 0, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (address, symbol) in [(CREATE, "CreateThread"), (SWITCH, "SwitchToThread")] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    let second_handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
+    assert_eq!(engine.unicorn.get_data().windows_threads.len(), 2);
+    assert!(engine.unicorn.get_data().windows_threads.values().all(|thread| thread.completed && thread.exit_code == 9));
+    assert!(engine.unicorn.get_data().windows_threads.contains_key(&second_handle));
+    assert_eq!(engine.unicorn.mem_read_as_vec(first_output, 8).unwrap(), 1u64.to_le_bytes());
+    assert_eq!(engine.unicorn.mem_read_as_vec(second_output, 8).unwrap(), 1u64.to_le_bytes());
+    assert!(engine.scheduler_ready.is_empty());
+    assert!(engine.scheduled_windows_threads.is_empty());
+}
+
+#[test]
+fn issue1404_reyielded_child_does_not_misclassify_a_new_synchronous_child() {
+    const CREATE: u64 = STUB_BASE + 0x330;
+    const SWITCH: u64 = STUB_BASE + 0x340;
+    const CHILD_A_OFFSET: usize = 0x180;
+    const CHILD_B_OFFSET: usize = 0x1c0;
+    let mut code = vec![0x48, 0x83, 0xec, 0x38];
+    let append_create = |code: &mut Vec<u8>, start: u64| {
+        code.extend_from_slice(&[0x31, 0xc9, 0x31, 0xd2]);
+        push_mov_imm64(code, [0x49, 0xb8], start);
+        code.extend_from_slice(&[0x45, 0x31, 0xc9]);
+        code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+        code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0]);
+        push_mov_imm64(code, [0x48, 0xb8], CREATE);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    };
+    append_create(&mut code, TEST_CODE + CHILD_A_OFFSET as u64);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    append_create(&mut code, TEST_CODE + CHILD_B_OFFSET as u64);
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    code.resize(CHILD_A_OFFSET, 0x90);
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
+    for _ in 0..2 {
+        push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+        code.extend_from_slice(&[0xff, 0xd0]);
+    }
+    code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xb8, 7, 0, 0, 0, 0xc3]);
+    code.resize(CHILD_B_OFFSET, 0x90);
+    code.extend_from_slice(&[0xb8, 5, 0, 0, 0, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (address, symbol) in [(CREATE, "CreateThread"), (SWITCH, "SwitchToThread")] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    let child_b_handle = engine.call_win64(TEST_CODE, [0; 6]).unwrap();
+    assert_eq!(engine.unicorn.get_data().windows_threads.len(), 2);
+    let exit_codes = engine
+        .unicorn
+        .get_data()
+        .windows_threads
+        .values()
+        .map(|thread| thread.exit_code)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(exit_codes, BTreeSet::from([5, 7]));
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_threads
+            .get(&child_b_handle)
+            .unwrap()
+            .exit_code,
+        5
+    );
+    assert!(engine.scheduled_windows_threads.is_empty());
+    assert!(engine.scheduler_ready.is_empty());
+    assert!(engine.parked_main_context.is_none());
+    assert!(!engine.unicorn.get_data().scheduler_resume_active);
+}
+
+#[test]
+fn issue1404_context_switch_isolates_last_error_and_callee_saved_registers() {
+    const CREATE: u64 = STUB_BASE + 0x2e0;
+    const SWITCH: u64 = STUB_BASE + 0x2f0;
+    const SET_LAST_ERROR: u64 = STUB_BASE + 0x300;
+    const GET_LAST_ERROR: u64 = STUB_BASE + 0x310;
+    const TLS_SET_VALUE: u64 = STUB_BASE + 0x320;
+    const CHILD_OFFSET: usize = 0x140;
+    let mut code = vec![0x48, 0x83, 0xec, 0x38];
+    code.extend_from_slice(&[0x31, 0xc9, 0x31, 0xd2]);
+    push_mov_imm64(&mut code, [0x49, 0xb8], TEST_CODE + CHILD_OFFSET as u64);
+    code.extend_from_slice(&[0x45, 0x31, 0xc9]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+    code.extend_from_slice(&[0x48, 0xc7, 0x44, 0x24, 0x28, 0, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], CREATE);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xbb], 0x1122_3344_5566_7788);
+    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xf3]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], GET_LAST_ERROR);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x38, 0xc3]);
+    code.resize(CHILD_OFFSET, 0x90);
+    code.extend_from_slice(&[0x48, 0x83, 0xec, 0x28, 0xb9, 0x22, 0x22, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SET_LAST_ERROR);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    code.extend_from_slice(&[0xb9, 3, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xba], 0xbbbb);
+    push_mov_imm64(&mut code, [0x48, 0xb8], TLS_SET_VALUE);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xbb], 0xdead_beef_dead_beef);
+    code.extend_from_slice(&[0x66, 0x48, 0x0f, 0x6e, 0xf3]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], GET_LAST_ERROR);
+    code.extend_from_slice(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (address, symbol) in [
+        (CREATE, "CreateThread"),
+        (SWITCH, "SwitchToThread"),
+        (SET_LAST_ERROR, "SetLastError"),
+        (GET_LAST_ERROR, "GetLastError"),
+        (TLS_SET_VALUE, "TlsSetValue"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    engine.unicorn.get_data_mut().windows_last_error = 0x1111;
+    engine.unicorn.get_data_mut().windows_tls_slots.insert(3, 0xaaaa);
+    assert_eq!(engine.call_win64(TEST_CODE, [0; 6]).unwrap(), 0x1111);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RBX).unwrap(), 0x1122_3344_5566_7788);
+    assert_eq!(
+        &engine.unicorn.reg_read_long(RegisterX86::XMM6).unwrap()[..8],
+        &0x1122_3344_5566_7788u64.to_le_bytes()
+    );
+    assert_eq!(engine.unicorn.get_data().windows_threads.values().next().unwrap().exit_code, 0x2222);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1111);
+    assert_eq!(engine.unicorn.get_data().windows_tls_slots.get(&3), Some(&0xaaaa));
 }
 
 #[test]
