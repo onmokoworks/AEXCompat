@@ -1,5 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod licenses;
+
 #[cfg(target_os = "macos")]
 mod gui_state;
 

@@ -335,6 +335,7 @@ pub fn run() -> eframe::Result<()> {
 }
 
 struct MacHarnessApp {
+    licenses: crate::licenses::LicenseWindow,
     repository: PathBuf,
     plugin_path: Option<PathBuf>,
     input: Option<PathBuf>,
@@ -364,6 +365,7 @@ impl Drop for MacHarnessApp {
 impl MacHarnessApp {
     fn new(repository: PathBuf) -> Self {
         Self {
+            licenses: crate::licenses::LicenseWindow::default(),
             repository,
             plugin_path: None,
             input: None,
@@ -666,6 +668,7 @@ impl eframe::App for MacHarnessApp {
         ctx.set_visuals(egui::Visuals::dark());
         self.poll(ctx);
         self.dispatch_live_render(ctx);
+        self.licenses.show(ctx);
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -717,6 +720,7 @@ impl eframe::App for MacHarnessApp {
                 if occupied {
                     ui.spinner();
                 }
+                self.licenses.about_button(ui, "About");
                 ui.label(&self.status);
             });
             ui.add_space(6.0);

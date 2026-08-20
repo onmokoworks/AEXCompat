@@ -285,6 +285,7 @@ fn single_supported_dropped_path(dropped: &[egui::DroppedFile]) -> Option<PathBu
 
 struct HarnessApp {
     ui_kit: AexUiKit,
+    licenses: crate::licenses::LicenseWindow,
     repository: PathBuf,
     selection: Option<Selection>,
     session_approved: bool,
@@ -364,6 +365,7 @@ impl HarnessApp {
         let missing_suite_aggregate = aggregate_missing_suites(&repository);
         Self {
             ui_kit: AexUiKit::default(),
+            licenses: crate::licenses::LicenseWindow::default(),
             repository,
             selection: None,
             session_approved: false,
@@ -2945,6 +2947,7 @@ impl eframe::App for HarnessApp {
             self.inspect_after_refresh = false;
             self.inspect_parameters_async();
         }
+        self.licenses.show(ctx);
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -2983,6 +2986,8 @@ impl eframe::App for HarnessApp {
                     if self.busy {
                         ui.spinner();
                     }
+                    self.licenses
+                        .about_button(ui, self.ui_kit.text("About", "ライセンス"));
                 });
             });
             ui.separator();

@@ -32,6 +32,19 @@ env:
   SDK_SHA256: ADB59B2C7F7A95A901F70DB15D679BFB89055A0E03176E7BC65ACC75CC3B359F
 
 jobs:
+  license-audit:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
+        with:
+          tool: cargo-about@0.9.1
+      - name: Verify desktop third-party license bundle
+        env:
+          PYTHONUTF8: "1"
+        run: python tools/generate-third-party-licenses.py
+
   # cargo build だけを先に済ませて実行ファイルを配る。python-tests は cargo test
   # の結果ではなくこの成果物しか要らないので、テストの完走を待たせない。
   rust-build:

@@ -28,22 +28,32 @@ approval and does not authorize a push or a license change.
 
 | Component | Declared metadata | Publication state |
 | --- | --- | --- |
-| AEXCompat-authored source, docs, schemas, tests, and instruments | MPL-2.0 root grant and Cargo metadata | Source grant resolved; dependency notices/SBOM and provenance review still gate publication |
+| AEXCompat-authored source, docs, schemas, tests, and instruments | MPL-2.0 root grant and Cargo metadata | Source grant resolved; provenance review still gates publication |
 | `guest/` AEXCompat-authored Rust source | MPL-2.0 | For a distributed GPLv2 Unicorn Larger Work, relevant Covered Software must additionally be distributed under GPL-2.0 and the combined work must satisfy applicable GPLv2 terms |
 | `imports/` and provenance-identified copies | Upstream/source terms | Not relicensed by the root grant; independent provenance approval required |
 | Adobe SDK-backed probes/fixtures | Adobe-proprietary SDK dependency | Source boundary and redistribution terms require manual review; SDK is never exported |
-| Third-party Cargo/Python dependencies | Upstream licenses | Generate and manually review a locked dependency notice/SBOM before publication |
+| Desktop harness Cargo dependencies | Upstream licenses | Locked Windows/macOS dependency graph is captured in `broker/licenses/third-party-licenses.json`; generated `THIRD_PARTY_LICENSES.txt` and `.html` are embedded/displayed or distributed, but still require manual review before publication |
+| Other Cargo/Python dependencies | Upstream licenses | Generate and manually review a locked dependency notice/SBOM before publication |
 | Private/commercial AEX corpus | Upstream proprietary or per-artifact terms | Local testing only; never included in a public export |
 
 The root `LICENSE` grants MPL-2.0 only for material the AEXCompat contributors
 have the right to license. It does not replace upstream notices or authorize
 redistribution of excluded SDK, corpus, fixture, dependency, or generated
 material. The AEXCompat MPL files are not marked incompatible with secondary
-licenses. Publication remains blocked until the dependency notice/SBOM and
-artifact-provenance gates are separately approved; a distributed Unicorn-linked
+licenses. Publication remains blocked until the generated desktop dependency
+notice, remaining dependency/SBOM inventory, and artifact-provenance gates are
+separately approved; a distributed Unicorn-linked
 guest also requires the relevant AEXCompat Covered Software under both MPL-2.0
 and GPL-2.0, plus applicable notices and corresponding source/build information
 for the combined work.
+
+Every desktop distribution must include the root `LICENSE` plus both generated
+`THIRD_PARTY_LICENSES.txt` and `THIRD_PARTY_LICENSES.html`. The harness also
+embeds the root license and text notice in its About/license window so the terms
+remain available offline. After changing the harness lockfile or supported
+targets, refresh the snapshot with `python tools/generate-third-party-licenses.py
+--refresh`, manually review the result, and run the same command without
+`--refresh` to fail closed on package or generated-output drift.
 
 ## Dry run
 
