@@ -167,10 +167,6 @@ impl AexUiKit {
         self.theme.palette.muted_foreground
     }
 
-    fn separator_color(&self) -> egui::Color32 {
-        self.theme.palette.border
-    }
-
     fn success_foreground(&self) -> egui::Color32 {
         if self.dark_mode {
             egui::Color32::from_rgb(100, 205, 150)
@@ -367,6 +363,7 @@ impl AexUiKit {
         response
     }
 
+    #[cfg(test)]
     fn modern_slider(
         &self,
         ui: &mut egui::Ui,
@@ -374,168 +371,7 @@ impl AexUiKit {
         range: std::ops::RangeInclusive<f64>,
         accessible_label: &str,
     ) -> egui::Response {
-        let minimum = *range.start();
-        let maximum = *range.end();
-        let previous = *value;
-        let enabled = ui.is_enabled();
-        let mut displayed_value = value.clamp(minimum, maximum);
-        let (track_response, numeric_response) = ui
-            .horizontal(|ui| {
-                let desired = egui::vec2(ui.available_width().min(180.0).max(96.0), 28.0);
-                let (rect, mut response) =
-                    ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
-                if response.clicked() {
-                    response.request_focus();
-                }
-                if response.dragged() || response.clicked() {
-                    if let Some(pointer) = response.interact_pointer_pos() {
-                        let fraction = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                        *value = minimum + (maximum - minimum) * f64::from(fraction);
-                    }
-                }
-                if response.enabled() && response.has_focus() && maximum > minimum {
-                    ui.memory_mut(|memory| {
-                        memory.set_focus_lock_filter(
-                            response.id,
-                            egui::EventFilter {
-                                horizontal_arrows: true,
-                                vertical_arrows: true,
-                                ..Default::default()
-                            },
-                        );
-                    });
-                    let step = (maximum - minimum) / 100.0;
-                    let (delta, home, end) = ui.input(|input| {
-                        let increment = input.key_pressed(egui::Key::ArrowRight)
-                            || input.key_pressed(egui::Key::ArrowUp);
-                        let decrement = input.key_pressed(egui::Key::ArrowLeft)
-                            || input.key_pressed(egui::Key::ArrowDown);
-                        (
-                            f64::from(increment) - f64::from(decrement),
-                            input.key_pressed(egui::Key::Home),
-                            input.key_pressed(egui::Key::End),
-                        )
-                    });
-                    if home {
-                        *value = minimum;
-                    } else if end {
-                        *value = maximum;
-                    } else {
-                        *value += delta * step;
-                    }
-                }
-                if response.enabled() && maximum > minimum {
-                    let step = (maximum - minimum) / 100.0;
-                    let access_delta = ui.input(|input| {
-                        input.num_accesskit_action_requests(
-                            response.id,
-                            egui::accesskit::Action::Increment,
-                        ) as f64
-                            - input.num_accesskit_action_requests(
-                                response.id,
-                                egui::accesskit::Action::Decrement,
-                            ) as f64
-                    });
-                    *value += access_delta * step;
-                    ui.input(|input| {
-                        for request in input.accesskit_action_requests(
-                            response.id,
-                            egui::accesskit::Action::SetValue,
-                        ) {
-                            if let Some(egui::accesskit::ActionData::NumericValue(new_value)) =
-                                request.data
-                            {
-                                *value = new_value.clamp(minimum, maximum);
-                            }
-                        }
-                    });
-                }
-                if response.enabled() {
-                    *value = value.clamp(minimum, maximum);
-                }
-                if *value != previous {
-                    response.mark_changed();
-                }
-                response.widget_info(|| {
-                    egui::WidgetInfo::slider(ui.is_enabled(), *value, accessible_label)
-                });
-                ui.ctx().accesskit_node_builder(response.id, |builder| {
-                    use egui::accesskit::Action;
-                    builder.set_min_numeric_value(minimum);
-                    builder.set_max_numeric_value(maximum);
-                    builder.set_numeric_value_step((maximum - minimum) / 100.0);
-                    if enabled {
-                        builder.add_action(Action::SetValue);
-                    }
-                    if enabled && *value < maximum {
-                        builder.add_action(Action::Increment);
-                    }
-                    if enabled && *value > minimum {
-                        builder.add_action(Action::Decrement);
-                    }
-                });
-                let visuals = ui.style().interact(&response);
-                let primary = if enabled {
-                    self.theme.palette.primary
-                } else {
-                    self.theme.palette.muted.gamma_multiply(0.55)
-                };
-                let thumb_fill = if enabled {
-                    self.theme.palette.background
-                } else {
-                    self.theme.palette.muted.gamma_multiply(0.55)
-                };
-                let track = egui::Rect::from_center_size(
-                    rect.center(),
-                    egui::vec2(rect.width(), if response.hovered() { 3.0 } else { 2.0 }),
-                );
-                ui.painter()
-                    .rect_filled(track, 2.0, self.theme.palette.muted);
-                let fraction = if maximum > minimum {
-                    ((*value - minimum) / (maximum - minimum)).clamp(0.0, 1.0) as f32
-                } else {
-                    0.0
-                };
-                let thumb = egui::pos2(
-                    egui::lerp(rect.left()..=rect.right(), fraction),
-                    rect.center().y,
-                );
-                ui.painter().line_segment(
-                    [track.left_center(), thumb],
-                    egui::Stroke::new(2.0, primary),
-                );
-                ui.painter().circle_filled(
-                    thumb,
-                    if response.hovered() || response.dragged() {
-                        7.0
-                    } else {
-                        6.0
-                    },
-                    thumb_fill,
-                );
-                ui.painter().circle_stroke(
-                    thumb,
-                    if response.has_focus() { 7.0 } else { 6.0 },
-                    egui::Stroke::new(2.0, visuals.fg_stroke.color),
-                );
-                let numeric_value = if enabled {
-                    &mut *value
-                } else {
-                    &mut displayed_value
-                };
-                let numeric = ui.add(
-                    egui::DragValue::new(numeric_value)
-                        .range(range)
-                        .speed(((maximum - minimum).abs() / 200.0).max(0.01)),
-                );
-                (response, numeric)
-            })
-            .inner;
-        let mut response = track_response.union(numeric_response.clone());
-        if numeric_response.changed() {
-            response.mark_changed();
-        }
-        response
+        crate::shared_ui::modern_slider(ui, value, range, accessible_label)
     }
 
     fn tab_button(

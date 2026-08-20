@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::gui_state::{GuiParameter, LiveRenderState, ViewerMode, reset_all};
+use crate::gui_state::{
+    AnalysisPaneState, LiveRenderState, ViewerMode, parameter_is_default, reset_all,
+    reset_parameter,
+};
 use crate::macos_worker_controller::{
     MAX_STDERR_BYTES, ResourceLimits, SecurityTier, WorkerSession, audit_process, read_bounded,
     run_staged_setup, terminate_process_group,
@@ -217,19 +220,64 @@ fn validate_resident_probe(
     Ok(())
 }
 
+fn validate_user_changed(
+    value: &Value,
+    worker_pid: u32,
+    requested_slot: u32,
+) -> Result<Vec<DynamicParameterUi>, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "USER_CHANGED_PARAM response is not an object".to_string())?;
+    if object.len() != 6
+        || value["v"].as_u64() != Some(1)
+        || value["type"].as_str() != Some("user_changed_done")
+        || value["worker_pid"].as_u64() != Some(worker_pid as u64)
+        || value["status"].as_str() != Some("ok")
+    {
+        return Err(format!("invalid USER_CHANGED_PARAM response: {value}"));
+    }
+    let report = value["report"]
+        .as_object()
+        .ok_or_else(|| "USER_CHANGED_PARAM report is not an object".to_string())?;
+    if report.len() != 3
+        || report["slot"].as_u64() != Some(requested_slot as u64)
+        || report["selector_error"].as_i64() != Some(0)
+    {
+        return Err(format!(
+            "invalid USER_CHANGED_PARAM report: {}",
+            value["report"]
+        ));
+    }
+    serde_json::from_value(report["parameters"].clone())
+        .map_err(|error| format!("invalid USER_CHANGED_PARAM parameter table: {error}"))
+}
+
 enum ResidentCommand {
     Render {
         frame_index: u64,
-        parameters: Vec<GuiParameter>,
+        parameters: Vec<InteractiveParameter>,
         output: PathBuf,
     },
+    UserChanged {
+        slot: u32,
+        parameters: String,
+        reply: Sender<Result<Vec<DynamicParameterUi>, String>>,
+    },
     Close(Sender<Result<(), String>>),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+struct DynamicParameterUi {
+    slot: u32,
+    ui_flags: u32,
+    flags: u32,
 }
 
 struct ResidentSessionHandle {
     plugin_path: PathBuf,
     input: PathBuf,
     format: MacRenderFormat,
+    layers: Vec<(u32, PathBuf)>,
     sender: Sender<ResidentCommand>,
     receiver: Receiver<Result<RenderResult, String>>,
     next_frame: u64,
@@ -241,7 +289,7 @@ struct ResidentSessionHandle {
 type SharedResidentChild = Arc<Mutex<Option<Child>>>;
 
 struct PendingResidentRender {
-    parameters: Vec<GuiParameter>,
+    parameters: Vec<InteractiveParameter>,
     output: PathBuf,
     format: MacRenderFormat,
 }
@@ -250,6 +298,7 @@ struct ResidentAdmissionHandle {
     plugin_path: PathBuf,
     input: PathBuf,
     format: MacRenderFormat,
+    layers: Vec<(u32, PathBuf)>,
     receiver: Receiver<Result<ResidentSessionHandle, String>>,
 }
 
@@ -344,7 +393,9 @@ struct MacHarnessApp {
     output_texture: Option<egui::TextureHandle>,
     status: String,
     report: String,
-    parameters: Vec<GuiParameter>,
+    parameters: Vec<InteractiveParameter>,
+    parameter_defaults: Vec<InteractiveParameter>,
+    analysis: AnalysisPaneState,
     live_render: LiveRenderState,
     viewer_mode: ViewerMode,
     viewer_zoom: f32,
@@ -352,6 +403,8 @@ struct MacHarnessApp {
     busy: bool,
     render_format: MacRenderFormat,
     resident: ResidentState,
+    user_changed: Option<Receiver<Result<Vec<DynamicParameterUi>, String>>>,
+    pending_user_changed: Option<u32>,
 }
 
 impl Drop for MacHarnessApp {
@@ -375,6 +428,8 @@ impl MacHarnessApp {
             status: "Select an x64 AEX and a PNG image.".into(),
             report: String::new(),
             parameters: Vec::new(),
+            parameter_defaults: Vec::new(),
+            analysis: AnalysisPaneState::default(),
             live_render: LiveRenderState::default(),
             viewer_mode: ViewerMode::Input,
             viewer_zoom: 1.0,
@@ -382,10 +437,14 @@ impl MacHarnessApp {
             busy: false,
             render_format: MacRenderFormat::PngArgb8,
             resident: ResidentState::Idle,
+            user_changed: None,
+            pending_user_changed: None,
         }
     }
 
     fn close_resident(&mut self) -> Result<(), String> {
+        self.user_changed = None;
+        self.pending_user_changed = None;
         match std::mem::replace(&mut self.resident, ResidentState::Idle) {
             ResidentState::Ready(mut session) => session.shutdown(),
             // Dropping the receiver is the cancellation boundary. The detached
@@ -410,13 +469,14 @@ impl MacHarnessApp {
                 return;
             }
             match discover_parameters(&self.repository, &path) {
-                Ok((parameters, report)) => {
+                Ok((parameters, parameter_defaults, report)) => {
                     self.status = format!(
                         "Selected AEX with {} editable parameters: {}",
                         parameters.len(),
                         path.display()
                     );
                     self.report = report;
+                    self.parameter_defaults = parameter_defaults;
                     self.parameters = parameters;
                     self.plugin_path = Some(path);
                     self.viewer_mode = ViewerMode::Input;
@@ -425,6 +485,7 @@ impl MacHarnessApp {
                     self.status = "Could not inspect AEX parameters.".into();
                     self.report = error;
                     self.parameters.clear();
+                    self.parameter_defaults.clear();
                     self.plugin_path = None;
                 }
             }
@@ -440,6 +501,10 @@ impl MacHarnessApp {
         else {
             return;
         };
+        self.load_input_path(ctx, path);
+    }
+
+    fn load_input_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         if let Err(error) = self.close_resident() {
             self.status = "Could not cleanly close the previous input session.".into();
             self.report = error;
@@ -465,6 +530,25 @@ impl MacHarnessApp {
                 self.report = error;
             }
         }
+    }
+
+    fn accept_dropped_input(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|input| input.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        if self.occupied() {
+            self.status = "Image drop ignored while a native task is running.".into();
+            return;
+        }
+        let Some(path) = crate::shared_ui::single_supported_dropped_path(&dropped, |path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+        }) else {
+            self.status = "Drop exactly one PNG image file.".into();
+            return;
+        };
+        self.load_input_path(ctx, path);
     }
 
     fn render(&mut self) {
@@ -501,12 +585,18 @@ impl MacHarnessApp {
         let same_ready = matches!(
             &self.resident,
             ResidentState::Ready(session)
-                if session.plugin_path == aex && session.input == input && session.format == self.render_format
+                if session.plugin_path == aex
+                    && session.input == input
+                    && session.format == self.render_format
+                    && session.layers == selected_layer_paths(&self.parameters)
         );
         let same_starting = matches!(
             &self.resident,
             ResidentState::Starting { admission, .. }
-                if admission.plugin_path == aex && admission.input == input && admission.format == self.render_format
+                if admission.plugin_path == aex
+                    && admission.input == input
+                    && admission.format == self.render_format
+                    && admission.layers == selected_layer_paths(&self.parameters)
         );
         let pending = PendingResidentRender {
             parameters: self.parameters.clone(),
@@ -536,6 +626,7 @@ impl MacHarnessApp {
                     input,
                     output_directory,
                     self.render_format,
+                    self.parameters.clone(),
                 ),
                 pending,
             };
@@ -575,6 +666,71 @@ impl MacHarnessApp {
         self.live_render.parameter_changed(Instant::now());
     }
 
+    fn dispatch_user_changed(&mut self, slot: u32) {
+        if self.user_changed.is_some() {
+            self.status = "A supervised parameter change is already in flight.".into();
+            return;
+        }
+        let ResidentState::Ready(session) = &self.resident else {
+            if self.plugin_path.is_some() && self.input.is_some() {
+                self.render();
+                if matches!(
+                    self.resident,
+                    ResidentState::Starting { .. } | ResidentState::Ready(_)
+                ) {
+                    self.pending_user_changed = Some(slot);
+                    self.status = "Queued USER_CHANGED_PARAM after the resident render.".into();
+                }
+            } else {
+                self.status =
+                    "Select an AEX and input before invoking a supervised control.".into();
+            }
+            return;
+        };
+        let parameters = match fixture_parameter_payload(&self.parameters) {
+            Ok(parameters) => parameters.transport,
+            Err(error) => {
+                self.status = "Could not encode the supervised parameter state.".into();
+                self.report = error;
+                self.parameter_changed();
+                return;
+            }
+        };
+        let (reply, receiver) = mpsc::channel();
+        if let Err(error) = session.sender.send(ResidentCommand::UserChanged {
+            slot,
+            parameters,
+            reply,
+        }) {
+            self.status = "Resident guest session stopped.".into();
+            self.report = error.to_string();
+            return;
+        }
+        self.user_changed = Some(receiver);
+        self.busy = true;
+        self.status = format!("Dispatching USER_CHANGED_PARAM for slot {slot}...");
+    }
+
+    fn apply_dynamic_parameter_ui(
+        &mut self,
+        updates: Vec<DynamicParameterUi>,
+    ) -> Result<(), String> {
+        if updates.len() != self.parameters.len() {
+            return Err("USER_CHANGED_PARAM returned a partial parameter table".into());
+        }
+        let mut next = self.parameters.clone();
+        for (parameter, update) in next.iter_mut().zip(updates) {
+            if parameter.slot != update.slot {
+                return Err("USER_CHANGED_PARAM parameter identity changed".into());
+            }
+            parameter.enabled = update.ui_flags & (1 << 5) == 0;
+            parameter.visible = update.ui_flags & (1 << 9) == 0;
+            parameter.supervised = update.flags & (1 << 6) != 0;
+        }
+        self.parameters = next;
+        Ok(())
+    }
+
     fn dispatch_live_render(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
         let ready = self.plugin_path.is_some() && self.input.is_some();
@@ -590,6 +746,33 @@ impl MacHarnessApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        let user_changed =
+            self.user_changed
+                .as_ref()
+                .and_then(|receiver| match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                        "resident USER_CHANGED_PARAM controller stopped without a result".into(),
+                    )),
+                });
+        if let Some(result) = user_changed {
+            self.user_changed = None;
+            self.busy = false;
+            match result.and_then(|updates| self.apply_dynamic_parameter_ui(updates)) {
+                Ok(()) => {
+                    self.status = "USER_CHANGED_PARAM completed.".into();
+                    self.parameter_changed();
+                }
+                Err(error) => {
+                    let cleanup = self.close_resident().err();
+                    self.status = "USER_CHANGED_PARAM failed.".into();
+                    self.report = cleanup
+                        .map(|cleanup| format!("{error}\nresident cleanup: {cleanup}"))
+                        .unwrap_or(error);
+                }
+            }
+        }
         let admission_result = match &self.resident {
             ResidentState::Starting { admission, .. } => match admission.receiver.try_recv() {
                 Ok(result) => Some(result),
@@ -610,11 +793,7 @@ impl MacHarnessApp {
                     self.resident = ResidentState::Ready(session);
                     self.dispatch_resident_render(pending);
                 }
-                Err(error) => {
-                    self.status = "Could not start resident guest session.".into();
-                    self.report = error.clone();
-                    self.resident = ResidentState::Failed;
-                }
+                Err(error) => self.record_resident_admission_failure(error),
             }
         }
         let result = match &self.resident {
@@ -660,12 +839,25 @@ impl MacHarnessApp {
                     .unwrap_or(error);
             }
         }
+        if matches!(self.resident, ResidentState::Ready(_))
+            && let Some(slot) = self.pending_user_changed.take()
+        {
+            self.dispatch_user_changed(slot);
+        }
+    }
+
+    fn record_resident_admission_failure(&mut self, error: String) {
+        self.pending_user_changed = None;
+        self.status = "Could not start resident guest session.".into();
+        self.report = error;
+        self.resident = ResidentState::Failed;
     }
 }
 
 impl eframe::App for MacHarnessApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_visuals(egui::Visuals::dark());
+        self.accept_dropped_input(ctx);
         self.poll(ctx);
         self.dispatch_live_render(ctx);
         self.licenses.show(ctx);
@@ -726,40 +918,132 @@ impl eframe::App for MacHarnessApp {
             ui.add_space(6.0);
         });
 
-        egui::SidePanel::left("effect_controls")
-            .default_width(340.0)
-            .min_width(260.0)
-            .max_width(460.0)
-            .resizable(true)
-            .show(ctx, |ui| self.show_effect_controls(ui));
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.show_workspace_viewer(ui);
-            ui.separator();
-            egui::CollapsingHeader::new("Paths and worker report")
-                .default_open(false)
-                .show(ui, |ui| {
-                    for (label, path) in [
-                        ("AEX", self.plugin_path.as_deref()),
-                        ("Input", self.input.as_deref()),
-                        ("Output", self.output.as_deref()),
-                    ] {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(label).strong());
-                            ui.monospace(
-                                path.map(Path::display)
-                                    .map(|value| value.to_string())
-                                    .unwrap_or_else(|| "not available".into()),
-                            );
-                        });
+        let mut analysis = std::mem::take(&mut self.analysis);
+        crate::shared_ui::show_analysis_panel(
+            ctx,
+            &mut analysis,
+            "Analysis & Logs",
+            "Diagnostics, render settings and command output",
+            |ui| {
+                crate::shared_ui::analysis_section_heading(
+                    ui,
+                    crate::shared_ui::AnalysisSection::ProjectSession.title(),
+                    ui.visuals().weak_text_color(),
+                );
+                ui.label(
+                    "Select the current plug-in and input used by the resident x64 guest session.",
+                );
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!self.occupied(), egui::Button::new("Change AEX source..."))
+                        .clicked()
+                    {
+                        self.choose_aex();
                     }
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.report)
-                            .font(egui::TextStyle::Monospace)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(12),
+                    if ui
+                        .add_enabled(
+                            !self.occupied(),
+                            egui::Button::new("Change image source..."),
+                        )
+                        .clicked()
+                    {
+                        self.choose_input(ctx);
+                    }
+                });
+                for (label, path) in [
+                    ("AEX", self.plugin_path.as_deref()),
+                    ("Input", self.input.as_deref()),
+                ] {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(label).strong());
+                        ui.monospace(
+                            path.map(Path::display)
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "not available".into()),
+                        );
+                    });
+                }
+
+                crate::shared_ui::analysis_section_heading(
+                    ui,
+                    crate::shared_ui::AnalysisSection::Advanced.title(),
+                    ui.visuals().weak_text_color(),
+                );
+                ui.collapsing("Developer probes and diagnostics", |ui| {
+                    ui.label(RichText::new("DEPENDENCIES").small().strong());
+                    ui.add_enabled(false, egui::Button::new("Inspect dependencies"))
+                        .on_disabled_hover_text(
+                            "Windows registry/runtime-root discovery has no macOS equivalent; the guest session reports its staged worker inputs instead.",
+                        );
+                    ui.weak("Dependency discovery: unavailable on this backend (no Windows registry/runtime roots).");
+                    ui.separator();
+                    ui.label(RichText::new("AEGP round-trip diagnostics").strong());
+                ui.weak(
+                    "Unavailable on Apple Silicon: the bounded x64 guest AEGP transport has not been implemented yet.",
+                );
+                let (_, intent) = crate::shared_ui::show_aegp_actions(
+                    ui,
+                    self.occupied(),
+                    false,
+                    crate::shared_ui::BackendCapability::Unavailable {
+                        reason: "Unavailable on Apple Silicon until the bounded x64 guest AEGP transport is implemented.",
+                    },
+                );
+                debug_assert!(intent.is_none());
+                });
+
+                crate::shared_ui::analysis_section_heading(
+                    ui,
+                    crate::shared_ui::AnalysisSection::RenderSettings.title(),
+                    ui.visuals().weak_text_color(),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Pixel depth");
+                    ui.selectable_value(
+                        &mut self.render_format,
+                        MacRenderFormat::PngArgb8,
+                        "8 bpc",
+                    );
+                    ui.selectable_value(
+                        &mut self.render_format,
+                        MacRenderFormat::RawArgb16,
+                        "16 bpc",
+                    );
+                    ui.selectable_value(
+                        &mut self.render_format,
+                        MacRenderFormat::ExrArgb32f,
+                        "32 bpc float",
                     );
                 });
+                let mut live_render = self.live_render.enabled();
+                if ui.checkbox(&mut live_render, "Auto Update").changed() {
+                    self.live_render.set_enabled(live_render);
+                }
+                ui.weak("Render path: persistent classic x64 guest session. GPU backend selection is unavailable in this backend.");
+
+                crate::shared_ui::analysis_section_heading(
+                    ui,
+                    crate::shared_ui::AnalysisSection::Output.title(),
+                    ui.visuals().weak_text_color(),
+                );
+                ui.label(RichText::new(&self.status).strong());
+                if let Some(output) = &self.output {
+                    ui.monospace(format!("Output: {}", output.display()));
+                }
+                ui.label(RichText::new("Worker report").strong());
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.report)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(12),
+                );
+            },
+        );
+        self.analysis = analysis;
+
+        crate::shared_ui::show_workspace_body(ctx, |region, ui| match region {
+            crate::shared_ui::WorkspaceRegion::EffectControls => self.show_effect_controls(ui),
+            crate::shared_ui::WorkspaceRegion::Viewer => self.show_workspace_viewer(ui),
         });
     }
 }
@@ -774,15 +1058,14 @@ impl MacHarnessApp {
                 if ui
                     .add_enabled(
                         !occupied
-                            && self
-                                .parameters
-                                .iter()
-                                .any(|parameter| !parameter.is_default()),
+                            && self.parameters.iter().zip(&self.parameter_defaults).any(
+                                |(parameter, default)| !parameter_is_default(parameter, default),
+                            ),
                         egui::Button::new("Reset All"),
                     )
                     .clicked()
                 {
-                    changed |= reset_all(&mut self.parameters);
+                    changed |= reset_all(&mut self.parameters, &self.parameter_defaults);
                 }
             });
         });
@@ -797,69 +1080,68 @@ impl MacHarnessApp {
         if self.parameters.is_empty() {
             ui.weak("This effect exposed no supported editable parameters.");
         }
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for parameter in &mut self.parameters {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&parameter.name).small());
-                        if ui
-                            .add_enabled(
-                                !occupied && !parameter.is_default(),
-                                egui::Button::new("Reset").small(),
-                            )
-                            .clicked()
-                        {
-                            changed |= parameter.reset();
-                        }
-                    });
-                    let previous_value = parameter.value;
-                    let previous_color = parameter.color;
-                    ui.add_enabled_ui(!occupied, |ui| match parameter.param_type {
-                        4 => {
-                            let mut checked = parameter.value != 0.0;
-                            if ui.checkbox(&mut checked, "Enabled").changed() {
-                                parameter.value = f64::from(checked);
-                            }
-                        }
-                        7 => {
-                            egui::ComboBox::from_id_salt(("mac-effect-control", &parameter.name))
-                                .selected_text(format!("{}", parameter.value.round() as i64))
-                                .show_ui(ui, |ui| {
-                                    for choice in
-                                        parameter.minimum as i64..=parameter.maximum as i64
-                                    {
-                                        ui.selectable_value(
-                                            &mut parameter.value,
-                                            choice as f64,
-                                            choice.to_string(),
-                                        );
-                                    }
-                                });
-                        }
-                        5 => {
-                            let mut rgba =
-                                argb8_to_rgba8(parameter.color.unwrap_or([255, 0, 0, 0]));
-                            if ui.color_edit_button_srgba_unmultiplied(&mut rgba).changed() {
-                                parameter.color = Some(rgba8_to_argb8(rgba));
-                            }
-                        }
-                        _ => {
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut parameter.value,
-                                    parameter.minimum..=parameter.maximum,
-                                )
-                                .fixed_decimals(parameter.precision)
-                                .show_value(true),
-                            );
-                        }
-                    });
-                    changed |=
-                        parameter.value != previous_value || parameter.color != previous_color;
-                    ui.add_space(6.0);
+        let output = crate::shared_ui::show_effect_controls(
+            ui,
+            &mut self.parameters,
+            &self.parameter_defaults,
+            occupied,
+            crate::shared_ui::EffectControlCapabilities {
+                choose_layer: true,
+                trigger_button: true,
+            },
+            crate::shared_ui::EffectControlsText {
+                layer_unavailable: "Layer selection is unavailable in the Apple Silicon guest transport.",
+                button_unavailable: "Button dispatch is unavailable in the Apple Silicon guest transport.",
+                ..Default::default()
+            },
+        );
+        for intent in output.intents {
+            match intent {
+                crate::shared_ui::EffectControlIntent::Changed { slot, supervised } => {
+                    if supervised {
+                        self.dispatch_user_changed(slot);
+                    } else {
+                        changed = true;
+                    }
                 }
-            });
+                crate::shared_ui::EffectControlIntent::Reset { slot, supervised } => {
+                    let mut reset = false;
+                    if let (Some(parameter), Some(default)) = (
+                        self.parameters.iter_mut().find(|value| value.slot == slot),
+                        self.parameter_defaults
+                            .iter()
+                            .find(|value| value.slot == slot),
+                    ) {
+                        reset = reset_parameter(parameter, default);
+                    }
+                    if reset {
+                        if supervised {
+                            self.dispatch_user_changed(slot);
+                        } else {
+                            changed = true;
+                        }
+                    }
+                }
+                crate::shared_ui::EffectControlIntent::ChooseLayer { slot } => {
+                    let selected = rfd::FileDialog::new()
+                        .add_filter("Image", &["png"])
+                        .pick_file();
+                    if let Some(parameter) =
+                        self.parameters.iter_mut().find(|value| value.slot == slot)
+                        && selected != parameter.layer_path
+                    {
+                        parameter.layer_path = selected;
+                        if let Err(error) = self.close_resident() {
+                            self.report = error;
+                        }
+                        changed = true;
+                    }
+                }
+                crate::shared_ui::EffectControlIntent::TriggerButton { slot } => {
+                    self.dispatch_user_changed(slot);
+                }
+            }
+        }
         if changed {
             self.parameter_changed();
         }
@@ -1044,35 +1326,8 @@ fn read_control_message_accounted(
     })
 }
 
-fn parameter_payload(parameters: &[GuiParameter]) -> Result<String, String> {
-    let assignments = parameters
-        .iter()
-        .map(|parameter| {
-            let (kind, value) = if parameter.param_type == 5 {
-                let [alpha, red, green, blue] = parameter.color.ok_or_else(|| {
-                    format!("color parameter slot {} has no ARGB8 value", parameter.slot)
-                })?;
-                ("argb8", format!("{alpha},{red},{green},{blue}"))
-            } else if matches!(parameter.param_type, 1 | 4 | 7) {
-                ("i32", format!("{}", parameter.value.round() as i32))
-            } else {
-                ("f64", format!("{}", parameter.value))
-            };
-            Ok(format!(
-                "param_{}@{}:{kind}={value}",
-                parameter.slot, parameter.slot
-            ))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(format!("v2|{}", assignments.join(";")))
-}
-
-fn argb8_to_rgba8([alpha, red, green, blue]: [u8; 4]) -> [u8; 4] {
-    [red, green, blue, alpha]
-}
-
-fn rgba8_to_argb8([red, green, blue, alpha]: [u8; 4]) -> [u8; 4] {
-    [alpha, red, green, blue]
+fn parameter_payload(parameters: &[InteractiveParameter]) -> Result<String, String> {
+    fixture_parameter_payload(parameters).map(|payload| payload.transport)
 }
 
 fn write_resident_input_slot(
@@ -1585,6 +1840,19 @@ struct FixtureParameterPayload {
     identity: Value,
 }
 
+fn selected_layer_paths(parameters: &[InteractiveParameter]) -> Vec<(u32, PathBuf)> {
+    parameters
+        .iter()
+        .filter(|parameter| parameter.kind == "layer")
+        .filter_map(|parameter| {
+            parameter
+                .layer_path
+                .as_ref()
+                .map(|path| (parameter.slot, path.clone()))
+        })
+        .collect()
+}
+
 fn fixture_parameter_payload(
     parameters: &[InteractiveParameter],
 ) -> Result<FixtureParameterPayload, String> {
@@ -2059,16 +2327,20 @@ fn begin_resident_admission(
     input: PathBuf,
     output_directory: PathBuf,
     format: MacRenderFormat,
+    parameters: Vec<InteractiveParameter>,
 ) -> ResidentAdmissionHandle {
     let plugin_path = aex.clone();
     let admission_input = input.clone();
+    let layers = selected_layer_paths(&parameters);
+    let identity_layers = layers.clone();
     let receiver = spawn_resident_admission(move || {
-        start_resident_session(&candidates, &aex, &input, &output_directory, format)
+        start_resident_session(&candidates, &aex, &input, &output_directory, format, layers)
     });
     ResidentAdmissionHandle {
         plugin_path,
         input: admission_input,
         format,
+        layers: identity_layers,
         receiver,
     }
 }
@@ -2124,8 +2396,17 @@ fn start_resident_session(
     input: &Path,
     _output_directory: &Path,
     format: MacRenderFormat,
+    layers: Vec<(u32, PathBuf)>,
 ) -> Result<ResidentSessionHandle, String> {
-    let started = start_resident_worker(candidates, aex, input, format, None)?;
+    if layers.len() > 8 {
+        return Err("resident secondary layer count exceeds 8".into());
+    }
+    let fixture = (!layers.is_empty()).then_some(MacFixtureLaunch {
+        layers: &layers,
+        smart: false,
+        time_scale: 30,
+    });
+    let started = start_resident_worker(candidates, aex, input, format, fixture.as_ref())?;
     let plugin_sha256 = started.plugin_sha256.clone();
     let input_sha256 = started.input_sha256.clone();
     let width = started.width;
@@ -2231,6 +2512,32 @@ fn start_resident_session(
                     });
                     let _ = result_sender.send(result);
                 }
+                Ok(ResidentCommand::UserChanged {
+                    slot,
+                    parameters,
+                    reply,
+                }) => {
+                    let result = write_control_message(
+                        &mut stdin,
+                        &json!({
+                            "v": 1,
+                            "type": "user_changed_param",
+                            "slot": slot,
+                            "parameters": parameters,
+                        }),
+                    )
+                    .and_then(|()| {
+                        recv_resident_response(
+                            &response_receiver,
+                            &controller_child,
+                            &worker_shutdown_requested,
+                            RESIDENT_RENDER_DEADLINE,
+                        )?
+                        .ok_or_else(|| "resident worker closed stdout".to_string())
+                    })
+                    .and_then(|response| validate_user_changed(&response, worker_pid, slot));
+                    let _ = reply.send(result);
+                }
                 Ok(ResidentCommand::Close(reply)) => {
                     close_reply = Some(reply);
                     running = false;
@@ -2293,6 +2600,7 @@ fn start_resident_session(
         plugin_path: aex.to_path_buf(),
         input: input.to_path_buf(),
         format,
+        layers,
         sender: command_sender,
         receiver: result_receiver,
         next_frame: 0,
@@ -2305,7 +2613,7 @@ fn start_resident_session(
 fn discover_parameters(
     repository: &Path,
     aex: &Path,
-) -> Result<(Vec<GuiParameter>, String), String> {
+) -> Result<(Vec<InteractiveParameter>, Vec<InteractiveParameter>, String), String> {
     let workers = guest_worker_candidates(repository)?;
     let mut failures = Vec::new();
     let mut process = None;
@@ -2358,97 +2666,8 @@ fn discover_parameters(
     );
     let report = serde_json::to_string_pretty(&value)
         .map_err(|error| format!("serialize macOS setup report: {error}"))?;
-    Ok((gui_parameters_from_setup(&value)?, report))
-}
-
-fn gui_parameters_from_setup(value: &Value) -> Result<Vec<GuiParameter>, String> {
-    let declared = value["parameters"]
-        .as_array()
-        .ok_or_else(|| "setup report has no parameters array".to_string())?;
-    let mut parameters = Vec::new();
-    for parameter in declared {
-        let param_type = parameter["param_type"]
-            .as_i64()
-            .ok_or_else(|| "parameter has no numeric param_type".to_string())?;
-        let slot = parameter["slot"]
-            .as_u64()
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| "parameter has no numeric slot".to_string())?;
-        if !matches!(param_type, 1 | 2 | 4 | 5 | 7 | 10) {
-            continue;
-        }
-        let name = parameter["name"]
-            .as_str()
-            .ok_or_else(|| "parameter has no name".to_string())?
-            .to_string();
-        if param_type == 5 {
-            let current = parse_argb8_parameter(parameter, "current_color", &name)?;
-            let default = parse_argb8_parameter(parameter, "default_color", &name)?;
-            parameters.push(GuiParameter {
-                slot,
-                name,
-                param_type,
-                value: 0.0,
-                default_value: 0.0,
-                color: Some(current),
-                default_color: Some(default),
-                minimum: 0.0,
-                maximum: 255.0,
-                precision: 0,
-            });
-            continue;
-        }
-        let value = parameter["default_value"]
-            .as_f64()
-            .ok_or_else(|| format!("editable parameter {name:?} has no default value"))?;
-        let minimum = parameter["slider_min"]
-            .as_f64()
-            .or_else(|| parameter["valid_min"].as_f64())
-            .ok_or_else(|| format!("editable parameter {name:?} has no minimum"))?;
-        let maximum = parameter["slider_max"]
-            .as_f64()
-            .or_else(|| parameter["valid_max"].as_f64())
-            .ok_or_else(|| format!("editable parameter {name:?} has no maximum"))?;
-        if !minimum.is_finite() || !maximum.is_finite() || minimum > maximum {
-            return Err(format!(
-                "editable parameter {name:?} has an invalid range {minimum}..={maximum}"
-            ));
-        }
-        parameters.push(GuiParameter {
-            slot,
-            name,
-            param_type,
-            value: value.clamp(minimum, maximum),
-            default_value: value.clamp(minimum, maximum),
-            color: None,
-            default_color: None,
-            minimum,
-            maximum,
-            precision: parameter["precision"].as_u64().unwrap_or(0).min(8) as usize,
-        });
-    }
-    Ok(parameters)
-}
-
-fn parse_argb8_parameter(parameter: &Value, field: &str, name: &str) -> Result<[u8; 4], String> {
-    let components = parameter[field]
-        .as_array()
-        .ok_or_else(|| format!("color parameter {name:?} has no {field} ARGB8 array"))?;
-    if components.len() != 4 {
-        return Err(format!(
-            "color parameter {name:?} {field} must contain four components"
-        ));
-    }
-    let mut color = [0u8; 4];
-    for (destination, component) in color.iter_mut().zip(components) {
-        *destination = component
-            .as_u64()
-            .and_then(|value| u8::try_from(value).ok())
-            .ok_or_else(|| {
-                format!("color parameter {name:?} {field} components must be 0..=255")
-            })?;
-    }
-    Ok(color)
+    let (parameters, defaults) = crate::shared_descriptor::parameters_from_guest_setup(&value)?;
+    Ok((parameters, defaults, report))
 }
 
 #[derive(Clone, Debug)]
@@ -3023,32 +3242,13 @@ mod tests {
 
     #[test]
     fn resident_parameter_payload_preserves_slots_and_numeric_kinds() {
-        let parameters = [
-            GuiParameter {
-                slot: 1,
-                name: "Amount".into(),
-                param_type: 10,
-                value: 50.25,
-                default_value: 5.0,
-                color: None,
-                default_color: None,
-                minimum: 0.0,
-                maximum: 100.0,
-                precision: 2,
-            },
-            GuiParameter {
-                slot: 2,
-                name: "Legacy".into(),
-                param_type: 4,
-                value: 1.0,
-                default_value: 0.0,
-                color: None,
-                default_color: None,
-                minimum: 0.0,
-                maximum: 1.0,
-                precision: 0,
-            },
-        ];
+        let mut amount = fixture_parameter(1, "float", 50.25);
+        amount.name = "Amount".into();
+        amount.maximum = 100.0;
+        let mut legacy = fixture_parameter(2, "integer", 1.0);
+        legacy.name = "Legacy".into();
+        legacy.maximum = 1.0;
+        let parameters = [amount, legacy];
         assert_eq!(
             parameter_payload(&parameters).unwrap(),
             "v2|param_1@1:f64=50.25;param_2@2:i32=1"
@@ -3057,18 +3257,10 @@ mod tests {
 
     #[test]
     fn resident_parameter_payload_encodes_slot_qualified_argb8() {
-        let parameters = [GuiParameter {
-            slot: 2,
-            name: "Color".into(),
-            param_type: 5,
-            value: 0.0,
-            default_value: 0.0,
-            color: Some([255, 64, 128, 192]),
-            default_color: Some([255, 0, 0, 0]),
-            minimum: 0.0,
-            maximum: 255.0,
-            precision: 0,
-        }];
+        let mut color = fixture_parameter(2, "color", 0.0);
+        color.name = "Color".into();
+        color.color = [255, 64, 128, 192];
+        let parameters = [color];
         assert_eq!(
             parameter_payload(&parameters).unwrap(),
             "v2|param_2@2:argb8=255,64,128,192"
@@ -3076,48 +3268,115 @@ mod tests {
     }
 
     #[test]
-    fn translucent_color_editor_transport_preserves_unmultiplied_rgb() {
-        let argb = [64, 200, 100, 50];
-        assert_eq!(rgba8_to_argb8(argb8_to_rgba8(argb)), argb);
-    }
-
-    #[test]
-    fn argb8_setup_fields_are_exact_and_bounded() {
-        let parameter = json!({
-            "current_color": [255, 64, 128, 192],
-            "default_color": [255, 0, 0, 0]
-        });
-        assert_eq!(
-            parse_argb8_parameter(&parameter, "current_color", "Color").unwrap(),
-            [255, 64, 128, 192]
-        );
-        assert!(
-            parse_argb8_parameter(
-                &json!({"current_color": [256, 0, 0, 0]}),
-                "current_color",
-                "Color"
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn setup_discovery_exposes_color_parameter_to_gui() {
-        let parameters = gui_parameters_from_setup(&json!({
-            "parameters": [{
-                "slot": 2,
-                "param_type": 5,
-                "name": "Color",
-                "current_color": [255, 64, 128, 192],
-                "default_color": [255, 0, 0, 0]
-            }]
-        }))
-        .unwrap();
+        let (parameters, defaults) =
+            crate::shared_descriptor::parameters_from_guest_setup(&json!({
+                "parameters": [{
+                    "slot": 2,
+                    "param_type": 5,
+                    "name": "Color",
+                    "current_color": [255, 64, 128, 192],
+                    "default_color": [255, 0, 0, 0]
+                }]
+            }))
+            .unwrap();
         assert_eq!(parameters.len(), 1);
         assert_eq!(parameters[0].slot, 2);
-        assert_eq!(parameters[0].param_type, 5);
-        assert_eq!(parameters[0].color, Some([255, 64, 128, 192]));
-        assert_eq!(parameters[0].default_color, Some([255, 0, 0, 0]));
+        assert_eq!(parameters[0].kind, "color");
+        assert_eq!(parameters[0].color, [255, 64, 128, 192]);
+        assert_eq!(defaults[0].color, [255, 0, 0, 0]);
+    }
+
+    #[test]
+    fn setup_discovery_preserves_complete_effect_control_descriptors() {
+        let descriptor = |slot: u32, param_type: i64, name: &str| {
+            json!({
+                "slot": slot,
+                "param_type": param_type,
+                "name": name,
+                "ui_flags": if name == "hidden" { 1 << 9 } else { 0 },
+                "flags": if name == "button" { 1 << 6 } else { 0 },
+                "valid_min": 0.0,
+                "valid_max": 100.0,
+                "slider_min": 0.0,
+                "slider_max": 100.0,
+                "default_value": 1.0,
+                "current_value": 2.0,
+                "choices": if param_type == 7 { "One|Two" } else { "" },
+                "default_components": if param_type == 3 { json!([10.0]) } else if param_type == 6 { json!([10.0, 20.0]) } else if param_type == 18 { json!([10.0, 20.0, 30.0]) } else { Value::Null },
+                "current_components": if param_type == 3 { json!([11.0]) } else if param_type == 6 { json!([11.0, 21.0]) } else if param_type == 18 { json!([11.0, 21.0, 31.0]) } else { Value::Null },
+                "arbitrary_summary": if param_type == 11 { "bounded summary" } else { "" }
+            })
+        };
+        let types = [
+            (0, "layer"),
+            (1, "integer"),
+            (2, "float"),
+            (3, "angle"),
+            (4, "integer"),
+            (6, "point"),
+            (7, "integer"),
+            (8, "custom"),
+            (9, "no_data"),
+            (10, "float"),
+            (11, "arbitrary_data"),
+            (12, "path"),
+            (13, "group_start"),
+            (14, "group_end"),
+            (15, "button"),
+            (18, "point3d"),
+        ];
+        let rows = types
+            .iter()
+            .enumerate()
+            .map(|(index, (param_type, _))| {
+                descriptor(
+                    index as u32 + 1,
+                    *param_type,
+                    if index == 1 {
+                        "hidden"
+                    } else if *param_type == 15 {
+                        "button"
+                    } else {
+                        "p"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let (current, defaults) =
+            crate::shared_descriptor::parameters_from_guest_setup(&json!({"parameters": rows}))
+                .unwrap();
+
+        assert_eq!(
+            current
+                .iter()
+                .map(|parameter| parameter.kind.as_str())
+                .collect::<Vec<_>>(),
+            types.iter().map(|(_, kind)| *kind).collect::<Vec<_>>()
+        );
+        assert!(!current[1].visible);
+        let button = current
+            .iter()
+            .find(|parameter| parameter.kind == "button")
+            .unwrap();
+        assert!(button.supervised);
+        let popup = current
+            .iter()
+            .find(|parameter| parameter.slot == 7)
+            .unwrap();
+        assert_eq!(popup.choices, ["One", "Two"]);
+        let point3d = current.last().unwrap();
+        assert_eq!(point3d.components, [11.0, 21.0, 31.0]);
+        assert_eq!(defaults.last().unwrap().components, [10.0, 20.0, 30.0]);
+        assert_eq!(
+            current
+                .iter()
+                .find(|parameter| parameter.kind == "arbitrary_data")
+                .unwrap()
+                .debug_summary
+                .as_deref(),
+            Some("bounded summary")
+        );
     }
 
     #[test]
@@ -3276,11 +3535,13 @@ mod tests {
         let join = thread::spawn(move || match command_receiver.recv().unwrap() {
             ResidentCommand::Close(reply) => reply.send(Ok(())).unwrap(),
             ResidentCommand::Render { .. } => panic!("unexpected render"),
+            ResidentCommand::UserChanged { .. } => panic!("unexpected user change"),
         });
         let mut session = ResidentSessionHandle {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
             format: MacRenderFormat::PngArgb8,
+            layers: Vec::new(),
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
@@ -3293,6 +3554,72 @@ mod tests {
             .shutdown_with_deadline(Duration::from_millis(100))
             .unwrap();
         assert!(session.join.is_none());
+    }
+
+    #[test]
+    fn user_changed_response_is_exact_and_dynamic_state_is_atomic() {
+        let response = json!({
+            "v": 1,
+            "type": "user_changed_done",
+            "worker_pid": 42,
+            "status": "ok",
+            "report": {
+                "slot": 2,
+                "selector_error": 0,
+                "parameters": [
+                    {"slot": 1, "ui_flags": 1 << 5, "flags": 0},
+                    {"slot": 2, "ui_flags": 1 << 9, "flags": 1 << 6}
+                ]
+            }
+        });
+        let updates = validate_user_changed(&response, 42, 2).unwrap();
+        let mut app = MacHarnessApp::new(PathBuf::new());
+        app.parameters = vec![
+            fixture_parameter(1, "integer", 1.0),
+            fixture_parameter(2, "button", 0.0),
+        ];
+        app.apply_dynamic_parameter_ui(updates).unwrap();
+        assert!(!app.parameters[0].enabled);
+        assert!(app.parameters[0].visible);
+        assert!(app.parameters[1].enabled);
+        assert!(!app.parameters[1].visible);
+        assert!(app.parameters[1].supervised);
+
+        let before = app
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.enabled, parameter.visible, parameter.supervised))
+            .collect::<Vec<_>>();
+        let partial = vec![DynamicParameterUi {
+            slot: 1,
+            ui_flags: 0,
+            flags: 0,
+        }];
+        assert!(app.apply_dynamic_parameter_ui(partial).is_err());
+        assert_eq!(
+            app.parameters
+                .iter()
+                .map(|parameter| (parameter.enabled, parameter.visible, parameter.supervised))
+                .collect::<Vec<_>>(),
+            before
+        );
+
+        let mut extra = response.clone();
+        extra["unexpected"] = json!(true);
+        assert!(validate_user_changed(&extra, 42, 2).is_err());
+        assert!(validate_user_changed(&response, 41, 2).is_err());
+        assert!(validate_user_changed(&response, 42, 3).is_err());
+    }
+
+    #[test]
+    fn failed_first_admission_discards_the_queued_supervised_change() {
+        let mut app = MacHarnessApp::new(std::env::temp_dir());
+        app.pending_user_changed = Some(3);
+        app.record_resident_admission_failure("admission failed".into());
+
+        assert_eq!(app.pending_user_changed, None);
+        assert!(matches!(app.resident, ResidentState::Failed));
+        assert_eq!(app.report, "admission failed");
     }
 
     #[test]
@@ -3316,6 +3643,9 @@ mod tests {
                     result_sender.send(result.map(|_| unreachable!())).unwrap();
                 }
                 ResidentCommand::Close(_) => panic!("render must be queued first"),
+                ResidentCommand::UserChanged { .. } => {
+                    panic!("user change must not replace render")
+                }
             }
             match command_receiver.recv().unwrap() {
                 ResidentCommand::Close(reply) => {
@@ -3323,12 +3653,16 @@ mod tests {
                     reply.send(Ok(())).unwrap();
                 }
                 ResidentCommand::Render { .. } => panic!("close must follow render"),
+                ResidentCommand::UserChanged { .. } => {
+                    panic!("user change must not replace close")
+                }
             }
         });
         let mut session = ResidentSessionHandle {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
             format: MacRenderFormat::PngArgb8,
+            layers: Vec::new(),
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
@@ -3375,6 +3709,7 @@ mod tests {
             plugin_path: PathBuf::new(),
             input: PathBuf::new(),
             format: MacRenderFormat::PngArgb8,
+            layers: Vec::new(),
             sender: command_sender,
             receiver: result_receiver,
             next_frame: 0,
@@ -3459,19 +3794,14 @@ mod tests {
             &input,
             &output_directory,
             MacRenderFormat::PngArgb8,
+            Vec::new(),
         )
         .unwrap();
-        let parameter = |value| GuiParameter {
-            slot: 5,
-            name: "Amount".into(),
-            param_type: 1,
-            value,
-            default_value: 0.0,
-            color: None,
-            default_color: None,
-            minimum: 0.0,
-            maximum: 4000.0,
-            precision: 0,
+        let parameter = |value| {
+            let mut parameter = fixture_parameter(5, "integer", value);
+            parameter.name = "Amount".into();
+            parameter.maximum = 4000.0;
+            parameter
         };
         let mut reports = Vec::new();
         let mut outputs = Vec::new();
@@ -3519,6 +3849,7 @@ mod tests {
             &input,
             &output_directory,
             MacRenderFormat::ExrArgb32f,
+            Vec::new(),
         )
         .unwrap();
         let artifact = output_directory.join("frame-0.exr-artifact");
