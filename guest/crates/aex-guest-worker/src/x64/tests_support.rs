@@ -4576,9 +4576,7 @@ fn environment_strings_w_is_kernel32_scoped_sorted_writable_and_double_nul_termi
     }
 
     engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
-    let pointer = engine
-        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
-        .unwrap();
+    let pointer = engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
     assert_ne!(pointer, 0);
     let expected = "OPENCV_FOR_THREADS_NUM=1\0\0"
         .encode_utf16()
@@ -4629,12 +4627,8 @@ fn environment_strings_w_allocations_are_independent_owned_and_reject_invalid_fr
     )
     .unwrap();
 
-    let first = engine
-        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
-        .unwrap();
-    let second = engine
-        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
-        .unwrap();
+    let first = engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
+    let second = engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
     assert_ne!(first, second);
     engine.unicorn.mem_write(first, &[b'X', 0]).unwrap();
     assert_eq!(
@@ -4688,12 +4682,8 @@ fn environment_strings_w_ownership_does_not_cross_guest_sessions() {
     ] {
         install_win64_import(&mut second.unicorn, stub, "kernel32.dll", symbol).unwrap();
     }
-    let stale = first
-        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
-        .unwrap();
-    let live = second
-        .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
-        .unwrap();
+    let stale = first.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
+    let live = second.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
     assert_ne!(stale, live, "sessions must not reuse environment tokens");
     assert_eq!(
         second
@@ -4743,9 +4733,7 @@ fn environment_strings_w_respects_shared_guest_allocation_budget() {
     .unwrap();
     engine.unicorn.get_data_mut().windows_last_error = 0;
     assert_eq!(
-        engine
-            .call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0])
-            .unwrap(),
+        engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap(),
         0
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 8);

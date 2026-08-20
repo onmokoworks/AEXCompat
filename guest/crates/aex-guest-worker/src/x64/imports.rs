@@ -1860,11 +1860,9 @@ fn deterministic_guest_environment_block_w() -> Vec<u8> {
 fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), String> {
     if state.environment_strings_base == 0 {
         let namespace = NEXT_ENVIRONMENT_STRINGS_NAMESPACE
-            .fetch_update(
-                AtomicOrdering::Relaxed,
-                AtomicOrdering::Relaxed,
-                |value| value.checked_add(1),
-            )
+            .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |value| {
+                value.checked_add(1)
+            })
             .map_err(|_| "GetEnvironmentStringsW namespace exhausted".to_string())?;
         let offset = namespace
             .checked_mul(ENVIRONMENT_STRINGS_NAMESPACE_SIZE)
@@ -1901,7 +1899,9 @@ fn emulate_get_environment_strings_w(unicorn: &mut Unicorn<'_, GuestState>) {
             .map_err(|error| format!("GetEnvironmentStringsW map failed: {error}"))?;
         if let Err(error) = unicorn.mem_write(pointer, &block) {
             let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
-            return Err(format!("GetEnvironmentStringsW block write failed: {error}"));
+            return Err(format!(
+                "GetEnvironmentStringsW block write failed: {error}"
+            ));
         }
         if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
             let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
