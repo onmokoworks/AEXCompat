@@ -1057,6 +1057,7 @@ mod tests {
             advertised_num_params: 0,
             out_flags: u32::MAX,
             out_flags2: u32::MAX,
+            custom_ui: None,
             parameters: Vec::new(),
             suite_requests: vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
             unsupported_suite_calls: calls.clone(),
@@ -1112,6 +1113,7 @@ mod tests {
             advertised_num_params: 2,
             out_flags: 0,
             out_flags2: 0,
+            custom_ui: None,
             parameters: vec![crate::classic::ParameterReport {
                 slot: 1,
                 index: 1,
@@ -1147,6 +1149,7 @@ mod tests {
             advertised_num_params: 2,
             out_flags: 0,
             out_flags2: 0,
+            custom_ui: None,
             parameters: vec![crate::classic::ParameterReport {
                 slot: 1,
                 index: 1,
@@ -1185,6 +1188,7 @@ mod tests {
             advertised_num_params: 2,
             out_flags: 0,
             out_flags2: 0,
+            custom_ui: None,
             parameters: vec![crate::classic::ParameterReport {
                 slot: 2,
                 index: 2,
@@ -1236,6 +1240,7 @@ mod tests {
             advertised_num_params: 3,
             out_flags: 0,
             out_flags2: 0,
+            custom_ui: None,
             parameters: vec![
                 parameter(1, PARAM_ANGLE, "Angle"),
                 parameter(2, PARAM_POINT3D, "Position"),

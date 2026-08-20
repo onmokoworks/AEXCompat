@@ -56,6 +56,7 @@ fn record_named_unsupported_suite_call(
 #[derive(Default)]
 struct GuestState {
     params: Vec<GuestParam>,
+    custom_ui_registration: Option<CustomUiRegistration>,
     callback_error: Option<String>,
     unsupported_import: Option<(String, String)>,
     smart_input_world: u64,
@@ -147,6 +148,20 @@ struct GuestState {
     avx_state_sync_points: HashMap<u64, AvxStateSync>,
     gpu_runtime: GpuRuntime,
     gpu_suite: GpuSuiteState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct CustomUiRegistration {
+    pub events: u32,
+    pub comp_width: i32,
+    pub comp_height: i32,
+    pub comp_alignment: i32,
+    pub layer_width: i32,
+    pub layer_height: i32,
+    pub layer_alignment: i32,
+    pub preview_width: i32,
+    pub preview_height: i32,
+    pub preview_alignment: i32,
 }
 
 #[derive(Clone, Debug)]

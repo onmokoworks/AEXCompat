@@ -122,6 +122,7 @@ const HOST_AEGP_COMPUTE_CACHE_CALLBACKS: [u64; 6] = [
     STUB_BASE + 0x80560,
 ];
 const HOST_DYNAMIC_FLS_ALLOC: u64 = STUB_BASE + 0x80570;
+const HOST_REGISTER_UI: u64 = STUB_BASE + 0x80590;
 const HOST_CREATE_THREAD_CONTINUE: u64 = STUB_BASE + 0x80580;
 const WINDOWS_KERNEL32_MODULE_TOKEN: u64 = STUB_BASE + 0x8f000;
 const WINDOWS_NTDLL_MODULE_TOKEN: u64 = STUB_BASE + 0x8f180;
@@ -438,6 +439,7 @@ mod tests {
     include!("x64/tests_area_sample.rs");
     include!("x64/tests_ansi_callbacks.rs");
     include!("x64/tests_transfer_rect.rs");
+    include!("x64/tests_register_ui.rs");
     include!("x64/tests_cases.rs");
     include!("x64/tests_issue1077.rs");
     include!("x64/tests_gpu.rs");

@@ -375,6 +375,7 @@ impl GuestEngine<'static> {
             ("write Iterate8 continuation", HOST_ITERATE8_CONTINUE),
             ("write color-param callback", HOST_COLOR_PARAM_VALUE),
             ("write point-param callback", HOST_POINT_PARAM_VALUE),
+            ("write register-ui callback", HOST_REGISTER_UI),
             ("write extended allocation callback", HOST_EXTENDED_ALLOC),
             ("write extended free callback", HOST_EXTENDED_FREE),
             ("write extended lookup callback", HOST_EXTENDED_LOOKUP),
@@ -407,6 +408,10 @@ impl GuestEngine<'static> {
             unicorn.add_code_hook(HOST_ADD_PARAM, HOST_ADD_PARAM, |unicorn, _, _| {
                 capture_add_param(unicorn);
             }),
+        )?;
+        uc(
+            "install register-ui callback",
+            unicorn.add_code_hook(HOST_REGISTER_UI, HOST_REGISTER_UI, emulate_register_ui),
         )?;
         uc(
             "install ANSI strcpy callback",
@@ -789,6 +794,7 @@ impl GuestEngine<'static> {
         install_aegp_utility_suites(&mut unicorn)?;
         for (address, name) in [
             (HOST_ADD_PARAM, "add_param"),
+            (HOST_REGISTER_UI, "register_ui"),
             (HOST_POISON, "unsupported_callback"),
             (HOST_ANSI_STRCPY, "ansi_strcpy"),
             (HOST_COPY, "copy"),
@@ -2253,6 +2259,14 @@ impl GuestEngine<'static> {
 
     pub fn add_param_callback_address(&self) -> u64 {
         HOST_ADD_PARAM
+    }
+
+    pub fn register_ui_callback_address(&self) -> u64 {
+        HOST_REGISTER_UI
+    }
+
+    pub fn custom_ui_registration(&self) -> Option<CustomUiRegistration> {
+        self.unicorn.get_data().custom_ui_registration
     }
 
     pub fn poison_callback_address(&self) -> u64 {

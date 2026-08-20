@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::backend::{
-    ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue, TraceWatchSpec,
-    UnsupportedSuiteCall,
+    CustomUiRegistration, ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue,
+    TraceWatchSpec, UnsupportedSuiteCall,
 };
 use crate::gpu_lifecycle::{
     GpuRenderDiagnostic, GpuRuntimeBackendKind, LifecycleCall, LifecycleFailure, LifecycleReply,
@@ -138,6 +138,8 @@ pub struct SetupReport {
     pub advertised_num_params: i32,
     pub out_flags: u32,
     pub out_flags2: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_ui: Option<CustomUiRegistration>,
     pub parameters: Vec<ParameterReport>,
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
@@ -416,7 +418,85 @@ struct ResidentLayerResources {
     pixels: u64,
 }
 
+pub(crate) fn build_interact_callbacks(
+    engine: &GuestEngine<'static>,
+) -> [u8; abi::PF_INTERACT_CALLBACKS_SIZE] {
+    let mut callbacks = [0u8; abi::PF_INTERACT_CALLBACKS_SIZE];
+    for offset in abi::INPUT_CALLBACK_OFFSETS {
+        write_u64(&mut callbacks, offset, engine.poison_callback_address());
+    }
+    for (offset, callback) in [
+        (
+            abi::INTER_ADD_PARAM_OFFSET,
+            engine.add_param_callback_address(),
+        ),
+        (
+            abi::INTER_REGISTER_UI_OFFSET,
+            engine.register_ui_callback_address(),
+        ),
+        (
+            abi::INTER_CHECKOUT_PARAM_OFFSET,
+            engine.checkout_param_callback_address(),
+        ),
+        (
+            abi::INTER_CHECKIN_PARAM_OFFSET,
+            engine.checkin_param_callback_address(),
+        ),
+        (abi::INTER_ABORT_OFFSET, engine.noop_callback_address()),
+        (abi::INTER_PROGRESS_OFFSET, engine.noop_callback_address()),
+        (
+            abi::INTER_RESERVED_0_OFFSET,
+            engine.extended_alloc_callback_address(),
+        ),
+        (
+            abi::INTER_RESERVED_1_OFFSET,
+            engine.extended_lookup_callback_address(),
+        ),
+        (
+            abi::INTER_RESERVED_2_OFFSET,
+            engine.extended_free_callback_address(),
+        ),
+    ] {
+        write_u64(&mut callbacks, offset, callback);
+    }
+    callbacks
+}
+
 impl ClassicHost {
+    #[cfg(test)]
+    pub(crate) fn from_test_engine(
+        mut engine: GuestEngine<'static>,
+        entry: u64,
+    ) -> Result<Self, ClassicError> {
+        let input = engine.allocate(abi::PF_IN_DATA_SIZE, 8)?;
+        let output = engine.allocate(abi::PF_OUT_DATA_SIZE, 8)?;
+        let mut input_bytes = vec![0u8; abi::PF_IN_DATA_SIZE];
+        input_bytes[..abi::PF_INTERACT_CALLBACKS_SIZE]
+            .copy_from_slice(&build_interact_callbacks(&engine));
+        write_u64(&mut input_bytes, abi::IN_EFFECT_REF_OFFSET, 1);
+        write_i32(&mut input_bytes, abi::IN_QUALITY_OFFSET, 1);
+        write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET, 13);
+        write_i16(&mut input_bytes, abi::IN_VERSION_OFFSET + 2, 29);
+        write_u32(&mut input_bytes, abi::IN_APPL_ID_OFFSET, 0x4658_5443);
+        write_i32(&mut input_bytes, abi::IN_NUM_PARAMS_OFFSET, 1);
+        engine.write(input, &input_bytes)?;
+        engine.write(output, &vec![0u8; abi::PF_OUT_DATA_SIZE])?;
+        Ok(Self {
+            engine,
+            entry,
+            input,
+            output,
+            trace_output_pixel: None,
+            setup_report: None,
+            global_active: false,
+            sequence_active: false,
+            frame_resources: None,
+            resident_frames: 0,
+            resident_frame_setdown_error: 0,
+            last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
+        })
+    }
+
     pub fn new(image: &PeImage) -> Result<Self, ClassicError> {
         Self::new_with_effect(image, None)
     }
@@ -432,49 +512,8 @@ impl ClassicHost {
         let pica_basic = engine.allocate(64, 8)?;
 
         let mut input_bytes = vec![0u8; abi::PF_IN_DATA_SIZE];
-        for offset in abi::INPUT_CALLBACK_OFFSETS {
-            write_u64(&mut input_bytes, offset, engine.poison_callback_address());
-        }
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_ADD_PARAM_OFFSET,
-            engine.add_param_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_CHECKOUT_PARAM_OFFSET,
-            engine.checkout_param_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_CHECKIN_PARAM_OFFSET,
-            engine.checkin_param_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_ABORT_OFFSET,
-            engine.noop_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_PROGRESS_OFFSET,
-            engine.noop_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_RESERVED_0_OFFSET,
-            engine.extended_alloc_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_RESERVED_1_OFFSET,
-            engine.extended_lookup_callback_address(),
-        );
-        write_u64(
-            &mut input_bytes,
-            abi::INTER_RESERVED_2_OFFSET,
-            engine.extended_free_callback_address(),
-        );
+        input_bytes[..abi::PF_INTERACT_CALLBACKS_SIZE]
+            .copy_from_slice(&build_interact_callbacks(&engine));
         write_u64(&mut input_bytes, abi::IN_UTILS_OFFSET, utils);
         write_u64(&mut input_bytes, abi::IN_PICA_BASICP_OFFSET, pica_basic);
         write_u64(&mut input_bytes, abi::IN_EFFECT_REF_OFFSET, 1);
@@ -590,6 +629,7 @@ impl ClassicHost {
             advertised_num_params,
             out_flags,
             out_flags2,
+            custom_ui: self.engine.custom_ui_registration(),
             parameters,
             suite_requests: self.engine.suite_requests().to_vec(),
             unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),

@@ -38,6 +38,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     unicorn.mem_write(RETURN_ADDRESS, &[0xcc]).unwrap();
     for address in [
         HOST_ACQUIRE_SUITE,
+        HOST_REGISTER_UI,
         HOST_NEW_HANDLE,
         HOST_LOCK_HANDLE,
         HOST_UNLOCK_HANDLE,
@@ -239,6 +240,9 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
             HOST_COLOR_PARAM_VALUE,
             emulate_color_param_value,
         )
+        .unwrap();
+    unicorn
+        .add_code_hook(HOST_REGISTER_UI, HOST_REGISTER_UI, emulate_register_ui)
         .unwrap();
     unicorn.get_data_mut().next_pf_handle_data = PF_HANDLE_DATA_BASE;
     unicorn
