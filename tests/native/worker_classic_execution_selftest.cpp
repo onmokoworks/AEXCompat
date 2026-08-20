@@ -8,16 +8,18 @@
 // three hooks, and the split is deliberate:
 //
 //   draw, dispatch_selector  - skipped, both guarded by `error == 0`
-//   close_ui                 - NOT skipped, called unconditionally so a custom
-//                              UI context opened earlier still gets closed.
-//                              That it is also unbracketed by any stage marker
-//                              is issue #735.
+//   close_ui                 - NOT skipped while a custom UI context is active,
+//                              so a context opened earlier still gets closed.
+//                              Its stage reports failure only when that failure
+//                              becomes the frame error (issue #735).
 //
 // prepare_output sits between them and is host-side only.
 
 #include "worker_classic_execution.hpp"
 
 #include <cstdio>
+#include <string>
+#include <vector>
 
 using namespace aexcompat::worker_runtime::classic_execution;
 
@@ -46,8 +48,12 @@ struct Host {
   int close_ui_calls{};
   int end_calls{};
   int32_t end_saw_error{-999};
+  std::vector<std::string> stage_events;
 
   bool click_result{true};
+  bool draw_enabled{true};
+  bool draw_result{true};
+  bool ui_context_active{true};
   bool close_ui_result{true};
   int32_t prepare_output_result{};
   int32_t selector_result{};
@@ -78,12 +84,22 @@ const LifecycleHooks& lifecycle_hooks() {
 
 const RenderHooks& render_hooks() {
   static const RenderHooks value{
-      +[](void* opaque) { ++host_of(opaque).draw_calls; return true; },
+      +[](void* opaque, const char* stage) {
+        host_of(opaque).stage_events.push_back(std::string(stage) + ":begin"); },
+      +[](void* opaque, const char* stage, int32_t error) {
+        host_of(opaque).stage_events.push_back(
+            std::string(stage) + ":end:" + std::to_string(error)); },
+      +[](void* opaque) { return host_of(opaque).draw_enabled; },
+      +[](void* opaque) { auto& h = host_of(opaque);
+        h.stage_events.push_back("draw:call");
+        ++h.draw_calls; return h.draw_result; },
       +[](void* opaque) { auto& h = host_of(opaque);
         ++h.prepare_output_calls; return h.prepare_output_result; },
       +[](void* opaque) { auto& h = host_of(opaque);
         ++h.selector_calls; return h.selector_result; },
+      +[](void* opaque) { return host_of(opaque).ui_context_active; },
       +[](void* opaque) { auto& h = host_of(opaque);
+        h.stage_events.push_back("close_ui:call");
         ++h.close_ui_calls; return h.close_ui_result; }};
   return value;
 }
@@ -167,8 +183,8 @@ void a_null_lifecycle_still_fails_closed() {
 }
 
 // dispatch_render enters the plug-in three times, and only two of them are
-// guarded by the incoming error. close_ui runs regardless - issue #735 tracks
-// that it is also unattributed - so pin the split rather than assuming it.
+// guarded by the incoming error. close_ui still runs for an active context, so
+// pin the split rather than assuming it.
 void a_nonzero_incoming_error_skips_everything_but_the_ui_close() {
   Host host;
   const int32_t error = dispatch_render(&host, 512, render_hooks());
@@ -197,6 +213,39 @@ void a_clean_dispatch_reaches_the_selector() {
   check(host.draw_calls == 1 && host.prepare_output_calls == 1 &&
             host.selector_calls == 1 && host.close_ui_calls == 1,
         "a clean dispatch runs every step once");
+  check(host.stage_events == std::vector<std::string>{
+            "classic_ui_draw:begin", "draw:call", "classic_ui_draw:end:0",
+            "classic_ui_teardown:begin", "close_ui:call",
+            "classic_ui_teardown:end:0"},
+        "a clean dispatch brackets both UI steps");
+}
+
+void inactive_ui_does_not_emit_stages_or_call_ui_hooks() {
+  Host host;
+  host.draw_enabled = false;
+  host.ui_context_active = false;
+  const int32_t error = dispatch_render(&host, 0, render_hooks());
+  check(error == 0, "an inactive UI does not change the frame result");
+  check(host.draw_calls == 0 && host.close_ui_calls == 0,
+        "inactive UI hooks do not run");
+  check(host.stage_events.empty(), "inactive UI emits no stage noise");
+  check(host.prepare_output_calls == 1 && host.selector_calls == 1,
+        "an inactive UI still reaches RENDER");
+}
+
+void a_failing_draw_is_attributed_before_the_dispatch_short_circuits() {
+  Host host;
+  host.draw_result = false;
+  const int32_t error = dispatch_render(&host, 0, render_hooks());
+  check(error == -5, "a failing draw is the frame error");
+  check(host.prepare_output_calls == 0 && host.selector_calls == 0,
+        "a failing draw short-circuits output and selector dispatch");
+  check(host.close_ui_calls == 1, "close_ui still runs after a failing draw");
+  check(host.stage_events == std::vector<std::string>{
+            "classic_ui_draw:begin", "draw:call", "classic_ui_draw:end:-5",
+            "classic_ui_teardown:begin", "close_ui:call",
+            "classic_ui_teardown:end:0"},
+        "only the draw stage carries the frame error");
 }
 
 // close_ui runs after a failing selector too, and it only becomes the frame's
@@ -211,18 +260,26 @@ void a_failing_close_ui_never_overwrites_an_existing_error() {
   check(kept == 512, "the selector's error survives a failing close_ui");
   check(selector_failed.selector_calls == 1, "the selector ran");
   check(selector_failed.close_ui_calls == 1, "close_ui ran after a failing selector");
+  check(selector_failed.stage_events.back() == "classic_ui_teardown:end:0",
+        "a suppressed close failure is not reported as a stage failure");
 
   // With nothing else wrong, the same teardown failure does become the error.
   Host only_close_failed;
   only_close_failed.close_ui_result = false;
   const int32_t surfaced = dispatch_render(&only_close_failed, 0, render_hooks());
   check(surfaced == -5, "a failing close_ui is -5 on an otherwise clean frame");
+  check(only_close_failed.stage_events.back() == "classic_ui_teardown:end:-5",
+        "a close failure that becomes the frame error is attributed");
 
   // And on a frame short-circuited before the selector, the drop applies too.
   Host short_circuited;
   short_circuited.close_ui_result = false;
   const int32_t incoming = dispatch_render(&short_circuited, 4, render_hooks());
   check(incoming == 4, "the incoming error survives a failing close_ui");
+  check(short_circuited.stage_events == std::vector<std::string>{
+            "classic_ui_teardown:begin", "close_ui:call",
+            "classic_ui_teardown:end:0"},
+        "an incoming error stays the only failure attribution");
 }
 
 }  // namespace
@@ -236,6 +293,8 @@ int main() {
   a_nonzero_incoming_error_skips_everything_but_the_ui_close();
   a_refused_output_stops_before_the_selector();
   a_clean_dispatch_reaches_the_selector();
+  inactive_ui_does_not_emit_stages_or_call_ui_hooks();
+  a_failing_draw_is_attributed_before_the_dispatch_short_circuits();
   a_failing_close_ui_never_overwrites_an_existing_error();
   if (failures == 0) std::printf("{\"classic_execution_selftest\":\"passed\"}\n");
   return failures == 0 ? 0 : 1;
