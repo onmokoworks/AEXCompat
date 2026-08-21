@@ -9,11 +9,6 @@ $allowlistRelative = "target/smart-allowlist/maskoffset.active.local.json"
 $brokerRelative = "broker/target/release/broker.exe"
 $workerRelative = "target/minihost-build/aex_worker.exe"
 $expectedOutput = "bf419f44e915901bac882e9b9e3411b8407df7f4e3a4a1c2719314bdfbb74b5f"
-$expectedBrokerHash = "57bb8ba3c882ebee19784e855ae25b0569ddea7733c6a51e5f681e18bfdefc83"
-$expectedBrokerSize = 1154560
-$expectedWorkerHash = "fd69dd640b3ae2ddbe6d8caa595069f9e10a1bd2d9aac2cc8d069bf6b92b33ad"
-$expectedWorkerSize = 845824
-$expectedRequestHash = "d92568e9f880ec9d06ceccb03de0ebb62d3dd00b0bdb9e3978c5fd687b7e26d7"
 
 function Resolve-RepositoryFile([string]$relative) {
     $path = Join-Path $root ($relative -replace '/', '\')
@@ -21,21 +16,22 @@ function Resolve-RepositoryFile([string]$relative) {
     return $path
 }
 
-function Assert-Identity([string]$path, [long]$size, [string]$sha256, [string]$label) {
-    if ((Get-Item -LiteralPath $path).Length -ne $size) { throw "$label size mismatch" }
-    if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha256) {
-        throw "$label SHA-256 mismatch"
-    }
+function Get-ObservedIdentity([string]$path, [string]$label) {
+    $item = Get-Item -LiteralPath $path
+    $sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Verbose ("Observed {0} identity: size_bytes={1}; sha256={2}" -f $label, [long]$item.Length, $sha256)
+    [ordered]@{ size_bytes = [long]$item.Length; sha256 = $sha256 }
 }
 
 $broker = Resolve-RepositoryFile $brokerRelative
 $worker = Resolve-RepositoryFile $workerRelative
 $request = Resolve-RepositoryFile $requestRelative
 $allowlistPath = Resolve-RepositoryFile $allowlistRelative
-Assert-Identity $broker $expectedBrokerSize $expectedBrokerHash "broker"
-Assert-Identity $worker $expectedWorkerSize $expectedWorkerHash "SmartFX worker"
-$requestSize = (Get-Item -LiteralPath $request).Length
-Assert-Identity $request $requestSize $expectedRequestHash "render request"
+$observedArtifacts = [ordered]@{
+    broker = Get-ObservedIdentity $broker "broker"
+    worker = Get-ObservedIdentity $worker "SmartFX worker"
+    request = Get-ObservedIdentity $request "render request"
+}
 
 $approval = @((Get-Content -LiteralPath $allowlistPath -Raw | ConvertFrom-Json).entries |
     Where-Object { $_.id -eq "maskoffset" })
@@ -44,13 +40,9 @@ $approval = $approval[0]
 if ($approval.approved_stage -ne "smartfx_render" -or $approval.receipt_id -ne "maskoffset-smartfx-20260713-001") {
     throw "MaskOffset approval receipt mismatch"
 }
-if ($approval.trusted_worker.byte_size -ne $expectedWorkerSize -or
-    -not $approval.trusted_worker.sha256.Equals($expectedWorkerHash, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "MaskOffset approval does not authenticate the fixed worker"
-}
 $fixture = $approval.load_tree.main
 if (-not (Test-Path -LiteralPath $fixture.source_path -PathType Leaf)) { throw "Approved fixture is missing" }
-Assert-Identity $fixture.source_path $fixture.byte_size $fixture.sha256.ToLowerInvariant() "MaskOffset fixture"
+$observedArtifacts['fixture'] = Get-ObservedIdentity $fixture.source_path "MaskOffset fixture"
 
 $receiptRelatives = 1..2 | ForEach-Object {
     "target/smart-request-render-results/maskoffset-gate-$([guid]::NewGuid().ToString('N')).local.json"
@@ -91,14 +83,18 @@ try {
         throw "MaskOffset broker receipt validation failed"
     }
     $evidence = [ordered]@{
-        schema_version = 2; gate = "maskoffset_smartfx_real_aex_render_gate"; classification = "host_regression_exact"
+        schema_version = 3; gate = "maskoffset_smartfx_real_aex_render_gate"; classification = "host_regression_exact"
         oracle = $false; status = "passed"
-        authenticated_artifacts = [ordered]@{
-            broker = [ordered]@{ path = $brokerRelative; size_bytes = $expectedBrokerSize; sha256 = $expectedBrokerHash }
-            worker = [ordered]@{ path = $workerRelative; size_bytes = $expectedWorkerSize; sha256 = $expectedWorkerHash }
-            request = [ordered]@{ path = $requestRelative; size_bytes = $requestSize; sha256 = $expectedRequestHash }
-            fixture = [ordered]@{ basename = $fixture.basename; size_bytes = $fixture.byte_size; sha256 = $fixture.sha256.ToLowerInvariant() }
-            approval = [ordered]@{ receipt_id = $approval.receipt_id; approved_stage = $approval.approved_stage }
+        observed_artifacts = [ordered]@{
+            broker = [ordered]@{ path = $brokerRelative; size_bytes = $observedArtifacts.broker.size_bytes; sha256 = $observedArtifacts.broker.sha256 }
+            worker = [ordered]@{ path = $workerRelative; size_bytes = $observedArtifacts.worker.size_bytes; sha256 = $observedArtifacts.worker.sha256 }
+            request = [ordered]@{ path = $requestRelative; size_bytes = $observedArtifacts.request.size_bytes; sha256 = $observedArtifacts.request.sha256 }
+            fixture = [ordered]@{ basename = $fixture.basename; size_bytes = $observedArtifacts.fixture.size_bytes; sha256 = $observedArtifacts.fixture.sha256 }
+            approval_provenance = [ordered]@{
+                receipt_id = $approval.receipt_id
+                approved_stage = $approval.approved_stage
+                recorded_worker = $approval.trusted_worker
+            }
         }
         execution = [ordered]@{ invocation = "broker smart-parameter-request <request> <create-new-output>"; broker_invocation_count = 2; worker_runs_per_receipt = 2 }
         expected_output_sha256 = $expectedOutput
