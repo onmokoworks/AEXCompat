@@ -686,12 +686,10 @@ jobs:
         with:
           fetch-depth: 0
       # broker binary 自体は rust-build の artifact を使う。gate 系テストの
-      # release FFI DLL は rust-release-ffi の artifact を使う (#1537) ので、
-      # CI では gate は cargo を叩かない。rust toolchain は gate の cargo
-      # fallback (env 未設定のローカル実行経路) を壊さないよう残してあり、
-      # CI からの削除は別途検証して行う。cargo 側は RUSTC_WRAPPER で sccache
-      # に通し、pytest 内の probe ビルドと合わせて native-probes が温めた
-      # キャッシュを拾う (#1510)。
+      # release FFI DLL は rust-release-ffi の artifact を使う (#1537)。
+      # この job のテストはもう cargo を叩かない (gate 4 本が唯一の consumer
+      # だった) が、rust toolchain / rust-cache / RUSTC_WRAPPER の削除は
+      # consumer の洗い出しを別 issue で行ってからにする。
       - uses: ./.github/actions/ci-setup
         with:
           rust-workspaces: broker
