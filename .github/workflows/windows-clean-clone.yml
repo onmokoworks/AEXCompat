@@ -400,6 +400,8 @@ jobs:
             artifact: native-probes-sdk-fixtures
             artifact-path: |
               target/sdk-fixtures/**
+              target/aegp-render-options-probe-build/Release/aegp_render_options_probe.exe
+              target/aegp-render-options-probe-build/aegp-render-options-result.json
               target/.native-probe-artifact-root
     env:
       PYTHONUTF8: "1"
@@ -570,6 +572,13 @@ jobs:
         run: >-
           uv run python -m pytest -q -rs
           tests/test_sdk_grabba_fixture_build.py::test_official_sdk_grabba_builds_unchanged_and_records_hash
+          --run-sdk-tests
+
+      - name: Build and exercise AEGP Render Options lifecycle fixture
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
+        run: >-
+          uv run python -m pytest -q -rs
+          tests/test_aegp_render_options_probe.py::test_fixture_builds_and_exercises_lifecycle
           --run-sdk-tests
 
       # upload-artifact computes one common root across all listed paths. This
