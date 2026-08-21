@@ -136,6 +136,9 @@ def test_nextest_command_uses_only_the_prebuilt_archive(tmp_path, monkeypatch) -
     assert command[:3] == ["cargo", "nextest", "run"]
     assert "--archive-file" in command
     assert "--workspace-remap" in command
+    extract_to = command.index("--extract-to")
+    assert command[extract_to + 1] == str(runner.MANIFEST.parent)
+    assert "--extract-overwrite" in command
     assert "--success-output" in command
     assert "immediate" in command
     assert "test" not in command[:3]

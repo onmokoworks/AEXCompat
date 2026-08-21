@@ -129,6 +129,9 @@ def nextest_run(filterset: str, *, reject_skip: bool = False) -> None:
         str(NEXTEST_ARCHIVE),
         "--workspace-remap",
         str(MANIFEST.parent),
+        "--extract-to",
+        str(MANIFEST.parent),
+        "--extract-overwrite",
     ]
     if reject_skip:
         command.extend(["--success-output", "immediate"])
