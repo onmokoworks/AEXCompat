@@ -232,6 +232,12 @@ identityをlaunch拒否条件にしない。実際に読み込んだplug-in byte
   VS 2026 固定の既定値ではないため、VS 2022 のみの環境でもそのまま動く。
   `-Generator` 引数で明示上書きもできる
   (`tools/refresh-runtime-evidence.ps1` は実際に VS 2022 generator を渡している)。
+  環境変数 `AEXCOMPAT_CMAKE_GENERATOR` でも上書きできる (#1510)。CI はこれで
+  `Ninja Multi-Config` を指定し、`AEXCOMPAT_COMPILE_CACHE=sccache` と併せて
+  コンパイルを sccache に通している。Ninja 系 generator は `-A` を受け付けず、
+  cl / link / rc / mt を PATH から解決する (vcvars 済みの環境が要る)。この
+  generator 差分の configure 引数は `tools/resolve-cmake-configure-args.ps1`
+  が組み立て、CI の job 環境は `tools/export-msvc-dev-env.ps1` が作る。
 - CMake の最低要件は各 `CMakeLists.txt` の `cmake_minimum_required` で 3.20。
   ただし `Visual Studio 18 2026` generator を使う場合は、その generator を
   認識するより新しい CMake が必要 (bundled 4.3.1 で検証。3.24 は

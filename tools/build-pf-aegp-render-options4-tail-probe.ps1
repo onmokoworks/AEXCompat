@@ -14,9 +14,10 @@ $build = Join-Path $repository "target\pf-aegp-render-options4-tail-probe-build"
 $headers = Join-Path $AfterEffectsSdk "Examples\Headers\AE_GeneralPlug.h"
 if (-not (Test-Path -LiteralPath $headers)) { throw "After Effects SDK headers were not found: $headers" }
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
-& $CMake -S $source -B $build -G $Generator -A $Architecture
+& $CMake -S $source -B $build -G $Generator @ConfigureArgs
 if ($LASTEXITCODE -ne 0) { throw "PF AEGP Render Options4 tail probe configure failed" }
 & $CMake --build $build --config $Configuration --target pf_aegp_render_options4_tail_probe
 if ($LASTEXITCODE -ne 0) { throw "PF AEGP Render Options4 tail probe build failed" }

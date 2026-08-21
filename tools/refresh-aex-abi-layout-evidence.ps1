@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
     [string]$Generator = "",
     [string]$Architecture = "x64",
@@ -15,14 +15,19 @@ $build = Join-Path $repository "target\abi-layout-probe-build"
 $evidence = Join-Path $repository "analysis\AE_ABI_LAYOUT_OBSERVATION_2026-07-13.json"
 
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
 
-$multiConfig = $Generator.StartsWith("Visual Studio ", [System.StringComparison]::Ordinal)
+# VS 系と Ninja Multi-Config はどちらも <build>\<config>\ レイアウトの
+# multi-config generator。-A を付けるのは VS 系だけなので、判定を分ける。
+$multiConfig = $Generator.StartsWith("Visual Studio ", [System.StringComparison]::Ordinal) -or
+    $Generator -eq "Ninja Multi-Config"
 $configureArguments = @("-S", $source, "-B", $build, "-G", $Generator)
-if ($multiConfig) {
-    $configureArguments += @("-A", $Architecture)
-} else {
+if ($ConfigureArgs) {
+    $configureArguments += $ConfigureArgs
+}
+if (-not $multiConfig) {
     $configureArguments += "-DCMAKE_BUILD_TYPE=$Configuration"
 }
 & $CMake @configureArguments
