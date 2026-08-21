@@ -576,10 +576,10 @@ jobs:
 
       - name: Build and exercise AEGP Render Options lifecycle fixture
         if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
-        run: >-
-          uv run python -m pytest -q -rs
-          tests/test_aegp_render_options_probe.py::test_fixture_builds_and_exercises_lifecycle
-          --run-sdk-tests
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          uv run python -m pytest -q -rs tests/test_aegp_render_options_probe.py::test_fixture_builds_and_exercises_lifecycle --run-sdk-tests
 
       # upload-artifact computes one common root across all listed paths. This
       # zero-byte anchor keeps the original target-relative directories in each
