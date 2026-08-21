@@ -37,14 +37,20 @@ if (-not (Test-Path -LiteralPath $vsdev -PathType Leaf)) {
     throw "VsDevCmd.bat is unavailable: $vsdev"
 }
 
-$manifest = Join-Path $repoRoot "broker\Cargo.toml"
-& cargo build --manifest-path $manifest `
-    --package aexcompat-host-core-ffi --release --quiet
-if ($LASTEXITCODE -ne 0) {
-    throw "Release Rust host-core FFI build failed"
+# CI passes the producer-built DLL via AEXCOMPAT_HOST_CORE_FFI_DLL so the
+# four gate scripts do not serialize on the same target dir's cargo file
+# lock (#1537). Local runs leave it unset and build as before.
+$rustDll = $env:AEXCOMPAT_HOST_CORE_FFI_DLL
+if ([string]::IsNullOrWhiteSpace($rustDll)) {
+    $manifest = Join-Path $repoRoot "broker\Cargo.toml"
+    & cargo build --manifest-path $manifest `
+        --package aexcompat-host-core-ffi --release --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release Rust host-core FFI build failed"
+    }
+    $rustDll = Join-Path $repoRoot `
+        "broker\target\release\aexcompat_host_core_ffi.dll"
 }
-$rustDll = Join-Path $repoRoot `
-    "broker\target\release\aexcompat_host_core_ffi.dll"
 if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
     throw "Release Rust host-core FFI DLL was not produced: $rustDll"
 }
