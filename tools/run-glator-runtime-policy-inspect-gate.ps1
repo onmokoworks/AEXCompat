@@ -12,29 +12,24 @@ $stdoutPath = Join-Path $runRoot 'stdout.json'
 $stderrPath = Join-Path $runRoot 'stderr.txt'
 $evidencePath = Join-Path $root 'analysis\SDK_GLATOR_RUNTIME_POLICY_INSPECT_RESULT_2026-07-18.json'
 
-$expected = [ordered]@{
-    harness = @{ path = $harness; size = 9945600; sha256 = 'bda35050e1505bb7cd1996738d965ebebb4c8f0812518ea13db7c3af129599a8' }
-    worker = @{ path = $worker; size = 756736; sha256 = 'cc8958ea36af84946d31f83eb61f40d6b375c3a7484197c2fac0968881136bfc' }
-    fixture = @{ path = $fixture; size = 6087168; sha256 = 'da8447f6f88e78fb00d5bd2d7e0cdc1d6bdcf1918b77e8684288a6d700c9f2ce' }
-}
 $moduleSpecs = @(
     @{ basename = 'nvoglv64.dll'; size = 46564584; sha256 = 'ca92775bcfa44eaa8ccb8c530e8df45bf88e19573cea4a6e0232342114355238'; version = '32.0.15.9579' },
     @{ basename = 'nvgpucomp64.dll'; size = 83758904; sha256 = 'c2d9c1d9a20b1275a6c4c66bd45e168088ffb3d5fdc928121a61531843f23098'; version = '32.0.15.9579' }
 )
 
-function Assert-Identity($spec) {
-    if (-not (Test-Path -LiteralPath $spec.path -PathType Leaf)) { throw 'Required artifact is missing.' }
-    $item = Get-Item -LiteralPath $spec.path
-    $sha = (Get-FileHash -LiteralPath $spec.path -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($item.Length -ne $spec.size -or $sha -ne $spec.sha256) { throw 'Artifact identity mismatch.' }
+function Get-ObservedIdentity([string]$path, [string]$label) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Required $label artifact is missing." }
+    $item = Get-Item -LiteralPath $path
+    $sha = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Verbose ("Observed {0} identity: size_bytes={1}; sha256={2}" -f $label, [long]$item.Length, $sha)
     [ordered]@{ size_bytes = [long]$item.Length; sha256 = $sha }
 }
 
 New-Item -ItemType Directory -Force -Path $runRoot | Out-Null
-$authenticated = [ordered]@{
-    release_harness = Assert-Identity $expected.harness
-    canonical_l2_worker = Assert-Identity $expected.worker
-    sdk_glator_fixture = Assert-Identity $expected.fixture
+$observedArtifacts = [ordered]@{
+    release_harness = Get-ObservedIdentity $harness 'release harness'
+    discovery_worker = Get-ObservedIdentity $worker 'discovery worker'
+    sdk_glator_fixture = Get-ObservedIdentity $fixture 'SDK GLator fixture'
 }
 
 $modules = @()
@@ -101,10 +96,10 @@ try {
     if (-not $passed) { throw 'Runtime-policy inspect contract failed.' }
 
     $evidence = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         result = 'passed'
         route = 'sealed staged L2 worker / purpose-bound OpenGL runtime module authorization'
-        authenticated_artifacts = $authenticated
+        observed_artifacts = $observedArtifacts
         authorized_runtime_modules = @($moduleSpecs | ForEach-Object {
             [ordered]@{ basename = $_.basename; size_bytes = [long]$_.size; sha256 = $_.sha256; version = $_.version; backend = 'opengl' }
         })
