@@ -62,7 +62,7 @@ class GitHubApi:
             raise CleanupError("cache inventory exceeded its bounded page contract")
 
         records: list[CacheRecord] = []
-        seen_ids: set[int] = set()
+        seen_payloads: dict[int, dict[str, object]] = {}
         for page in pages:
             if not isinstance(page, dict) or not isinstance(
                 page.get("actions_caches"), list
@@ -80,17 +80,22 @@ class GitHubApi:
                     or not isinstance(cache_ref, str)
                     or not isinstance(size, int)
                     or size < 0
-                    or cache_id in seen_ids
                 ):
-                    raise CleanupError(
-                        "cache inventory record is invalid or duplicated"
-                    )
+                    raise CleanupError("cache inventory record is invalid")
                 if ref is not None and cache_ref != ref:
                     raise CleanupError(
                         "ref-filtered cache inventory returned another ref"
                     )
-                seen_ids.add(cache_id)
-                records.append(CacheRecord(cache_id, cache_ref, size))
+                record = CacheRecord(cache_id, cache_ref, size)
+                previous = seen_payloads.get(cache_id)
+                if previous is not None:
+                    if previous != value:
+                        raise CleanupError(
+                            "cache inventory duplicated an id with conflicting data"
+                        )
+                    continue
+                seen_payloads[cache_id] = value
+                records.append(record)
         return records
 
     def pull_state(self, number: int) -> str:
