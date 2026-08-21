@@ -11,9 +11,10 @@ $repository = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $repository "instruments\pf-transfer-rect-probe"
 $build = Join-Path $repository "target\pf-transfer-rect-probe-build"
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $env:AE_SDK_ROOT = $AfterEffectsSdk
-& $CMake -S $source -B $build -G $Generator -A $Architecture
+& $CMake -S $source -B $build -G $Generator @ConfigureArgs
 if ($LASTEXITCODE -ne 0) { throw "PF transfer rect probe configure failed" }
 & $CMake --build $build --config $Configuration --target pf_transfer_rect_probe
 if ($LASTEXITCODE -ne 0) { throw "PF transfer rect probe build failed" }

@@ -1,6 +1,14 @@
-param([AllowEmptyString()][string]$Generator)
+﻿param([AllowEmptyString()][string]$Generator)
 
 $ErrorActionPreference = 'Stop'
+
+if (-not $Generator -and $env:AEXCOMPAT_CMAKE_GENERATOR) {
+    # CI の opt-in (#1510)。'Ninja Multi-Config' を指定すると CMAKE_<LANG>_COMPILER_LAUNCHER
+    # が効く generator でビルドできる (VS generator には効かない)。Ninja 系は
+    # vcvars 済みの環境を要求し、-A を受け付けない。両方の対応は
+    # resolve-cmake-configure-args.ps1 側が担う。
+    $Generator = $env:AEXCOMPAT_CMAKE_GENERATOR
+}
 
 if ($Generator) {
     $Generator

@@ -331,6 +331,17 @@ jobs:
     env:
       PYTHONUTF8: "1"
       SDK_READY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # probe ビルドを Ninja Multi-Config + sccache に通す (#1510)。VS generator
+      # のままだと CMAKE_<LANG>_COMPILER_LAUNCHER が効かず、python-tests 側での
+      # 作り直しが全部無キャッシュの再コンパイルになる。ここで温めたキャッシュを
+      # python-tests が拾う。Ninja Multi-Config は VS と同じく
+      # <build>\<config>\ 以下に出力するので、成果物パス契約は変わらない。
+      AEXCOMPAT_CMAKE_GENERATOR: 'Ninja Multi-Config'
+      AEXCOMPAT_COMPILE_CACHE: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # sccache サーバが cl を起動する環境と configure 時の環境で /showIncludes の
+      # ロケールを一致させる。ずれると ninja がヘッダ依存を 0 件記録する (#651)。
+      VSLANG: "1033"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -338,6 +349,14 @@ jobs:
       - uses: ./.github/actions/ci-setup
         with:
           rust: 'false'
+          compile-cache: 'true'
+
+      # Ninja 系 generator は cl / link / rc / mt を PATH から解決する。
+      # VS generator は MSBuild が toolset を自分で解決するので不要だった環境を、
+      # この job の全 step (と pytest から spawn される build-*.ps1) へ配る。
+      - name: Export MSVC environment for Ninja probe builds
+        shell: pwsh
+        run: pwsh -File tools\export-msvc-dev-env.ps1
 
       # SDK zip を置いた R2 バケットは非公開で、資格情報は secrets にしかない。
       # fork PR は secrets を受け取れないので、fork PR はここから下の SDK 依存
@@ -480,6 +499,10 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats
+
   python-tests:
     runs-on: windows-latest
     timeout-minutes: 60
@@ -488,15 +511,33 @@ jobs:
       PYTHONUTF8: "1"
       AEXCOMPAT_CARGO_PROFILE: debug
       SDK_READY: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      # pytest 内の build 検証テストが probe を作り直す。native-probes と同じ
+      # generator / flags なので、あちらが温めた sccache をそのまま拾う (#1510)。
+      AEXCOMPAT_CMAKE_GENERATOR: 'Ninja Multi-Config'
+      AEXCOMPAT_COMPILE_CACHE: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # gate 系テストの cargo build --release も sccache に通す。
+      RUSTC_WRAPPER: sccache
+      VSLANG: "1033"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      # broker binary 自体は rust-build の artifact を使うが、gate 系テスト
+      # (tools/test-rust-host-core-scene-*.ps1) が cargo build --release と
+      # cl.exe を自前で叩くので rust toolchain は外せない。cargo 側は
+      # RUSTC_WRAPPER で sccache に通し、pytest 内の probe ビルドと合わせて
+      # native-probes が温めたキャッシュを拾う (#1510)。
       - uses: ./.github/actions/ci-setup
         with:
           rust-workspaces: broker
           cache-key: python-tests
           save-cache: 'false'
+          compile-cache: 'true'
+
+      - name: Export MSVC environment for Ninja probe builds
+        shell: pwsh
+        run: pwsh -File tools\export-msvc-dev-env.ps1
 
       # pytest が起動するテストの一部は SDK ヘッダを要るビルドを自前で走らせる。
       # native-probes が取ったのと同じ zip を取り直す (4.6 MiB、実測 4 秒)。
@@ -679,3 +720,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
+
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats

@@ -7,13 +7,14 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
 $repository = Split-Path -Parent $PSScriptRoot
 $source = Join-Path $repository "instruments\pf-ae-channel-native-probe"
 $build = Join-Path $repository "target\pf-ae-channel-native-probe-build"
 $env:AE_SDK_ROOT = $AfterEffectsSdk
-& $CMake -S $source -B $build -G $Generator -A $Architecture
+& $CMake -S $source -B $build -G $Generator @ConfigureArgs
 if ($LASTEXITCODE -ne 0) { throw "Channel native probe configure failed" }
 & $CMake --build $build --config $Configuration --target pf_ae_channel_native_probe --clean-first
 if ($LASTEXITCODE -ne 0) { throw "Channel native probe build failed" }

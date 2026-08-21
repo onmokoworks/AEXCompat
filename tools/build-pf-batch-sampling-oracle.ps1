@@ -4,6 +4,7 @@ param([string]$AfterEffectsSdk=$env:AFTER_EFFECTS_SDK_ROOT,
 $ErrorActionPreference="Stop"
 $AfterEffectsSdk = & "$PSScriptRoot\resolve-after-effects-sdk.ps1" $AfterEffectsSdk
 $Generator = & "$PSScriptRoot\resolve-cmake-generator.ps1" $Generator
+$ConfigureArgs = & "$PSScriptRoot\resolve-cmake-configure-args.ps1" $Generator $Architecture
 $CMake = & "$PSScriptRoot\resolve-build-cmake.ps1" $CMake $Generator
 $repo=Split-Path -Parent $PSScriptRoot
 $src=Join-Path $repo "instruments\pf-batch-sampling-oracle"
@@ -11,7 +12,7 @@ $build=Join-Path $repo "target\pf-batch-sampling-oracle-build"
 $resultDir=Join-Path $repo "target\ae-oracles"
 New-Item -ItemType Directory -Force $resultDir | Out-Null
 $env:AE_SDK_ROOT=$AfterEffectsSdk
-& $CMake -S $src -B $build -G $Generator -A $Architecture
+& $CMake -S $src -B $build -G $Generator @ConfigureArgs
 if($LASTEXITCODE){throw "configure failed"}
 & $CMake --build $build --config Release --target pf_batch_sampling_oracle
 if($LASTEXITCODE){throw "build failed"}
