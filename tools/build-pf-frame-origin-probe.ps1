@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$AfterEffectsSdk = $env:AFTER_EFFECTS_SDK_ROOT,
     [string]$Generator = "",
     [string]$Architecture = "x64",
