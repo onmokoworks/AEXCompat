@@ -70,6 +70,7 @@ jobs:
           rust-workspaces: broker
           cache-key: broker
           save-cache: ${{ github.event_name == 'push' }}
+          python-environment: 'false'
 
       # 追跡している .rs を全部見る。変更されたファイルだけに絞っていたときは、
       # `cargo fmt` が辿れないファイル (guest の x64.rs と multifilter の lib.rs
@@ -263,6 +264,7 @@ jobs:
           cache-key: bridge-${{ matrix.name }}
           save-cache: ${{ github.event_name == 'push' }}
           resolve-libclang: ${{ matrix.libclang }}
+          python-environment: 'false'
 
       - name: Test ${{ matrix.name }}
         run: cargo test ${{ matrix.args }}
@@ -298,6 +300,7 @@ jobs:
         with:
           rust: 'false'
           compile-cache: 'true'
+          python-environment: 'false'
 
       # 入口は tools\build-native.ps1 に一本化してある (#1495)。vswhere から
       # vcvars64 を解決するのはあのスクリプトの仕事で、ここに 3 回複製されて
