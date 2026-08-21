@@ -12,6 +12,10 @@ CLASSIC_FAILURE_EVIDENCE_NODE = (
     "tests/test_classic_failure_stage_evidence.py::"
     "test_refresh_replays_three_classic_failures_before_updating_evidence"
 )
+SDK_BACKWARDS_BUILD_NODE = (
+    "tests/test_sdk_backwards_fixture_build.py::"
+    "test_official_sdk_backwards_builds_unchanged_and_records_hash"
+)
 
 
 def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
@@ -39,6 +43,8 @@ def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
             "--run-built-artifact-tests",
             "--deselect",
             CLASSIC_FAILURE_EVIDENCE_NODE,
+            "--deselect",
+            SDK_BACKWARDS_BUILD_NODE,
         ]
     arguments.append("--validate-local-artifact-manifest")
     return arguments

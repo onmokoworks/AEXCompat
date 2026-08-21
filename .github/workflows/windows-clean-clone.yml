@@ -522,7 +522,20 @@ jobs:
         shell: cmd
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
-          powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 || exit /b 1
+          if not exist target\sdk-fixtures\sdk-backwards mkdir target\sdk-fixtures\sdk-backwards
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\build-sdk-backwards.ps1 > target\sdk-fixtures\sdk-backwards\ci-build-output.txt 2>&1
+          set BUILD_EXIT=%ERRORLEVEL%
+          type target\sdk-fixtures\sdk-backwards\ci-build-output.txt
+          exit /b %BUILD_EXIT%
+
+      - name: Verify SDK Backwards fixture build
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
+        env:
+          AEXCOMPAT_SDK_BACKWARDS_PREBUILT: "1"
+        run: >-
+          uv run python -m pytest -q -rs
+          tests/test_sdk_backwards_fixture_build.py::test_official_sdk_backwards_builds_unchanged_and_records_hash
+          --run-sdk-tests
 
       # upload-artifact computes one common root across all listed paths. This
       # zero-byte anchor keeps the original target-relative directories in each
