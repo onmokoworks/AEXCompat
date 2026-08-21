@@ -4328,9 +4328,7 @@ fn srw_exclusive_try_acquire_is_nonblocking_and_never_queues() {
             .waiters
             .is_empty()
     );
-    engine
-        .call_win64(RELEASE, [LOCK, 0, 0, 0, 0, 0])
-        .unwrap();
+    engine.call_win64(RELEASE, [LOCK, 0, 0, 0, 0, 0]).unwrap();
     assert_eq!(
         engine
             .call_win64(TRY_ACQUIRE, [LOCK, 0, 0, 0, 0, 0])
