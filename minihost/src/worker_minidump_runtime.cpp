@@ -18,7 +18,11 @@ namespace {
 // a pre-started dedicated thread because calling it from the faulting SEH
 // thread can deadlock in an unstable process.
 constexpr uint64_t kMaxMinidumpFileBytes = 64ull * 1024ull * 1024ull;
-constexpr DWORD kMinidumpWriterWaitMs = 2'000;
+// This wait includes DbgHelp generation, the bounded pipe copy, and the
+// broker acknowledgement. A loaded CI runner can legitimately take more than
+// two seconds after the dump itself is complete, but the faulting thread must
+// still fail closed instead of waiting indefinitely for a broken transport.
+constexpr DWORD kMinidumpWriterWaitMs = 10'000;
 constexpr std::array<unsigned char, 16> kMinidumpCompletionMarker{
     'A', 'E', 'X', 'D', 'U', 'M', 'P', '-',
     'C', 'O', 'M', 'P', 'L', 'E', 'T', 'E'};

@@ -3,6 +3,7 @@ import os
 import struct
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,12 @@ def test_guarded_crash_writes_a_minidump(kind: str, tmp_path: Path) -> None:
                 if pending != completion_marker:
                     overflow = True
             try:
+                # A loaded CI runner can finish the dump but delay the broker
+                # acknowledgement beyond the old two-second writer wait. Keep
+                # one route deterministically beyond that boundary while the
+                # other routes retain the ordinary transport timing.
+                if kind == "discovery":
+                    time.sleep(3)
                 os.write(ack_write, struct.pack("<QB", total, int(overflow)))
             except OSError:
                 pass
@@ -75,9 +82,7 @@ def test_guarded_crash_writes_a_minidump(kind: str, tmp_path: Path) -> None:
     try:
         environment = os.environ.copy()
         environment.pop("AEXCOMPAT_MINIDUMP_DIR", None)
-        environment["AEXCOMPAT_MINIDUMP_HANDLE"] = str(
-            msvcrt.get_osfhandle(dump_write)
-        )
+        environment["AEXCOMPAT_MINIDUMP_HANDLE"] = str(msvcrt.get_osfhandle(dump_write))
         environment["AEXCOMPAT_MINIDUMP_ACK_HANDLE"] = str(
             msvcrt.get_osfhandle(ack_read)
         )
