@@ -8,6 +8,7 @@ fn main() {
         eprintln!("usage: broker <operation> <json arguments>");
         std::process::exit(2);
     }
+    let operation = aexcompat_broker::cli_operation::canonical_operation(&args[1]);
     let executable = std::env::current_exe().expect("current executable");
     let directory = executable.parent().expect("executable directory");
     let repository = directory
@@ -46,7 +47,7 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
-    if args.len() == 4 && args[1] == "render-parameter-request" {
+    if args.len() == 4 && operation == "classic-parameter-request" {
         let passed = match aexcompat_broker::render_request::execute(
             repository,
             &PathBuf::from(&args[2]),
@@ -60,7 +61,7 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
-    if args.len() == 4 && args[1] == "smart-parameter-request" {
+    if args.len() == 4 && operation == "smart-parameter-request" {
         let passed = match aexcompat_broker::render_request::execute_smart(
             repository,
             &PathBuf::from(&args[2]),
@@ -74,7 +75,7 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
-    if args.len() == 5 && args[1] == "smart-suite-fault" {
+    if args.len() == 5 && operation == "smart-suite-fault" {
         let passed = match aexcompat_broker::render_request::execute_smart_suite_fault(
             repository,
             &args[2],
@@ -89,7 +90,7 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
-    if args.len() == 5 && args[1] == "smart-mask-scene" {
+    if args.len() == 5 && operation == "smart-mask-scene" {
         let passed = match aexcompat_broker::render_request::execute_smart_mask_scene(
             repository,
             &args[2],
@@ -104,7 +105,7 @@ fn main() {
         };
         std::process::exit(if passed { 0 } else { 3 });
     }
-    if args.len() == 4 && args[1] == "l2" {
+    if args.len() == 4 && operation == "discovery" {
         let output = PathBuf::from(&args[3]);
         if !args[3].ends_with(".json") {
             eprintln!("observation output must be JSON");
@@ -123,18 +124,18 @@ fn main() {
     }
     if args.len() != 3 || !args[2].ends_with(".json") {
         eprintln!(
-            "usage: broker <selftest|l2-scattermap|render-scattermap|smart-scattermap> <create-new-json-output>"
+            "usage: broker <selftest|discovery-scattermap|classic-scattermap|smart-scattermap> <create-new-json-output>"
         );
         std::process::exit(2);
     }
-    if args[1] == "l2-scattermap" {
+    if operation == "discovery-scattermap" {
         let worker = repository.join("target/minihost-build/aex_worker.exe");
         let passed =
             aexcompat_broker::l2::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
-                .expect("L2 broker run");
+                .expect("discovery broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
-    if args[1] == "render-scattermap" {
+    if operation == "classic-scattermap" {
         let worker = repository.join("target/minihost-build/aex_worker.exe");
         let passed = aexcompat_broker::render::run(
             repository,
@@ -143,10 +144,10 @@ fn main() {
             "default",
             &PathBuf::from(&args[2]),
         )
-        .expect("render broker run");
+        .expect("classic broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
-    if args[1] == "smart-scattermap" {
+    if operation == "smart-scattermap" {
         let worker = repository.join("target/minihost-build/aex_worker.exe");
         let passed = aexcompat_broker::smart::run(
             repository,
@@ -158,7 +159,7 @@ fn main() {
         .expect("SmartFX broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
-    let smart_case = match args[1].as_str() {
+    let smart_case = match operation {
         "smart-identity-scattermap" => Some("identity"),
         "smart-horizontal-scattermap" => Some("horizontal"),
         "smart-vertical-no-repeat-scattermap" => Some("vertical_no_repeat"),
@@ -191,20 +192,20 @@ fn main() {
         .expect("extended SmartFX broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
-    let extended_case = match args[1].as_str() {
-        "render-identity-scattermap" => Some("identity"),
-        "render-horizontal-scattermap" => Some("horizontal"),
-        "render-vertical-no-repeat-scattermap" => Some("vertical_no_repeat"),
-        "render-mixed-scattermap" => Some("mixed"),
-        "render-amount-max-scattermap" => Some("amount_max"),
-        "render-seed-max-scattermap" => Some("seed_max"),
-        "render-mix-zero-scattermap" => Some("mix_zero"),
-        "render-odd-dimensions-scattermap" => Some("odd_dimensions"),
-        "render-padded-stride-scattermap" => Some("padded_stride"),
-        "render-connected-map-scattermap" => Some("connected_map"),
-        "render-inverted-map-scattermap" => Some("inverted_map"),
-        "render-partial-extent-hint-scattermap" => Some("partial_extent_hint"),
-        "render-threaded-default-scattermap" => Some("threaded_default"),
+    let extended_case = match operation {
+        "classic-identity-scattermap" => Some("identity"),
+        "classic-horizontal-scattermap" => Some("horizontal"),
+        "classic-vertical-no-repeat-scattermap" => Some("vertical_no_repeat"),
+        "classic-mixed-scattermap" => Some("mixed"),
+        "classic-amount-max-scattermap" => Some("amount_max"),
+        "classic-seed-max-scattermap" => Some("seed_max"),
+        "classic-mix-zero-scattermap" => Some("mix_zero"),
+        "classic-odd-dimensions-scattermap" => Some("odd_dimensions"),
+        "classic-padded-stride-scattermap" => Some("padded_stride"),
+        "classic-connected-map-scattermap" => Some("connected_map"),
+        "classic-inverted-map-scattermap" => Some("inverted_map"),
+        "classic-partial-extent-hint-scattermap" => Some("partial_extent_hint"),
+        "classic-threaded-default-scattermap" => Some("threaded_default"),
         _ => None,
     };
     if let Some(case_id) = extended_case {
@@ -216,10 +217,10 @@ fn main() {
             case_id,
             &PathBuf::from(&args[2]),
         )
-        .expect("extended render broker run");
+        .expect("extended classic broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
-    if args[1] != "selftest" {
+    if operation != "selftest" {
         eprintln!("unknown broker operation");
         std::process::exit(2);
     }

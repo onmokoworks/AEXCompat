@@ -106,7 +106,7 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
     `worker_report.selector_invocations.records[].unwind_frames` /
     `.unwind_stop` として入る。ただし broker の `propagate_selector_invocations`
     は key allowlist で record を組み直すので、`inspect` や render session の
-    diagnostics には伝わらない (worker report をそのまま埋め込む `broker l2`
+    diagnostics には伝わらない (worker report をそのまま埋め込む `broker discovery`
     route だけが持ち、そこは登録済み observation profile 専用)。任意の AEX の
     fault を読むときは stderr の行が唯一の経路 (#1314)。
 - `AEXCOMPAT_EXTENDED_DIAG=1`: worker の host-callback trace を stderr に出し、
