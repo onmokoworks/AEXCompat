@@ -3849,11 +3849,68 @@ mod tests {
     }
 
     /// The registered label nests the category under AEXCompat and falls
-    /// back to the bare brand without one.
+    /// back to the bare brand without one; the standard AE categories
+    /// localize per the configured language (issue #876), and a third-party
+    /// category passes through untranslated.
     #[test]
     fn filter_labels_nest_the_category_under_the_brand() {
-        assert_eq!(filter_label(Some("Stylize")), "AEXCompat\\Stylize");
-        assert_eq!(filter_label(None), "AEXCompat");
+        assert_eq!(filter_label(Some("Stylize"), false), "AEXCompat\\Stylize");
+        assert_eq!(
+            filter_label(Some("Stylize"), true),
+            "AEXCompat\\スタイライズ"
+        );
+        assert_eq!(
+            filter_label(Some("RG Universe Transitions"), true),
+            "AEXCompat\\RG Universe Transitions"
+        );
+        assert_eq!(filter_label(None, true), "AEXCompat");
+    }
+
+    /// The bundled-effect table fills the PiPL gap (issue #876): AE's own
+    /// Effects files carry no PiPL, so their stems resolve here, matched
+    /// case-insensitively; anything unknown stays uncategorized.
+    #[test]
+    fn ae_builtin_stems_resolve_to_their_menu_category() {
+        assert_eq!(ae_builtin_category("Gaussian_Blur"), Some("Blur & Sharpen"));
+        assert_eq!(ae_builtin_category("gaussian_blur"), Some("Blur & Sharpen"));
+        assert_eq!(ae_builtin_category("Card Dance"), Some("Simulation"));
+        assert_eq!(ae_builtin_category("TotallyUnknown"), None);
+    }
+
+    /// The production registration planner combines virtual-effect category
+    /// propagation, the bundled-effect fallback, and the configured language.
+    #[test]
+    fn registration_labels_cover_primary_secondary_and_unknown_effects() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        let mut secondary = cached_plugin_data_effect(1, "second", None);
+        secondary.identity.category_hex = "5374796c697a65".to_owned(); // Stylize
+        entry.additional_effects = vec![secondary];
+        let plans = virtual_effect_registrations(
+            &entry,
+            "Bundle",
+            &HashMap::from([(1, "Bundle — Second".to_owned())]),
+        );
+
+        let builtin = Path::new("Gaussian_Blur.aex");
+        assert_eq!(
+            registration_label(builtin, &plans[0].entry, true),
+            "AEXCompat\\ブラー＆シャープ"
+        );
+        assert_eq!(
+            registration_label(builtin, &plans[0].entry, false),
+            "AEXCompat\\Blur & Sharpen"
+        );
+        assert_eq!(
+            registration_label(builtin, &plans[1].entry, true),
+            "AEXCompat\\スタイライズ",
+            "the secondary identity category overrides the module stem fallback"
+        );
+        let unknown = discovered(5, 64, build(1));
+        assert_eq!(
+            registration_label(Path::new("ThirdParty.aex"), &unknown, true),
+            "AEXCompat"
+        );
     }
 
     // --- cluster sessions (issue #405) ---
@@ -5780,6 +5837,7 @@ mod tests {
             repository: "  C:\\repo  ".into(),
             module_limit: " 40 ".into(),
             byte_limit: "1073741824".into(),
+            japanese_categories: false,
         }
     }
 
@@ -5852,6 +5910,7 @@ mod tests {
             dependency_module_limit: Some(7),
             dependency_byte_limit: None,
             ignore: vec!["Noisy".into()],
+            category_language: None,
         };
         let form = form_from_config(&config);
         assert_eq!(form.dirs, "C:\\single\r\nC:\\more");
@@ -5859,6 +5918,12 @@ mod tests {
         assert_eq!(form.module_limit, "7");
         assert_eq!(form.byte_limit, "");
         assert_eq!(form.ignore, "Noisy");
+        assert!(form.japanese_categories, "an absent key reads as 日本語");
+        let english = Config {
+            category_language: Some("en".into()),
+            ..config
+        };
+        assert!(!form_from_config(&english).japanese_categories);
     }
 
     /// A dialog save must not destroy what it does not manage: comments and
@@ -5889,8 +5954,8 @@ mod tests {
     /// default", and a lingering stale value would override it.
     #[test]
     fn a_cleared_field_removes_its_key() {
-        let existing =
-            "dirs = ['C:\\plugins']\nrepository = 'C:\\repo'\ndependency_byte_limit = 9\n";
+        let existing = "dirs = ['C:\\plugins']\nrepository = 'C:\\repo'\n\
+                        dependency_byte_limit = 9\ncategory_language = 'en'\n";
         let edit = parse_form(&ConfigForm::default()).expect("an empty form is valid");
         let (text, backed_up) = merged_config_text(existing, &edit);
         assert!(!backed_up);
@@ -5925,6 +5990,7 @@ mod tests {
         assert_eq!(config.repository, Some(PathBuf::from("C:\\repo")));
         assert_eq!(config.dependency_byte_limit, Some(1 << 30));
         assert_eq!(config.ignore, vec!["Noisy.aex", "Slow"]);
+        assert_eq!(config.category_language.as_deref(), Some("en"));
         // And the reload shows in the dialog what was typed (modulo trimming).
         let form = form_from_config(&config);
         assert_eq!(form.dirs, "C:\\plugins\r\nD:\\more");

@@ -2129,6 +2129,19 @@ fn filter_stem(plugin: &Path) -> &str {
         .unwrap_or("AEX")
 }
 
+/// Computes the exact initial menu label handed to AviUtl2. Keeping the
+/// PiPL/PluginData category, bundled-effect fallback, and configured language
+/// in one planner prevents discovery and registration from drifting apart.
+fn registration_label(plugin: &Path, entry: &CacheEntry, japanese_categories: bool) -> String {
+    filter_label(
+        entry
+            .category
+            .as_deref()
+            .or_else(|| ae_builtin_category(filter_stem(plugin))),
+        japanese_categories,
+    )
+}
+
 /// Registers one discovered AEX as an AviUtl2 filter. Runs on the RegisterPlugin
 /// (host callback) thread only. `name` comes from [`unique_filter_names`], which
 /// is what keeps the host from being handed two filters under one name.
@@ -2141,6 +2154,7 @@ fn register_discovered(
     companions: Vec<ApprovedCompanion>,
     name: &str,
     plugin_data_selector: Option<PluginDataEffectSelector>,
+    japanese_categories: bool,
 ) {
     let mut resolved_dependency = dependency.clone();
     if !entry.closure.roots.is_empty() {
@@ -2215,10 +2229,12 @@ fn register_discovered(
         name: wide_leak(&format!("AEX: {name}")),
         // The INITIAL menu category (issue #871): hundreds of AE effects do
         // not belong under the default 「加工」 among the built-ins, so they
-        // nest under "AEXCompat" by their own PiPL category. Initial only —
-        // once AviUtl2 has persisted an effect's label in aviutl2.ini, that
-        // (user-editable) value wins on every later launch.
-        label: wide_leak(&filter_label(entry.category.as_deref())),
+        // nest under "AEXCompat" by their own PiPL category — or, for AE's
+        // bundled effects, whose files carry no PiPL at all, by the shipped
+        // stem table (issue #876). Initial only — once AviUtl2 has persisted
+        // an effect's label in aviutl2.ini, that (user-editable) value wins
+        // on every later launch.
+        label: wide_leak(&registration_label(plugin, entry, japanese_categories)),
         information: wide_leak(&format!("AEXCompat multi-filter: {name}")),
         items: items.as_ptr(),
         func_proc_video: Some(func_proc_video),
