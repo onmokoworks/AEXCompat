@@ -1,3 +1,4 @@
+pub mod cli_operation;
 pub mod cluster_manifest;
 pub mod companion_manifest;
 pub mod cuda_compute_probe;
