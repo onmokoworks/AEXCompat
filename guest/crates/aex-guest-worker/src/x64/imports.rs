@@ -21,6 +21,7 @@ enum LegacyWin64Import {
     Calloc,
     Free,
     CrtStrdup,
+    CrtStricmp,
     CrtToLower,
     CrtToUpper,
     AlignedMalloc,
@@ -597,6 +598,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtStrdup
         }
         (_, "_strdup") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "_stricmp") => {
+            LegacyWin64Import::CrtStricmp
+        }
+        (_, "_stricmp") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "tolower") => {
             LegacyWin64Import::CrtToLower
         }
@@ -745,6 +750,15 @@ fn install_win64_import(
                     "install _strdup import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_strdup(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtStricmp => {
+                uc("write _stricmp return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install _stricmp import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_stricmp(unicorn);
                     }),
                 )?;
             }
