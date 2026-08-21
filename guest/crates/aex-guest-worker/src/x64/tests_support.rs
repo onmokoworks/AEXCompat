@@ -612,6 +612,132 @@ fn win64_crt_tolower_uses_integer_abi_and_ascii_c_locale_semantics() {
 }
 
 #[test]
+fn win64_crt_stricmp_is_bounded_ascii_only_and_library_scoped() {
+    const STRICMP: u64 = STUB_BASE + 0x5d0;
+    assert!(matches!(
+        dispatch_win64_import("api-ms-win-crt-string-l1-1-0.dll", "_stricmp"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtStricmp)
+    ));
+    assert!(matches!(
+        dispatch_win64_import("ucrtbase.dll", "_stricmp"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::CrtStricmp)
+    ));
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "_stricmp"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+
+    let prepare = || {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            STRICMP,
+            "api-ms-win-crt-string-l1-1-0.dll",
+            "_stricmp",
+        )
+        .unwrap();
+        engine
+    };
+    let compare = |engine: &mut GuestEngine<'static>, left: &[u8], right: &[u8]| {
+        let left_address = DATA_BASE + 0xa00;
+        let right_address = DATA_BASE + 0xb00;
+        engine.write(left_address, left).unwrap();
+        engine.write(right_address, right).unwrap();
+        engine
+            .call_win64(STRICMP, [left_address, right_address, 0, 0, 0, 0])
+            .unwrap() as u32 as i32
+    };
+
+    let mut ordinary = prepare();
+    assert_eq!(compare(&mut ordinary, b"Depth\0", b"depth\0"), 0);
+    assert!(compare(&mut ordinary, b"alpha\0", b"BETA\0") < 0);
+    assert!(compare(&mut ordinary, b"gamma\0", b"Beta\0") > 0);
+    assert!(compare(&mut ordinary, &[0xc0, 0], &[0xe0, 0]) < 0);
+    assert!(compare(&mut ordinary, &[0x80, 0], &[0x7f, 0]) > 0);
+
+    let mut no_read_ahead = prepare();
+    let left_page = DATA_BASE + 0x30_0000;
+    let right_page = DATA_BASE + 0x32_0000;
+    for page in [left_page, right_page] {
+        no_read_ahead
+            .unicorn
+            .mem_map(page, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .unwrap();
+    }
+    let left_edge = left_page + PAGE_SIZE - 1;
+    let right_edge = right_page + PAGE_SIZE - 1;
+    no_read_ahead.write(left_edge, &[b'a']).unwrap();
+    no_read_ahead.write(right_edge, &[b'b']).unwrap();
+    assert_eq!(
+        no_read_ahead
+            .call_win64(STRICMP, [left_edge, right_edge, 0, 0, 0, 0])
+            .unwrap() as u32 as i32,
+        -1
+    );
+
+    let mut nul_does_not_read_ahead = prepare();
+    for page in [left_page, right_page] {
+        nul_does_not_read_ahead
+            .unicorn
+            .mem_map(page, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .unwrap();
+    }
+    nul_does_not_read_ahead.write(left_edge, &[0]).unwrap();
+    nul_does_not_read_ahead.write(right_edge, &[0]).unwrap();
+    assert_eq!(
+        nul_does_not_read_ahead
+            .call_win64(STRICMP, [left_edge, right_edge, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+
+    let mut aliased = prepare();
+    let address = DATA_BASE + 0xa00;
+    aliased.write(address, b"Alias\0").unwrap();
+    assert_eq!(
+        aliased
+            .call_win64(STRICMP, [address, address, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+
+    let mut invalid = prepare();
+    assert!(
+        invalid
+            .call_win64(STRICMP, [0, DATA_BASE, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("null")
+    );
+    let mut unreadable = prepare();
+    assert!(
+        unreadable
+            .call_win64(STRICMP, [0x10, DATA_BASE, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("not readable")
+    );
+
+    let mut unterminated = prepare();
+    let left = DATA_BASE + 0x1000;
+    let right = DATA_BASE + 0x1000 + MAX_CRT_STRING_BYTES;
+    unterminated
+        .unicorn
+        .mem_map(left, MAX_CRT_STRING_BYTES * 2, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let bytes = vec![b'x'; MAX_CRT_STRING_BYTES as usize];
+    unterminated.write(left, &bytes).unwrap();
+    unterminated.write(right, &bytes).unwrap();
+    assert!(
+        unterminated
+            .call_win64(STRICMP, [left, right, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("exceed")
+    );
+}
+
+#[test]
 fn win64_crt_toupper_uses_integer_abi_and_ascii_c_locale_semantics() {
     const TOUPPER: u64 = STUB_BASE + 0x550;
     let mut engine = test_engine(&[0xc3]);
