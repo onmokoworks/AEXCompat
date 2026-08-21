@@ -260,7 +260,11 @@ fn apply_edit(existing: &str, edit: &ConfigEdit) -> Result<String, toml_edit::To
         "dependency_byte_limit",
         edit.dependency_byte_limit.map(|limit| limit as i64),
     );
-    set_optional(&mut doc, "category_language", edit.category_language.as_deref());
+    set_optional(
+        &mut doc,
+        "category_language",
+        edit.category_language.as_deref(),
+    );
     Ok(doc.to_string())
 }
 
