@@ -24,6 +24,9 @@ AEGP_RENDER_OPTIONS_LIFECYCLE_NODE = (
     "tests/test_aegp_render_options_probe.py::"
     "test_fixture_builds_and_exercises_lifecycle"
 )
+PF_ADV_TIME_RELEASE_BUILD_NODE = (
+    "tests/test_pf_adv_time_probe.py::test_pf_adv_time_probe_release_build"
+)
 
 
 def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
@@ -57,6 +60,8 @@ def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
             SDK_GRABBA_BUILD_NODE,
             "--deselect",
             AEGP_RENDER_OPTIONS_LIFECYCLE_NODE,
+            "--deselect",
+            PF_ADV_TIME_RELEASE_BUILD_NODE,
         ]
     arguments.append("--validate-local-artifact-manifest")
     return arguments
