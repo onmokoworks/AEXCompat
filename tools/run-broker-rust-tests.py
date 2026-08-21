@@ -22,6 +22,7 @@ NATIVE_BROKER_TARGETS = {
 }
 NATIVE_HARNESS_TARGETS = {"artifact_cli"}
 INDEPENDENT_BROKER_TARGETS = {
+    "cli_operation_aliases",
     "cuda_compute_probe",
     "descriptor_manifest",
     "gpu_platform_collector",
