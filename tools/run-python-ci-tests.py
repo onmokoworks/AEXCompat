@@ -16,6 +16,10 @@ SDK_BACKWARDS_BUILD_NODE = (
     "tests/test_sdk_backwards_fixture_build.py::"
     "test_official_sdk_backwards_builds_unchanged_and_records_hash"
 )
+SDK_GRABBA_BUILD_NODE = (
+    "tests/test_sdk_grabba_fixture_build.py::"
+    "test_official_sdk_grabba_builds_unchanged_and_records_hash"
+)
 
 
 def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
@@ -45,6 +49,8 @@ def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
             CLASSIC_FAILURE_EVIDENCE_NODE,
             "--deselect",
             SDK_BACKWARDS_BUILD_NODE,
+            "--deselect",
+            SDK_GRABBA_BUILD_NODE,
         ]
     arguments.append("--validate-local-artifact-manifest")
     return arguments
