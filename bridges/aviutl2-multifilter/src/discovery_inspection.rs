@@ -123,7 +123,22 @@ fn finish_one_shot_in_place(
     };
     match inspected {
         Ok((params, diagnostics)) => {
-            entry.demanded_suites = demanded_suites_from_report(&diagnostics);
+            let identities = match plugin_data_identities(&diagnostics) {
+                Ok(identities) => identities,
+                Err(_) => return entry,
+            };
+            if !identities.is_empty()
+                && diagnostics
+                    .pointer("/plugin_data/selected_index")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(0)
+            {
+                return entry;
+            }
+            entry.demanded_suites.clear();
+            if !merge_demanded_suites_from_report(&mut entry.demanded_suites, &diagnostics) {
+                return entry;
+            }
             entry.closure.roots = effective_roots
                 .iter()
                 .map(|root| root.to_string_lossy().into_owned())
@@ -137,6 +152,60 @@ fn finish_one_shot_in_place(
             entry.smart = entry.out_flags2 & (1 << 10) != 0;
             entry.params = params;
             normalize_parameters_for_cache(&mut entry.params);
+            entry.plugin_data_effect = identities.first().cloned();
+            entry.additional_effects.clear();
+            let mut all_effects_inspected = true;
+            for identity in identities.iter().skip(1) {
+                let selector = identity.selector();
+                let Ok((mut params, effect_diagnostics)) =
+                    inspect_experimental_in_place_plugin_data_effect(
+                        repository,
+                        plugin,
+                        &entry.sha,
+                        effective_roots.clone(),
+                        &selector,
+                    )
+                else {
+                    all_effects_inspected = false;
+                    break;
+                };
+                if !selected_plugin_data_identity_matches(&effect_diagnostics, identity) {
+                    all_effects_inspected = false;
+                    break;
+                }
+                if !merge_demanded_suites_from_report(
+                    &mut entry.demanded_suites,
+                    &effect_diagnostics,
+                ) {
+                    all_effects_inspected = false;
+                    break;
+                }
+                normalize_parameters_for_cache(&mut params);
+                let out_flags2 = effect_diagnostics
+                    .get("advertised_out_flags2")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u32;
+                entry.additional_effects.push(CachedPluginDataEffect {
+                    identity: identity.clone(),
+                    smart: out_flags2 & (1 << 10) != 0,
+                    out_flags2,
+                    params,
+                    registered_name: None,
+                });
+            }
+            if !all_effects_inspected {
+                entry.additional_effects.clear();
+                entry.plugin_data_effect = None;
+                entry.failure_diagnostics = Some(serde_json::json!({
+                    "inspection_error_kind": "plugin_data_effect_inspection_failed",
+                }));
+                return entry;
+            }
+            if !entry.additional_effects.is_empty() {
+                // Existing cluster manifests identify DLL members, not effects.
+                // Keep multi-registration bundles on exact per-effect sessions.
+                entry.closure_identity = None;
+            }
             entry.ok = true;
         }
         Err(error) => {
@@ -154,6 +223,95 @@ fn finish_one_shot_in_place(
         }
     }
     entry
+}
+
+fn plugin_data_identities(diagnostics: &serde_json::Value) -> Result<Vec<PluginDataIdentity>, ()> {
+    let Some(plugin_data) = diagnostics.get("plugin_data") else {
+        return Ok(Vec::new());
+    };
+    if plugin_data.is_null() {
+        return Ok(Vec::new());
+    }
+    let object = plugin_data.as_object().ok_or(())?;
+    if object.len() != 2 || !object.contains_key("selected_index") {
+        return Err(());
+    }
+    let registrations = object
+        .get("registrations")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(())?;
+    if registrations.is_empty() || registrations.len() > 64 {
+        return Err(());
+    }
+    let _selected_index = object
+        .get("selected_index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|index| *index < registrations.len())
+        .ok_or(())?;
+    let mut identities = Vec::with_capacity(registrations.len());
+    for (expected_index, value) in registrations.iter().enumerate() {
+        let registration = value.as_object().ok_or(())?;
+        if registration.len() != 5 {
+            return Err(());
+        }
+        let index = registration
+            .get("index")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(())?;
+        if index as usize != expected_index {
+            return Err(());
+        }
+        let text = |key: &str| {
+            registration
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or(())
+        };
+        let identity = PluginDataIdentity {
+            index,
+            name_hex: text("name_hex")?,
+            match_name_hex: text("match_name_hex")?,
+            category_hex: text("category_hex")?,
+            entrypoint: text("entrypoint")?,
+        };
+        if identity.display_name().is_none()
+            || decode_plugin_data_bytes(&identity.match_name_hex).is_none()
+            || identity.category().is_none()
+            || identity.entrypoint.is_empty()
+            || identity.entrypoint.len() > 127
+            || !identity
+                .entrypoint
+                .bytes()
+                .enumerate()
+                .all(|(position, byte)| {
+                    byte == b'_'
+                        || byte.is_ascii_alphabetic()
+                        || (position != 0 && byte.is_ascii_digit())
+                })
+        {
+            return Err(());
+        }
+        identities.push(identity);
+    }
+    Ok(identities)
+}
+
+fn selected_plugin_data_identity_matches(
+    diagnostics: &serde_json::Value,
+    expected: &PluginDataIdentity,
+) -> bool {
+    plugin_data_identities(diagnostics)
+        .ok()
+        .and_then(|identities| identities.get(expected.index as usize).cloned())
+        .is_some_and(|selected| selected == *expected)
+        && diagnostics
+            .get("plugin_data")
+            .and_then(|value| value.get("selected_index"))
+            .and_then(serde_json::Value::as_u64)
+            == Some(u64::from(expected.index))
 }
 
 fn inspection_is_load_failure(error: &std::io::Error) -> bool {
@@ -564,10 +722,16 @@ fn inspect_report_failure_fields(
             diagnostics.insert(field.to_owned(), value.into());
         }
     }
-    if let Some(parameters) = report.get("parameters").and_then(serde_json::Value::as_array) {
+    if let Some(parameters) = report
+        .get("parameters")
+        .and_then(serde_json::Value::as_array)
+    {
         diagnostics.insert("parameter_count".to_owned(), parameters.len().into());
     }
-    if let Some(missing) = report.get("missing_suites").and_then(serde_json::Value::as_array) {
+    if let Some(missing) = report
+        .get("missing_suites")
+        .and_then(serde_json::Value::as_array)
+    {
         diagnostics.insert(
             "missing_suites".to_owned(),
             serde_json::Value::Array(missing.clone()),
@@ -673,6 +837,77 @@ fn demanded_suites_from_report(report: &serde_json::Value) -> Vec<ProvidedSuite>
             })
         })
         .collect()
+}
+
+fn merge_demanded_suites_from_report(
+    demanded: &mut Vec<ProvidedSuite>,
+    report: &serde_json::Value,
+) -> bool {
+    merge_demanded_suites(demanded, demanded_suites_from_report(report))
+}
+
+fn merge_demanded_suites(
+    demanded: &mut Vec<ProvidedSuite>,
+    incoming: impl IntoIterator<Item = ProvidedSuite>,
+) -> bool {
+    const MAX_PLUGIN_DATA_DEMANDED_SUITES: usize = 64;
+    for suite in incoming {
+        if demanded.iter().any(|existing| {
+            existing.name == suite.name && existing.api_version == suite.api_version
+        }) {
+            continue;
+        }
+        if demanded.len() == MAX_PLUGIN_DATA_DEMANDED_SUITES {
+            return false;
+        }
+        demanded.push(suite);
+    }
+    true
+}
+
+fn finish_companion_demand_probe(
+    entry: &mut CacheEntry,
+    probed_suites: Vec<ProvidedSuite>,
+) -> bool {
+    entry.demanded_suites.clear();
+    if !merge_demanded_suites(&mut entry.demanded_suites, probed_suites) {
+        return false;
+    }
+    entry.companion_demand_probe_complete = true;
+    true
+}
+
+fn reject_plugin_data_bundle(entry: &mut CacheEntry) {
+    entry.ok = false;
+    entry.plugin_data_effect = None;
+    entry.additional_effects.clear();
+    entry.closure_identity = None;
+}
+
+fn confirmed_plugin_data_demands<T>(
+    effects: &[(Option<PluginDataEffectSelector>, bool, u32)],
+    mut provider_free: impl FnMut(
+        Option<&PluginDataEffectSelector>,
+        bool,
+        u32,
+    ) -> Option<Vec<ProvidedSuite>>,
+    mut providers_for: impl FnMut(&[ProvidedSuite]) -> Option<T>,
+    mut with_provider: impl FnMut(Option<&PluginDataEffectSelector>, bool, u32, T) -> bool,
+) -> Option<Vec<ProvidedSuite>> {
+    let mut confirmed = Vec::new();
+    for (selector, smart, out_flags2) in effects {
+        let candidates = provider_free(selector.as_ref(), *smart, *out_flags2)?;
+        if candidates.is_empty() {
+            continue;
+        }
+        let providers = providers_for(&candidates)?;
+        if with_provider(selector.as_ref(), *smart, *out_flags2, providers)
+            && !merge_demanded_suites(&mut confirmed, candidates)
+        {
+            return None;
+        }
+    }
+    Some(confirmed)
 }
 
 fn companion_demand_from_probe_report(close: &serde_json::Value) -> Option<Vec<ProvidedSuite>> {
@@ -884,6 +1119,7 @@ fn discover_cluster_in_place(
 
     let mut results: Vec<(PathBuf, CacheEntry)> = Vec::with_capacity(member_count);
     let mut invalidated: Option<(u32, String, bool)> = None;
+    let mut next_request_index = 0u32;
     for (index, (path, prepared)) in members.into_iter().enumerate() {
         if let Some((at_member, reason, cleanup_crash)) = &invalidated {
             let (path, entry) = if *cleanup_crash {
@@ -917,11 +1153,103 @@ fn discover_cluster_in_place(
             results.push((path, entry));
             continue;
         }
-        let request_index = index as u32;
-        match session.inspect_plugin(request_index, request_index) {
+        let plugin_index = index as u32;
+        let request_index = next_request_index;
+        next_request_index += 1;
+        match session.inspect_plugin(plugin_index, request_index) {
             Ok(InspectOutcome::Inspected { report }) => {
                 let mut entry = prepared.entry;
+                let identities = match plugin_data_identities(&report) {
+                    Ok(identities) => identities,
+                    Err(()) => {
+                        entry.failure_diagnostics = Some(serde_json::json!({
+                            "cluster_error_kind": "inspected_report_unusable",
+                            "reason": "plugin_data_inventory_invalid",
+                        }));
+                        results.push((path, entry));
+                        continue;
+                    }
+                };
+                if !identities.is_empty()
+                    && report
+                        .pointer("/plugin_data/selected_index")
+                        .and_then(serde_json::Value::as_u64)
+                        != Some(0)
+                {
+                    entry.failure_diagnostics = Some(serde_json::json!({
+                        "cluster_error_kind": "inspected_report_unusable",
+                        "reason": "plugin_data_default_selection_mismatch",
+                    }));
+                    results.push((path, entry));
+                    continue;
+                }
                 fill_entry_from_inspect_report(&mut entry, &report);
+                // A PluginData bundle is atomic: the primary report alone has
+                // not earned a registerable cache entry until every advertised
+                // secondary identity has been inspected and matched.
+                entry.ok = false;
+                entry.demanded_suites.clear();
+                if !merge_demanded_suites_from_report(&mut entry.demanded_suites, &report) {
+                    entry.failure_diagnostics = Some(serde_json::json!({
+                        "cluster_error_kind": "inspected_report_unusable",
+                        "reason": "plugin_data_suite_demand_overflow",
+                    }));
+                    results.push((path, entry));
+                    continue;
+                }
+                entry.plugin_data_effect = identities.first().cloned();
+                entry.additional_effects.clear();
+                let mut all_effects_inspected = true;
+                for identity in identities.iter().skip(1) {
+                    let selector = identity.selector();
+                    let outcome = session.inspect_plugin_effect(
+                        plugin_index,
+                        next_request_index,
+                        Some(&selector),
+                    );
+                    next_request_index += 1;
+                    let Ok(InspectOutcome::Inspected { report }) = outcome else {
+                        all_effects_inspected = false;
+                        break;
+                    };
+                    if !selected_plugin_data_identity_matches(&report, identity) {
+                        all_effects_inspected = false;
+                        break;
+                    }
+                    if !merge_demanded_suites_from_report(&mut entry.demanded_suites, &report) {
+                        all_effects_inspected = false;
+                        break;
+                    }
+                    let Ok(mut params) = parameters_from_inspect_report(&report) else {
+                        all_effects_inspected = false;
+                        break;
+                    };
+                    normalize_parameters_for_cache(&mut params);
+                    let out_flags2 = report
+                        .get("out_flags2")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as u32;
+                    entry.additional_effects.push(CachedPluginDataEffect {
+                        identity: identity.clone(),
+                        smart: out_flags2 & (1 << 10) != 0,
+                        out_flags2,
+                        params,
+                        registered_name: None,
+                    });
+                }
+                if !all_effects_inspected {
+                    reject_plugin_data_bundle(&mut entry);
+                    entry.failure_diagnostics = Some(serde_json::json!({
+                        "cluster_error_kind": "inspected_report_unusable",
+                        "reason": "plugin_data_effect_inspection_failed",
+                    }));
+                    results.push((path, entry));
+                    continue;
+                }
+                if !entry.additional_effects.is_empty() {
+                    entry.closure_identity = None;
+                }
+                entry.ok = true;
                 results.push((path, entry));
             }
             Ok(InspectOutcome::InspectError { error_kind, report }) => {
@@ -1494,8 +1822,19 @@ fn complete_companion_demand_probes(
             continue;
         }
         let roots: Vec<PathBuf> = entry.closure.roots.iter().map(PathBuf::from).collect();
-        let run_probe = |companions| {
-            RenderSession::open(SessionOpenRequest {
+        let mut effects = vec![(None, entry.smart, entry.out_flags2)];
+        effects.extend(entry.additional_effects.iter().map(|effect| {
+            (
+                Some(effect.identity.selector()),
+                effect.smart,
+                effect.out_flags2,
+            )
+        }));
+        let run_probe = |selector: Option<&PluginDataEffectSelector>,
+                         smart: bool,
+                         out_flags2: u32,
+                         companions| {
+            let request = SessionOpenRequest {
                 repository,
                 plugin_path: Path::new(&path),
                 plugin_sha256: &entry.sha,
@@ -1521,56 +1860,49 @@ fn complete_companion_demand_probes(
                 total_time: 1,
                 time_scale: 1,
                 frame_deadline: Duration::from_secs(5),
-                smart: smart_render_route_supported(entry.smart, entry.out_flags2),
+                smart: smart_render_route_supported(smart, out_flags2),
                 gpu_backend: RenderGpuBackend::Auto,
                 gpu_runtime_policy: None,
                 payload_override: None,
                 launch_environment: Default::default(),
-            })
-        };
-        if let Ok(mut session) = run_probe(Vec::new()) {
-            let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
-            let close = session.close();
-            if let Some(candidate_suites) = companion_demand_from_probe_report(&close) {
-                // A clean effect merely queried an optional host capability and
-                // successfully used its fallback. Only a non-clean provider-free
-                // lifecycle is a candidate. Confirm causality by requiring the
-                // exact provider injection to make the same lifecycle clean.
-                let demanded_suites = if candidate_suites.is_empty() {
-                    Some(Vec::new())
-                } else {
-                    let mut candidate_cache = completed.clone();
-                    if let Some(candidate) = candidate_cache.get_mut(&path) {
-                        candidate.demanded_suites = candidate_suites.clone();
-                        candidate.companion_demand_probe_complete = true;
-                    }
-                    companion_providers_for(Path::new(&path), &candidate_cache)
-                        .ok()
-                        .and_then(|companions| {
-                            let mut session = run_probe(companions).ok()?;
-                            let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
-                            let close = session.close();
-                            Some(
-                                if close.get("session_clean")
-                                    == Some(&serde_json::Value::Bool(true))
-                                {
-                                    candidate_suites
-                                } else {
-                                    // The provider did not repair the lifecycle;
-                                    // the observed miss was optional/unrelated.
-                                    Vec::new()
-                                },
-                            )
-                        })
-                };
-                if let Some(demanded_suites) = demanded_suites {
-                    if let Some(entry) = completed.get_mut(&path) {
-                        entry.demanded_suites = demanded_suites;
-                        entry.companion_demand_probe_complete = true;
-                        changed = true;
-                    }
-                }
+            };
+            match selector {
+                Some(selector) => RenderSession::open_plugin_data_effect(request, selector),
+                None => RenderSession::open(request),
             }
+        };
+        let confirmed_suites = confirmed_plugin_data_demands(
+            &effects,
+            |selector, smart, out_flags2| {
+                let mut session = run_probe(selector, smart, out_flags2, Vec::new()).ok()?;
+                let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
+                companion_demand_from_probe_report(&session.close())
+            },
+            |candidate_suites| {
+                let mut candidate_cache = completed.clone();
+                let candidate = candidate_cache.get_mut(&path)?;
+                candidate.demanded_suites.clear();
+                merge_demanded_suites(
+                    &mut candidate.demanded_suites,
+                    candidate_suites.iter().cloned(),
+                )
+                .then_some(())?;
+                candidate.companion_demand_probe_complete = true;
+                companion_providers_for(Path::new(&path), &candidate_cache).ok()
+            },
+            |selector, smart, out_flags2, companions| {
+                let Ok(mut session) = run_probe(selector, smart, out_flags2, companions) else {
+                    return false;
+                };
+                let _ = session.render_frame(0, 0, &[255, 0, 0, 0]);
+                session.close().get("session_clean") == Some(&serde_json::Value::Bool(true))
+            },
+        );
+        if let Some(confirmed_suites) = confirmed_suites
+            && let Some(entry) = completed.get_mut(&path)
+            && finish_companion_demand_probe(entry, confirmed_suites)
+        {
+            changed = true;
         }
     }
     changed
@@ -1631,12 +1963,20 @@ fn version_key(version: &str) -> Vec<u64> {
 /// filter name, so that renaming drops them from saved projects for good
 /// (issues #307, #321).
 ///
-/// A name still depends on which same-stem plug-ins exist, so installing or
-/// uninstalling one renames the others — the trade-off recorded in issue #662.
 /// The final numeric pass is global, so a plug-in whose own stem already reads
 /// like a generated name (`Threshold (Effects).aex`) can be renamed by an
 /// unrelated collision too.
+#[cfg(test)]
 fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<String> {
+    stable_filter_names(plugins, also_known, &vec![None; plugins.len()])
+}
+
+fn stable_filter_names(
+    plugins: &[PathBuf],
+    also_known: &[PathBuf],
+    remembered: &[Option<String>],
+) -> Vec<String> {
+    debug_assert_eq!(plugins.len(), remembered.len());
     let mut counted = HashSet::<String>::new();
     let mut counts = HashMap::<String, usize>::new();
     for plugin in plugins.iter().chain(also_known) {
@@ -1653,9 +1993,22 @@ fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<Strin
     }
 
     let mut used = HashSet::<String>::new();
+    let mut names = vec![None; plugins.len()];
+    for (index, name) in remembered.iter().enumerate() {
+        let Some(name) = name.as_deref().filter(|name| valid_registered_name(name)) else {
+            continue;
+        };
+        if used.insert(name.to_lowercase()) {
+            names[index] = Some(name.to_owned());
+        }
+    }
     plugins
         .iter()
-        .map(|plugin| {
+        .enumerate()
+        .map(|(index, plugin)| {
+            if let Some(name) = names[index].take() {
+                return name;
+            }
             let stem = filter_stem(plugin);
             let collides = counts
                 .get(&stem.to_lowercase())
@@ -1683,6 +2036,91 @@ fn unique_filter_names(plugins: &[PathBuf], also_known: &[PathBuf]) -> Vec<Strin
         .collect()
 }
 
+fn valid_registered_name(name: &str) -> bool {
+    !name.is_empty() && name.encode_utf16().count() <= 255 && !name.chars().any(char::is_control)
+}
+
+fn bounded_filter_name(name: &str) -> String {
+    let mut result = String::new();
+    let mut units = 0usize;
+    for ch in name.chars() {
+        let width = ch.len_utf16();
+        if units + width > 255 {
+            break;
+        }
+        result.push(ch);
+        units += width;
+    }
+    result
+}
+
+fn remember_secondary_filter_names(
+    cache: &mut HashMap<String, CacheEntry>,
+    names: &HashMap<(String, u32), String>,
+) -> bool {
+    let mut changed = false;
+    for ((plugin, index), name) in names {
+        let Some(effect) = cache.get_mut(plugin).and_then(|entry| {
+            entry
+                .additional_effects
+                .iter_mut()
+                .find(|effect| effect.identity.index == *index)
+        }) else {
+            continue;
+        };
+        if effect.registered_name.as_deref() != Some(name) {
+            effect.registered_name = Some(name.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+fn remembered_filter_names(
+    plugins: &[PathBuf],
+    cache: &HashMap<String, CacheEntry>,
+) -> Vec<Option<String>> {
+    plugins
+        .iter()
+        .map(|plugin| {
+            let key = plugin.to_string_lossy();
+            cache
+                .get(key.as_ref())
+                .or_else(|| {
+                    let folded = key.to_lowercase();
+                    cache.iter().find_map(|(cached_key, entry)| {
+                        let targets_plugin = cached_key.to_lowercase() == folded
+                            || entry
+                                .alias_target
+                                .as_deref()
+                                .is_some_and(|target| target.to_lowercase() == folded);
+                        targets_plugin.then_some(entry)
+                    })
+                })
+                .and_then(|entry| entry.registered_name.clone())
+        })
+        .collect()
+}
+
+fn remember_filter_names(
+    cache: &mut HashMap<String, CacheEntry>,
+    plugins: &[PathBuf],
+    names: &[String],
+) -> bool {
+    let mut changed = false;
+    for (plugin, name) in plugins.iter().zip(names) {
+        let Some(entry) = cache.get_mut(plugin.to_string_lossy().as_ref()) else {
+            continue;
+        };
+        if is_registerable_effect(entry) && entry.registered_name.as_deref() != Some(name) {
+            entry.registered_name = Some(name.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// The plug-in's file stem, or `AEX` when it has none or is not UTF-8.
 fn filter_stem(plugin: &Path) -> &str {
     plugin
@@ -1702,6 +2140,7 @@ fn register_discovered(
     entry: &CacheEntry,
     companions: Vec<ApprovedCompanion>,
     name: &str,
+    plugin_data_selector: Option<PluginDataEffectSelector>,
 ) {
     let mut resolved_dependency = dependency.clone();
     if !entry.closure.roots.is_empty() {
@@ -1731,6 +2170,7 @@ fn register_discovered(
         dependency: resolved_dependency,
         sha: entry.sha.clone(),
         smart: smart_render_route_supported(entry.smart, entry.out_flags2),
+        plugin_data_selector,
         companions: companions.clone(),
         closure_identity: entry.closure_identity.clone(),
         // From the raw discovery parameters, NOT from `defaults`: `build_item`

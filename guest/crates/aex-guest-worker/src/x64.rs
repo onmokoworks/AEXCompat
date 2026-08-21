@@ -122,6 +122,7 @@ const HOST_AEGP_COMPUTE_CACHE_CALLBACKS: [u64; 6] = [
     STUB_BASE + 0x80560,
 ];
 const HOST_DYNAMIC_FLS_ALLOC: u64 = STUB_BASE + 0x80570;
+const HOST_REGISTER_UI: u64 = STUB_BASE + 0x80590;
 const HOST_CREATE_THREAD_CONTINUE: u64 = STUB_BASE + 0x80580;
 const WINDOWS_KERNEL32_MODULE_TOKEN: u64 = STUB_BASE + 0x8f000;
 const WINDOWS_NTDLL_MODULE_TOKEN: u64 = STUB_BASE + 0x8f180;
@@ -264,6 +265,7 @@ const ERROR_INVALID_HANDLE: u32 = 6;
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
 const ERROR_ACCESS_DENIED: u32 = 5;
+const ERROR_NOT_SUPPORTED: u32 = 50;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const ERROR_MOD_NOT_FOUND: u32 = 126;
 const ERROR_PROC_NOT_FOUND: u32 = 127;
@@ -439,6 +441,7 @@ mod tests {
     include!("x64/tests_area_sample.rs");
     include!("x64/tests_ansi_callbacks.rs");
     include!("x64/tests_transfer_rect.rs");
+    include!("x64/tests_register_ui.rs");
     include!("x64/tests_cases.rs");
     include!("x64/tests_issue1077.rs");
     include!("x64/tests_gpu.rs");

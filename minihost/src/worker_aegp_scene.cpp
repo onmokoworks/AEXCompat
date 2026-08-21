@@ -1635,9 +1635,8 @@ int32_t __cdecl aegp_dispose_effect(void* effect) {
     // still live - `legacy_effect_stream_parent_live` asks only those two -
     // and they would go on being answered, out of the probe fixture's table
     // instead of the plug-in's, if the flag went away with the handle. The
-    // paths that do reuse slot 0 (`aegp_apply_effect`,
-    // `aegp_delete_layer_effect`) assign a whole instance and clear it that
-    // way.
+    // `aegp_delete_layer_effect` clears the whole instance when it retires
+    // this reserved slot.
     ++g_aegp_effect_disposes;
     return 0;
   }
@@ -1660,7 +1659,11 @@ int32_t __cdecl aegp_apply_effect(
       !effect || !find_installed_effect(installed_key) ||
       g_aegp_effect_lease_generation == UINT32_MAX)
     return 4;
-  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin(),
+  // Slot 0 belongs exclusively to the PF loaded-plugin handle returned by
+  // `AEGP_GetNewEffectForEffect`. Sharing it with ApplyEffect lets that later
+  // call turn an already-published installed effect into the loaded plug-in
+  // and answer its parameter streams from the wrong table (issue #922).
+  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin() + 1,
       g_aegp_effect_instances.end(), [](const auto& instance) { return !instance.occupied; });
   const auto lease_slot = std::find_if(g_aegp_effect_leases.begin(),
       g_aegp_effect_leases.end(), [](const auto& lease) { return !lease.live; });
@@ -1789,7 +1792,10 @@ int32_t __cdecl aegp_duplicate_effect(void* original, void** duplicate) {
           original, ObjectKind::effect, source_identity) ||
       g_aegp_effect_lease_generation == UINT32_MAX)
     return 4;
-  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin(),
+  // Slot 0 is reserved for the PF loaded-plugin handle just as it is in
+  // ApplyEffect. A duplicate published there would be reclassified by a later
+  // `AEGP_GetNewEffectForEffect` call (issue #922).
+  const auto instance_slot = std::find_if(g_aegp_effect_instances.begin() + 1,
       g_aegp_effect_instances.end(), [](const auto& value) { return !value.occupied; });
   const auto lease_slot = std::find_if(g_aegp_effect_leases.begin(),
       g_aegp_effect_leases.end(), [](const auto& value) { return !value.live; });
@@ -2017,6 +2023,51 @@ const AegpEffectParameterRecord* loaded_effect_parameter(int32_t index) {
   // Writes go through the parameter runtime's own path, not this one.
   published.writable = false;
   return &published;
+}
+
+bool loaded_effect_stream_value(
+    int32_t index, std::array<std::byte, 32>& output) noexcept {
+  if (index < 1) return false;
+  const auto& records = aexcompat::worker_runtime::parameters::state().records;
+  if (static_cast<std::size_t>(index) > records.size()) return false;
+  const auto& record = records[static_cast<std::size_t>(index - 1)];
+  std::array<double, 4> value{};
+  switch (record.type) {
+    case 0:  // PF_Param_LAYER: zero is no layer.
+      break;
+    case 1:   // PF_Param_SLIDER
+    case 2:   // PF_Param_FIX_SLIDER
+    case 4:   // PF_Param_CHECKBOX
+    case 7:   // PF_Param_POPUP
+    case 10:  // PF_Param_FLOAT_SLIDER
+      value[0] = record.has_current ? record.current_value
+                                    : record.default_value;
+      break;
+    case 3:  // PF_Param_ANGLE
+      if (record.component_count != 1) return false;
+      value[0] = record.current_components[0];
+      break;
+    case 5:  // PF_Param_COLOR (AEGP_ColorVal: alpha, red, green, blue)
+      if (!record.has_color) return false;
+      for (std::size_t channel = 0; channel < value.size(); ++channel)
+        value[channel] = record.current_color[channel] / 255.0;
+      break;
+    case 6:  // PF_Param_POINT
+      if (record.component_count != 2) return false;
+      std::copy_n(record.current_components.begin(), 2, value.begin());
+      break;
+    case 18:  // PF_Param_POINT_3D
+      if (record.component_count != 3) return false;
+      std::copy_n(record.current_components.begin(), 3, value.begin());
+      break;
+    default:
+      // Arbitrary data and valueless definitions have no bounded runtime
+      // representation here. Do not publish a fabricated zero value.
+      return false;
+  }
+  static_assert(sizeof(value) == 32);
+  std::memcpy(output.data(), value.data(), sizeof(value));
+  return true;
 }
 const AegpEffectParameterRecord* find_effect_parameter(
     const AegpEffectInstance& instance, int32_t index) {
@@ -2798,47 +2849,34 @@ SceneSuiteAcquireResult scene_acquire_suite(
   }
 
   if (named("AEGP Layer Suite") && version == 15) {
-    const bool render_receipt = factory.render_scene_enabled();
-    if (render_receipt || state().comp_idle_roundtrip_mode) {
-      g_aegp_layer_suite9 =
-          unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_15, 53>();
-      g_aegp_layer_suite9[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
-      g_aegp_layer_suite9[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
-      g_aegp_layer_suite9[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
-      g_aegp_layer_suite9[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
-      g_aegp_layer_suite9[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
-      g_aegp_layer_suite9[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
-      g_aegp_layer_suite9[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
-      // These sit outside the receipt block because every other table wires
-      // them ungated - version 14 has had `AEGP_SetLayerFlag` there since
-      // before this gate existed. That is the honest state of the gate: it is
-      // not a boundary. A plug-in that wants what the block below withholds
-      // acquires version 13 or 14 instead and gets it, in-point included.
-      // Making it one, or dropping it, is #921.
-      g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
-      g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
-      g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
-      if (!render_receipt) {
-        g_aegp_layer_suite9[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
-        g_aegp_layer_suite9[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
-        g_aegp_layer_suite9[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
-        g_aegp_layer_suite9[17] =
-            reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
-        g_aegp_layer_suite9[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
-        g_aegp_layer_suite9[37] = reinterpret_cast<void*>(&aegp_get_layer_id);
-        g_aegp_layer_suite9[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
-        g_aegp_layer_suite9[42] =
-            reinterpret_cast<void*>(&aegp_set_layer_parent);
-        g_aegp_layer_suite9[43] =
-            reinterpret_cast<void*>(&aegp_delete_layer);
-        g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
-      }
-      g_aegp_layer_suite9[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
-      g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
-      g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
-      *suite = g_aegp_layer_suite9.data();
-      return SceneSuiteAcquireResult::acquired;
-    }
+    g_aegp_layer_suite9 =
+        unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_15, 53>();
+    g_aegp_layer_suite9[0] = reinterpret_cast<void*>(&aegp_get_comp_num_layers);
+    g_aegp_layer_suite9[1] = reinterpret_cast<void*>(&aegp_get_comp_layer_by_index);
+    g_aegp_layer_suite9[2] = reinterpret_cast<void*>(&aegp_get_active_layer);
+    g_aegp_layer_suite9[3] = reinterpret_cast<void*>(&aegp_get_layer_index);
+    g_aegp_layer_suite9[4] = reinterpret_cast<void*>(&aegp_get_layer_source_item);
+    g_aegp_layer_suite9[6] = reinterpret_cast<void*>(&aegp_get_layer_parent_comp);
+    g_aegp_layer_suite9[7] = reinterpret_cast<void*>(&aegp_get_layer_name);
+    g_aegp_layer_suite9[10] = reinterpret_cast<void*>(&aegp_get_layer_flags);
+    g_aegp_layer_suite9[11] = reinterpret_cast<void*>(&aegp_set_layer_flag);
+    g_aegp_layer_suite9[15] = reinterpret_cast<void*>(&aegp_get_layer_in_point);
+    g_aegp_layer_suite9[16] = reinterpret_cast<void*>(&aegp_get_layer_duration);
+    g_aegp_layer_suite9[17] =
+        reinterpret_cast<void*>(&aegp_set_layer_in_point_and_duration);
+    g_aegp_layer_suite9[22] = reinterpret_cast<void*>(&aegp_get_layer_transfer_mode);
+    g_aegp_layer_suite9[27] = reinterpret_cast<void*>(&aegp_get_layer_masked_bounds);
+    g_aegp_layer_suite9[28] = reinterpret_cast<void*>(&aegp_get_layer_object_type);
+    g_aegp_layer_suite9[34] = reinterpret_cast<void*>(&aegp_convert_comp_to_layer_time);
+    g_aegp_layer_suite9[35] = reinterpret_cast<void*>(&aegp_convert_layer_to_comp_time);
+    g_aegp_layer_suite9[37] = reinterpret_cast<void*>(&aegp_get_layer_id);
+    g_aegp_layer_suite9[38] = reinterpret_cast<void*>(&aegp_get_layer_to_world_xform);
+    g_aegp_layer_suite9[41] = reinterpret_cast<void*>(&aegp_get_layer_parent);
+    g_aegp_layer_suite9[42] = reinterpret_cast<void*>(&aegp_set_layer_parent);
+    g_aegp_layer_suite9[43] = reinterpret_cast<void*>(&aegp_delete_layer);
+    g_aegp_layer_suite9[45] = reinterpret_cast<void*>(&aegp_get_layer_from_id);
+    *suite = g_aegp_layer_suite9.data();
+    return SceneSuiteAcquireResult::acquired;
   }
   // Version 5 is `AEGP_LayerSuite1`, frozen in AE 5.0. The suite struct number
   // and the version a plug-in acquires with do not line up - `AEGP_LayerSuite5`
@@ -2861,10 +2899,9 @@ SceneSuiteAcquireResult scene_acquire_suite(
   // `AEGP_MemHandle` outputs). Pointing one at the other would be a different
   // call, not a compatible one.
   //
-  // Unconditional, like version 14 beside it. Version 11 is behind
-  // `comp_idle_roundtrip_mode` and version 15 withholds part of its table under
-  // a render receipt; neither gate is adopted here because this table exposes
-  // nothing they withhold that version 14 does not already expose ungated.
+  // Unconditional, like versions 14 and 15 beside it. Version 11 remains
+  // behind `comp_idle_roundtrip_mode`; its gate is not adopted here because
+  // this table exposes nothing version 14 does not already expose ungated.
   if (named("AEGP Layer Suite") && version == 5) {
     g_aegp_layer_suite1 =
         unsupported_suite_slots<UnsupportedSuiteId::aegp_layer_5, 39>();
@@ -3503,30 +3540,21 @@ int32_t __cdecl aegp_get_new_stream_value_v2(
       stream_snapshot.stream.value_kind ==
           aexcompat::scene_model::StreamValueKind::no_data)
     return 4;
-  output->stream = stream;
-  output->value.fill(std::byte{});
+  std::array<std::byte, 32> result{};
   const std::size_t fixture_slot =
       static_cast<std::size_t>(value->param_index - 1);
   if (value->param_index == 0) {
-    std::memcpy(output->value.data(), &instance.layer, sizeof(instance.layer));
+    std::memcpy(result.data(), &instance.layer, sizeof(instance.layer));
+  } else if (instance.loaded_plugin) {
+    if (!loaded_effect_stream_value(value->param_index, result)) return 4;
   } else if (!instance.loaded_plugin &&
              fixture_slot < instance.parameter_values.size()) {
-    std::memcpy(output->value.data(),
+    std::memcpy(result.data(),
                 instance.parameter_values[fixture_slot].data(),
                 sizeof(instance.parameter_values[0]));
   }
-  // Anything else stays zero, which for a layer parameter is "no layer" - the
-  // answer DeepGlow2's matte path is asking for when its matte parameter is
-  // left unset.
-  //
-  // `parameter_values` has room for twelve but only the first four carry
-  // anything: the probe's defaults, seeded at scene start, plus whatever
-  // `initialize_effect_parameter_values` writes when an effect is applied. For
-  // the loaded plug-in none of that is its own, so reading it would have
-  // answered the plug-in's first four parameters with the probe's numbers
-  // under the plug-in's names and types. The records do carry each
-  // parameter's declared default, and for some types its current value; this
-  // path is not wired to them yet (#929).
+  output->stream = stream;
+  output->value = result;
   value->value_live = true;
   value->checked_out_value = output;
   if (!scene_registry().create_child(

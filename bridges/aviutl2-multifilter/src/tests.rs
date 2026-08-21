@@ -39,6 +39,9 @@ mod tests {
             closure_identity: None,
             cluster_fallback: None,
             category: None,
+            registered_name: None,
+            plugin_data_effect: None,
+            additional_effects: Vec::new(),
         }
     }
 
@@ -48,6 +51,34 @@ mod tests {
             sha: String::new(),
             smart: false,
             ..discovered(mtime_secs, len, build)
+        }
+    }
+
+    fn plugin_data_identity(index: u32, match_name: &str) -> PluginDataIdentity {
+        PluginDataIdentity {
+            index,
+            name_hex: format!("{:x}", index + 0x41),
+            match_name_hex: match_name
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            category_hex: "456666656374".to_owned(),
+            entrypoint: format!("effect_{index}"),
+        }
+    }
+
+    fn cached_plugin_data_effect(
+        index: u32,
+        match_name: &str,
+        registered_name: Option<&str>,
+    ) -> CachedPluginDataEffect {
+        CachedPluginDataEffect {
+            identity: plugin_data_identity(index, match_name),
+            smart: index.is_multiple_of(2),
+            out_flags2: if index.is_multiple_of(2) { 1 << 10 } else { 0 },
+            params: Vec::new(),
+            registered_name: registered_name.map(str::to_owned),
         }
     }
 
@@ -157,12 +188,47 @@ mod tests {
             internal_version: 2,
         }];
         let mut effect_entry = discovered(1, 7, build(1));
-        effect_entry.demanded_suites = vec![ProvidedSuite {
-            name: "Opaque Runtime Service 2026.1".into(),
-            api_version: 1,
-            internal_version: 0,
-        }];
-        effect_entry.companion_demand_probe_complete = true;
+        let primary_report = serde_json::json!({"missing_suites": []});
+        let secondary_report = serde_json::json!({
+            "missing_suites": [{
+                "name": "Opaque Runtime Service 2026.1",
+                "version": 1
+            }]
+        });
+        assert!(merge_demanded_suites_from_report(
+            &mut effect_entry.demanded_suites,
+            &primary_report
+        ));
+        assert!(merge_demanded_suites_from_report(
+            &mut effect_entry.demanded_suites,
+            &secondary_report
+        ));
+        let mut optional_entry = effect_entry.clone();
+        assert!(finish_companion_demand_probe(
+            &mut optional_entry,
+            Vec::new()
+        ));
+        assert!(
+            optional_entry.demanded_suites.is_empty(),
+            "an unconfirmed secondary miss must not load a provider"
+        );
+        assert!(finish_companion_demand_probe(
+            &mut effect_entry,
+            vec![ProvidedSuite {
+                name: "Opaque Runtime Service 2026.1".into(),
+                api_version: 1,
+                internal_version: 0,
+            }]
+        ));
+        assert_eq!(
+            effect_entry.demanded_suites,
+            vec![ProvidedSuite {
+                name: "Opaque Runtime Service 2026.1".into(),
+                api_version: 1,
+                internal_version: 0,
+            }],
+            "a provider-confirmed secondary demand must survive association"
+        );
         let mut arbitrary_entry = provider_entry.clone();
         arbitrary_entry.plugin_kind = DiscoveredPluginKind::Effect;
         let mut cache = HashMap::new();
@@ -1004,6 +1070,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn a_registered_name_survives_cache_save_reload_and_concurrent_merge() {
+        let dir = TempRoot::from_path(std::env::temp_dir().join(format!(
+            "aexcompat-mf-saved-name-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        let path = dir.join("discovery-cache.json");
+        let key = "effect.aex".to_owned();
+        let mut named = discovered(5, 64, build(1));
+        named.registered_name = Some("Threshold (Effects)".to_owned());
+        assert!(save_cache_at(&path, &HashMap::from([(key.clone(), named)])));
+
+        // A concurrently running older build can write the same entry without
+        // the additive field. It must not erase the stable project identity.
+        assert!(save_cache_at(
+            &path,
+            &HashMap::from([(key.clone(), discovered(5, 64, build(1)))])
+        ));
+        assert_eq!(
+            load_cache_at(&path)[&key].registered_name.as_deref(),
+            Some("Threshold (Effects)")
+        );
+
+        let mut conflicting = discovered(5, 64, build(1));
+        conflicting.registered_name = Some("Threshold".to_owned());
+        assert!(save_cache_at(
+            &path,
+            &HashMap::from([(key.clone(), conflicting)])
+        ));
+        assert_eq!(
+            load_cache_at(&path)[&key].registered_name.as_deref(),
+            Some("Threshold (Effects)"),
+            "the first valid persisted identity wins a concurrent save race"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The concurrent-launch half still holds through the file: disjoint
     /// keys from an earlier save survive a later one, and an on-disk
     /// same-meta known-good beats a later transient negative.
@@ -1759,6 +1866,45 @@ mod tests {
         assert!(found.is_some(), "but the real path finds it");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn an_alias_rekey_uses_the_old_registered_name_before_registration() {
+        let root = temp_root("alias-registered-name");
+        let real = root.join("Effects");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("Threshold.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+
+        let walked = root.join("link").join("Threshold.aex");
+        let old_key = real.join("Threshold.aex");
+        let meta = file_meta(&walked).unwrap();
+        let mut old_entry = discovered(meta.0.0, meta.1, build(1));
+        old_entry.mtime = meta.0;
+        old_entry.registered_name = Some("Threshold (Effects)".to_owned());
+        let cache = peer_cache(&[(old_key.to_str().unwrap(), old_entry)]);
+        let walked_key = walked.to_string_lossy().into_owned();
+        let roots = vec![root.path().to_path_buf()];
+        let mut aliases = None;
+
+        let (resolved, alias) = resolve_cached(
+            &cache,
+            &walked_key,
+            &walked,
+            Some(meta),
+            build(1),
+            &roots,
+            true,
+            &mut aliases,
+        );
+        assert_eq!(alias.as_deref(), Some(old_key.to_string_lossy().as_ref()));
+        let remembered = vec![resolved.and_then(|entry| entry.registered_name.clone())];
+        assert_eq!(
+            stable_filter_names(std::slice::from_ref(&walked), &[], &remembered),
+            vec!["Threshold (Effects)".to_owned()],
+            "the old saved-project identity is chosen before registration"
+        );
+    }
+
     /// After an aliased hit the entry must also be reachable under the spelling
     /// the scan walked: the background pass keys by that, and without it
     /// `keep_best` sees no cached entry, so a transient discovery failure would
@@ -1776,6 +1922,26 @@ mod tests {
         // And now the background merge sees it, so a failed recheck cannot demote.
         let merged = keep_best(Some(moved), failed(5, 64, build(2)), META).unwrap();
         assert!(merged.ok, "the demotion guard applies again");
+    }
+
+    #[test]
+    fn alias_copies_count_as_one_owner_during_registered_name_merge() {
+        let mut named = discovered(5, 64, build(1));
+        named.registered_name = Some("Threshold (Effects)".to_owned());
+        let mut on_disk = peer_cache(&[("old.aex", named)]);
+        apply_rekey(
+            &mut on_disk,
+            vec![("old.aex".to_owned(), "walked.aex".to_owned())],
+        );
+        let mut local = on_disk.clone();
+        local.get_mut("walked.aex").unwrap().registered_name = Some("Threshold".to_owned());
+
+        merge_cache_entries(&mut local, &on_disk);
+        assert_eq!(
+            local["walked.aex"].registered_name.as_deref(),
+            Some("Threshold (Effects)"),
+            "the retained alias must not make one disk identity look duplicated"
+        );
     }
 
     /// The alias index only covers the folders this launch scanned, so a leftover
@@ -2661,6 +2827,500 @@ mod tests {
                 "Levels".to_owned(),
                 "Threshold (Effects)".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn installing_a_same_stem_plugin_does_not_rename_the_existing_filter() {
+        let existing = PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex");
+        let added = PathBuf::from(r"C:\AE\Plug-ins\Effects\CycoreFXHD\Threshold.aex");
+        let mut cache = peer_cache(&[(existing.to_str().unwrap(), discovered(5, 64, build(1)))]);
+
+        let first_names = stable_filter_names(
+            std::slice::from_ref(&existing),
+            &[],
+            &remembered_filter_names(std::slice::from_ref(&existing), &cache),
+        );
+        assert_eq!(first_names, ["Threshold"]);
+        assert!(remember_filter_names(
+            &mut cache,
+            std::slice::from_ref(&existing),
+            &first_names
+        ));
+
+        cache.insert(
+            added.to_string_lossy().into_owned(),
+            discovered(5, 64, build(1)),
+        );
+        let plugins = vec![existing, added];
+        assert_eq!(
+            stable_filter_names(&plugins, &[], &remembered_filter_names(&plugins, &cache)),
+            vec!["Threshold".to_owned(), "Threshold (CycoreFXHD)".to_owned()],
+            "the newly installed peer moves aside from the saved-project name"
+        );
+    }
+
+    #[test]
+    fn uninstalling_a_same_stem_plugin_keeps_the_qualified_name() {
+        let existing = PathBuf::from(r"C:\AE\Plug-ins\Effects\Threshold.aex");
+        let removed = PathBuf::from(r"C:\AE\Plug-ins\Effects\CycoreFXHD\Threshold.aex");
+        let plugins = vec![existing.clone(), removed.clone()];
+        let mut cache = peer_cache(&[
+            (existing.to_str().unwrap(), discovered(5, 64, build(1))),
+            (removed.to_str().unwrap(), discovered(5, 64, build(1))),
+        ]);
+        let collision_names =
+            stable_filter_names(&plugins, &[], &remembered_filter_names(&plugins, &cache));
+        assert_eq!(
+            collision_names,
+            vec![
+                "Threshold (Effects)".to_owned(),
+                "Threshold (CycoreFXHD)".to_owned()
+            ]
+        );
+        assert!(remember_filter_names(
+            &mut cache,
+            &plugins,
+            &collision_names
+        ));
+
+        cache.remove(removed.to_str().unwrap());
+        assert_eq!(
+            stable_filter_names(
+                std::slice::from_ref(&existing),
+                &[],
+                &remembered_filter_names(std::slice::from_ref(&existing), &cache)
+            ),
+            vec!["Threshold (Effects)".to_owned()],
+            "removing the peer must not invalidate saved-project objects"
+        );
+    }
+
+    #[test]
+    fn rediscovery_preserves_the_registered_name() {
+        let mut cached = discovered(5, 64, build(1));
+        cached.registered_name = Some("Threshold (Effects)".to_owned());
+        let refreshed = discovered(5, 64, build(2));
+
+        assert_eq!(
+            keep_best(Some(&cached), refreshed, META)
+                .unwrap()
+                .registered_name
+                .as_deref(),
+            Some("Threshold (Effects)")
+        );
+    }
+
+    #[test]
+    fn rediscovery_preserves_secondary_names_by_logical_identity_after_reorder() {
+        let mut cached = discovered(5, 64, build(1));
+        cached.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let mut refreshed = discovered(5, 64, build(2));
+        let mut reordered = cached_plugin_data_effect(1, "second", None);
+        reordered.identity.index = 2;
+        refreshed.additional_effects = vec![reordered];
+
+        let merged = keep_best(Some(&cached), refreshed, META).unwrap();
+        assert_eq!(merged.additional_effects[0].identity.index, 2);
+        assert_eq!(
+            merged.additional_effects[0].registered_name.as_deref(),
+            Some("Bundle — Second"),
+            "registration order may change, but the exact match/export identity owns the saved-project name"
+        );
+    }
+
+    #[test]
+    fn primary_secondary_reorder_keeps_each_saved_project_name_with_its_effect() {
+        let mut old = discovered(5, 64, build(1));
+        old.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        old.registered_name = Some("Bundle".to_owned());
+        old.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+
+        let mut refreshed = discovered(5, 64, build(2));
+        let mut new_primary = plugin_data_identity(1, "second");
+        new_primary.index = 0;
+        refreshed.plugin_data_effect = Some(new_primary);
+        let mut new_secondary = cached_plugin_data_effect(0, "first", None);
+        new_secondary.identity.index = 1;
+        refreshed.additional_effects = vec![new_secondary];
+
+        let merged = keep_best(Some(&old), refreshed, META).unwrap();
+        assert_eq!(merged.registered_name.as_deref(), Some("Bundle — Second"));
+        assert_eq!(
+            merged.additional_effects[0].registered_name.as_deref(),
+            Some("Bundle")
+        );
+    }
+
+    #[test]
+    fn concurrent_merge_maps_primary_secondary_names_by_effect_not_slot() {
+        let key = r"C:\AE\Bundle.aex".to_owned();
+        let mut disk = discovered(5, 64, build(1));
+        disk.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        disk.registered_name = Some("Bundle".to_owned());
+        disk.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+
+        let mut local = discovered(5, 64, build(1));
+        let mut local_primary = plugin_data_identity(1, "second");
+        local_primary.index = 0;
+        local.plugin_data_effect = Some(local_primary);
+        local.registered_name = Some("wrong-primary".to_owned());
+        let mut local_secondary = cached_plugin_data_effect(0, "first", Some("wrong-secondary"));
+        local_secondary.identity.index = 1;
+        local.additional_effects = vec![local_secondary];
+        let on_disk = HashMap::from([(key.clone(), disk)]);
+        let mut local_cache = HashMap::from([(key.clone(), local)]);
+
+        merge_cache_entries(&mut local_cache, &on_disk);
+
+        assert_eq!(
+            local_cache[&key].registered_name.as_deref(),
+            Some("Bundle — Second")
+        );
+        assert_eq!(
+            local_cache[&key].additional_effects[0]
+                .registered_name
+                .as_deref(),
+            Some("Bundle")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn alias_resolved_entry_plans_every_secondary_filter_on_first_launch() {
+        let root = temp_root("alias-multi-effect-plan");
+        let real = root.join("Effects");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("Bundle.aex"), b"x").unwrap();
+        junction(&root.join("link"), &real);
+        let walked = root.join("link").join("Bundle.aex");
+        let old_key = real.join("Bundle.aex");
+        let meta = file_meta(&walked).unwrap();
+        let mut entry = discovered(meta.0.0, meta.1, build(1));
+        entry.mtime = meta.0;
+        entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let cache = HashMap::from([(old_key.to_string_lossy().into_owned(), entry)]);
+        let roots = vec![root.path().to_path_buf()];
+        let mut aliases = None;
+        let (resolved, alias) = resolve_cached(
+            &cache,
+            &walked.to_string_lossy(),
+            &walked,
+            Some(meta),
+            build(1),
+            &roots,
+            true,
+            &mut aliases,
+        );
+        assert_eq!(alias.as_deref(), Some(old_key.to_string_lossy().as_ref()));
+        let resolved_entries = vec![resolved.cloned()];
+        let names = plan_secondary_filter_names(
+            std::slice::from_ref(&walked),
+            &["Bundle".to_owned()],
+            &resolved_entries,
+        );
+        assert_eq!(
+            names.get(&(walked.to_string_lossy().into_owned(), 1)),
+            Some(&"Bundle — Second".to_owned())
+        );
+        let plans = virtual_effect_registrations(
+            resolved_entries[0].as_ref().unwrap(),
+            "Bundle",
+            &HashMap::from([(1, names.values().next().unwrap().clone())]),
+        );
+        assert_eq!(plans.len(), 2);
+        assert_eq!(
+            cache.len(),
+            1,
+            "the alias need not be rekeyed before planning"
+        );
+    }
+
+    #[test]
+    fn concurrent_cache_save_keeps_the_first_secondary_project_name() {
+        let key = r"C:\AE\Bundle.aex".to_owned();
+        let mut disk_entry = discovered(5, 64, build(1));
+        disk_entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Second"),
+        )];
+        let mut local_entry = discovered(5, 64, build(1));
+        local_entry.additional_effects = vec![cached_plugin_data_effect(
+            1,
+            "second",
+            Some("Bundle — Conflicting"),
+        )];
+        let on_disk = HashMap::from([(key.clone(), disk_entry)]);
+        let mut local = HashMap::from([(key.clone(), local_entry)]);
+
+        merge_cache_entries(&mut local, &on_disk);
+
+        assert_eq!(
+            local[&key].additional_effects[0].registered_name.as_deref(),
+            Some("Bundle — Second")
+        );
+    }
+
+    #[test]
+    fn plugin_data_inventory_requires_exact_bounded_sequential_identities() {
+        let identity0 = plugin_data_identity(0, "first");
+        let identity1 = plugin_data_identity(1, "second");
+        let report = serde_json::json!({
+            "plugin_data": {
+                "selected_index": 1,
+                "registrations": [identity0, identity1]
+            }
+        });
+        let parsed = plugin_data_identities(&report).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(selected_plugin_data_identity_matches(&report, &parsed[1]));
+
+        for malformed in [
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": []}}),
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": [plugin_data_identity(1, "wrong-index")]}}),
+            serde_json::json!({"plugin_data": {"selected_index": 0, "registrations": [{"index": 0, "name_hex": "41", "match_name_hex": "6669727374", "category_hex": "45", "entrypoint": "effect_0", "extra": true}]}}),
+        ] {
+            assert!(plugin_data_identities(&malformed).is_err());
+        }
+        let overflow = (0..65)
+            .map(|index| plugin_data_identity(index, &format!("effect-{index}")))
+            .collect::<Vec<_>>();
+        assert!(
+            plugin_data_identities(&serde_json::json!({
+                "plugin_data": {"selected_index": 0, "registrations": overflow}
+            }))
+            .is_err()
+        );
+
+        let opaque = serde_json::json!({
+            "plugin_data": {
+                "selected_index": 0,
+                "registrations": [{
+                    "index": 0,
+                    "name_hex": "82a0",
+                    "match_name_hex": "82a1",
+                    "category_hex": "836583588367",
+                    "entrypoint": "EffectMain"
+                }]
+            }
+        });
+        let parsed = plugin_data_identities(&opaque).expect("opaque metadata stays selectable");
+        assert_eq!(parsed[0].match_name_hex, "82a1");
+        assert!(parsed[0].display_name().is_some());
+        assert!(parsed[0].category().is_some());
+    }
+
+    #[test]
+    fn plugin_data_bundle_flattens_to_distinct_exact_registration_plans() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        entry.closure_identity = Some("shared-dll-closure".to_owned());
+        entry.additional_effects = vec![cached_plugin_data_effect(1, "second", None)];
+        let plans = virtual_effect_registrations(
+            &entry,
+            "Bundle",
+            &HashMap::from([(1, "Bundle — Second".to_owned())]),
+        );
+
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].name, "Bundle");
+        assert!(plans[0].selector.is_none());
+        assert_eq!(
+            plans[0].entry.closure_identity.as_deref(),
+            Some("shared-dll-closure")
+        );
+        assert_eq!(plans[1].name, "Bundle — Second");
+        assert_eq!(
+            plans[1].selector,
+            Some(PluginDataEffectSelector {
+                index: 1,
+                match_name_hex: "7365636f6e64".to_owned(),
+            })
+        );
+        assert_eq!(plans[1].entry.plugin_data_effect.as_ref().unwrap().index, 1);
+        assert!(plans[1].entry.closure_identity.is_none());
+        assert!(plans[1].entry.additional_effects.is_empty());
+    }
+
+    #[test]
+    fn failed_secondary_inspection_makes_the_whole_bundle_unregistrationable() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.ok = true;
+        entry.closure_identity = Some("cluster-primary".to_owned());
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        entry.additional_effects = vec![cached_plugin_data_effect(1, "second", None)];
+
+        reject_plugin_data_bundle(&mut entry);
+
+        assert!(!is_registerable_effect(&entry));
+        assert!(entry.plugin_data_effect.is_none());
+        assert!(entry.additional_effects.is_empty());
+        assert!(entry.closure_identity.is_none());
+    }
+
+    #[test]
+    fn companion_probe_confirms_each_secondary_on_its_exact_selector() {
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        let effects = vec![(None, false, 0), (Some(selector.clone()), true, 1 << 10)];
+        for repaired in [false, true] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let confirmed = confirmed_plugin_data_demands(
+                &effects,
+                |selected, _, _| {
+                    calls.borrow_mut().push(("without", selected.cloned()));
+                    Some(if selected.is_some() {
+                        vec![ProvidedSuite {
+                            name: "Secondary Effect Suite".to_owned(),
+                            api_version: 2,
+                            internal_version: 0,
+                        }]
+                    } else {
+                        Vec::new()
+                    })
+                },
+                |candidates| {
+                    assert_eq!(candidates[0].name, "Secondary Effect Suite");
+                    Some("provider")
+                },
+                |selected, smart, out_flags2, provider| {
+                    calls.borrow_mut().push(("with", selected.cloned()));
+                    assert_eq!(selected, Some(&selector));
+                    assert!(smart);
+                    assert_eq!(out_flags2, 1 << 10);
+                    assert_eq!(provider, "provider");
+                    repaired
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                calls.into_inner(),
+                vec![
+                    ("without", None),
+                    ("without", Some(selector.clone())),
+                    ("with", Some(selector.clone())),
+                ]
+            );
+            assert_eq!(confirmed.len(), usize::from(repaired));
+        }
+    }
+
+    #[test]
+    fn secondary_filter_context_routes_both_render_paths_to_the_exact_selector() {
+        let selector = PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "7365636f6e64".to_owned(),
+        };
+        for route in ["resident", "classic-fallback"] {
+            let selected = route_plugin_data_session(
+                route,
+                Some(&selector),
+                |_| -> Result<_, ()> { panic!("secondary effect used the default entrypoint") },
+                |request, selected| Ok((request, selected.index, selected.match_name_hex.clone())),
+            )
+            .unwrap();
+            assert_eq!(
+                selected,
+                (route, 1, "7365636f6e64".to_owned()),
+                "{route} must retain the virtual filter's exact selector"
+            );
+        }
+        let default = route_plugin_data_session(
+            "primary",
+            None,
+            |request| Ok::<_, ()>(request),
+            |_, _| panic!("legacy primary unexpectedly selected a secondary"),
+        )
+        .unwrap();
+        assert_eq!(default, "primary");
+    }
+
+    #[test]
+    fn plugin_data_labels_use_the_adobe_localization_fallback() {
+        let encoded = |text: &str| {
+            text.as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let identity = PluginDataIdentity {
+            index: 1,
+            name_hex: encoded("$$$/AE/Effect/Name/RollingShutter=Rolling Shutter Repair"),
+            match_name_hex: encoded("ADBE Rolling Shutter"),
+            category_hex: encoded("$$$/MediaCore/FiltersAndEffects/Category/Distort=Distort"),
+            entrypoint: "RollingShutterMain".to_owned(),
+        };
+        assert_eq!(
+            identity.display_name().as_deref(),
+            Some("Rolling Shutter Repair")
+        );
+        assert_eq!(identity.category().as_deref(), Some("Distort"));
+    }
+
+    #[test]
+    fn invalid_or_duplicate_cached_names_are_repaired_deterministically() {
+        let plugins = vec![
+            PathBuf::from(r"C:\AE\A\Threshold.aex"),
+            PathBuf::from(r"C:\AE\B\Threshold.aex"),
+            PathBuf::from(r"C:\AE\C\Levels.aex"),
+        ];
+        let repaired = stable_filter_names(
+            &plugins,
+            &[],
+            &[
+                Some("Threshold".to_owned()),
+                Some("threshold".to_owned()),
+                Some("bad\0name".to_owned()),
+            ],
+        );
+        assert_eq!(
+            repaired,
+            vec![
+                "Threshold".to_owned(),
+                "Threshold (B)".to_owned(),
+                "Levels".to_owned()
+            ]
+        );
+
+        let mut on_disk = peer_cache(&[
+            (plugins[0].to_str().unwrap(), discovered(5, 64, build(1))),
+            (plugins[1].to_str().unwrap(), discovered(5, 64, build(1))),
+        ]);
+        for entry in on_disk.values_mut() {
+            entry.registered_name = Some("Threshold".to_owned());
+        }
+        let mut local = on_disk.clone();
+        assert!(remember_filter_names(
+            &mut local,
+            &plugins[..2],
+            &repaired[..2]
+        ));
+        merge_cache_entries(&mut local, &on_disk);
+        assert_eq!(
+            local[plugins[1].to_str().unwrap()]
+                .registered_name
+                .as_deref(),
+            Some("Threshold (B)"),
+            "two logical owners on disk must not block duplicate repair"
         );
     }
 
@@ -3802,6 +4462,7 @@ mod tests {
                 dependency: dependency(),
                 sha: sha_of(&one),
                 smart: false,
+                plugin_data_selector: None,
                 identity: GeomIdentity {
                     width: 8,
                     height: 4,
@@ -3900,6 +4561,107 @@ mod tests {
             unpack_rgba16f_to_rgba8(&[0u8; 16], 2, 1, 8).is_none(),
             "pitch below width*8"
         );
+    }
+
+    fn tagged_pixel(tag: u8) -> PIXEL_RGBA {
+        PIXEL_RGBA {
+            r: tag,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    }
+
+    fn red_tags(pixels: &[PIXEL_RGBA]) -> Vec<u8> {
+        pixels.iter().map(|pixel| pixel.r).collect()
+    }
+
+    fn tagged_pixels(tag: u8, count: usize) -> Vec<PIXEL_RGBA> {
+        (0..count).map(|_| tagged_pixel(tag)).collect()
+    }
+
+    #[test]
+    fn rendered_frame_origin_places_and_clips_at_every_object_edge() {
+        let source = [
+            tagged_pixel(1),
+            tagged_pixel(2),
+            tagged_pixel(3),
+            tagged_pixel(4),
+        ];
+
+        let mut zero = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut zero, 4, 4, &source, 2, 2, 0, 0),
+            Ok(true)
+        );
+        assert_eq!(
+            red_tags(&zero),
+            vec![1, 2, 9, 9, 3, 4, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9]
+        );
+
+        for (origin, expected) in [
+            ((-1, 1), vec![(4, 2), (8, 4)]),
+            ((3, 1), vec![(7, 1), (11, 3)]),
+            ((1, -1), vec![(1, 3), (2, 4)]),
+            ((1, 3), vec![(13, 1), (14, 2)]),
+        ] {
+            let mut destination = tagged_pixels(9, 16);
+            assert_eq!(
+                place_frame_at_origin(&mut destination, 4, 4, &source, 2, 2, origin.0, origin.1,),
+                Ok(true)
+            );
+            for (index, tag) in expected {
+                assert_eq!(destination[index].r, tag, "origin={origin:?} index={index}");
+            }
+            assert_eq!(
+                destination.iter().filter(|pixel| pixel.r != 9).count(),
+                2,
+                "only the clipped overlap is written for origin={origin:?}"
+            );
+        }
+
+        let mut corner = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut corner, 4, 4, &source, 2, 2, 3, 3),
+            Ok(true)
+        );
+        assert_eq!(corner[15].r, 1);
+        assert_eq!(corner.iter().filter(|pixel| pixel.r != 9).count(), 1);
+    }
+
+    #[test]
+    fn rendered_frame_origin_fails_closed_without_an_object_overlap() {
+        let source = tagged_pixels(1, 4);
+        for origin in [(4, 0), (-2, 0), (0, 4), (0, -2)] {
+            let mut destination = tagged_pixels(9, 16);
+            assert_eq!(
+                place_frame_at_origin(&mut destination, 4, 4, &source, 2, 2, origin.0, origin.1,),
+                Ok(false)
+            );
+            assert_eq!(red_tags(&destination), vec![9; 16]);
+        }
+
+        let mut destination = tagged_pixels(9, 16);
+        assert_eq!(
+            place_frame_at_origin(&mut destination, 4, 4, &source, 3, 2, 0, 0),
+            Err(()),
+            "a source geometry/length mismatch is never copied"
+        );
+        assert_eq!(
+            place_frame_at_origin(
+                &mut destination,
+                u32::MAX,
+                u32::MAX,
+                &source,
+                2,
+                2,
+                i32::MAX,
+                i32::MAX,
+            ),
+            Err(()),
+            "an unrepresentable destination geometry fails before indexing"
+        );
+        assert_eq!(red_tags(&destination), vec![9; 16]);
     }
 
     /// The virtual-buffer wiring reads layer slots from the RAW discovery

@@ -132,10 +132,11 @@ and bounded image input/output are now the main implementation path.
 - The After Effects installation is an exclusive machine resource. Before any
   capture or aerender run, verify no AfterFX/aerender/aerendercore process is
   running; if one is, another session owns it — wait instead of killing it.
-  The self-hosted CI runner shares that machine, so an open AfterFX session
-  also turns a PR's CI red on `test_ae_reference_capture_automation` (the
-  fail-closed guard, not a regression); after AfterFX exits,
-  `gh run rerun <run-id> --failed` recovers it
+  This is about the local machine only. CI runs on GitHub-hosted runners and
+  no longer shares it (#1457), so an open AfterFX session cannot turn a PR
+  red any more. It still turns a local `uv run python -m pytest` run red on
+  `test_ae_reference_capture_automation`, which is the fail-closed guard
+  doing its job rather than a regression
   (`docs/SWEEP_INVESTIGATION_WORKFLOW_2026-08-17.md` §5).
 - Do not hold back on implementation, reverse engineering, or AE-oracle
   verification work, and do not ask the user for permission before starting it.
@@ -233,9 +234,17 @@ and bounded image input/output are now the main implementation path.
 uv sync --locked
 uv run python -m pytest -q
 cargo test --manifest-path broker\Cargo.toml --workspace
-cargo fmt --manifest-path broker\Cargo.toml --all --check
+rustfmt --edition 2024 --check --config skip_children=true @(git ls-files '*.rs')
 cargo check --manifest-path bridges\aviutl2-multifilter\Cargo.toml --all-targets --locked
 ```
+
+Format-check every tracked `.rs`, not `cargo fmt --check`. `cargo fmt` collects
+files by following `mod` declarations, so it never reaches anything pulled in
+with `include!` — `guest/crates/aex-guest-worker/src/x64.rs` takes 17 files that
+way and `bridges/aviutl2-multifilter/src/lib.rs` another 3. `cargo fmt --check`
+returned clean on every workspace while 7 of those 20 files were unformatted in
+`main`, and touching one of them then failed CI on the pre-existing diffs
+(issue #1460). CI runs the same whole-tree check, which takes about 3 seconds.
 
 Some runtime and oracle gates additionally require locally built workers, the
 After Effects SDK, approved AEX fixtures, a matching GPU driver, or AE itself.

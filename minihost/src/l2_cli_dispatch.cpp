@@ -36,6 +36,7 @@ AuxiliaryOptionResult strip_auxiliary_options(
   bool saw_render_settings = false, saw_authorization = false;
   bool saw_cluster_manifest = false, saw_companion_manifest = false;
   bool saw_dependency_dirs = false;
+  bool saw_plugin_data_selector = false;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -75,6 +76,10 @@ AuxiliaryOptionResult strip_auxiliary_options(
                hooks.set_dependency_search_dirs && !saw_dependency_dirs) {
       accepted = hooks.set_dependency_search_dirs(hooks.context, value);
       saw_dependency_dirs = accepted;
+    } else if (equals(flag, L"--plugin-data-selector-v1") &&
+               hooks.set_plugin_data_selector && !saw_plugin_data_selector) {
+      accepted = hooks.set_plugin_data_selector(hooks.context, value);
+      saw_plugin_data_selector = accepted;
     } else {
       break;
     }

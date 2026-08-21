@@ -53,18 +53,18 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
 - `--depth` (省略時 8) で経路が変わる効果がある。`xGPUFilterEntry` を export する
   AEX (AE 2026 Effects folder では VR 12 本 + Bilateral / Box_Blur /
   DirectionalBlur / FractalNoise / Levels2 / Lumetri / Transform / VideoLimiter
-  の 8 本、dumpbin /EXPORTS で列挙できる) は、depth 32 では pr-gpu 経路
-  (`worker_smart_dispatch.cpp` の `run_pr_gpu_filter`) が PF path より先に走り、
-  depth 8/16 では PF CPU path が 512 を返したときだけ frame loop の retry で
-  pr-gpu 経路に入る (#1271。trace では `smart_render_cpu_end error=512` →
+  の 8 本、dumpbin /EXPORTS で列挙できる) は、全 depth でまず PF path を通り、
+  PF CPU selector が 512 または 516 を返したときだけ frame loop の retry で
+  pr-gpu 経路 (`worker_smart_dispatch.cpp` の `run_pr_gpu_filter`) に入る
+  (#1271, #1272。trace では `smart_render_cpu_end error=512` →
   `frame_setdown_*` → `frame_setup_*` → `pr_gpu_startup_end` →
   `pr_gpu_render_begin` の順に見える。retry は session frame loop だけで、
-  one-shot `--smart-image*` は 8/16 では 512 のまま。512 が plug-in 自身の
+  one-shot `--smart-image*` は session-loop retry を持たない。8/16bpc は
+  PF の 512/516 のまま、float32 は従来どおり export-first になる。512 が plug-in 自身の
   戻り値でない frame (selector が SEH で落ちた / C++ 例外が抜けた / module
   audit を通らなかった、いずれも host が 512 に置換する) や、#1072 の
-  14 → GPU transport retry を通った frame (plan が float32 になり pr-gpu を
-  先に試している) では retry しない)。VR 以外の
-  8 本の depth 32 の挙動は #1272。1 depth の結果だけで「render する / しない」を
+  14 → GPU transport retry を通った frame では retry しない)。
+  1 depth の結果だけで「render する / しない」を
   判定しない。経路に入った frame があれば、その終わり方が各 record の
   `worker.pr_gpu_route` に 1 つ入る (`committed` / `startup_fault` /
   `no_output_frame` など。EXTENDED_DIAG 不要)。frame ごとには入らず、記録に
@@ -211,17 +211,20 @@ exe で測り、「修正が効いていない」ように見える (08-17 に�
 
 ## 5. CI runner
 
-- CI (`Windows clean clone`) は現状の設定 (`vars.USE_SELF_HOSTED_RUNNER`) では
-  self-hosted runner `windows-real` で走り、AE と機械を共有する。owner が AfterFX
-  を開いている間は `test_ae_reference_capture_automation` が fail-closed で red に
-  なり ("After Effects is already running; refusing to touch an existing user
-  session")、AfterFX 終了後の `gh run rerun <run-id> --failed` で回復する
-  (PR #1215 の初回 run がこれ)。
-- run が queued のまま数十分動かないなら runner が落ちている。担当セッションから
-  runner の再起動はできないので owner に依頼する (runner を触らない)。CI が
-  動かない間のマージ可否は owner 判断で、担当セッションは blocked として報告する
-  (PR #1255 で CI を待たずにマージしたのは、明示の owner 指示による 1 回限りの
-  例外)。
+- CI (`Windows clean clone`) は GitHub-hosted の `windows-latest` で走る
+  (#1457)。self-hosted runner `windows-real` は廃止したので、CI が AE と機械を
+  共有することはもう無い。owner が AfterFX を開いていても CI 側は影響を受けない。
+  - 訂正前の記述 (2026-08-20 まで): CI は `vars.USE_SELF_HOSTED_RUNNER` により
+    self-hosted runner `windows-real` で走り AE と機械を共有していた。AfterFX
+    起動中は `test_ae_reference_capture_automation` が fail-closed で red になり
+    ("After Effects is already running; refusing to touch an existing user
+    session")、AfterFX 終了後の `gh run rerun <run-id> --failed` で回復していた
+    (PR #1215 の初回 run がこれ)。ローカルで pytest を回すときの AE 排他は
+    §6 のとおり今も有効。
+- run が queued のまま長時間動かないのは GitHub 側の事情 (無料枠、同時実行上限、
+  runner 障害) になった。担当セッションから打てる手は無いので、blocked として
+  報告する。CI が動かない間のマージ可否は owner 判断 (PR #1255 で CI を待たずに
+  マージしたのは、明示の owner 指示による 1 回限りの例外)。
 
 ## 6. local pytest の既知の環境要因 fail
 

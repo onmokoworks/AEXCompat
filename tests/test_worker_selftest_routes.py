@@ -97,6 +97,29 @@ def test_aegp_installed_effect_catalog_passes_on_all_workers() -> None:
         pass
 
 
+def test_loaded_plugin_aegp_stream_values_pass_on_all_workers() -> None:
+    for _ in _all_workers(
+        "--self-test-aegp-loaded-plugin-streams",
+        "aegp_loaded_plugin_effect_streams",
+    ):
+        pass
+
+
+def test_l2_point_defaults_use_the_lifecycle_layer_extent() -> None:
+    report = _passing_report(
+        "aex_l2_worker.exe",
+        "--self-test-l2-point-default-units",
+        "l2_point_default_units",
+    )
+    assert report == {
+        "l2_point_default_units": "passed",
+        "width": 256,
+        "height": 144,
+        "point": [64, 72],
+        "point3d": [64, 72, 108],
+    }
+
+
 def test_aegp_keyframe_mutations_pass_on_all_workers() -> None:
     for name, report in _all_workers(
         "--self-test-aegp-keyframe-mutations", "aegp_keyframe_mutations"
@@ -240,9 +263,7 @@ def test_pf_private_callbacks_answer_like_ae_on_all_workers() -> None:
     malformed blur calls fail closed with the world untouched. The verdict is
     what is asserted here.
     """
-    for _ in _all_workers(
-        "--self-test-pf-private-callbacks", "pf_private_callbacks"
-    ):
+    for _ in _all_workers("--self-test-pf-private-callbacks", "pf_private_callbacks"):
         pass
 
 

@@ -2088,6 +2088,58 @@ bool pr_gpu_filter_route_available() {
                      pr_gpu::kGPUFilterEntryExport) != nullptr;
 }
 
+bool dispatch_pr_gpu_filter_route(bool route_available, bool float32,
+                                  bool pf_first, bool forced_retry,
+                                  smart_execution::Result& result,
+                                  PrGpuRouteRunner runner,
+                                  void* runner_context) {
+  if (!route_available || (!forced_retry && (!float32 || pf_first)) || !runner)
+    return false;
+  result.pr_gpu_route_attempted = true;
+  return runner(runner_context);
+}
+
+bool verify_pr_gpu_route_admission() {
+  struct Probe {
+    int calls{};
+  } probe;
+  const auto runner = [](void* context) {
+    ++static_cast<Probe*>(context)->calls;
+    return true;
+  };
+  smart_execution::Result result;
+  if (dispatch_pr_gpu_filter_route(false, true, false, false, result, runner,
+                                   &probe) ||
+      result.pr_gpu_route_attempted || probe.calls != 0)
+    return false;
+  const bool resident_first =
+      smart_setup::run_pr_gpu_pf_first_session_attempt([&] {
+        return dispatch_pr_gpu_filter_route(
+            true, true, smart_setup::pr_gpu_pf_first_requested(),
+            smart_setup::force_pr_gpu_retry_requested(), result, runner, &probe);
+      });
+  if (resident_first || result.pr_gpu_route_attempted || probe.calls != 0 ||
+      smart_setup::pr_gpu_pf_first_requested())
+    return false;
+  if (!dispatch_pr_gpu_filter_route(true, true, false, false, result, runner,
+                                    &probe) ||
+      !result.pr_gpu_route_attempted || probe.calls != 1)
+    return false;
+  result = {};
+  const bool resident_retry = [&] {
+    const smart_setup::ForcePrGpuRetryScope force_retry(512);
+    return smart_setup::run_pr_gpu_pf_first_session_attempt([&] {
+      return dispatch_pr_gpu_filter_route(
+          true, false, smart_setup::pr_gpu_pf_first_requested(),
+          smart_setup::force_pr_gpu_retry_requested(), result, runner, &probe);
+    });
+  }();
+  if (!resident_retry ||
+      !result.pr_gpu_route_attempted || probe.calls != 2)
+    return false;
+  return true;
+}
+
 bool dispatch(const Request& request, const Hooks& hooks,
               smart_execution::Result& result, State& dispatch_state) {
   if (!request.entry || !request.input || !request.output || !request.plan ||
@@ -2106,23 +2158,31 @@ bool dispatch(const Request& request, const Hooks& hooks,
   // Premiere GPU-filter route (issue #1058): the VR / Immersive effect family
   // exports xGPUFilterEntry and is GPU-only - its PF SmartFX CPU path only draws
   // a "requires GPU acceleration" warning and returns 512. Drive the Premiere
-  // GPU filter directly instead. The filter renders 32f frames: a float32
-  // session takes this route first, as before. An 8/16bpc session takes it
-  // only on the frame loop's retry after the PF CPU path answered 512 (issue
-  // #1271; the input is widened to 32f and the output narrowed back inside
-  // run_pr_gpu_filter). Not export-first at 8/16: other AE effects export
+  // GPU filter directly instead. Resident sessions at every depth take this
+  // route only on the frame loop's retry after the PF CPU path answered
+  // 512/516 (issues #1271 and #1272; 8/16 input is widened to 32f and narrowed
+  // back inside run_pr_gpu_filter). Not export-first in a resident session:
+  // other AE effects export
   // xGPUFilterEntry with a working PF CPU path (Levels2, Box_Blur, Lumetri,
   // DirectionalBlur, ...) and routing them here first at the default depth
   // measured as crashes and changed pixels against their PF renders. Any
   // failure falls through to the ordinary PF path below, so a genuine
   // GPU-only effect is never made worse than its pre-existing 512.
-  if (pr_gpu_filter_route_available() &&
-      (plan.float32 || smart_setup::force_pr_gpu_retry_requested())) {
-    result.pr_gpu_route_attempted = true;
-    VideoFrameCpuWorlds pr_filter_frames;
-    if (pr_host::run_pr_gpu_filter(request, pr_filter_frames, result))
-      return true;
-  }
+  struct PrGpuRouteContext {
+    const Request& request;
+    smart_execution::Result& result;
+  } pr_gpu_context{request, result};
+  const auto run_pr_gpu_route = [](void* opaque) {
+    auto& context = *static_cast<PrGpuRouteContext*>(opaque);
+    VideoFrameCpuWorlds frames;
+    return pr_host::run_pr_gpu_filter(context.request, frames, context.result);
+  };
+  if (dispatch_pr_gpu_filter_route(
+          pr_gpu_filter_route_available(), plan.float32,
+          smart_setup::pr_gpu_pf_first_requested(),
+          smart_setup::force_pr_gpu_retry_requested(), result, run_pr_gpu_route,
+          &pr_gpu_context))
+    return true;
 
   std::array<std::byte, 8> gpu_setup_input{}, gpu_setup_output{};
   std::array<std::byte, 16> gpu_setup_extra{};

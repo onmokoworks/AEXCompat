@@ -194,11 +194,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            single_supported_dropped_path(std::slice::from_ref(&path_drop)),
+            crate::shared_ui::single_supported_dropped_path(
+                std::slice::from_ref(&path_drop),
+                is_supported_input_image,
+            ),
             Some(valid.clone())
         );
-        assert!(single_supported_dropped_path(std::slice::from_ref(&memory_drop)).is_none());
-        assert!(single_supported_dropped_path(&[path_drop, memory_drop]).is_none());
+        assert!(
+            crate::shared_ui::single_supported_dropped_path(
+                std::slice::from_ref(&memory_drop),
+                is_supported_input_image,
+            )
+            .is_none()
+        );
+        assert!(
+            crate::shared_ui::single_supported_dropped_path(
+                &[path_drop, memory_drop],
+                is_supported_input_image,
+            )
+            .is_none()
+        );
 
         let ctx = egui::Context::default();
         let mut app = HarnessApp::new(root.clone());
@@ -215,31 +230,14 @@ mod tests {
     }
 
     #[test]
-    fn analysis_panel_width_uses_the_padded_action_layout_and_stable_collapsed_rail() {
-        assert_eq!(
-            analysis_panel_min_width(),
-            ANALYSIS_PANEL_ACTION_WIDTH + ANALYSIS_PANEL_PADDING * 2.0
-        );
-        assert_eq!(clamp_analysis_panel_width(0.0), analysis_panel_min_width());
-        assert_eq!(
-            clamp_analysis_panel_width(f32::MAX),
-            ANALYSIS_PANEL_MAX_WIDTH
-        );
-        assert_eq!(
-            analysis_panel_display_width(analysis_panel_min_width(), 0.0),
-            ANALYSIS_PANEL_COLLAPSED_WIDTH
-        );
-        assert_eq!(
-            analysis_panel_display_width(analysis_panel_min_width(), 1.0),
-            analysis_panel_min_width()
-        );
-        let stored = 540.0;
-        assert!(analysis_panel_display_width(stored, 0.25) < stored);
-        assert_eq!(
-            resized_analysis_panel_width(stored, 8.0),
-            548.0,
-            "dragging during reopen must use the stored target, not animated visible width"
-        );
+    fn analysis_panel_uses_shared_bounded_state() {
+        let mut state = crate::gui_state::AnalysisPaneState::default();
+        state.set_width(0.0);
+        assert_eq!(state.width, crate::gui_state::AnalysisPaneState::MIN_WIDTH);
+        state.set_width(f32::MAX);
+        assert_eq!(state.width, crate::gui_state::AnalysisPaneState::MAX_WIDTH);
+        state.set_width(540.0 + 8.0);
+        assert_eq!(state.width, 548.0);
     }
 
     #[test]
@@ -516,6 +514,70 @@ mod tests {
             Some(root.join("input.png").as_path())
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn individual_reset_queues_the_same_supervised_or_live_transition_as_an_edit() {
+        let mut app = HarnessApp::new(std::env::temp_dir());
+        let now = Instant::now();
+
+        app.queue_parameter_transition(7, true, now);
+        assert_eq!(app.pending_parameter_slot, Some(7));
+        assert!(!app.pending_live_render);
+        assert_eq!(
+            app.live_render_due,
+            Some(now + std::time::Duration::from_millis(500))
+        );
+
+        app.pending_parameter_slot = None;
+        app.live_render_due = None;
+        app.live_render = true;
+        app.queue_parameter_transition(8, false, now);
+        assert_eq!(app.pending_parameter_slot, None);
+        assert!(app.pending_live_render);
+        assert_eq!(
+            app.live_render_due,
+            Some(now + std::time::Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn reset_all_preserves_runtime_ui_state_and_queues_live_render_only_on_change() {
+        let mut app = HarnessApp::new(std::env::temp_dir());
+        let mut default = parameter(1, "integer");
+        default.value = 10.0;
+        let mut current = default.clone();
+        current.value = 40.0;
+        current.enabled = false;
+        current.visible = false;
+        current.supervised = true;
+        current.minimum = -100.0;
+        current.maximum = 500.0;
+        app.parameter_defaults = vec![default];
+        app.parameters = vec![current];
+        app.live_render = true;
+        let now = Instant::now();
+
+        assert!(app.reset_all_parameters(now));
+        assert_eq!(app.parameters[0].value, 10.0);
+        assert!(!app.parameters[0].enabled);
+        assert!(!app.parameters[0].visible);
+        assert!(app.parameters[0].supervised);
+        assert_eq!(
+            (app.parameters[0].minimum, app.parameters[0].maximum),
+            (-100.0, 500.0)
+        );
+        assert!(app.pending_live_render);
+        assert_eq!(
+            app.live_render_due,
+            Some(now + std::time::Duration::from_millis(500))
+        );
+
+        app.pending_live_render = false;
+        app.live_render_due = None;
+        assert!(!app.reset_all_parameters(now));
+        assert!(!app.pending_live_render);
+        assert_eq!(app.live_render_due, None);
     }
 
     #[test]

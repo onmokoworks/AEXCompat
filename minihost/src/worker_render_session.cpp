@@ -1364,12 +1364,18 @@ SmartRenderSessionOutcome run_smart_render_session(
         // read at the end is the one from the pass whose pixels are reported.
         worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
         const worker_runtime::smart_execution::SessionFrame* verdict = &session_frame;
-        worker_runtime::smart_execution::Result frame_result = smart_render_once(
-            current_entry, input, output, case_id,
-            frame_override ? frame_override : requested,
-            &frame_rgba,
-            max_width, max_height, frame_layers, current_time, time_step, total_time,
-            time_scale, pixel_bytes, &session_frame);
+        const auto render_attempt = [&](worker_runtime::smart_execution::SessionFrame* attempt_frame) {
+          return worker_runtime::smart_setup::run_pr_gpu_pf_first_session_attempt(
+              [&] {
+                return smart_render_once(
+                    current_entry, input, output, case_id,
+                    frame_override ? frame_override : requested, &frame_rgba,
+                    max_width, max_height, frame_layers, current_time, time_step,
+                    total_time, time_scale, pixel_bytes, attempt_frame);
+              });
+        };
+        worker_runtime::smart_execution::Result frame_result =
+            render_attempt(&session_frame);
         // GPU-required fallback (#1072): an effect advertising GPU F32 render
         // (out_flags2 bit25) that answers PF_Err 14 at the start of CPU
         // SMART_RENDER only implements the GPU path (the color family). out_flags2
@@ -1383,12 +1389,7 @@ SmartRenderSessionOutcome run_smart_render_session(
           captured.clear();
           retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
           verdict = &retry_frame;
-          frame_result = smart_render_once(
-              current_entry, input, output, case_id,
-              frame_override ? frame_override : requested,
-              &frame_rgba,
-              max_width, max_height, frame_layers, current_time, time_step, total_time,
-              time_scale, pixel_bytes, &retry_frame);
+          frame_result = render_attempt(&retry_frame);
         }
         // Premiere GPU-filter fallback (#1271): an effect exporting
         // xGPUFilterEntry whose SMART_RENDER selector refused the frame only
@@ -1405,10 +1406,9 @@ SmartRenderSessionOutcome run_smart_render_session(
         // export test below, and the `stage:pr_gpu_route_begin reason=cpu_*`
         // line the route now carries, which keeps a papered-over host refusal
         // visible in the record. A dispatch that
-        // already offered the route (a float32 session, a gpu_*_float32 case,
-        // or the #1072 retry above, whose plan is float32) is not retried: the
-        // route declined once and would again. Re-run the frame once with the
-        // route enabled; if it declines, the PF path answers the same again.
+        // already offered the route is not retried: the route declined once
+        // and would again. Re-run the frame once with the route enabled; if it
+        // declines, the PF path answers the same again.
         //
         // Both 512 and 516 count (issue #1283). The VR family's CPU path
         // answered 512 only because it gave up before reaching a host
@@ -1432,12 +1432,7 @@ SmartRenderSessionOutcome run_smart_render_session(
           captured.clear();
           retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
           verdict = &retry_frame;
-          frame_result = smart_render_once(
-              current_entry, input, output, case_id,
-              frame_override ? frame_override : requested,
-              &frame_rgba,
-              max_width, max_height, frame_layers, current_time, time_step, total_time,
-              time_scale, pixel_bytes, &retry_frame);
+          frame_result = render_attempt(&retry_frame);
         }
         outcome.last = frame_result;
         // The GPU transport captures float32 ARGB; when the session output is

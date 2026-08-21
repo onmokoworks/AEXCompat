@@ -1,6 +1,7 @@
 use crate::classic::{
     ClassicError, ClassicHost, PARAM_ANGLE, PARAM_COLOR, PARAM_LAYER, PARAM_POINT, PARAM_POINT3D,
     ParameterValue, RenderReport, ResidentFailureDiagnostic, ResidentLayer, SetupReport,
+    UserChangedReport,
 };
 use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
@@ -117,6 +118,16 @@ struct SessionClosed<'a> {
     worker_pid: u32,
     setup: &'a SetupReport,
     close: Value,
+}
+
+#[derive(Serialize)]
+struct UserChangedDone<'a> {
+    v: u32,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    worker_pid: u32,
+    status: &'static str,
+    report: &'a UserChangedReport,
 }
 
 pub fn run_resident_session(
@@ -290,6 +301,21 @@ pub fn run_resident_session(
                         &mut response,
                     )?;
                 }
+                Some("user_changed_param") => {
+                    let (slot, parameters) = parse_user_changed_request(object, &setup)?;
+                    host.apply_resident_parameter_values(&parameters)?;
+                    let report = host.user_changed_parameter(slot)?;
+                    write_message(
+                        &mut response,
+                        &UserChangedDone {
+                            v: 1,
+                            kind: "user_changed_done",
+                            worker_pid: std::process::id(),
+                            status: "ok",
+                            report: &report,
+                        },
+                    )?;
+                }
                 Some(other) => {
                     return Err(SessionError::Protocol(format!(
                         "unsupported request type {other:?}"
@@ -323,6 +349,36 @@ pub fn run_resident_session(
         ));
     }
     Ok(())
+}
+
+fn parse_user_changed_request(
+    object: &serde_json::Map<String, Value>,
+    setup: &SetupReport,
+) -> Result<(usize, Vec<ParameterValue>), SessionError> {
+    require_exact_keys(
+        object.keys().map(String::as_str),
+        &["parameters", "slot", "type", "v"],
+    )?;
+    if object.get("v").and_then(Value::as_u64) != Some(1) {
+        return Err(SessionError::Protocol(
+            "user_changed_param requires protocol version 1".into(),
+        ));
+    }
+    let slot = object
+        .get("slot")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|slot| *slot > 0)
+        .ok_or_else(|| {
+            SessionError::Protocol("user_changed_param slot must be a positive usize".into())
+        })?;
+    let payload = object
+        .get("parameters")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SessionError::Protocol("user_changed_param parameters must be a string".into())
+        })?;
+    Ok((slot, parse_parameter_payload(payload, setup)?))
 }
 
 fn bound_session_close(
@@ -936,6 +992,65 @@ mod tests {
     };
 
     #[test]
+    fn user_changed_request_has_an_exact_positive_slot_contract() {
+        let setup = SetupReport {
+            schema_version: 1,
+            execution_backend: "fixture",
+            global_setup_error: 0,
+            params_setup_error: 0,
+            advertised_num_params: 8,
+            out_flags: 0,
+            out_flags2: 0,
+            custom_ui: None,
+            parameters: vec![crate::classic::ParameterReport {
+                slot: 7,
+                index: 7,
+                name: "Amount".into(),
+                param_type: 1,
+                ui_flags: 0,
+                flags: 0,
+                ui_width: 0,
+                ui_height: 0,
+                choices: None,
+                default_value: Some(1.0),
+                valid_min: None,
+                valid_max: None,
+                slider_min: None,
+                slider_max: None,
+                precision: None,
+                current_color: None,
+                default_color: None,
+                current_components: None,
+                default_components: None,
+            }],
+            suite_requests: Vec::new(),
+            unsupported_suite_calls: Vec::new(),
+            dropped_unsupported_suite_calls: 0,
+        };
+        let valid = serde_json::json!({
+            "v": 1,
+            "type": "user_changed_param",
+            "slot": 7,
+            "parameters": "v2|param_7@7:i32=9"
+        });
+        assert_eq!(
+            parse_user_changed_request(valid.as_object().unwrap(), &setup)
+                .unwrap()
+                .0,
+            7,
+        );
+        for invalid in [
+            serde_json::json!({"v": 2, "type": "user_changed_param", "slot": 7, "parameters": "v2|"}),
+            serde_json::json!({"v": 1, "type": "user_changed_param", "slot": 0, "parameters": "v2|"}),
+            serde_json::json!({"v": 1, "type": "user_changed_param", "slot": "7", "parameters": "v2|"}),
+            serde_json::json!({"v": 1, "type": "user_changed_param", "slot": 7}),
+            serde_json::json!({"v": 1, "type": "user_changed_param", "slot": 7, "parameters": "v2|", "extra": true}),
+        ] {
+            assert!(parse_user_changed_request(invalid.as_object().unwrap(), &setup).is_err());
+        }
+    }
+
+    #[test]
     fn fixture_total_time_is_strict_and_allows_zero_duration_at_t_zero() {
         let valid = serde_json::json!({"total":210})
             .as_object()
@@ -1057,6 +1172,7 @@ mod tests {
             advertised_num_params: 0,
             out_flags: u32::MAX,
             out_flags2: u32::MAX,
+            custom_ui: None,
             parameters: Vec::new(),
             suite_requests: vec!["s".repeat(MAX_FAILURE_SUITE_REQUEST_BYTES); 64],
             unsupported_suite_calls: calls.clone(),
@@ -1112,11 +1228,17 @@ mod tests {
             advertised_num_params: 2,
             out_flags: 0,
             out_flags2: 0,
+            custom_ui: None,
             parameters: vec![crate::classic::ParameterReport {
                 slot: 1,
                 index: 1,
                 param_type: 10,
                 name: "Amount".into(),
+                ui_flags: 0,
+                flags: 0,
+                ui_width: 0,
+                ui_height: 0,
+                choices: None,
                 default_value: Some(5.0),
                 valid_min: Some(0.0),
                 valid_max: Some(100.0),
@@ -1125,6 +1247,8 @@ mod tests {
                 precision: Some(2),
                 current_color: None,
                 default_color: None,
+                current_components: None,
+                default_components: None,
             }],
             suite_requests: Vec::new(),
             unsupported_suite_calls: Vec::new(),
@@ -1147,11 +1271,17 @@ mod tests {
             advertised_num_params: 2,
             out_flags: 0,
             out_flags2: 0,
+            custom_ui: None,
             parameters: vec![crate::classic::ParameterReport {
                 slot: 1,
                 index: 1,
                 param_type: PARAM_COLOR,
                 name: "Key Color".into(),
+                ui_flags: 0,
+                flags: 0,
+                ui_width: 0,
+                ui_height: 0,
+                choices: None,
                 default_value: None,
                 valid_min: None,
                 valid_max: None,
@@ -1160,6 +1290,8 @@ mod tests {
                 precision: None,
                 current_color: Some([0, 0, 0, 0]),
                 default_color: Some([255, 1, 2, 3]),
+                current_components: None,
+                default_components: None,
             }],
             suite_requests: Vec::new(),
             unsupported_suite_calls: Vec::new(),
@@ -1185,11 +1317,17 @@ mod tests {
             advertised_num_params: 2,
             out_flags: 0,
             out_flags2: 0,
+            custom_ui: None,
             parameters: vec![crate::classic::ParameterReport {
                 slot: 2,
                 index: 2,
                 param_type: PARAM_POINT,
                 name: "Center".into(),
+                ui_flags: 0,
+                flags: 0,
+                ui_width: 0,
+                ui_height: 0,
+                choices: None,
                 default_value: None,
                 valid_min: None,
                 valid_max: None,
@@ -1198,6 +1336,8 @@ mod tests {
                 precision: None,
                 current_color: None,
                 default_color: None,
+                current_components: None,
+                default_components: None,
             }],
             suite_requests: Vec::new(),
             unsupported_suite_calls: Vec::new(),
@@ -1219,6 +1359,11 @@ mod tests {
             index: slot as i32,
             param_type,
             name: name.into(),
+            ui_flags: 0,
+            flags: 0,
+            ui_width: 0,
+            ui_height: 0,
+            choices: None,
             default_value: None,
             valid_min: None,
             valid_max: None,
@@ -1227,6 +1372,8 @@ mod tests {
             precision: None,
             current_color: None,
             default_color: None,
+            current_components: None,
+            default_components: None,
         };
         let setup = SetupReport {
             schema_version: 1,
@@ -1236,6 +1383,7 @@ mod tests {
             advertised_num_params: 3,
             out_flags: 0,
             out_flags2: 0,
+            custom_ui: None,
             parameters: vec![
                 parameter(1, PARAM_ANGLE, "Angle"),
                 parameter(2, PARAM_POINT3D, "Position"),

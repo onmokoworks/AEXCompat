@@ -1,6 +1,94 @@
 use super::*;
 
 #[test]
+fn plugin_data_effect_selector_is_exact_and_bounded() {
+    let selector = PluginDataEffectSelector {
+        index: 63,
+        match_name_hex: "5365636f6e64".to_lowercase(),
+    };
+    assert_eq!(
+        selector.encoded().unwrap(),
+        "v1|63|5365636f6e64".to_lowercase()
+    );
+    let mut args = vec!["worker-prefix".to_owned()];
+    append_plugin_data_selector_args(&mut args, Some(&selector)).unwrap();
+    assert_eq!(
+        args,
+        [
+            "worker-prefix",
+            "--plugin-data-selector-v1",
+            "v1|63|5365636f6e64"
+        ]
+        .map(str::to_lowercase)
+    );
+    let request: serde_json::Value = serde_json::from_str(
+        &discovery::inspect_plugin_request_json(4, 9, Some(&selector)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        request,
+        serde_json::json!({
+            "v": 1,
+            "type": "inspect_plugin",
+            "plugin_index": 4,
+            "request_index": 9,
+            "effect_index": 63,
+            "effect_match_name_hex": "5365636f6e64".to_lowercase(),
+        })
+    );
+    let default_request: serde_json::Value =
+        serde_json::from_str(&discovery::inspect_plugin_request_json(4, 9, None).unwrap()).unwrap();
+    assert_eq!(default_request.as_object().unwrap().len(), 4);
+    let matching_report = serde_json::json!({
+        "plugin_data": {
+            "selected_index": 63,
+            "registrations": (0..64).map(|index| serde_json::json!({
+                "index": index,
+                "match_name_hex": if index == 63 {
+                    "5365636f6e64".to_lowercase()
+                } else {
+                    format!("{index:02x}")
+                }
+            })).collect::<Vec<_>>()
+        }
+    });
+    assert!(discovery::report_matches_plugin_data_selector(
+        &matching_report,
+        Some(&selector)
+    ));
+    for mismatched in [
+        serde_json::json!({"plugin_data": null}),
+        serde_json::json!({"plugin_data": {"selected_index": 62, "registrations": []}}),
+        serde_json::json!({"plugin_data": {"selected_index": 63, "registrations": []}}),
+    ] {
+        assert!(!discovery::report_matches_plugin_data_selector(
+            &mismatched,
+            Some(&selector)
+        ));
+    }
+    for selector in [
+        PluginDataEffectSelector {
+            index: 64,
+            match_name_hex: "61".into(),
+        },
+        PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: String::new(),
+        },
+        PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "A1".into(),
+        },
+        PluginDataEffectSelector {
+            index: 1,
+            match_name_hex: "00".into(),
+        },
+    ] {
+        assert!(selector.encoded().is_err());
+    }
+}
+
+#[test]
 fn session_geometry_slot_layout_matches_the_protocol() {
     let geometry = SessionGeometry {
         width: 33,
