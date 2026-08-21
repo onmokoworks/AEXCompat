@@ -3877,6 +3877,42 @@ mod tests {
         assert_eq!(ae_builtin_category("TotallyUnknown"), None);
     }
 
+    /// The production registration planner combines virtual-effect category
+    /// propagation, the bundled-effect fallback, and the configured language.
+    #[test]
+    fn registration_labels_cover_primary_secondary_and_unknown_effects() {
+        let mut entry = discovered(5, 64, build(1));
+        entry.plugin_data_effect = Some(plugin_data_identity(0, "first"));
+        let mut secondary = cached_plugin_data_effect(1, "second", None);
+        secondary.identity.category_hex = "5374796c697a65".to_owned(); // Stylize
+        entry.additional_effects = vec![secondary];
+        let plans = virtual_effect_registrations(
+            &entry,
+            "Bundle",
+            &HashMap::from([(1, "Bundle — Second".to_owned())]),
+        );
+
+        let builtin = Path::new("Gaussian_Blur.aex");
+        assert_eq!(
+            registration_label(builtin, &plans[0].entry, true),
+            "AEXCompat\\ブラー＆シャープ"
+        );
+        assert_eq!(
+            registration_label(builtin, &plans[0].entry, false),
+            "AEXCompat\\Blur & Sharpen"
+        );
+        assert_eq!(
+            registration_label(builtin, &plans[1].entry, true),
+            "AEXCompat\\スタイライズ",
+            "the secondary identity category overrides the module stem fallback"
+        );
+        let unknown = discovered(5, 64, build(1));
+        assert_eq!(
+            registration_label(Path::new("ThirdParty.aex"), &unknown, true),
+            "AEXCompat"
+        );
+    }
+
     // --- cluster sessions (issue #405) ---
 
     fn artifact(name: &str, sha_byte: u8) -> ApprovedImageArtifact {
