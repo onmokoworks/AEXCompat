@@ -112,6 +112,26 @@ def test_inventory_parser_is_paginated_bounded_and_ref_exact() -> None:
         api.list_caches("refs/pull/9/merge")
 
 
+def test_inventory_deduplicates_only_identical_records() -> None:
+    record = {
+        "id": 11,
+        "ref": "refs/pull/9/merge",
+        "size_in_bytes": 10,
+        "key": "cache-a",
+    }
+    pages = [
+        {"actions_caches": [record]},
+        {"actions_caches": [dict(record)]},
+    ]
+    api = cleanup.GitHubApi("owner/repo", run=lambda _: json.dumps(pages))
+
+    assert api.list_caches() == [cleanup.CacheRecord(11, "refs/pull/9/merge", 10)]
+
+    pages[1]["actions_caches"][0]["key"] = "cache-b"
+    with pytest.raises(cleanup.CleanupError, match="conflicting data"):
+        api.list_caches()
+
+
 def test_api_failures_and_incomplete_deletion_do_not_become_success() -> None:
     class IncompleteDelete(FakeApi):
         def delete_cache(self, cache_id: int) -> None:
