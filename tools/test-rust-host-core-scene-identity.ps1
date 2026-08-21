@@ -57,12 +57,31 @@ $oracleSource = Join-Path $repoRoot `
     "minihost\src\worker_aegp_scene_model.cpp"
 $executable = Join-Path $buildRoot `
     "rust_host_core_scene_identity_dual_run_selftest.exe"
+# sccache cannot cache a cl invocation that also links (those pass
+# through), so compile each translation unit separately and link after.
+# AEXCOMPAT_COMPILE_CACHE=sccache wraps only the /c compiles (#1533).
+# Keep /Fo outside the colon-quoted form: sccache mis-parses /Fo:"..."
+# as a relative path and fails to zip the outputs.
+$compileDriver = 'cl.exe'
+if ($env:AEXCOMPAT_COMPILE_CACHE -eq 'sccache') {
+    $compileDriver = 'sccache cl.exe'
+}
+$compileFlags = (
+    '/nologo /std:c++17 /O2 /DNDEBUG /EHsc /W4 /WX ' +
+    '/DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX ' +
+    '/I"' + $abiInclude + '" /I"' + $minihostInclude + '"'
+)
+$nativeObject = Join-Path $buildRoot `
+    ([IO.Path]::GetFileNameWithoutExtension($nativeSource) + '.obj')
+$oracleObject = Join-Path $buildRoot `
+    ([IO.Path]::GetFileNameWithoutExtension($oracleSource) + '.obj')
 $compileCommand = (
     'call "' + $vsdev + '" -arch=x64 -host_arch=x64 >nul && ' +
-    'cl.exe /nologo /std:c++17 /O2 /DNDEBUG /EHsc /W4 /WX ' +
-    '/DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX ' +
-    '/I"' + $abiInclude + '" /I"' + $minihostInclude + '" ' +
-    '"' + $nativeSource + '" "' + $oracleSource + '" ' +
+    $compileDriver + ' ' + $compileFlags +
+    ' /c "' + $nativeSource + '" /Fo"' + $nativeObject + '" && ' +
+    $compileDriver + ' ' + $compileFlags +
+    ' /c "' + $oracleSource + '" /Fo"' + $oracleObject + '" && ' +
+    'cl.exe /nologo "' + $nativeObject + '" "' + $oracleObject + '" ' +
     '/Fe:"' + $executable + '"'
 )
 
