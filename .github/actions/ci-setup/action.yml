@@ -40,6 +40,13 @@ inputs:
       (#1501)。有効にする job は SCCACHE_GHA_ENABLED も自分で立てること。
     required: false
     default: 'false'
+  python-environment:
+    description: >
+      Python tests/toolsを実行するjobだけ'true'。Cargo/CMakeだけのjobはhosted
+      runnerのsystem Pythonでrestore-mtime.pyを実行できるため、setup-uvと
+      dev dependency一式の復元を行わない。
+    required: false
+    default: 'true'
   resolve-libclang:
     description: guest workspace を触る job だけ 'true'。
     required: false
@@ -79,10 +86,12 @@ runs:
     # Python 版は .python-version (3.12) に従う。
     # setup-uv は v8 から floating major tag (@v8) を出していないので full tag で pin する。
     - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      if: inputs.python-environment == 'true'
       with:
         enable-cache: true
 
     - name: Install Python test dependencies
+      if: inputs.python-environment == 'true'
       shell: pwsh
       run: uv sync --locked
 
@@ -91,7 +100,7 @@ runs:
     - name: Restore source timestamps from git
       if: inputs.rust == 'true'
       shell: pwsh
-      run: uv run python tools/restore-mtime.py
+      run: python tools/restore-mtime.py
 
     # guest workspace の bindgen が libclang.dll をロードする。runner image の
     # LLVM の位置をハードコードすると、image 更新で黙って別物を掴んだり
