@@ -20,6 +20,10 @@ SDK_GRABBA_BUILD_NODE = (
     "tests/test_sdk_grabba_fixture_build.py::"
     "test_official_sdk_grabba_builds_unchanged_and_records_hash"
 )
+AEGP_RENDER_OPTIONS_LIFECYCLE_NODE = (
+    "tests/test_aegp_render_options_probe.py::"
+    "test_fixture_builds_and_exercises_lifecycle"
+)
 
 
 def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
@@ -51,6 +55,8 @@ def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
             SDK_BACKWARDS_BUILD_NODE,
             "--deselect",
             SDK_GRABBA_BUILD_NODE,
+            "--deselect",
+            AEGP_RENDER_OPTIONS_LIFECYCLE_NODE,
         ]
     arguments.append("--validate-local-artifact-manifest")
     return arguments
