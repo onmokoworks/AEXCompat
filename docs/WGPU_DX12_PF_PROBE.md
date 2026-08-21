@@ -24,8 +24,9 @@ SHA-256 values in a target-local manifest.
 .\tools\build-wgpu-dx12-pf-probe.ps1
 ```
 
-Build the existing `aex_l2_worker.exe` in Release configuration and the
-`wgpu-dx12-pf-probe` broker binary, then run:
+Build the existing `aex_worker.exe` (the probe dispatches it with
+`--kind discovery`) in Release configuration and the `wgpu-dx12-pf-probe`
+broker binary, then run:
 
 ```powershell
 .\broker\target\release\wgpu-dx12-pf-probe.exe `

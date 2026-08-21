@@ -1,7 +1,7 @@
 //! Render-session protocol test fixture (issue #98 PR-C).
 //!
 //! Speaks the worker side of docs/RENDER_SESSION_PROTOCOL_2026-07-19.md over
-//! the inherited transport exactly like `aex_render_worker --render-session-v1`
+//! the inherited transport exactly like `aex_worker --kind classic --render-session-v1`
 //! so broker `RenderSession` integration tests can exercise per-frame
 //! validation, the watchdog, and crash invalidation against a real isolated
 //! process without a native minihost build. The "render" is a byte inversion
@@ -467,8 +467,24 @@ mod worker {
         report.to_string()
     }
 
+    /// Drops the `--kind <route>` pair the broker puts in front of every worker
+    /// launch (#1495). This fixture emulates the real worker's transport, and
+    /// the real worker consumes that pair in `wmain` before its positional
+    /// contract starts, so the emulation has to do the same or every command
+    /// arrives one slot late and is rejected. The route itself does not change
+    /// what this fixture does; the session commands already say which one they
+    /// are.
+    fn strip_leading_kind(args: Vec<String>) -> Vec<String> {
+        if args.len() >= 3 && args[1] == "--kind" {
+            let mut stripped = vec![args[0].clone()];
+            stripped.extend_from_slice(&args[3..]);
+            return stripped;
+        }
+        args
+    }
+
     pub fn run() -> i32 {
-        let args: Vec<String> = std::env::args().collect();
+        let args = strip_leading_kind(std::env::args().collect());
         if args.len() == 2 && args[1] == "--sleep-child" {
             std::thread::sleep(std::time::Duration::from_secs(120));
             return 0;

@@ -78,9 +78,9 @@ def test_native_chain_passes_all_release_workers() -> None:
         "zoom": 1920,
         "dimensions": [1920, 1080],
     }
-    for name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):
+    for kind in ("discovery", "classic", "smart"):
         completed = subprocess.run(
-            [str(BUILD / name), "--self-test-aegp-resizer-3d"],
+            [str(BUILD / "aex_worker.exe"), "--kind", kind, "--self-test-aegp-resizer-3d"],
             cwd=ROOT,
             capture_output=True,
             text=True,

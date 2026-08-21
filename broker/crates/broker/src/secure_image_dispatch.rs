@@ -5,25 +5,55 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+/// Which route the worker process is asked to serve.
+///
+/// `Discovery` was called L2 until #1495, after the L0/L1/L2 staging plan whose
+/// L1 was deleted in #732. `Classic` was called Render, which did not separate
+/// it from Smart since both render.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkerKind {
-    L2,
-    Render,
+    Discovery,
+    Classic,
     Smart,
 }
 
+/// The one worker image. Every route runs these bytes and picks its behaviour
+/// from `--kind`; there were three executables until #1495, and building one of
+/// them left the other two on an older build.
+pub const WORKER_RELATIVE_PROGRAM: &str = "target/minihost-build/aex_worker.exe";
+
 impl WorkerKind {
+    /// Value for the worker's leading `--kind` argument.
+    pub const fn kind_argument(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::Classic => "classic",
+            Self::Smart => "smart",
+        }
+    }
+
     /// Repository-relative worker image selected by production dispatch.
     /// Diagnostic callers use the same candidate path for build-set boundary
     /// snapshots. Such snapshots are not launch-admission receipts and do not
     /// claim which bytes an individual worker process used.
     pub const fn repository_relative_program(self) -> &'static str {
-        match self {
-            Self::L2 => "target/minihost-build/aex_l2_worker.exe",
-            Self::Render => "target/minihost-build/aex_render_worker.exe",
-            Self::Smart => "target/minihost-build/aex_smart_worker.exe",
-        }
+        WORKER_RELATIVE_PROGRAM
     }
+}
+
+/// Prepends the route selector to a caller's leading worker arguments (#1495).
+///
+/// Every dispatch goes through here rather than each caller remembering the
+/// pair. There is one worker image, so omitting it would not fail to find a
+/// binary; it would run the route the worker falls back to. The worker
+/// consumes the pair before its positional contract starts, so `rest` keeps
+/// the indices it had when the route was chosen by executable name.
+fn worker_arguments(kind: WorkerKind, rest: &[String]) -> Vec<String> {
+    let mut arguments = Vec::with_capacity(rest.len() + 2);
+    arguments.push("--kind".to_owned());
+    arguments.push(kind.kind_argument().to_owned());
+    arguments.extend_from_slice(rest);
+    arguments
 }
 
 /// A trust decision made before dispatch. This type never derives trust from
@@ -164,7 +194,7 @@ fn dispatch_secure_image_session_with_policy(
         worker_program: &worker_program,
         worker_expected_sha256: admitted.sha256,
         worker_expected_size: admitted.size,
-        args_before_plugin: input.args_before_plugin,
+        args_before_plugin: &worker_arguments(input.worker_kind, input.args_before_plugin),
         args_after_plugin: &args_after_plugin,
         repository: input.repository,
         require_module_audit: true,
@@ -299,7 +329,7 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
         worker_program: &worker_program,
         worker_expected_sha256: admitted.sha256,
         worker_expected_size: admitted.size,
-        args_before_plugin: input.args_before_plugin,
+        args_before_plugin: &worker_arguments(input.worker_kind, input.args_before_plugin),
         args_after_plugin: &args_after_plugin,
         repository: input.repository,
         // The in-place cluster audit is recorded at close
@@ -478,7 +508,7 @@ fn dispatch_secure_image_impl(
         worker_program: &worker_program,
         worker_expected_sha256: admitted.sha256,
         worker_expected_size: admitted.size,
-        args_before_plugin: input.args_before_plugin,
+        args_before_plugin: &worker_arguments(input.worker_kind, input.args_before_plugin),
         args_after_plugin: &args_after_plugin,
         // The repository is carried to the Windows launch boundary so the
         // optional minidump file handle is created there for every dispatch.
@@ -743,7 +773,7 @@ mod tests {
         let source = root.join("minihost/src/worker.cpp");
         fs::create_dir_all(source.parent().unwrap()).unwrap();
         fs::write(&source, b"source").unwrap();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         fs::write(&worker, b"worker").unwrap();
         let now = SystemTime::now();
@@ -761,16 +791,16 @@ mod tests {
     #[test]
     fn worker_kind_uses_only_fixed_repository_paths() {
         assert_eq!(
-            WorkerKind::L2.repository_relative_program(),
-            "target/minihost-build/aex_l2_worker.exe"
+            WorkerKind::Discovery.repository_relative_program(),
+            "target/minihost-build/aex_worker.exe"
         );
         assert_eq!(
-            WorkerKind::Render.repository_relative_program(),
-            "target/minihost-build/aex_render_worker.exe"
+            WorkerKind::Classic.repository_relative_program(),
+            "target/minihost-build/aex_worker.exe"
         );
         assert_eq!(
             WorkerKind::Smart.repository_relative_program(),
-            "target/minihost-build/aex_smart_worker.exe"
+            "target/minihost-build/aex_worker.exe"
         );
     }
 
@@ -785,7 +815,7 @@ mod tests {
 
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin,
             dependencies: vec![],
             dependency_search_dirs: vec![root.clone()],
@@ -819,7 +849,7 @@ mod tests {
         // bug and must not silently prefer either.
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin: plugin.clone(),
             dependencies: vec![dependency],
             dependency_search_dirs: vec![root.clone()],
@@ -834,7 +864,7 @@ mod tests {
 
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin: ApprovedImageArtifact {
                 path: PathBuf::from("relative.plugin"),
                 expected_sha256: plugin.expected_sha256,
@@ -907,7 +937,7 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         let plugin = artifact(&root, "plugin.plugin", b"plugin");
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         fs::write(&worker, b"").unwrap();
         let source = root.join("minihost/src/worker.cpp");
@@ -919,7 +949,7 @@ mod tests {
 
         let error = dispatch_secure_image(SecureImageDispatch {
             repository: &root,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin,
             dependencies: vec![],
             dependency_search_dirs: vec![root.clone()],
@@ -976,7 +1006,7 @@ mod tests {
             rand::random::<u128>()
         ));
         fs::create_dir(&root).unwrap();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         fs::create_dir_all(worker.parent().unwrap()).unwrap();
         fs::write(&worker, b"worker").unwrap();
         let admitted = admit_local_worker(&root, &worker)

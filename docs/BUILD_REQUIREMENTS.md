@@ -11,7 +11,7 @@
 | Apple Silicon correctness CLI (`guest/`) | arm64 worker / local ad-hoc DMG | Apple Silicon Mac + Rust/Cargo |
 | Rust broker / harness (`broker/`) | `aexcompat-harness.exe` (GUI) ほか | Rust + MSVC Build Tools + Windows SDK |
 | Python テスト (`tests/`) | - | uv (`pyproject.toml` + `uv.lock`、一部は下記 SDK / VS も) |
-| C++ worker (`minihost/`) | `aex_l2_worker.exe` / `aex_render_worker.exe` ほか | CMake + MSVC (After Effects SDK 不要) |
+| C++ worker (`minihost/`) | `aex_worker.exe` (discovery/classic/smart を `--kind` で切替) | CMake + MSVC (After Effects SDK 不要) |
 | probe AEX (`instruments/`) | `pf_*_probe.aex` ほか | CMake + Visual Studio + After Effects SDK |
 | SDK sample fixture (v143 固定分: Grabba / Supervisor 等) | `Grabba.aex` ほか | v143 toolset + MSBuild + After Effects SDK (Supervisor は VS 2022 Build Tools 既定パス固定) |
 | AE oracle 取得 (`tools/*.jsx`) | 参照画像 / trace | After Effects 25.2 実機 |
@@ -161,8 +161,9 @@ cmake --build target\minihost-build
 生成物の確認:
 
 ```powershell
-Get-ChildItem target\minihost-build\aex_*.exe
-# aex_l2_worker.exe / aex_render_worker.exe / aex_smart_worker.exe ほか
+Get-ChildItem target\minihost-build\aex_worker.exe
+# 単一の実行ファイル。discovery/classic/smart は起動時の
+# `--kind discovery|classic|smart` で切り替える (ほかに selftest 用の実行ファイルも生成される)
 ```
 
 ### ヘッダ依存追跡の検証 (issue #657)
@@ -405,15 +406,16 @@ Per-component prerequisites on Windows x64:
   with self-computed expectations, so CI runs it too) and
   `tests/local_artifact_tests.txt` (`--run-local-artifact-tests`;
   machine-bound evidence comparison, local-only).
-- **C++ workers (minihost)**: build with the Ninja generator into
-  `target\minihost-build\` so the harness and gate scripts find the four
-  `aex_*_worker.exe` binaries directly under that directory. No SDK needed.
-  The harness's image dispatch admits the locally built workers at dispatch
-  time (frozen trust constants were retired; see
-  `docs/EVIDENCE_POLICY_2026-07-18.md` section 3), so third-party builds work
-  as soon as the workers exist. Plug-in identity is recorded from the bytes
-  that actually load; a selection-time mismatch triggers rediscovery or
-  evidence rejection rather than refusing launch.
+- **C++ worker (minihost)**: build with the Ninja generator into
+  `target\minihost-build\` so the harness and gate scripts find
+  `aex_worker.exe` directly under that directory. It is a single executable
+  that picks its discovery/classic/smart route at run time from a leading
+  `--kind discovery|classic|smart` pair. No SDK needed. The harness's image
+  dispatch admits the locally built worker at dispatch time (frozen trust
+  constants were retired; see `docs/EVIDENCE_POLICY_2026-07-18.md` section 3),
+  so third-party builds work as soon as the worker exists. Plug-in identity is
+  recorded from the bytes that actually load; a selection-time mismatch
+  triggers rediscovery or evidence rejection rather than refusing launch.
 - **After Effects SDK**: set `AFTER_EFFECTS_SDK_ROOT` to a directory that
   directly contains `Examples\`. The verified configuration uses the AE 25.2
   SDK generation. Provenance receipts record the verified SDK header file

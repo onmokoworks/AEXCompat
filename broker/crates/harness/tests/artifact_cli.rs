@@ -36,8 +36,8 @@ fn built_cli_dispatches_raw_and_exr_and_rejects_wrong_exr_depth() {
     let repository = repository_root();
     let plugin =
         repository.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
-    let render_worker = repository.join("target/minihost-build/aex_render_worker.exe");
-    let smart_worker = repository.join("target/minihost-build/aex_smart_worker.exe");
+    let render_worker = repository.join("target/minihost-build/aex_worker.exe");
+    let smart_worker = repository.join("target/minihost-build/aex_worker.exe");
     if !plugin.is_file() || !render_worker.is_file() || !smart_worker.is_file() {
         eprintln!("skipping built artifact CLI test: native fixtures are not built");
         return;

@@ -953,7 +953,7 @@ pub fn inspect_experimental_external_dependencies(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -999,7 +999,7 @@ pub fn probe_experimental_options_dialog(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1054,7 +1054,7 @@ pub fn probe_experimental_automatic_options_dialog(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1112,7 +1112,7 @@ pub fn probe_experimental_nop_render(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1210,7 +1210,7 @@ pub fn probe_experimental_input_buffer_write(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1315,7 +1315,7 @@ fn probe_experimental_frame_resize(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1403,7 +1403,7 @@ pub fn probe_experimental_persistent_sequence(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1451,7 +1451,7 @@ pub fn probe_experimental_flattened_sequence(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1500,7 +1500,7 @@ pub fn probe_experimental_copied_flattened_sequence(
     let started = Instant::now();
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::Render,
+        WorkerKind::Classic,
         plugin_path,
         approved_sha256,
         &args_before_plugin,

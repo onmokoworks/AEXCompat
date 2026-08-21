@@ -10,11 +10,15 @@ TRANSPORT = ROOT / "target/image-transport"
 WORKER_CWD = ROOT / "target"
 
 def _workers():
+    # One binary now serves every route (issue #1495); this used to return the
+    # two separate classic/smart executables, and still runs each command
+    # once per route, just against the same file with a different --kind.
     builds = [ROOT / "target/minihost-build-v18", ROOT / "target/minihost-build"]
     build = next((candidate for candidate in builds if candidate.is_dir()), builds[0])
-    return [build / "aex_render_worker.exe", build / "aex_smart_worker.exe"]
+    worker = build / "aex_worker.exe"
+    return [(worker, "classic"), (worker, "smart")]
 
-def _run_sidecar(worker: Path, document, name="parameter-animation-test.json"):
+def _run_sidecar(worker: Path, kind: str, document, name="parameter-animation-test.json"):
     TRANSPORT.mkdir(parents=True, exist_ok=True)
     path = (TRANSPORT / name).resolve()
     if isinstance(document, str):
@@ -23,7 +27,7 @@ def _run_sidecar(worker: Path, document, name="parameter-animation-test.json"):
         path.write_text(json.dumps(document, separators=(",", ":")), encoding="utf-8")
     try:
         return subprocess.run(
-            [str(worker), "--self-test-parameter-animation-sidecar", str(path)],
+            [str(worker), "--kind", kind, "--self-test-parameter-animation-sidecar", str(path)],
             cwd=WORKER_CWD, text=True, capture_output=True, timeout=30, check=False,
         )
     finally:
@@ -46,26 +50,26 @@ def _valid_arbitrary():
     ]}]}
 
 def test_native_timeline_evaluation_and_param_utils():
-    for worker in _workers():
+    for worker, kind in _workers():
         assert worker.is_file(), f"missing VS2022 worker: {worker}"
-        completed = subprocess.run([str(worker), "--self-test-parameter-animation"], cwd=WORKER_CWD,
+        completed = subprocess.run([str(worker), "--kind", kind, "--self-test-parameter-animation"], cwd=WORKER_CWD,
                                    text=True, capture_output=True, timeout=30, check=False)
         assert completed.returncode == 0, completed.stderr or completed.stdout
         assert json.loads(completed.stdout)["parameter_animation_transport"] == "passed"
 
 def test_parameter_registry_accepts_more_than_1024_entries():
-    for worker in _workers():
+    for worker, kind in _workers():
         assert worker.is_file(), f"missing VS2022 worker: {worker}"
         completed = subprocess.run(
-            [str(worker), "--self-test-parameter-registry-capacity"],
+            [str(worker), "--kind", kind, "--self-test-parameter-registry-capacity"],
             cwd=WORKER_CWD, text=True, capture_output=True, timeout=30, check=False,
         )
         assert completed.returncode == 0, completed.stderr or completed.stdout
         assert json.loads(completed.stdout)["parameter_registry_capacity"] == "passed"
 
 def test_strict_sidecar_accepts_schema_and_rejects_malformed_documents():
-    worker = _workers()[0]
-    accepted = _run_sidecar(worker, _valid())
+    worker, kind = _workers()[0]
+    accepted = _run_sidecar(worker, kind, _valid())
     assert accepted.returncode == 0, accepted.stderr or accepted.stdout
     invalid = []
     unknown = _valid(); unknown["extra"] = 1; invalid.append(unknown)
@@ -75,32 +79,32 @@ def test_strict_sidecar_accepts_schema_and_rejects_malformed_documents():
     bad_interp = _valid(); bad_interp["parameters"][0]["keys"][0]["interpolation"] = "bezier"; invalid.append(bad_interp)
     too_many = _valid(); too_many["parameters"][0]["keys"] = too_many["parameters"][0]["keys"][:1] * 257; invalid.append(too_many)
     for index, document in enumerate(invalid):
-        rejected = _run_sidecar(worker, document, f"parameter-animation-invalid-{index}.json")
+        rejected = _run_sidecar(worker, kind, document, f"parameter-animation-invalid-{index}.json")
         assert rejected.returncode == 3, (index, rejected.stdout, rejected.stderr)
     duplicate_field = '{"schema_version":1,"schema_version":1,"parameters":[]}'
-    assert _run_sidecar(worker, duplicate_field, "parameter-animation-duplicate.json").returncode == 3
+    assert _run_sidecar(worker, kind, duplicate_field, "parameter-animation-duplicate.json").returncode == 3
     nonfinite = json.dumps(_valid()).replace("1.25", "1e999")
-    assert _run_sidecar(worker, nonfinite, "parameter-animation-nonfinite.json").returncode == 3
+    assert _run_sidecar(worker, kind, nonfinite, "parameter-animation-nonfinite.json").returncode == 3
 
 def test_arbitrary_sidecar_is_bounded_and_strict():
-    worker = _workers()[0]
-    accepted = _run_sidecar(worker, _valid_arbitrary(), "parameter-animation-arbitrary.json")
+    worker, kind = _workers()[0]
+    accepted = _run_sidecar(worker, kind, _valid_arbitrary(), "parameter-animation-arbitrary.json")
     assert accepted.returncode == 0, accepted.stderr or accepted.stdout
     invalid = []
     empty = _valid_arbitrary(); empty["parameters"][0]["keys"][0]["value"]["value"] = []; invalid.append(empty)
     wide = _valid_arbitrary(); wide["parameters"][0]["keys"][0]["value"]["value"] = [256]; invalid.append(wide)
     mixed = _valid_arbitrary(); mixed["parameters"][0]["keys"][1]["value"] = {"type": "scalar", "value": 1}; invalid.append(mixed)
     for index, document in enumerate(invalid):
-        rejected = _run_sidecar(worker, document, f"parameter-animation-arbitrary-invalid-{index}.json")
+        rejected = _run_sidecar(worker, kind, document, f"parameter-animation-arbitrary-invalid-{index}.json")
         assert rejected.returncode == 3, (index, rejected.stdout, rejected.stderr)
 
 def test_sidecar_is_confined_to_broker_owned_transport_and_trailers_are_peeled():
-    worker = _workers()[0]
+    worker, kind = _workers()[0]
     outside = ROOT / "target/parameter-animation-outside.json"
     outside.parent.mkdir(parents=True, exist_ok=True)
     outside.write_text(json.dumps(_valid()), encoding="utf-8")
     try:
-        completed = subprocess.run([str(worker), "--self-test-parameter-animation-sidecar", str(outside.resolve())],
+        completed = subprocess.run([str(worker), "--kind", kind, "--self-test-parameter-animation-sidecar", str(outside.resolve())],
                                    cwd=WORKER_CWD, text=True, capture_output=True, timeout=30, check=False)
         assert completed.returncode == 3
     finally:

@@ -4133,7 +4133,7 @@ mod tests {
             fixture
         }
 
-        /// A temp repository whose `target/minihost-build/aex_render_worker.exe`
+        /// A temp repository whose `target/minihost-build/aex_worker.exe`
         /// is the protocol fixture and whose two "plug-ins" are two copies of
         /// one real PE image, so the closure resolver sees identical import
         /// sets — one shared closure identity, exactly the cluster shape. The
@@ -4171,7 +4171,7 @@ mod tests {
                 .unwrap();
             let worker_dir = root.join("target/minihost-build");
             std::fs::create_dir_all(&worker_dir).unwrap();
-            std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+            std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
             let one = root.join("one.aex");
             let two = root.join("two.aex");
             std::fs::copy(&fixture, &one).unwrap();
@@ -4798,11 +4798,11 @@ mod tests {
 
     // --- worker root resolution (issue #650) ---------------------------------
 
-    /// Lays out `<root>/target/minihost-build/aex_l2_worker.exe`.
+    /// Lays out `<root>/target/minihost-build/aex_worker.exe`.
     fn place_worker(root: &Path) {
         let dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("aex_l2_worker.exe"), b"MZ").unwrap();
+        std::fs::write(dir.join("aex_worker.exe"), b"MZ").unwrap();
     }
 
     /// A temp directory removed when the guard drops, so the suite does not

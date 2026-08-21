@@ -6,11 +6,11 @@ ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "target" / "minihost-build"
 
 def test_native_self_test_covers_all_three_release_workers():
-    for worker_name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):
-        worker = BUILD / worker_name
-        assert worker.exists(), f"build {worker_name} before running the native test"
+    worker = BUILD / "aex_worker.exe"
+    assert worker.exists(), "build the worker with tools\\build-native.ps1 first"
+    for kind in ("discovery", "classic", "smart"):
         completed = subprocess.run(
-            [str(worker), "--self-test-aegp-get-effect-camera"],
+            [str(worker), "--kind", kind, "--self-test-aegp-get-effect-camera"],
             cwd=ROOT,
             capture_output=True,
             text=True,

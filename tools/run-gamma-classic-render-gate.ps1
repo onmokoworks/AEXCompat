@@ -6,7 +6,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $resultRelative = "analysis/SDK_GAMMA_CLASSIC_RENDER_GATE_RESULT_2026-07-18.json"
 $adapterRelative = "tools/refresh-runtime-session.py"
 $sessionHarnessRelative = "broker/target/release/aexcompat-harness.exe"
-$releaseWorkerRelative = "target/minihost-build/aex_render_worker.exe"
+$releaseWorkerRelative = "target/minihost-build/aex_worker.exe"
 
 $artifacts = [ordered]@{
     fixture = [ordered]@{

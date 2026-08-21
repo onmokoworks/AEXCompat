@@ -156,7 +156,7 @@ def build_harness_argv(harness_program: str, session_args: list[str]) -> list[st
 
     ``session_args`` excludes the executable and must contain either the
     ``--render-experimental-session`` command or its parameterized variant. The
-    old ``aex_render_worker.exe --render-image*`` transport was removed in #365;
+    old ``--render-image*`` worker transport was removed in #365;
     accepting it here would make an observation look runnable while spawning a
     command that cannot exist anymore.
     """

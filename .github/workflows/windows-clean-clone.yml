@@ -238,17 +238,13 @@ jobs:
         with:
           rust: 'false'
 
-      # docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
+      # 入口は tools\build-native.ps1 に一本化してある (#1495)。vswhere から
+      # vcvars64 を解決するのはあのスクリプトの仕事で、ここに 3 回複製されて
+      # いた。docs/BUILD_REQUIREMENTS.md の指示どおり target\minihost-build 直下に
       # フラット配置する (single-config)。
-      - name: Build minihost workers (Ninja)
-        shell: cmd
-        run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
-          if not defined VSROOT exit /b 1
-          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          cmake -S minihost -B target\minihost-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
-          cmake --build target\minihost-build || exit /b 1
-          dir /b target\minihost-build\aex_*.exe
+      - name: Build minihost workers
+        shell: pwsh
+        run: pwsh -File tools\build-native.ps1
 
       # ヘッダ依存が実際に記録されているかを確認する (#657)。cl の /showIncludes
       # はローカライズされるため、configure 時と build 時で言語が食い違うと
@@ -260,18 +256,12 @@ jobs:
       # trace writer の動的テスト (test_production_worker_trace.py /
       # test_instruments_trace_writer.py の handle ベース検証) を実走させる (#250)。
       # この target は trace_writer.cpp + windows.h のみで SDK 不要。
-      - name: Build trace writer selftest (Ninja)
-        shell: cmd
-        run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
-          if not defined VSROOT exit /b 1
-          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
-          cmake --build target\instruments-build --target trace_writer_selftest || exit /b 1
-          dir /b target\instruments-build\trace_writer_selftest.exe
+      - name: Build trace writer selftest
+        shell: pwsh
+        run: pwsh -File tools\build-native.ps1 -Source instruments -Target trace_writer_selftest
 
 
-      # `aex_*.exe` に絞らない。minihost-build 直下には worker 3 本のほかに
+      # `aex_*.exe` に絞らない。minihost-build 直下には worker のほかに
       # native selftest のラッパが 30 本以上あり、pytest がそれらを直接起動する。
       # dll も要る: worker_session_detach_fixture.dll と dynamic suite の
       # companion/consumer fixture は selftest がロードする側の入力で、
@@ -363,16 +353,10 @@ jobs:
       # ステップが同じ runner で先に configure していたが、あちらは SDK を
       # 要らないので native-workers に移っており、この job の target\ は空で
       # 始まる。
-      - name: Build ABI layout probe (Ninja)
+      - name: Build ABI layout probe
         if: matrix.producer == 'abi' && steps.sdk.outcome == 'success'
-        shell: cmd
-        run: |
-          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSROOT=%%i"
-          if not defined VSROOT exit /b 1
-          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
-          cmake -S instruments -B target\instruments-build -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
-          cmake --build target\instruments-build --target abi_layout_probe || exit /b 1
-          dir /b target\instruments-build\abi_layout_probe.exe
+        shell: pwsh
+        run: pwsh -File tools\build-native.ps1 -Source instruments -Target abi_layout_probe
 
       # probe テストの入力 fixture (37x23 raw RGBA)。内容は決定論的に生成され、
       # built_artifact テストは期待値を実行時に自己計算するため内容非依存。
@@ -574,7 +558,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
           $required = @(
-            (Join-Path $root 'target\minihost-build\aex_render_worker.exe'),
+            (Join-Path $root 'target\minihost-build\aex_worker.exe'),
             (Join-Path $root 'target\pf-layer-param-probe-build\Release\pf_layer_param_probe.aex'),
             (Join-Path $root 'target\pf-param-utils-animation-probe-build\Release\pf_param_utils_animation_probe.aex')
           )
@@ -596,7 +580,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
           $required = @(
-            (Join-Path $root 'target\minihost-build\aex_render_worker.exe'),
+            (Join-Path $root 'target\minihost-build\aex_worker.exe'),
             (Join-Path $root 'target\pf-visual-audio-probe-build\pf-visual-audio-probe\Release\pf_visual_audio_audio_only_probe.aex')
           )
           foreach ($path in $required) {
@@ -622,7 +606,7 @@ jobs:
         env:
           # native-workers job がビルド済みの worker を canonical_release_worker fixture に
           # 渡し、二重ビルドを避ける (#681)。
-          AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\minihost-build\aex_render_worker.exe
+          AEXCOMPAT_CANONICAL_WORKER: ${{ github.workspace }}\target\minihost-build\aex_worker.exe
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           set "SDK_FLAGS="

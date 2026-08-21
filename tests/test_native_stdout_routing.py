@@ -19,18 +19,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "target" / "minihost-build"
-WORKERS = ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe")
+WORKER = BUILD / "aex_worker.exe"
+KINDS = ("discovery", "classic", "smart")
 MARKER = "native-stdout-marker"
 
 
-def _run(worker: Path, diagnostics: bool) -> subprocess.CompletedProcess:
+def _run(kind: str, diagnostics: bool) -> subprocess.CompletedProcess:
     environment = dict(os.environ)
     if diagnostics:
         environment["AEXCOMPAT_EXTENDED_DIAG"] = "1"
     else:
         environment.pop("AEXCOMPAT_EXTENDED_DIAG", None)
     return subprocess.run(
-        [str(worker), "--self-test-native-stdout-routing"],
+        [str(WORKER), "--kind", kind, "--self-test-native-stdout-routing"],
         cwd=ROOT,
         env=environment,
         capture_output=True,
@@ -40,10 +41,9 @@ def _run(worker: Path, diagnostics: bool) -> subprocess.CompletedProcess:
 
 
 def test_plugin_stdout_is_discarded_by_default() -> None:
-    for name in WORKERS:
-        worker = BUILD / name
-        assert worker.exists(), f"build {name} before running the native test"
-        completed = _run(worker, diagnostics=False)
+    assert WORKER.exists(), "build the worker with tools\\build-native.ps1 first"
+    for kind in KINDS:
+        completed = _run(kind, diagnostics=False)
         assert completed.returncode == 0, completed.stderr or completed.stdout
         # The worker's own report still owns stdout.
         assert json.loads(completed.stdout) == {"native_stdout_routing": "passed"}
@@ -52,10 +52,9 @@ def test_plugin_stdout_is_discarded_by_default() -> None:
 
 
 def test_plugin_stdout_reaches_stderr_under_extended_diagnostics() -> None:
-    for name in WORKERS:
-        worker = BUILD / name
-        assert worker.exists(), f"build {name} before running the native test"
-        completed = _run(worker, diagnostics=True)
+    assert WORKER.exists(), "build the worker with tools\\build-native.ps1 first"
+    for kind in KINDS:
+        completed = _run(kind, diagnostics=True)
         assert completed.returncode == 0, completed.stderr or completed.stdout
         # The report is unchanged: the plug-in's writes never join it.
         assert json.loads(completed.stdout) == {"native_stdout_routing": "passed"}

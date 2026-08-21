@@ -7,7 +7,7 @@ from _render_session import assert_artifact_fresh
 
 def test_stale_artifact_is_rejected_with_rebuild_diagnostic(tmp_path):
     artifact = tmp_path / "probe.aex"
-    runtime = tmp_path / "aex_render_worker.exe"
+    runtime = tmp_path / "aex_worker.exe"
     artifact.write_bytes(b"old probe")
     runtime.write_bytes(b"new worker")
     os.utime(artifact, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))

@@ -8,19 +8,20 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKERS = [
-    ROOT / "target" / "minihost-build" / "aex_l2_worker.exe",
-    ROOT / "target" / "minihost-build" / "aex_render_worker.exe",
-    ROOT / "target" / "minihost-build" / "aex_smart_worker.exe",
-]
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
+# The routes still parametrise this even though one binary serves them all
+# (#1495): the crash guard runs inside the worker and the route gates behaviour
+# in about forty places, so a dump written on one route says nothing about
+# another.
+KINDS = ["discovery", "classic", "smart"]
 
 
-@pytest.mark.parametrize("worker", WORKERS, ids=lambda p: p.name)
-def test_guarded_crash_writes_a_minidump(worker: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", KINDS)
+def test_guarded_crash_writes_a_minidump(kind: str, tmp_path: Path) -> None:
     if os.name != "nt":
         pytest.skip("crash minidump capture is Windows-only")
-    if not worker.is_file():
-        pytest.skip(f"{worker.name} is not built; run the minihost build")
+    if not WORKER.is_file():
+        pytest.skip(f"{WORKER.name} is not built; run tools\\build-native.ps1")
 
     import msvcrt
 
@@ -81,7 +82,7 @@ def test_guarded_crash_writes_a_minidump(worker: Path, tmp_path: Path) -> None:
             msvcrt.get_osfhandle(ack_read)
         )
         process = subprocess.Popen(
-            [str(worker), "--self-test-crash-minidump"],
+            [str(WORKER), "--kind", kind, "--self-test-crash-minidump"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -137,19 +138,19 @@ def test_guarded_crash_writes_a_minidump(worker: Path, tmp_path: Path) -> None:
     assert dump_path.stat().st_size == report["dump_bytes"]
 
 
-@pytest.mark.parametrize("worker", WORKERS, ids=lambda p: p.name)
-def test_crash_writes_nothing_without_opt_in(worker: Path, tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", KINDS)
+def test_crash_writes_nothing_without_opt_in(kind: str, tmp_path: Path) -> None:
     if os.name != "nt":
         pytest.skip("crash minidump capture is Windows-only")
-    if not worker.is_file():
-        pytest.skip(f"{worker.name} is not built; run the minihost build")
+    if not WORKER.is_file():
+        pytest.skip(f"{WORKER.name} is not built; run tools\\build-native.ps1")
 
     environment = os.environ.copy()
     environment.pop("AEXCOMPAT_MINIDUMP_DIR", None)
     environment.pop("AEXCOMPAT_MINIDUMP_HANDLE", None)
     environment.pop("AEXCOMPAT_MINIDUMP_ACK_HANDLE", None)
     result = subprocess.run(
-        [str(worker), "--self-test-crash-no-minidump"],
+        [str(WORKER), "--kind", kind, "--self-test-crash-no-minidump"],
         capture_output=True,
         text=True,
         timeout=60,

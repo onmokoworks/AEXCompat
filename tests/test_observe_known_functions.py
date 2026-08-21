@@ -333,7 +333,7 @@ class LiveObservationIntegrationTests(unittest.TestCase):
             import frida  # noqa: F401
         except ImportError:
             self.skipTest("frida not installed")
-        worker = Path(__file__).resolve().parents[1] / "target" / "minihost-build" / "aex_render_worker.exe"
+        worker = Path(__file__).resolve().parents[1] / "target" / "minihost-build" / "aex_worker.exe"
         if not worker.exists():
             self.skipTest("worker build not present")
         self.skipTest(

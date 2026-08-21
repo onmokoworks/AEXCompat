@@ -206,7 +206,7 @@ mod tests {
             .nth(3)
             .unwrap()
             .to_path_buf();
-        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         if !worker.is_file() {
             return;
         }

@@ -9,8 +9,8 @@ def worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
     candidates = [
         Path(configured) if configured else None,
-        ROOT / "target/minihost-timed-layers/Release/aex_render_worker.exe",
-        ROOT / "target/minihost-build-v18/Release/aex_render_worker.exe",
+        ROOT / "target/minihost-timed-layers/Release/aex_worker.exe",
+        ROOT / "target/minihost-build-v18/Release/aex_worker.exe",
     ]
     return next((path for path in candidates if path and path.is_file()), None)
 
@@ -18,7 +18,7 @@ def test_native_provider_oracle_normalizes_8_16_float_and_pins_receipt():
     executable = worker()
     assert executable is not None, "build the render worker first"
     completed = subprocess.run(
-        [str(executable), "--self-test-pf-ae-channel-native-provider"],
+        [str(executable), "--kind", "classic", "--self-test-pf-ae-channel-native-provider"],
         cwd=ROOT,
         text=True,
         capture_output=True,

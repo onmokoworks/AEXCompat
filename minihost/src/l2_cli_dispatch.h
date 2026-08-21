@@ -41,7 +41,7 @@ struct AuxiliaryOptionResult {
 AuxiliaryOptionResult strip_auxiliary_options(
     int argc, wchar_t** argv, const AuxiliaryOptionHooks& hooks);
 
-enum class WorkerKind { Render, Smart };
+enum class WorkerKind { Classic, Smart };
 
 struct WorkerMode {
   int external_pixel_bytes{4};

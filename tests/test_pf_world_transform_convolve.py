@@ -5,9 +5,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_convolve_runtime_clips_output_area():
-    worker = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+    worker = ROOT / "target" / "minihost-build" / "aex_worker.exe"
     result = subprocess.run(
-        [str(worker), "--self-test-world-transform-convolve"],
+        [str(worker), "--kind", "classic", "--self-test-world-transform-convolve"],
         cwd=ROOT,
         capture_output=True,
         text=True,

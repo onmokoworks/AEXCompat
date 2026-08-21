@@ -6,7 +6,7 @@ ROOT=Path(__file__).resolve().parents[1]
 SOURCE=ROOT/"instruments/pf-transform-affine-probe/pf_transform_affine_probe.cpp"
 SCRIPT=ROOT/"tools/build-pf-transform-affine-probe.ps1"
 PROBE=ROOT/"target/pf-transform-affine-probe-build/Release/pf_transform_affine_probe.aex"
-WORKER=ROOT/"target/minihost-build/aex_render_worker.exe"
+WORKER=ROOT/"target/minihost-build/aex_worker.exe"
 INPUT=ROOT/"target/gpu-effects/opencl-input.rgba"
 def test_build_and_vectors():
     subprocess.run(["powershell","-NoProfile","-ExecutionPolicy","Bypass","-File",str(SCRIPT)],cwd=ROOT,check=True,timeout=180)

@@ -6,7 +6,7 @@ from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-external-cache-roundtrip-probe" / "pf_aegp_external_cache_roundtrip_probe.cpp"
 SCRIPT = ROOT / "tools" / "build-pf-aegp-external-cache-roundtrip-probe.ps1"
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = ROOT / "target" / "pf-aegp-external-cache-roundtrip-probe-build" / "Release" / "pf_aegp_external_cache_roundtrip_probe.aex"
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 

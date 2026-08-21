@@ -1937,9 +1937,9 @@ fn record_session_close(config: &MfSessionConfig, close: &serde_json::Value) {
                 .map(str::to_owned)
         });
     let worker = config.repository.join(if config.smart {
-        "target/minihost-build/aex_smart_worker.exe"
+        "target/minihost-build/aex_worker.exe"
     } else {
-        "target/minihost-build/aex_render_worker.exe"
+        "target/minihost-build/aex_worker.exe"
     });
     let worker_sha256 = std::fs::read(&worker)
         .ok()
@@ -2943,7 +2943,7 @@ impl WorkerRootSource {
 
 /// The L2 (discovery) worker, relative to the root handed to the broker. Kept in
 /// step with the broker's own `WorkerKind::repository_relative_program`.
-const L2_WORKER_RELATIVE_PATH: &str = "target/minihost-build/aex_l2_worker.exe";
+const L2_WORKER_RELATIVE_PATH: &str = "target/minihost-build/aex_worker.exe";
 
 /// The path of this running DLL, resolved from an address inside it. Used to
 /// fingerprint the in-process broker (its bytes ship in this module, not the

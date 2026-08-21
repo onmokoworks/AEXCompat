@@ -240,7 +240,7 @@ pub fn run_from_manifest(
     let launch = dispatch_secure_image_with_process_memory_limit(
         SecureImageDispatch {
             repository,
-            worker_kind: WorkerKind::L2,
+            worker_kind: WorkerKind::Discovery,
             plugin: approved(aex, &manifest.artifacts.aex)?,
             // #816: the runtime rides a search directory rather than a staged
             // artifact, and dispatch rejects the staged form outright.

@@ -23,12 +23,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "target" / "minihost-build"
 ABI_OBSERVATION = ROOT / "analysis" / "AE_ABI_LAYOUT_OBSERVATION_2026-07-13.json"
-WORKERS = ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe")
+WORKER = BUILD / "aex_worker.exe"
+KINDS = ("discovery", "classic", "smart")
 
 
-def _self_test(worker: Path) -> dict:
+def _self_test(kind: str) -> dict:
     completed = subprocess.run(
-        [str(worker), "--self-test-smart-selector-inputs"],
+        [str(WORKER), "--kind", kind, "--self-test-smart-selector-inputs"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -39,10 +40,9 @@ def _self_test(worker: Path) -> dict:
 
 
 def test_native_selector_input_self_test_passes_all_three_workers() -> None:
-    for name in WORKERS:
-        worker = BUILD / name
-        assert worker.exists(), f"build {name} before running the native test"
-        report = _self_test(worker)
+    assert WORKER.exists(), "build the worker with tools\\build-native.ps1 first"
+    for kind in KINDS:
+        report = _self_test(kind)
         assert report["smart_selector_inputs"] == "passed"
         assert report["pr_gpu_pf_first_all_depths"] is True
 
@@ -58,10 +58,9 @@ def test_reported_offsets_match_the_frozen_sdk_abi_observation() -> None:
     assert request["offset"] == 0
     assert bitdepth["offset"] == request["size"]
 
-    for name in WORKERS:
-        worker = BUILD / name
-        assert worker.exists(), f"build {name} before running the native test"
-        reported = _self_test(worker)
+    assert WORKER.exists(), "build the worker with tools\\build-native.ps1 first"
+    for kind in KINDS:
+        reported = _self_test(kind)
         assert reported["render_request_bytes"] == request["size"]
         assert reported["bitdepth_offset"] == bitdepth["offset"]
         assert reported["pre_render_data_offset"] == pre_render_data["offset"]

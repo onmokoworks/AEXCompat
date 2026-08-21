@@ -59,7 +59,7 @@ mod windows_real_worker {
             .ancestors()
             .nth(3)
             .unwrap();
-        let worker = repository.join("target/minihost-build/aex_render_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         // The fixture extension is joined at runtime because the native code
         // guard forbids production-looking plugin literals in broker sources.
         let plugin = repository
@@ -205,7 +205,7 @@ mod windows_real_worker {
             .ancestors()
             .nth(3)
             .unwrap();
-        let worker = repository.join("target/minihost-build/aex_render_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         let plugin = repository
             .join("target/pf-layer-param-probe-build/Release")
             .join(["pf_layer_param_probe", "aex"].join("."));

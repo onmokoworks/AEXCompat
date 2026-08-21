@@ -10,7 +10,7 @@
 
 namespace aexcompat::worker_runtime::request_parser {
 
-enum class Kind { Render, Smart };
+enum class Kind { Classic, Smart };
 
 struct LayerInput {
   int32_t slot{};

@@ -2454,7 +2454,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
 
   if (is_render_worker()) {
     const auto parsed = aexcompat::worker_runtime::request_parser::parse(
-      aexcompat::worker_runtime::request_parser::Kind::Render, argc, argv,
+      aexcompat::worker_runtime::request_parser::Kind::Classic, argc, argv,
       {{nullptr, set_l2_dump_worlds_dir, enable_l2_checksum_detail,
         load_l2_aux_manifest, parse_l2_alpha_coverage, load_l2_parameter_animation,
         parse_l2_conformance_render_settings,

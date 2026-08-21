@@ -51,7 +51,7 @@ public sealed class AexCompatVideoEffect : VideoEffectBase
         }
     }
 
-    [Display(GroupName = "AEXCompat", Name = "AEXCompatリポジトリ", Description = "aex_render_worker.exeを含むAEXCompatリポジトリのパス")]
+    [Display(GroupName = "AEXCompat", Name = "AEXCompatリポジトリ", Description = "aex_worker.exeを含むAEXCompatリポジトリのパス")]
     [Browsable(false)]
     public string RepositoryPath
     {
@@ -484,7 +484,7 @@ internal static partial class NativeMethods
 
 internal static class AexCompatRuntime
 {
-    private const string RenderWorkerRelativePath = "target\\minihost-build\\aex_render_worker.exe";
+    private const string WorkerRelativePath = "target\\minihost-build\\aex_worker.exe";
 
     public static string AssemblyDirectory
         => Path.GetDirectoryName(typeof(AexCompatRuntime).Assembly.Location)
@@ -494,7 +494,7 @@ internal static class AexCompatRuntime
     {
         foreach (var candidate in CandidateRoots())
         {
-            if (File.Exists(Path.Combine(candidate, RenderWorkerRelativePath)))
+            if (File.Exists(Path.Combine(candidate, WorkerRelativePath)))
             {
                 return candidate;
             }

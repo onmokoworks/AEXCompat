@@ -10,6 +10,8 @@ def test_worker_intercepts_system_alert_before_windows_audio(
     completed = subprocess.run(
         [
             str(canonical_release_worker),
+            "--kind",
+            "classic",
             "--self-test-headless-system-sound-suppression",
         ],
         capture_output=True,

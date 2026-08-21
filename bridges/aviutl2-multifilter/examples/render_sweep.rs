@@ -196,8 +196,8 @@ fn capture_report_build_fingerprint(
     let worker = |kind: WorkerKind| {
         fingerprint_executable(&repository.join(kind.repository_relative_program()))
     };
-    let l2_worker = worker(WorkerKind::L2);
-    let classic_worker = worker(WorkerKind::Render);
+    let l2_worker = worker(WorkerKind::Discovery);
+    let classic_worker = worker(WorkerKind::Classic);
     let smart_worker = worker(WorkerKind::Smart);
     ReportBuildFingerprint {
         schema_version: 1,
@@ -1704,8 +1704,8 @@ mod tests {
         let cli = root.join("render_sweep.exe");
         std::fs::write(&cli, b"render-sweep-v1").unwrap();
         for (kind, bytes) in [
-            (WorkerKind::L2, b"l2-v1".as_slice()),
-            (WorkerKind::Render, b"classic-v1".as_slice()),
+            (WorkerKind::Discovery, b"l2-v1".as_slice()),
+            (WorkerKind::Classic, b"classic-v1".as_slice()),
             (WorkerKind::Smart, b"smart-v1".as_slice()),
         ] {
             let worker = root.join(kind.repository_relative_program());

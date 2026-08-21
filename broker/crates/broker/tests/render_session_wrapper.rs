@@ -214,12 +214,12 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping smart session render: build aex_smart_worker.exe and                  pf_smart_geometry_probe.aex first"
+                "skipping smart session render: build aex_worker.exe and                  pf_smart_geometry_probe.aex first"
             );
             return;
         }
@@ -372,7 +372,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
@@ -475,7 +475,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
@@ -616,7 +616,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
@@ -742,7 +742,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping declarative layer fixture: build classic worker and layer probe");
@@ -812,7 +812,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root
             .join("target/pf-smart-timed-multilayer-probe-build/Release")
             .join("pf_smart_timed_multilayer_probe.aex");
@@ -1003,7 +1003,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping host-context shapes: build the worker and pf_sampling_probe.aex");
@@ -1198,11 +1198,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping classic session render: build aex_render_worker.exe and                  pf_sampling_probe.aex first"
+                "skipping classic session render: build aex_worker.exe and                  pf_sampling_probe.aex first"
             );
             return;
         }
@@ -1309,11 +1309,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping layer+slider render: build aex_render_worker.exe and                  pf_layer_param_probe.aex first"
+                "skipping layer+slider render: build aex_worker.exe and                  pf_layer_param_probe.aex first"
             );
             return;
         }
@@ -1437,11 +1437,11 @@ mod windows_e2e {
             .nth(3)
             .expect("repository root")
             .to_path_buf();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping animation A/B: build aex_render_worker.exe and \
+                "skipping animation A/B: build aex_worker.exe and \
                  pf_layer_param_probe.aex first"
             );
             return;
@@ -1557,7 +1557,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/sdk-fixtures/sdk-backwards/SDK_Backwards.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping audio render: build the worker and SDK_Backwards.aex");
@@ -1714,7 +1714,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-custom-ui-probe-build/Release/pf_custom_ui_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping custom UI click: build the worker and pf_custom_ui_probe.aex");
@@ -1860,7 +1860,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-custom-ui-probe-build/Release/pf_custom_ui_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping custom UI draw: build the worker and pf_custom_ui_probe.aex");
@@ -1973,7 +1973,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root
             .join("target/pf-frame-origin-probe-build/Release/pf_frame_origin_offered_probe.aex");
         if !worker.is_file() || !aex.is_file() {
@@ -2024,7 +2024,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-frame-origin-probe-build/Release/pf_frame_origin_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping origin render: build the worker and pf_frame_origin_probe.aex");
@@ -2154,7 +2154,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-frame-resize-probe-build/Release/pf_shrink_allowed_probe.aex");
         if !worker.is_file() || !aex.is_file() {
@@ -2206,7 +2206,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-frame-resize-probe-build/Release/pf_expand_allowed_probe.aex");
         if !worker.is_file() || !aex.is_file() {
@@ -2299,11 +2299,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping fail-closed test: build aex_render_worker.exe and pf_sampling_probe.aex first"
+                "skipping fail-closed test: build aex_worker.exe and pf_sampling_probe.aex first"
             );
             return;
         }
@@ -2361,7 +2361,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!("skipping oversized-layer render: build the worker and the layer probe");
@@ -2482,11 +2482,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping zero-duration render: build aex_render_worker.exe and                  pf_sampling_probe.aex first"
+                "skipping zero-duration render: build aex_worker.exe and                  pf_sampling_probe.aex first"
             );
             return;
         }
@@ -2576,11 +2576,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping conformance render: build aex_render_worker.exe and \
+                "skipping conformance render: build aex_worker.exe and \
                  pf_sampling_probe.aex first"
             );
             return;
@@ -2698,11 +2698,11 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex = root.join("target/sdk-fixtures/sdk-backwards/SDK_Backwards.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping audio fail-closed test: build aex_render_worker.exe and \
+                "skipping audio fail-closed test: build aex_worker.exe and \
                  SDK_Backwards.aex (tools/build-sdk-backwards.ps1) first"
             );
             return;
@@ -2894,13 +2894,13 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = plain_windows_path(&repository_root());
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let Some(audio) = visual_audio_probe(&root, "pf_visual_audio_audio_only_probe") else {
             eprintln!("skipping audio-only session: build pf-visual-audio-probe first");
             return;
         };
         if !worker.is_file() {
-            eprintln!("skipping audio-only session: build aex_render_worker.exe first");
+            eprintln!("skipping audio-only session: build aex_worker.exe first");
             return;
         }
         let input = (0..8 * 5 * 4)
@@ -2979,7 +2979,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = plain_windows_path(&repository_root());
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let Some(video) = visual_audio_probe(&root, "pf_visual_audio_cluster_video_probe") else {
             eprintln!("skipping audio-only cluster: build pf-visual-audio-probe first");
             return;
@@ -2989,7 +2989,7 @@ mod windows_e2e {
             return;
         };
         if !worker.is_file() {
-            eprintln!("skipping audio-only cluster: build aex_render_worker.exe first");
+            eprintln!("skipping audio-only cluster: build aex_worker.exe first");
             return;
         }
         let first_input = (0..8 * 5 * 4)
@@ -3058,13 +3058,13 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let Some(aex) = visual_audio_probe(&root, "pf_visual_audio_sidecar_probe") else {
             eprintln!("skipping image+audio: run tools/build-pf-visual-audio-probe.ps1 first");
             return;
         };
         if !worker.is_file() {
-            eprintln!("skipping image+audio: build aex_render_worker.exe first");
+            eprintln!("skipping image+audio: build aex_worker.exe first");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
@@ -3195,7 +3195,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let Some(aex) = visual_audio_probe(&root, "pf_visual_audio_layer_sidecar_probe") else {
             eprintln!(
                 "skipping image+audio+layer session test: run \
@@ -3205,7 +3205,7 @@ mod windows_e2e {
             return;
         };
         if !worker.is_file() {
-            eprintln!("skipping image+audio+layer session test: build aex_render_worker.exe first");
+            eprintln!("skipping image+audio+layer session test: build aex_worker.exe first");
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
@@ -3329,7 +3329,7 @@ mod windows_e2e {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         // pf_sampling_probe never advertises audio and never touches the audio
         // suite, so the rest of its report is clean and the only thing that can
         // refuse it is the audio gate itself. pf_visual_audio_unadvertised_probe
@@ -3339,7 +3339,7 @@ mod windows_e2e {
         let aex = root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping unadvertised-audio gate check: build aex_render_worker.exe and \
+                "skipping unadvertised-audio gate check: build aex_worker.exe and \
                  pf_sampling_probe.aex first"
             );
             return;

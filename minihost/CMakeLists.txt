@@ -335,6 +335,7 @@ endif()
 
 add_library(aex_worker_runtime_core OBJECT
   ${AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES}
+  src/worker_target_kind.cpp
   src/worker_build_provenance.cpp)
 target_compile_features(aex_worker_runtime_core PRIVATE cxx_std_17)
 # Where the configured provenance header lands. Object-library sources are all
@@ -343,10 +344,17 @@ target_include_directories(aex_worker_runtime_core PRIVATE "${CMAKE_CURRENT_BINA
 target_compile_definitions(aex_worker_runtime_core PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX AEXCOMPAT_COMPILE_AEGP_SCENE_CALLBACKS=1)
 target_link_libraries(aex_worker_runtime_core PRIVATE aexcompat_trace_writer)
 
-add_executable(aex_l2_worker src/worker_l2_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
-target_compile_features(aex_l2_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_l2_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(aex_l2_worker PRIVATE bcrypt aexcompat_trace_writer)
+# One worker executable, one link step (issue #1495). It used to be three --
+# aex_l2_worker, aex_render_worker, aex_smart_worker -- differing only by the
+# Kind their five-line entry passed in. Building one of those targets
+# recompiled the shared object but relinked only that target, so the other two
+# silently stayed on the previous build and a sweep measured old code on the
+# routes it did not name. Selecting the route at runtime removes the way to
+# express a half-built set.
+add_executable(aex_worker src/worker_main_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
+target_compile_features(aex_worker PRIVATE cxx_std_17)
+target_compile_definitions(aex_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(aex_worker PRIVATE bcrypt aexcompat_trace_writer)
 
 add_executable(worker_report_json_selftest
     ../tests/native/worker_report_json_selftest.cpp
@@ -374,16 +382,6 @@ target_compile_features(worker_pf_ansi_diagnostics_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_pf_ansi_diagnostics_selftest PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_pf_ansi_diagnostics_selftest PRIVATE src)
-
-add_executable(aex_render_worker src/worker_render_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
-target_compile_features(aex_render_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_render_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(aex_render_worker PRIVATE bcrypt aexcompat_trace_writer)
-
-add_executable(aex_smart_worker src/worker_smart_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
-target_compile_features(aex_smart_worker PRIVATE cxx_std_17)
-target_compile_definitions(aex_smart_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(aex_smart_worker PRIVATE bcrypt aexcompat_trace_writer)
 
 add_executable(worker_classic_suite_report_selftest
     ../tests/native/worker_classic_suite_report_selftest.cpp

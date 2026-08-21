@@ -19,14 +19,21 @@ bool teardown_bib_suite(void*) noexcept;
 uint32_t bib_termination_attempt_count() noexcept;
 
 // Retained worker-entry identity state (issue #126 Phase D). The worker-kind
-// selector is set once by the entry shims before worker_main runs and is part
-// of the entry/admission minimum that stays owned here. Lifetime: set at
-// process entry, constant afterwards.
+// selector is set once by the entry before worker_main runs and is part of the
+// entry/admission minimum that stays owned here. Lifetime: set at process
+// entry, constant afterwards.
+//
+// The initialiser is Classic rather than a route that renders nothing on
+// purpose (#1495): the entry refuses to start without an explicit --kind, so
+// this value is never the one that runs, and if some future path did reach it
+// uninitialised, failing to render is louder than quietly reporting a
+// discovery result for a render request. Before #1495 it defaulted to the
+// discovery route, where that mistake looked like a successful run.
 aexcompat::worker_target::Kind g_worker_target =
-    aexcompat::worker_target::Kind::L2;
+    aexcompat::worker_target::Kind::Classic;
 
 bool is_render_worker() {
-  return g_worker_target == aexcompat::worker_target::Kind::Render;
+  return g_worker_target == aexcompat::worker_target::Kind::Classic;
 }
 
 bool is_smart_worker() {
@@ -1445,13 +1452,16 @@ void record_selector_dispatch(const char* selector) {
   if (g_trace_writer && selector) g_trace_writer->selector_dispatch(selector);
 }
 
+// Names the route in the trace. It used to name the executable, which said the
+// same thing while there were three of them; with one binary (#1495) the route
+// is the part that still varies.
 const char* trace_worker_label() {
   switch (g_worker_target) {
-    case aexcompat::worker_target::Kind::Render: return "aex_render_worker";
-    case aexcompat::worker_target::Kind::Smart: return "aex_smart_worker";
-    case aexcompat::worker_target::Kind::L2: return "aex_l2_worker";
+    case aexcompat::worker_target::Kind::Classic: return "classic";
+    case aexcompat::worker_target::Kind::Smart: return "smart";
+    case aexcompat::worker_target::Kind::Discovery: return "discovery";
   }
-  return "aex_l2_worker";
+  return "unknown";
 }
 
 int capture_seh_exception(EXCEPTION_POINTERS* information) {

@@ -11,7 +11,7 @@ from _render_session import HARNESS, assert_artifact_fresh
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "target" / "minihost-build" / "aex_smart_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = (
     ROOT
     / "target"

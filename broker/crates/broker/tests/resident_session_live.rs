@@ -34,12 +34,12 @@ mod windows_e2e {
 
     fn built_artifacts() -> Option<(PathBuf, PathBuf, String)> {
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_render_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-parameter-echo-probe-build/Release/pf_parameter_echo_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping resident-session live test: build aex_render_worker.exe and \
+                "skipping resident-session live test: build aex_worker.exe and \
                  pf_parameter_echo_probe.aex first"
             );
             return None;

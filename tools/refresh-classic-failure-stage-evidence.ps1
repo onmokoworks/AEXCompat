@@ -46,16 +46,11 @@ if (-not $SkipBuild) {
             Set-Item -LiteralPath "Env:$($matches[1])" -Value $matches[2]
         }
     }
-    $cmake = & "$PSScriptRoot\resolve-build-cmake.ps1" '' 'Ninja'
-    Invoke-Checked $cmake @(
-        '-S', (Join-Path $root 'minihost'),
-        '-B', (Join-Path $root 'target\minihost-build'),
-        '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release'
-    )
-    Invoke-Checked $cmake @(
-        '--build', (Join-Path $root 'target\minihost-build'),
-        '--target', 'aex_l2_worker', 'aex_render_worker'
-    )
+    # One worker binary now serves the discovery and classic routes this
+    # evidence exercises (issue #1495): a single `aex_worker` target replaces
+    # the two link targets this used to name.
+    & (Join-Path $PSScriptRoot 'build-native.ps1') -Target aex_worker
+    if ($LASTEXITCODE -ne 0) { throw 'aex_worker build failed' }
     Invoke-Checked cargo @(
         'build', '--manifest-path', (Join-Path $root 'broker\Cargo.toml'),
         '-p', 'aexcompat-harness', '--release'

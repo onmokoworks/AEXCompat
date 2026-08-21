@@ -31,12 +31,12 @@ mod windows_e2e {
     #[test]
     fn sealed_smart_cpu_render_passes_the_module_audit() {
         let root = repository_root();
-        let worker = root.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = root.join("target/minihost-build/aex_worker.exe");
         let aex =
             root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
         if !worker.is_file() || !aex.is_file() {
             eprintln!(
-                "skipping sealed smart CPU render: build aex_smart_worker.exe and \
+                "skipping sealed smart CPU render: build aex_worker.exe and \
                  pf_smart_geometry_probe.aex first"
             );
             return;

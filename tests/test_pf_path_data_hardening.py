@@ -6,14 +6,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _worker() -> Path:
     candidates = (
-        ROOT / "target" / "minihost-build-v18" / "Release" / "aex_render_worker.exe",
-        ROOT / "target" / "minihost-build-v18" / "aex_render_worker.exe",
+        ROOT / "target" / "minihost-build-v18" / "Release" / "aex_worker.exe",
+        ROOT / "target" / "minihost-build-v18" / "aex_worker.exe",
     )
     return next(path for path in candidates if path.exists())
 
 def test_path_hardening_runtime_self_test():
     completed = subprocess.run(
-        [str(_worker()), "--self-test-pf-path-data-hardening"],
+        [str(_worker()), "--kind", "classic", "--self-test-pf-path-data-hardening"],
         cwd=ROOT,
         check=False,
         capture_output=True,

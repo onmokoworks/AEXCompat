@@ -6,9 +6,11 @@ purge, leaving the routes built, linked, and never run. Each test here starts
 the production workers and checks the route's own verdict plus the invariants
 the route reports, which is the behavioral form issue #691 asked for.
 
-The routes live in ``aex_worker_runtime_core``, so every production worker
-exposes them; ``--self-test-aegp-layer-render-options-suite2`` is the one
-render-worker-only route and its absence elsewhere is part of the contract.
+The routes live in ``aex_worker_runtime_core``, so the worker exposes them on
+every route; ``--self-test-aegp-layer-render-options-suite2`` is the one that
+only the classic route serves, and its absence on the others is part of the
+contract -- which is also the clearest demonstration that ``--kind`` selects
+behaviour rather than just labelling it.
 """
 
 import json
@@ -18,14 +20,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "target" / "minihost-build"
-WORKERS = ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe")
+WORKER = BUILD / "aex_worker.exe"
+KINDS = ("discovery", "classic", "smart")
 
 
-def _run_route(worker_name: str, flag: str) -> subprocess.CompletedProcess:
-    worker = BUILD / worker_name
-    assert worker.exists(), f"build {worker_name} before running the native test"
+def _run_route(kind: str, flag: str) -> subprocess.CompletedProcess:
+    assert WORKER.exists(), "build the worker before running the native test"
     return subprocess.run(
-        [str(worker), flag],
+        [str(WORKER), "--kind", kind, flag],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -34,8 +36,8 @@ def _run_route(worker_name: str, flag: str) -> subprocess.CompletedProcess:
     )
 
 
-def _passing_report(worker_name: str, flag: str, result_key: str) -> dict:
-    completed = _run_route(worker_name, flag)
+def _passing_report(kind: str, flag: str, result_key: str) -> dict:
+    completed = _run_route(kind, flag)
     assert completed.returncode == 0, completed.stderr or completed.stdout
     report = json.loads(completed.stdout)
     assert report[result_key] == "passed", completed.stdout
@@ -43,8 +45,8 @@ def _passing_report(worker_name: str, flag: str, result_key: str) -> dict:
 
 
 def _all_workers(flag: str, result_key: str):
-    for name in WORKERS:
-        yield name, _passing_report(name, flag, result_key)
+    for kind in KINDS:
+        yield kind, _passing_report(kind, flag, result_key)
 
 
 def test_legacy_effect_compat_suites_pass_on_all_workers() -> None:
@@ -73,7 +75,7 @@ def test_aegp_scene_registry_suites_pass_on_all_workers() -> None:
 
 
 def test_aegp_borrowed_handle_report_passes_on_all_workers() -> None:
-    for worker in WORKERS:
+    for worker in KINDS:
         completed = _run_route(worker, "--self-test-aegp-borrowed-handle-report")
         assert completed.returncode == 0, completed.stderr or completed.stdout
         report = json.loads(completed.stdout)
@@ -107,7 +109,7 @@ def test_loaded_plugin_aegp_stream_values_pass_on_all_workers() -> None:
 
 def test_l2_point_defaults_use_the_lifecycle_layer_extent() -> None:
     report = _passing_report(
-        "aex_l2_worker.exe",
+        "discovery",
         "--self-test-l2-point-default-units",
         "l2_point_default_units",
     )
@@ -167,15 +169,15 @@ def test_smart_runtime_concurrency_passes_on_all_workers() -> None:
 
 def test_layer_render_options_suite2_is_a_render_worker_route() -> None:
     _passing_report(
-        "aex_render_worker.exe",
+        "classic",
         "--self-test-aegp-layer-render-options-suite2",
         "aegp_layer_render_options_suite2",
     )
 
-    # The route needs the render worker's downstream renderer, so on the other
-    # workers the flag must fall through to the usage error instead of
-    # pretending to have run.
-    for name in ("aex_l2_worker.exe", "aex_smart_worker.exe"):
+    # The route needs the classic route's downstream renderer, so elsewhere the
+    # flag must fall through to the usage error instead of pretending to have
+    # run.
+    for name in ("discovery", "smart"):
         completed = _run_route(name, "--self-test-aegp-layer-render-options-suite2")
         assert completed.returncode != 0, name
         assert completed.stdout.strip() == "", name

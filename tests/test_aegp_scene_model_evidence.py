@@ -12,7 +12,7 @@ SCHEMA = json.loads(
         encoding="utf-8"
     )
 )
-WORKERS = ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe")
+KINDS = ("discovery", "classic", "smart")
 
 
 def reject_duplicate_keys(pairs):
@@ -24,12 +24,13 @@ def reject_duplicate_keys(pairs):
     return result
 
 
-def worker_path(name: str) -> Path:
+def worker_path(name: str = "aex_worker.exe") -> Path:
     configured = os.environ.get("AEXCOMPAT_SCENE_MODEL_BUILD")
     candidates = [
         Path(configured) / name if configured else None,
         ROOT / "build" / "issue26-scene-model" / "Release" / name,
         ROOT / "target" / "minihost-build" / "Release" / name,
+        ROOT / "target" / "minihost-build" / name,
     ]
     found = next((path for path in candidates if path and path.is_file()), None)
     assert found is not None, f"build the production worker first: {name}"
@@ -45,9 +46,9 @@ def test_scene_model_schema_is_valid() -> None:
 def test_scene_model_evidence_all_production_workers() -> None:
     validator = Draft202012Validator(SCHEMA)
     reports = []
-    for name in WORKERS:
+    for kind in KINDS:
         completed = subprocess.run(
-            [str(worker_path(name)), "--self-test-aegp-scene-model"],
+            [str(worker_path()), "--kind", kind, "--self-test-aegp-scene-model"],
             cwd=ROOT,
             text=True,
             capture_output=True,
@@ -78,10 +79,12 @@ def test_scene_model_evidence_all_production_workers() -> None:
 
 
 def test_scene_transaction_mid_apply_rollback_all_production_workers() -> None:
-    for name in WORKERS:
+    for kind in KINDS:
         completed = subprocess.run(
             [
-                str(worker_path(name)),
+                str(worker_path()),
+                "--kind",
+                kind,
                 "--self-test-aegp-scene-mutation-transactions",
             ],
             cwd=ROOT,

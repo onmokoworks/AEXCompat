@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-fast-blur-probe" / "pf_aegp_fast_blur_probe.cpp"
 SCRIPT = ROOT / "tools" / "build-pf-aegp-fast-blur-probe.ps1"
 PROBE = ROOT / "target" / "pf-aegp-fast-blur-probe-build" / "Release" / "pf_aegp_fast_blur_probe.aex"
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 
 

@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-layer-receipt-probe" / "pf_aegp_layer_receipt_probe.cpp"
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = ROOT / "target" / "pf-aegp-layer-receipt-probe-build" / "Release" / "pf_aegp_layer_receipt_probe.aex"
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 

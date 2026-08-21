@@ -7,7 +7,7 @@ from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-smart-geometry-probe" / "pf_smart_geometry_probe.cpp"
-WORKER = ROOT / "target" / "minihost-build" / "aex_smart_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = ROOT / "target" / "pf-smart-geometry-probe-build" / "Release" / "pf_smart_geometry_probe.aex"
 WIDTH, HEIGHT = 16, 12
 DEPTH_FORMATS = ("argb8", "argb16", "argb32f")
@@ -88,7 +88,7 @@ MODES = {
 
 
 def _run(tmp_path, pixel_format, mode):
-    assert WORKER.exists(), "build aex_smart_worker.exe before running this test"
+    assert WORKER.exists(), "build aex_worker.exe before running this test"
     assert PROBE.exists(), (
         "build the probe first: tools/build-pf-smart-geometry-probe.ps1"
     )
@@ -125,7 +125,7 @@ def test_empty_result_emits_the_input_unchanged(tmp_path):
     input_path = tmp_path / "passthrough-input.rgba"
     output_path = tmp_path / "passthrough-output.bin"
     input_path.write_bytes(bytes(index % 251 for index in range(WIDTH * HEIGHT * 4)))
-    assert WORKER.exists(), "build aex_smart_worker.exe before running this test"
+    assert WORKER.exists(), "build aex_worker.exe before running this test"
     assert PROBE.exists(), (
         "build the probe first: tools/build-pf-smart-geometry-probe.ps1"
     )
