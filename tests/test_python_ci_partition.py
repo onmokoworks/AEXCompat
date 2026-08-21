@@ -29,6 +29,9 @@ def test_trusted_python_ci_partitions_classic_evidence_exactly_once():
     assert main.count(RUNNER.SDK_BACKWARDS_BUILD_NODE) == 1
     sdk_index = main.index(RUNNER.SDK_BACKWARDS_BUILD_NODE)
     assert main[sdk_index - 1] == "--deselect"
+    assert main.count(RUNNER.SDK_GRABBA_BUILD_NODE) == 1
+    grabba_index = main.index(RUNNER.SDK_GRABBA_BUILD_NODE)
+    assert main[grabba_index - 1] == "--deselect"
     assert "--run-sdk-tests" in main
     assert "--run-built-artifact-tests" in main
     assert "--validate-local-artifact-manifest" in main
@@ -39,6 +42,7 @@ def test_fork_python_ci_keeps_evidence_in_main_policy_run():
 
     assert RUNNER.CLASSIC_FAILURE_EVIDENCE_NODE not in main
     assert RUNNER.SDK_BACKWARDS_BUILD_NODE not in main
+    assert RUNNER.SDK_GRABBA_BUILD_NODE not in main
     assert "--deselect" not in main
     assert "--run-sdk-tests" not in main
     assert "--run-built-artifact-tests" not in main
