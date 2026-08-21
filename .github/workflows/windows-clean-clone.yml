@@ -402,6 +402,7 @@ jobs:
               target/sdk-fixtures/**
               target/aegp-render-options-probe-build/Release/aegp_render_options_probe.exe
               target/aegp-render-options-probe-build/aegp-render-options-result.json
+              target/pf-adv-time-probe-build/Release/pf_adv_time_probe.aex
               target/.native-probe-artifact-root
     env:
       PYTHONUTF8: "1"
@@ -580,6 +581,13 @@ jobs:
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           uv run python -m pytest -q -rs tests/test_aegp_render_options_probe.py::test_fixture_builds_and_exercises_lifecycle --run-sdk-tests
+
+      - name: Build PF Adv Time Release fixture
+        if: matrix.producer == 'sdk-fixtures' && steps.sdk.outcome == 'success'
+        shell: cmd
+        run: |
+          set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
+          uv run python -m pytest -q -rs tests/test_pf_adv_time_probe.py::test_pf_adv_time_probe_release_build --run-sdk-tests
 
       # upload-artifact computes one common root across all listed paths. This
       # zero-byte anchor keeps the original target-relative directories in each
