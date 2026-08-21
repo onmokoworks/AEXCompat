@@ -76,7 +76,12 @@ def test_refresh_replays_three_classic_failures_before_updating_evidence(tmp_pat
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=60,
+        # The hang case replays the classic_render deadline in real time
+        # (~35s), so the whole refresh run measures 55-65s on a hosted
+        # runner; 60s flaked on runner variance (issue #1535). 180s keeps
+        # the run bounded while leaving margin well inside the job's
+        # 10-minute limit.
+        timeout=180,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     summary = json.loads(completed.stdout)
