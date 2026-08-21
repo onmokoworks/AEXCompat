@@ -806,7 +806,7 @@ mod tests {
             .join(["HistoGrid", "aex"].join("."));
         if !plugin.exists()
             || !repository
-                .join("target/minihost-build/aex_smart_worker.exe")
+                .join("target/minihost-build/aex_worker.exe")
                 .exists()
         {
             return;
@@ -2711,17 +2711,17 @@ mod tests {
             .ancestors()
             .nth(3)
             .unwrap();
-        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         if !worker.exists() {
             assert!(
                 std::env::var_os("CI").is_none(),
-                "CI must build aex_l2_worker.exe before broker tests"
+                "CI must build aex_worker.exe before broker tests"
             );
             return;
         }
 
         let output = std::process::Command::new(&worker)
-            .arg("--self-test-pf-private-callbacks")
+            .args(["--kind", "discovery", "--self-test-pf-private-callbacks"])
             .output()
             .unwrap();
         assert!(

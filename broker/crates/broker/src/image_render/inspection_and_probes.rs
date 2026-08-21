@@ -61,7 +61,7 @@ fn inspect_experimental_impl(
     let isolated = if !dependencies.is_empty() || !dependency_search_dirs.is_empty() {
         crate::secure_image_dispatch::dispatch_secure_image(SecureImageDispatch {
             repository,
-            worker_kind: WorkerKind::L2,
+            worker_kind: WorkerKind::Discovery,
             plugin: ApprovedImageArtifact {
                 path: plugin_path.to_path_buf(),
                 expected_sha256: decode_sha256_hex(approved_sha256)?,
@@ -77,7 +77,7 @@ fn inspect_experimental_impl(
     } else {
         dispatch_approved_image(
             repository,
-            WorkerKind::L2,
+            WorkerKind::Discovery,
             plugin_path,
             approved_sha256,
             &args_before_plugin,
@@ -379,7 +379,7 @@ pub fn probe_experimental_custom_ui_cursor(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -416,7 +416,7 @@ pub fn probe_experimental_custom_ui_draw(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -470,7 +470,7 @@ pub fn probe_experimental_custom_ui_lifecycle(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -510,7 +510,7 @@ pub fn probe_experimental_custom_ui_idle(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -557,7 +557,7 @@ pub fn probe_experimental_custom_ui_keydown(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -599,7 +599,7 @@ pub fn probe_experimental_custom_ui_mouse_exited(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -656,7 +656,7 @@ pub fn probe_experimental_custom_ui_click(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -709,7 +709,7 @@ pub fn probe_experimental_custom_ui_drag(
     ];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -757,7 +757,7 @@ pub fn trigger_experimental_button(
     let args_after_plugin = vec![actual.to_ascii_lowercase(), slot.to_string(), payload];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -824,7 +824,7 @@ fn initialize_experimental_aegp_impl(
     let isolated = if dependency_search_dirs.is_empty() {
         dispatch_approved_image(
             repository,
-            WorkerKind::L2,
+            WorkerKind::Discovery,
             plugin_path,
             approved_sha256,
             &args_before_plugin,
@@ -834,7 +834,7 @@ fn initialize_experimental_aegp_impl(
     } else {
         crate::secure_image_dispatch::dispatch_secure_image(SecureImageDispatch {
             repository,
-            worker_kind: WorkerKind::L2,
+            worker_kind: WorkerKind::Discovery,
             plugin: ApprovedImageArtifact {
                 path: plugin_path.to_path_buf(),
                 expected_sha256: decode_sha256_hex(approved_sha256)?,
@@ -926,7 +926,7 @@ pub fn dispatch_experimental_aegp_update_menu(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -961,7 +961,7 @@ pub fn dispatch_experimental_aegp_idle(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1001,7 +1001,7 @@ pub fn dispatch_experimental_aegp_command_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1037,7 +1037,7 @@ pub fn dispatch_experimental_aegp_active_idle_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1075,7 +1075,7 @@ pub fn dispatch_experimental_aegp_comp_idle_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1260,7 +1260,7 @@ pub fn dispatch_experimental_aegp_keyframe_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1324,7 +1324,7 @@ pub fn dispatch_experimental_aegp_seek_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1381,7 +1381,7 @@ pub fn dispatch_experimental_aegp_trim_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,
@@ -1430,7 +1430,7 @@ pub fn dispatch_experimental_aegp_switch_roundtrip(
     let args_after_plugin = vec![actual.to_ascii_lowercase()];
     let isolated = dispatch_approved_image(
         repository,
-        WorkerKind::L2,
+        WorkerKind::Discovery,
         plugin_path,
         approved_sha256,
         &args_before_plugin,

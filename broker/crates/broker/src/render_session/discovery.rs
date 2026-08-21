@@ -314,7 +314,7 @@ impl DiscoverySession {
         let (process, plugin_count, in_place_transport) = {
             let dispatch = crate::secure_image_dispatch::SecureInPlaceClusterDispatch {
                 repository: request.repository,
-                worker_kind: WorkerKind::Render,
+                worker_kind: WorkerKind::Classic,
                 plugins: request.plugins,
                 dependency_search_dirs,
                 positional_plugin: false,

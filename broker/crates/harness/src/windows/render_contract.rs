@@ -87,9 +87,9 @@ fn visible_text_summary(value: &str) -> String {
 
 fn required_render_worker_path(repository: &Path, smart: bool) -> PathBuf {
     repository.join(if smart {
-        "target/minihost-build/aex_smart_worker.exe"
+        "target/minihost-build/aex_worker.exe"
     } else {
-        "target/minihost-build/aex_render_worker.exe"
+        "target/minihost-build/aex_worker.exe"
     })
 }
 

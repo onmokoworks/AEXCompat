@@ -9,10 +9,10 @@ def _worker() -> Path | None:
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
     candidates = [
         Path(configured) if configured else None,
-        ROOT / "target" / "minihost-build" / "Release" / "aex_render_worker.exe",
-        ROOT / "target" / "minihost-build" / "aex_render_worker.exe",
-        ROOT / "target" / "minihost-build-v18" / "Release" / "aex_render_worker.exe",
-        ROOT / "target" / "minihost-build-v18" / "aex_render_worker.exe",
+        ROOT / "target" / "minihost-build" / "Release" / "aex_worker.exe",
+        ROOT / "target" / "minihost-build" / "aex_worker.exe",
+        ROOT / "target" / "minihost-build-v18" / "Release" / "aex_worker.exe",
+        ROOT / "target" / "minihost-build-v18" / "aex_worker.exe",
     ]
     return next((path for path in candidates if path and path.is_file()), None)
 
@@ -25,9 +25,9 @@ def test_pf_world_registry_rejects_double_dispose_and_oversized_allocations():
     self-test checks those alongside the rejections that must stay fail-closed.
     """
     worker = _worker()
-    assert worker is not None, "build aex_render_worker before running the runtime test"
+    assert worker is not None, "build aex_worker.exe (pwsh -File tools/build-native.ps1) before running the runtime test"
     completed = subprocess.run(
-        [worker, "--self-test-pf-world-registry"],
+        [worker, "--kind", "classic", "--self-test-pf-world-registry"],
         cwd=ROOT,
         capture_output=True,
         text=True,

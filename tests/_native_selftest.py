@@ -73,3 +73,38 @@ def run(name: str, report_key: str, override_variable: str | None = None) -> dic
     report = json.loads(completed.stdout)
     assert report[report_key] == "passed", report
     return report
+
+
+# The worker self-tests are the other family: they run inside the worker binary
+# itself rather than in a standalone fake, so the route the worker was asked to
+# serve is part of what they exercise -- `is_render_worker()` and friends gate
+# behaviour in about forty places. Running one on all three routes is therefore
+# three configurations, not the same thing three times.
+WORKER = "aex_worker.exe"
+WORKER_KINDS = ("discovery", "classic", "smart")
+
+
+def worker_self_test(selector: str, *, timeout: int = 30) -> dict[str, dict]:
+    """Run one worker self-test on every route; returns `{kind: report}`.
+
+    Until #1495 this was three executables and every caller carried its own
+    copy of the loop over their names. The names are gone -- one binary picks
+    its route from `--kind` -- and the loop lives here so a route added or
+    renamed does not have to be found in eighteen files.
+    """
+    worker = locate(WORKER)
+    reports: dict[str, dict] = {}
+    for kind in WORKER_KINDS:
+        completed = subprocess.run(
+            [str(worker), "--kind", kind, selector],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        assert completed.returncode == 0, (
+            f"{selector} failed on the {kind} route: "
+            + (completed.stderr or completed.stdout)
+        )
+        reports[kind] = json.loads(completed.stdout)
+    return reports

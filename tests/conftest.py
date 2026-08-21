@@ -38,7 +38,7 @@ def canonical_release_worker(tmp_path_factory, request):
         pytest.skip("native worker self-tests require Windows")
 
     # ae-sdk-tests.yml は前段の Build minihost workers ステップで同一 checkout
-    # から aex_render_worker.exe をビルド済みなので、ここで再ビルドせず
+    # から aex_worker.exe をビルド済みなので、ここで再ビルドせず
     # そのバイナリを指せる (#681 の二重ビルド解消)。指定が壊れている場合は
     # fail-closed (黙ってビルドに fallback すると workflow 側の期待とずれる)。
     override = os.environ.get("AEXCOMPAT_CANONICAL_WORKER")
@@ -125,13 +125,13 @@ def _build_canonical_release_worker(build: Path) -> Path:
             f'@call "{vcvars}" >nul && '
             f'"{cmake}" -S "{source}" -B "{ninja_build}" -G Ninja '
             f"-DCMAKE_BUILD_TYPE=Release && "
-            f'"{cmake}" --build "{ninja_build}" --target aex_render_worker'
+            f'"{cmake}" --build "{ninja_build}" --target aex_worker'
         )
         batch = ninja_build / "build-worker.bat"
         batch.write_text(command + "\n", encoding="ascii")
         completed = subprocess.run(
             ["cmd", "/d", "/c", str(batch)], check=False, timeout=420)
-        worker = ninja_build / "aex_render_worker.exe"
+        worker = ninja_build / "aex_worker.exe"
         if completed.returncode == 0 and worker.is_file():
             return worker
         print("canonical worker: Ninja build failed "
@@ -174,12 +174,12 @@ def _build_canonical_release_worker(build: Path) -> Path:
     command = (
         f'@call "{vcvars}" >nul && '
         f'"{cmake}" -S "{source}" -B "{build}" -G "{generator}" -A x64 && '
-        f'"{cmake}" --build "{build}" --config Release --target aex_render_worker'
+        f'"{cmake}" --build "{build}" --config Release --target aex_worker'
     )
     batch = build / "build-worker.bat"
     batch.write_text(command + "\n", encoding="ascii")
     subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=420)
-    worker = build / "Release" / "aex_render_worker.exe"
+    worker = build / "Release" / "aex_worker.exe"
     assert worker.is_file(), f"canonical worker was not produced: {worker}"
     return worker
 

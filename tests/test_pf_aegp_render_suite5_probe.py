@@ -4,7 +4,7 @@ from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-aegp-render-suite5-probe" / "pf_aegp_render_suite5_probe.cpp"
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = ROOT / "target" / "pf-aegp-render-suite5-probe-build" / "Release" / "pf_aegp_render_suite5_probe.aex"
 INPUT = ROOT / "target" / "gpu-effects" / "opencl-input.rgba"
 

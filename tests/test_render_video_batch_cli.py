@@ -2,7 +2,7 @@
 
 Source-level wiring assertions always run. The runtime test drives
 ``broker.exe render-video-batch`` end to end against the session-capable
-``aex_render_worker.exe`` (PR-B) and the pf_sampling_probe fixture, with
+``aex_worker.exe`` (PR-B) and the pf_sampling_probe fixture, with
 self-computed expectations only, so a fresh build on any machine satisfies
 it.
 """
@@ -18,7 +18,7 @@ from _render_session import BROKER
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"
 GENERATOR = ROOT / "tools" / "generate-oracle-rgba-input.py"
 

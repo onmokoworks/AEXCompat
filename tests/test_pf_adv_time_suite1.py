@@ -61,7 +61,7 @@ int main() { return 0; }
 
 
 def test_release_worker_native_v1_v4_guard_and_lease_selftest(canonical_release_worker):
-    result = subprocess.run([str(canonical_release_worker), "--self-test-pf-adv-time-suite1"], cwd=ROOT,
+    result = subprocess.run([str(canonical_release_worker), "--kind", "classic", "--self-test-pf-adv-time-suite1"], cwd=ROOT,
                             check=True, capture_output=True, text=True, errors="replace", timeout=60)
     assert json.loads(result.stdout) == {
         "pf_adv_time_suite_versions": "passed", "v1_slots": 4, "v2_slots": 4,

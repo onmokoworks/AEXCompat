@@ -76,7 +76,7 @@ int main() { return 0; }
 
 def test_suite_entry_guards_and_utility13_native_contract(canonical_release_worker):
     result = subprocess.run(
-        [str(canonical_release_worker), "--self-test-suite-entry-utility13"],
+        [str(canonical_release_worker), "--kind", "classic", "--self-test-suite-entry-utility13"],
         cwd=ROOT,
         check=True,
         capture_output=True,

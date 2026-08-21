@@ -39,8 +39,9 @@ INDEPENDENT_BROKER_TARGETS = {
 INDEPENDENT_HARNESS_TARGETS = {"render_fixture_cli"}
 NATIVE_LIB_TEST = "image_render::tests::worker_callback_addr_denial_round_trips_through_broker_diagnostics"
 SILENT_SKIP_PREREQUISITES = (
-    "target/minihost-build/aex_l2_worker.exe",
-    "target/minihost-build/aex_render_worker.exe",
+    # One binary serves every route since #1495, so naming it once covers what
+    # the discovery and classic executables used to cover separately.
+    "target/minihost-build/aex_worker.exe",
     "target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex",
     "target/pf-param-utils-animation-probe-build/Release/pf_param_utils_animation_probe.aex",
 )

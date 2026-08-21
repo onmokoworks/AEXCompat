@@ -104,7 +104,7 @@ WorkerMode classify_worker_mode(
     return mode;
   }
 
-  if (kind == WorkerKind::Render) {
+  if (kind == WorkerKind::Classic) {
     const bool session16 = equals(command, L"--render-session16-v1");
     const bool session32 = equals(command, L"--render-session32-v1");
     // Session launches carry no input/output paths and no current_time:

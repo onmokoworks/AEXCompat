@@ -194,7 +194,7 @@ impl AudioRenderSession {
         ];
         let dispatch = SecureImageDispatch {
             repository: request.repository,
-            worker_kind: WorkerKind::Render,
+            worker_kind: WorkerKind::Classic,
             plugin,
             dependencies: request.dependencies,
             dependency_search_dirs: request.dependency_search_dirs,

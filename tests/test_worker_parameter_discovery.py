@@ -20,14 +20,14 @@ from _render_session import HARNESS, assert_artifact_fresh, run_session_render
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "instruments" / "pf-param-utils-animation-probe" / "pf_param_utils_animation_probe.cpp"
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = (ROOT / "target" / "pf-param-utils-animation-probe-build" / "Release"
          / "pf_param_utils_animation_probe.aex")
 
 
 def test_parameter_declaring_aex_passes_the_count_contract(tmp_path):
     if not WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if not PROBE.is_file():
         pytest.skip("pf_param_utils_animation_probe.aex is not built")
     assert_artifact_fresh(PROBE, SOURCE, WORKER, HARNESS)

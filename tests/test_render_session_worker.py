@@ -1,6 +1,6 @@
 """Behavioral self-tests for the worker render session frame loop.
 
-Drives ``aex_render_worker.exe --render-session-v1`` directly over the
+Drives ``aex_worker.exe --kind classic --render-session-v1`` directly over the
 protocol transport (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md): two
 inherited anonymous pipes carrying length-prefixed JSON and one inherited
 anonymous file mapping with copy-through pixel slots. Expectations are
@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"
 PARAMETER_ECHO_AEX = (
     ROOT / "target" / "pf-parameter-echo-probe-build" / "Release"
@@ -303,7 +303,7 @@ class SessionTransport:
 
 def _require_artifacts():
     if not WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if not AEX.is_file():
         pytest.skip("pf_sampling_probe.aex is not built")
 
@@ -312,7 +312,7 @@ def _spawn(transport, aex=None, payload="v5|"):
     aex = AEX if aex is None else aex
     aex_sha = hashlib.sha256(aex.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(WORKER), "--render-session-v1", str(aex), aex_sha, payload,
+        [str(WORKER), "--kind", "classic", "--render-session-v1", str(aex), aex_sha, payload,
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -617,7 +617,7 @@ def test_session_launch_without_channels_fails_closed():
     _require_artifacts()
     aex_sha = hashlib.sha256(AEX.read_bytes()).hexdigest()
     result = subprocess.run(
-        [str(WORKER), "--render-session-v1", str(AEX), aex_sha, "v5|",
+        [str(WORKER), "--kind", "classic", "--render-session-v1", str(AEX), aex_sha, "v5|",
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE)],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
     assert result.returncode == EXIT_PROTOCOL_VIOLATION
@@ -629,7 +629,7 @@ def test_session_launch_rejects_time_scale_above_int32():
     # The per-frame protocol carries scales as signed 32-bit, so a launch
     # scale above INT32_MAX could never be matched by any frame.
     result = subprocess.run(
-        [str(WORKER), "--render-session-v1", str(AEX), aex_sha, "v5|",
+        [str(WORKER), "--kind", "classic", "--render-session-v1", str(AEX), aex_sha, "v5|",
          str(WIDTH), str(HEIGHT), "1", "300", str(2**31)],
         cwd=ROOT, capture_output=True, text=True, timeout=60)
     assert result.returncode == 3
@@ -681,7 +681,7 @@ def test_session_audio_trailer_feeds_the_plug_in_the_checked_out_window(tmp_path
     equivalence with that transport, which #365 removed.
     """
     if not WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if SIDECAR_AEX is None:
         pytest.skip("pf_visual_audio_sidecar_probe.aex is not built; run "
                     "tools/build-pf-visual-audio-probe.ps1")
@@ -690,7 +690,7 @@ def test_session_audio_trailer_feeds_the_plug_in_the_checked_out_window(tmp_path
     transport = SessionTransport()
     aex_sha = hashlib.sha256(SIDECAR_AEX.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(WORKER), "--render-session-v1", str(SIDECAR_AEX), aex_sha, "v5|",
+        [str(WORKER), "--kind", "classic", "--render-session-v1", str(SIDECAR_AEX), aex_sha, "v5|",
          str(WIDTH), str(HEIGHT), "1", "300", str(TIME_SCALE), trailer],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -733,7 +733,7 @@ def test_session_without_the_audio_trailer_leaves_the_plug_in_no_source(tmp_path
     caught the trailer being dropped on the session route.
     """
     if not WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if SIDECAR_AEX is None:
         pytest.skip("pf_visual_audio_sidecar_probe.aex is not built; run "
                     "tools/build-pf-visual-audio-probe.ps1")

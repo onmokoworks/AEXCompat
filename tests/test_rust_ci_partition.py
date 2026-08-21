@@ -74,7 +74,7 @@ def test_only_the_existing_issue_900_visual_audio_skip_is_allowlisted() -> None:
         "skipping audio-only session: build pf-visual-audio-probe first",
         "skipping audio-only cluster: build pf-visual-audio-probe first",
         "skipping image+audio: run tools/build-pf-visual-audio-probe.ps1 first",
-        "skipping classic session render: build aex_render_worker.exe first",
+        "skipping classic session render: build aex_worker.exe first",
     ]
     for regression in regressions:
         assert runner.unexpected_skip_lines(regression) == [regression]

@@ -35,7 +35,7 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
   if (!auxiliary.accepted) { result.error = 3; return result; }
   result.invocation.effective_argc = auxiliary.effective_argc;
   result.invocation.mode = aexcompat::l2cli::classify_worker_mode(
-      kind == Kind::Render ? aexcompat::l2cli::WorkerKind::Render :
+      kind == Kind::Classic ? aexcompat::l2cli::WorkerKind::Classic :
                              aexcompat::l2cli::WorkerKind::Smart,
       argc, argv, auxiliary.effective_argc);
   const auto& mode = result.invocation.mode;

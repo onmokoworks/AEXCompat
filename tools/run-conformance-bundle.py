@@ -71,11 +71,9 @@ DEPTH_COMMANDS = {
 }
 PIXEL_BYTES = {"argb8": 4, "argb16": 8, "argb32f": 16}
 RAW_SUFFIX = {"argb8": "rgba8", "argb16": "rgba16le", "argb32f": "rgba32f-le"}
-NATIVE_WORKERS = (
-    "target/minihost-build/aex_l2_worker.exe",
-    "target/minihost-build/aex_render_worker.exe",
-    "target/minihost-build/aex_smart_worker.exe",
-)
+# One binary serves discovery, classic and smart since #1495; the routes are
+# chosen with --kind rather than by picking an executable.
+NATIVE_WORKERS = ("target/minihost-build/aex_worker.exe",)
 RESERVED_BUNDLE_FILES = {"manifest.json", "report.json"}
 RESERVED_BUNDLE_DIRECTORIES = {"diagnostics", "outputs", "raw", "requests", "target"}
 SUCCESS_CLASSIFICATIONS = frozenset({"ok", "empty_result"})

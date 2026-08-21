@@ -110,7 +110,7 @@ fn main() {
             eprintln!("observation output must be JSON");
             std::process::exit(2);
         }
-        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         let result = aexcompat_broker::l2::run(repository, &worker, &args[2], &output);
         let passed = match result {
             Ok(passed) => passed,
@@ -128,14 +128,14 @@ fn main() {
         std::process::exit(2);
     }
     if args[1] == "l2-scattermap" {
-        let worker = repository.join("target/minihost-build/aex_l2_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         let passed =
             aexcompat_broker::l2::run(repository, &worker, "scattermap", &PathBuf::from(&args[2]))
                 .expect("L2 broker run");
         std::process::exit(if passed { 0 } else { 1 });
     }
     if args[1] == "render-scattermap" {
-        let worker = repository.join("target/minihost-build/aex_render_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         let passed = aexcompat_broker::render::run(
             repository,
             &worker,
@@ -147,7 +147,7 @@ fn main() {
         std::process::exit(if passed { 0 } else { 1 });
     }
     if args[1] == "smart-scattermap" {
-        let worker = repository.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         let passed = aexcompat_broker::smart::run(
             repository,
             &worker,
@@ -180,7 +180,7 @@ fn main() {
         _ => None,
     };
     if let Some(case_id) = smart_case {
-        let worker = repository.join("target/minihost-build/aex_smart_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         let passed = aexcompat_broker::smart::run(
             repository,
             &worker,
@@ -208,7 +208,7 @@ fn main() {
         _ => None,
     };
     if let Some(case_id) = extended_case {
-        let worker = repository.join("target/minihost-build/aex_render_worker.exe");
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
         let passed = aexcompat_broker::render::run(
             repository,
             &worker,

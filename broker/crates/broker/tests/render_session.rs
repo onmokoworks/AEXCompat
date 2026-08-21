@@ -105,7 +105,7 @@ mod windows_e2e {
             .unwrap();
     }
 
-    /// A temp repository whose `target/minihost-build/aex_render_worker.exe`
+    /// A temp repository whose `target/minihost-build/aex_worker.exe`
     /// is the protocol fixture; the "plugin" is inert bytes sealed and staged
     /// like a real AEX.
     fn temp_repository() -> (TempRepository, PathBuf, String) {
@@ -118,11 +118,11 @@ mod windows_e2e {
         write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
         // The smart session dispatches the smart worker binary; the fixture
         // serves both roles and keys its final-report contract off the
         // session command word.
-        std::fs::copy(&fixture, worker_dir.join("aex_smart_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
         let plugin = root.join("plugin.plugin");
         let plugin_bytes = b"render session dummy plugin";
         std::fs::write(&plugin, plugin_bytes).unwrap();
@@ -356,7 +356,7 @@ mod windows_e2e {
         write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
         let plugin = root.join("plugin.plugin");
         let plugin_bytes = b"audio session dummy plugin";
         std::fs::write(&plugin, plugin_bytes).unwrap();
@@ -3166,7 +3166,7 @@ mod windows_e2e {
         write_freshness_source_marker(&root);
         let worker_dir = root.join("target/minihost-build");
         std::fs::create_dir_all(&worker_dir).unwrap();
-        std::fs::copy(&fixture, worker_dir.join("aex_render_worker.exe")).unwrap();
+        std::fs::copy(&fixture, worker_dir.join("aex_worker.exe")).unwrap();
         let mut plugins = Vec::new();
         for (name, bytes) in [
             ("alpha.plugin", b"cluster plugin alpha" as &[u8]),

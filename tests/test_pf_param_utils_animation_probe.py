@@ -15,8 +15,8 @@ PROBE = ROOT / "target/pf-param-utils-animation-probe-build/Release/pf_param_uti
 def _worker():
     configured = os.environ.get("AEXCOMPAT_RENDER_WORKER")
     candidates = [Path(configured) if configured else None,
-                  ROOT / "target/minihost-build-v18/Release/aex_render_worker.exe",
-                  ROOT / "target/minihost-build-v18/aex_render_worker.exe"]
+                  ROOT / "target/minihost-build-v18/Release/aex_worker.exe",
+                  ROOT / "target/minihost-build-v18/aex_worker.exe"]
     return next((path for path in candidates if path and path.is_file()), None)
 
 

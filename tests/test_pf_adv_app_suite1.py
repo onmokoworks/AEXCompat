@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 SDK_HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
-WORKER = ROOT / "target" / "minihost-build-v18" / "Release" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build-v18" / "Release" / "aex_worker.exe"
 
 
 def _visual_studio_installation() -> Path:
@@ -125,7 +125,7 @@ def test_temp_cleanup_does_not_retry_other_permission_errors():
 
 
 def test_worker_v1_v2_tables_are_independent_non_null_fail_closed_and_balanced():
-    result = subprocess.run([str(WORKER), "--self-test-pf-adv-app-suite"], cwd=ROOT,
+    result = subprocess.run([str(WORKER), "--kind", "classic", "--self-test-pf-adv-app-suite"], cwd=ROOT,
                             check=True, capture_output=True, text=True, timeout=30)
     assert json.loads(result.stdout.strip()) == {
         "pf_adv_app_suite_versions": "passed",
@@ -153,7 +153,7 @@ def test_info_text_trace_stops_at_the_first_unterminated_argument():
     emitted.
     """
     environment = dict(os.environ, AEXCOMPAT_EXTENDED_DIAG="1")
-    result = subprocess.run([str(WORKER), "--self-test-pf-adv-app-suite"], cwd=ROOT,
+    result = subprocess.run([str(WORKER), "--kind", "classic", "--self-test-pf-adv-app-suite"], cwd=ROOT,
                             check=True, capture_output=True, text=True, timeout=30,
                             env=environment)
     assert json.loads(result.stdout.strip())["pf_adv_app_suite_versions"] == "passed"
@@ -184,7 +184,7 @@ def test_info_text_trace_stops_at_the_first_unterminated_argument():
 
 def test_pf_pixel_format_v1_v2_catalog_and_world_callbacks_are_behavioral():
     result = subprocess.run(
-        [str(WORKER), "--self-test-pf-pixel-format-suite"],
+        [str(WORKER), "--kind", "classic", "--self-test-pf-pixel-format-suite"],
         cwd=ROOT,
         check=True,
         capture_output=True,

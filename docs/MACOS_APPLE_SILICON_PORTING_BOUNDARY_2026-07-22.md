@@ -14,7 +14,8 @@ Windows x64 実装を壊さずに、どこまでを共通化し、どこから�
   分離している。`harness` と一部の policy は非Windowsで静的な検証を持つが、これは
   macOSでAEXをロードできることを意味しない。
 - `minihost` は CMake で Win32/MSVC と After Effects の Windows SDK/PE module を前提に
-  する。`aex_l2_worker.exe` などを macOS arm64 へクロスビルドすることは、単なる
+  する。単一の worker 実行ファイル `aex_worker.exe` (discovery/classic/smart を
+  `--kind` で切替) を macOS arm64 へクロスビルドすることは、単なる
   Rust target追加では代替できない。
 - 現行の AEX は Windows の PE DLL と After Effects Effect SDK ABI を前提にするため、
   macOSで同じバイナリをロードする設計は対象外。macOS版AE plugin形式とSDK ABIの

@@ -1,13 +1,13 @@
-import json
 import os
 import subprocess
 import tempfile
 from pathlib import Path
 
+from _native_selftest import worker_self_test
+
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
 
@@ -57,15 +57,5 @@ int main() { return 0; }
 
 def test_native_self_test_passes_all_three_workers() -> None:
     expected = {"pf_pre_checkout_result": "passed"}
-    for name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe"):
-        worker = BUILD / name
-        assert worker.exists(), f"build {name} before running the native test"
-        completed = subprocess.run(
-            [str(worker), "--self-test-pf-pre-checkout-result"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        assert completed.returncode == 0, completed.stderr
-        assert json.loads(completed.stdout) == expected
+    for report in worker_self_test("--self-test-pf-pre-checkout-result").values():
+        assert report == expected

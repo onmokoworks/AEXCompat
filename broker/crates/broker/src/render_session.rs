@@ -1516,7 +1516,7 @@ impl RenderSession {
                 worker_kind: if request.smart {
                     WorkerKind::Smart
                 } else {
-                    WorkerKind::Render
+                    WorkerKind::Classic
                 },
                 plugins: cluster.plugins,
                 dependency_search_dirs: request.dependency_search_dirs.clone(),
@@ -1554,7 +1554,7 @@ impl RenderSession {
                 worker_kind: if request.smart {
                     WorkerKind::Smart
                 } else {
-                    WorkerKind::Render
+                    WorkerKind::Classic
                 },
                 plugin,
                 dependencies,

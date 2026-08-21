@@ -4,7 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $harness = Join-Path $root 'broker\target\release\aexcompat-harness.exe'
-$worker = Join-Path $root 'target\minihost-build\aex_l2_worker.exe'
+$worker = Join-Path $root 'target\minihost-build\aex_worker.exe'
 $fixture = Join-Path $root 'target\sdk-fixtures\glator\GLator.aex'
 $runRoot = Join-Path $root 'target\glator-runtime-policy-inspect'
 $policyPath = Join-Path $runRoot 'opengl-policy.local.json'

@@ -111,7 +111,7 @@ worker 側パースは `trace_writer.cpp:16-28` の型)。worker はパス文字
 可能な限り踏襲する:
 
 ```
-aex_render_worker.exe --render-session-v1 <plugin> <plugin_sha256> <payload>
+aex_worker.exe --kind classic --render-session-v1 <plugin> <plugin_sha256> <payload>
     <max_width> <max_height> <time_step> <total_time> <time_scale>
     [session-layers:v2|<slot,w,h,handle | slot,w,h,time,scale,handle;...>]
     [v2|<mask context>] [spatial:v*|<...>] [render:v1|<...>]
@@ -251,7 +251,7 @@ one-shot との差分:
 - 深度はコマンド語で表現する (one-shot の `--render-image` /
   `--render-image16` / `--render-image32` に倣い、`--render-session-v1` /
   `--render-session16-v1` / `--render-session32-v1`)。
-- SmartFX セッション (v1.1) は smart worker (`aex_smart_worker.exe`) の
+- SmartFX セッション (v1.1) は smart route (`aex_worker.exe --kind smart`) の
   コマンド語で、位置引数の契約は同一: `--smart-session-v1` /
   `--smart-session16-v1` / `--smart-session32-v1`。ARGB32f は one-shot の
   `--smart-image32[-cpu|-opencl|-directx]` に倣い GPU backend をコマンド語で
@@ -745,7 +745,7 @@ one-shot audio (`--render-audio`、`worker_audio_execution.cpp` の
 足す:
 
 ```
-aex_render_worker.exe --render-audio-session-v1 <plugin> <plugin_sha256>
+aex_worker.exe --kind classic --render-audio-session-v1 <plugin> <plugin_sha256>
     <payload> <max_samples> <channels> <time_scale>
     [--parameter-animation-v1 <path>] [--minidump-v1 <dir>]
     [--dependency-dirs-v1 <dir;dir;...>]

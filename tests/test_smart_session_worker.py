@@ -1,6 +1,6 @@
 """Behavioral self-tests for the SmartFX resident session frame loop (v1.1).
 
-Drives ``aex_smart_worker.exe --smart-session-v1`` over the same transport as
+Drives ``aex_worker.exe --kind smart --smart-session-v1`` over the same transport as
 the classic session tests (docs/RENDER_SESSION_PROTOCOL_2026-07-19.md), using
 the reproducible ``pf_smart_geometry_probe.aex`` fixture. The probe selects a
 geometry scenario per render time (current_time % 4), which doubles as the
@@ -26,8 +26,7 @@ from test_render_session_worker import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "target" / "minihost-build" / "aex_smart_worker.exe"
-RENDER_WORKER = ROOT / "target" / "minihost-build" / "aex_render_worker.exe"
+WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 PROBE = (
     ROOT / "target" / "pf-smart-geometry-probe-build" / "Release"
     / "pf_smart_geometry_probe.aex"
@@ -45,16 +44,15 @@ TOTAL_TIME = 300
 
 def _require_artifacts():
     if not WORKER.is_file():
-        pytest.skip("aex_smart_worker.exe is not built; run the minihost build")
+        pytest.skip("aex_worker.exe is not built; run the minihost build")
     if not PROBE.is_file():
         pytest.skip("pf_smart_geometry_probe.aex is not built")
 
 
-def _spawn(transport, command="--smart-session-v1", worker=None):
-    binary = worker or WORKER
+def _spawn(transport, command="--smart-session-v1", kind="smart"):
     aex_sha = hashlib.sha256(PROBE.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(binary), command, str(PROBE), aex_sha, "v2|",
+        [str(WORKER), "--kind", kind, command, str(PROBE), aex_sha, "v2|",
          str(WIDTH), str(HEIGHT), "1", str(TOTAL_TIME), str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -244,14 +242,12 @@ def test_smart_session_grows_for_a_result_larger_than_the_session():
 
 def test_session_commands_are_bound_to_their_worker_kind():
     _require_artifacts()
-    if not RENDER_WORKER.is_file():
-        pytest.skip("aex_render_worker.exe is not built; run the minihost build")
-    # The render worker must not accept the smart session command and the
-    # smart worker must not accept the classic one; both exit with the
+    # The classic kind must not accept the smart session command and the
+    # smart kind must not accept the classic one; both exit with the
     # command-rejection code before any session transport is touched.
-    for binary, command in ((RENDER_WORKER, "--smart-session-v1"),
-                            (WORKER, "--render-session-v1")):
+    for kind, command in (("classic", "--smart-session-v1"),
+                          ("smart", "--render-session-v1")):
         transport = SessionTransport()
-        process = _spawn(transport, command=command, worker=binary)
+        process = _spawn(transport, command=command, kind=kind)
         code, _, _ = _finish(process)
-        assert code == 2, (binary.name, command, code)
+        assert code == 2, (kind, command, code)

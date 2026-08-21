@@ -328,11 +328,11 @@ mod tests {
         let repository = Path::new("C:/aexcompat");
         assert_eq!(
             required_render_worker_path(repository, false),
-            repository.join("target/minihost-build/aex_render_worker.exe")
+            repository.join("target/minihost-build/aex_worker.exe")
         );
         assert_eq!(
             required_render_worker_path(repository, true),
-            repository.join("target/minihost-build/aex_smart_worker.exe")
+            repository.join("target/minihost-build/aex_worker.exe")
         );
 
         let (sender, receiver) = mpsc::channel();

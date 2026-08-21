@@ -111,14 +111,9 @@ int main() { return 0; }
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
 
 def test_native_projector_levels_self_test_passes_all_present_workers() -> None:
-    workers = [
-        BUILD / name
-        for name in ("aex_l2_worker.exe", "aex_render_worker.exe", "aex_smart_worker.exe")
-    ]
-    if not any(worker.is_file() for worker in workers):
-        pytest.skip("Release minihost workers are not present; run the native build first")
-    missing = [worker.name for worker in workers if not worker.is_file()]
-    assert not missing, f"native build is incomplete; missing: {', '.join(missing)}"
+    worker = BUILD / "aex_worker.exe"
+    if not worker.is_file():
+        pytest.skip("the minihost worker is not present; run the native build first")
 
     expected = {
         "projector_levels": "passed",
@@ -131,9 +126,9 @@ def test_native_projector_levels_self_test_passes_all_present_workers() -> None:
         "reverse_dispose": True,
         "fail_closed": True,
     }
-    for worker in workers:
+    for kind in ("discovery", "classic", "smart"):
         completed = subprocess.run(
-            [str(worker), "--self-test-aegp-projector-levels"],
+            [str(worker), "--kind", kind, "--self-test-aegp-projector-levels"],
             cwd=ROOT,
             capture_output=True,
             text=True,

@@ -61,8 +61,8 @@ and bounded image input/output are now the main implementation path.
   compiled-in fixture identities went with #733; and the per-frame output hash
   became an extent cross-check in #690; the `l1` route (load-only probe, the
   last plug-in-loading normal-token route) was deleted outright in #732 —
-  nothing executed it and L2 plus multifilter discovery cover the property it
-  observed. What remains: the `l2`/`render*`/`smart*`/`render_request` CLI
+  nothing executed it and the discovery route plus multifilter discovery cover
+  the property it observed. What remains: the `l2`/`render*`/`smart*`/`render_request` CLI
   routes read a selection file that names the plug-in and its dependencies
   (`selftest` launches only the broker's own probe workers and is out of
   scope). Sealed staging still copies and hashes
@@ -251,28 +251,30 @@ After Effects SDK, approved AEX fixtures, a matching GPU driver, or AE itself.
 Run the named build/gate script rather than relying on untracked `target/`
 artifacts from a previous checkout.
 
-The worker C++ build (`docs/BUILD_REQUIREMENTS.md`, "C++ worker (minihost)") needs an
-MSVC developer environment (vcvars64). From a plain PowerShell,
-`cmake --build target\minihost-build` fails with
-`fatal error C1083: Cannot open include file: 'cstddef'`; that is the missing
-environment, not a source problem.
+Build the C++ side with `pwsh -File tools\build-native.ps1`. It resolves the
+MSVC developer environment itself, so it works from a plain PowerShell; calling
+`cmake --build` directly without vcvars64 fails with `fatal error C1083: Cannot
+open include file: 'cstddef'`, which is the missing environment rather than a
+source problem. `-Source instruments -Target <name>` builds the other native
+tree; `-Target <name>` alone narrows the minihost build to one self-test.
 
-There is more than one worker exe and they must all be rebuilt after any change
-to shared worker code. `aex_worker_runtime_core` (which holds `l2_main*.inc`,
-`worker_*.cpp`, the dispatch/suite/lifecycle logic) is linked into THREE
-separate exes under `target/minihost-build/`: `aex_smart_worker.exe` (SmartFX
-render path), `aex_render_worker.exe` (Classic render path), and
-`aex_l2_worker.exe` (discovery). A render sweep routes each plug-in to the exe
-its route needs — SmartFX effects to smart, Classic effects (e.g. every
-CycoreFXHD effect) to render, parameter discovery to l2. So
-`cmake --build target\minihost-build --target aex_smart_worker` alone recompiles
-the shared object but only RELINKS smart; the other two exes stay stale and a
-sweep silently measures old code for Classic/discovery routes (the recurring
-trap: a fix looks like it does nothing, or a Classic effect "won't recover",
-because only the smart exe was relinked). Always rebuild all three
-(`--target aex_smart_worker aex_render_worker aex_l2_worker`, or build the
-default target) and confirm all three exe mtimes are newer than the edit before
-trusting a sweep.
+There is one worker executable, `target/minihost-build/aex_worker.exe`, and it
+picks its route at run time from a leading `--kind discovery|classic|smart`
+pair, which it consumes before its positional argument contract begins. A
+render sweep routes each plug-in to the route it needs: SmartFX effects to
+`smart`, Classic effects (e.g. every CycoreFXHD effect) to `classic`, parameter
+discovery to `discovery`. Missing or unknown `--kind` exits 90 without loading
+anything.
+
+It was three executables until issue #1495 — `aex_smart_worker.exe`,
+`aex_render_worker.exe`, `aex_l2_worker.exe` — built from three five-line entry
+files that differed by one enum value and linked the same
+`aex_worker_runtime_core`. Building one of those targets recompiled the shared
+object but relinked only that target, so the other two silently stayed on the
+previous build and a sweep measured old code on the routes it had not named.
+That is why this section used to carry a paragraph telling you to always
+rebuild all three; there is now one link step and no way to express a
+half-built set.
 
 `rust-toolchain.toml` pins the toolchain, so `cargo fmt --check` means the same
 thing on every machine (issue #656). Raising the pin is a deliberate change:
@@ -284,9 +286,9 @@ formatting-only commits listed there.
 ## Project Direction
 
 1. Discover and diagnose arbitrary Effect AEX binaries without fixture names.
-   The harness no longer recognizes fixtures by a compiled-in hash, and L2
-   checks the host's own contract rather than a fixture's flags (issue #733);
-   keep it that way.
+   The harness no longer recognizes fixtures by a compiled-in hash, and the
+   discovery route checks the host's own contract rather than a fixture's flags
+   (issue #733); keep it that way.
 2. Implement observed missing suites, slots, selectors, and scene semantics as
    general host capabilities.
 3. Verify image input/output across Classic, SmartFX, depths, and multiple inputs.

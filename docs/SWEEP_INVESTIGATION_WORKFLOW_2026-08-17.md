@@ -26,7 +26,7 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
 
 - 引数に渡したフォルダ (無ければ「configured scan」と明記) と件数
 - `--depth` (省略時 8) と、`--size` / `--time` / `--frames` など既定から変えたもの
-- report JSON の build fingerprint (sweep 実行ファイルと worker 3 exe の hash) か、
+- report JSON の build fingerprint (sweep 実行ファイルと worker exe の hash) か、
   最低でも計測した build の commit
 - baseline との比較なら baseline 側も同じ項目
 
@@ -35,13 +35,15 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
 
 ## 2. sweep と trace の取り方
 
-- `AEXCOMPAT_MULTIFILTER_REPOSITORY=<repo>` は worker 3 exe
-  (`aex_l2_worker.exe` / `aex_render_worker.exe` / `aex_smart_worker.exe`) を
+- `AEXCOMPAT_MULTIFILTER_REPOSITORY=<repo>` は worker 実行ファイル
+  (`aex_worker.exe`、discovery/classic/smart を `--kind` で切替) を
   `<repo>\target\minihost-build\` から解決するための変数。sweep はこの値を
   そのまま使い (AviUtl2 DLL 側にあるプラグイン隣接への降格は sweep には無い)、
-  3 exe の hash を報告の build fingerprint に入れる。指した先に exe が無ければ
-  fingerprint に `open_failed` が記録され worker 起動が失敗する。sweep 前に
-  指した先の 3 exe を確認する。
+  その hash を報告の build fingerprint に入れる。fingerprint は
+  `l2_worker` / `classic_worker` / `smart_worker` の 3 フィールドを持つが
+  (issue #1495 前の 3 exe 構成の名残)、いずれも同じ `aex_worker.exe` を指すため
+  常に同一の値になる。指した先に exe が無ければ fingerprint に `open_failed`
+  が記録され worker 起動が失敗する。sweep 前に指した先の exe を確認する。
 - 実行例:
   ```powershell
   $env:AEXCOMPAT_MULTIFILTER_REPOSITORY = "<worktree>"
@@ -147,11 +149,11 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
   `detail.discovery_diagnostics` (#1063 以降) には worker の partial report の
   selector 別 error code (`global_setup_error` / `params_setup_error` /
   `global_setdown_error`、`missing_suites`) が乗るのでまずそれを見る。1 本の
-  生 stderr が要るときは one-shot の l2 worker を直接叩く:
+  生 stderr が要るときは one-shot の discovery route を直接叩く:
   ```powershell
   $env:AEXCOMPAT_EXTENDED_DIAG = "1"
   $sha = (Get-FileHash $aex -Algorithm SHA256).Hash.ToLower()
-  & target\minihost-build\aex_l2_worker.exe --l2-params-only $aex $sha `
+  & target\minihost-build\aex_worker.exe --kind discovery --l2-params-only $aex $sha `
       --dependency-dirs-v1 "<AE>\Support Files\Plug-ins\Effects;<AE>\Support Files"
   ```
   exit 20 = selector が非 0 (report の status=selector_error)、exit 11 = LoadLibrary
@@ -188,7 +190,7 @@ Get-CimInstance Win32_Process -Filter "Name='render_sweep.exe'" |
   ビルドが依存クレートの build script で `LNK1104: cannot open file
   '...\build_script_build-*.exe'` を出して全滅する (4 セッション全部が踏んだ)。
   回避は worktree 自体を短いパスに置くか、`CARGO_TARGET_DIR` を短いパスに逃がす。
-- C++ (minihost) の build dir も短いパスに置いてよい。生成した 3 exe を
+- C++ (minihost) の build dir も短いパスに置いてよい。生成した exe を
   `<worktree>\target\minihost-build\` にコピーすれば sweep はそこから解決する
   (§2)。コピーし忘れると別 build の exe で測る。
 - vcvars64 が要る点は `CLAUDE.md` Canonical Verification と
@@ -196,17 +198,19 @@ Get-CimInstance Win32_Process -Filter "Name='render_sweep.exe'" |
 
 ## 4. worker 再ビルドの確認手順
 
-CLAUDE.md の「3 exe 全部を再ビルドする」に加えて、ビルドは 1 回でも失敗しうる
-(commit charge 枯渇で rustc / cl が落ちるなど)。失敗したまま sweep を回すと古い
-exe で測り、「修正が効いていない」ように見える (08-17 に実例あり)。
+issue #1495 で worker は `aex_worker.exe` 1 本 (discovery/classic/smart を
+`--kind` で切替) に統合され、以前あった「3 exe 個別にリンクされ、1 target だけ
+ビルドすると他 2 つがステールのまま残る」罠は無くなった (link は 1 回だけ)。
+ただしビルドは 1 回でも失敗しうる (commit charge 枯渇で rustc / cl が落ちるなど)。
+失敗したまま sweep を回すと古い exe で測り、「修正が効いていない」ように見える
+(08-17 に実例あり)。
 
-1. `cmake --build target\minihost-build --target aex_smart_worker aex_render_worker aex_l2_worker`
-   の exit code を見る (`$LASTEXITCODE`)。
-2. 3 exe の mtime が編集より新しいことを見る:
+1. `pwsh -File tools\build-native.ps1` の exit code を見る (`$LASTEXITCODE`)。
+2. exe の mtime が編集より新しいことを見る:
    ```powershell
-   Get-ChildItem target\minihost-build\aex_*_worker.exe | Select-Object Name, LastWriteTime
+   Get-ChildItem target\minihost-build\aex_worker.exe | Select-Object Name, LastWriteTime
    ```
-3. §3 のコピー運用なら、コピー先の 3 exe で同じ確認をする。
+3. §3 のコピー運用なら、コピー先の exe で同じ確認をする。
 4. それから `--filter` 再計測 → full-corpus。
 
 ## 5. CI runner
@@ -236,7 +240,7 @@ exe で測り、「修正が効いていない」ように見える (08-17 に�
 | `test_pf_smart_geometry_probe[4]` | 2 | `pf_smart_geometry_probe.aex` をその worktree で build していない |
 | `test_rust_host_core_phase5` 〜 `phase8` | 4 | `CARGO_TARGET_DIR` を分離しているため `broker\target\release` に FFI dll (`aexcompat_host_core_ffi.dll`) が無い |
 | worker stderr を読む test (`test_active_plugin_context` / `test_worker_effect_bootstrap_timing` など) | 環境次第 | cp932 locale で worker stderr の decode が `UnicodeDecodeError` になる |
-| `build aex_l2_worker.exe before running the native test` で落ちる native test 群 | 2026-08-17 の文書のみ worktree で 5 | その worktree の `target\minihost-build\` に worker 3 exe が無い |
+| `build aex_l2_worker.exe before running the native test` などで落ちる native test 群 (テストが pre-#1495 の `aex_l2_worker.exe` / `aex_render_worker.exe` / `aex_smart_worker.exe` という個別ファイル名をまだ探している) | 2026-08-17 の文書のみ worktree で 5 | issue #1495 で worker は単一の `aex_worker.exe` に統合され、現行の CMake ビルドはこの 3 ファイル名を生成しない。ビルドし直しても解消せず、テスト側の追随が必要 |
 | `missing self-test binary` で落ちる selftest 系 test | 同 worktree で 3 | selftest exe (`worker_*_selftest.exe`) を build していない。worker だけ build した worktree ではこちらだけ残る |
 | `missing VS2022 worker` (`test_pf_parameter_animation_transport`) | 同 worktree で 1 | 別 build dir `target\minihost-build-v18\` の worker を build していない |
 
