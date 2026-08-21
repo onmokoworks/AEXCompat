@@ -32,6 +32,13 @@ Build only these CMake targets instead of everything. Intended for iterating on
 one self-test; the worker itself is a single target, so there is no way to ask
 for a partial worker.
 
+.PARAMETER CompileCache
+Name of a compiler cache (sccache, ccache) to run every compile through. It is
+a configure-time choice, so passing it against a build directory configured
+without it re-runs configure rather than building uncached. CI uses it because
+every run starts from a clean machine and would otherwise recompile all 244
+translation units (issue #1501).
+
 .PARAMETER Configure
 Re-run the CMake configure step even when the build directory already has a
 cache.
@@ -47,6 +54,7 @@ param(
     [string]$Source = 'minihost',
     [string]$BuildDir,
     [string[]]$Target,
+    [string]$CompileCache,
     [switch]$Configure
 )
 
@@ -82,12 +90,34 @@ if (-not (Test-Path -LiteralPath $vcvars -PathType Leaf)) {
 # cmd carries the environment vcvars64 sets; running the whole build inside one
 # invocation keeps it, rather than trying to import the variables back into this
 # session and hoping the set is complete.
-$configureNeeded = $Configure -or
-    -not (Test-Path -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt') -PathType Leaf)
+$cmakeCache = Join-Path $BuildDir 'CMakeCache.txt'
+$configureNeeded = $Configure -or -not (Test-Path -LiteralPath $cmakeCache -PathType Leaf)
+
+# The launcher is baked into the ninja rules at configure time, so an existing
+# build directory that was configured without the cache would quietly build
+# uncached and look like a cache that does not work. Re-configure instead of
+# reporting a hit rate for compiles that never reached the cache.
+if (-not $configureNeeded -and $PSBoundParameters.ContainsKey('CompileCache')) {
+    # A cache configured before this option existed has no such entry at all,
+    # which is a mismatch like any other rather than an error to trip over.
+    $match = Select-String -LiteralPath $cmakeCache `
+        -Pattern '^AEXCOMPAT_COMPILE_CACHE:[^=]*=(.*)$' | Select-Object -First 1
+    $recorded = if ($match) { $match.Matches[0].Groups[1].Value } else { '' }
+    if ($recorded -ne $CompileCache) {
+        Write-Host "reconfiguring: compile cache was '$recorded', now '$CompileCache'"
+        $configureNeeded = $true
+    }
+}
 
 $steps = @()
 if ($configureNeeded) {
-    $steps += "cmake -S `"$sourceDir`" -B `"$BuildDir`" -G Ninja -DCMAKE_BUILD_TYPE=Release"
+    # Not $configure: PowerShell variables are case-insensitive, so that name is
+    # the -Configure switch parameter and assigning a string to it throws.
+    $configureStep = "cmake -S `"$sourceDir`" -B `"$BuildDir`" -G Ninja -DCMAKE_BUILD_TYPE=Release"
+    if ($PSBoundParameters.ContainsKey('CompileCache')) {
+        $configureStep += " -DAEXCOMPAT_COMPILE_CACHE=`"$CompileCache`""
+    }
+    $steps += $configureStep
 }
 if ($Target) {
     $steps += "cmake --build `"$BuildDir`" --target $($Target -join ' ')"

@@ -33,6 +33,13 @@ inputs:
       job 分割ではその費用を job 数だけ払うことになるため。
     required: false
     default: 'false'
+  compile-cache:
+    description: >
+      cmake の C++ ビルドを sccache に通す job だけ 'true'。rust: 'false' の
+      native job でも sccache 本体が要るので、rust とは別の入口にしてある
+      (#1501)。有効にする job は SCCACHE_GHA_ENABLED も自分で立てること。
+    required: false
+    default: 'false'
   resolve-libclang:
     description: guest workspace を触る job だけ 'true'。
     required: false
@@ -58,7 +65,7 @@ runs:
         components: rustfmt
 
     - uses: mozilla/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      if: inputs.rust == 'true'
+      if: inputs.rust == 'true' || inputs.compile-cache == 'true'
       with:
         version: v0.17.0
 

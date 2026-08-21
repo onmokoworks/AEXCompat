@@ -229,14 +229,26 @@ jobs:
     timeout-minutes: 60
     env:
       PYTHONUTF8: "1"
+      # minihost の 244 翻訳単位を実行間で使い回す (#1501)。runner は毎回
+      # まっさらなので、minihost/src に一切触れていない PR でも全部を一から
+      # コンパイルしていた (163 秒)。この job は rust-test と python-tests
+      # 両方の needs に入っているため、その 163 秒がそのまま wall clock の門。
+      SCCACHE_GHA_ENABLED: "true"
+      # sccache は常駐サーバが cl を起動する。サーバが継承するのは per-compile の
+      # `cmake -E env VSLANG=...` ではなく job の環境なので、同じ値をここにも
+      # 置いて両者を一致させる。ずれると configure 時に捕まえた
+      # msvc_deps_prefix と build 時の /showIncludes が食い違い、ninja が
+      # ヘッダ依存を 0 件記録する (#651/#657/#942)。判定は下の Verify が行う。
+      VSLANG: "1033"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      # この job は cmake しか呼ばない。
+      # この job は cmake しか呼ばない。sccache だけは C++ 用に要る。
       - uses: ./.github/actions/ci-setup
         with:
           rust: 'false'
+          compile-cache: 'true'
 
       # 入口は tools\build-native.ps1 に一本化してある (#1495)。vswhere から
       # vcvars64 を解決するのはあのスクリプトの仕事で、ここに 3 回複製されて
@@ -244,7 +256,7 @@ jobs:
       # フラット配置する (single-config)。
       - name: Build minihost workers
         shell: pwsh
-        run: pwsh -File tools\build-native.ps1
+        run: pwsh -File tools\build-native.ps1 -CompileCache sccache
 
       # ヘッダ依存が実際に記録されているかを確認する (#657)。cl の /showIncludes
       # はローカライズされるため、configure 時と build 時で言語が食い違うと
@@ -256,9 +268,16 @@ jobs:
       # trace writer の動的テスト (test_production_worker_trace.py /
       # test_instruments_trace_writer.py の handle ベース検証) を実走させる (#250)。
       # この target は trace_writer.cpp + windows.h のみで SDK 不要。
+      # instruments は Ninja だが CMakeLists に locale pin が無く、ここは
+      # 5 秒でクリティカルパスにも乗っていないので素のまま通す。
       - name: Build trace writer selftest
         shell: pwsh
         run: pwsh -File tools\build-native.ps1 -Source instruments -Target trace_writer_selftest
+
+      - name: Show sccache stats
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
 
 
       # `aex_*.exe` に絞らない。minihost-build 直下には worker のほかに
