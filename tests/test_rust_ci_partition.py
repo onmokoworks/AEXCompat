@@ -80,15 +80,15 @@ def test_only_the_existing_issue_900_visual_audio_skip_is_allowlisted() -> None:
         assert runner.unexpected_skip_lines(regression) == [regression]
 
 
-def test_each_cargo_test_surface_is_planned_once_across_both_partitions() -> None:
+def test_each_nextest_surface_is_planned_once_across_both_partitions() -> None:
     runner = load_runner()
     independent, native = runner.partitions(metadata(runner))
     calls = []
 
-    def record(*arguments, **options):
-        calls.append((arguments, options))
+    def record(filterset, **options):
+        calls.append((filterset, options))
 
-    runner.cargo_test = record
+    runner.nextest_run = record
     runner.run_independent(independent)
     independent_calls = list(calls)
     calls.clear()
@@ -96,64 +96,79 @@ def test_each_cargo_test_surface_is_planned_once_across_both_partitions() -> Non
     runner.run_native(native)
     native_calls = list(calls)
 
-    assert independent_calls[:4] == [
-        (
-            ("--workspace", "--exclude", runner.BROKER, "--exclude", runner.HARNESS),
-            {},
-        ),
-        (
-            (
-                "-p",
-                runner.BROKER,
-                "--lib",
-                "--",
-                "--skip",
-                runner.NATIVE_LIB_TEST,
-            ),
-            {},
-        ),
-        (("-p", runner.BROKER, "--doc"), {}),
-        (("-p", runner.BROKER, "--bins"), {}),
-    ]
-    assert independent_calls[4] == (
-        ("-p", runner.BROKER)
-        + tuple(
-            argument
-            for target in sorted(runner.INDEPENDENT_BROKER_TARGETS)
-            for argument in ("--test", target)
-        ),
-        {},
+    assert independent_calls == [(runner.independent_filter(independent), {})]
+    assert native_calls == [(runner.native_filter(native), {"reject_skip": True})]
+
+    independent_plan = independent_calls[0][0]
+    native_plan = native_calls[0][0]
+    for target in (
+        runner.INDEPENDENT_BROKER_TARGETS | runner.INDEPENDENT_HARNESS_TARGETS
+    ):
+        assert f"binary(={target})" in independent_plan
+        assert f"binary(={target})" not in native_plan
+    for target in runner.NATIVE_BROKER_TARGETS | runner.NATIVE_HARNESS_TARGETS:
+        assert f"binary(={target})" in native_plan
+        assert f"binary(={target})" not in independent_plan
+    assert f"test(={runner.NATIVE_LIB_TEST})" in independent_plan
+    assert f"test(={runner.NATIVE_LIB_TEST})" in native_plan
+
+
+def test_nextest_command_uses_only_the_prebuilt_archive(tmp_path, monkeypatch) -> None:
+    runner = load_runner()
+    archive = tmp_path / "tests.tar.zst"
+    archive.write_bytes(b"archive")
+    runner.NEXTEST_ARCHIVE = archive
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(
+        runner.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or Result(),
     )
-    assert independent_calls[5] == (
-        ("-p", runner.HARNESS, "--bin", runner.HARNESS)
-        + tuple(
-            argument
-            for target in sorted(runner.INDEPENDENT_HARNESS_TARGETS)
-            for argument in ("--test", target)
-        ),
-        {},
+    runner.nextest_run("package(=example)", reject_skip=True)
+
+    command = calls[0][0][0]
+    assert command[:3] == ["cargo", "nextest", "run"]
+    assert "--archive-file" in command
+    assert "--workspace-remap" in command
+    assert "--success-output" in command
+    assert "immediate" in command
+    assert "test" not in command[:3]
+
+
+def test_archive_partition_validation_rejects_overlap_and_missing_tests() -> None:
+    runner = load_runner()
+    independent, native = runner.partitions(metadata(runner))
+    all_tests = {("suite", "independent"), ("suite", "native")}
+    selections = iter(
+        (
+            all_tests,
+            {("suite", "independent")},
+            {("suite", "native")},
+        )
     )
-    assert native_calls == [
+    runner.listed_tests = lambda _: next(selections)
+    runner.validate_archive_partitions(independent, native)
+
+    invalid_selections = (
+        # Overlap without a missing test.
+        (all_tests, all_tests, {("suite", "native")}),
+        # Missing without overlap.
+        (all_tests, {("suite", "independent")}, set()),
+        # A selected test not present in the archive inventory.
         (
-            ("-p", runner.BROKER, "--lib", runner.NATIVE_LIB_TEST),
-            {"reject_skip": True},
+            all_tests,
+            {("suite", "independent"), ("suite", "unexpected")},
+            {("suite", "native")},
         ),
-        (
-            ("-p", runner.BROKER)
-            + tuple(
-                argument
-                for target in sorted(runner.NATIVE_BROKER_TARGETS)
-                for argument in ("--test", target)
-            ),
-            {"reject_skip": True},
-        ),
-        (
-            ("-p", runner.HARNESS)
-            + tuple(
-                argument
-                for target in sorted(runner.NATIVE_HARNESS_TARGETS)
-                for argument in ("--test", target)
-            ),
-            {"reject_skip": True},
-        ),
-    ]
+    )
+    for invalid in invalid_selections:
+        selections = iter(invalid)
+        runner.listed_tests = lambda _: next(selections)
+        with pytest.raises(SystemExit, match="not complete and disjoint"):
+            runner.validate_archive_partitions(independent, native)

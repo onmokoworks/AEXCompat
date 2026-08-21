@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "broker" / "Cargo.toml"
+NEXTEST_ARCHIVE = Path(
+    os.environ.get(
+        "AEXCOMPAT_NEXTEST_ARCHIVE",
+        ROOT / "broker" / "target" / "nextest-archive.tar.zst",
+    )
+)
 BROKER = "aexcompat-broker"
 HARNESS = "aexcompat-harness"
 NATIVE_BROKER_TARGETS = {
@@ -111,29 +118,40 @@ def partitions(
     return independent, native
 
 
-def cargo_test(*arguments: str, reject_skip: bool = False) -> None:
+def nextest_run(filterset: str, *, reject_skip: bool = False) -> None:
+    if not NEXTEST_ARCHIVE.is_file():
+        raise SystemExit(f"nextest archive is missing: {NEXTEST_ARCHIVE}")
     command = [
         "cargo",
-        "test",
-        "--manifest-path",
-        str(MANIFEST),
-        "--locked",
-        *arguments,
+        "nextest",
+        "run",
+        "--archive-file",
+        str(NEXTEST_ARCHIVE),
+        "--workspace-remap",
+        str(MANIFEST.parent),
     ]
     if reject_skip:
-        command.extend(["--", "--nocapture"])
+        command.extend(["--success-output", "immediate"])
+    command.extend(
+        [
+            "--failure-output",
+            "immediate",
+            "-E",
+            filterset,
+        ]
+    )
     print("+", subprocess.list2cmdline(command), flush=True)
     result = subprocess.run(
         command,
         cwd=ROOT,
-        capture_output=reject_skip,
-        text=reject_skip,
-        encoding="utf-8" if reject_skip else None,
-        errors="replace" if reject_skip else None,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
     if reject_skip:
-        sys.stdout.write(result.stdout)
-        sys.stderr.write(result.stderr)
         unexpected = unexpected_skip_lines(result.stdout + result.stderr)
         if unexpected:
             raise SystemExit(
@@ -143,6 +161,40 @@ def cargo_test(*arguments: str, reject_skip: bool = False) -> None:
         raise SystemExit(result.returncode)
 
 
+def listed_tests(filterset: str) -> set[tuple[str, str]]:
+    if not NEXTEST_ARCHIVE.is_file():
+        raise SystemExit(f"nextest archive is missing: {NEXTEST_ARCHIVE}")
+    command = [
+        "cargo",
+        "nextest",
+        "list",
+        "--archive-file",
+        str(NEXTEST_ARCHIVE),
+        "--workspace-remap",
+        str(MANIFEST.parent),
+        "--message-format",
+        "json",
+        "-E",
+        filterset,
+    ]
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    payload = json.loads(result.stdout)
+    return {
+        (suite["binary-id"], name)
+        for suite in payload["rust-suites"].values()
+        for name, testcase in suite["testcases"].items()
+        if testcase["filter-match"]["status"] == "matches"
+    }
+
+
 def unexpected_skip_lines(output: str) -> list[str]:
     skip_lines = [line for line in output.lower().splitlines() if "skipping" in line]
     return [
@@ -150,23 +202,64 @@ def unexpected_skip_lines(output: str) -> list[str]:
     ]
 
 
+def exact_union(predicate: str, values: set[str]) -> str:
+    if not values:
+        return "none()"
+    return " + ".join(f"{predicate}(={value})" for value in sorted(values))
+
+
+def independent_filter(independent: dict[str, set[str]]) -> str:
+    broker = f"package(={BROKER})"
+    harness = f"package(={HARNESS})"
+    return " + ".join(
+        (
+            f"(not {broker} & not {harness})",
+            f"({broker} & kind(=lib) - test(={NATIVE_LIB_TEST}))",
+            f"({broker} & kind(=bin))",
+            f"({broker} & kind(=test) & ({exact_union('binary', independent[BROKER])}))",
+            f"({harness} & kind(=bin))",
+            f"({harness} & kind(=test) & ({exact_union('binary', independent[HARNESS])}))",
+        )
+    )
+
+
+def native_filter(native: dict[str, set[str]]) -> str:
+    broker = f"package(={BROKER})"
+    harness = f"package(={HARNESS})"
+    return " + ".join(
+        (
+            f"({broker} & kind(=lib) & test(={NATIVE_LIB_TEST}))",
+            f"({broker} & kind(=test) & ({exact_union('binary', native[BROKER])}))",
+            f"({harness} & kind(=test) & ({exact_union('binary', native[HARNESS])}))",
+        )
+    )
+
+
+def validate_archive_partitions(
+    independent: dict[str, set[str]], native: dict[str, set[str]]
+) -> None:
+    all_tests = listed_tests("all()")
+    independent_tests = listed_tests(independent_filter(independent))
+    native_tests = listed_tests(native_filter(native))
+    overlap = independent_tests & native_tests
+    missing = all_tests - (independent_tests | native_tests)
+    unexpected = (independent_tests | native_tests) - all_tests
+    if not all_tests or overlap or missing or unexpected:
+        raise SystemExit(
+            "nextest archive partitions are not complete and disjoint: "
+            f"all={len(all_tests)} independent={len(independent_tests)} "
+            f"native={len(native_tests)} overlap={len(overlap)} "
+            f"missing={len(missing)} unexpected={len(unexpected)}"
+        )
+    print(
+        "nextest partition validation: "
+        f"all={len(all_tests)} independent={len(independent_tests)} "
+        f"native={len(native_tests)}"
+    )
+
+
 def run_independent(independent: dict[str, set[str]]) -> None:
-    cargo_test("--workspace", "--exclude", BROKER, "--exclude", HARNESS)
-    cargo_test("-p", BROKER, "--lib", "--", "--skip", NATIVE_LIB_TEST)
-    cargo_test("-p", BROKER, "--doc")
-    cargo_test("-p", BROKER, "--bins")
-    broker_targets = [
-        argument
-        for target in sorted(independent[BROKER])
-        for argument in ("--test", target)
-    ]
-    cargo_test("-p", BROKER, *broker_targets)
-    harness_targets = [
-        argument
-        for target in sorted(independent[HARNESS])
-        for argument in ("--test", target)
-    ]
-    cargo_test("-p", HARNESS, "--bin", HARNESS, *harness_targets)
+    nextest_run(independent_filter(independent))
 
 
 def run_native(native: dict[str, set[str]]) -> None:
@@ -177,25 +270,17 @@ def run_native(native: dict[str, set[str]]) -> None:
     ]
     if missing:
         raise SystemExit(f"native Rust test prerequisites are missing: {missing}")
-    cargo_test("-p", BROKER, "--lib", NATIVE_LIB_TEST, reject_skip=True)
-    broker_targets = [
-        argument for target in sorted(native[BROKER]) for argument in ("--test", target)
-    ]
-    cargo_test("-p", BROKER, *broker_targets, reject_skip=True)
-    harness_targets = [
-        argument
-        for target in sorted(native[HARNESS])
-        for argument in ("--test", target)
-    ]
-    cargo_test("-p", HARNESS, *harness_targets, reject_skip=True)
+    nextest_run(native_filter(native), reject_skip=True)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("partition", choices=("independent", "native"))
+    parser.add_argument("partition", choices=("validate", "independent", "native"))
     args = parser.parse_args()
     independent, native = partitions(cargo_metadata())
-    if args.partition == "independent":
+    if args.partition == "validate":
+        validate_archive_partitions(independent, native)
+    elif args.partition == "independent":
         run_independent(independent)
     else:
         run_native(native)
