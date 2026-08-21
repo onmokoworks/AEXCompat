@@ -140,6 +140,9 @@ enum LegacyWin64Import {
     EnterCriticalSection,
     LeaveCriticalSection,
     DeleteCriticalSection,
+    AcquireSrwLockExclusive,
+    TryAcquireSrwLockExclusive,
+    ReleaseSrwLockExclusive,
     GetModuleHandleW,
     GetModuleHandleExA,
     GetModuleHandleExW,
@@ -479,6 +482,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "EnterCriticalSection") => LegacyWin64Import::EnterCriticalSection,
         ("kernel32.dll", "LeaveCriticalSection") => LegacyWin64Import::LeaveCriticalSection,
         ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
+        ("kernel32.dll", "AcquireSRWLockExclusive") => LegacyWin64Import::AcquireSrwLockExclusive,
+        ("kernel32.dll", "TryAcquireSRWLockExclusive") => {
+            LegacyWin64Import::TryAcquireSrwLockExclusive
+        }
+        ("kernel32.dll", "ReleaseSRWLockExclusive") => LegacyWin64Import::ReleaseSrwLockExclusive,
         ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
         ("kernel32.dll", "GetModuleHandleExA") => LegacyWin64Import::GetModuleHandleExA,
         ("kernel32.dll", "GetModuleHandleExW") => LegacyWin64Import::GetModuleHandleExW,
@@ -490,6 +498,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             | "InitializeCriticalSectionAndSpinCount"
             | "InitializeCriticalSectionEx"
             | "EnterCriticalSection"
+            | "AcquireSRWLockExclusive"
+            | "TryAcquireSRWLockExclusive"
+            | "ReleaseSRWLockExclusive"
             | "LeaveCriticalSection"
             | "DeleteCriticalSection",
         ) => {
@@ -1676,6 +1687,17 @@ fn install_win64_import(
                     "install critical-section import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                         emulate_windows_critical_section(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::AcquireSrwLockExclusive
+            | LegacyWin64Import::TryAcquireSrwLockExclusive
+            | LegacyWin64Import::ReleaseSrwLockExclusive => {
+                uc("write SRW return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install SRW import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_windows_srw_lock(unicorn, implementation);
                     }),
                 )?;
             }
@@ -3903,6 +3925,130 @@ fn emulate_windows_critical_section(
             }
             let _ = unicorn.emu_stop();
         }
+    }
+}
+
+fn emulate_windows_srw_lock(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<(), String> {
+        let address = read_win64_import_argument(unicorn, 0)?;
+        if address == 0
+            || !guest_range_has_permission(unicorn, address, 8, Prot::READ | Prot::WRITE)
+                .unwrap_or(false)
+        {
+            return Err(format!(
+                "SRW lock storage {address:#x} is not readable and writable"
+            ));
+        }
+        if !unicorn.get_data().windows_srw_locks.contains_key(&address) {
+            if unicorn.get_data().windows_srw_locks.len() >= MAX_WINDOWS_SRW_LOCKS {
+                return Err(format!("SRW lock count exceeds {MAX_WINDOWS_SRW_LOCKS}"));
+            }
+            let bytes = unicorn
+                .mem_read_as_vec(address, 8)
+                .map_err(|error| format!("read SRW lock storage failed: {error}"))?;
+            if bytes != [0; 8] {
+                return Err(format!("SRW lock {address:#x} is not initialized by zero"));
+            }
+            unicorn
+                .get_data_mut()
+                .windows_srw_locks
+                .insert(address, WindowsSrwLock::default());
+        }
+        let thread_id = unicorn.get_data().current_windows_thread_id;
+        match operation {
+            LegacyWin64Import::AcquireSrwLockExclusive => {
+                let lock = unicorn
+                    .get_data_mut()
+                    .windows_srw_locks
+                    .get_mut(&address)
+                    .expect("SRW lock was inserted");
+                if lock.owner.is_none() {
+                    lock.owner = Some(thread_id);
+                    unicorn
+                        .mem_write(address, &1u64.to_le_bytes())
+                        .map_err(|error| format!("write acquired SRW state failed: {error}"))?;
+                    return Ok(());
+                }
+                if lock.owner == Some(thread_id) {
+                    return Err(format!("SRW lock {address:#x} recursive exclusive acquire"));
+                }
+                if lock.waiters.len() >= MAX_WINDOWS_SRW_WAITERS {
+                    return Err(format!(
+                        "SRW lock waiter count exceeds {MAX_WINDOWS_SRW_WAITERS}"
+                    ));
+                }
+                if lock.waiters.contains(&thread_id) {
+                    return Err(format!(
+                        "thread {thread_id} is already waiting on SRW lock {address:#x}"
+                    ));
+                }
+                lock.waiters.push_back(thread_id);
+                let rsp = unicorn
+                    .reg_read(RegisterX86::RSP)
+                    .map_err(|error| format!("read SRW acquire stack failed: {error}"))?;
+                let return_address = read_vcomp_u64(unicorn, rsp)?;
+                unicorn
+                    .reg_write(RegisterX86::RSP, rsp + 8)
+                    .map_err(|error| format!("advance SRW acquire stack failed: {error}"))?;
+                unicorn
+                    .reg_write(RegisterX86::RIP, return_address)
+                    .map_err(|error| format!("advance SRW acquire return failed: {error}"))?;
+                unicorn.get_data_mut().scheduler_yield_reason = Some(SchedulerYieldReason::SrwLock);
+                unicorn.get_data_mut().scheduler_resume_rip = return_address;
+                unicorn
+                    .emu_stop()
+                    .map_err(|error| format!("SRW acquire scheduler stop failed: {error}"))
+            }
+            LegacyWin64Import::TryAcquireSrwLockExclusive => {
+                let lock = unicorn
+                    .get_data_mut()
+                    .windows_srw_locks
+                    .get_mut(&address)
+                    .expect("SRW lock was inserted");
+                let acquired = lock.owner.is_none();
+                if acquired {
+                    lock.owner = Some(thread_id);
+                    unicorn
+                        .mem_write(address, &1u64.to_le_bytes())
+                        .map_err(|error| format!("write acquired SRW state failed: {error}"))?;
+                }
+                unicorn
+                    .reg_write(RegisterX86::RAX, u64::from(acquired))
+                    .map_err(|error| format!("write SRW try-acquire result failed: {error}"))
+            }
+            LegacyWin64Import::ReleaseSrwLockExclusive => {
+                let lock = unicorn
+                    .get_data_mut()
+                    .windows_srw_locks
+                    .get_mut(&address)
+                    .expect("SRW lock was inserted");
+                if lock.owner != Some(thread_id) {
+                    return Err(format!(
+                        "thread {thread_id} does not own SRW lock {address:#x}"
+                    ));
+                }
+                let next = lock.waiters.pop_front();
+                lock.owner = next;
+                unicorn
+                    .mem_write(address, &(u64::from(next.is_some())).to_le_bytes())
+                    .map_err(|error| format!("write released SRW state failed: {error}"))?;
+                if let Some(waiter) = next.filter(|waiter| *waiter != 1) {
+                    unicorn
+                        .get_data_mut()
+                        .scheduler_woken_threads
+                        .push_back(waiter);
+                    unicorn.get_data_mut().scheduler_ready_hint = true;
+                }
+                Ok(())
+            }
+            _ => Err("invalid SRW lock operation".into()),
+        }
+    })();
+    if let Err(error) = result {
+        if unicorn.get_data().callback_error.is_none() {
+            unicorn.get_data_mut().callback_error = Some(error);
+        }
+        let _ = unicorn.emu_stop();
     }
 }
 
