@@ -140,6 +140,7 @@ enum LegacyWin64Import {
     LeaveCriticalSection,
     DeleteCriticalSection,
     AcquireSrwLockExclusive,
+    TryAcquireSrwLockExclusive,
     ReleaseSrwLockExclusive,
     GetModuleHandleW,
     GetModuleHandleExA,
@@ -479,6 +480,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "LeaveCriticalSection") => LegacyWin64Import::LeaveCriticalSection,
         ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
         ("kernel32.dll", "AcquireSRWLockExclusive") => LegacyWin64Import::AcquireSrwLockExclusive,
+        ("kernel32.dll", "TryAcquireSRWLockExclusive") => {
+            LegacyWin64Import::TryAcquireSrwLockExclusive
+        }
         ("kernel32.dll", "ReleaseSRWLockExclusive") => LegacyWin64Import::ReleaseSrwLockExclusive,
         ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
         ("kernel32.dll", "GetModuleHandleExA") => LegacyWin64Import::GetModuleHandleExA,
@@ -492,6 +496,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             | "InitializeCriticalSectionEx"
             | "EnterCriticalSection"
             | "AcquireSRWLockExclusive"
+            | "TryAcquireSRWLockExclusive"
             | "ReleaseSRWLockExclusive"
             | "LeaveCriticalSection"
             | "DeleteCriticalSection",
@@ -1671,6 +1676,7 @@ fn install_win64_import(
                 )?;
             }
             LegacyWin64Import::AcquireSrwLockExclusive
+            | LegacyWin64Import::TryAcquireSrwLockExclusive
             | LegacyWin64Import::ReleaseSrwLockExclusive => {
                 uc("write SRW return", unicorn.mem_write(stub, &[0xc3]))?;
                 uc(
@@ -3977,6 +3983,23 @@ fn emulate_windows_srw_lock(unicorn: &mut Unicorn<'_, GuestState>, operation: Le
                 unicorn
                     .emu_stop()
                     .map_err(|error| format!("SRW acquire scheduler stop failed: {error}"))
+            }
+            LegacyWin64Import::TryAcquireSrwLockExclusive => {
+                let lock = unicorn
+                    .get_data_mut()
+                    .windows_srw_locks
+                    .get_mut(&address)
+                    .expect("SRW lock was inserted");
+                let acquired = lock.owner.is_none();
+                if acquired {
+                    lock.owner = Some(thread_id);
+                    unicorn
+                        .mem_write(address, &1u64.to_le_bytes())
+                        .map_err(|error| format!("write acquired SRW state failed: {error}"))?;
+                }
+                unicorn
+                    .reg_write(RegisterX86::RAX, u64::from(acquired))
+                    .map_err(|error| format!("write SRW try-acquire result failed: {error}"))
             }
             LegacyWin64Import::ReleaseSrwLockExclusive => {
                 let lock = unicorn

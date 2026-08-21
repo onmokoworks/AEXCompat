@@ -4271,6 +4271,71 @@ fn srw_exclusive_rejects_storage_recursive_and_unbalanced_misuse() {
 }
 
 #[test]
+fn srw_exclusive_try_acquire_is_nonblocking_and_never_queues() {
+    const TRY_ACQUIRE: u64 = STUB_BASE + 0x450;
+    const RELEASE: u64 = STUB_BASE + 0x458;
+    const LOCK: u64 = DATA_BASE + 0x910;
+    let mut engine = test_engine(&[0xc3]);
+    for (address, symbol) in [
+        (TRY_ACQUIRE, "TryAcquireSRWLockExclusive"),
+        (RELEASE, "ReleaseSRWLockExclusive"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    engine.write(LOCK, &[0; 8]).unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64(TRY_ACQUIRE, [LOCK, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_srw_locks[&LOCK].owner,
+        Some(1)
+    );
+
+    engine.unicorn.get_data_mut().current_windows_thread_id = 2;
+    assert_eq!(
+        engine
+            .call_win64(TRY_ACQUIRE, [LOCK, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_srw_locks[&LOCK].owner,
+        Some(1)
+    );
+    assert!(
+        engine.unicorn.get_data().windows_srw_locks[&LOCK]
+            .waiters
+            .is_empty()
+    );
+
+    engine.unicorn.get_data_mut().current_windows_thread_id = 1;
+    assert_eq!(
+        engine
+            .call_win64(TRY_ACQUIRE, [LOCK, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert!(
+        engine.unicorn.get_data().windows_srw_locks[&LOCK]
+            .waiters
+            .is_empty()
+    );
+    engine
+        .call_win64(RELEASE, [LOCK, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(TRY_ACQUIRE, [LOCK, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn srw_exclusive_cross_thread_contention_never_false_succeeds() {
     const ACQUIRE: u64 = STUB_BASE + 0x460;
     const LOCK: u64 = DATA_BASE + 0x918;
