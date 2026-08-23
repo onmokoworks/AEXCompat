@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from _compile_cache import compile_and_link
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -14,17 +16,11 @@ def test_temporal_checkout_report_keeps_legacy_and_separates_ledgers(tmp_path):
     if compiler is None:
         pytest.skip("c++ compiler is unavailable")
     executable = tmp_path / "temporal-checkout-report-selftest"
-    subprocess.run(
-        [
-            compiler,
-            "-std=c++17",
-            "-I",
-            str(ROOT / "minihost" / "src"),
-            str(ROOT / "tests" / "native" / "worker_temporal_checkout_report_selftest.cpp"),
-            "-o",
-            str(executable),
-        ],
-        check=True,
+    compile_and_link(
+        compiler,
+        [ROOT / "tests" / "native" / "worker_temporal_checkout_report_selftest.cpp"],
+        executable,
+        compile_args=("-std=c++17", "-I", str(ROOT / "minihost" / "src")),
     )
     completed = subprocess.run(
         [str(executable)], check=True, text=True, capture_output=True
