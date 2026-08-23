@@ -6,19 +6,23 @@ from pathlib import Path
 
 import pytest
 
+from _msvc_compile import compile_driver
+
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / "target" / "minihost-build"
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
 HEADERS = Path(SDK_ROOT) / "Examples" / "Headers" if SDK_ROOT else None
+
 
 def _sdk_headers() -> Path:
     if HEADERS is None or not HEADERS.is_dir():
         pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     return HEADERS
 
+
 def test_sdk_frozen_layer_and_stream_slots_compile() -> None:
     headers = _sdk_headers()
-    source = r'''
+    source = r"""
 #include <cstddef>
 #include <type_traits>
 #include "AEConfig.h"
@@ -42,12 +46,25 @@ static_assert(kAEGPItemSuiteVersion6 == 10);
 static_assert(offsetof(AEGP_ItemSuite6, AEGP_GetItemDimensions) == 16 * sizeof(void*));
 static_assert(std::is_same_v<decltype(AEGP_ItemSuite6::AEGP_GetItemDimensions), ItemDimensions>);
 int main() { return 0; }
-'''
+"""
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    vswhere = (
+        Path(program_files_x86)
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
     installation = subprocess.check_output(
-        [str(vswhere), "-latest", "-products", "*", "-requires",
-         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+        [
+            str(vswhere),
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ],
         text=True,
     ).strip()
     vcvars = Path(installation) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
@@ -58,11 +75,12 @@ int main() { return 0; }
         cpp.write_text(source, encoding="ascii")
         batch.write_text(
             f'@call "{vcvars}" >nul\n'
-            f'@cl /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{headers}" '
+            f'@{compile_driver()} /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{headers}" '
             f'/I"{headers / "SP"}" /Fo"{obj}" "{cpp}"\n',
             encoding="ascii",
         )
         subprocess.run(["cmd", "/d", "/c", str(batch)], check=True, timeout=120)
+
 
 def test_native_chain_passes_all_release_workers() -> None:
     expected = {
@@ -80,7 +98,12 @@ def test_native_chain_passes_all_release_workers() -> None:
     }
     for kind in ("discovery", "classic", "smart"):
         completed = subprocess.run(
-            [str(BUILD / "aex_worker.exe"), "--kind", kind, "--self-test-aegp-resizer-3d"],
+            [
+                str(BUILD / "aex_worker.exe"),
+                "--kind",
+                kind,
+                "--self-test-aegp-resizer-3d",
+            ],
             cwd=ROOT,
             capture_output=True,
             text=True,
