@@ -112,6 +112,7 @@ using aexcompat::worker_runtime::ExtendedLookupStringTableState;
 using aexcompat::worker_runtime::guarded_effect_call;
 using aexcompat::worker_runtime::HostCallbackClassification;
 using aexcompat::worker_runtime::invoke_entry_seh;
+using aexcompat::worker_runtime::invoke_tolerated_entry_seh;
 using aexcompat::worker_runtime::invoke_smart_pre_render_cleanup_seh;
 using aexcompat::worker_runtime::module_audit_json;
 using aexcompat::worker_runtime::observe_extended_allocation;
@@ -3346,9 +3347,13 @@ bool parameter_active_mask_id(std::size_t index, int32_t* id) {
   *id = masks[index]->id;
   return true;
 }
+// The arbitrary-data probes tolerate a non-zero answer and a fault alike
+// (count it, go on, or end the frame with -5), so they dispatch through the
+// paused entry: neither outcome may decide a frame's `selector_crash`
+// (issue #983).
 const bool g_parameter_execution_configured = configure_hooks({
-    &invoke_entry_seh, &host_handle_is_live, &parameter_active_mask_count,
-    &parameter_active_mask_id});
+    &invoke_tolerated_entry_seh, &host_handle_is_live,
+    &parameter_active_mask_count, &parameter_active_mask_id});
 
 // Write one packed-ARGB world as raw RGBA in the byte layout that
 // tools/compare-pixel-oracles.py consumes (rgba8 / rgba16le / rgba32f-le,

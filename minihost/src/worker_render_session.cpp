@@ -867,8 +867,9 @@ void run_session_frame_loop(
     // Each frame starts with no message: what the plug-in said about a previous
     // frame is not this frame's diagnosis (issue #707).
     aexcompat::worker_runtime::reset_selector_return_message();
-    const uint64_t seh_sequence_at_frame_start =
-        aexcompat::worker_runtime::selector_dispatch_telemetry().seh_sequence;
+    // And with no fault: a startup, custom-UI, or previous-frame fault is not
+    // this frame's either (issue #983).
+    aexcompat::worker_runtime::reset_selector_fault_attribution();
     const auto& time_object = std::get<JsonValue::Object>(time_value->value);
     int32_t current_time{};
     int32_t current_scale{};
@@ -938,21 +939,40 @@ void run_session_frame_loop(
       if (!missing.empty()) reply += ",\"missing_dependency\":\"" + missing + "\"";
       // A selector SEH used to be flattened into kAuditFailure == 512, which
       // collides with PF_Err_INTERNAL_STRUCT_DAMAGED. Carry a frame-local,
-      // structured discriminator instead. The sequence comparison prevents a
-      // crash from startup or a previous frame being attached to this error,
-      // and the error check keeps the field meaning exactly "this 512 is the
-      // host's substitute for a fault": a fault this frame that the reported
-      // error did not come from (a GPU setdown or custom-UI event fault behind
-      // an untouched-output -6, say) stays on the always-on
-      // `stage:selector_seh` stderr line (issue #1212) rather than being
-      // attached to a number it does not explain (issue #983).
+      // structured discriminator instead, meaning exactly "this 512 is the
+      // host's substitute for this fault" (issue #983).
+      //
+      // Which fault: the one whose substituted 512 is `frame_error`, and that
+      // is established, not guessed. Both flavors report the first non-zero
+      // result, in dispatch order, among the selectors whose result they fold
+      // in - classic `end_frame` takes FRAME_SETDOWN's error only when the
+      // primary error is 0, and the smart precedence below (GPU setup,
+      // PreRender, render with FRAME_SETDOWN folded in, GPU setdown) is the
+      // same rule - so the first fault of the frame produced the frame's 512
+      // unless some folded-in result was already non-zero before it, and
+      // `frame_fault` records both (the first fault since the frame-start
+      // reset above, and whether a non-zero result preceded it). The two
+      // dispatches the rule does not cover run with the attribution paused:
+      // the arbitrary-data probes, which tolerate an answer or a fault, and
+      // GPU_DEVICE_SETDOWN, ranked behind the FRAME_SETDOWN dispatched after
+      // it, which the smart frame records itself when its arm is reported
+      // (`SelectorFaultAttribution` in worker_selector_dispatch.hpp). A frame
+      // whose 512 came before its first fault (the plug-in's own 512 from
+      // RENDER, then a FRAME_SETDOWN fault; a C++ exception substitute, then
+      // a fault) carries no `selector_crash`: the fault it had is on the
+      // always-on `stage:selector_seh` stderr line (issue #1212), and the
+      // 512 stays a 512 that no fault explains. So does a fault the reported
+      // error did not come from at all (a GPU setdown or custom-UI event
+      // fault behind an untouched-output -6, say): the error check keeps the
+      // field off any number it does not explain.
       constexpr int32_t kSelectorFaultSubstitute = 512;  // kAuditFailure
-      if (frame_error == kSelectorFaultSubstitute &&
-          telemetry.seh_sequence != seh_sequence_at_frame_start &&
-          telemetry.seh_code != 0 && !telemetry.selector.empty()) {
+      const auto& fault = telemetry.frame_fault;
+      if (frame_error == kSelectorFaultSubstitute && fault.captured &&
+          !fault.error_before_fault && fault.fault_code != 0 &&
+          !fault.selector.empty()) {
         reply += ",\"selector_crash\":{\"selector\":\"" +
-            escape(telemetry.selector) + "\",\"exception_code\":" +
-            std::to_string(telemetry.seh_code) + "}";
+            escape(fault.selector) + "\",\"exception_code\":" +
+            std::to_string(fault.fault_code) + "}";
       }
       // What the plug-in itself said about the failure. The SDK writes
       // "Couldn't load suite." here when a suite is missing, and plug-ins write
@@ -1390,6 +1410,11 @@ SmartRenderSessionOutcome run_smart_render_session(
         worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
         const worker_runtime::smart_execution::SessionFrame* verdict = &session_frame;
         const auto render_attempt = [&](worker_runtime::smart_execution::SessionFrame* attempt_frame) {
+          // A retry's result replaces the first attempt's outright, so the
+          // fault attribution restarts with it: the first attempt's 14 or
+          // 512/516 (the codes the retries below key on) must not mark a
+          // fault in the retry as decided-before (issue #983).
+          worker_runtime::reset_selector_fault_attribution();
           return worker_runtime::smart_setup::run_pr_gpu_pf_first_session_attempt(
               [&] {
                 return smart_render_once(
@@ -1524,6 +1549,18 @@ SmartRenderSessionOutcome run_smart_render_session(
                 ? frame_result.pre_error
                 : frame_result.render_error != 0 ? frame_result.render_error
                                                  : frame_result.gpu_setdown_error;
+        // GPU device setdown is dispatched before FRAME_SETDOWN (folded into
+        // render_error above) but ranked behind it, so it runs with the fault
+        // attribution paused and is named here instead, only when its arm is
+        // the one reported: the three earlier arms are 0, so no folded-in
+        // result preceded it and its 512 is the frame's (issue #983).
+        if (frame.frame_error == frame_result.gpu_setdown_error &&
+            frame_result.gpu_setup_error == 0 && frame_result.pre_error == 0 &&
+            frame_result.render_error == 0 &&
+            frame_result.gpu_setdown_exception_code != 0) {
+          worker_runtime::record_selector_fault_attribution(
+              "GPU_DEVICE_SETDOWN", frame_result.gpu_setdown_exception_code);
+        }
         frame.smart_output_untouched = frame_result.selector_error == 0 &&
             frame_result.pre_error == 0 && frame_result.render_error == -6 &&
             frame_result.output_untouched && !frame_result.empty_result_rect;

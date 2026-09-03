@@ -13,6 +13,8 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
+#include <utility>
 
 #include "worker_minidump_runtime.hpp"
 #include "worker_aegp_compute_cache.hpp"
@@ -549,6 +551,39 @@ int capture_seh_exception(EXCEPTION_POINTERS* information) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// The per-frame view of a caught fault (`SelectorFaultAttribution`). The first
+// fault since the reset is the one a frame's `selector_crash` may name; a later
+// one is masked by the frame's first-non-zero-result precedence and stays on
+// its `stage:selector_seh` line. Called from the `__except` arm, after the
+// filter above has classified the fault.
+// Depth of live `SelectorFaultAttributionPause` objects: while non-zero, the
+// two notes below are no-ops (the caller's result is not folded into the
+// frame's error, so it must not decide `frame_fault` either way).
+uint32_t g_attribution_pause_depth{};
+
+void note_selector_fault(const char* selector, uint32_t code) {
+  SelectorFaultAttribution& fault = g_telemetry.frame_fault;
+  if (g_attribution_pause_depth != 0 || fault.captured) return;
+  fault.captured = true;
+  fault.selector = selector ? selector : "";
+  fault.fault_code = code;
+}
+
+// A selector result the frame will take as its error if nothing before it was
+// non-zero. Recorded only until the first fault: what decides whether that
+// fault's 512 is the frame's error is whether a non-zero result preceded it,
+// and a result after it is either masked by it or masked by the same earlier
+// answer. The plug-in's own codes and the non-SEH substitutes (an escaped C++
+// exception, a failed module audit, a guard refusal) count alike: each decides
+// the frame ahead of the fault.
+void note_selector_result(int32_t result, uint32_t code) {
+  SelectorFaultAttribution& fault = g_telemetry.frame_fault;
+  if (g_attribution_pause_depth != 0 || fault.captured || code != 0 ||
+      result == 0)
+    return;
+  fault.error_before_fault = true;
+}
+
 int32_t audited_effect_call(EffectEntry entry, int32_t command, void* input,
                             void* output, void** params, void* world, void* extra,
                             bool* invocation_completed_normally,
@@ -1066,6 +1101,193 @@ void configure_selector_dispatch_trace(SelectorDispatchTrace trace) noexcept {
 }
 
 void reset_selector_return_message() noexcept { g_telemetry.return_message = {}; }
+
+void reset_selector_fault_attribution() noexcept {
+  g_telemetry.frame_fault = {};
+}
+
+SelectorFaultAttributionPause::SelectorFaultAttributionPause() noexcept {
+  ++g_attribution_pause_depth;
+}
+
+SelectorFaultAttributionPause::~SelectorFaultAttributionPause() {
+  if (g_attribution_pause_depth != 0) --g_attribution_pause_depth;
+}
+
+int32_t invoke_tolerated_entry_seh(EffectEntry entry, int32_t command,
+                                   void* input, void* output, void** params,
+                                   void* world, void* extra,
+                                   uint32_t* out_exception_code) {
+  const SelectorFaultAttributionPause pause;
+  return invoke_entry_seh(entry, command, input, output, params, world, extra,
+                          out_exception_code);
+}
+
+void record_selector_fault_attribution(const char* selector,
+                                       uint32_t fault_code) noexcept {
+  SelectorFaultAttribution& fault = g_telemetry.frame_fault;
+  fault.captured = true;
+  fault.selector = selector ? selector : "";
+  fault.fault_code = fault_code;
+  fault.error_before_fault = false;
+}
+
+namespace {
+
+// Probe entries for the attribution self-test. The faulting one writes
+// through a null pointer, the shape the production capture classifies as a
+// plug-in access violation; the throwing one escapes a C++ exception, which
+// the guarded call turns into the same 512 with no SEH fault behind it.
+int32_t __cdecl attribution_probe_fault(int32_t, void*, void*, void**, void*,
+                                        void*) {
+  volatile int* null_slot = nullptr;
+  *null_slot = 1;
+  return 0;
+}
+
+int32_t __cdecl attribution_probe_throw(int32_t, void*, void*, void**, void*,
+                                        void*) {
+  throw std::runtime_error("attribution probe");
+}
+
+int32_t __cdecl attribution_probe_answer_512(int32_t, void*, void*, void**,
+                                             void*, void*) {
+  return kAuditFailure;
+}
+
+int32_t __cdecl attribution_probe_answer_0(int32_t, void*, void*, void**, void*,
+                                           void*) {
+  return 0;
+}
+
+void __cdecl attribution_probe_cleanup_fault(void*) {
+  volatile int* null_slot = nullptr;
+  *null_slot = 1;
+}
+
+void attribution_probe_audit_capture() {}
+bool attribution_probe_audit_passed() { return true; }
+
+}  // namespace
+
+SelectorFaultAttributionProbe verify_selector_fault_attribution() noexcept {
+  SelectorFaultAttributionProbe probe;
+  // The audited call refuses to dispatch without an audit pair and answers a
+  // 512 that is not the fault under test, and the production pair inspects
+  // loaded modules this probe has no interest in. Borrow the slot, restore it.
+  const AuditCapture previous_capture = g_capture_audit;
+  const AuditPassed previous_passed = g_audit_passed;
+  g_capture_audit = &attribution_probe_audit_capture;
+  g_audit_passed = &attribution_probe_audit_passed;
+  try {
+    constexpr int32_t kRender = 11;
+    constexpr int32_t kFrameSetdown = 12;
+    constexpr uint32_t kAccessViolation = 0xC0000005u;
+    // Sized to the PF_InData / PF_OutData the production callers hand over,
+    // so the entry-side captures read real zeroed bytes.
+    std::array<std::byte, 408> input{};
+    std::array<std::byte, 408> output{};
+    const auto call = [&](EffectEntry entry, int32_t command) {
+      uint32_t code = 0;
+      const int32_t result = invoke_entry_seh(
+          entry, command, input.data(), output.data(), nullptr, nullptr,
+          nullptr, &code);
+      return std::pair<int32_t, uint32_t>{result, code};
+    };
+    const SelectorFaultAttribution& fault = g_telemetry.frame_fault;
+    const auto names = [&](const char* selector) {
+      return fault.captured && fault.selector == selector &&
+          fault.fault_code == kAccessViolation && !fault.error_before_fault;
+    };
+
+    // RENDER faults, FRAME_SETDOWN faults: the frame's 512 is RENDER's.
+    reset_selector_fault_attribution();
+    const auto render_fault = call(&attribution_probe_fault, kRender);
+    const auto setdown_fault = call(&attribution_probe_fault, kFrameSetdown);
+    probe.first_fault_named = render_fault.first == kAuditFailure &&
+        render_fault.second == kAccessViolation &&
+        setdown_fault.first == kAuditFailure &&
+        setdown_fault.second == kAccessViolation && names("RENDER");
+
+    // The previous frame's fault must not survive the reset.
+    reset_selector_fault_attribution();
+    probe.reset_clears_previous_frame =
+        !fault.captured && fault.selector.empty() &&
+        fault.fault_code == 0 && !fault.error_before_fault;
+
+    // RENDER answers 512 itself, FRAME_SETDOWN faults: the 512 the frame
+    // reports is the plug-in's, and the fault is recorded as decided-before.
+    const auto own_512 = call(&attribution_probe_answer_512, kRender);
+    call(&attribution_probe_fault, kFrameSetdown);
+    probe.own_512_not_charged_to_a_later_fault =
+        own_512.first == kAuditFailure && own_512.second == 0 &&
+        fault.captured && fault.selector == "FRAME_SETDOWN" &&
+        fault.error_before_fault;
+
+    // RENDER escapes a C++ exception (512 with no SEH), FRAME_SETDOWN faults.
+    reset_selector_fault_attribution();
+    const auto thrown = call(&attribution_probe_throw, kRender);
+    call(&attribution_probe_fault, kFrameSetdown);
+    probe.non_seh_substitute_decides_first =
+        thrown.first == kAuditFailure && thrown.second == 0 &&
+        fault.captured && fault.selector == "FRAME_SETDOWN" &&
+        fault.error_before_fault;
+
+    // RENDER answers 0, FRAME_SETDOWN faults: the setdown's 512 is the frame's.
+    reset_selector_fault_attribution();
+    const auto zero = call(&attribution_probe_answer_0, kRender);
+    call(&attribution_probe_fault, kFrameSetdown);
+    probe.zero_answer_leaves_fault_attributable =
+        zero.first == 0 && zero.second == 0 && names("FRAME_SETDOWN");
+
+    // The PreRender cleanup faults (result discarded), then FRAME_SETDOWN
+    // faults: the setdown is the frame's first candidate.
+    reset_selector_fault_attribution();
+    const int32_t cleanup = invoke_smart_pre_render_cleanup_seh(
+        &attribution_probe_cleanup_fault, nullptr);
+    const bool cleanup_skipped = cleanup == kAuditFailure && !fault.captured;
+    call(&attribution_probe_fault, kFrameSetdown);
+    probe.discarded_cleanup_fault_skipped =
+        cleanup_skipped && names("FRAME_SETDOWN");
+
+    // Under a pause (the arbitrary-data probe shape) an own 512 and a fault
+    // both go unrecorded; the FRAME_SETDOWN fault after it is still named.
+    reset_selector_fault_attribution();
+    bool paused_untraced = false;
+    {
+      const SelectorFaultAttributionPause pause;
+      const auto paused_512 = call(&attribution_probe_answer_512, kRender);
+      const auto paused_fault = call(&attribution_probe_fault, kRender);
+      paused_untraced = paused_512.first == kAuditFailure &&
+          paused_fault.first == kAuditFailure &&
+          paused_fault.second == kAccessViolation && !fault.captured &&
+          !fault.error_before_fault;
+    }
+    call(&attribution_probe_fault, kFrameSetdown);
+    probe.paused_calls_leave_no_trace =
+        paused_untraced && names("FRAME_SETDOWN");
+
+    // The GPU_DEVICE_SETDOWN shape: the smart frame records the fault itself.
+    reset_selector_fault_attribution();
+    record_selector_fault_attribution("GPU_DEVICE_SETDOWN", kAccessViolation);
+    probe.recorded_fault_named = names("GPU_DEVICE_SETDOWN");
+
+    reset_selector_fault_attribution();
+    g_current_access_violation = {};
+  } catch (...) {
+    probe = SelectorFaultAttributionProbe{};
+  }
+  g_capture_audit = previous_capture;
+  g_audit_passed = previous_passed;
+  probe.passed = probe.first_fault_named &&
+      probe.own_512_not_charged_to_a_later_fault &&
+      probe.non_seh_substitute_decides_first &&
+      probe.zero_answer_leaves_fault_attributable &&
+      probe.discarded_cleanup_fault_skipped &&
+      probe.reset_clears_previous_frame && probe.paused_calls_leave_no_trace &&
+      probe.recorded_fault_named;
+  return probe;
+}
 
 SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept {
   return g_telemetry;
@@ -1603,6 +1825,16 @@ int32_t invoke_audited_effect_call_seh(
     void** params, void* world, void* extra,
     bool* invocation_completed_normally, int32_t* raw_return_code,
     uint32_t* out_exception_code, const char* selector) {
+  // Every path below that stands in for the plug-in's return answers
+  // kAuditFailure (512). At this boundary only the `__except` arm is an SEH
+  // fault and bumps `seh_sequence` / records a `frame_fault`; the two `catch`
+  // arms here and the audit-failure and guard-refusal returns in
+  // `audited_effect_call` substitute the same 512 with no fault at all (and
+  // the Premiere GPU route's own filter, `pr_seh_filter`, declines a faulting
+  // route and falls through to the PF path without passing here). So a frame
+  // error of 512 that carries no `selector_crash` is not proof that the
+  // plug-in returned 512 itself: it is a 512 that no SEH fault at this
+  // boundary explains (issue #983).
   const auto invoke_cpp = [&]() -> int32_t {
     try {
       return audited_effect_call(
@@ -1623,6 +1855,7 @@ int32_t invoke_audited_effect_call_seh(
     *out_exception_code = GetExceptionCode();
     g_telemetry.selector = selector;
     g_telemetry.error = kAuditFailure;
+    note_selector_fault(selector, *out_exception_code);
     if (g_capture_audit) g_capture_audit();
     result = kAuditFailure;
   }
@@ -1741,6 +1974,7 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
       entry, command, input, output, params, world, extra,
       &invocation_completed_normally, &raw_return_code, out_exception_code,
       selector);
+  note_selector_result(result, *out_exception_code);
   record_extended_allocation_selector_exit(selector);
   // The buffer was cleared before the call, so whatever is in it now was
   // written by this selector. It is recorded whatever this selector returned:
@@ -1788,6 +2022,10 @@ int32_t invoke_smart_pre_render_cleanup_seh(void(__cdecl* cleanup)(void*),
   } __except(capture_seh_exception(GetExceptionInformation())) {
     g_telemetry.selector = "SMART_PRE_RENDER_CLEANUP";
     g_telemetry.error = kAuditFailure;
+    // Not a `frame_fault` candidate: every caller discards this result, so
+    // its 512 is never the frame's error. Naming it would charge a later
+    // selector's fault - or a plug-in's own 512 - to the cleanup callback.
+    // The fault itself stays on its `stage:selector_seh` line.
     if (g_capture_audit) g_capture_audit();
     return kAuditFailure;
   }

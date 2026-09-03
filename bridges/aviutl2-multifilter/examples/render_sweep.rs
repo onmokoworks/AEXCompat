@@ -2421,7 +2421,12 @@ mod tests {
     }
 
     #[test]
-    fn plugin_returning_512_stays_a_frame_error() {
+    fn uncrashed_512_stays_a_frame_error() {
+        // A 512 with no `selector_crash` is a 512 that no SEH fault explains,
+        // not proof the plug-in returned it itself (an escaped C++ exception
+        // or a failed module audit substitutes the same number without a
+        // fault). Either way it stays in the `frame_error:512:...` bucket;
+        // the bucket string is an artifact-compatibility contract.
         let outcome = frame_outcome(Ok(FrameOutcome {
             frame_index: 0,
             status: FrameStatus::FrameError {
