@@ -4,6 +4,20 @@ const TEST_CODE: u64 = 0x1000_0000;
 const TEST_CXX_THROW: u64 = STUB_BASE + 0x80460;
 const TEST_THROW_INFO: u64 = TEST_CODE + 0x800;
 
+/// RSP at guest entry for a `call_win64` with `argument_count` slots: the
+/// frame holds the return address, the 32-byte home space, and one slot per
+/// argument beyond the four register slots, padded so RSP % 16 == 8 (mirrors
+/// `call_win64_with_timeout`).
+fn win64_entry_rsp(argument_count: usize) -> u64 {
+    let frame_bytes = 8 + 0x20 + 8 * argument_count.saturating_sub(4) as u64;
+    let frame_bytes = if frame_bytes % 16 == 8 {
+        frame_bytes
+    } else {
+        frame_bytes + 8
+    };
+    STACK_BASE + STACK_SIZE - frame_bytes
+}
+
 fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     let mut unicorn = Unicorn::new_with_data(
         Arch::X86,
@@ -9634,7 +9648,7 @@ fn rtl_capture_context_writes_the_win64_caller_context() {
     assert_eq!(qword(0xe8), 0xeeee);
     assert_eq!(qword(0xf0), 0xffff);
     assert_eq!(qword(0xf8), RETURN_ADDRESS);
-    assert_eq!(qword(0x98), ((STACK_BASE + STACK_SIZE - 0x108) | 8) + 8);
+    assert_eq!(qword(0x98), win64_entry_rsp(6) + 8);
     assert_eq!(&context[0x1a0..0x1b0], &xmm0);
     assert_eq!(&context[0x290..0x2a0], &xmm15);
     assert!(context[0x48..0x78].iter().all(|byte| *byte == 0));
@@ -11042,7 +11056,7 @@ fn issue1347_create_thread_runs_bounded_guest_callback_and_completes_handle() {
     );
     assert_eq!(
         engine.unicorn.reg_read(RegisterX86::RSP).unwrap(),
-        (((STACK_BASE + STACK_SIZE) - 0x108) | 8) + 8
+        win64_entry_rsp(6) + 8
     );
     assert_eq!(engine.unicorn.get_data().current_windows_thread_id, 1);
     assert_eq!(
@@ -14393,7 +14407,7 @@ fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
     );
 
     assert_eq!(
-        smart_checkout_world(&engine.unicorn, 1).unwrap(),
+        smart_checkout_world(&mut engine.unicorn, 1).unwrap(),
         (input_world, 4, 3)
     );
 
@@ -14403,8 +14417,136 @@ fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
             &1i32.to_le_bytes(),
         )
         .unwrap();
-    let error = smart_checkout_world(&engine.unicorn, 1).unwrap_err();
+    let error = smart_checkout_world(&mut engine.unicorn, 1).unwrap_err();
     assert!(error.contains("invalid smart checkout world"), "{error}");
+}
+
+fn disk_id_parameter(disk_id: i32, param_type: i32, name: &str) -> GuestParam {
+    let mut bytes = vec![0; abi::PF_PARAM_DEF_SIZE];
+    bytes[..4].copy_from_slice(&disk_id.to_le_bytes());
+    GuestParam {
+        index: -1,
+        param_type,
+        name: name.into(),
+        bytes,
+    }
+}
+
+#[test]
+fn smart_checkout_resolves_layer_disk_id_without_aliasing_positional_point_storage() {
+    let parameters = vec![
+        disk_id_parameter(2, 6, "Center"),
+        disk_id_parameter(30, 10, "Amount"),
+        disk_id_parameter(1, 0, "Noise Layer"),
+    ];
+
+    assert_eq!(
+        resolve_layer_parameter_offset(&parameters, 1).unwrap(),
+        LayerParameterResolution {
+            offset: 2,
+            disk_id_fallback: true,
+        }
+    );
+    assert_eq!(
+        parameters[0].param_type, 6,
+        "the positional point stays distinct"
+    );
+
+    let mut duplicate = parameters.clone();
+    duplicate.push(disk_id_parameter(1, 0, "Duplicate Layer"));
+    assert!(
+        resolve_layer_parameter_offset(&duplicate, 1)
+            .unwrap_err()
+            .contains("duplicated")
+    );
+    assert!(
+        resolve_layer_parameter_offset(&parameters, 2)
+            .unwrap_err()
+            .contains("not a PF_Param_LAYER")
+    );
+    assert!(
+        resolve_layer_parameter_offset(&parameters, 99)
+            .unwrap_err()
+            .contains("does not resolve")
+    );
+}
+
+#[test]
+fn smart_checkout_positional_layer_wins_over_colliding_non_layer_disk_id() {
+    // AE and the minihost `pre_checkout_layer` match `slot == index` only: a
+    // popup whose disk id equals the checkout index must not make the
+    // positional layer ambiguous.
+    let parameters = vec![
+        disk_id_parameter(3, 1, "Slider"),
+        disk_id_parameter(1, 0, "Layer"),
+        disk_id_parameter(2, 7, "Popup"),
+    ];
+    assert_eq!(
+        resolve_layer_parameter_offset(&parameters, 2).unwrap(),
+        LayerParameterResolution {
+            offset: 1,
+            disk_id_fallback: false,
+        }
+    );
+    // A non-layer disk id never resolves a non-positional checkout either.
+    assert!(
+        resolve_layer_parameter_offset(&parameters, 3)
+            .unwrap_err()
+            .contains("not a PF_Param_LAYER")
+    );
+}
+
+#[test]
+fn smart_checkout_duplicated_disk_id_does_not_block_positional_layer() {
+    let parameters = vec![
+        disk_id_parameter(4, 0, "Layer A"),
+        disk_id_parameter(4, 0, "Layer B"),
+        disk_id_parameter(4, 1, "Slider"),
+    ];
+    for index in [1, 2] {
+        assert_eq!(
+            resolve_layer_parameter_offset(&parameters, index).unwrap(),
+            LayerParameterResolution {
+                offset: (index - 1) as usize,
+                disk_id_fallback: false,
+            },
+            "index {index}"
+        );
+    }
+    // Only when positional resolution fails does the duplicated id matter.
+    assert!(
+        resolve_layer_parameter_offset(&parameters, 4)
+            .unwrap_err()
+            .contains("duplicated")
+    );
+    assert!(
+        resolve_layer_parameter_offset(&parameters, 3)
+            .unwrap_err()
+            .contains("not a PF_Param_LAYER")
+    );
+}
+
+#[test]
+fn smart_checkout_disk_id_fallback_is_recorded_per_index_and_slot() {
+    let mut records = Vec::new();
+    record_smart_checkout_disk_id_fallback(&mut records, 1, 3);
+    record_smart_checkout_disk_id_fallback(&mut records, 1, 3);
+    record_smart_checkout_disk_id_fallback(&mut records, 2, 4);
+    assert_eq!(
+        records,
+        vec![
+            SmartCheckoutDiskIdFallback {
+                requested_index: 1,
+                resolved_slot: 3,
+                call_count: 2,
+            },
+            SmartCheckoutDiskIdFallback {
+                requested_index: 2,
+                resolved_slot: 4,
+                call_count: 1,
+            },
+        ]
+    );
 }
 
 #[test]

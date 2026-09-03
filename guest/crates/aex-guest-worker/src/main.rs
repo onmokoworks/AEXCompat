@@ -703,6 +703,7 @@ fn parse_trace_watches(
         let mut register = None;
         let mut size = None;
         let mut occurrence = None;
+        let mut dereference_offset = None;
         for field in specification.split(',') {
             let (key, value) = field
                 .split_once('=')
@@ -730,6 +731,18 @@ fn parse_trace_watches(
                             .parse::<usize>()
                             .map_err(|error| format!("invalid watch size: {error}"))?,
                     )
+                }
+                "deref" => {
+                    if dereference_offset.is_some() {
+                        return Err("duplicate watch dereference offset".into());
+                    }
+                    let parsed = parse_watch_number(value)?;
+                    if parsed > 4096 {
+                        return Err(
+                            "watch dereference offset must be between 0 and 4096 bytes".into()
+                        );
+                    }
+                    dereference_offset = Some(parsed);
                 }
                 "occurrence" => {
                     if occurrence.is_some() {
@@ -767,6 +780,7 @@ fn parse_trace_watches(
             instruction_rva,
             absolute_address: None,
             register,
+            dereference_offset,
             size,
             occurrence,
             image_coordinate: None,
@@ -1060,11 +1074,29 @@ mod tests {
         assert_eq!(watches.len(), 2);
         assert_eq!(watches[0].function_rva, Some(0xcce0));
         assert_eq!(watches[0].register, "rcx");
+        assert_eq!(watches[0].dereference_offset, None);
         assert_eq!(watches[0].occurrence, Some(2113));
         assert_eq!(watches[1].instruction_rva, Some(0x350b));
         assert_eq!(watches[1].occurrence, None);
         assert_eq!(output_pixel, Some([92, 841]));
         assert_eq!(values, [OsString::from("Amount=2.5")]);
+    }
+
+    #[test]
+    fn trace_watch_accepts_bounded_pointer_dereference() {
+        let mut values = vec![OsString::from(
+            "--watch=function=0xcce0,arg=rdx,deref=0x10,size=748",
+        )];
+        let (watches, _) = parse_trace_watches(&mut values).unwrap();
+        assert_eq!(watches[0].dereference_offset, Some(0x10));
+
+        for specification in [
+            "--watch=function=0xcce0,arg=rdx,deref=4097,size=4",
+            "--watch=function=0xcce0,arg=rdx,deref=0,deref=8,size=4",
+        ] {
+            let mut values = vec![OsString::from(specification)];
+            assert!(parse_trace_watches(&mut values).is_err(), "{specification}");
+        }
     }
 
     #[test]

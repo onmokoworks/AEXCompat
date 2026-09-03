@@ -180,6 +180,26 @@ fn selected_watch_occurrence(capture: &mut TraceCapture, spec: &TraceWatchSpec) 
         .is_none_or(|occurrence| occurrence == *count)
 }
 
+fn trace_watch_address(
+    unicorn: &Unicorn<'_, GuestState>,
+    register: &'static str,
+    stack_offset: u64,
+    dereference_offset: Option<u64>,
+) -> u64 {
+    let base = trace_register_value(unicorn, register, stack_offset).unwrap_or(0);
+    let Some(offset) = dereference_offset else {
+        return base;
+    };
+    let Some(pointer_address) = base.checked_add(offset) else {
+        return 0;
+    };
+    let mut bytes = [0u8; 8];
+    if unicorn.mem_read(pointer_address, &mut bytes).is_err() {
+        return 0;
+    }
+    u64::from_le_bytes(bytes)
+}
+
 fn select_function_watches(capture: &mut TraceCapture, function_rva: u64) -> Vec<TraceWatchSpec> {
     let matches = capture
         .watch_specs
@@ -213,14 +233,114 @@ fn select_call_watches(
         .collect()
 }
 
-fn trace_instruction(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckpointSiteKind {
+    Call,
+    Jump,
+}
+
+/// A call or jump instruction in the image, as checkpoint capture sees it
+/// before execution: only a direct near branch has a static target, and
+/// `target_rva` is set only when that target lies inside the image.
+#[derive(Clone, Copy, Debug)]
+struct CheckpointSite {
+    address: u64,
+    return_address: u64,
+    pc_rva: u64,
+    target_rva: Option<u64>,
+    kind: CheckpointSiteKind,
+    direct: bool,
+}
+
+impl CheckpointSite {
+    /// A direct call into the image: the only site `checkpoint_instruction`
+    /// arms, so a direct call whose target is outside the image is not one.
+    fn hookable_call(&self) -> bool {
+        self.kind == CheckpointSiteKind::Call && self.direct && self.target_rva.is_some()
+    }
+}
+
+fn checkpoint_site(
+    instruction: &iced_x86::Instruction,
+    address: u64,
+    image_base: u64,
+    image_end: u64,
+) -> Option<CheckpointSite> {
+    let kind = match instruction.mnemonic() {
+        Mnemonic::Call => CheckpointSiteKind::Call,
+        Mnemonic::Jmp => CheckpointSiteKind::Jump,
+        _ => return None,
+    };
+    let direct = matches!(
+        instruction.op0_kind(),
+        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+    );
+    let target_rva = direct
+        .then(|| instruction.near_branch_target())
+        .filter(|target| (image_base..image_end).contains(target))
+        .map(|target| target - image_base);
+    Some(CheckpointSite {
+        address,
+        return_address: instruction.next_ip(),
+        pc_rva: address.saturating_sub(image_base),
+        target_rva,
+        kind,
+        direct,
+    })
+}
+
+/// Why checkpoint capture cannot arm `watch`, or `None` when it can.
+fn checkpoint_unhookable_reason(
+    watch: &TraceWatchSpec,
+    entry_rva: u64,
+    sites: &[CheckpointSite],
+) -> Option<&'static str> {
+    if watch.absolute_address.is_some() {
+        // Selector-scoped snapshot, taken at begin/finish without a hook.
+        return None;
+    }
+    if let Some(function_rva) = watch.function_rva {
+        if function_rva == entry_rva
+            || sites
+                .iter()
+                .any(|site| site.hookable_call() && site.target_rva == Some(function_rva))
+        {
+            return None;
+        }
+        return Some(
+            if sites.iter().any(|site| {
+                site.kind == CheckpointSiteKind::Jump && site.target_rva == Some(function_rva)
+            }) {
+                "function is reached only by a tail-call jump; checkpoint capture hooks direct call sites and the selector entry"
+            } else {
+                "no direct call site targets the function; checkpoint capture hooks direct call sites and the selector entry, not indirect calls"
+            },
+        );
+    }
+    if let Some(instruction_rva) = watch.instruction_rva {
+        return match sites.iter().find(|site| site.pc_rva == instruction_rva) {
+            Some(site) if site.hookable_call() => None,
+            Some(site) if site.kind == CheckpointSiteKind::Call && site.direct => Some(
+                "direct call whose target lies outside the image; checkpoint capture hooks direct calls into the image only",
+            ),
+            Some(site) if site.kind == CheckpointSiteKind::Call => {
+                Some("indirect call site; checkpoint capture hooks direct call sites only")
+            }
+            Some(_) => Some("tail-call jump site; checkpoint capture hooks direct call sites only"),
+            None => Some("rva is not a call or jump instruction in an executable section"),
+        };
+    }
+    None
+}
+
+/// Arms `function=` watches that name the traced selector itself when
+/// execution reaches its entry; they complete when the selector returns.
+fn arm_selector_entry_watches(
     unicorn: &mut Unicorn<'_, GuestState>,
     address: u64,
-    size: u32,
     image_base: u64,
     image_end: u64,
 ) {
-    let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
     let entry_rva = address.saturating_sub(image_base);
     let entry_watches = if unicorn.get_data().trace.as_ref().is_some_and(|capture| {
         address == image_base + capture.entry_rva
@@ -238,35 +358,126 @@ fn trace_instruction(
     } else {
         Vec::new()
     };
-    if !entry_watches.is_empty() {
-        let pending = entry_watches
-            .into_iter()
-            .map(|spec| {
-                let watch_address = trace_register_value(unicorn, spec.register, 0x28).unwrap_or(0);
-                PendingTraceWatch {
-                    spec_id: spec.id,
-                    register: spec.register,
-                    call_id: None,
-                    function_rva: Some(entry_rva),
-                    pc_rva: Some(entry_rva),
-                    address: watch_address,
-                    before: trace_memory_snapshot(
-                        unicorn,
-                        watch_address,
-                        spec.size,
-                        image_base,
-                        image_end,
-                    ),
-                    image_coordinate: spec.image_coordinate,
-                    image_row_offset: spec.image_row_offset,
-                    image_format: spec.image_format,
-                }
-            })
-            .collect::<Vec<_>>();
+    if entry_watches.is_empty() {
+        return;
+    }
+    let pending = entry_watches
+        .into_iter()
+        .map(|spec| {
+            let watch_address =
+                trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset);
+            PendingTraceWatch {
+                spec_id: spec.id,
+                register: spec.register,
+                call_id: None,
+                function_rva: Some(entry_rva),
+                pc_rva: Some(entry_rva),
+                address: watch_address,
+                before: trace_memory_snapshot(
+                    unicorn,
+                    watch_address,
+                    spec.size,
+                    image_base,
+                    image_end,
+                ),
+                image_coordinate: spec.image_coordinate,
+                image_row_offset: spec.image_row_offset,
+                image_format: spec.image_format,
+            }
+        })
+        .collect::<Vec<_>>();
+    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+        capture.selector_watches.extend(pending);
+    }
+}
+
+fn checkpoint_instruction(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+    image_base: u64,
+    image_end: u64,
+) {
+    arm_selector_entry_watches(unicorn, address, image_base, image_end);
+    let pc_rva = address.saturating_sub(image_base);
+    let pending = unicorn
+        .get_data_mut()
+        .trace
+        .as_mut()
+        .and_then(|capture| capture.checkpoint_returns.remove(&pc_rva))
+        .unwrap_or_default();
+    if !pending.is_empty() {
+        let completed = complete_trace_watches(unicorn, pending, image_base, image_end);
         if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
-            capture.selector_watches.extend(pending);
+            append_trace_witnesses(capture, completed);
         }
     }
+
+    let mut bytes = [0u8; 15];
+    if unicorn.mem_read(address, &mut bytes).is_err() {
+        return;
+    }
+    let instruction = Decoder::with_ip(64, &bytes, address, DecoderOptions::NONE).decode();
+    if instruction.mnemonic() != Mnemonic::Call {
+        return;
+    }
+    let target = instruction.near_branch_target();
+    if !(image_base..image_end).contains(&target) {
+        return;
+    }
+    let target_rva = target - image_base;
+    let watches = unicorn
+        .get_data_mut()
+        .trace
+        .as_mut()
+        .map(|capture| select_call_watches(capture, Some(target_rva), Some(pc_rva)))
+        .unwrap_or_default();
+    if watches.is_empty() {
+        return;
+    }
+    let pending = watches
+        .into_iter()
+        .map(|spec| {
+            let watch_address =
+                trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset);
+            PendingTraceWatch {
+                spec_id: spec.id,
+                register: spec.register,
+                call_id: None,
+                function_rva: Some(target_rva),
+                pc_rva: Some(pc_rva),
+                address: watch_address,
+                before: trace_memory_snapshot(
+                    unicorn,
+                    watch_address,
+                    spec.size,
+                    image_base,
+                    image_end,
+                ),
+                image_coordinate: spec.image_coordinate,
+                image_row_offset: spec.image_row_offset,
+                image_format: spec.image_format,
+            }
+        })
+        .collect::<Vec<_>>();
+    let return_rva = instruction.next_ip().saturating_sub(image_base);
+    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+        capture
+            .checkpoint_returns
+            .entry(return_rva)
+            .or_default()
+            .extend(pending);
+    }
+}
+
+fn trace_instruction(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    address: u64,
+    size: u32,
+    image_base: u64,
+    image_end: u64,
+) {
+    let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or(0);
+    arm_selector_entry_watches(unicorn, address, image_base, image_end);
     let return_value = trace_return_value(unicorn, image_base, image_end);
     loop {
         let should_infer_return = unicorn
@@ -487,7 +698,8 @@ fn trace_instruction(
         let pending = matching_watches
             .into_iter()
             .map(|spec| {
-                let address = trace_register_value(unicorn, spec.register, 0x20).unwrap_or(0);
+                let address =
+                    trace_watch_address(unicorn, spec.register, 0x20, spec.dereference_offset);
                 PendingTraceWatch {
                     spec_id: spec.id,
                     register: spec.register,
@@ -586,7 +798,8 @@ fn trace_instruction(
             let pending = matching_watches
                 .into_iter()
                 .map(|spec| {
-                    let address = trace_register_value(unicorn, spec.register, 0x28).unwrap_or(0);
+                    let address =
+                        trace_watch_address(unicorn, spec.register, 0x28, spec.dereference_offset);
                     PendingTraceWatch {
                         spec_id: spec.id,
                         register: spec.register,

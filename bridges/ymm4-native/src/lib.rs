@@ -212,8 +212,19 @@ fn open_session(
                     render_error,
                     missing_dependency,
                     return_message,
+                    selector_crash,
                 } => RenderReply::Error(format!(
-                    "AEX frame error {render_error}{}{}",
+                    "AEX frame error {render_error}{}{}{}",
+                    // A guarded selector fault, not a value the plug-in returned:
+                    // the numeric 512 alone cannot tell the two apart (issue #983).
+                    selector_crash
+                        .map(|crash| {
+                            format!(
+                                "; {} crashed with exception 0x{:08X}",
+                                crash.selector, crash.exception_code
+                            )
+                        })
+                        .unwrap_or_default(),
                     missing_dependency
                         .as_deref()
                         .map(|value| format!("; missing dependency: {value}"))

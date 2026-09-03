@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::backend::{
-    CustomUiRegistration, ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue,
-    TraceWatchSpec, UnsupportedSuiteCall,
+    CustomUiRegistration, ExecutionTrace, GuestCensus, GuestEngine, GuestError,
+    SmartCheckoutDiskIdFallback, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
 };
 use crate::gpu_lifecycle::{
     GpuRenderDiagnostic, GpuRuntimeBackendKind, LifecycleCall, LifecycleFailure, LifecycleReply,
@@ -29,6 +29,7 @@ const CMD_SMART_RENDER: u64 = abi::PF_CMD_SMART_RENDER as u64;
 const CMD_SMART_RENDER_GPU: u64 = abi::PF_CMD_SMART_RENDER_GPU as u64;
 const CMD_GPU_DEVICE_SETUP: u64 = abi::PF_CMD_GPU_DEVICE_SETUP as u64;
 const CMD_GPU_DEVICE_SETDOWN: u64 = abi::PF_CMD_GPU_DEVICE_SETDOWN as u64;
+const CMD_ARBITRARY_CALLBACK: u64 = abi::PF_CMD_ARBITRARY_CALLBACK as u64;
 pub const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
@@ -39,6 +40,22 @@ pub(crate) const PARAM_POINT: i32 = 6;
 pub(crate) const PARAM_POINT3D: i32 = 18;
 const PARAM_POPUP: i32 = 7;
 const PARAM_FLOAT_SLIDER: i32 = 10;
+const PARAM_ARBITRARY_DATA: i32 = 11;
+const ARBITRARY_DEFAULT_HANDLE_OFFSET: usize = 8;
+const ARBITRARY_VALUE_HANDLE_OFFSET: usize = 16;
+const ARBITRARY_REFCON_OFFSET: usize = 24;
+/// `PF_ArbParamsExtra`: `which_function` at 0, then the per-function union
+/// (`id` at 4, `refconPV` at 8, source handle at 16, destination handle
+/// pointer at 24). The host keeps the COPY destination cell inside the same
+/// scratch block, after the union.
+const ARBITRARY_EXTRA_BYTES: usize = 48;
+const ARBITRARY_EXTRA_ID_OFFSET: usize = 4;
+const ARBITRARY_EXTRA_REFCON_OFFSET: usize = 8;
+const ARBITRARY_EXTRA_HANDLE_OFFSET: usize = 16;
+const ARBITRARY_EXTRA_DESTINATION_POINTER_OFFSET: usize = 24;
+const ARBITRARY_EXTRA_DESTINATION_CELL_OFFSET: usize = 32;
+const ARBITRARY_DISPOSE_FUNC: i32 = 1;
+const ARBITRARY_COPY_FUNC: i32 = 2;
 const LAYER_DEFAULT_OFFSET: usize = 116;
 const ANGLE_DEFAULT_OFFSET: usize = 4;
 const POINT_DEFAULT_X_OFFSET: usize = 12;
@@ -67,6 +84,101 @@ pub enum ClassicError {
     Selector { selector: &'static str, error: i32 },
     #[error("invalid frame input: {0}")]
     Input(String),
+    /// A `PF_Cmd_ARBITRARY_CALLBACK` round trip (COPY/DISPOSE) the host
+    /// issued on the plug-in's behalf did not produce the contract result.
+    #[error("arbitrary parameter id={id} {operation} failed: {message}")]
+    Arbitrary {
+        operation: &'static str,
+        id: i16,
+        message: String,
+    },
+    /// Two independent failures from one lifecycle step. `primary` keeps the
+    /// error whose kind (guest crash, selector code) categorizes the failure;
+    /// `secondary` stays visible in the message instead of being dropped.
+    #[error("{primary}; additionally: {secondary}")]
+    Compound {
+        primary: Box<ClassicError>,
+        secondary: Box<ClassicError>,
+    },
+}
+
+impl ClassicError {
+    /// The selector error code this failure carries, looking through a
+    /// compound failure to its primary error.
+    pub fn selector_error_code(&self) -> Option<i32> {
+        match self {
+            ClassicError::Selector { error, .. } => Some(*error),
+            ClassicError::Compound { primary, .. } => primary.selector_error_code(),
+            _ => None,
+        }
+    }
+}
+
+fn combine_failures(failures: Vec<ClassicError>) -> Result<(), ClassicError> {
+    match failures
+        .into_iter()
+        .reduce(|primary, secondary| ClassicError::Compound {
+            primary: Box::new(primary),
+            secondary: Box::new(secondary),
+        }) {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Settles a render against the disposal of its arbitrary value copies.
+/// A finished render stays finished: its DISPOSE failures are handed to
+/// `record` as messages, mirroring the minihost `ArbitraryValuesScope`, which
+/// discards the DISPOSE result and only counts it (AE ignores the arbitrary
+/// callback's return code). A failed render keeps its own error primary, with
+/// the disposal failures attached as the secondary so neither is dropped.
+fn settle_render_disposal<T>(
+    result: Result<T, ClassicError>,
+    failures: Vec<ClassicError>,
+    record: impl FnOnce(&mut T, Vec<String>),
+) -> Result<T, ClassicError> {
+    match result {
+        Ok(mut value) => {
+            record(
+                &mut value,
+                failures.iter().map(ToString::to_string).collect(),
+            );
+            Ok(value)
+        }
+        Err(primary) => match combine_failures(failures) {
+            Ok(()) => Err(primary),
+            Err(secondary) => Err(ClassicError::Compound {
+                primary: Box::new(primary),
+                secondary: Box::new(secondary),
+            }),
+        },
+    }
+}
+
+/// Settles `GLOBAL_SETDOWN` against the arbitrary disposal that preceded it.
+/// The minihost fails global teardown on either, so both stay errors here; a
+/// GLOBAL_SETDOWN failure (its error code, or a guest crash) is the primary
+/// so `selector_error_code` reports it, and the disposal failure rides along
+/// as the secondary, never instead of it.
+fn settle_global_setdown(
+    setdown: Result<i32, ClassicError>,
+    cleanup: Result<(), ClassicError>,
+) -> Result<i32, ClassicError> {
+    match (setdown, cleanup) {
+        (setdown, Ok(())) => setdown,
+        (Ok(0), Err(cleanup)) => Err(cleanup),
+        (Ok(error), Err(cleanup)) => Err(ClassicError::Compound {
+            primary: Box::new(ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error,
+            }),
+            secondary: Box::new(cleanup),
+        }),
+        (Err(setdown), Err(cleanup)) => Err(ClassicError::Compound {
+            primary: Box::new(setdown),
+            secondary: Box::new(cleanup),
+        }),
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -237,6 +349,24 @@ pub struct RenderReport {
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
+    /// Smart checkouts the host resolved by disk id instead of positionally.
+    /// AE and the minihost resolve `PF_CHECKOUT_LAYER` positionally only, so
+    /// every entry here is a host-side substitution rather than observed AE
+    /// behavior; an empty list means no render on this engine has used such a
+    /// substitution yet. Entries are deduplicated on
+    /// `(requested_index, resolved_slot)` with a running `call_count`, and the
+    /// engine never clears them between resident frames, so a per-frame
+    /// report carries the cumulative total for the engine's lifetime, the
+    /// same convention as `unsupported_suite_calls`.
+    pub smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
+    /// `PF_Arbitrary_DISPOSE_FUNC` failures from releasing this render's
+    /// arbitrary value copies, one message per failed slot. AE ignores the
+    /// arbitrary callback's return code and the minihost
+    /// `ArbitraryValuesScope` only counts a failed DISPOSE
+    /// (`arbitrary.invalid_operations`), so the render result stands and the
+    /// failures are recorded next to it instead of replacing it; an empty
+    /// list means every copy was released cleanly.
+    pub arbitrary_dispose_failures: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub census: Option<GuestCensus>,
     pub argb8: Vec<u8>,
@@ -415,9 +545,23 @@ pub struct ClassicHost {
     sequence_active: bool,
     frame_resources: Option<FrameResources>,
     user_changed_extra: Option<u64>,
+    arbitrary_extra: Option<u64>,
+    arbitrary_values: Vec<ArbitraryValue>,
     resident_frames: u64,
     resident_frame_setdown_error: i32,
     last_gpu_diagnostic: GpuRenderDiagnostic,
+}
+
+/// A private copy of an arbitrary parameter's default, made through
+/// `PF_Arbitrary_COPY_FUNC` for one render and disposed through
+/// `PF_Arbitrary_DISPOSE_FUNC` when that render ends.
+#[derive(Clone, Copy, Debug)]
+struct ArbitraryValue {
+    id: i16,
+    refcon: u64,
+    handle: u64,
+    /// Guest address of the `PF_ParamDef` whose value slot holds `handle`.
+    definition: u64,
 }
 
 #[derive(Clone)]
@@ -518,6 +662,8 @@ impl ClassicHost {
             sequence_active: false,
             frame_resources: None,
             user_changed_extra: None,
+            arbitrary_extra: None,
+            arbitrary_values: Vec::new(),
             resident_frames: 0,
             resident_frame_setdown_error: 0,
             last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
@@ -580,6 +726,8 @@ impl ClassicHost {
             sequence_active: false,
             frame_resources: None,
             user_changed_extra: None,
+            arbitrary_extra: None,
+            arbitrary_values: Vec::new(),
             resident_frames: 0,
             resident_frame_setdown_error: 0,
             last_gpu_diagnostic: GpuRenderDiagnostic::pending(RenderBackendRequest::Cpu),
@@ -1167,6 +1315,14 @@ impl ClassicHost {
         stage: &'static str,
         error: &ClassicError,
     ) -> ResidentFailureDiagnostic {
+        if let ClassicError::Compound { primary, secondary } = error {
+            let mut diagnostic = self.resident_failure_diagnostic(stage, primary);
+            diagnostic.message = bounded_failure_text(&format!(
+                "{}; additionally: {secondary}",
+                diagnostic.message
+            ));
+            return diagnostic;
+        }
         let (category, selector, error_code, message, crash_reason, crash_snapshot) = match error {
             ClassicError::Guest(source) => (
                 source.diagnostic_category(),
@@ -1193,6 +1349,10 @@ impl ClassicHost {
                 None,
             ),
             ClassicError::Input(message) => ("input", None, None, message.clone(), None, None),
+            ClassicError::Arbitrary { .. } => {
+                ("arbitrary", None, None, error.to_string(), None, None)
+            }
+            ClassicError::Compound { .. } => unreachable!("compound failures are unwrapped above"),
         };
         let suite_requests = self.engine.suite_requests();
         let unsupported_suite_calls = self.engine.unsupported_suite_calls();
@@ -1479,6 +1639,10 @@ impl ClassicHost {
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        // The engine keeps trace configuration between renders, so a plain
+        // trace resets whatever an earlier watched render configured: it is
+        // always a full capture with no watches.
+        self.configure_trace(Vec::new(), None);
         self.render_pixels_with_request(
             width,
             height,
@@ -1490,6 +1654,13 @@ impl ClassicHost {
             true,
             RenderBackendRequest::Cpu,
         )
+    }
+
+    fn configure_trace(&mut self, watches: Vec<TraceWatchSpec>, output_pixel: Option<[u32; 2]>) {
+        self.engine
+            .configure_trace_checkpoint_only(!watches.is_empty());
+        self.engine.configure_trace_watches(watches);
+        self.trace_output_pixel = output_pixel;
     }
 
     pub fn render_argb8_trace_with_watches(
@@ -1523,9 +1694,18 @@ impl ClassicHost {
         watches: Vec<TraceWatchSpec>,
         output_pixel: Option<[u32; 2]>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
-        self.engine.configure_trace_watches(watches);
-        self.trace_output_pixel = output_pixel;
-        self.render_pixels_trace(width, height, format, input_pixels, parameter_values)
+        self.configure_trace(watches, output_pixel);
+        self.render_pixels_with_request(
+            width,
+            height,
+            format,
+            input_pixels,
+            parameter_values,
+            [0, 0, width as i32, height as i32],
+            false,
+            true,
+            RenderBackendRequest::Cpu,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1559,6 +1739,46 @@ impl ClassicHost {
 
     #[allow(clippy::too_many_arguments)]
     fn render_pixels_with_request_mode(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+        output_request: [i32; 4],
+        census_enabled: bool,
+        trace_enabled: bool,
+        persistent_sequence: bool,
+        backend: RenderBackendRequest,
+        secondary_layers: &[ResidentLayer<'_>],
+        smart_override: Option<bool>,
+    ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        let result = self.render_pixels_with_request_mode_body(
+            width,
+            height,
+            format,
+            input_pixels,
+            parameter_values,
+            output_request,
+            census_enabled,
+            trace_enabled,
+            persistent_sequence,
+            backend,
+            secondary_layers,
+            smart_override,
+        );
+        // The arbitrary value copies live exactly as long as this render, the
+        // minihost ArbitraryValuesScope: dispose them on every exit path. A
+        // DISPOSE failure never discards a finished render; it is recorded on
+        // the report, or appended to the render's own error.
+        let failures = self.dispose_arbitrary_values();
+        settle_render_disposal(result, failures, |(report, _), failures| {
+            report.arbitrary_dispose_failures = failures;
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_pixels_with_request_mode_body(
         &mut self,
         width: u32,
         height: u32,
@@ -1685,6 +1905,7 @@ impl ClassicHost {
                     output_pixels + row_offset + u64::from(x) * format.bytes_per_pixel() as u64,
                 ),
                 register: "absolute",
+                dereference_offset: None,
                 size: format.bytes_per_pixel(),
                 occurrence: None,
                 image_coordinate: Some([x, y]),
@@ -1734,7 +1955,31 @@ impl ClassicHost {
         self.engine.write_u64(params, input_param)?;
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
-            materialize_default(&mut definition, captured.param_type, width, height);
+            materialize_default(&mut definition, captured.param_type, width, height)
+                .map_err(ClassicError::Input)?;
+            if captured.param_type == PARAM_ARBITRARY_DATA {
+                let union = abi::PARAM_U_OFFSET;
+                let default = read_u64(&definition, union + ARBITRARY_DEFAULT_HANDLE_OFFSET);
+                // PF_ADD_ARBITRARY2 leaves the value null when there is no
+                // default; otherwise the value is a private COPY of it, never
+                // the default handle itself (minihost initialize_arbitrary_values).
+                if default != 0 {
+                    let id = read_i16(&definition, union);
+                    let refcon = read_u64(&definition, union + ARBITRARY_REFCON_OFFSET);
+                    let handle = self.copy_arbitrary_default(id, refcon, default)?;
+                    write_u64(
+                        &mut definition,
+                        union + ARBITRARY_VALUE_HANDLE_OFFSET,
+                        handle,
+                    );
+                    self.arbitrary_values.push(ArbitraryValue {
+                        id,
+                        refcon,
+                        handle,
+                        definition: resources.parameter_definitions[index],
+                    });
+                }
+            }
             if let Some(layer) = resources
                 .secondary_layers
                 .iter()
@@ -2068,6 +2313,11 @@ impl ClassicHost {
                 suite_requests: self.engine.suite_requests().to_vec(),
                 unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
                 dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
+                smart_checkout_disk_id_fallbacks: self
+                    .engine
+                    .smart_checkout_disk_id_fallbacks()
+                    .to_vec(),
+                arbitrary_dispose_failures: Vec::new(),
                 census,
                 argb8,
                 raw_pixels,
@@ -2221,19 +2471,186 @@ impl ClassicHost {
         if !self.global_active {
             return Ok(0);
         }
+        // Both disposals go through PF_Cmd_ARBITRARY_CALLBACK and need the
+        // plug-in's global data, so they run before GLOBAL_SETDOWN.
+        let cleanup = combine_failures(
+            self.dispose_arbitrary_values()
+                .into_iter()
+                .chain(self.dispose_arbitrary_defaults().err())
+                .collect(),
+        );
         let result = self.invoke(CMD_GLOBAL_SETDOWN);
         self.global_active = false;
         let clear = self.write_input_pointer(abi::IN_GLOBAL_DATA_OFFSET, 0);
-        match result {
-            Ok(result) => {
-                clear?;
-                Ok(result as i32)
+        let setdown = match result {
+            Ok(result) => clear.map(|()| result as i32).map_err(ClassicError::from),
+            Err(error) => Err(selector_guest_error("GLOBAL_SETDOWN", error)),
+        };
+        settle_global_setdown(setdown, cleanup)
+    }
+
+    fn arbitrary_extra(&mut self) -> Result<u64, ClassicError> {
+        if let Some(extra) = self.arbitrary_extra {
+            return Ok(extra);
+        }
+        let extra = self.engine.allocate(ARBITRARY_EXTRA_BYTES, 8)?;
+        self.arbitrary_extra = Some(extra);
+        Ok(extra)
+    }
+
+    /// Issues one `PF_Cmd_ARBITRARY_CALLBACK` with a freshly zeroed
+    /// `PF_ArbParamsExtra` and returns the plug-in's error code.
+    fn call_arbitrary_callback(
+        &mut self,
+        which_function: i32,
+        id: i16,
+        refcon: u64,
+        payload: &[(usize, u64)],
+    ) -> Result<i32, ClassicError> {
+        let extra = self.arbitrary_extra()?;
+        let mut bytes = vec![0u8; ARBITRARY_EXTRA_BYTES];
+        write_i32(&mut bytes, 0, which_function);
+        write_i16(&mut bytes, ARBITRARY_EXTRA_ID_OFFSET, id);
+        write_u64(&mut bytes, ARBITRARY_EXTRA_REFCON_OFFSET, refcon);
+        for (offset, value) in payload {
+            write_u64(&mut bytes, *offset, *value);
+        }
+        self.engine.write(extra, &bytes)?;
+        let error = self
+            .engine
+            .call_selector_win64(
+                self.entry,
+                [CMD_ARBITRARY_CALLBACK, self.input, self.output, 0, 0, extra],
+            )
+            .map_err(|source| selector_guest_error("ARBITRARY_CALLBACK", source))?;
+        Ok(error as i32)
+    }
+
+    /// `PF_Arbitrary_COPY_FUNC`: duplicates `source` into a handle the render
+    /// owns. A null or aliased destination is a contract failure, not a value.
+    fn copy_arbitrary_default(
+        &mut self,
+        id: i16,
+        refcon: u64,
+        source: u64,
+    ) -> Result<u64, ClassicError> {
+        let destination_cell =
+            self.arbitrary_extra()? + ARBITRARY_EXTRA_DESTINATION_CELL_OFFSET as u64;
+        let error = self.call_arbitrary_callback(
+            ARBITRARY_COPY_FUNC,
+            id,
+            refcon,
+            &[
+                (ARBITRARY_EXTRA_HANDLE_OFFSET, source),
+                (ARBITRARY_EXTRA_DESTINATION_POINTER_OFFSET, destination_cell),
+            ],
+        )?;
+        if error != 0 {
+            return Err(ClassicError::Arbitrary {
+                operation: "COPY",
+                id,
+                message: format!("ARBITRARY_CALLBACK returned {error}"),
+            });
+        }
+        let destination = self.read_guest_u64(destination_cell)?;
+        if destination == 0 {
+            return Err(ClassicError::Arbitrary {
+                operation: "COPY",
+                id,
+                message: "plug-in returned a null destination handle".into(),
+            });
+        }
+        if destination == source {
+            return Err(ClassicError::Arbitrary {
+                operation: "COPY",
+                id,
+                message: "plug-in returned the source handle instead of a copy".into(),
+            });
+        }
+        Ok(destination)
+    }
+
+    /// `PF_Arbitrary_DISPOSE_FUNC` for one handle.
+    fn dispose_arbitrary_handle(
+        &mut self,
+        id: i16,
+        refcon: u64,
+        handle: u64,
+    ) -> Result<(), ClassicError> {
+        let error = self.call_arbitrary_callback(
+            ARBITRARY_DISPOSE_FUNC,
+            id,
+            refcon,
+            &[(ARBITRARY_EXTRA_HANDLE_OFFSET, handle)],
+        )?;
+        if error != 0 {
+            return Err(ClassicError::Arbitrary {
+                operation: "DISPOSE",
+                id,
+                message: format!("ARBITRARY_CALLBACK returned {error}"),
+            });
+        }
+        Ok(())
+    }
+
+    /// Disposes every render-owned value copy. Each slot is released exactly
+    /// once whether or not its DISPOSE succeeds, and every failure is
+    /// returned, in slot order, for the caller to record or report.
+    fn dispose_arbitrary_values(&mut self) -> Vec<ClassicError> {
+        let mut failures = Vec::new();
+        for value in std::mem::take(&mut self.arbitrary_values) {
+            if let Err(error) = self.dispose_arbitrary_handle(value.id, value.refcon, value.handle)
+            {
+                failures.push(error);
             }
-            Err(error) => {
-                let _ = clear;
-                Err(selector_guest_error("GLOBAL_SETDOWN", error))
+            if let Err(error) = self.engine.write_u64(
+                value.definition + (abi::PARAM_U_OFFSET + ARBITRARY_VALUE_HANDLE_OFFSET) as u64,
+                0,
+            ) {
+                failures.push(ClassicError::Guest(error));
             }
         }
+        failures
+    }
+
+    /// Disposes every captured arbitrary default (minihost
+    /// `dispose_arbitrary_defaults`): all slots are visited, each default slot
+    /// is nulled whether or not its DISPOSE succeeded so it is never disposed
+    /// twice, and the failures are reported together.
+    fn dispose_arbitrary_defaults(&mut self) -> Result<(), ClassicError> {
+        let union = abi::PARAM_U_OFFSET;
+        let owned = self
+            .engine
+            .parameters()
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| parameter.param_type == PARAM_ARBITRARY_DATA)
+            .map(|(index, parameter)| {
+                (
+                    index,
+                    read_i16(&parameter.bytes, union),
+                    read_u64(&parameter.bytes, union + ARBITRARY_DEFAULT_HANDLE_OFFSET),
+                    read_u64(&parameter.bytes, union + ARBITRARY_REFCON_OFFSET),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for (index, id, handle, refcon) in owned {
+            if handle == 0 {
+                continue;
+            }
+            if let Err(error) = self.dispose_arbitrary_handle(id, refcon, handle) {
+                failures.push(error);
+            }
+            if let Some(parameter) = self.engine.parameters_mut().get_mut(index) {
+                write_u64(
+                    &mut parameter.bytes,
+                    union + ARBITRARY_DEFAULT_HANDLE_OFFSET,
+                    0,
+                );
+            }
+        }
+        combine_failures(failures)
     }
 
     fn call_with_optional_trace(
@@ -2917,7 +3334,12 @@ fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
-fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, height: u32) {
+fn materialize_default(
+    definition: &mut [u8],
+    param_type: i32,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
     let union = abi::PARAM_U_OFFSET;
     match param_type {
         PARAM_SLIDER | PARAM_FIXED_SLIDER => {
@@ -2942,6 +3364,16 @@ fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, heigh
                 union + abi::PF_PIXEL_SIZE..union + abi::PF_PIXEL_SIZE * 2,
                 union,
             );
+        }
+        PARAM_ARBITRARY_DATA => {
+            // PF_ADD_ARBITRARY2 initializes the value to null independently of
+            // the optional default handle. The render-time value is a private
+            // COPY of the default that ClassicHost obtains through
+            // PF_Cmd_ARBITRARY_CALLBACK; it is never the default handle itself,
+            // and a null default simply leaves the value uninitialized.
+            definition
+                [union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+                .copy_from_slice(&0u64.to_le_bytes());
         }
         PARAM_POPUP => {
             let value = i16::from_le_bytes(
@@ -2990,6 +3422,7 @@ fn materialize_default(definition: &mut [u8], param_type: i32, width: u32, heigh
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn materialize_layer_world(definition: &mut [u8], param_type: i32, input_world: &[u8]) {
@@ -3501,7 +3934,7 @@ mod tests {
         slider[abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET
             ..abi::PARAM_U_OFFSET + abi::SLIDER_DEFAULT_OFFSET + 4]
             .copy_from_slice(&123i32.to_le_bytes());
-        materialize_default(&mut slider, PARAM_FIXED_SLIDER, 32, 20);
+        materialize_default(&mut slider, PARAM_FIXED_SLIDER, 32, 20).unwrap();
         assert_eq!(
             &slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
             &123i32.to_le_bytes()
@@ -3511,7 +3944,7 @@ mod tests {
         float_slider[abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET
             ..abi::PARAM_U_OFFSET + abi::FLOAT_SLIDER_DEFAULT_OFFSET + 4]
             .copy_from_slice(&5.0f32.to_le_bytes());
-        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER, 32, 20);
+        materialize_default(&mut float_slider, PARAM_FLOAT_SLIDER, 32, 20).unwrap();
         assert_eq!(
             &float_slider[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8],
             &5.0f64.to_le_bytes()
@@ -3520,7 +3953,7 @@ mod tests {
         let mut color = vec![0u8; abi::PF_PARAM_DEF_SIZE];
         color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 8]
             .copy_from_slice(&[1, 2, 3, 4, 255, 64, 128, 192]);
-        materialize_default(&mut color, PARAM_COLOR, 32, 20);
+        materialize_default(&mut color, PARAM_COLOR, 32, 20).unwrap();
         assert_eq!(
             &color[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + 4],
             &[255, 64, 128, 192]
@@ -3533,7 +3966,7 @@ mod tests {
         point[abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET
             ..abi::PARAM_U_OFFSET + POINT_DEFAULT_Y_OFFSET + 4]
             .copy_from_slice(&(25 * 65536i32).to_le_bytes());
-        materialize_default(&mut point, PARAM_POINT, 32, 20);
+        materialize_default(&mut point, PARAM_POINT, 32, 20).unwrap();
         assert_eq!(
             read_i32(&point, abi::PARAM_U_OFFSET),
             16 * 65536,
@@ -3550,7 +3983,7 @@ mod tests {
             point3d[abi::PARAM_U_OFFSET + 24 + index * 8..abi::PARAM_U_OFFSET + 32 + index * 8]
                 .copy_from_slice(&value.to_le_bytes());
         }
-        materialize_default(&mut point3d, PARAM_POINT3D, 32, 20);
+        materialize_default(&mut point3d, PARAM_POINT3D, 32, 20).unwrap();
         for (index, expected) in [16.0f64, 5.0, 15.0].into_iter().enumerate() {
             assert_eq!(
                 f64::from_le_bytes(
@@ -3598,6 +4031,197 @@ mod tests {
                 Some(vec![10.5, -20.25, 30.75])
             )
         );
+    }
+
+    #[test]
+    fn materialize_default_never_aliases_arbitrary_default_into_value() {
+        let union = abi::PARAM_U_OFFSET;
+        let mut arbitrary = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        arbitrary[union..union + 4].copy_from_slice(&[7, 0, 0, 0]);
+        arbitrary
+            [union + ARBITRARY_DEFAULT_HANDLE_OFFSET..union + ARBITRARY_DEFAULT_HANDLE_OFFSET + 8]
+            .copy_from_slice(&0x1234_5678_9abc_def0u64.to_le_bytes());
+        arbitrary[union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+            .copy_from_slice(&0x5555_5555_5555_5555u64.to_le_bytes());
+        arbitrary[union + ARBITRARY_REFCON_OFFSET..union + ARBITRARY_REFCON_OFFSET + 8]
+            .copy_from_slice(&0x0fed_cba9_8765_4321u64.to_le_bytes());
+
+        materialize_default(&mut arbitrary, PARAM_ARBITRARY_DATA, 32, 20).unwrap();
+
+        // The value is left null for the host's COPY; the default and refcon
+        // metadata stay intact for that callback.
+        assert_eq!(
+            read_u64(&arbitrary, union + ARBITRARY_VALUE_HANDLE_OFFSET),
+            0
+        );
+        assert_eq!(
+            read_u64(&arbitrary, union + ARBITRARY_DEFAULT_HANDLE_OFFSET),
+            0x1234_5678_9abc_def0
+        );
+        assert_eq!(&arbitrary[union..union + 4], &[7, 0, 0, 0]);
+        assert_eq!(
+            read_u64(&arbitrary, union + ARBITRARY_REFCON_OFFSET),
+            0x0fed_cba9_8765_4321
+        );
+    }
+
+    #[test]
+    fn arbitrary_null_default_leaves_value_uninitialized() {
+        let union = abi::PARAM_U_OFFSET;
+        let mut arbitrary = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        arbitrary[union + ARBITRARY_VALUE_HANDLE_OFFSET..union + ARBITRARY_VALUE_HANDLE_OFFSET + 8]
+            .copy_from_slice(&0x5555_5555_5555_5555u64.to_le_bytes());
+        materialize_default(&mut arbitrary, PARAM_ARBITRARY_DATA, 32, 20).unwrap();
+        assert_eq!(
+            read_u64(&arbitrary, union + ARBITRARY_VALUE_HANDLE_OFFSET),
+            0
+        );
+    }
+
+    #[test]
+    fn combine_failures_keeps_every_error_visible_in_order() {
+        assert!(combine_failures(Vec::new()).is_ok());
+        let single = combine_failures(vec![ClassicError::Selector {
+            selector: "GLOBAL_SETDOWN",
+            error: 5,
+        }])
+        .unwrap_err();
+        assert!(matches!(
+            single,
+            ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error: 5
+            }
+        ));
+        let combined = combine_failures(vec![
+            ClassicError::Arbitrary {
+                operation: "DISPOSE",
+                id: 3,
+                message: "ARBITRARY_CALLBACK returned 9".into(),
+            },
+            ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error: 5,
+            },
+            ClassicError::Input("third".into()),
+        ])
+        .unwrap_err();
+        assert_eq!(combined.selector_error_code(), None);
+        assert_eq!(
+            combined.to_string(),
+            "arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9; additionally: selector GLOBAL_SETDOWN returned 5; additionally: invalid frame input: third"
+        );
+        let selector_primary = ClassicError::Compound {
+            primary: Box::new(ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error: 5,
+            }),
+            secondary: Box::new(ClassicError::Input("cleanup".into())),
+        };
+        assert_eq!(selector_primary.selector_error_code(), Some(5));
+    }
+
+    fn dispose_failure(id: i16, error: i32) -> ClassicError {
+        ClassicError::Arbitrary {
+            operation: "DISPOSE",
+            id,
+            message: format!("ARBITRARY_CALLBACK returned {error}"),
+        }
+    }
+
+    #[test]
+    fn finished_render_survives_dispose_failures_and_records_them() {
+        let settled = settle_render_disposal(
+            Ok::<Vec<String>, ClassicError>(Vec::new()),
+            vec![dispose_failure(3, 9), dispose_failure(5, -1)],
+            |recorded, failures| *recorded = failures,
+        )
+        .unwrap();
+        assert_eq!(
+            settled,
+            [
+                "arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9",
+                "arbitrary parameter id=5 DISPOSE failed: ARBITRARY_CALLBACK returned -1",
+            ]
+        );
+
+        let clean = settle_render_disposal(
+            Ok::<Vec<String>, ClassicError>(vec!["untouched".into()]),
+            Vec::new(),
+            |recorded, failures| {
+                assert!(failures.is_empty());
+                recorded.push("recorded".into());
+            },
+        )
+        .unwrap();
+        assert_eq!(clean, ["untouched", "recorded"]);
+    }
+
+    #[test]
+    fn failed_render_keeps_its_error_primary_over_dispose_failures() {
+        let failed = settle_render_disposal(
+            Err::<(), _>(ClassicError::Selector {
+                selector: "SMART_RENDER",
+                error: 25,
+            }),
+            vec![dispose_failure(3, 9)],
+            |_, _| panic!("a failed render has no report to record on"),
+        )
+        .unwrap_err();
+        assert_eq!(failed.selector_error_code(), Some(25));
+        assert_eq!(
+            failed.to_string(),
+            "selector SMART_RENDER returned 25; additionally: arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9"
+        );
+
+        let untouched = settle_render_disposal(
+            Err::<(), _>(ClassicError::Input("bad frame".into())),
+            Vec::new(),
+            |_, _| panic!("a failed render has no report to record on"),
+        )
+        .unwrap_err();
+        assert!(matches!(untouched, ClassicError::Input(ref message) if message == "bad frame"));
+    }
+
+    #[test]
+    fn global_setdown_error_stays_primary_over_dispose_failures() {
+        let cleanup = || combine_failures(vec![dispose_failure(3, 9)]);
+
+        assert_eq!(settle_global_setdown(Ok(0), Ok(())).unwrap(), 0);
+        assert_eq!(settle_global_setdown(Ok(7), Ok(())).unwrap(), 7);
+
+        let cleanup_only = settle_global_setdown(Ok(0), cleanup()).unwrap_err();
+        assert_eq!(cleanup_only.selector_error_code(), None);
+        assert!(matches!(
+            cleanup_only,
+            ClassicError::Arbitrary {
+                operation: "DISPOSE",
+                id: 3,
+                ..
+            }
+        ));
+
+        let setdown_code = settle_global_setdown(Ok(5), cleanup()).unwrap_err();
+        assert_eq!(setdown_code.selector_error_code(), Some(5));
+        assert_eq!(
+            setdown_code.to_string(),
+            "selector GLOBAL_SETDOWN returned 5; additionally: arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9"
+        );
+
+        let setdown_crash = settle_global_setdown(
+            Err(ClassicError::SelectorGuest {
+                selector: "GLOBAL_SETDOWN",
+                source: GuestError::Callback("faulted".into()),
+            }),
+            cleanup(),
+        )
+        .unwrap_err();
+        assert_eq!(setdown_crash.selector_error_code(), None);
+        assert!(matches!(
+            setdown_crash,
+            ClassicError::Compound { ref primary, .. }
+                if matches!(**primary, ClassicError::SelectorGuest { selector: "GLOBAL_SETDOWN", .. })
+        ));
     }
 
     #[test]

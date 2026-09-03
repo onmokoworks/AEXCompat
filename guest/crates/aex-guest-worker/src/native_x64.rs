@@ -41,8 +41,10 @@ use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
 };
 pub use crate::x64::{
-    ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
+    ExecutionTrace, GuestCensus, GuestParam, SmartCheckoutDiskIdFallback, TraceStateValue,
+    TraceWatchSpec, UnsupportedSuiteCall,
 };
+use crate::x64::{record_smart_checkout_disk_id_fallback, resolve_layer_parameter_offset};
 use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_suite_layout};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;
@@ -213,6 +215,7 @@ struct NativeState {
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
+    smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
     utility_suites: HashMap<u32, u64>,
     iterate8_suite: u64,
     iterate16_suite: u64,
@@ -677,6 +680,8 @@ impl GuestEngine<'static> {
 
     pub fn configure_trace_watches(&mut self, _: Vec<TraceWatchSpec>) {}
 
+    pub fn configure_trace_checkpoint_only(&mut self, _: bool) {}
+
     pub fn add_trace_watch(&mut self, _: TraceWatchSpec) {}
 
     pub fn configure_parameter_definitions(
@@ -748,6 +753,10 @@ impl GuestEngine<'static> {
         &self.state.params
     }
 
+    pub fn parameters_mut(&mut self) -> &mut [GuestParam] {
+        &mut self.state.params
+    }
+
     pub fn suite_requests(&self) -> &[String] {
         &self.state.suite_requests
     }
@@ -808,6 +817,10 @@ impl GuestEngine<'static> {
 
     pub fn dropped_unsupported_suite_calls(&self) -> u64 {
         self.state.dropped_unsupported_suite_calls
+    }
+
+    pub fn smart_checkout_disk_id_fallbacks(&self) -> &[SmartCheckoutDiskIdFallback] {
+        &self.state.smart_checkout_disk_id_fallbacks
     }
 
     pub fn pre_checkout_requests(&self) -> &[[i32; 4]] {
@@ -2002,17 +2015,21 @@ unsafe extern "win64" fn iterate_generic(iterations: i32, refcon: u64, callback:
     0
 }
 
-fn native_smart_checkout_world(state: &NativeState, index: i32) -> Option<(u64, i32, i32)> {
+fn native_smart_checkout_world(state: &mut NativeState, index: i32) -> Option<(u64, i32, i32)> {
     let mut world = if index == 0 {
         state.smart_input_world
     } else {
-        let offset = usize::try_from(index).ok()?.checked_sub(1)?;
-        if state.params.get(offset)?.param_type != 0 {
-            return None;
+        let resolution = resolve_layer_parameter_offset(&state.params, index).ok()?;
+        if resolution.disk_id_fallback {
+            record_smart_checkout_disk_id_fallback(
+                &mut state.smart_checkout_disk_id_fallbacks,
+                index,
+                resolution.offset + 1,
+            );
         }
         state
             .parameter_definitions
-            .get(offset)
+            .get(resolution.offset)
             .copied()
             .filter(|definition| *definition != 0)?
             .checked_add(abi::PARAM_U_OFFSET as u64)?

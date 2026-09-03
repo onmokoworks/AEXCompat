@@ -30,6 +30,28 @@ aex-guest-worker render-trace-png \
 `SEQUENCE_SETDOWN`ごとの記録が`execution_traces`へ入ります。生成画像は
 `output.png`、通常のrender reportとtraceは標準出力のJSONへ入ります。
 
+`--watch`を1件以上指定したrenderは、全basic-block/branch censusを行わない
+低オーバーヘッドの`checkpoint` captureになります。hookするのは次の3種類だけ
+です。
+
+- watchが名指しするdirect call-site (`rva=`がそのcall命令、または`function=`
+  がそのcall命令の静的な飛び先) と、そのcall命令の直後 (return checkpoint)。
+- trace対象selectorの入口。`function=<selector entry RVA>`はここで発火し、
+  selector return時に完了します。
+
+通常のSmart Render経路を維持したままentry/return snapshotを取得し、JSONの
+`trace_configuration.capture_mode`は`checkpoint`、`basic_blocks`と
+`branch_edges`は空になります。watchなしの従来traceは`full_trace`です。
+
+checkpointがhookできないwatchは、黙って0件になるのではなく
+`trace_configuration.unhookable_watches`に`id`と`reason`付きで列挙されます。
+該当するのは、tail-call (`jmp`) でしか到達しない関数への`function=`、
+`jmp`命令やindirect call (`call rax`、`call [rip+x]`等) を指す`rva=`、
+飛び先がimage外にあるdirect `call`を指す`rva=`、call/jmp命令ではないRVAを
+指す`rva=`です。これらを追うにはwatchなしの
+`full_trace`か、direct call-site側の`rva=`を使ってください。checkpointも
+通常のguest selector timeout内でfail-closeします。
+
 ## 特定の値を追う
 
 関数の入口とreturnで、引数ポインター先の変化を保存できます。
@@ -53,9 +75,14 @@ aex-guest-worker render-trace-png \
 - `function`は監視対象関数の入口RVAです。trace対象selector自身も指定できます。
 - `rva`はcallまたはtail-callを行うinstructionのRVAです。
 - `function`と`rva`はどちらか一方だけを指定します。
+- `occurrence=<n>`はn回目だけを取得するため、実質的なhit上限として使えます。
 - `arg`と`register`は同義です。`rcx`、`rdx`、`r8`、`r9`、`rax`、
   `stack5`～`stack8`（または`5`～`8`）を指定できます。
 - `size`は1～4096 byteです。
+- `deref=<offset>`を指定すると、register/stack引数そのものではなく、
+  `引数 + offset`に格納された64-bit little-endian pointerの参照先を監視します。
+  offsetは0～4096 byteです。OpenCV `Mat`のdata fieldなど、headerと実データが
+  分離した構造を同じentry/return境界で追う用途を想定しています。
 - `when`は省略可能です。指定する場合は`entry+return`または`both`です。
 - `occurrence`は省略可能な1始まりの呼び出し番号です。例えば
   `occurrence=2113`は、同じwatchに一致する2113回目だけを記録します。
@@ -66,7 +93,9 @@ aex-guest-worker render-trace-png \
 - `--watch-output-pixel x,y`は出力pixelの前後値と画像内位置を記録します。
 
 `rva=`はメモリアドレスではなくinstructionのRVAです。監視するメモリのアドレスは、
-その時点の指定registerまたはstack引数からworkerが取得します。
+その時点の指定registerまたはstack引数からworkerが取得します。`deref`指定時は、
+そこからpointer fieldを1段だけ安全に読み取ります。fieldまたは参照先が未mapなら
+snapshotはunreadableとして記録され、workerをクラッシュさせません。
 
 ## JSONの読み方
 

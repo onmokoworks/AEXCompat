@@ -1499,6 +1499,7 @@ fn execution_trace_records_jump_to_known_function_as_tail_call() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -1541,6 +1542,190 @@ fn execution_trace_records_jump_to_known_function_as_tail_call() {
 }
 
 #[test]
+fn execution_trace_watch_can_dereference_pointer_field() {
+    const CODE: u64 = 0x1000_0000;
+    // mov rax,[rcx]; inc byte ptr [rax]; ret
+    let mut engine = test_engine(&[0x48, 0x8b, 0x01, 0xfe, 0x00, 0xc3]);
+    let target = engine.allocate(1, 1).unwrap();
+    engine.write(target, &[41]).unwrap();
+    let holder = engine.allocate(8, 8).unwrap();
+    engine.write(holder, &target.to_le_bytes()).unwrap();
+    engine.configure_trace_watches(vec![TraceWatchSpec {
+        id: "dereferenced-target".into(),
+        function_rva: Some(0),
+        instruction_rva: None,
+        absolute_address: None,
+        register: "rcx",
+        dereference_offset: Some(0),
+        size: 1,
+        occurrence: None,
+        image_coordinate: None,
+        image_row_offset: None,
+        image_format: None,
+    }]);
+    engine.begin_execution_trace("RENDER", CODE).unwrap();
+    engine.call_win64(CODE, [holder, 0, 0, 0, 0, 0]).unwrap();
+    let trace = engine.finish_execution_trace(0).unwrap();
+    let witness = trace.memory_witnesses.first().unwrap();
+    assert_eq!(witness.before.u8_values, [41]);
+    assert_eq!(witness.after.u8_values, [42]);
+}
+
+#[test]
+fn checkpoint_trace_skips_hot_basic_block_collection() {
+    const CODE: u64 = 0x1000_0000;
+    // entry calls a target which increments the watched byte.
+    let mut engine = test_engine(&[0xe8, 1, 0, 0, 0, 0xc3, 0xfe, 0x02, 0xc3]);
+    let buffer = engine.allocate(1, 1).unwrap();
+    engine.write(buffer, &[1]).unwrap();
+    engine.configure_trace_watches(vec![TraceWatchSpec {
+        id: "checkpoint".into(),
+        function_rva: Some(6),
+        instruction_rva: None,
+        absolute_address: None,
+        register: "rdx",
+        dereference_offset: None,
+        size: 1,
+        occurrence: Some(1),
+        image_coordinate: None,
+        image_row_offset: None,
+        image_format: None,
+    }]);
+    engine.configure_trace_checkpoint_only(true);
+    engine.begin_execution_trace("RENDER", CODE).unwrap();
+    engine.call_win64(CODE, [0, buffer, 0, 0, 0, 0]).unwrap();
+    let trace = engine.finish_execution_trace(0).unwrap();
+    assert_eq!(trace.trace_configuration.capture_mode, "checkpoint");
+    assert!(trace.trace_configuration.unhookable_watches.is_empty());
+    assert!(trace.basic_blocks.is_empty());
+    assert!(trace.branch_edges.is_empty());
+    assert_eq!(trace.memory_witnesses[0].before.u8_values, [1]);
+    assert_eq!(trace.memory_witnesses[0].after.u8_values, [2]);
+}
+
+#[test]
+fn checkpoint_trace_activates_function_watch_at_selector_entry() {
+    const CODE: u64 = 0x1000_0000;
+    // inc byte ptr [rcx]; ret
+    let mut engine = test_engine(&[0xfe, 0x01, 0xc3]);
+    let buffer = engine.allocate(1, 1).unwrap();
+    engine.write(buffer, &[1]).unwrap();
+    engine.configure_trace_watches(vec![TraceWatchSpec {
+        id: "selector-entry".into(),
+        function_rva: Some(0),
+        instruction_rva: None,
+        absolute_address: None,
+        register: "rcx",
+        dereference_offset: None,
+        size: 1,
+        occurrence: None,
+        image_coordinate: None,
+        image_row_offset: None,
+        image_format: None,
+    }]);
+    engine.configure_trace_checkpoint_only(true);
+    engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+    let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
+    let trace = engine.finish_execution_trace(result).unwrap();
+
+    assert_eq!(trace.trace_configuration.capture_mode, "checkpoint");
+    assert!(trace.trace_configuration.unhookable_watches.is_empty());
+    let witness = trace.memory_witnesses.first().unwrap();
+    assert_eq!(witness.watch_id, "selector-entry");
+    assert_eq!(witness.function_rva, Some(0));
+    assert_eq!(witness.before.u8_values, [1]);
+    assert_eq!(witness.after.u8_values, [2]);
+}
+
+#[test]
+fn checkpoint_trace_lists_watches_it_cannot_hook() {
+    const CODE: u64 = 0x1000_0000;
+    // 0: jmp +1 (tail-call to 6); 5: ret; 6: inc byte ptr [rdx]; 8: ret;
+    // 9: call rax (indirect, never executed);
+    // 11: call +0x1000 (direct, target past the image, never executed)
+    let mut engine = test_engine(&[
+        0xe9, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xfe, 0x02, 0xc3, 0xff, 0xd0, 0xe8, 0x00, 0x10, 0x00,
+        0x00,
+    ]);
+    let entry_buffer = engine.allocate(1, 1).unwrap();
+    engine.write(entry_buffer, &[10]).unwrap();
+    let tail_buffer = engine.allocate(1, 1).unwrap();
+    engine.write(tail_buffer, &[1]).unwrap();
+    let watch =
+        |id: &str, function_rva: Option<u64>, instruction_rva: Option<u64>| TraceWatchSpec {
+            id: id.into(),
+            function_rva,
+            instruction_rva,
+            absolute_address: None,
+            register: "rdx",
+            dereference_offset: None,
+            size: 1,
+            occurrence: None,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        };
+    engine.configure_trace_watches(vec![
+        TraceWatchSpec {
+            register: "rcx",
+            ..watch("entry", Some(0), None)
+        },
+        watch("tail-called-function", Some(6), None),
+        watch("jump-site", None, Some(0)),
+        watch("indirect-call-site", None, Some(9)),
+        watch("external-call-site", None, Some(11)),
+        watch("not-a-call", None, Some(7)),
+        watch("uncalled-function", Some(8), None),
+    ]);
+    engine.configure_trace_checkpoint_only(true);
+    engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+    engine
+        .call_win64(CODE, [entry_buffer, tail_buffer, 0, 0, 0, 0])
+        .unwrap();
+    let trace = engine.finish_execution_trace(0).unwrap();
+
+    assert_eq!(trace.trace_configuration.capture_mode, "checkpoint");
+    let unhookable = &trace.trace_configuration.unhookable_watches;
+    let ids = unhookable
+        .iter()
+        .map(|watch| watch.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            "tail-called-function",
+            "jump-site",
+            "indirect-call-site",
+            "external-call-site",
+            "not-a-call",
+            "uncalled-function",
+        ]
+    );
+    let reason = |id: &str| {
+        unhookable
+            .iter()
+            .find(|watch| watch.id == id)
+            .map(|watch| watch.reason)
+            .unwrap()
+    };
+    assert!(reason("tail-called-function").contains("tail-call jump"));
+    assert!(reason("jump-site").contains("tail-call jump site"));
+    assert!(reason("indirect-call-site").contains("indirect call site"));
+    assert!(reason("external-call-site").contains("outside the image"));
+    assert!(reason("not-a-call").contains("not a call or jump"));
+    assert!(reason("uncalled-function").contains("no direct call site"));
+    // The tail-called function did run and mutate its buffer, but only the
+    // entry watch could produce a witness; the others are absent by design.
+    let mut mutated = [0u8; 1];
+    engine.read(tail_buffer, &mut mutated).unwrap();
+    assert_eq!(mutated, [2]);
+    assert_eq!(trace.memory_witnesses.len(), 1);
+    assert_eq!(trace.memory_witnesses[0].watch_id, "entry");
+    assert_eq!(trace.memory_witnesses[0].before.u8_values, [10]);
+    assert_eq!(trace.memory_witnesses[0].after.u8_values, [10]);
+}
+
+#[test]
 fn execution_trace_treats_explicitly_watched_first_jump_as_tail_call() {
     const CODE: u64 = 0x1000_0000;
     // jmp target; padding; target: mov rax,[rsp+0x28]; inc byte ptr [rax]; ret
@@ -1555,6 +1740,7 @@ fn execution_trace_treats_explicitly_watched_first_jump_as_tail_call() {
         instruction_rva: None,
         absolute_address: None,
         register: "stack5",
+        dereference_offset: None,
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -1594,6 +1780,7 @@ fn execution_trace_applies_watch_occurrence_to_tail_calls() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 1,
         occurrence: Some(2),
         image_coordinate: None,
@@ -1631,6 +1818,7 @@ fn execution_trace_activates_function_watch_at_selector_entry() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -1799,6 +1987,7 @@ fn execution_trace_witnesses_memory_before_and_after_a_call() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 4,
         occurrence: None,
         image_coordinate: None,
@@ -1845,6 +2034,7 @@ fn execution_trace_selects_one_based_watch_occurrence_without_spending_witness_b
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 1,
         occurrence: Some(2),
         image_coordinate: None,
@@ -1884,6 +2074,7 @@ fn inferred_return_path_completes_pending_memory_witness() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 4,
         occurrence: None,
         image_coordinate: None,
@@ -2591,6 +2782,8 @@ fn trace_event_limit_marks_capture_as_truncated() {
         watch_occurrence_counts: HashMap::new(),
         watch_stack: Vec::new(),
         selector_watches: Vec::new(),
+        checkpoint_returns: HashMap::new(),
+        unhookable_watches: Vec::new(),
         witnesses: Vec::new(),
         dropped_witnesses: 0,
         basic_blocks: HashMap::new(),
@@ -2603,6 +2796,7 @@ fn trace_event_limit_marks_capture_as_truncated() {
         known_function_entries: HashSet::new(),
         truncated: false,
         dropped_events: 0,
+        checkpoint_only: false,
     };
     for index in 0..=MAX_TRACE_EVENTS {
         push_trace_event(
@@ -2637,6 +2831,148 @@ fn win64_call_rejects_execution_that_does_not_reach_return_sentinel() {
     let mut engine = test_engine(&[0xf4]); // hlt
     let error = engine.call_win64(CODE, [0; 6]).unwrap_err().to_string();
     assert!(error.contains("before the guest returned"), "{error}");
+}
+
+#[test]
+fn win64_call_passes_ten_fifteen_and_sixteen_opaque_argument_slots() {
+    const CODE: u64 = 0x1000_0000;
+
+    for argument_count in [10usize, 15, 16] {
+        // Save the four register slots and every supplied stack slot to the
+        // buffer in RCX, then save the entry RSP alignment nibble.
+        let mut code = vec![
+            0x48, 0x89, 0x09, // mov [rcx],rcx
+            0x48, 0x89, 0x51, 0x08, // mov [rcx+8],rdx
+            0x4c, 0x89, 0x41, 0x10, // mov [rcx+16],r8
+            0x4c, 0x89, 0x49, 0x18, // mov [rcx+24],r9
+        ];
+        for index in 4u8..u8::try_from(argument_count).unwrap() {
+            let stack_offset = 0x28u32 + u32::from(index - 4) * 8;
+            if stack_offset <= 0x7f {
+                code.extend_from_slice(&[0x48, 0x8b, 0x44, 0x24, stack_offset as u8]);
+            } else {
+                code.extend_from_slice(&[0x48, 0x8b, 0x84, 0x24]);
+                code.extend_from_slice(&stack_offset.to_le_bytes());
+            }
+            // The sixteenth argument is still stored at +120, which fits
+            // the signed disp8 form used by this synthetic callee.
+            code.extend_from_slice(&[0x48, 0x89, 0x41, index * 8]);
+        }
+        code.extend_from_slice(&[
+            0x48, 0x89, 0xe0, // mov rax,rsp
+            0x83, 0xe0, 0x0f, // and eax,15
+            0x48, 0x89, 0x81, 0x80, 0, 0, 0, // mov [rcx+128],rax
+            0x31, 0xc0, // xor eax,eax
+            0xc3, // ret
+        ]);
+        let mut engine = test_engine(&code);
+        let output = engine.allocate(136, 8).unwrap();
+        let mut args = vec![
+            output,
+            0x1111_2222_3333_4444,
+            0x5555_6666_7777_8888,
+            0x9999_aaaa_bbbb_cccc,
+            0xdddd_eeee_ffff_0001,
+            0x1234_5678_9abc_def0,
+            0xfedc_ba98_7654_3210,
+            0x0000_0000_8000_0000, // raw -0.0f32 word
+            0x0000_0000_3f80_0000, // raw 1.0f32 word
+            0x0102_0304_0506_0708,
+            0x1112_1314_1516_1718,
+            0x2122_2324_2526_2728,
+            0x3132_3334_3536_3738,
+            0x4142_4344_4546_4748,
+            0x0000_0000_7fc1_2345, // raw NaN f32 word
+            0x0000_0000_3f80_0000, // Kira full-caller raw gain f32 word
+        ];
+        args.truncate(argument_count);
+
+        assert_eq!(engine.call_win64_args(CODE, &args).unwrap(), 0);
+
+        let mut observed = [0u8; 136];
+        engine.read(output, &mut observed).unwrap();
+        for (index, expected) in args.iter().copied().enumerate() {
+            assert_eq!(
+                u64::from_le_bytes(observed[index * 8..index * 8 + 8].try_into().unwrap()),
+                expected,
+                "argument {index} of {argument_count}"
+            );
+        }
+        for index in argument_count..16 {
+            assert_eq!(
+                u64::from_le_bytes(observed[index * 8..index * 8 + 8].try_into().unwrap()),
+                0,
+                "unused argument slot {index} of {argument_count}"
+            );
+        }
+        assert_eq!(
+            u64::from_le_bytes(observed[128..136].try_into().unwrap()),
+            8
+        );
+    }
+}
+
+#[test]
+fn win64_call_zeroes_register_and_home_slots_it_was_not_given() {
+    const CODE: u64 = 0x1000_0000;
+    // OR the four register slots and the four home-space slots into RAX so a
+    // zero return proves every slot the caller did not supply was cleared.
+    let mut engine = test_engine(&[
+        0x48, 0x89, 0xc8, // mov rax,rcx
+        0x48, 0x09, 0xd0, // or rax,rdx
+        0x4c, 0x09, 0xc0, // or rax,r8
+        0x4c, 0x09, 0xc8, // or rax,r9
+        0x48, 0x0b, 0x44, 0x24, 0x08, // or rax,[rsp+8]
+        0x48, 0x0b, 0x44, 0x24, 0x10, // or rax,[rsp+16]
+        0x48, 0x0b, 0x44, 0x24, 0x18, // or rax,[rsp+24]
+        0x48, 0x0b, 0x44, 0x24, 0x20, // or rax,[rsp+32]
+        0xc3, // ret
+    ]);
+    for argument_count in [0usize, 1, 3] {
+        // Dirty the registers and the top of the stack so the zeroes observed
+        // below come from the call frame setup, not from a fresh engine.
+        for register in [
+            RegisterX86::RCX,
+            RegisterX86::RDX,
+            RegisterX86::R8,
+            RegisterX86::R9,
+        ] {
+            engine
+                .unicorn
+                .reg_write(register, 0xdead_beef_dead_beef)
+                .unwrap();
+        }
+        engine
+            .write(STACK_BASE + STACK_SIZE - 0x100, &[0xa5; 0x100])
+            .unwrap();
+        let args = vec![0u64; argument_count];
+        assert_eq!(
+            engine.call_win64_args(CODE, &args).unwrap(),
+            0,
+            "{argument_count} arguments"
+        );
+    }
+}
+
+#[test]
+fn win64_call_rejects_an_argument_frame_the_stack_cannot_hold() {
+    const CODE: u64 = 0x1000_0000;
+    // mov rax,[rsp+0x2000] (0x28 + (1023 - 4) * 8: the slot of argument
+    // 1023); ret
+    let mut engine = test_engine(&[0x48, 0x8b, 0x84, 0x24, 0x00, 0x20, 0x00, 0x00, 0xc3]);
+    let mut args = vec![0u64; 1024];
+    args[1023] = 0x0bad_f00d_cafe_babe;
+    assert_eq!(
+        engine.call_win64_args(CODE, &args).unwrap(),
+        0x0bad_f00d_cafe_babe
+    );
+
+    let too_many = vec![0u64; usize::try_from(STACK_SIZE / 8).unwrap()];
+    let error = engine
+        .call_win64_args(CODE, &too_many)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Win64 argument frame requires"), "{error}");
 }
 
 #[test]

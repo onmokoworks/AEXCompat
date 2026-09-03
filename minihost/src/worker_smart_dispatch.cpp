@@ -2711,9 +2711,17 @@ bool dispatch(const Request& request, const Hooks& hooks,
     write<void*>(setdown_extra, 0, setdown_input.data());
     hooks.capture_module_audit();
     std::cerr << "stage:gpu_device_setdown_begin\n" << std::flush;
-    result.gpu_setdown_error = invoke_entry_seh(request.entry, kGpuDeviceSetdown,
-        request.input->data(), request.output->data(), params.data(), nullptr,
-        setdown_extra.data(), &result.gpu_setdown_exception_code);
+    {
+      // Dispatched before FRAME_SETDOWN but ranked behind it in the session
+      // frame's precedence, so the first-non-zero attribution rule does not
+      // cover it: neither its own answer nor its fault is recorded here, and
+      // the session frame names the fault from `gpu_setdown_exception_code`
+      // when this arm is the one it reports (issue #983).
+      const SelectorFaultAttributionPause pause;
+      result.gpu_setdown_error = invoke_entry_seh(request.entry, kGpuDeviceSetdown,
+          request.input->data(), request.output->data(), params.data(), nullptr,
+          setdown_extra.data(), &result.gpu_setdown_exception_code);
+    }
     std::cerr << "stage:gpu_device_setdown_end error=" << result.gpu_setdown_error
               << "\n" << std::flush;
   }

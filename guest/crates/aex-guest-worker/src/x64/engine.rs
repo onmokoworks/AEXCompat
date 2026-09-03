@@ -1082,6 +1082,8 @@ impl GuestEngine<'static> {
             watch_occurrence_counts: HashMap::new(),
             watch_stack: Vec::new(),
             selector_watches,
+            checkpoint_returns: HashMap::new(),
+            unhookable_watches: Vec::new(),
             witnesses: Vec::new(),
             dropped_witnesses: 0,
             basic_blocks: HashMap::new(),
@@ -1094,11 +1096,66 @@ impl GuestEngine<'static> {
             known_function_entries: HashSet::from([entry_address.saturating_sub(self.image_base)]),
             truncated: false,
             dropped_events: 0,
+            checkpoint_only: self.unicorn.get_data().trace_checkpoint_only,
         });
         let image_base = self.image_base;
         let image_end = self.image_end;
-        let mut hook_points = self.trace_points.clone();
-        hook_points.push(entry_address);
+        let checkpoint_only = self.unicorn.get_data().trace_checkpoint_only;
+        let mut hook_points = if checkpoint_only {
+            // Checkpoint capture hooks three kinds of points only: the direct
+            // call sites a watch names (by call-site rva or by callee
+            // function rva), the instruction right after each of them (the
+            // return checkpoint), and the selector entry so `function=` on
+            // the selector itself still arms. Everything a watch needs
+            // beyond that (tail-call jumps, indirect calls) is reported in
+            // `unhookable_watches` rather than silently producing nothing.
+            let watches = self.unicorn.get_data().trace_watches.clone();
+            let sites = self
+                .trace_points
+                .iter()
+                .filter_map(|point| {
+                    let mut bytes = [0u8; 15];
+                    self.unicorn.mem_read(*point, &mut bytes).ok()?;
+                    let instruction =
+                        Decoder::with_ip(64, &bytes, *point, DecoderOptions::NONE).decode();
+                    checkpoint_site(&instruction, *point, image_base, image_end)
+                })
+                .collect::<Vec<_>>();
+            let entry_rva = entry_address.saturating_sub(image_base);
+            let unhookable_watches = watches
+                .iter()
+                .filter_map(|watch| {
+                    checkpoint_unhookable_reason(watch, entry_rva, &sites).map(|reason| {
+                        UnhookableWatch {
+                            id: watch.id.clone(),
+                            reason,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            if let Some(capture) = self.unicorn.get_data_mut().trace.as_mut() {
+                capture.unhookable_watches = unhookable_watches;
+            }
+            let mut points = sites
+                .iter()
+                .filter(|site| {
+                    site.hookable_call()
+                        && watches.iter().any(|watch| {
+                            watch.instruction_rva == Some(site.pc_rva)
+                                || watch
+                                    .function_rva
+                                    .is_some_and(|rva| Some(rva) == site.target_rva)
+                        })
+                })
+                .flat_map(|site| [site.address, site.return_address])
+                .collect::<Vec<_>>();
+            points.push(entry_address);
+            points
+        } else {
+            let mut points = self.trace_points.clone();
+            points.push(entry_address);
+            points
+        };
         let label_points = self
             .unicorn
             .get_data()
@@ -1106,8 +1163,14 @@ impl GuestEngine<'static> {
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        hook_points.extend(label_points.iter().copied());
-        for point in label_points {
+        if !checkpoint_only {
+            hook_points.extend(label_points.iter().copied());
+        }
+        for point in if checkpoint_only {
+            Vec::new()
+        } else {
+            label_points
+        } {
             let mut bytes = [0u8; STUB_STRIDE as usize];
             if self.unicorn.mem_read(point, &mut bytes).is_err() {
                 continue;
@@ -1123,43 +1186,49 @@ impl GuestEngine<'static> {
         }
         hook_points.sort_unstable();
         hook_points.dedup();
-        let block_hook = uc(
-            "install guest trace block hook",
-            self.unicorn.add_block_hook(
-                image_base,
-                image_end - 1,
-                move |unicorn, address, size| {
-                    advance_runtime_target_lifecycle(unicorn.get_data_mut(), address);
-                    if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
-                        let block_key = (address, size);
-                        if let Some(observed) = capture.basic_blocks.get_mut(&block_key) {
-                            *observed += 1;
-                        } else if capture.basic_blocks.len() < MAX_TRACE_BASIC_BLOCKS {
-                            capture.basic_blocks.insert(block_key, 1);
-                        } else {
-                            capture.dropped_basic_blocks += 1;
-                        }
-                        if let Some(previous) = capture.previous_block.replace(address) {
-                            let edge_key = (previous, address);
-                            if let Some(observed) = capture.branch_edges.get_mut(&edge_key) {
+        if !self.unicorn.get_data().trace_checkpoint_only {
+            let block_hook = uc(
+                "install guest trace block hook",
+                self.unicorn.add_block_hook(
+                    image_base,
+                    image_end - 1,
+                    move |unicorn, address, size| {
+                        advance_runtime_target_lifecycle(unicorn.get_data_mut(), address);
+                        if let Some(capture) = unicorn.get_data_mut().trace.as_mut() {
+                            let block_key = (address, size);
+                            if let Some(observed) = capture.basic_blocks.get_mut(&block_key) {
                                 *observed += 1;
-                            } else if capture.branch_edges.len() < MAX_TRACE_BRANCH_EDGES {
-                                capture.branch_edges.insert(edge_key, 1);
+                            } else if capture.basic_blocks.len() < MAX_TRACE_BASIC_BLOCKS {
+                                capture.basic_blocks.insert(block_key, 1);
                             } else {
-                                capture.dropped_branch_edges += 1;
+                                capture.dropped_basic_blocks += 1;
+                            }
+                            if let Some(previous) = capture.previous_block.replace(address) {
+                                let edge_key = (previous, address);
+                                if let Some(observed) = capture.branch_edges.get_mut(&edge_key) {
+                                    *observed += 1;
+                                } else if capture.branch_edges.len() < MAX_TRACE_BRANCH_EDGES {
+                                    capture.branch_edges.insert(edge_key, 1);
+                                } else {
+                                    capture.dropped_branch_edges += 1;
+                                }
                             }
                         }
-                    }
-                },
-            ),
-        )?;
-        self.trace_hooks.push(block_hook);
+                    },
+                ),
+            )?;
+            self.trace_hooks.push(block_hook);
+        }
         for point in hook_points {
             let hook = uc(
                 "install guest execution trace point",
                 self.unicorn
                     .add_code_hook(point, point, move |unicorn, address, size| {
-                        trace_instruction(unicorn, address, size, image_base, image_end);
+                        if unicorn.get_data().trace_checkpoint_only {
+                            checkpoint_instruction(unicorn, address, image_base, image_end);
+                        } else {
+                            trace_instruction(unicorn, address, size, image_base, image_end);
+                        }
                     }),
             )?;
             self.trace_hooks.push(hook);
@@ -1302,6 +1371,12 @@ impl GuestEngine<'static> {
         }
         let trace_truncated = !truncation.is_empty();
         let trace_configuration = TraceConfiguration {
+            capture_mode: if capture.checkpoint_only {
+                "checkpoint"
+            } else {
+                "full_trace"
+            },
+            unhookable_watches: capture.unhookable_watches.clone(),
             max_events: MAX_TRACE_EVENTS,
             max_basic_blocks: MAX_TRACE_BASIC_BLOCKS,
             max_branch_edges: MAX_TRACE_BRANCH_EDGES,
@@ -1382,6 +1457,10 @@ impl GuestEngine<'static> {
 
     pub fn configure_trace_watches(&mut self, watches: Vec<TraceWatchSpec>) {
         self.unicorn.get_data_mut().trace_watches = watches;
+    }
+
+    pub fn configure_trace_checkpoint_only(&mut self, enabled: bool) {
+        self.unicorn.get_data_mut().trace_checkpoint_only = enabled;
     }
 
     pub fn add_trace_watch(&mut self, watch: TraceWatchSpec) {
@@ -1539,7 +1618,17 @@ impl GuestEngine<'static> {
     }
 
     pub fn call_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
-        self.call_win64_with_timeout(address, &args, TIMEOUT_MICROSECONDS)
+        self.call_win64_args(address, &args)
+    }
+
+    /// Calls a guest function using the Win64 ABI with an arbitrary number of
+    /// integer/pointer argument slots.
+    ///
+    /// Each value is copied as an opaque 64-bit payload. This is intentional:
+    /// callers that need to pass a raw `f32` word can place `value.to_bits()` in
+    /// the low 32 bits without a host-side numeric conversion.
+    pub fn call_win64_args(&mut self, address: u64, args: &[u64]) -> Result<u64, GuestError> {
+        self.call_win64_with_timeout(address, args, TIMEOUT_MICROSECONDS)
     }
 
     pub fn call_selector_win64(&mut self, address: u64, args: [u64; 6]) -> Result<u64, GuestError> {
@@ -1565,10 +1654,34 @@ impl GuestEngine<'static> {
         args: &[u64],
         timeout_microseconds: u64,
     ) -> Result<u64, GuestError> {
-        if args.len() < 4 || args.len() > 16 {
+        const WIN64_HOME_SPACE_BYTES: u64 = 0x20;
+        const RETURN_ADDRESS_BYTES: u64 = 8;
+        const MINIMUM_CALLEE_STACK_BYTES: u64 = PAGE_SIZE;
+
+        let stack_argument_count = args.len().saturating_sub(4);
+        let stack_argument_bytes = u64::try_from(stack_argument_count)
+            .ok()
+            .and_then(|count| count.checked_mul(8))
+            .ok_or_else(|| GuestError::Callback("Win64 argument list is too large".to_string()))?;
+        let unaligned_frame_bytes = RETURN_ADDRESS_BYTES
+            .checked_add(WIN64_HOME_SPACE_BYTES)
+            .and_then(|bytes| bytes.checked_add(stack_argument_bytes))
+            .ok_or_else(|| GuestError::Callback("Win64 argument frame is too large".to_string()))?;
+        // STACK_BASE + STACK_SIZE is 16-byte aligned. At function entry the
+        // Win64 ABI requires RSP % 16 == 8, so the bytes above RSP must also be
+        // congruent to 8 modulo 16.
+        let frame_bytes = if unaligned_frame_bytes % 16 == 8 {
+            unaligned_frame_bytes
+        } else {
+            unaligned_frame_bytes.checked_add(8).ok_or_else(|| {
+                GuestError::Callback("Win64 argument frame is too large".to_string())
+            })?
+        };
+        let available_frame_bytes = STACK_SIZE - MINIMUM_CALLEE_STACK_BYTES;
+        if frame_bytes > available_frame_bytes {
             return Err(GuestError::Callback(format!(
-                "Win64 call requires 4..=16 arguments, got {}",
-                args.len()
+                "Win64 argument frame requires {frame_bytes} bytes, but only \
+                 {available_frame_bytes} are available",
             )));
         }
         while let Some(thread_id) = self.scheduler_deferred_ready.pop_front() {
@@ -1590,9 +1703,15 @@ impl GuestEngine<'static> {
         self.unicorn.get_data_mut().latest_runtime_target = None;
         self.unicorn.get_data_mut().unsupported_import = None;
         let stack_top = STACK_BASE + STACK_SIZE;
-        // Win64 function entry observes RSP % 16 == 8. Reserve a return
-        // address, 32-byte shadow space, bounded stack arguments, and scratch.
-        let rsp = (stack_top - 0x108) | 8;
+        // Reserve the return address, 32-byte home space, every stack argument,
+        // alignment padding, and at least one page below RSP for the callee.
+        let rsp = stack_top - frame_bytes;
+        debug_assert_eq!(rsp % 16, 8);
+        uc(
+            "clear Win64 argument frame",
+            self.unicorn
+                .mem_write(rsp, &vec![0; usize::try_from(frame_bytes).unwrap()]),
+        )?;
         uc(
             "write return address",
             self.unicorn.mem_write(rsp, &RETURN_ADDRESS.to_le_bytes()),
@@ -1606,10 +1725,10 @@ impl GuestEngine<'static> {
         }
         for (register, value) in [
             (RegisterX86::RSP, rsp),
-            (RegisterX86::RCX, args[0]),
-            (RegisterX86::RDX, args[1]),
-            (RegisterX86::R8, args[2]),
-            (RegisterX86::R9, args[3]),
+            (RegisterX86::RCX, args.first().copied().unwrap_or(0)),
+            (RegisterX86::RDX, args.get(1).copied().unwrap_or(0)),
+            (RegisterX86::R8, args.get(2).copied().unwrap_or(0)),
+            (RegisterX86::R9, args.get(3).copied().unwrap_or(0)),
         ] {
             uc(
                 "write argument register",
@@ -2499,6 +2618,10 @@ impl GuestEngine<'static> {
         self.unicorn.get_data().dropped_unsupported_suite_calls
     }
 
+    pub fn smart_checkout_disk_id_fallbacks(&self) -> &[SmartCheckoutDiskIdFallback] {
+        &self.unicorn.get_data().smart_checkout_disk_id_fallbacks
+    }
+
     pub fn smart_callback_counts(&self) -> (u32, u32, u32) {
         let state = self.unicorn.get_data();
         (
@@ -2595,6 +2718,10 @@ impl GuestEngine<'static> {
 
     pub fn parameters(&self) -> &[GuestParam] {
         &self.unicorn.get_data().params
+    }
+
+    pub fn parameters_mut(&mut self) -> &mut [GuestParam] {
+        &mut self.unicorn.get_data_mut().params
     }
 }
 

@@ -6,6 +6,113 @@ pub struct GuestParam {
     pub bytes: Vec<u8>,
 }
 
+fn parameter_disk_id(parameter: &GuestParam) -> Option<i32> {
+    parameter.bytes.get(..4).and_then(|bytes| {
+        let bytes: [u8; 4] = bytes.try_into().ok()?;
+        Some(i32::from_le_bytes(bytes))
+    })
+}
+
+/// Where a smart checkout index landed among the declared parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LayerParameterResolution {
+    /// Zero-based offset into the captured parameter list (slot - 1).
+    pub offset: usize,
+    /// `true` when the positional slot was not a layer and the offset came
+    /// from matching the index against the layer parameters' disk ids. AE and
+    /// the minihost's `pre_checkout_layer` resolve positionally only, so this
+    /// is a host-side substitution the caller must record.
+    pub disk_id_fallback: bool,
+}
+
+/// Resolves a `PF_CHECKOUT_LAYER`/pre-checkout index to a layer parameter.
+///
+/// Positional resolution wins outright: when parameter `index` (1-based) is a
+/// `PF_Param_LAYER`, that slot is returned without consulting disk ids, no
+/// matter what other parameters declare as their id. Only when the positional
+/// slot is absent or not a layer are disk ids consulted, and only among layer
+/// parameters, so a slider or popup that happens to carry the same id never
+/// makes a valid positional checkout ambiguous.
+pub(crate) fn resolve_layer_parameter_offset(
+    parameters: &[GuestParam],
+    checkout_index: i32,
+) -> Result<LayerParameterResolution, String> {
+    let positional = usize::try_from(checkout_index)
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|offset| parameters.get(offset).map(|parameter| (offset, parameter)));
+    if let Some((offset, parameter)) = positional
+        && parameter.param_type == 0
+    {
+        return Ok(LayerParameterResolution {
+            offset,
+            disk_id_fallback: false,
+        });
+    }
+    let mut layer_disk_matches = parameters.iter().enumerate().filter(|(_, parameter)| {
+        parameter.param_type == 0 && parameter_disk_id(parameter) == Some(checkout_index)
+    });
+    let disk_match = layer_disk_matches.next();
+    if disk_match.is_some() && layer_disk_matches.next().is_some() {
+        return Err(format!(
+            "smart checkout index={checkout_index} is not a positional PF_Param_LAYER and its disk_id is duplicated among layer parameters"
+        ));
+    }
+    if let Some((offset, _)) = disk_match {
+        return Ok(LayerParameterResolution {
+            offset,
+            disk_id_fallback: true,
+        });
+    }
+    if positional.is_some() {
+        Err(format!(
+            "smart checkout index={checkout_index} is not a PF_Param_LAYER"
+        ))
+    } else {
+        Err(format!(
+            "smart checkout index={checkout_index} does not resolve to a declared parameter"
+        ))
+    }
+}
+
+/// A smart checkout that the host resolved through the disk-id fallback in
+/// `resolve_layer_parameter_offset` instead of positionally. AE and the
+/// minihost have no such fallback, so each one is a host-side substitution
+/// that a sweep must be able to see next to the render result.
+///
+/// Records are keyed by `(requested_index, resolved_slot)` and accumulate for
+/// the engine's lifetime: a repeat checkout bumps `call_count` instead of
+/// adding an entry, and nothing clears the list between resident frames, so
+/// a per-frame report carries the running total across every frame the
+/// engine has rendered so far (the same convention as
+/// `unsupported_suite_calls`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SmartCheckoutDiskIdFallback {
+    pub requested_index: i32,
+    pub resolved_slot: usize,
+    pub call_count: u64,
+}
+
+/// Dedupes on `(requested_index, resolved_slot)` and never removes an entry;
+/// see `SmartCheckoutDiskIdFallback` for the resulting cumulative semantics.
+pub(crate) fn record_smart_checkout_disk_id_fallback(
+    records: &mut Vec<SmartCheckoutDiskIdFallback>,
+    requested_index: i32,
+    resolved_slot: usize,
+) {
+    if let Some(record) = records.iter_mut().find(|record| {
+        record.requested_index == requested_index && record.resolved_slot == resolved_slot
+    }) {
+        record.call_count += 1;
+    } else {
+        records.push(SmartCheckoutDiskIdFallback {
+            requested_index,
+            resolved_slot,
+            call_count: 1,
+        });
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnsupportedSuiteCall {
     pub name: &'static str,
@@ -70,6 +177,7 @@ struct GuestState {
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
+    smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
     aegp_compute_cache_classes: HashMap<Vec<u8>, [u64; 4]>,
     selector_dispatch_active: bool,
     pending_unsupported_suite: Option<PendingUnsupportedSuite>,
@@ -99,6 +207,7 @@ struct GuestState {
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
     trace_watches: Vec<TraceWatchSpec>,
+    trace_checkpoint_only: bool,
     pending_iterate: Option<PendingIterate>,
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     vcomp_requested_threads: Option<u32>,
@@ -440,6 +549,8 @@ struct TraceCapture {
     watch_occurrence_counts: HashMap<String, u64>,
     watch_stack: Vec<Vec<PendingTraceWatch>>,
     selector_watches: Vec<PendingTraceWatch>,
+    checkpoint_returns: HashMap<u64, Vec<PendingTraceWatch>>,
+    unhookable_watches: Vec<UnhookableWatch>,
     witnesses: Vec<TraceMemoryWitness>,
     dropped_witnesses: u64,
     basic_blocks: HashMap<(u64, u32), u64>,
@@ -452,6 +563,7 @@ struct TraceCapture {
     known_function_entries: HashSet<u64>,
     truncated: bool,
     dropped_events: u64,
+    checkpoint_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -478,6 +590,8 @@ pub struct TraceWatchSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub absolute_address: Option<u64>,
     pub register: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dereference_offset: Option<u64>,
     pub size: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<u64>,
@@ -498,8 +612,21 @@ pub struct TraceModule {
     pub symbols: Vec<String>,
 }
 
+/// A watch the active capture mode cannot arm. Checkpoint capture hooks the
+/// selector entry and the direct call sites its watches name, so a watch
+/// that depends on a tail-call jump or an indirect call produces no witness;
+/// listing it here keeps that absence explicit instead of silent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UnhookableWatch {
+    pub id: String,
+    pub reason: &'static str,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceConfiguration {
+    pub capture_mode: &'static str,
+    /// Watches this capture could not hook (always empty for `full_trace`).
+    pub unhookable_watches: Vec<UnhookableWatch>,
     pub max_events: usize,
     pub max_basic_blocks: usize,
     pub max_branch_edges: usize,

@@ -118,6 +118,19 @@ fn admissible_return_message(message: &FrameReturnMessage) -> bool {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
+/// What the worker's guarded selector call returns in place of a faulting
+/// selector's result (`kAuditFailure`), and the only `render_error` a
+/// `selector_crash` may accompany (issue #983).
+const SELECTOR_FAULT_SUBSTITUTE: i64 = 512;
+
+fn admissible_selector_name(selector: &str) -> bool {
+    !selector.is_empty()
+        && selector.len() <= 64
+        && selector
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
 fn valid_dependency_basename(name: &str) -> bool {
     name.len() >= 5
         && name.len() <= 260
@@ -712,6 +725,24 @@ pub enum FrameStatus {
         /// there, and plug-ins write their own reason, so this is often the
         /// whole diagnosis (issue #707). Absent when the plug-in said nothing.
         return_message: Option<FrameReturnMessage>,
+        /// The frame failed because a selector raised an SEH exception, rather
+        /// than because the plug-in returned `render_error` normally. This is
+        /// essential when the worker's fail-closed substitute (512) collides
+        /// with a real PF_Err value (issue #983). Present only with
+        /// `render_error == 512`: the worker attaches it to the substitute it
+        /// explains and to nothing else, and the session fails closed on any
+        /// other shape. The fault named is the one whose substituted 512 is
+        /// this `render_error`, not merely the last fault of the frame: a frame
+        /// whose 512 was decided before its first fault (the plug-in's own 512
+        /// from RENDER and then a FRAME_SETDOWN fault, say) carries none. The
+        /// converse does not hold: a 512 without this field is a 512 that no
+        /// SEH fault explains, not proof the plug-in returned it itself, since
+        /// an escaped C++ exception, a failed module audit, and a guard
+        /// refusal substitute the same number without a fault. The fault
+        /// fingerprint (site, module, RVA, unwind) stays on the worker's
+        /// `stage:selector_seh` stderr line (issue #1212); this is the
+        /// bounded, frame-scoped discriminator.
+        selector_crash: Option<SelectorCrash>,
     },
     /// The Smart selector returned success, but the guarded output retained
     /// its initialization sentinel. This typed host observation is not a
@@ -787,6 +818,13 @@ pub struct FrameReturnMessage {
     pub display_requested: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SelectorCrash {
+    pub selector: String,
+    pub exception_code: u32,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FrameDone {
@@ -804,6 +842,8 @@ struct FrameDone {
     missing_dependency: Option<String>,
     #[serde(default)]
     return_message: Option<FrameReturnMessage>,
+    #[serde(default)]
+    selector_crash: Option<SelectorCrash>,
     #[serde(default)]
     generation: Option<u32>,
     /// Present only on a "resize_needed" status (#262): the dimensions the
@@ -2226,6 +2266,24 @@ impl RenderSession {
             {
                 done.return_message = None;
             }
+            // Fail closed rather than drop: unlike `return_message` this is
+            // the host's own claim about the frame, so a shape the worker
+            // cannot legitimately produce (a zero exception code, a selector
+            // name outside the worker's vocabulary, or a crash attached to an
+            // error other than the 512 the guard substitutes for a fault) is a
+            // protocol violation, not plug-in text to be discarded.
+            if done.selector_crash.as_ref().is_some_and(|crash| {
+                crash.exception_code == 0
+                    || !admissible_selector_name(&crash.selector)
+                    || done.render_error != SELECTOR_FAULT_SUBSTITUTE
+            }) {
+                return Err(self.invalidate(
+                    "malformed_selector_crash",
+                    format!("frame {frame_index} carried an invalid selector crash diagnostic"),
+                    true,
+                    POST_TERMINATION_COLLECT_TIMEOUT,
+                ));
+            }
             match done.status.as_str() {
                 "error" => {
                     if done.output.is_some()
@@ -2235,7 +2293,8 @@ impl RenderSession {
                             && (!self.smart
                                 || done.render_error != -6
                                 || done.missing_dependency.is_some()
-                                || done.return_message.is_some()))
+                                || done.return_message.is_some()
+                                || done.selector_crash.is_some()))
                         || carries_resize_fields
                     {
                         return Err(self.invalidate(
@@ -2308,6 +2367,7 @@ impl RenderSession {
                                 render_error: done.render_error,
                                 missing_dependency: done.missing_dependency,
                                 return_message: done.return_message,
+                                selector_crash: done.selector_crash,
                             }
                         },
                     });
@@ -2321,9 +2381,12 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     };
+                    // The `selector_crash` arm is belt-and-braces: the shape
+                    // check above already refused any crash outside a 512.
                     if carries_resize_fields
                         || done.missing_dependency.is_some()
                         || done.smart_output_untouched
+                        || done.selector_crash.is_some()
                     {
                         return Err(self.invalidate(
                             "malformed_ok_response",
@@ -2389,7 +2452,12 @@ impl RenderSession {
                     // carries only width/height. Bound the requested size so a
                     // misbehaving worker cannot force an unbounded re-open, and
                     // require it to actually exceed the current slot.
-                    if done.output.is_some() || done.generation.is_some() || done.render_error != 0
+                    // The `selector_crash` arm is belt-and-braces: the shape
+                    // check above already refused any crash outside a 512.
+                    if done.output.is_some()
+                        || done.generation.is_some()
+                        || done.render_error != 0
+                        || done.selector_crash.is_some()
                     {
                         return Err(self.invalidate(
                             "malformed_resize_response",
@@ -2900,8 +2968,10 @@ impl RenderSession {
                 // record instead of needing `--close-report` (issue #1264).
                 // The block is windowed per plug-in in the worker, so after a
                 // cluster swap it describes the plug-in current at close, not
-                // the launch-time one this close names by hash; after a failed
-                // swap (exit 25) it covers only the failed load attempt. The sibling
+                // the launch-time one this close names by hash. After a swap
+                // that failed at the load step (exit 25) it covers only that
+                // failed attempt; a swap rejected before the outgoing plug-in
+                // was unloaded leaves the outgoing plug-in's window intact. The sibling
                 // `unsupported_suite_calls` is not propagated here (the close
                 // never carried it), so on this path the positive half stands
                 // alone: read `trap_count` for the negative half.
@@ -3686,12 +3756,14 @@ pub fn run_video_batch(
                     render_error,
                     missing_dependency,
                     return_message,
+                    selector_crash,
                 } => Ok(json!({
                     "frame_index": frame_index,
                     "status": "error",
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
                     "return_message": return_message,
+                    "selector_crash": selector_crash,
                 })),
                 FrameStatus::SmartOutputUntouched => Ok(json!({
                     "frame_index": frame_index,

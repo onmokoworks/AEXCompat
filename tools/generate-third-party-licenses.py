@@ -46,6 +46,15 @@ def external_package(package: dict[str, object]) -> bool:
     return isinstance(source, str) and bool(source)
 
 
+def lockfile_sha256() -> str:
+    # Hash the lockfile as text, not as the bytes a particular checkout holds:
+    # with core.autocrlf=true the working copy carries CRLF and the same
+    # committed lockfile hashes differently from an LF checkout, which turned
+    # this audit into a verdict about the machine's git configuration.
+    normalized = LOCKFILE.read_bytes().replace(b"\r\n", b"\n")
+    return hashlib.sha256(normalized).hexdigest()
+
+
 def compact_cargo_about(raw: dict[str, object]) -> dict[str, object]:
     packages = []
     for entry in raw["crates"]:
@@ -90,7 +99,7 @@ def compact_cargo_about(raw: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": 1,
         "cargo_about_version": CARGO_ABOUT_VERSION,
-        "cargo_lock_sha256": hashlib.sha256(LOCKFILE.read_bytes()).hexdigest(),
+        "cargo_lock_sha256": lockfile_sha256(),
         "targets": list(TARGETS),
         "packages": packages,
         "licenses": licenses,

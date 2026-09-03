@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "cargo_about_version": "0.9.1",
-  "cargo_lock_sha256": "86e13c3eda571929c41953429d5f6653c42e0b0edf0d21107684a4953c933b43",
+  "cargo_lock_sha256": "e6faadbda4fff8bdeaaccc991696110958575d9e33bdc6a65004eb190ef5dd9d",
   "targets": [
     "x86_64-pc-windows-msvc",
     "aarch64-apple-darwin",
