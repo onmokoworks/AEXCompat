@@ -75,9 +75,6 @@ aex-guest-worker render-trace-png \
 - `rva`はcallまたはtail-callを行うinstructionのRVAです。
 - `function`と`rva`はどちらか一方だけを指定します。
 - `occurrence=<n>`はn回目だけを取得するため、実質的なhit上限として使えます。
-- `size`は1..4096 bytesに制限されます。`deref=<offset>`を指定すると、register
-  またはstack引数の`+offset`に格納されたpointer先を取得します。
-- checkpointも通常のguest selector timeout内でfail-closeします。
 - `arg`と`register`は同義です。`rcx`、`rdx`、`r8`、`r9`、`rax`、
   `stack5`～`stack8`（または`5`～`8`）を指定できます。
 - `size`は1～4096 byteです。
