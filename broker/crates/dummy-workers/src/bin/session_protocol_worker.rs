@@ -21,6 +21,13 @@
 //! - `bad_extent`: reports a packed byte count that disagrees with the
 //!   dimensions it reports alongside it.
 //! - `error_frame_0`: answers frame 0 with a frame-local error response.
+//! - `selector_crash_frame_0`: answers frame 0 with a structured guarded-SEH
+//!   diagnostic whose numeric render error collides with PF error 512.
+//! - `selector_crash_wrong_error_frame_0`, `selector_crash_bad_selector_frame_0`,
+//!   `selector_crash_zero_code_frame_0`: the same diagnostic attached to a
+//!   render error the guard never substitutes, naming a selector outside the
+//!   worker's vocabulary, or carrying no exception code. Each must invalidate
+//!   the session.
 //! - `modal_frame`: opens a MessageBox on its first frame and waits for the
 //!   broker watchdog (issue #351). The desktop report itself is written at
 //!   launch, independent of this behavior.
@@ -1008,6 +1015,40 @@ mod worker {
                          \"smart_output_untouched\":true}}"
                     ),
                 };
+                if !write_message(response, &reply) {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                continue;
+            }
+            if matches!(
+                behavior.as_str(),
+                "selector_crash_frame_0"
+                    | "selector_crash_wrong_error_frame_0"
+                    | "selector_crash_bad_selector_frame_0"
+                    | "selector_crash_zero_code_frame_0"
+            ) && frame_index == 0
+            {
+                let render_error = if behavior == "selector_crash_wrong_error_frame_0" {
+                    -40
+                } else {
+                    512
+                };
+                let selector = if behavior == "selector_crash_bad_selector_frame_0" {
+                    "smart render"
+                } else {
+                    "SMART_RENDER"
+                };
+                let exception_code: u32 = if behavior == "selector_crash_zero_code_frame_0" {
+                    0
+                } else {
+                    0xC000_0005
+                };
+                let reply = format!(
+                    "{{\"v\":1,\"type\":\"frame_done\",\"frame_index\":{frame_index},\
+                     \"status\":\"error\",\"render_error\":{render_error},\
+                     \"selector_crash\":{{\"selector\":\"{selector}\",\
+                     \"exception_code\":{exception_code}}}}}"
+                );
                 if !write_message(response, &reply) {
                     return EXIT_PROTOCOL_VIOLATION;
                 }
