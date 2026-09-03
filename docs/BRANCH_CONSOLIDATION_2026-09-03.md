@@ -317,3 +317,166 @@ main を `ad9e3103` に ff (1537 + 1134 + bee-scope とそのレビュー修正�
 計 24 ファイル +845/-51)。この head でローカル CI 全 job を実行中。
 PASS したら origin/main へ push する。
 
+### 2026-09-03 バッチ 1 を origin/main へ push
+
+- `ad9e3103` を push (4912b28f..ad9e3103)。続けてこのログを `b6662f00` で
+  commit / push。mirror も更新済み。
+
+### 2026-09-03 層 3 の個別判定 (別エージェント調査、diff-of-diffs と main の squash commit で確認)
+
+| branch | 判定 | 根拠 |
+|---|---|---|
+| `issue335-ci-greenable` | ALREADY-ON-MAIN | `162238f4` (#346) に squash 済み。後に #731 で restricted token 自体が消えた |
+| `issue339-session-audio-sidecar` | ALREADY-ON-MAIN | `ee3d88ac` (#343)、diff-of-diffs 空 |
+| `issue353-layered-argb32f` | ALREADY-ON-MAIN | `c2fc6725` (#355) |
+| `worktree-issue351-worker-desktop` | ALREADY-ON-MAIN | `c7817e5f` (#359) |
+| `backup-issue351-full-impl` | SUPERSEDED | #359 → #1196。未反映の案は `DESKTOP_SWITCHDESKTOP` を worker に渡さない点だけで、同一トークンの worker には効かない (推論) |
+| `issue664-ci-speedup` | ALREADY-ON-MAIN | `d23c586c` (#669) |
+| `issue660-scan-depth` | ALREADY-ON-MAIN | `d2bac24d` (#666) |
+| `issue671-ninja-worker` | ALREADY-ON-MAIN | `dfd08d8b` (#673) |
+| `issue686-simd-unpack` | ALREADY-ON-MAIN | `030ed09e` (#687) |
+| `codex/issue404-sweep-parallel` (ローカルのみ) | ALREADY-ON-MAIN | `287dee60` (#406) |
+| `origin/codex/olm-suite-followup` | SUPERSEDED | 各トピックが #509 / #516 / #518 / #525 / #526 / #528 / #531 / #756 として個別に main 入り。guest crate はその後モジュール分割されていて適用不能 |
+| `origin/codex/pointparam-suite` | SUPERSEDED | 上の部分集合 |
+| `origin/codex/docs-refresh` | RESIDUAL (小) | README の headless CLI 段落と docs/README.md の索引 3 件 (`CONFORMANCE_BUNDLE_CONTRACT.md` 等) が main に無い。README は 08-20 に再構成済みで hunk は当たらないので、要るなら手で書き直す (約 26 行) |
+| `issue725-classic-setup-error` | ALREADY-ON-MAIN | 実体は #777 の WIP で、`f42289d8` (#785) に全行含まれる |
+| `worktree-claim-convention` | ALREADY-ON-MAIN | `0854865b` (#21)。main は `MEMORY_LIMIT_DETECTION_SLACK` を足した上位互換 |
+| `issue8-smartfx-geometry-probe` | ALREADY-ON-MAIN | `e3278416` (同題)。probe と refresh script は main にあり後に進化 |
+| `issue743-linux-pytest-probe` | 一時 workflow | 本人が「本採用時に削除」と明記。main に #743 の痕跡なし。Issue #743 の open/closed は git からは判定不能 |
+
+推奨: `codex/docs-refresh` の索引 3 件をオーナー判断で手書きする以外、
+層 3 は全部 DROP (ブランチ削除候補)。今回はブランチを削除しない。
+
+### 2026-09-03 バッチ 2 の準備 (consolidate/main 上)
+
+- `9ee15933` bee-scope の close コメント精度 (再々レビュー指摘)。
+- `d41ca02e` license audit の lockfile hash を改行正規化してから計算する
+  ように修正し、snapshot の `cargo_lock_sha256` を LF 版に更新。packages /
+  licenses / HTML / TXT は変化なし。ローカルで `generate-third-party-licenses.py`
+  (check) が通ることを確認。ベースラインで見つけた既存問題の修正で、
+  マージ作業の範囲外だが、CI 相当の検証を全 job 揃えるために取り込む
+  (逸脱として記録)。
+- `pick/1162-guest` (5 commit、+528/-60、guest のみ) を merge、conflict なし。
+- `pick/olm-win64` (3 commit、+209/-13、guest のみ) を merge、conflict なし。
+- 両 pick のレビューを別エージェントで実施中。`pick/983-seh` は作業中。
+
+### 2026-09-03 バッチ 2 のレビュー結果 (1 周目)
+
+- `pick/olm-win64` (3 commit): 承認。frame 計算 (RSP ≡ 8 mod 16、shadow
+  0x20、stack arg 位置)、上限検査 (`STACK_SIZE/8` 引数は拒否)、ゼロ埋め範囲、
+  main の scheduler-deferred-thread 処理の保持、テスト helper の一致を独立に
+  検算済み。非 blocking: `imports.rs` / `opencl_imports.rs` の callback
+  frame は旧式 `(top-0x108)|8` のまま (元 commit も同様、別件)。
+- `pick/1162-guest` (5 commit): 指摘あり、修正中。
+  - F5 blocking: `resolve_layer_parameter_offset` が disk-id 照合を param
+    type で絞らずに曖昧判定するため、`[Slider id=3, Layer id=1, Popup id=2]`
+    で `checkout_layer(2)` (positional、AE と minihost `pre_checkout_layer`
+    はこれ) が「ambiguous」で拒否される。→ positional slot が layer なら
+    即それを返し、disk id は layer 以外のときだけ layer 同士で照合。
+  - F6: disk-id fallback は minihost にも AE 文書にも対応物が無く、発火
+    しても記録が残らない → 記録を残す (fallback 自体はオーナーのブランチ
+    由来なので残す)。
+  - F1: arbitrary default の value が default handle の alias。minihost は
+    `PF_Arbitrary_COPY_FUNC` で私有コピーを作り同一 handle を拒否する →
+    合わせる。F2: null default を error にしている (minihost は
+    「value = null で続行」) → 合わせる。F3: dispose 失敗時に GLOBAL_SETDOWN
+    の結果が捨てられる → 両方残す。F4: 最初の DISPOSE 失敗で中断 (minihost
+    は残りも dispose) → 全部 dispose。
+  - F8: `--watch` があると checkpoint mode が強制され、`function=` /
+    jmp tail-call / indirect call の watch が黙って 0 件になる → entry
+    hook を checkpoint mode でも残し、hook できない watch を
+    `unhookable_watches` として出力。F9: 設定が sticky → 毎回リセット。
+    F7: dossier の `size` / `deref` 重複記述。
+- `pick/983-seh` (2 commit): レビュー中。
+- consolidate/main (1162 + olm + 983 を merge、`cddb06fc`) のテスト: 全木
+  rustfmt PASS、broker 629、multifilter 237、ymm4 3、guest 444 (983 merge
+  前、guest は 983 で変化なし)、いずれも failed 0。
+
+### 2026-09-03 バッチ 2 のレビュー結果 (2 周目以降)
+
+- `pick/1162-guest` 修正 1 周目 (4 commit、F1〜F9 全部対応)。再レビューで
+  追加指摘: (a) `native_x64.rs` (macOS 専用、この機ではコンパイル不能) に
+  `SmartCheckoutDiskIdFallback` の二重 import で E0252 → 除去。(b) render
+  成功後の value-copy DISPOSE 失敗で render 結果を捨てていた (minihost は
+  `invalid_operations` を数えて結果を残す、AE は ARB callback の戻り値を
+  無視) → 結果を残し `RenderReport.arbitrary_dispose_failures` に記録、
+  `end_global` の失敗扱いは維持。(c) `Compound` で cleanup が primary に
+  なる arm があり GLOBAL_SETDOWN の code が消えていた → 入れ替え。
+  (d) fallback 記録が resident frame 間で累積する旨を doc に明記。
+  (e) image 外を指す direct call の `rva=` watch を unhookable に分類。
+  → 修正 2 commit を再々レビュー: 退行なし、承認。補足: resident の
+  `frame_done` は `arbitrary_dispose_failures` や
+  `smart_checkout_disk_id_fallbacks` を投影しない (既存の
+  `unsupported_suite_calls` と同じ扱い、CLI `render` / `render-png` の
+  report には出る)。
+- `pick/983-seh` 1 周目: 承認 + should-fix 1 件 (`selector_crash` が
+  「最後に fault した selector」を指し、precedence で 512 を勝ち取った
+  selector と一致しない場合がある)。512 のみに attach する逸脱 (adapting
+  agent の判断) はレビューも妥当と判定。修正 2 commit: per-frame の
+  `SelectorFaultAttribution` (最初の fault + それ以前の非ゼロ結果の有無)
+  を導入し、`frame_error == 512 && captured && !error_before_fault` の
+  ときだけ attach。ARB probe と GPU_DEVICE_SETDOWN は attribution を pause。
+  worker self-test route `--self-test-selector-fault-attribution` (8 シナ
+  リオ) を追加し `test_worker_selftest_routes.py` から 3 route で実行。
+  再レビュー実施中。
+- guest テスト (1162 修正 2 周目 merge 後): 453 passed。
+
+### 2026-09-03 バッチ 2 の main 反映
+
+- `pick/983-seh` 修正 2 commit の再レビュー: blocking なし、承認
+  (`frame_fault` と pause guard は selector dispatch が単一スレッドである
+  前提で `seh_sequence` と同じ保管モデル、reset 点は全 route で frame 先頭、
+  `!error_before_fault` 規則は under-attribution 側にしか倒れない、
+  self-test は実 dispatch 経路で実 SEH を起こす)。
+- consolidate/main `e06884b9` (1162 修正 2 周 + olm + 983 修正 + license
+  audit 修正 + bee-scope コメント) の Rust suite: 全木 rustfmt PASS、broker
+  629、multifilter 237 (+ `--all-targets` check)、ymm4 3、guest 453、failed 0。
+- main にはログの commit `b6662f00` があり ff できないので、
+  `git merge --no-ff consolidate/main` で `e22592bc` を作成 (conflict なし、
+  27 ファイル +2607/-147)。この head でローカル CI 全 job を実行中。
+
+### 2026-09-03 バッチ 2 を origin/main へ push
+
+- main `e22592bc` のローカル CI: 全 25 step PASS (license-audit も修正で
+  PASS)。pytest main partition は failed 0。origin/main へ push 済み。
+- レビュー済み境界: `e22592bc` (バッチ 1 は `ad9e3103`)。以後の差分は
+  `git diff e22592bc` で見る。
+
+## 状態まとめ (2026-09-03 時点)
+
+取り込み済み (origin/main):
+- `issue1537-ffi-prebuilt` (merge + 相対パス正規化)
+- `issue1134-load-library-w` (merge)
+- `bee-scope` (merge + attribution window / parsing の修正 3 commit)
+- `codex/integrate-1162-world-io` の MISSING 5 commit (cherry-pick + 修正 6 commit)
+- `codex/issue983-seh-diagnostics` (cherry-pick + 修正 2 commit) と 1162 の
+  `642b3c7b`
+- `codex/olm-win64-stack-args` (cherry-pick 2 + 追加テスト 1)
+- license audit の CRLF 依存修正 (逸脱として記録)
+
+取り込まない (判定は上の各項):
+- 層 0 の 9 本、`codex/issue1446`、`codex/issue1475`、`codex/issue1135`、
+  `codex/issue1113`、`codex/issue851`、`codex/issue388-resolve-ofx`、
+  `multifilter-*-876/871`、層 3 の 18 本 (`codex/docs-refresh` の索引 3 件は
+  オーナー判断)。ブランチは削除していない。
+
+保留 (オーナーの意図待ち):
+- `wip/worker-desktop-20260903` (#1196 の機械的 revert)。
+
+follow-up (Issue が立てられないためここに記録):
+- LoadLibraryW / LoadLibraryExW / GetModuleHandleW の名前解決ポリシー
+  統一、`windows_module_refcounts` の部分モデル、拒否モジュール名の診断
+  (マージ 2 のレビュー)。
+- `imports.rs` / `opencl_imports.rs` の callback frame が旧式
+  `(top-0x108)|8` のまま (olm レビュー)。
+- resident `frame_done` が `arbitrary_dispose_failures` /
+  `smart_checkout_disk_id_fallbacks` を投影しない (既存の
+  `unsupported_suite_calls` と同じ)。
+- `docs/BEE_SCENE_OBJECT_ABI_2026-08-17.md` の Timecode 証跡に
+  `bee_facade` の参照を足す。
+- `test_worker_selftest_routes.py` は built worker 無しの素の `pytest -q`
+  で落ちる (既存)。
+
+ローカル CI スクリプト (CI workflow の再現) はこのセッションの scratchpad
+にあり、リポジトリには入れていない。必要なら `tools/` へ移す。
+
