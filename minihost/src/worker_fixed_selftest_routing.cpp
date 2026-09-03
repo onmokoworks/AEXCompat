@@ -214,7 +214,11 @@ int selftest_selector_fault_attribution(int, wchar_t**) {
             << ",\"discarded_cleanup_fault_skipped\":"
             << flag(probe.discarded_cleanup_fault_skipped)
             << ",\"reset_clears_previous_frame\":"
-            << flag(probe.reset_clears_previous_frame) << "}\n";
+            << flag(probe.reset_clears_previous_frame)
+            << ",\"paused_calls_leave_no_trace\":"
+            << flag(probe.paused_calls_leave_no_trace)
+            << ",\"recorded_fault_named\":" << flag(probe.recorded_fault_named)
+            << "}\n";
   return probe.passed ? 0 : 1;
 }
 

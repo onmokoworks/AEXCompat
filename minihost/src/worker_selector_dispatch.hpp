@@ -235,15 +235,24 @@ struct SelectorReturnMessage {
 
 /// Which fault a frame's `selector_crash` names (issue #983). One frame
 /// dispatches several selectors, more than one of which can fault, and reports
-/// one error: the first non-zero selector result in dispatch order. The
-/// classic `render_lifecycle::end_frame` takes FRAME_SETDOWN's error only when
-/// the primary error is 0, the smart precedence is GPU setup, PreRender,
-/// render, GPU setdown, and the UI-close and PreRender-cleanup calls never
-/// replace a non-zero error. Under that rule the first SEH fault of the frame
-/// is the source of a 512 frame error exactly when no selector result was
-/// already non-zero before it: a result that was (the plug-in's own 512, or a
-/// non-SEH substitute) decided the frame first, and every later fault is
-/// masked. Reset per frame by `reset_selector_fault_attribution`.
+/// one error: the first non-zero result among the selectors whose result the
+/// frame folds in, in dispatch order. The classic `render_lifecycle::end_frame`
+/// takes FRAME_SETDOWN's error only when the primary error is 0, the smart
+/// precedence is GPU setup, PreRender, render (FRAME_SETDOWN folded in), GPU
+/// setdown, and the UI-close and PreRender-cleanup calls never replace a
+/// non-zero error. Under that rule the first SEH fault of the frame is the
+/// source of a 512 frame error exactly when no folded-in result was already
+/// non-zero before it: a result that was (the plug-in's own 512, or a non-SEH
+/// substitute) decided the frame first, and every later fault is masked.
+///
+/// Two dispatches fall outside the rule and run with the attribution paused
+/// (`SelectorFaultAttributionPause`): the arbitrary-data probes in
+/// worker_parameter_execution.cpp tolerate both a non-zero answer and a fault
+/// (they count it and go on, or end the frame with -5), so neither is ever the
+/// frame's 512; and GPU_DEVICE_SETDOWN is dispatched before FRAME_SETDOWN but
+/// ranked behind it, so the smart frame records its fault itself, from the
+/// setdown's own exception code, when its arm is the one reported. Reset per
+/// frame by `reset_selector_fault_attribution`.
 struct SelectorFaultAttribution {
   /// A guarded selector call faulted since the last reset. The fields below
   /// describe the first such fault; later ones are on their
@@ -343,6 +352,13 @@ struct SelectorFaultAttributionProbe {
   bool discarded_cleanup_fault_skipped{};
   /// A reset forgets the previous frame's fault and its decided-before flag.
   bool reset_clears_previous_frame{};
+  /// Under `SelectorFaultAttributionPause` neither an own 512 nor a fault is
+  /// recorded (the arbitrary-data probe shape): a FRAME_SETDOWN fault after
+  /// the pause is still named, with no decided-before mark.
+  bool paused_calls_leave_no_trace{};
+  /// `record_selector_fault_attribution` names the fault it is given (the
+  /// GPU_DEVICE_SETDOWN shape the smart frame records itself).
+  bool recorded_fault_named{};
 };
 
 /// Behavioural check that `SelectorFaultAttribution` names the fault whose
@@ -363,6 +379,31 @@ void reset_selector_return_message() noexcept;
 /// session frame and of every retried render attempt (the retry's result
 /// replaces the first attempt's, so its attribution restarts with it).
 void reset_selector_fault_attribution() noexcept;
+/// While one is alive, guarded calls record neither a fault nor a non-zero
+/// result in `frame_fault`. For the dispatches whose result the frame does not
+/// fold in under the first-non-zero rule (see `SelectorFaultAttribution`).
+/// Nestable; not copyable.
+class SelectorFaultAttributionPause {
+ public:
+  SelectorFaultAttributionPause() noexcept;
+  ~SelectorFaultAttributionPause();
+  SelectorFaultAttributionPause(const SelectorFaultAttributionPause&) = delete;
+  SelectorFaultAttributionPause& operator=(
+      const SelectorFaultAttributionPause&) = delete;
+};
+/// `invoke_entry_seh` under a `SelectorFaultAttributionPause`, for callers
+/// that tolerate a non-zero answer or a fault and never fold it into the
+/// frame's error (the arbitrary-data probes).
+int32_t invoke_tolerated_entry_seh(EffectEntry entry, int32_t command,
+                                   void* input, void* output, void** params,
+                                   void* world, void* extra,
+                                   uint32_t* out_exception_code);
+/// Names a fault the caller established as the frame's own 512 through a
+/// route the first-non-zero rule does not cover (GPU_DEVICE_SETDOWN, ranked
+/// behind the FRAME_SETDOWN dispatched after it). Replaces whatever
+/// `frame_fault` held.
+void record_selector_fault_attribution(const char* selector,
+                                       uint32_t fault_code) noexcept;
 void* active_selector_module() noexcept;
 HostCallbackTimelineTelemetry& host_callback_timeline_telemetry() noexcept;
 void reset_host_callback_timeline() noexcept;

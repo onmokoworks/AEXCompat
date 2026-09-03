@@ -953,13 +953,19 @@ void run_session_frame_loop(
       //
       // Which fault: the one whose substituted 512 is `frame_error`, and that
       // is established, not guessed. Both flavors report the first non-zero
-      // selector result in dispatch order - classic `end_frame` takes
-      // FRAME_SETDOWN's error only when the primary error is 0, and the smart
-      // precedence below (GPU setup, PreRender, render, GPU setdown) is the
+      // result, in dispatch order, among the selectors whose result they fold
+      // in - classic `end_frame` takes FRAME_SETDOWN's error only when the
+      // primary error is 0, and the smart precedence below (GPU setup,
+      // PreRender, render with FRAME_SETDOWN folded in, GPU setdown) is the
       // same rule - so the first fault of the frame produced the frame's 512
-      // unless some selector result was already non-zero before it, and
+      // unless some folded-in result was already non-zero before it, and
       // `frame_fault` records both (the first fault since the frame-start
-      // reset above, and whether a non-zero result preceded it). A frame
+      // reset above, and whether a non-zero result preceded it). The two
+      // dispatches the rule does not cover run with the attribution paused:
+      // the arbitrary-data probes, which tolerate an answer or a fault, and
+      // GPU_DEVICE_SETDOWN, ranked behind the FRAME_SETDOWN dispatched after
+      // it, which the smart frame records itself when its arm is reported
+      // (`SelectorFaultAttribution` in worker_selector_dispatch.hpp). A frame
       // whose 512 came before its first fault (the plug-in's own 512 from
       // RENDER, then a FRAME_SETDOWN fault; a C++ exception substitute, then
       // a fault) carries no `selector_crash`: the fault it had is on the
@@ -1552,6 +1558,18 @@ SmartRenderSessionOutcome run_smart_render_session(
                 ? frame_result.pre_error
                 : frame_result.render_error != 0 ? frame_result.render_error
                                                  : frame_result.gpu_setdown_error;
+        // GPU device setdown is dispatched before FRAME_SETDOWN (folded into
+        // render_error above) but ranked behind it, so it runs with the fault
+        // attribution paused and is named here instead, only when its arm is
+        // the one reported: the three earlier arms are 0, so no folded-in
+        // result preceded it and its 512 is the frame's (issue #983).
+        if (frame.frame_error == frame_result.gpu_setdown_error &&
+            frame_result.gpu_setup_error == 0 && frame_result.pre_error == 0 &&
+            frame_result.render_error == 0 &&
+            frame_result.gpu_setdown_exception_code != 0) {
+          worker_runtime::record_selector_fault_attribution(
+              "GPU_DEVICE_SETDOWN", frame_result.gpu_setdown_exception_code);
+        }
         frame.smart_output_untouched = frame_result.selector_error == 0 &&
             frame_result.pre_error == 0 && frame_result.render_error == -6 &&
             frame_result.output_untouched && !frame_result.empty_result_rect;

@@ -329,6 +329,8 @@ def test_selector_fault_attribution_names_the_fault_whose_512_won() -> None:
             "zero_answer_leaves_fault_attributable",
             "discarded_cleanup_fault_skipped",
             "reset_clears_previous_frame",
+            "paused_calls_leave_no_trace",
+            "recorded_fault_named",
         ):
             assert report[key] is True, (name, key)
 
