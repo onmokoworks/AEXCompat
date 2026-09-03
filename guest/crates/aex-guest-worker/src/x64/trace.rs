@@ -240,7 +240,8 @@ enum CheckpointSiteKind {
 }
 
 /// A call or jump instruction in the image, as checkpoint capture sees it
-/// before execution: only a direct near branch has a static target.
+/// before execution: only a direct near branch has a static target, and
+/// `target_rva` is set only when that target lies inside the image.
 #[derive(Clone, Copy, Debug)]
 struct CheckpointSite {
     address: u64,
@@ -252,8 +253,10 @@ struct CheckpointSite {
 }
 
 impl CheckpointSite {
+    /// A direct call into the image: the only site `checkpoint_instruction`
+    /// arms, so a direct call whose target is outside the image is not one.
     fn hookable_call(&self) -> bool {
-        self.kind == CheckpointSiteKind::Call && self.direct
+        self.kind == CheckpointSiteKind::Call && self.direct && self.target_rva.is_some()
     }
 }
 
@@ -317,6 +320,9 @@ fn checkpoint_unhookable_reason(
     if let Some(instruction_rva) = watch.instruction_rva {
         return match sites.iter().find(|site| site.pc_rva == instruction_rva) {
             Some(site) if site.hookable_call() => None,
+            Some(site) if site.kind == CheckpointSiteKind::Call && site.direct => Some(
+                "direct call whose target lies outside the image; checkpoint capture hooks direct calls into the image only",
+            ),
             Some(site) if site.kind == CheckpointSiteKind::Call => {
                 Some("indirect call site; checkpoint capture hooks direct call sites only")
             }

@@ -47,7 +47,8 @@ checkpointがhookできないwatchは、黙って0件になるのではなく
 `trace_configuration.unhookable_watches`に`id`と`reason`付きで列挙されます。
 該当するのは、tail-call (`jmp`) でしか到達しない関数への`function=`、
 `jmp`命令やindirect call (`call rax`、`call [rip+x]`等) を指す`rva=`、
-call/jmp命令ではないRVAを指す`rva=`です。これらを追うにはwatchなしの
+飛び先がimage外にあるdirect `call`を指す`rva=`、call/jmp命令ではないRVAを
+指す`rva=`です。これらを追うにはwatchなしの
 `full_trace`か、direct call-site側の`rva=`を使ってください。checkpointも
 通常のguest selector timeout内でfail-closeします。
 

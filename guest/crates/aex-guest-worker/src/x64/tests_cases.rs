@@ -1641,9 +1641,11 @@ fn checkpoint_trace_activates_function_watch_at_selector_entry() {
 fn checkpoint_trace_lists_watches_it_cannot_hook() {
     const CODE: u64 = 0x1000_0000;
     // 0: jmp +1 (tail-call to 6); 5: ret; 6: inc byte ptr [rdx]; 8: ret;
-    // 9: call rax (indirect, never executed)
+    // 9: call rax (indirect, never executed);
+    // 11: call +0x1000 (direct, target past the image, never executed)
     let mut engine = test_engine(&[
-        0xe9, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xfe, 0x02, 0xc3, 0xff, 0xd0,
+        0xe9, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xfe, 0x02, 0xc3, 0xff, 0xd0, 0xe8, 0x00, 0x10, 0x00,
+        0x00,
     ]);
     let entry_buffer = engine.allocate(1, 1).unwrap();
     engine.write(entry_buffer, &[10]).unwrap();
@@ -1671,6 +1673,7 @@ fn checkpoint_trace_lists_watches_it_cannot_hook() {
         watch("tail-called-function", Some(6), None),
         watch("jump-site", None, Some(0)),
         watch("indirect-call-site", None, Some(9)),
+        watch("external-call-site", None, Some(11)),
         watch("not-a-call", None, Some(7)),
         watch("uncalled-function", Some(8), None),
     ]);
@@ -1693,6 +1696,7 @@ fn checkpoint_trace_lists_watches_it_cannot_hook() {
             "tail-called-function",
             "jump-site",
             "indirect-call-site",
+            "external-call-site",
             "not-a-call",
             "uncalled-function",
         ]
@@ -1707,6 +1711,7 @@ fn checkpoint_trace_lists_watches_it_cannot_hook() {
     assert!(reason("tail-called-function").contains("tail-call jump"));
     assert!(reason("jump-site").contains("tail-call jump site"));
     assert!(reason("indirect-call-site").contains("indirect call site"));
+    assert!(reason("external-call-site").contains("outside the image"));
     assert!(reason("not-a-call").contains("not a call or jump"));
     assert!(reason("uncalled-function").contains("no direct call site"));
     // The tail-called function did run and mutate its buffer, but only the
