@@ -31,11 +31,25 @@ aex-guest-worker render-trace-png \
 `output.png`、通常のrender reportとtraceは標準出力のJSONへ入ります。
 
 `--watch`を1件以上指定したrenderは、全basic-block/branch censusを行わない
-低オーバーヘッドの`checkpoint` captureになります。指定したdirect call-siteと
-そのcall-return直後だけをhookし、通常のSmart Render経路を維持したまま
-entry/return snapshotを取得します。JSONの
-`trace_configuration.capture_mode`は`checkpoint`になり、`basic_blocks`と
-`branch_edges`は空です。watchなしの従来traceは`full_trace`です。
+低オーバーヘッドの`checkpoint` captureになります。hookするのは次の3種類だけ
+です。
+
+- watchが名指しするdirect call-site (`rva=`がそのcall命令、または`function=`
+  がそのcall命令の静的な飛び先) と、そのcall命令の直後 (return checkpoint)。
+- trace対象selectorの入口。`function=<selector entry RVA>`はここで発火し、
+  selector return時に完了します。
+
+通常のSmart Render経路を維持したままentry/return snapshotを取得し、JSONの
+`trace_configuration.capture_mode`は`checkpoint`、`basic_blocks`と
+`branch_edges`は空になります。watchなしの従来traceは`full_trace`です。
+
+checkpointがhookできないwatchは、黙って0件になるのではなく
+`trace_configuration.unhookable_watches`に`id`と`reason`付きで列挙されます。
+該当するのは、tail-call (`jmp`) でしか到達しない関数への`function=`、
+`jmp`命令やindirect call (`call rax`、`call [rip+x]`等) を指す`rva=`、
+call/jmp命令ではないRVAを指す`rva=`です。これらを追うにはwatchなしの
+`full_trace`か、direct call-site側の`rva=`を使ってください。checkpointも
+通常のguest selector timeout内でfail-closeします。
 
 ## 特定の値を追う
 
@@ -61,9 +75,6 @@ aex-guest-worker render-trace-png \
 - `rva`はcallまたはtail-callを行うinstructionのRVAです。
 - `function`と`rva`はどちらか一方だけを指定します。
 - `occurrence=<n>`はn回目だけを取得するため、実質的なhit上限として使えます。
-- `size`は1..4096 bytesに制限されます。`deref=<offset>`を指定すると、register
-  またはstack引数の`+offset`に格納されたpointer先を取得します。
-- checkpointも通常のguest selector timeout内でfail-closeします。
 - `arg`と`register`は同義です。`rcx`、`rdx`、`r8`、`r9`、`rax`、
   `stack5`～`stack8`（または`5`～`8`）を指定できます。
 - `size`は1～4096 byteです。

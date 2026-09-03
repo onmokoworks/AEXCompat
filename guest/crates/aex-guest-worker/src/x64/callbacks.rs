@@ -3049,21 +3049,33 @@ fn emulate_get_callback_addr(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u
 }
 
 fn smart_checkout_world(
-    unicorn: &Unicorn<'_, GuestState>,
+    unicorn: &mut Unicorn<'_, GuestState>,
     index: i32,
 ) -> Result<(u64, i32, i32), String> {
-    let state = unicorn.get_data();
-    let mut world = if index == 0 {
-        state.smart_input_world
+    let resolution = if index == 0 {
+        None
     } else {
-        let offset = resolve_layer_parameter_offset(&state.params, index)?;
+        let resolution = resolve_layer_parameter_offset(&unicorn.get_data().params, index)?;
+        if resolution.disk_id_fallback {
+            record_smart_checkout_disk_id_fallback(
+                &mut unicorn.get_data_mut().smart_checkout_disk_id_fallbacks,
+                index,
+                resolution.offset + 1,
+            );
+        }
+        Some(resolution)
+    };
+    let state = unicorn.get_data();
+    let mut world = if let Some(resolution) = resolution {
         state
             .parameter_definitions
-            .get(offset)
+            .get(resolution.offset)
             .copied()
             .filter(|definition| *definition != 0)
             .ok_or_else(|| format!("smart checkout layer index={index} has no definition"))?
             + abi::PARAM_U_OFFSET as u64
+    } else {
+        state.smart_input_world
     };
     if world == 0 {
         return Err(format!("smart checkout layer index={index} has no world"));

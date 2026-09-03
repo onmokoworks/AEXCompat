@@ -14407,7 +14407,7 @@ fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
     );
 
     assert_eq!(
-        smart_checkout_world(&engine.unicorn, 1).unwrap(),
+        smart_checkout_world(&mut engine.unicorn, 1).unwrap(),
         (input_world, 4, 3)
     );
 
@@ -14417,36 +14417,43 @@ fn smart_checkout_inherits_input_for_an_unselected_declared_layer() {
             &1i32.to_le_bytes(),
         )
         .unwrap();
-    let error = smart_checkout_world(&engine.unicorn, 1).unwrap_err();
+    let error = smart_checkout_world(&mut engine.unicorn, 1).unwrap_err();
     assert!(error.contains("invalid smart checkout world"), "{error}");
+}
+
+fn disk_id_parameter(disk_id: i32, param_type: i32, name: &str) -> GuestParam {
+    let mut bytes = vec![0; abi::PF_PARAM_DEF_SIZE];
+    bytes[..4].copy_from_slice(&disk_id.to_le_bytes());
+    GuestParam {
+        index: -1,
+        param_type,
+        name: name.into(),
+        bytes,
+    }
 }
 
 #[test]
 fn smart_checkout_resolves_layer_disk_id_without_aliasing_positional_point_storage() {
-    let parameter = |disk_id: i32, param_type: i32, name: &str| {
-        let mut bytes = vec![0; abi::PF_PARAM_DEF_SIZE];
-        bytes[..4].copy_from_slice(&disk_id.to_le_bytes());
-        GuestParam {
-            index: -1,
-            param_type,
-            name: name.into(),
-            bytes,
-        }
-    };
     let parameters = vec![
-        parameter(2, 6, "Center"),
-        parameter(30, 10, "Amount"),
-        parameter(1, 0, "Noise Layer"),
+        disk_id_parameter(2, 6, "Center"),
+        disk_id_parameter(30, 10, "Amount"),
+        disk_id_parameter(1, 0, "Noise Layer"),
     ];
 
-    assert_eq!(resolve_layer_parameter_offset(&parameters, 1).unwrap(), 2);
+    assert_eq!(
+        resolve_layer_parameter_offset(&parameters, 1).unwrap(),
+        LayerParameterResolution {
+            offset: 2,
+            disk_id_fallback: true,
+        }
+    );
     assert_eq!(
         parameters[0].param_type, 6,
         "the positional point stays distinct"
     );
 
     let mut duplicate = parameters.clone();
-    duplicate.push(parameter(1, 0, "Duplicate Layer"));
+    duplicate.push(disk_id_parameter(1, 0, "Duplicate Layer"));
     assert!(
         resolve_layer_parameter_offset(&duplicate, 1)
             .unwrap_err()
@@ -14461,6 +14468,84 @@ fn smart_checkout_resolves_layer_disk_id_without_aliasing_positional_point_stora
         resolve_layer_parameter_offset(&parameters, 99)
             .unwrap_err()
             .contains("does not resolve")
+    );
+}
+
+#[test]
+fn smart_checkout_positional_layer_wins_over_colliding_non_layer_disk_id() {
+    // AE and the minihost `pre_checkout_layer` match `slot == index` only: a
+    // popup whose disk id equals the checkout index must not make the
+    // positional layer ambiguous.
+    let parameters = vec![
+        disk_id_parameter(3, 1, "Slider"),
+        disk_id_parameter(1, 0, "Layer"),
+        disk_id_parameter(2, 7, "Popup"),
+    ];
+    assert_eq!(
+        resolve_layer_parameter_offset(&parameters, 2).unwrap(),
+        LayerParameterResolution {
+            offset: 1,
+            disk_id_fallback: false,
+        }
+    );
+    // A non-layer disk id never resolves a non-positional checkout either.
+    assert!(
+        resolve_layer_parameter_offset(&parameters, 3)
+            .unwrap_err()
+            .contains("not a PF_Param_LAYER")
+    );
+}
+
+#[test]
+fn smart_checkout_duplicated_disk_id_does_not_block_positional_layer() {
+    let parameters = vec![
+        disk_id_parameter(4, 0, "Layer A"),
+        disk_id_parameter(4, 0, "Layer B"),
+        disk_id_parameter(4, 1, "Slider"),
+    ];
+    for index in [1, 2] {
+        assert_eq!(
+            resolve_layer_parameter_offset(&parameters, index).unwrap(),
+            LayerParameterResolution {
+                offset: (index - 1) as usize,
+                disk_id_fallback: false,
+            },
+            "index {index}"
+        );
+    }
+    // Only when positional resolution fails does the duplicated id matter.
+    assert!(
+        resolve_layer_parameter_offset(&parameters, 4)
+            .unwrap_err()
+            .contains("duplicated")
+    );
+    assert!(
+        resolve_layer_parameter_offset(&parameters, 3)
+            .unwrap_err()
+            .contains("not a PF_Param_LAYER")
+    );
+}
+
+#[test]
+fn smart_checkout_disk_id_fallback_is_recorded_per_index_and_slot() {
+    let mut records = Vec::new();
+    record_smart_checkout_disk_id_fallback(&mut records, 1, 3);
+    record_smart_checkout_disk_id_fallback(&mut records, 1, 3);
+    record_smart_checkout_disk_id_fallback(&mut records, 2, 4);
+    assert_eq!(
+        records,
+        vec![
+            SmartCheckoutDiskIdFallback {
+                requested_index: 1,
+                resolved_slot: 3,
+                call_count: 2,
+            },
+            SmartCheckoutDiskIdFallback {
+                requested_index: 2,
+                resolved_slot: 4,
+                call_count: 1,
+            },
+        ]
     );
 }
 
