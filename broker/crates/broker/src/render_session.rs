@@ -2898,6 +2898,12 @@ impl RenderSession {
                 // The facade counters ride the diagnostics rather than only the
                 // final report, so a corpus sweep can read them off an ordinary
                 // record instead of needing `--close-report` (issue #1264).
+                // The block is windowed per plug-in in the worker, so after a
+                // cluster swap it describes the plug-in current at close, not
+                // the launch-time one this close names by hash. The sibling
+                // `unsupported_suite_calls` is not propagated here (the close
+                // never carried it), so on this path the positive half stands
+                // alone: read `trap_count` for the negative half.
                 if let Some(report) = &report {
                     propagate_bee_facade(&mut diagnostics, report);
                 }

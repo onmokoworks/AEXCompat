@@ -1171,6 +1171,9 @@ pub(crate) fn propagate_bee_facade(diagnostics: &mut Value, worker_report: &Valu
     /// Enough for every implemented slot several times over; a report naming
     /// more is not describing this facade.
     const MAX_SLOTS: usize = 32;
+    /// The BEE_AVLayer vtable has 246 slots; a slot index past this is not one
+    /// the worker can dispatch, so the entry is a malformed report, not data.
+    const MAX_SLOT_INDEX: u64 = 1024;
     let Some(reported) = worker_report
         .get("bee_facade")
         .and_then(Value::as_object)
@@ -1199,14 +1202,17 @@ pub(crate) fn propagate_bee_facade(diagnostics: &mut Value, worker_report: &Valu
                     truncated = true;
                     continue;
                 };
+                if slot >= MAX_SLOT_INDEX {
+                    truncated = true;
+                    continue;
+                }
                 slots.push(json!({"slot": slot, "call_count": call_count}));
             }
         }
-        // A non-array where the list belongs is a malformed report, and an
-        // empty list would read as "no slot was dispatched" - say it was not
-        // legible instead.
-        Some(_) => truncated = true,
-        None => {}
+        // The worker always writes the list, so a missing key is as malformed
+        // as a non-array where the list belongs, and an empty list would read
+        // as "no slot was dispatched" - say it was not legible instead.
+        _ => truncated = true,
     }
     diagnostics["bee_facade"] = json!({
         "effect_layer_hand_outs": counter("effect_layer_hand_outs"),
