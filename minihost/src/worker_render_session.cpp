@@ -1,5 +1,7 @@
 #include "worker_render_session.hpp"
 
+#include "worker_bee_scene_facade.hpp"
+
 #include <windows.h>
 
 #include "render_pixel_transport.hpp"
@@ -800,6 +802,13 @@ void run_session_frame_loop(
         break;
       }
       entry = swap.entry;
+      // The incoming plug-in's facade activity is its own. A cluster session
+      // hosts many plug-ins in one worker, and the terminal report is written
+      // once at process exit, so without this the block would describe every
+      // plug-in the session ever held (issue #1264). Safe to write here: the
+      // swap has already taken the outgoing plug-in through SEQUENCE_SETDOWN
+      // and GLOBAL_SETDOWN and no render is in flight.
+      aexcompat::worker_runtime::bee_facade::begin_attribution_window();
       current_plugin_index = plugin_index;
       current_audio_passthrough = swap.audio_effect_only;
       swapped_plugin_setup_failed =

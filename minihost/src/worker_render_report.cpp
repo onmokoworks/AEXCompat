@@ -5,6 +5,7 @@
 #include "gpu_memory_world_transport.hpp"
 #include "gpu_opencl_backend.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
+#include "worker_bee_scene_facade.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_pf_path_runtime.hpp"
@@ -673,6 +674,11 @@ ClassicSubsystemDiagnostics capture_classic_subsystems() {
        i64(l2_detail::live_suite_reference_count())},
       l2_detail::missing_suites_report_json() +
           l2_detail::unsupported_suite_calls_report_json() +
+          // The positive counterpart to the line above: which BEE facade slots
+          // a plug-in actually took, and whether the facade was handed out at
+          // all. Without it an empty `unsupported_suite_calls` cannot tell
+          // "the facade held" from "nothing reached it" (issue #1264).
+          worker_runtime::bee_facade::report_json() +
           l2_detail::suite_timeline_report_json() +
           worker_runtime::suite_call_slot_probe::report_json(),
       l2_detail::live_suite_lease_summary(),

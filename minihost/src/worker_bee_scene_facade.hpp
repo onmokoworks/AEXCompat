@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -203,6 +204,39 @@ const void* const* layer_vtable() noexcept;
 uint32_t trap_count() noexcept;
 // Calls the observed layer vtable slots have taken (by slot index).
 uint32_t observed_call_count(std::size_t layer_slot) noexcept;
+// A point-in-time reading of the three counters the report is built from.
+struct Counters {
+  uint32_t effect_layer_hand_outs;
+  uint32_t traps;
+  std::array<uint32_t, kLayerVtableSlots> layer_vtable_calls;
+};
+Counters counters() noexcept;
+
+// Starts a fresh attribution window: everything the report says afterwards is
+// measured from here. Both routes that host more than one plug-in in a worker
+// process open one per plug-in - the discovery session before each inspect
+// column, the render session at each swap - because a report built from
+// whole-process counters would carry the earlier plug-ins' activity on every
+// later record. A route that runs one plug-in per process need not call it;
+// its window is the process, which is the same thing.
+void begin_attribution_window() noexcept;
+
+// The `,"bee_facade":{...}` fragment for the close report, measured over the
+// current attribution window.
+//
+// The counterpart to `unsupported_suite_calls`, which only ever names slots
+// nobody implemented: `layer_vtable_calls` names the slots that were taken, so
+// an empty unsupported list can be read as "held" rather than merely "nothing
+// was recorded" (issue #1264).
+//
+// Read the two fields for exactly what they count. `effect_layer_hand_outs` is
+// answered AEGP_GetEffectLayer calls - that handle doubles as an ordinary
+// AEGP_LayerH, so a plug-in with no interest in BEE increments it (measured:
+// 11 of the 304-AEX corpus do, only 4 of them import BEE.dll).
+// `layer_vtable_calls` is vtable dispatches, and BEE.dll mostly reads the
+// graph by field offset instead, which executes none of this host's code, so
+// an empty list does not mean the facade went unused.
+std::string report_json();
 // The `<module>+0x<rva>` classification the last trap wrote (empty before the
 // first trap); for the self-test.
 std::string last_trap_caller();

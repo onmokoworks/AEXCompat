@@ -2275,6 +2275,12 @@ int run_discovery_session(const std::wstring& manifest_argument,
         // U.dll init for PIN-era closures, once per mapping (#362, #1063).
         initialize_legacy_support_libraries();
         publish_effect_ref_object();
+        // Attribute the BEE facade counters to this column. Opened here and
+        // not at the plug-in swap: the swap first runs the OUTGOING
+        // plug-in's GLOBAL_SETDOWN and arbitrary-data disposal, whose facade
+        // calls belong to that plug-in, and a re-inspect of the current
+        // plug-in takes no swap at all (issue #1264).
+        aexcompat::worker_runtime::bee_facade::begin_attribution_window();
         inspect_column();
       } else {
         current_global_error = -1;
@@ -2298,6 +2304,12 @@ int run_discovery_session(const std::wstring& manifest_argument,
                               effect_state.output.data());
         current_setdown_pending = false;
       }
+      // Attribute the BEE facade counters to this column. Opened here and
+      // not at the plug-in swap: the swap first runs the OUTGOING
+      // plug-in's GLOBAL_SETDOWN and arbitrary-data disposal, whose facade
+      // calls belong to that plug-in, and a re-inspect of the current
+      // plug-in takes no swap at all (issue #1264).
+      aexcompat::worker_runtime::bee_facade::begin_attribution_window();
       inspect_column();
     }
 

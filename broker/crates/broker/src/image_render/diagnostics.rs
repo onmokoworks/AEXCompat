@@ -810,6 +810,11 @@ fn worker_diagnostics(
         "callback_denials_truncated": callback_denials.1,
         "unsupported_suite_calls": [],
         "unsupported_suite_calls_truncated": false,
+        // Filled by `propagate_bee_facade` when the worker's report carried
+        // one. Present as null rather than absent so a consumer can tell "this
+        // run produced no parsable report" from "the facade block was empty",
+        // the same way `suite_call_slot_probe` beside it does.
+        "bee_facade": Value::Null,
         "callback_history": [],
         "suite_call_slot_probe": null,
         "suite_timeline": [],
@@ -1145,6 +1150,70 @@ fn propagate_missing_suites(diagnostics: &mut Value, worker_report: &Value) {
     }
     diagnostics["missing_suites"] = Value::Array(suites);
     diagnostics["missing_suites_truncated"] = Value::Bool(truncated);
+}
+
+/// Carries the BEE facade's own counters (issue #1264) onto the diagnostics.
+///
+/// `unsupported_suite_calls` beside it only ever names slots nobody
+/// implemented, so an empty list there cannot separate "a slot was reached and
+/// held" from "nothing reached the facade". This block is the other half:
+/// which vtable slots were dispatched, how many times the effect layer was
+/// handed out, and how many traps fired - all counted over the one plug-in
+/// this record is about.
+///
+/// Rebuilt from validated integers rather than copied, like every sibling
+/// propagator here: this is the boundary against the worker's stdout, the
+/// result lands in a shareable sweep artifact, and a shape assertion that
+/// holds only because of what the producer happens to emit is not a check.
+/// The slot list is capped for the same reason - only a handful of slots are
+/// implemented, so a longer list is a malformed report, not a bigger session.
+pub(crate) fn propagate_bee_facade(diagnostics: &mut Value, worker_report: &Value) {
+    /// Enough for every implemented slot several times over; a report naming
+    /// more is not describing this facade.
+    const MAX_SLOTS: usize = 32;
+    let Some(reported) = worker_report
+        .get("bee_facade")
+        .and_then(Value::as_object)
+    else {
+        return;
+    };
+    let counter = |key: &str| {
+        reported
+            .get(key)
+            .and_then(Value::as_u64)
+            .map_or(Value::Null, |value| json!(value))
+    };
+    let mut slots = Vec::new();
+    let mut truncated = false;
+    match reported.get("layer_vtable_calls") {
+        Some(Value::Array(entries)) => {
+            for entry in entries {
+                if slots.len() >= MAX_SLOTS {
+                    truncated = true;
+                    break;
+                }
+                let (Some(slot), Some(call_count)) = (
+                    entry.get("slot").and_then(Value::as_u64),
+                    entry.get("call_count").and_then(Value::as_u64),
+                ) else {
+                    truncated = true;
+                    continue;
+                };
+                slots.push(json!({"slot": slot, "call_count": call_count}));
+            }
+        }
+        // A non-array where the list belongs is a malformed report, and an
+        // empty list would read as "no slot was dispatched" - say it was not
+        // legible instead.
+        Some(_) => truncated = true,
+        None => {}
+    }
+    diagnostics["bee_facade"] = json!({
+        "effect_layer_hand_outs": counter("effect_layer_hand_outs"),
+        "trap_count": counter("trap_count"),
+        "layer_vtable_calls": Value::Array(slots),
+        "layer_vtable_calls_truncated": truncated,
+    });
 }
 
 fn propagate_unsupported_suite_calls(diagnostics: &mut Value, worker_report: &Value) {

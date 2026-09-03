@@ -1208,6 +1208,12 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
         "active_stage",
         "missing_suites",
         "unsupported_suite_calls",
+        // The positive counterpart to the line above: which BEE facade slots a
+        // plug-in dispatched and how often the effect layer was handed out.
+        // Without it a corpus run can only see the slots nobody implemented,
+        // and "no trap" reads the same whether the facade held or nothing
+        // touched it (issue #1264).
+        "bee_facade",
         "callback_history",
         // Present only with AEXCOMPAT_EXTENDED_DIAG; this keeps one-off host
         // callback evidence available in the sweep artifact without exposing

@@ -17,7 +17,8 @@ use crate::image_render::{
     MAX_PIXELS, MAX_RGBA_TRANSPORT_BYTES, ParameterAnimation, RenderGpuBackend, RenderPixelFormat,
     RenderUiAction, decode_bounded_image, decode_sha256_hex, encode_default_interactive_payload,
     encode_interactive_payload, isolated_worker_diagnostics, native_rgba_to_preview,
-    parameter_animation_sidecar_json, runtime_backend, validate_animation_bindings,
+    parameter_animation_sidecar_json, propagate_bee_facade, runtime_backend,
+    validate_animation_bindings,
 };
 use crate::runtime_module_policy::{WorkerModuleValidation, authenticate_gpu_worker_report};
 use crate::secure_image_dispatch::{
@@ -2893,11 +2894,18 @@ impl RenderSession {
             }) => {
                 let report: Option<Value> =
                     crate::worker_module_audit::parse_report_prefix(&result.stdout).ok();
+                let mut diagnostics = isolated_worker_diagnostics(result, elapsed_ms);
+                // The facade counters ride the diagnostics rather than only the
+                // final report, so a corpus sweep can read them off an ordinary
+                // record instead of needing `--close-report` (issue #1264).
+                if let Some(report) = &report {
+                    propagate_bee_facade(&mut diagnostics, report);
+                }
                 (
                     json!({
                         "classification": result.classification.as_str(),
                         "exit_code": result.exit_code,
-                        "diagnostics": isolated_worker_diagnostics(result, elapsed_ms),
+                        "diagnostics": diagnostics,
                     }),
                     report,
                 )

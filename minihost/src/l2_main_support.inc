@@ -3404,6 +3404,7 @@ std::string build_l2_report_json(
   c.last_seh_exception_code = g_last_seh_exception_code;
   c.lifecycle_errors = lifecycle_errors; c.lifecycle_data_null = lifecycle_data_null;
   c.unsupported_suite_calls_json = unsupported_suite_calls_report_json();
+  c.bee_facade_json = aexcompat::worker_runtime::bee_facade::report_json();
   c.suite_call_slot_probe_json = suite_call_slot_probe_report_json();
   c.compute_cache_timeline_json = compute_cache_timeline_report_json();
   c.selector_invocations_json = selector_invocations_report_json();

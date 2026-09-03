@@ -39,6 +39,7 @@ struct L2ReportContext {
   bool suite_leases_balanced{}, user_changed_param_requested{};
   int32_t user_changed_param_slot{}, user_changed_param_error{};
   std::string user_changed_parameters_json, unsupported_suite_calls_json;
+  std::string bee_facade_json;
   std::string suite_call_slot_probe_json;
   std::string compute_cache_timeline_json;
   std::string selector_invocations_json;

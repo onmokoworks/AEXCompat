@@ -760,6 +760,7 @@ fn render_classic_via_length_one_session(
     // had to move here rather than go with it.
     propagate_missing_suites(&mut diagnostics, &final_report);
     propagate_unsupported_suite_calls(&mut diagnostics, &final_report);
+    propagate_bee_facade(&mut diagnostics, &final_report);
     propagate_suite_call_slot_probe(&mut diagnostics, &final_report);
     propagate_selector_invocations(&mut diagnostics, &final_report);
     propagate_host_callback_timeline(&mut diagnostics, &final_report);
