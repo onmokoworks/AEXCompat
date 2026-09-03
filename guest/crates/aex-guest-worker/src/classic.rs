@@ -1571,6 +1571,10 @@ impl ClassicHost {
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        // The engine keeps trace configuration between renders, so a plain
+        // trace resets whatever an earlier watched render configured: it is
+        // always a full capture with no watches.
+        self.configure_trace(Vec::new(), None);
         self.render_pixels_with_request(
             width,
             height,
@@ -1582,6 +1586,13 @@ impl ClassicHost {
             true,
             RenderBackendRequest::Cpu,
         )
+    }
+
+    fn configure_trace(&mut self, watches: Vec<TraceWatchSpec>, output_pixel: Option<[u32; 2]>) {
+        self.engine
+            .configure_trace_checkpoint_only(!watches.is_empty());
+        self.engine.configure_trace_watches(watches);
+        self.trace_output_pixel = output_pixel;
     }
 
     pub fn render_argb8_trace_with_watches(
@@ -1615,11 +1626,18 @@ impl ClassicHost {
         watches: Vec<TraceWatchSpec>,
         output_pixel: Option<[u32; 2]>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
-        self.engine
-            .configure_trace_checkpoint_only(!watches.is_empty());
-        self.engine.configure_trace_watches(watches);
-        self.trace_output_pixel = output_pixel;
-        self.render_pixels_trace(width, height, format, input_pixels, parameter_values)
+        self.configure_trace(watches, output_pixel);
+        self.render_pixels_with_request(
+            width,
+            height,
+            format,
+            input_pixels,
+            parameter_values,
+            [0, 0, width as i32, height as i32],
+            false,
+            true,
+            RenderBackendRequest::Cpu,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

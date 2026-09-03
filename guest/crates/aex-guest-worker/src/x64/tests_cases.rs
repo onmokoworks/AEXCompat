@@ -1596,10 +1596,128 @@ fn checkpoint_trace_skips_hot_basic_block_collection() {
     engine.call_win64(CODE, [0, buffer, 0, 0, 0, 0]).unwrap();
     let trace = engine.finish_execution_trace(0).unwrap();
     assert_eq!(trace.trace_configuration.capture_mode, "checkpoint");
+    assert!(trace.trace_configuration.unhookable_watches.is_empty());
     assert!(trace.basic_blocks.is_empty());
     assert!(trace.branch_edges.is_empty());
     assert_eq!(trace.memory_witnesses[0].before.u8_values, [1]);
     assert_eq!(trace.memory_witnesses[0].after.u8_values, [2]);
+}
+
+#[test]
+fn checkpoint_trace_activates_function_watch_at_selector_entry() {
+    const CODE: u64 = 0x1000_0000;
+    // inc byte ptr [rcx]; ret
+    let mut engine = test_engine(&[0xfe, 0x01, 0xc3]);
+    let buffer = engine.allocate(1, 1).unwrap();
+    engine.write(buffer, &[1]).unwrap();
+    engine.configure_trace_watches(vec![TraceWatchSpec {
+        id: "selector-entry".into(),
+        function_rva: Some(0),
+        instruction_rva: None,
+        absolute_address: None,
+        register: "rcx",
+        dereference_offset: None,
+        size: 1,
+        occurrence: None,
+        image_coordinate: None,
+        image_row_offset: None,
+        image_format: None,
+    }]);
+    engine.configure_trace_checkpoint_only(true);
+    engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+    let result = engine.call_win64(CODE, [buffer, 0, 0, 0, 0, 0]).unwrap();
+    let trace = engine.finish_execution_trace(result).unwrap();
+
+    assert_eq!(trace.trace_configuration.capture_mode, "checkpoint");
+    assert!(trace.trace_configuration.unhookable_watches.is_empty());
+    let witness = trace.memory_witnesses.first().unwrap();
+    assert_eq!(witness.watch_id, "selector-entry");
+    assert_eq!(witness.function_rva, Some(0));
+    assert_eq!(witness.before.u8_values, [1]);
+    assert_eq!(witness.after.u8_values, [2]);
+}
+
+#[test]
+fn checkpoint_trace_lists_watches_it_cannot_hook() {
+    const CODE: u64 = 0x1000_0000;
+    // 0: jmp +1 (tail-call to 6); 5: ret; 6: inc byte ptr [rdx]; 8: ret;
+    // 9: call rax (indirect, never executed)
+    let mut engine = test_engine(&[
+        0xe9, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xfe, 0x02, 0xc3, 0xff, 0xd0,
+    ]);
+    let entry_buffer = engine.allocate(1, 1).unwrap();
+    engine.write(entry_buffer, &[10]).unwrap();
+    let tail_buffer = engine.allocate(1, 1).unwrap();
+    engine.write(tail_buffer, &[1]).unwrap();
+    let watch =
+        |id: &str, function_rva: Option<u64>, instruction_rva: Option<u64>| TraceWatchSpec {
+            id: id.into(),
+            function_rva,
+            instruction_rva,
+            absolute_address: None,
+            register: "rdx",
+            dereference_offset: None,
+            size: 1,
+            occurrence: None,
+            image_coordinate: None,
+            image_row_offset: None,
+            image_format: None,
+        };
+    engine.configure_trace_watches(vec![
+        TraceWatchSpec {
+            register: "rcx",
+            ..watch("entry", Some(0), None)
+        },
+        watch("tail-called-function", Some(6), None),
+        watch("jump-site", None, Some(0)),
+        watch("indirect-call-site", None, Some(9)),
+        watch("not-a-call", None, Some(7)),
+        watch("uncalled-function", Some(8), None),
+    ]);
+    engine.configure_trace_checkpoint_only(true);
+    engine.begin_execution_trace("SMART_RENDER", CODE).unwrap();
+    engine
+        .call_win64(CODE, [entry_buffer, tail_buffer, 0, 0, 0, 0])
+        .unwrap();
+    let trace = engine.finish_execution_trace(0).unwrap();
+
+    assert_eq!(trace.trace_configuration.capture_mode, "checkpoint");
+    let unhookable = &trace.trace_configuration.unhookable_watches;
+    let ids = unhookable
+        .iter()
+        .map(|watch| watch.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        [
+            "tail-called-function",
+            "jump-site",
+            "indirect-call-site",
+            "not-a-call",
+            "uncalled-function",
+        ]
+    );
+    let reason = |id: &str| {
+        unhookable
+            .iter()
+            .find(|watch| watch.id == id)
+            .map(|watch| watch.reason)
+            .unwrap()
+    };
+    assert!(reason("tail-called-function").contains("tail-call jump"));
+    assert!(reason("jump-site").contains("tail-call jump site"));
+    assert!(reason("indirect-call-site").contains("indirect call site"));
+    assert!(reason("not-a-call").contains("not a call or jump"));
+    assert!(reason("uncalled-function").contains("no direct call site"));
+    // The tail-called function did run and mutate its buffer, but only the
+    // entry watch could produce a witness; the others are absent by design.
+    let mut mutated = [0u8; 1];
+    engine.read(tail_buffer, &mut mutated).unwrap();
+    assert_eq!(mutated, [2]);
+    assert_eq!(trace.memory_witnesses.len(), 1);
+    assert_eq!(trace.memory_witnesses[0].watch_id, "entry");
+    assert_eq!(trace.memory_witnesses[0].before.u8_values, [10]);
+    assert_eq!(trace.memory_witnesses[0].after.u8_values, [10]);
 }
 
 #[test]
@@ -2660,6 +2778,7 @@ fn trace_event_limit_marks_capture_as_truncated() {
         watch_stack: Vec::new(),
         selector_watches: Vec::new(),
         checkpoint_returns: HashMap::new(),
+        unhookable_watches: Vec::new(),
         witnesses: Vec::new(),
         dropped_witnesses: 0,
         basic_blocks: HashMap::new(),

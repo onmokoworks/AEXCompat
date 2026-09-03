@@ -541,6 +541,7 @@ struct TraceCapture {
     watch_stack: Vec<Vec<PendingTraceWatch>>,
     selector_watches: Vec<PendingTraceWatch>,
     checkpoint_returns: HashMap<u64, Vec<PendingTraceWatch>>,
+    unhookable_watches: Vec<UnhookableWatch>,
     witnesses: Vec<TraceMemoryWitness>,
     dropped_witnesses: u64,
     basic_blocks: HashMap<(u64, u32), u64>,
@@ -602,9 +603,21 @@ pub struct TraceModule {
     pub symbols: Vec<String>,
 }
 
+/// A watch the active capture mode cannot arm. Checkpoint capture hooks the
+/// selector entry and the direct call sites its watches name, so a watch
+/// that depends on a tail-call jump or an indirect call produces no witness;
+/// listing it here keeps that absence explicit instead of silent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UnhookableWatch {
+    pub id: String,
+    pub reason: &'static str,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceConfiguration {
     pub capture_mode: &'static str,
+    /// Watches this capture could not hook (always empty for `full_trace`).
+    pub unhookable_watches: Vec<UnhookableWatch>,
     pub max_events: usize,
     pub max_basic_blocks: usize,
     pub max_branch_edges: usize,

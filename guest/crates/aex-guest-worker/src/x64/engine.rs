@@ -1083,6 +1083,7 @@ impl GuestEngine<'static> {
             watch_stack: Vec::new(),
             selector_watches,
             checkpoint_returns: HashMap::new(),
+            unhookable_watches: Vec::new(),
             witnesses: Vec::new(),
             dropped_witnesses: 0,
             basic_blocks: HashMap::new(),
@@ -1101,32 +1102,55 @@ impl GuestEngine<'static> {
         let image_end = self.image_end;
         let checkpoint_only = self.unicorn.get_data().trace_checkpoint_only;
         let mut hook_points = if checkpoint_only {
+            // Checkpoint capture hooks three kinds of points only: the direct
+            // call sites a watch names (by call-site rva or by callee
+            // function rva), the instruction right after each of them (the
+            // return checkpoint), and the selector entry so `function=` on
+            // the selector itself still arms. Everything a watch needs
+            // beyond that (tail-call jumps, indirect calls) is reported in
+            // `unhookable_watches` rather than silently producing nothing.
             let watches = self.unicorn.get_data().trace_watches.clone();
-            self.trace_points
+            let sites = self
+                .trace_points
                 .iter()
                 .filter_map(|point| {
                     let mut bytes = [0u8; 15];
                     self.unicorn.mem_read(*point, &mut bytes).ok()?;
                     let instruction =
                         Decoder::with_ip(64, &bytes, *point, DecoderOptions::NONE).decode();
-                    if instruction.mnemonic() != Mnemonic::Call {
-                        return None;
-                    }
-                    let pc_rva = point.saturating_sub(image_base);
-                    let target = instruction.near_branch_target();
-                    let target_rva = target.checked_sub(image_base);
-                    watches
-                        .iter()
-                        .any(|watch| {
-                            watch.instruction_rva == Some(pc_rva)
+                    checkpoint_site(&instruction, *point, image_base, image_end)
+                })
+                .collect::<Vec<_>>();
+            let entry_rva = entry_address.saturating_sub(image_base);
+            let unhookable_watches = watches
+                .iter()
+                .filter_map(|watch| {
+                    checkpoint_unhookable_reason(watch, entry_rva, &sites).map(|reason| {
+                        UnhookableWatch {
+                            id: watch.id.clone(),
+                            reason,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            if let Some(capture) = self.unicorn.get_data_mut().trace.as_mut() {
+                capture.unhookable_watches = unhookable_watches;
+            }
+            let mut points = sites
+                .iter()
+                .filter(|site| {
+                    site.hookable_call()
+                        && watches.iter().any(|watch| {
+                            watch.instruction_rva == Some(site.pc_rva)
                                 || watch
                                     .function_rva
-                                    .is_some_and(|rva| Some(rva) == target_rva)
+                                    .is_some_and(|rva| Some(rva) == site.target_rva)
                         })
-                        .then_some([*point, instruction.next_ip()])
                 })
-                .flatten()
-                .collect::<Vec<_>>()
+                .flat_map(|site| [site.address, site.return_address])
+                .collect::<Vec<_>>();
+            points.push(entry_address);
+            points
         } else {
             let mut points = self.trace_points.clone();
             points.push(entry_address);
@@ -1352,6 +1376,7 @@ impl GuestEngine<'static> {
             } else {
                 "full_trace"
             },
+            unhookable_watches: capture.unhookable_watches.clone(),
             max_events: MAX_TRACE_EVENTS,
             max_basic_blocks: MAX_TRACE_BASIC_BLOCKS,
             max_branch_edges: MAX_TRACE_BRANCH_EDGES,
