@@ -731,9 +731,17 @@ pub enum FrameStatus {
         /// with a real PF_Err value (issue #983). Present only with
         /// `render_error == 512`: the worker attaches it to the substitute it
         /// explains and to nothing else, and the session fails closed on any
-        /// other shape. The fault fingerprint (site, module, RVA, unwind) stays
-        /// on the worker's `stage:selector_seh` stderr line (issue #1212); this
-        /// is the bounded, frame-scoped discriminator.
+        /// other shape. The fault named is the one whose substituted 512 is
+        /// this `render_error`, not merely the last fault of the frame: a frame
+        /// whose 512 was decided before its first fault (the plug-in's own 512
+        /// from RENDER and then a FRAME_SETDOWN fault, say) carries none. The
+        /// converse does not hold: a 512 without this field is a 512 that no
+        /// SEH fault explains, not proof the plug-in returned it itself, since
+        /// an escaped C++ exception, a failed module audit, and a guard
+        /// refusal substitute the same number without a fault. The fault
+        /// fingerprint (site, module, RVA, unwind) stays on the worker's
+        /// `stage:selector_seh` stderr line (issue #1212); this is the
+        /// bounded, frame-scoped discriminator.
         selector_crash: Option<SelectorCrash>,
     },
     /// The Smart selector returned success, but the guarded output retained
@@ -2373,6 +2381,8 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     };
+                    // The `selector_crash` arm is belt-and-braces: the shape
+                    // check above already refused any crash outside a 512.
                     if carries_resize_fields
                         || done.missing_dependency.is_some()
                         || done.smart_output_untouched
@@ -2442,6 +2452,8 @@ impl RenderSession {
                     // carries only width/height. Bound the requested size so a
                     // misbehaving worker cannot force an unbounded re-open, and
                     // require it to actually exceed the current slot.
+                    // The `selector_crash` arm is belt-and-braces: the shape
+                    // check above already refused any crash outside a 512.
                     if done.output.is_some()
                         || done.generation.is_some()
                         || done.render_error != 0

@@ -308,6 +308,31 @@ def test_selector_fault_unwind_recovers_the_caller_of_a_null_call() -> None:
         assert report["frames"] >= 3, name
 
 
+def test_selector_fault_attribution_names_the_fault_whose_512_won() -> None:
+    """Which fault a frame's ``selector_crash`` names (issue #983). A frame
+    dispatches several selectors and reports the first non-zero result; two
+    of them can fault, and a plug-in's own 512 can precede a fault. The route
+    drives the production guarded call with faulting, throwing, and answering
+    probe entries and checks that the recorded fault is the frame's first, that
+    a 512 answered or substituted before it (the plug-in's own, an escaped C++
+    exception) marks it decided-before so no crash is charged to it, that a
+    discarded PreRender-cleanup fault is never a candidate, and that the
+    per-frame reset forgets the previous frame.
+    """
+    for name, report in _all_workers(
+        "--self-test-selector-fault-attribution", "selector_fault_attribution"
+    ):
+        for key in (
+            "first_fault_named",
+            "own_512_not_charged_to_a_later_fault",
+            "non_seh_substitute_decides_first",
+            "zero_answer_leaves_fault_attributable",
+            "discarded_cleanup_fault_skipped",
+            "reset_clears_previous_frame",
+        ):
+            assert report[key] is True, (name, key)
+
+
 def test_pf_progress_info_is_installed_behind_effect_ref_on_all_workers() -> None:
     """The PF_ProgressInfo-shaped object behind ``in_data->effect_ref``
     (issue #1275). Adobe-bundled effects and PF.dll read the effect ref as

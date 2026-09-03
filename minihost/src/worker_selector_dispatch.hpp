@@ -233,6 +233,33 @@ struct SelectorReturnMessage {
   bool empty() const noexcept { return text.empty(); }
 };
 
+/// Which fault a frame's `selector_crash` names (issue #983). One frame
+/// dispatches several selectors, more than one of which can fault, and reports
+/// one error: the first non-zero selector result in dispatch order. The
+/// classic `render_lifecycle::end_frame` takes FRAME_SETDOWN's error only when
+/// the primary error is 0, the smart precedence is GPU setup, PreRender,
+/// render, GPU setdown, and the UI-close and PreRender-cleanup calls never
+/// replace a non-zero error. Under that rule the first SEH fault of the frame
+/// is the source of a 512 frame error exactly when no selector result was
+/// already non-zero before it: a result that was (the plug-in's own 512, or a
+/// non-SEH substitute) decided the frame first, and every later fault is
+/// masked. Reset per frame by `reset_selector_fault_attribution`.
+struct SelectorFaultAttribution {
+  /// A guarded selector call faulted since the last reset. The fields below
+  /// describe the first such fault; later ones are on their
+  /// `stage:selector_seh` lines.
+  bool captured{};
+  std::string selector;
+  /// Named to stay clear of `exception_code`, which <excpt.h> defines as an
+  /// object-like macro.
+  uint32_t fault_code{};
+  /// A selector answered non-zero (itself, or through a non-SEH substitute:
+  /// an escaped C++ exception, a failed module audit, a guard refusal) before
+  /// the first fault. The frame's error was decided by that answer, so the
+  /// fault's 512 is not the one the frame reports.
+  bool error_before_fault{};
+};
+
 struct SelectorDispatchTelemetry {
   // Selector return codes this host substituted for the plug-in's own since
   // the worker started, all selectors together: a fault the SEH boundary
@@ -251,15 +278,21 @@ struct SelectorDispatchTelemetry {
   // can never present a faulted selector's 512 as the plug-in's own.
   uint64_t substituted_selector_failures{};
   uint32_t seh_code{};
-  /// Monotonic within one worker process. A session frame snapshots this
-  /// before invoking any selectors so an old startup/UI exception cannot be
-  /// attributed to a later frame error.
+  /// Faults the SEH boundary caught, and only those: the C++-exception,
+  /// audit-failure, and guard-refusal substitutes counted above do not bump
+  /// it. Monotonic within one worker process. So a 512 that arrives without
+  /// a `selector_crash` is not proof that the plug-in returned 512 itself -
+  /// it is a 512 that no SEH fault explains, and the substitutions counter is
+  /// what separates the remaining cases.
   uint64_t seh_sequence{};
   uint64_t seh_address{};
   std::string seh_module;
+  /// The selector of the most recent fault - the last one, not the frame's.
+  /// `frame_fault` is the per-frame view a `selector_crash` is built from.
   std::string selector;
   std::string missing_dependency;
   SelectorReturnMessage return_message;
+  SelectorFaultAttribution frame_fault;
   int32_t error{};
   std::vector<SelectorInvocationDiagnostic> invocations;
   bool invocations_truncated{};
@@ -288,6 +321,35 @@ struct SelectorFaultUnwindProbe {
 /// the fault behind the same SEH capture the selector dispatch uses.
 SelectorFaultUnwindProbe verify_selector_fault_unwind() noexcept;
 
+/// What the fault-attribution self-test observed. Each flag is one frame
+/// shape driven through the production guarded call with faulting, throwing,
+/// and answering probe entries.
+struct SelectorFaultAttributionProbe {
+  bool passed{};
+  /// RENDER faults, then FRAME_SETDOWN faults: the frame names RENDER with
+  /// RENDER's exception code, not the later setdown fault.
+  bool first_fault_named{};
+  /// RENDER answers 512 itself, then FRAME_SETDOWN faults: the fault is
+  /// recorded but marked as decided-before, so no `selector_crash` is built.
+  bool own_512_not_charged_to_a_later_fault{};
+  /// RENDER escapes a C++ exception (a 512 substitute with no SEH), then
+  /// FRAME_SETDOWN faults: same verdict as the plug-in's own 512.
+  bool non_seh_substitute_decides_first{};
+  /// RENDER answers 0, then FRAME_SETDOWN faults: the setdown fault is the
+  /// frame's 512 and is named.
+  bool zero_answer_leaves_fault_attributable{};
+  /// A PreRender-cleanup fault (result discarded by every caller) is not a
+  /// candidate: a FRAME_SETDOWN fault after it is the one named.
+  bool discarded_cleanup_fault_skipped{};
+  /// A reset forgets the previous frame's fault and its decided-before flag.
+  bool reset_clears_previous_frame{};
+};
+
+/// Behavioural check that `SelectorFaultAttribution` names the fault whose
+/// substituted 512 is the frame's error (issue #983). Drives the production
+/// SEH capture with probe entries; restores the audit hooks it borrows.
+SelectorFaultAttributionProbe verify_selector_fault_attribution() noexcept;
+
 void configure_selector_dispatch_audit(AuditCapture capture,
                                        AuditPassed passed) noexcept;
 void configure_selector_dispatch_trace(SelectorDispatchTrace trace) noexcept;
@@ -296,6 +358,11 @@ SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept;
 /// frame and on a cluster plug-in swap, so a frame never reports what a
 /// previous frame - or a previous plug-in - said (issue #707).
 void reset_selector_return_message() noexcept;
+/// Forgets the faults and non-zero answers seen so far, so the next
+/// `frame_fault` describes only what follows. Called at the start of every
+/// session frame and of every retried render attempt (the retry's result
+/// replaces the first attempt's, so its attribution restarts with it).
+void reset_selector_fault_attribution() noexcept;
 void* active_selector_module() noexcept;
 HostCallbackTimelineTelemetry& host_callback_timeline_telemetry() noexcept;
 void reset_host_callback_timeline() noexcept;

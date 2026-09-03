@@ -198,13 +198,35 @@ int selftest_selector_fault_unwind(int, wchar_t**) {
   return probe.passed ? 0 : 1;
 }
 
+int selftest_selector_fault_attribution(int, wchar_t**) {
+  const SelectorFaultAttributionProbe probe =
+      verify_selector_fault_attribution();
+  const auto flag = [](bool value) { return value ? "true" : "false"; };
+  std::cout << "{\"selector_fault_attribution\":\""
+            << (probe.passed ? "passed" : "failed")
+            << "\",\"first_fault_named\":" << flag(probe.first_fault_named)
+            << ",\"own_512_not_charged_to_a_later_fault\":"
+            << flag(probe.own_512_not_charged_to_a_later_fault)
+            << ",\"non_seh_substitute_decides_first\":"
+            << flag(probe.non_seh_substitute_decides_first)
+            << ",\"zero_answer_leaves_fault_attributable\":"
+            << flag(probe.zero_answer_leaves_fault_attributable)
+            << ",\"discarded_cleanup_fault_skipped\":"
+            << flag(probe.discarded_cleanup_fault_skipped)
+            << ",\"reset_clears_previous_frame\":"
+            << flag(probe.reset_clears_previous_frame) << "}\n";
+  return probe.passed ? 0 : 1;
+}
+
 }  // namespace
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 13> host_commands{{
+  const std::array<selftest::HostCommand, 14> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-selector-fault-unwind", 2, &selftest_selector_fault_unwind},
+      {L"--self-test-selector-fault-attribution", 2,
+       &selftest_selector_fault_attribution},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
       {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
