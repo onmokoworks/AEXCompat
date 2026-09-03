@@ -2710,6 +2710,148 @@ fn win64_call_rejects_execution_that_does_not_reach_return_sentinel() {
 }
 
 #[test]
+fn win64_call_passes_ten_fifteen_and_sixteen_opaque_argument_slots() {
+    const CODE: u64 = 0x1000_0000;
+
+    for argument_count in [10usize, 15, 16] {
+        // Save the four register slots and every supplied stack slot to the
+        // buffer in RCX, then save the entry RSP alignment nibble.
+        let mut code = vec![
+            0x48, 0x89, 0x09, // mov [rcx],rcx
+            0x48, 0x89, 0x51, 0x08, // mov [rcx+8],rdx
+            0x4c, 0x89, 0x41, 0x10, // mov [rcx+16],r8
+            0x4c, 0x89, 0x49, 0x18, // mov [rcx+24],r9
+        ];
+        for index in 4u8..u8::try_from(argument_count).unwrap() {
+            let stack_offset = 0x28u32 + u32::from(index - 4) * 8;
+            if stack_offset <= 0x7f {
+                code.extend_from_slice(&[0x48, 0x8b, 0x44, 0x24, stack_offset as u8]);
+            } else {
+                code.extend_from_slice(&[0x48, 0x8b, 0x84, 0x24]);
+                code.extend_from_slice(&stack_offset.to_le_bytes());
+            }
+            // The sixteenth argument is still stored at +120, which fits
+            // the signed disp8 form used by this synthetic callee.
+            code.extend_from_slice(&[0x48, 0x89, 0x41, index * 8]);
+        }
+        code.extend_from_slice(&[
+            0x48, 0x89, 0xe0, // mov rax,rsp
+            0x83, 0xe0, 0x0f, // and eax,15
+            0x48, 0x89, 0x81, 0x80, 0, 0, 0, // mov [rcx+128],rax
+            0x31, 0xc0, // xor eax,eax
+            0xc3, // ret
+        ]);
+        let mut engine = test_engine(&code);
+        let output = engine.allocate(136, 8).unwrap();
+        let mut args = vec![
+            output,
+            0x1111_2222_3333_4444,
+            0x5555_6666_7777_8888,
+            0x9999_aaaa_bbbb_cccc,
+            0xdddd_eeee_ffff_0001,
+            0x1234_5678_9abc_def0,
+            0xfedc_ba98_7654_3210,
+            0x0000_0000_8000_0000, // raw -0.0f32 word
+            0x0000_0000_3f80_0000, // raw 1.0f32 word
+            0x0102_0304_0506_0708,
+            0x1112_1314_1516_1718,
+            0x2122_2324_2526_2728,
+            0x3132_3334_3536_3738,
+            0x4142_4344_4546_4748,
+            0x0000_0000_7fc1_2345, // raw NaN f32 word
+            0x0000_0000_3f80_0000, // Kira full-caller raw gain f32 word
+        ];
+        args.truncate(argument_count);
+
+        assert_eq!(engine.call_win64_args(CODE, &args).unwrap(), 0);
+
+        let mut observed = [0u8; 136];
+        engine.read(output, &mut observed).unwrap();
+        for (index, expected) in args.iter().copied().enumerate() {
+            assert_eq!(
+                u64::from_le_bytes(observed[index * 8..index * 8 + 8].try_into().unwrap()),
+                expected,
+                "argument {index} of {argument_count}"
+            );
+        }
+        for index in argument_count..16 {
+            assert_eq!(
+                u64::from_le_bytes(observed[index * 8..index * 8 + 8].try_into().unwrap()),
+                0,
+                "unused argument slot {index} of {argument_count}"
+            );
+        }
+        assert_eq!(
+            u64::from_le_bytes(observed[128..136].try_into().unwrap()),
+            8
+        );
+    }
+}
+
+#[test]
+fn win64_call_zeroes_register_and_home_slots_it_was_not_given() {
+    const CODE: u64 = 0x1000_0000;
+    // OR the four register slots and the four home-space slots into RAX so a
+    // zero return proves every slot the caller did not supply was cleared.
+    let mut engine = test_engine(&[
+        0x48, 0x89, 0xc8, // mov rax,rcx
+        0x48, 0x09, 0xd0, // or rax,rdx
+        0x4c, 0x09, 0xc0, // or rax,r8
+        0x4c, 0x09, 0xc8, // or rax,r9
+        0x48, 0x0b, 0x44, 0x24, 0x08, // or rax,[rsp+8]
+        0x48, 0x0b, 0x44, 0x24, 0x10, // or rax,[rsp+16]
+        0x48, 0x0b, 0x44, 0x24, 0x18, // or rax,[rsp+24]
+        0x48, 0x0b, 0x44, 0x24, 0x20, // or rax,[rsp+32]
+        0xc3, // ret
+    ]);
+    for argument_count in [0usize, 1, 3] {
+        // Dirty the registers and the top of the stack so the zeroes observed
+        // below come from the call frame setup, not from a fresh engine.
+        for register in [
+            RegisterX86::RCX,
+            RegisterX86::RDX,
+            RegisterX86::R8,
+            RegisterX86::R9,
+        ] {
+            engine
+                .unicorn
+                .reg_write(register, 0xdead_beef_dead_beef)
+                .unwrap();
+        }
+        engine
+            .write(STACK_BASE + STACK_SIZE - 0x100, &[0xa5; 0x100])
+            .unwrap();
+        let args = vec![0u64; argument_count];
+        assert_eq!(
+            engine.call_win64_args(CODE, &args).unwrap(),
+            0,
+            "{argument_count} arguments"
+        );
+    }
+}
+
+#[test]
+fn win64_call_rejects_an_argument_frame_the_stack_cannot_hold() {
+    const CODE: u64 = 0x1000_0000;
+    // mov rax,[rsp+0x2000] (0x28 + (1023 - 4) * 8: the slot of argument
+    // 1023); ret
+    let mut engine = test_engine(&[0x48, 0x8b, 0x84, 0x24, 0x00, 0x20, 0x00, 0x00, 0xc3]);
+    let mut args = vec![0u64; 1024];
+    args[1023] = 0x0bad_f00d_cafe_babe;
+    assert_eq!(
+        engine.call_win64_args(CODE, &args).unwrap(),
+        0x0bad_f00d_cafe_babe
+    );
+
+    let too_many = vec![0u64; usize::try_from(STACK_SIZE / 8).unwrap()];
+    let error = engine
+        .call_win64_args(CODE, &too_many)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Win64 argument frame requires"), "{error}");
+}
+
+#[test]
 fn win64_call_timeout_still_fails_closed() {
     const CODE: u64 = 0x1000_0000;
     let mut engine = test_engine(&[0xeb, 0xfe]); // jmp $
