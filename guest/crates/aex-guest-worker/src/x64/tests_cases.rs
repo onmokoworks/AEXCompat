@@ -2719,6 +2719,69 @@ fn win64_call_passes_ten_fifteen_and_sixteen_opaque_argument_slots() {
 }
 
 #[test]
+fn win64_call_zeroes_register_and_home_slots_it_was_not_given() {
+    const CODE: u64 = 0x1000_0000;
+    // OR the four register slots and the four home-space slots into RAX so a
+    // zero return proves every slot the caller did not supply was cleared.
+    let mut engine = test_engine(&[
+        0x48, 0x89, 0xc8, // mov rax,rcx
+        0x48, 0x09, 0xd0, // or rax,rdx
+        0x4c, 0x09, 0xc0, // or rax,r8
+        0x4c, 0x09, 0xc8, // or rax,r9
+        0x48, 0x0b, 0x44, 0x24, 0x08, // or rax,[rsp+8]
+        0x48, 0x0b, 0x44, 0x24, 0x10, // or rax,[rsp+16]
+        0x48, 0x0b, 0x44, 0x24, 0x18, // or rax,[rsp+24]
+        0x48, 0x0b, 0x44, 0x24, 0x20, // or rax,[rsp+32]
+        0xc3, // ret
+    ]);
+    for argument_count in [0usize, 1, 3] {
+        // Dirty the registers and the top of the stack so the zeroes observed
+        // below come from the call frame setup, not from a fresh engine.
+        for register in [
+            RegisterX86::RCX,
+            RegisterX86::RDX,
+            RegisterX86::R8,
+            RegisterX86::R9,
+        ] {
+            engine
+                .unicorn
+                .reg_write(register, 0xdead_beef_dead_beef)
+                .unwrap();
+        }
+        engine
+            .write(STACK_BASE + STACK_SIZE - 0x100, &[0xa5; 0x100])
+            .unwrap();
+        let args = vec![0u64; argument_count];
+        assert_eq!(
+            engine.call_win64_args(CODE, &args).unwrap(),
+            0,
+            "{argument_count} arguments"
+        );
+    }
+}
+
+#[test]
+fn win64_call_rejects_an_argument_frame_the_stack_cannot_hold() {
+    const CODE: u64 = 0x1000_0000;
+    // mov rax,[rsp+0x2000] (0x28 + (1023 - 4) * 8: the slot of argument
+    // 1023); ret
+    let mut engine = test_engine(&[0x48, 0x8b, 0x84, 0x24, 0x00, 0x20, 0x00, 0x00, 0xc3]);
+    let mut args = vec![0u64; 1024];
+    args[1023] = 0x0bad_f00d_cafe_babe;
+    assert_eq!(
+        engine.call_win64_args(CODE, &args).unwrap(),
+        0x0bad_f00d_cafe_babe
+    );
+
+    let too_many = vec![0u64; usize::try_from(STACK_SIZE / 8).unwrap()];
+    let error = engine
+        .call_win64_args(CODE, &too_many)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Win64 argument frame requires"), "{error}");
+}
+
+#[test]
 fn win64_call_timeout_still_fails_closed() {
     const CODE: u64 = 0x1000_0000;
     let mut engine = test_engine(&[0xeb, 0xfe]); // jmp $
