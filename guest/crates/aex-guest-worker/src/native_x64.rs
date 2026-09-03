@@ -756,6 +756,10 @@ impl GuestEngine<'static> {
         &self.state.params
     }
 
+    pub fn parameters_mut(&mut self) -> &mut [GuestParam] {
+        &mut self.state.params
+    }
+
     pub fn suite_requests(&self) -> &[String] {
         &self.state.suite_requests
     }

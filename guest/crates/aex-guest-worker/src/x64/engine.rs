@@ -2654,6 +2654,10 @@ impl GuestEngine<'static> {
     pub fn parameters(&self) -> &[GuestParam] {
         &self.unicorn.get_data().params
     }
+
+    pub fn parameters_mut(&mut self) -> &mut [GuestParam] {
+        &mut self.unicorn.get_data_mut().params
+    }
 }
 
 fn initialize_windows_command_line_a(engine: &mut GuestEngine<'static>) -> Result<(), GuestError> {

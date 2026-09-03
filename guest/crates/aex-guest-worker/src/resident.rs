@@ -252,10 +252,7 @@ pub fn run_resident_session(
                             },
                         )?,
                         Err(error) => {
-                            let render_error = match &error {
-                                ClassicError::Selector { error, .. } => *error,
-                                _ => -40,
-                            };
+                            let render_error = error.selector_error_code().unwrap_or(-40);
                             let failure =
                                 host.resident_failure_diagnostic("admission_probe", &error);
                             write_message(
@@ -600,10 +597,7 @@ fn parse_render_frame(
             )
         }
         Err(error) => {
-            let render_error = match error {
-                ClassicError::Selector { error, .. } => error,
-                _ => -40,
-            };
+            let render_error = error.selector_error_code().unwrap_or(-40);
             write_message(
                 response,
                 &FrameDone {
