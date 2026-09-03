@@ -44,10 +44,7 @@ pub use crate::x64::{
     ExecutionTrace, GuestCensus, GuestParam, SmartCheckoutDiskIdFallback, TraceStateValue,
     TraceWatchSpec, UnsupportedSuiteCall,
 };
-use crate::x64::{
-    SmartCheckoutDiskIdFallback, record_smart_checkout_disk_id_fallback,
-    resolve_layer_parameter_offset,
-};
+use crate::x64::{record_smart_checkout_disk_id_fallback, resolve_layer_parameter_offset};
 use crate::x64::{record_suite_request, record_unsupported_suite_call, utility_suite_layout};
 
 const ARENA_SIZE: usize = 256 * 1024 * 1024;

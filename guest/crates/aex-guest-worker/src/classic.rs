@@ -126,6 +126,61 @@ fn combine_failures(failures: Vec<ClassicError>) -> Result<(), ClassicError> {
     }
 }
 
+/// Settles a render against the disposal of its arbitrary value copies.
+/// A finished render stays finished: its DISPOSE failures are handed to
+/// `record` as messages, mirroring the minihost `ArbitraryValuesScope`, which
+/// discards the DISPOSE result and only counts it (AE ignores the arbitrary
+/// callback's return code). A failed render keeps its own error primary, with
+/// the disposal failures attached as the secondary so neither is dropped.
+fn settle_render_disposal<T>(
+    result: Result<T, ClassicError>,
+    failures: Vec<ClassicError>,
+    record: impl FnOnce(&mut T, Vec<String>),
+) -> Result<T, ClassicError> {
+    match result {
+        Ok(mut value) => {
+            record(
+                &mut value,
+                failures.iter().map(ToString::to_string).collect(),
+            );
+            Ok(value)
+        }
+        Err(primary) => match combine_failures(failures) {
+            Ok(()) => Err(primary),
+            Err(secondary) => Err(ClassicError::Compound {
+                primary: Box::new(primary),
+                secondary: Box::new(secondary),
+            }),
+        },
+    }
+}
+
+/// Settles `GLOBAL_SETDOWN` against the arbitrary disposal that preceded it.
+/// The minihost fails global teardown on either, so both stay errors here; a
+/// GLOBAL_SETDOWN failure (its error code, or a guest crash) is the primary
+/// so `selector_error_code` reports it, and the disposal failure rides along
+/// as the secondary, never instead of it.
+fn settle_global_setdown(
+    setdown: Result<i32, ClassicError>,
+    cleanup: Result<(), ClassicError>,
+) -> Result<i32, ClassicError> {
+    match (setdown, cleanup) {
+        (setdown, Ok(())) => setdown,
+        (Ok(0), Err(cleanup)) => Err(cleanup),
+        (Ok(error), Err(cleanup)) => Err(ClassicError::Compound {
+            primary: Box::new(ClassicError::Selector {
+                selector: "GLOBAL_SETDOWN",
+                error,
+            }),
+            secondary: Box::new(cleanup),
+        }),
+        (Err(setdown), Err(cleanup)) => Err(ClassicError::Compound {
+            primary: Box::new(setdown),
+            secondary: Box::new(cleanup),
+        }),
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct ParameterReport {
     pub slot: usize,
@@ -297,8 +352,21 @@ pub struct RenderReport {
     /// Smart checkouts the host resolved by disk id instead of positionally.
     /// AE and the minihost resolve `PF_CHECKOUT_LAYER` positionally only, so
     /// every entry here is a host-side substitution rather than observed AE
-    /// behavior; an empty list means the render used no such substitution.
+    /// behavior; an empty list means no render on this engine has used such a
+    /// substitution yet. Entries are deduplicated on
+    /// `(requested_index, resolved_slot)` with a running `call_count`, and the
+    /// engine never clears them between resident frames, so a per-frame
+    /// report carries the cumulative total for the engine's lifetime, the
+    /// same convention as `unsupported_suite_calls`.
     pub smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
+    /// `PF_Arbitrary_DISPOSE_FUNC` failures from releasing this render's
+    /// arbitrary value copies, one message per failed slot. AE ignores the
+    /// arbitrary callback's return code and the minihost
+    /// `ArbitraryValuesScope` only counts a failed DISPOSE
+    /// (`arbitrary.invalid_operations`), so the render result stands and the
+    /// failures are recorded next to it instead of replacing it; an empty
+    /// list means every copy was released cleanly.
+    pub arbitrary_dispose_failures: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub census: Option<GuestCensus>,
     pub argb8: Vec<u8>,
@@ -1700,16 +1768,13 @@ impl ClassicHost {
             smart_override,
         );
         // The arbitrary value copies live exactly as long as this render, the
-        // minihost ArbitraryValuesScope: dispose them on every exit path, and
-        // keep a render failure primary over a disposal failure.
-        match (result, self.dispose_arbitrary_values()) {
-            (result, Ok(())) => result,
-            (Ok(_), Err(cleanup)) => Err(cleanup),
-            (Err(primary), Err(secondary)) => Err(ClassicError::Compound {
-                primary: Box::new(primary),
-                secondary: Box::new(secondary),
-            }),
-        }
+        // minihost ArbitraryValuesScope: dispose them on every exit path. A
+        // DISPOSE failure never discards a finished render; it is recorded on
+        // the report, or appended to the render's own error.
+        let failures = self.dispose_arbitrary_values();
+        settle_render_disposal(result, failures, |(report, _), failures| {
+            report.arbitrary_dispose_failures = failures;
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2252,6 +2317,7 @@ impl ClassicHost {
                     .engine
                     .smart_checkout_disk_id_fallbacks()
                     .to_vec(),
+                arbitrary_dispose_failures: Vec::new(),
                 census,
                 argb8,
                 raw_pixels,
@@ -2408,13 +2474,10 @@ impl ClassicHost {
         // Both disposals go through PF_Cmd_ARBITRARY_CALLBACK and need the
         // plug-in's global data, so they run before GLOBAL_SETDOWN.
         let cleanup = combine_failures(
-            [
-                self.dispose_arbitrary_values(),
-                self.dispose_arbitrary_defaults(),
-            ]
-            .into_iter()
-            .filter_map(Result::err)
-            .collect(),
+            self.dispose_arbitrary_values()
+                .into_iter()
+                .chain(self.dispose_arbitrary_defaults().err())
+                .collect(),
         );
         let result = self.invoke(CMD_GLOBAL_SETDOWN);
         self.global_active = false;
@@ -2423,23 +2486,7 @@ impl ClassicHost {
             Ok(result) => clear.map(|()| result as i32).map_err(ClassicError::from),
             Err(error) => Err(selector_guest_error("GLOBAL_SETDOWN", error)),
         };
-        // A GLOBAL_SETDOWN failure (possibly a guest crash) stays the primary
-        // error; a disposal failure is reported alongside it, never instead.
-        match (setdown, cleanup) {
-            (setdown, Ok(())) => setdown,
-            (Ok(0), Err(cleanup)) => Err(cleanup),
-            (Ok(error), Err(cleanup)) => Err(ClassicError::Compound {
-                primary: Box::new(cleanup),
-                secondary: Box::new(ClassicError::Selector {
-                    selector: "GLOBAL_SETDOWN",
-                    error,
-                }),
-            }),
-            (Err(setdown), Err(cleanup)) => Err(ClassicError::Compound {
-                primary: Box::new(setdown),
-                secondary: Box::new(cleanup),
-            }),
-        }
+        settle_global_setdown(setdown, cleanup)
     }
 
     fn arbitrary_extra(&mut self) -> Result<u64, ClassicError> {
@@ -2547,8 +2594,9 @@ impl ClassicHost {
     }
 
     /// Disposes every render-owned value copy. Each slot is released exactly
-    /// once whether or not its DISPOSE succeeds, and every failure is kept.
-    fn dispose_arbitrary_values(&mut self) -> Result<(), ClassicError> {
+    /// once whether or not its DISPOSE succeeds, and every failure is
+    /// returned, in slot order, for the caller to record or report.
+    fn dispose_arbitrary_values(&mut self) -> Vec<ClassicError> {
         let mut failures = Vec::new();
         for value in std::mem::take(&mut self.arbitrary_values) {
             if let Err(error) = self.dispose_arbitrary_handle(value.id, value.refcon, value.handle)
@@ -2562,7 +2610,7 @@ impl ClassicHost {
                 failures.push(ClassicError::Guest(error));
             }
         }
-        combine_failures(failures)
+        failures
     }
 
     /// Disposes every captured arbitrary default (minihost
@@ -4071,6 +4119,109 @@ mod tests {
             secondary: Box::new(ClassicError::Input("cleanup".into())),
         };
         assert_eq!(selector_primary.selector_error_code(), Some(5));
+    }
+
+    fn dispose_failure(id: i16, error: i32) -> ClassicError {
+        ClassicError::Arbitrary {
+            operation: "DISPOSE",
+            id,
+            message: format!("ARBITRARY_CALLBACK returned {error}"),
+        }
+    }
+
+    #[test]
+    fn finished_render_survives_dispose_failures_and_records_them() {
+        let settled = settle_render_disposal(
+            Ok::<Vec<String>, ClassicError>(Vec::new()),
+            vec![dispose_failure(3, 9), dispose_failure(5, -1)],
+            |recorded, failures| *recorded = failures,
+        )
+        .unwrap();
+        assert_eq!(
+            settled,
+            [
+                "arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9",
+                "arbitrary parameter id=5 DISPOSE failed: ARBITRARY_CALLBACK returned -1",
+            ]
+        );
+
+        let clean = settle_render_disposal(
+            Ok::<Vec<String>, ClassicError>(vec!["untouched".into()]),
+            Vec::new(),
+            |recorded, failures| {
+                assert!(failures.is_empty());
+                recorded.push("recorded".into());
+            },
+        )
+        .unwrap();
+        assert_eq!(clean, ["untouched", "recorded"]);
+    }
+
+    #[test]
+    fn failed_render_keeps_its_error_primary_over_dispose_failures() {
+        let failed = settle_render_disposal(
+            Err::<(), _>(ClassicError::Selector {
+                selector: "SMART_RENDER",
+                error: 25,
+            }),
+            vec![dispose_failure(3, 9)],
+            |_, _| panic!("a failed render has no report to record on"),
+        )
+        .unwrap_err();
+        assert_eq!(failed.selector_error_code(), Some(25));
+        assert_eq!(
+            failed.to_string(),
+            "selector SMART_RENDER returned 25; additionally: arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9"
+        );
+
+        let untouched = settle_render_disposal(
+            Err::<(), _>(ClassicError::Input("bad frame".into())),
+            Vec::new(),
+            |_, _| panic!("a failed render has no report to record on"),
+        )
+        .unwrap_err();
+        assert!(matches!(untouched, ClassicError::Input(ref message) if message == "bad frame"));
+    }
+
+    #[test]
+    fn global_setdown_error_stays_primary_over_dispose_failures() {
+        let cleanup = || combine_failures(vec![dispose_failure(3, 9)]);
+
+        assert_eq!(settle_global_setdown(Ok(0), Ok(())).unwrap(), 0);
+        assert_eq!(settle_global_setdown(Ok(7), Ok(())).unwrap(), 7);
+
+        let cleanup_only = settle_global_setdown(Ok(0), cleanup()).unwrap_err();
+        assert_eq!(cleanup_only.selector_error_code(), None);
+        assert!(matches!(
+            cleanup_only,
+            ClassicError::Arbitrary {
+                operation: "DISPOSE",
+                id: 3,
+                ..
+            }
+        ));
+
+        let setdown_code = settle_global_setdown(Ok(5), cleanup()).unwrap_err();
+        assert_eq!(setdown_code.selector_error_code(), Some(5));
+        assert_eq!(
+            setdown_code.to_string(),
+            "selector GLOBAL_SETDOWN returned 5; additionally: arbitrary parameter id=3 DISPOSE failed: ARBITRARY_CALLBACK returned 9"
+        );
+
+        let setdown_crash = settle_global_setdown(
+            Err(ClassicError::SelectorGuest {
+                selector: "GLOBAL_SETDOWN",
+                source: GuestError::Callback("faulted".into()),
+            }),
+            cleanup(),
+        )
+        .unwrap_err();
+        assert_eq!(setdown_crash.selector_error_code(), None);
+        assert!(matches!(
+            setdown_crash,
+            ClassicError::Compound { ref primary, .. }
+                if matches!(**primary, ClassicError::SelectorGuest { selector: "GLOBAL_SETDOWN", .. })
+        ));
     }
 
     #[test]
