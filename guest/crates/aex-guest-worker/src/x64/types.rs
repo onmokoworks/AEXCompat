@@ -120,6 +120,7 @@ struct GuestState {
     pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
     crt_errno: u32,
+    windows_module_refcounts: HashMap<u64, u32>,
     windows_thread_error_mode: u32,
     windows_socket_startups: u32,
     windows_private_heaps: BTreeMap<u64, BTreeSet<u64>>,
