@@ -2553,6 +2553,10 @@ impl GuestEngine<'static> {
         self.unicorn.get_data().dropped_unsupported_suite_calls
     }
 
+    pub fn smart_checkout_disk_id_fallbacks(&self) -> &[SmartCheckoutDiskIdFallback] {
+        &self.unicorn.get_data().smart_checkout_disk_id_fallbacks
+    }
+
     pub fn smart_callback_counts(&self) -> (u32, u32, u32) {
         let state = self.unicorn.get_data();
         (

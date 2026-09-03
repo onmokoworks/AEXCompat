@@ -13,42 +13,58 @@ fn parameter_disk_id(parameter: &GuestParam) -> Option<i32> {
     })
 }
 
+/// Where a smart checkout index landed among the declared parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LayerParameterResolution {
+    /// Zero-based offset into the captured parameter list (slot - 1).
+    pub offset: usize,
+    /// `true` when the positional slot was not a layer and the offset came
+    /// from matching the index against the layer parameters' disk ids. AE and
+    /// the minihost's `pre_checkout_layer` resolve positionally only, so this
+    /// is a host-side substitution the caller must record.
+    pub disk_id_fallback: bool,
+}
+
+/// Resolves a `PF_CHECKOUT_LAYER`/pre-checkout index to a layer parameter.
+///
+/// Positional resolution wins outright: when parameter `index` (1-based) is a
+/// `PF_Param_LAYER`, that slot is returned without consulting disk ids, no
+/// matter what other parameters declare as their id. Only when the positional
+/// slot is absent or not a layer are disk ids consulted, and only among layer
+/// parameters, so a slider or popup that happens to carry the same id never
+/// makes a valid positional checkout ambiguous.
 pub(crate) fn resolve_layer_parameter_offset(
     parameters: &[GuestParam],
     checkout_index: i32,
-) -> Result<usize, String> {
+) -> Result<LayerParameterResolution, String> {
     let positional = usize::try_from(checkout_index)
         .ok()
         .and_then(|index| index.checked_sub(1))
         .and_then(|offset| parameters.get(offset).map(|parameter| (offset, parameter)));
-    let mut disk_matches = parameters
-        .iter()
-        .enumerate()
-        .filter(|(_, parameter)| parameter_disk_id(parameter) == Some(checkout_index));
-    let disk_match = disk_matches.next();
-    if disk_matches.next().is_some() {
+    if let Some((offset, parameter)) = positional
+        && parameter.param_type == 0
+    {
+        return Ok(LayerParameterResolution {
+            offset,
+            disk_id_fallback: false,
+        });
+    }
+    let mut layer_disk_matches = parameters.iter().enumerate().filter(|(_, parameter)| {
+        parameter.param_type == 0 && parameter_disk_id(parameter) == Some(checkout_index)
+    });
+    let disk_match = layer_disk_matches.next();
+    if disk_match.is_some() && layer_disk_matches.next().is_some() {
         return Err(format!(
-            "smart checkout disk_id={checkout_index} is duplicated"
+            "smart checkout index={checkout_index} is not a positional PF_Param_LAYER and its disk_id is duplicated among layer parameters"
         ));
     }
-
-    let positional_layer = positional.filter(|(_, parameter)| parameter.param_type == 0);
-    if let (Some((position, _)), Some((disk_position, _))) = (positional_layer, disk_match) {
-        if position != disk_position {
-            return Err(format!(
-                "smart checkout index={checkout_index} ambiguously names positional and disk-id parameters"
-            ));
-        }
+    if let Some((offset, _)) = disk_match {
+        return Ok(LayerParameterResolution {
+            offset,
+            disk_id_fallback: true,
+        });
     }
-    if let Some((offset, _)) = positional_layer {
-        return Ok(offset);
-    }
-    if let Some((offset, parameter)) = disk_match {
-        if parameter.param_type == 0 {
-            return Ok(offset);
-        }
-    }
-    if positional.is_some() || disk_match.is_some() {
+    if positional.is_some() {
         Err(format!(
             "smart checkout index={checkout_index} is not a PF_Param_LAYER"
         ))
@@ -56,6 +72,35 @@ pub(crate) fn resolve_layer_parameter_offset(
         Err(format!(
             "smart checkout index={checkout_index} does not resolve to a declared parameter"
         ))
+    }
+}
+
+/// A smart checkout that the host resolved through the disk-id fallback in
+/// `resolve_layer_parameter_offset` instead of positionally. AE and the
+/// minihost have no such fallback, so each one is a host-side substitution
+/// that a sweep must be able to see next to the render result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SmartCheckoutDiskIdFallback {
+    pub requested_index: i32,
+    pub resolved_slot: usize,
+    pub call_count: u64,
+}
+
+pub(crate) fn record_smart_checkout_disk_id_fallback(
+    records: &mut Vec<SmartCheckoutDiskIdFallback>,
+    requested_index: i32,
+    resolved_slot: usize,
+) {
+    if let Some(record) = records.iter_mut().find(|record| {
+        record.requested_index == requested_index && record.resolved_slot == resolved_slot
+    }) {
+        record.call_count += 1;
+    } else {
+        records.push(SmartCheckoutDiskIdFallback {
+            requested_index,
+            resolved_slot,
+            call_count: 1,
+        });
     }
 }
 
@@ -123,6 +168,7 @@ struct GuestState {
     suite_requests: Vec<String>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
+    smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
     aegp_compute_cache_classes: HashMap<Vec<u8>, [u64; 4]>,
     selector_dispatch_active: bool,
     pending_unsupported_suite: Option<PendingUnsupportedSuite>,

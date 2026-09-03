@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::backend::{
-    CustomUiRegistration, ExecutionTrace, GuestCensus, GuestEngine, GuestError, TraceStateValue,
-    TraceWatchSpec, UnsupportedSuiteCall,
+    CustomUiRegistration, ExecutionTrace, GuestCensus, GuestEngine, GuestError,
+    SmartCheckoutDiskIdFallback, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
 };
 use crate::gpu_lifecycle::{
     GpuRenderDiagnostic, GpuRuntimeBackendKind, LifecycleCall, LifecycleFailure, LifecycleReply,
@@ -241,6 +241,11 @@ pub struct RenderReport {
     pub suite_requests: Vec<String>,
     pub unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     pub dropped_unsupported_suite_calls: u64,
+    /// Smart checkouts the host resolved by disk id instead of positionally.
+    /// AE and the minihost resolve `PF_CHECKOUT_LAYER` positionally only, so
+    /// every entry here is a host-side substitution rather than observed AE
+    /// behavior; an empty list means the render used no such substitution.
+    pub smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub census: Option<GuestCensus>,
     pub argb8: Vec<u8>,
@@ -2076,6 +2081,10 @@ impl ClassicHost {
                 suite_requests: self.engine.suite_requests().to_vec(),
                 unsupported_suite_calls: self.engine.unsupported_suite_calls().to_vec(),
                 dropped_unsupported_suite_calls: self.engine.dropped_unsupported_suite_calls(),
+                smart_checkout_disk_id_fallbacks: self
+                    .engine
+                    .smart_checkout_disk_id_fallbacks()
+                    .to_vec(),
                 census,
                 argb8,
                 raw_pixels,
