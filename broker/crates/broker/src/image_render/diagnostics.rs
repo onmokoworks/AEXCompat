@@ -1174,10 +1174,7 @@ pub(crate) fn propagate_bee_facade(diagnostics: &mut Value, worker_report: &Valu
     /// The BEE_AVLayer vtable has 246 slots; a slot index past this is not one
     /// the worker can dispatch, so the entry is a malformed report, not data.
     const MAX_SLOT_INDEX: u64 = 1024;
-    let Some(reported) = worker_report
-        .get("bee_facade")
-        .and_then(Value::as_object)
-    else {
+    let Some(reported) = worker_report.get("bee_facade").and_then(Value::as_object) else {
         return;
     };
     let counter = |key: &str| {
