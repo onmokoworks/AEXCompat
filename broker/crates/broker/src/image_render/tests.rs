@@ -2942,6 +2942,35 @@ mod tests {
         assert_eq!(capped["bee_facade"]["layer_vtable_calls_truncated"], true);
         // Counters the report omitted stay null rather than reading as zero.
         assert_eq!(capped["bee_facade"]["effect_layer_hand_outs"], Value::Null);
+
+        // The worker always writes the list, so a block without it is not
+        // legible either: an empty list with the flag down would read as "no
+        // slot was dispatched".
+        let mut missing = json!({});
+        propagate_bee_facade(
+            &mut missing,
+            &json!({"bee_facade": {"effect_layer_hand_outs": 1, "trap_count": 0}}),
+        );
+        assert_eq!(missing["bee_facade"]["layer_vtable_calls"], json!([]));
+        assert_eq!(missing["bee_facade"]["layer_vtable_calls_truncated"], true);
+
+        // A slot index no BEE_AVLayer vtable has is a malformed entry, not data.
+        let mut out_of_range = json!({});
+        propagate_bee_facade(
+            &mut out_of_range,
+            &json!({"bee_facade": {"layer_vtable_calls": [
+                {"slot": 1024, "call_count": 1},
+                {"slot": 5, "call_count": 3},
+            ]}}),
+        );
+        assert_eq!(
+            out_of_range["bee_facade"]["layer_vtable_calls"],
+            json!([{"slot": 5, "call_count": 3}])
+        );
+        assert_eq!(
+            out_of_range["bee_facade"]["layer_vtable_calls_truncated"],
+            true
+        );
     }
 
     #[test]

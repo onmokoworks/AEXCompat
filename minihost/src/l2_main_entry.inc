@@ -1820,6 +1820,16 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     result.hard_failure = true;
     return result;
   }
+  // The incoming plug-in's BEE facade activity is its own. A cluster session
+  // hosts many plug-ins in one worker and the terminal report is written once
+  // at process exit, so without a fresh window the block would describe every
+  // plug-in the session ever held (issue #1264). Opened here, after the
+  // outgoing plug-in is unloaded and before the incoming one is loaded: its
+  // GLOBAL_SETUP / PARAMS_SETUP run in run_bootstrap below, and a plug-in that
+  // asks for the effect layer there must count against itself. Should the
+  // load below fail (exit 25), the terminal report's window covers only that
+  // failed attempt; the outgoing plug-in's activity is not reported anywhere.
+  aexcompat::worker_runtime::bee_facade::begin_attribution_window();
   // Step 5: authenticate plugins[N] against the manifest, then load with the
   // in-place admission flags. A failure means the real bytes changed under
   // the recorded identity (the #309 state transition) or the loader rejected

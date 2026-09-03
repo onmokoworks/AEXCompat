@@ -791,22 +791,13 @@ void run_session_frame_loop(
           break;
         }
       }
-      // The incoming plug-in's facade activity is its own. A cluster session
-      // hosts many plug-ins in one worker, and the terminal report is written
-      // once at process exit, so without this the block would describe every
-      // plug-in the session ever held (issue #1264). Opened before the swap
-      // hook, not after it: the hook runs the incoming plug-in's GLOBAL_SETUP
-      // and PARAMS_SETUP, and a plug-in that asks for the effect layer there
-      // must count against itself, the way the discovery route opens its
-      // window before inspect_column(). The outgoing plug-in's GLOBAL_SETDOWN
-      // also lands inside this window; nothing reports that activity
-      // separately, and the discovery route makes the same trade. Safe to
-      // write here: the sequence is down and no render is in flight.
-      aexcompat::worker_runtime::bee_facade::begin_attribution_window();
       // 2.-6. GLOBAL_SETDOWN, quiescence, plug-in-only unload, authenticated
       // load of plugins[N], GLOBAL_SETUP/PARAMS_SETUP, and the payload swap
       // all belong to the dispatch owner, which holds the WorkerSession, the
-      // bootstrap wiring, and the launch payload parser.
+      // bootstrap wiring, and the launch payload parser. The BEE facade's
+      // attribution window (issue #1264) is opened inside that hook, between
+      // the outgoing plug-in's unload and the incoming plug-in's bootstrap,
+      // so each side's facade calls count against the plug-in that made them.
       wrs::SwapPluginResult swap =
           swap_hook->invoke(swap_hook->context, plugin_index);
       if (swap.hard_failure || !swap.entry) {
