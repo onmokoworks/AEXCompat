@@ -50,9 +50,20 @@ if ([string]::IsNullOrWhiteSpace($rustDll)) {
     }
     $rustDll = Join-Path $repoRoot `
         "broker\target\release\aexcompat_host_core_ffi.dll"
-}
-if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
-    throw "Release Rust host-core FFI DLL was not produced: $rustDll"
+    if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
+        throw "Release Rust host-core FFI DLL was not produced: $rustDll"
+    }
+} else {
+    # The gate exe resolves the path against its own working directory,
+    # which is $buildRoot by the time it runs, so anchor a relative value to
+    # the caller's directory before the existence check agrees with it.
+    $rustDll = $rustDll.Trim()
+    if (-not [System.IO.Path]::IsPathRooted($rustDll)) {
+        $rustDll = Join-Path (Get-Location).Path $rustDll
+    }
+    if (-not (Test-Path -LiteralPath $rustDll -PathType Leaf)) {
+        throw "AEXCOMPAT_HOST_CORE_FFI_DLL does not name a file: $rustDll"
+    }
 }
 
 $abiInclude = Join-Path $repoRoot "broker\crates\broker\include"
