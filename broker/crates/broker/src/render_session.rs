@@ -2900,8 +2900,10 @@ impl RenderSession {
                 // record instead of needing `--close-report` (issue #1264).
                 // The block is windowed per plug-in in the worker, so after a
                 // cluster swap it describes the plug-in current at close, not
-                // the launch-time one this close names by hash; after a failed
-                // swap (exit 25) it covers only the failed load attempt. The sibling
+                // the launch-time one this close names by hash. After a swap
+                // that failed at the load step (exit 25) it covers only that
+                // failed attempt; a swap rejected before the outgoing plug-in
+                // was unloaded leaves the outgoing plug-in's window intact. The sibling
                 // `unsupported_suite_calls` is not propagated here (the close
                 // never carried it), so on this path the positive half stands
                 // alone: read `trap_count` for the negative half.
