@@ -1499,6 +1499,7 @@ fn execution_trace_records_jump_to_known_function_as_tail_call() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -1541,6 +1542,67 @@ fn execution_trace_records_jump_to_known_function_as_tail_call() {
 }
 
 #[test]
+fn execution_trace_watch_can_dereference_pointer_field() {
+    const CODE: u64 = 0x1000_0000;
+    // mov rax,[rcx]; inc byte ptr [rax]; ret
+    let mut engine = test_engine(&[0x48, 0x8b, 0x01, 0xfe, 0x00, 0xc3]);
+    let target = engine.allocate(1, 1).unwrap();
+    engine.write(target, &[41]).unwrap();
+    let holder = engine.allocate(8, 8).unwrap();
+    engine.write(holder, &target.to_le_bytes()).unwrap();
+    engine.configure_trace_watches(vec![TraceWatchSpec {
+        id: "dereferenced-target".into(),
+        function_rva: Some(0),
+        instruction_rva: None,
+        absolute_address: None,
+        register: "rcx",
+        dereference_offset: Some(0),
+        size: 1,
+        occurrence: None,
+        image_coordinate: None,
+        image_row_offset: None,
+        image_format: None,
+    }]);
+    engine.begin_execution_trace("RENDER", CODE).unwrap();
+    engine.call_win64(CODE, [holder, 0, 0, 0, 0, 0]).unwrap();
+    let trace = engine.finish_execution_trace(0).unwrap();
+    let witness = trace.memory_witnesses.first().unwrap();
+    assert_eq!(witness.before.u8_values, [41]);
+    assert_eq!(witness.after.u8_values, [42]);
+}
+
+#[test]
+fn checkpoint_trace_skips_hot_basic_block_collection() {
+    const CODE: u64 = 0x1000_0000;
+    // entry calls a target which increments the watched byte.
+    let mut engine = test_engine(&[0xe8, 1, 0, 0, 0, 0xc3, 0xfe, 0x02, 0xc3]);
+    let buffer = engine.allocate(1, 1).unwrap();
+    engine.write(buffer, &[1]).unwrap();
+    engine.configure_trace_watches(vec![TraceWatchSpec {
+        id: "checkpoint".into(),
+        function_rva: Some(6),
+        instruction_rva: None,
+        absolute_address: None,
+        register: "rdx",
+        dereference_offset: None,
+        size: 1,
+        occurrence: Some(1),
+        image_coordinate: None,
+        image_row_offset: None,
+        image_format: None,
+    }]);
+    engine.configure_trace_checkpoint_only(true);
+    engine.begin_execution_trace("RENDER", CODE).unwrap();
+    engine.call_win64(CODE, [0, buffer, 0, 0, 0, 0]).unwrap();
+    let trace = engine.finish_execution_trace(0).unwrap();
+    assert_eq!(trace.trace_configuration.capture_mode, "checkpoint");
+    assert!(trace.basic_blocks.is_empty());
+    assert!(trace.branch_edges.is_empty());
+    assert_eq!(trace.memory_witnesses[0].before.u8_values, [1]);
+    assert_eq!(trace.memory_witnesses[0].after.u8_values, [2]);
+}
+
+#[test]
 fn execution_trace_treats_explicitly_watched_first_jump_as_tail_call() {
     const CODE: u64 = 0x1000_0000;
     // jmp target; padding; target: mov rax,[rsp+0x28]; inc byte ptr [rax]; ret
@@ -1555,6 +1617,7 @@ fn execution_trace_treats_explicitly_watched_first_jump_as_tail_call() {
         instruction_rva: None,
         absolute_address: None,
         register: "stack5",
+        dereference_offset: None,
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -1594,6 +1657,7 @@ fn execution_trace_applies_watch_occurrence_to_tail_calls() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 1,
         occurrence: Some(2),
         image_coordinate: None,
@@ -1631,6 +1695,7 @@ fn execution_trace_activates_function_watch_at_selector_entry() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 1,
         occurrence: None,
         image_coordinate: None,
@@ -1799,6 +1864,7 @@ fn execution_trace_witnesses_memory_before_and_after_a_call() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 4,
         occurrence: None,
         image_coordinate: None,
@@ -1845,6 +1911,7 @@ fn execution_trace_selects_one_based_watch_occurrence_without_spending_witness_b
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 1,
         occurrence: Some(2),
         image_coordinate: None,
@@ -1884,6 +1951,7 @@ fn inferred_return_path_completes_pending_memory_witness() {
         instruction_rva: None,
         absolute_address: None,
         register: "rcx",
+        dereference_offset: None,
         size: 4,
         occurrence: None,
         image_coordinate: None,
@@ -2591,6 +2659,7 @@ fn trace_event_limit_marks_capture_as_truncated() {
         watch_occurrence_counts: HashMap::new(),
         watch_stack: Vec::new(),
         selector_watches: Vec::new(),
+        checkpoint_returns: HashMap::new(),
         witnesses: Vec::new(),
         dropped_witnesses: 0,
         basic_blocks: HashMap::new(),
@@ -2603,6 +2672,7 @@ fn trace_event_limit_marks_capture_as_truncated() {
         known_function_entries: HashSet::new(),
         truncated: false,
         dropped_events: 0,
+        checkpoint_only: false,
     };
     for index in 0..=MAX_TRACE_EVENTS {
         push_trace_event(

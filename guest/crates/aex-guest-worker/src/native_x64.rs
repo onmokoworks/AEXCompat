@@ -40,6 +40,7 @@ use crate::pe::PeImage;
 use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
 };
+use crate::x64::resolve_layer_parameter_offset;
 pub use crate::x64::{
     ExecutionTrace, GuestCensus, GuestParam, TraceStateValue, TraceWatchSpec, UnsupportedSuiteCall,
 };
@@ -676,6 +677,8 @@ impl GuestEngine<'static> {
     }
 
     pub fn configure_trace_watches(&mut self, _: Vec<TraceWatchSpec>) {}
+
+    pub fn configure_trace_checkpoint_only(&mut self, _: bool) {}
 
     pub fn add_trace_watch(&mut self, _: TraceWatchSpec) {}
 
@@ -2006,10 +2009,7 @@ fn native_smart_checkout_world(state: &NativeState, index: i32) -> Option<(u64, 
     let mut world = if index == 0 {
         state.smart_input_world
     } else {
-        let offset = usize::try_from(index).ok()?.checked_sub(1)?;
-        if state.params.get(offset)?.param_type != 0 {
-            return None;
-        }
+        let offset = resolve_layer_parameter_offset(&state.params, index).ok()?;
         state
             .parameter_definitions
             .get(offset)

@@ -6,6 +6,59 @@ pub struct GuestParam {
     pub bytes: Vec<u8>,
 }
 
+fn parameter_disk_id(parameter: &GuestParam) -> Option<i32> {
+    parameter.bytes.get(..4).and_then(|bytes| {
+        let bytes: [u8; 4] = bytes.try_into().ok()?;
+        Some(i32::from_le_bytes(bytes))
+    })
+}
+
+pub(crate) fn resolve_layer_parameter_offset(
+    parameters: &[GuestParam],
+    checkout_index: i32,
+) -> Result<usize, String> {
+    let positional = usize::try_from(checkout_index)
+        .ok()
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|offset| parameters.get(offset).map(|parameter| (offset, parameter)));
+    let mut disk_matches = parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| parameter_disk_id(parameter) == Some(checkout_index));
+    let disk_match = disk_matches.next();
+    if disk_matches.next().is_some() {
+        return Err(format!(
+            "smart checkout disk_id={checkout_index} is duplicated"
+        ));
+    }
+
+    let positional_layer = positional.filter(|(_, parameter)| parameter.param_type == 0);
+    if let (Some((position, _)), Some((disk_position, _))) = (positional_layer, disk_match) {
+        if position != disk_position {
+            return Err(format!(
+                "smart checkout index={checkout_index} ambiguously names positional and disk-id parameters"
+            ));
+        }
+    }
+    if let Some((offset, _)) = positional_layer {
+        return Ok(offset);
+    }
+    if let Some((offset, parameter)) = disk_match {
+        if parameter.param_type == 0 {
+            return Ok(offset);
+        }
+    }
+    if positional.is_some() || disk_match.is_some() {
+        Err(format!(
+            "smart checkout index={checkout_index} is not a PF_Param_LAYER"
+        ))
+    } else {
+        Err(format!(
+            "smart checkout index={checkout_index} does not resolve to a declared parameter"
+        ))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UnsupportedSuiteCall {
     pub name: &'static str,
@@ -99,6 +152,7 @@ struct GuestState {
     trace: Option<TraceCapture>,
     trace_labels: HashMap<u64, TraceLabel>,
     trace_watches: Vec<TraceWatchSpec>,
+    trace_checkpoint_only: bool,
     pending_iterate: Option<PendingIterate>,
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     vcomp_requested_threads: Option<u32>,
@@ -440,6 +494,7 @@ struct TraceCapture {
     watch_occurrence_counts: HashMap<String, u64>,
     watch_stack: Vec<Vec<PendingTraceWatch>>,
     selector_watches: Vec<PendingTraceWatch>,
+    checkpoint_returns: HashMap<u64, Vec<PendingTraceWatch>>,
     witnesses: Vec<TraceMemoryWitness>,
     dropped_witnesses: u64,
     basic_blocks: HashMap<(u64, u32), u64>,
@@ -452,6 +507,7 @@ struct TraceCapture {
     known_function_entries: HashSet<u64>,
     truncated: bool,
     dropped_events: u64,
+    checkpoint_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -478,6 +534,8 @@ pub struct TraceWatchSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub absolute_address: Option<u64>,
     pub register: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dereference_offset: Option<u64>,
     pub size: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub occurrence: Option<u64>,
@@ -500,6 +558,7 @@ pub struct TraceModule {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TraceConfiguration {
+    pub capture_mode: &'static str,
     pub max_events: usize,
     pub max_basic_blocks: usize,
     pub max_branch_edges: usize,
