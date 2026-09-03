@@ -79,6 +79,13 @@ pub(crate) fn resolve_layer_parameter_offset(
 /// `resolve_layer_parameter_offset` instead of positionally. AE and the
 /// minihost have no such fallback, so each one is a host-side substitution
 /// that a sweep must be able to see next to the render result.
+///
+/// Records are keyed by `(requested_index, resolved_slot)` and accumulate for
+/// the engine's lifetime: a repeat checkout bumps `call_count` instead of
+/// adding an entry, and nothing clears the list between resident frames, so
+/// a per-frame report carries the running total across every frame the
+/// engine has rendered so far (the same convention as
+/// `unsupported_suite_calls`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SmartCheckoutDiskIdFallback {
     pub requested_index: i32,
@@ -86,6 +93,8 @@ pub struct SmartCheckoutDiskIdFallback {
     pub call_count: u64,
 }
 
+/// Dedupes on `(requested_index, resolved_slot)` and never removes an entry;
+/// see `SmartCheckoutDiskIdFallback` for the resulting cumulative semantics.
 pub(crate) fn record_smart_checkout_disk_id_fallback(
     records: &mut Vec<SmartCheckoutDiskIdFallback>,
     requested_index: i32,
