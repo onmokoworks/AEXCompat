@@ -3,10 +3,13 @@ import subprocess
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from _msvc_compile import require_sccache
+
 
 def compiler_argv(compiler: str) -> list[str]:
     """Return a compiler argv prefix with the explicitly configured cache."""
     if os.environ.get("AEXCOMPAT_COMPILE_CACHE") == "sccache":
+        require_sccache()
         return ["sccache", compiler]
     return [compiler]
 

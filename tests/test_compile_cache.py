@@ -1,7 +1,21 @@
 from pathlib import Path
 
 import _compile_cache
+import _msvc_compile
+import pytest
 from _compile_cache import compile_and_link, compiler_argv
+
+
+@pytest.fixture
+def sccache_on_path(monkeypatch):
+    monkeypatch.setattr(_msvc_compile.shutil, "which", lambda name: f"/fake/{name}")
+
+
+def test_compiler_argv_refuses_an_absent_sccache(monkeypatch):
+    monkeypatch.setenv("AEXCOMPAT_COMPILE_CACHE", "sccache")
+    monkeypatch.setattr(_msvc_compile.shutil, "which", lambda name: None)
+    with pytest.raises(RuntimeError, match="sccache is not on PATH"):
+        compiler_argv("clang++")
 
 
 def test_compiler_argv_uses_the_compiler_directly_by_default(monkeypatch):
@@ -9,7 +23,7 @@ def test_compiler_argv_uses_the_compiler_directly_by_default(monkeypatch):
     assert compiler_argv("clang++") == ["clang++"]
 
 
-def test_compiler_argv_wraps_only_the_explicit_sccache_mode(monkeypatch):
+def test_compiler_argv_wraps_only_the_explicit_sccache_mode(monkeypatch, sccache_on_path):
     monkeypatch.setenv("AEXCOMPAT_COMPILE_CACHE", "sccache")
     assert compiler_argv("clang++") == ["sccache", "clang++"]
 
@@ -17,7 +31,7 @@ def test_compiler_argv_wraps_only_the_explicit_sccache_mode(monkeypatch):
     assert compiler_argv("clang++") == ["clang++"]
 
 
-def test_compile_and_link_caches_only_compile_steps(monkeypatch, tmp_path):
+def test_compile_and_link_caches_only_compile_steps(monkeypatch, tmp_path, sccache_on_path):
     calls = []
 
     def record_run(argv, **kwargs):
