@@ -480,3 +480,51 @@ follow-up (Issue が立てられないためここに記録):
 ローカル CI スクリプト (CI workflow の再現) はこのセッションの scratchpad
 にあり、リポジトリには入れていない。必要なら `tools/` へ移す。
 
+## 2026-09-04 handoff アーカイブ 2 件
+
+オーナー側の別マシンから渡された zip 2 件 (`AEXCompat-push-handoff-2026-09-04.zip`,
+`AEXCompat-issue1366-handoff.zip`)。いずれも SHA256SUMS を検証し、bundle を
+`refs/handoff/*` に fetch して main と照合した。
+
+### `AEXCompat-issue1366-handoff.zip`: 対応不要
+
+観察: bundle のブランチ先端 `a8656ff4` (`codex/issue1366-srw-exclusive`)
+は main の祖先 (PR #1436 `4b67a2b9` でマージ済み)。patch 2 本 (`6f019bfe`,
+`55fa4f02`) も main に含まれる。README の「Application-tested main
+5d2d69c3」は 08-21 の main で、当時 origin に push 済みの範囲。
+handoff 作成側は GitHub を確認できなかったため二重に送られたと思われる。
+
+### `AEXCompat-push-handoff-2026-09-04.zip`: 2 commit を取り込み
+
+観察: `499badcb` "test: cache compile-only MSVC ABI probes"、`50222085`
+"test: cache portable native selftest compiles" (author onmokoworks、
+2026-08-24)。期待 base `93b15cf5` は origin/main の 08-21 18:40 時点で、
+最後の push (`4912b28f`) の 1 つ前。2 commit とも main / mirror に無い
+(停止後のローカル作業)。tests/ 配下のみ 15 ファイル (+419/-93)。
+処置: `handoff/ci-cache` ブランチ (worktree `AEXCompat-handoff`) に
+`git cherry-pick -x` で clean に適用 (`21785488`, `dd37ba97`)。
+`test_compile_cache.py` / `test_msvc_compile_driver.py` 5 passed、collect
+931 件。adversarial review 実施中。通れば main に merge → ローカル CI → push。
+- review 結果: blocking なし。実体は自前のキャッシュではなく、CI が既に
+  使っている `AEXCOMPAT_COMPILE_CACHE=sccache` のときだけ `cl` / `clang++`
+  を sccache 経由にする薄い wrapper (#1533 の ps1 と同型)。既定は従来と
+  byte 単位で同じコマンド。sccache の key は preprocessed output なので
+  ヘッダ変更も miss になることを実測で確認済み。should-fix: sccache 指定で
+  PATH に無いとき cmd の 9009 で分かりにくく落ちる → `require_sccache()`
+  で明示的に失敗させる修正 (`e8f2bf48`)。nit: 差分の 2/3 が無関係な
+  整形、`ccache` 指定を黙って無視するのは minihost/CMake と契約が違う
+  (既存の不一致)。
+- 修正の再レビュー: `test_pf_adv_time_suite1.py` の既存テストが sccache
+  未導入機で新しい RuntimeError を踏む (CI とこの機では通る) → `which` を
+  monkeypatch (`4daa2412`)。
+- main `24f3ec69` (merge, `e8f2bf48` まで) でローカル CI 実行中。
+  `4daa2412` は tests/*.py のみの変更なので、完走後に cherry-pick して
+  pytest 系 step だけ再実行する (Rust / native step は同一コード)。
+- main `24f3ec69` のローカル CI: 全 25 step PASS (sccache モード)。
+  `4daa2412` を `22b91a18` として cherry-pick し、pytest 系 step を再実行:
+  906 passed / 0 failed / 22 skipped。origin/main へ push。
+- レビュー済み境界: `22b91a18`。
+- 取り込んだ handoff の元 commit (`499badcb`, `50222085`) は
+  `refs/handoff/push-main`、issue1366 の bundle は `refs/handoff/issue1366`
+  としてローカルに残してある (main に含まれるので不要になれば削除可)。
+
