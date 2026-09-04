@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from _msvc_compile import compile_driver
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_ROOT = os.environ.get("AFTER_EFFECTS_SDK_ROOT")
@@ -16,7 +18,12 @@ def _msvc_vcvars() -> Path:
     if os.name != "nt":
         pytest.skip("SDK ABI compile test requires the Windows MSVC toolchain")
     program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-    vswhere = Path(program_files_x86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    vswhere = (
+        Path(program_files_x86)
+        / "Microsoft Visual Studio"
+        / "Installer"
+        / "vswhere.exe"
+    )
     if not vswhere.is_file():
         pytest.skip("vswhere.exe is unavailable; install Visual Studio C++ tools")
     # -utf8 forces UTF-8 output, so decode it as UTF-8 explicitly rather than the
@@ -24,10 +31,21 @@ def _msvc_vcvars() -> Path:
     # install path with non-ASCII characters would mojibake. errors="replace"
     # still guards any stray CP932 chatter (#237, follow-up to #58).
     installation = subprocess.run(
-        [str(vswhere), "-latest", "-products", "*", "-requires",
-         "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath",
-         "-utf8"],
-        capture_output=True, text=True, encoding="utf-8-sig", errors="replace",
+        [
+            str(vswhere),
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+            "-utf8",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8-sig",
+        errors="replace",
     ).stdout.strip()
     if not installation:
         pytest.skip("no Visual Studio installation with the C++ x64 toolset")
@@ -41,7 +59,7 @@ def test_sdk_frozen_utility_suite_hwnd_slots_compile() -> None:
     if HEADERS is None or not HEADERS.is_dir():
         pytest.skip("set AFTER_EFFECTS_SDK_ROOT to a valid After Effects SDK root")
     vcvars = _msvc_vcvars()
-    source = r'''
+    source = r"""
 #include <cstddef>
 #include "AEConfig.h"
 #include "AE_GeneralPlug.h"
@@ -59,7 +77,7 @@ static_assert(sizeof(AEGP_UtilitySuite2) == 19 * sizeof(void*));
 static_assert(offsetof(AEGP_UtilitySuite2, AEGP_RegisterWithAEGP) == 7 * sizeof(void*));
 static_assert(offsetof(AEGP_UtilitySuite2, AEGP_GetMainHWND) == 8 * sizeof(void*));
 int main() { return 0; }
-'''
+"""
     with tempfile.TemporaryDirectory() as directory:
         cpp = Path(directory) / "utility_suite_hwnd_abi.cpp"
         obj = Path(directory) / "utility_suite_hwnd_abi.obj"
@@ -67,7 +85,7 @@ int main() { return 0; }
         cpp.write_text(source, encoding="ascii")
         batch.write_text(
             f'@call "{vcvars}" >nul\n'
-            f'@cl /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{HEADERS}" '
+            f'@{compile_driver()} /nologo /std:c++17 /DWIN32 /D_WINDOWS /c /I"{HEADERS}" '
             f'/I"{HEADERS / "SP"}" /Fo"{obj}" "{cpp}"\n',
             encoding="ascii",
         )
@@ -76,7 +94,12 @@ int main() { return 0; }
 
 def test_suite_entry_guards_and_utility13_native_contract(canonical_release_worker):
     result = subprocess.run(
-        [str(canonical_release_worker), "--kind", "classic", "--self-test-suite-entry-utility13"],
+        [
+            str(canonical_release_worker),
+            "--kind",
+            "classic",
+            "--self-test-suite-entry-utility13",
+        ],
         cwd=ROOT,
         check=True,
         capture_output=True,
