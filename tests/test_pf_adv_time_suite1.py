@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import _msvc_compile
 from _msvc_compile import compile_driver
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +94,9 @@ int main() { return 0; }
 
 def test_sdk_compile_command_honors_the_configured_cache(monkeypatch):
     monkeypatch.setenv("AEXCOMPAT_COMPILE_CACHE", "sccache")
+    # The command shape is what is under test, not whether this machine has
+    # sccache installed.
+    monkeypatch.setattr(_msvc_compile.shutil, "which", lambda name: f"/fake/{name}")
     command = _compile_command(
         Path("probe.cpp"), Path("build"), Path("sdk/Examples/Headers")
     )
