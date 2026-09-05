@@ -24,19 +24,22 @@ intended for a disposable Windows CI VM, not an existing development machine.
 
 ## Cache and timing policy
 
-Three GitLab caches are used, all under `.ci-cache/`:
+Two GitLab caches are used, both under `.ci-cache/`:
 
-- Rustup and Cargo proxy binaries are keyed by `rust-toolchain.toml`.
-  Bootstrap installs no default stable toolchain; the repository-pinned version
-  is installed with the minimal profile. This avoids installing two toolchains
-  and local Rust documentation on every clean VM.
-- Cargo downloads, uv's package cache and managed Python are keyed by the lock
-  files. The virtual environment is recreated with `uv sync --locked`.
+- Cargo registry package archives are keyed by `broker/Cargo.lock`.
 - A branch-specific, 2 GB sccache store caches Rust and minihost C++ compilation,
   with the default branch as a fallback when available. Rust incremental
   compilation is disabled for sccache. VSLANG and the existing dependency check
   remain enabled. Cache entries are saved even after a failed job so a later
   fix can reuse completed compilation.
+
+Rustup installs no default stable toolchain. The repository-pinned version is
+explicitly installed with the minimal profile plus rustfmt/clippy. Toolchains
+are not archived: job 16324927682 spent about 28 minutes archiving 51,000 Rust
+files, while installation took about 98 seconds. Managed Python is not archived
+either: GitLab's Windows ZIP archiver failed on its directory link. uv recreates
+the environment from the lock file. This leaves only cache stores that saved
+successfully and avoids both expensive archives and filesystem-link failures.
 
 No CMake build tree or Cargo target tree is restored; compiler/content-based
 cache keys avoid relying on checkout timestamps or stale build configuration.

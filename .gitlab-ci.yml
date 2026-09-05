@@ -29,18 +29,9 @@ windows-tests:
     CACHE_COMPRESSION_LEVEL: fastest
   cache:
     - key:
-        prefix: windows-rust-v1
-        files: [rust-toolchain.toml]
-      paths: [.ci-cache/rustup/, .ci-cache/cargo/bin/]
-      when: always
-    - key:
-        prefix: windows-downloads-v1
-        files: [uv.lock, broker/Cargo.lock]
-      paths:
-        - .ci-cache/cargo/registry/
-        - .ci-cache/cargo/git/db/
-        - .ci-cache/uv/
-        - .ci-cache/python/
+        prefix: windows-crate-downloads-v2
+        files: [broker/Cargo.lock]
+      paths: [.ci-cache/cargo/registry/cache/]
       when: always
     - key: "windows-sccache-v1-$CI_COMMIT_REF_SLUG"
       fallback_keys: ["windows-sccache-v1-$CI_DEFAULT_BRANCH"]

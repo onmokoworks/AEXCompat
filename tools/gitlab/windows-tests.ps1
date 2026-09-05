@@ -18,7 +18,7 @@ function Invoke-Checked {
 }
 
 Set-Location (Join-Path $PSScriptRoot '../..')
-# Keep rustup and its selected toolchain inside GitLab's restored cache.
+# Use job-local paths; archiving the toolchain was slower than installation.
 if (-not $env:CARGO_HOME -or -not $env:RUSTUP_HOME) { throw 'CI cache paths are required' }
 $env:Path = "$env:CARGO_HOME\bin;$env:Path"
 if (-not (Test-Path "$env:CARGO_HOME\bin\rustup.exe")) {
@@ -52,6 +52,11 @@ $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
     [Environment]::GetEnvironmentVariable('Path', 'User')
 $env:Path = "$env:CARGO_HOME\bin;$env:Path"
 try {
+    $channelMatch = Select-String -Path rust-toolchain.toml -Pattern '^channel\s*=\s*"([^"]+)"'
+    if (-not $channelMatch -or @($channelMatch).Count -ne 1) { throw 'Expected one Rust toolchain channel' }
+    $channel = $channelMatch.Matches[0].Groups[1].Value
+    Invoke-Checked rustup @('toolchain', 'install', $channel, '--profile', 'minimal', '--component', 'rustfmt,clippy')
+    $env:RUSTUP_TOOLCHAIN = $channel
     Invoke-Checked rustup @('show')
     Invoke-Checked uv @('sync', '--locked')
     $files = @(git ls-files '*.rs')
