@@ -1,0 +1,29 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+stages: [test]
+
+windows-tests:
+  stage: test
+  tags: [saas-windows-medium-amd64]
+  timeout: 2h
+  interruptible: true
+  variables:
+    PYTHONUTF8: "1"
+    VSLANG: "1033"
+    AEXCOMPAT_CARGO_PROFILE: debug
+    SDK_READY: "false"
+  script:
+    - powershell -NoProfile -ExecutionPolicy Bypass -File tools/gitlab/windows-tests.ps1
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - gitlab-test-results.xml
+      - gitlab-python-tests.log
+    reports:
+      junit: gitlab-test-results.xml
