@@ -11,7 +11,20 @@ function Invoke-Checked {
 }
 
 Set-Location (Join-Path $PSScriptRoot '../..')
-Invoke-Checked choco @('install', 'rustup.install', 'uv', 'powershell-core', 'ninja', '-y', '--no-progress')
+$packages = @()
+foreach ($tool in @(
+    @{ Command = 'rustup'; Package = 'rustup.install' },
+    @{ Command = 'uv'; Package = 'uv' },
+    @{ Command = 'pwsh'; Package = 'powershell-core' },
+    @{ Command = 'ninja'; Package = 'ninja' }
+)) {
+    if (-not (Get-Command $tool.Command -CommandType Application -ErrorAction SilentlyContinue)) {
+        $packages += $tool.Package
+    }
+}
+if ($packages.Count -gt 0) {
+    Invoke-Checked choco (@('install') + $packages + @('-y', '--no-progress'))
+}
 $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
     [Environment]::GetEnvironmentVariable('Path', 'User') + ';' + "$env:USERPROFILE\.cargo\bin"
 Invoke-Checked rustup @('show')
