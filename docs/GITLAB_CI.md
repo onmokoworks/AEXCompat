@@ -52,3 +52,12 @@ The small instruments trace writer still builds directly.
 run on the same branch before claiming a speedup; include restore/upload time.
 Windows VM provisioning remains outside this optimization. No test selection
 or automatic pipeline trigger was removed.
+
+Observed on job 16325304596: 391 cache hits / 409 hit-or-miss requests
+(95.60%; C++ 99.59%, Rust 89.82%). Native build fell from about 627 seconds
+to about three minutes; Rust build fell from 647 seconds to 418 seconds.
+Job duration fell from roughly 66 minutes to 25 minutes, including removing
+the expensive Rust archive. These were failing runs at different test points,
+not comparable full-suite success benchmarks. The CLI fixture test remains
+under investigation. Rust uses `--no-fail-fast`, and Python runs even after
+Rust test failures; any failure still fails the final job.

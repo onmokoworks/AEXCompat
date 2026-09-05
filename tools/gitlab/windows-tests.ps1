@@ -66,9 +66,19 @@ try {
     Invoke-Checked pwsh @('-NoProfile', '-File', 'tools/verify-minihost-build-deps.ps1')
     Invoke-Checked pwsh @('-NoProfile', '-File', 'tools/build-native.ps1', '-Source', 'instruments', '-Target', 'trace_writer_selftest')
     Invoke-Checked cargo @('build', '--manifest-path', 'broker/Cargo.toml', '--workspace', '--locked')
-    Invoke-Checked cargo @('test', '--manifest-path', 'broker/Cargo.toml', '--workspace', '--locked')
+    $testFailures = @()
+    try {
+        Invoke-Checked cargo @('test', '--manifest-path', 'broker/Cargo.toml', '--workspace', '--locked', '--no-fail-fast')
+    } catch {
+        $testFailures += "Rust tests: $_"
+    }
     $env:PYTEST_ADDOPTS = '--junitxml=gitlab-test-results.xml'
-    Invoke-Checked uv @('run', '--locked', 'python', 'tools/run-python-ci-tests.py', 'main', '--output', 'gitlab-python-tests.log')
+    try {
+        Invoke-Checked uv @('run', '--locked', 'python', 'tools/run-python-ci-tests.py', 'main', '--output', 'gitlab-python-tests.log')
+    } catch {
+        $testFailures += "Python tests: $_"
+    }
+    if ($testFailures.Count -gt 0) { throw ($testFailures -join "`n") }
 
 } finally {
     # Keep cache hit statistics even when compilation/tests fail. Do not mask
