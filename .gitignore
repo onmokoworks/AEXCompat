@@ -28,3 +28,10 @@ Thumbs.db
 # After Effects third-party plug-ins can write junk into the CWD during
 # oracle captures (e.g. Watchtower's invalidParam/ tree); never commit it.
 invalidParam/
+
+# GitLab CI caches and diagnostics
+.ci-cache/
+gitlab-timings.jsonl
+gitlab-sccache.log
+gitlab-python-tests.log
+gitlab-test-results.xml

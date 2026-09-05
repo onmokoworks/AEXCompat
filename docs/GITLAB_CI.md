@@ -21,3 +21,31 @@ Runner availability and account compute quota still determine whether it runs.
 
 The entry point is `tools/gitlab/windows-tests.ps1`. It installs tools and is
 intended for a disposable Windows CI VM, not an existing development machine.
+
+## Cache and timing policy
+
+Three GitLab caches are used, all under `.ci-cache/`:
+
+- Rustup and Cargo proxy binaries are keyed by `rust-toolchain.toml`.
+  Bootstrap installs no default stable toolchain; the repository-pinned version
+  is installed with the minimal profile. This avoids installing two toolchains
+  and local Rust documentation on every clean VM.
+- Cargo downloads, uv's package cache and managed Python are keyed by the lock
+  files. The virtual environment is recreated with `uv sync --locked`.
+- A branch-specific, 2 GB sccache store caches Rust and minihost C++ compilation,
+  with the default branch as a fallback when available. Rust incremental
+  compilation is disabled for sccache. VSLANG and the existing dependency check
+  remain enabled. Cache entries are saved even after a failed job so a later
+  fix can reuse completed compilation.
+
+No CMake build tree or Cargo target tree is restored; compiler/content-based
+cache keys avoid relying on checkout timestamps or stale build configuration.
+GitLab's protected/unprotected cache separation is retained. Caches are optional:
+a miss rebuilds normally. Fast ZIP compression limits cache transfer overhead.
+The small instruments trace writer still builds directly.
+
+`gitlab-timings.jsonl` records each command's wall time, including failures, and
+`gitlab-sccache.log` records cache statistics. Compare a cold run and a later
+run on the same branch before claiming a speedup; include restore/upload time.
+Windows VM provisioning remains outside this optimization. No test selection
+or automatic pipeline trigger was removed.
