@@ -22,13 +22,16 @@ Set-Location (Join-Path $PSScriptRoot '../..')
 if (-not $env:CARGO_HOME -or -not $env:RUSTUP_HOME) { throw 'CI cache paths are required' }
 $env:Path = "$env:CARGO_HOME\bin;$env:Path"
 if (-not (Test-Path "$env:CARGO_HOME\bin\rustup.exe")) {
-    $installer = Join-Path $env:TEMP 'aexcompat-rustup-init.exe'
+    # rustup dispatches by executable basename; retain rustup-init.exe.
+    $installerDir = Join-Path $env:TEMP ('aexcompat-rustup-' + [guid]::NewGuid())
+    [void](New-Item -ItemType Directory -Path $installerDir)
+    $installer = Join-Path $installerDir 'rustup-init.exe'
     $url = 'https://static.rust-lang.org/rustup/archive/1.27.1/x86_64-pc-windows-msvc/rustup-init.exe'
     Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $installer
     $expected = '193d6c727e18734edbf7303180657e96e9d5a08432002b4e6c5bbe77c60cb3e8'
     if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $expected) { throw 'rustup checksum mismatch' }
     Invoke-Checked $installer @('-y', '--no-modify-path', '--profile', 'minimal', '--default-toolchain', 'none')
-    Remove-Item $installer
+    Remove-Item $installerDir -Recurse
 }
 Invoke-Checked rustup @('set', 'profile', 'minimal')
 $packages = @()
