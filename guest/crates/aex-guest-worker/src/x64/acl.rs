@@ -67,6 +67,36 @@ fn build_new_guest_acl(
 
 fn emulate_windows_acl(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
+        if operation == LegacyWin64Import::InitializeAcl {
+            let output = read_win64_import_argument(unicorn, 0)?;
+            let size = read_win64_import_argument(unicorn, 1)? as u32;
+            let revision = read_win64_import_argument(unicorn, 2)? as u32;
+            if !(2..=4).contains(&revision) {
+                unicorn.get_data_mut().windows_last_error = 87;
+                return Ok(0);
+            }
+            if size < 8 {
+                unicorn.get_data_mut().windows_last_error = 122;
+                return Ok(0);
+            }
+            if size > u16::MAX as u32 {
+                unicorn.get_data_mut().windows_last_error = 87;
+                return Ok(0);
+            }
+            // RtlCreateAcl writes only the header and retains the supplied
+            // capacity verbatim. The remaining buffer is uninitialized space.
+            if output == 0 || !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+                return Err("InitializeAcl header is not writable".into());
+            }
+            let mut header = [0u8; 8];
+            header[0] = revision as u8;
+            header[2..4].copy_from_slice(&(size as u16).to_le_bytes());
+            unicorn
+                .mem_write(output, &header)
+                .map_err(|e| e.to_string())?;
+            // The buffer remains caller-owned, unlike a SetEntriesInAcl result.
+            return Ok(1);
+        }
         if operation == LegacyWin64Import::SetNamedSecurityInfoA {
             let address = read_win64_import_argument(unicorn, 0)?;
             let kind = read_win64_import_argument(unicorn, 1)? as u32;

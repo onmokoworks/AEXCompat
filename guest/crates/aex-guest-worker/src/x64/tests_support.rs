@@ -19588,3 +19588,94 @@ fn well_known_sid_rejects_unwritable_buffers_and_unimplemented_types() {
         assert!(engine.unicorn.get_data().windows_sids.is_empty());
     }
 }
+
+#[test]
+fn initialize_acl_writes_only_empty_header_and_retains_caller_ownership() {
+    const INIT: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, INIT, "advapi32.dll", "InitializeAcl").unwrap();
+    let output = DATA_BASE + 0x900;
+    for revision in [2u64, 3, 4] {
+        for capacity in [8u64, 9, 68, 65535] {
+            engine.write(output, &[0xa5; 16]).unwrap();
+            engine.unicorn.get_data_mut().windows_last_error = 71;
+            engine.unicorn.get_data_mut().crt_errno = 72;
+            assert_eq!(
+                engine
+                    .call_win64(
+                        INIT,
+                        [output, (1 << 32) | capacity, (1 << 32) | revision, 0, 0, 0]
+                    )
+                    .unwrap(),
+                1
+            );
+            let mut expected = vec![revision as u8, 0];
+            expected.extend_from_slice(&(capacity as u16).to_le_bytes());
+            expected.extend_from_slice(&[0; 4]);
+            expected.extend_from_slice(&[0xa5; 8]);
+            assert_eq!(
+                engine.unicorn.mem_read_as_vec(output, 16).unwrap(),
+                expected
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+            assert!(engine.unicorn.get_data().windows_acl_allocations.is_empty());
+        }
+    }
+    for (size, rev, error) in [
+        (0, 2, 122),
+        (7, 2, 122),
+        (65536, 2, 87),
+        (8, 1, 87),
+        (8, 5, 87),
+    ] {
+        engine.write(output, &[0xa5; 16]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(INIT, [output, size, rev, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, error);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 16).unwrap(),
+            vec![0xa5; 16]
+        );
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "InitializeAcl"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn initialize_acl_rejects_inaccessible_headers_without_partial_writes() {
+    const INIT: u64 = STUB_BASE + 0x410;
+    for case in 0..3 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, INIT, "advapi32.dll", "InitializeAcl").unwrap();
+        let output = if case == 0 { 0 } else { DATA_BASE + 0x900 };
+        engine.write(DATA_BASE + 0x900, &[0xa5; 8]).unwrap();
+        if case == 1 {
+            engine
+                .unicorn
+                .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        let pointer = if case == 2 { u64::MAX - 3 } else { output };
+        assert!(
+            engine
+                .call_win64(INIT, [pointer, 8, 2, 0, 0, 0])
+                .unwrap_err()
+                .to_string()
+                .contains("not writable")
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(DATA_BASE + 0x900, 8)
+                .unwrap(),
+            vec![0xa5; 8]
+        );
+    }
+}
