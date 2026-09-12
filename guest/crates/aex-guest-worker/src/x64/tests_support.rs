@@ -18500,3 +18500,105 @@ fn system_metrics_reports_local_guest_session_and_rejects_unknown_metrics() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn strcat_appends_bytes_and_nul_without_touching_tail() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "strcat").unwrap();
+        let source = DATA_BASE + 0x200;
+        for (prefix, suffix) in [
+            (b"ab".as_slice(), b"c\xff".as_slice()),
+            (b"", b"x"),
+            (b"x", b""),
+        ] {
+            engine.write(DATA_BASE, &[0xa5; 32]).unwrap();
+            engine.write(DATA_BASE, &[prefix, b"\0"].concat()).unwrap();
+            engine
+                .write(source, &[suffix, b"\0ignored"].concat())
+                .unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 71;
+            assert_eq!(
+                engine
+                    .call_win64(entry, [DATA_BASE, source, 0, 0, 0, 0])
+                    .unwrap(),
+                DATA_BASE
+            );
+            let expected = [prefix, suffix, b"\0"].concat();
+            let mut actual = [0; 32];
+            engine.read(DATA_BASE, &mut actual).unwrap();
+            assert_eq!(&actual[..expected.len()], &expected);
+            assert!(actual[expected.len()..].iter().all(|b| *b == 0xa5));
+            assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        }
+        engine.write(DATA_BASE, b"abc\0").unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [DATA_BASE, DATA_BASE + 1, 0, 0, 0, 0])
+                .is_err()
+        );
+        let mut unchanged = [0; 4];
+        engine.read(DATA_BASE, &mut unchanged).unwrap();
+        assert_eq!(&unchanged, b"abc\0");
+        assert!(engine.call_win64(entry, [0, source, 0, 0, 0, 0]).is_err());
+        assert!(
+            engine
+                .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                .is_err()
+        );
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "strcat"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn strcat_preflights_full_append_and_requires_terminated_inputs() {
+    const PAGE: u64 = 0x30_0000_0000;
+    for bad_source in [false, true] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", "strcat").unwrap();
+        engine
+            .unicorn
+            .mem_map(PAGE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .unwrap();
+        engine.write(PAGE + PAGE_SIZE - 4, b"ab\0X").unwrap();
+        engine.write(DATA_BASE, b"test\0").unwrap();
+        let (destination, source) = if bad_source {
+            (DATA_BASE, PAGE + PAGE_SIZE - 1)
+        } else {
+            (PAGE + PAGE_SIZE - 4, DATA_BASE)
+        };
+        assert!(
+            engine
+                .call_win64(entry, [destination, source, 0, 0, 0, 0])
+                .is_err()
+        );
+        let mut actual = [0; 4];
+        engine.read(PAGE + PAGE_SIZE - 4, &mut actual).unwrap();
+        assert_eq!(&actual, b"ab\0X");
+        let mut original = [0; 5];
+        engine.read(DATA_BASE, &mut original).unwrap();
+        assert_eq!(&original, b"test\0");
+        // An unterminated destination also fails before changing either input.
+        assert!(
+            engine
+                .call_win64(entry, [PAGE + PAGE_SIZE - 1, DATA_BASE, 0, 0, 0, 0])
+                .is_err()
+        );
+        // Empty suffix fits within the mapped page; this failure isolates WRITE protection.
+        engine.write(DATA_BASE, b"\0").unwrap();
+        engine
+            .unicorn
+            .mem_protect(PAGE, PAGE_SIZE, Prot::READ)
+            .unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [PAGE + PAGE_SIZE - 4, DATA_BASE, 0, 0, 0, 0])
+                .is_err()
+        );
+    }
+}

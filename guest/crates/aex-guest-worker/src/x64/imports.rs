@@ -70,6 +70,7 @@ enum LegacyWin64Import {
     StrNCmp,
     StrLen,
     StrCpy,
+    StrCat,
     SetNamedSecurityInfoA,
     SetEntriesInAclA,
     LocalFree,
@@ -836,6 +837,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::StrCpy
         }
         (_, "strcpy") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcat") => {
+            LegacyWin64Import::StrCat
+        }
+        (_, "strcat") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetNamedSecurityInfoA") => LegacyWin64Import::SetNamedSecurityInfoA,
         (_, "SetNamedSecurityInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetEntriesInAclA") => LegacyWin64Import::SetEntriesInAclA,
@@ -1339,6 +1344,13 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_reg_close_key(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::StrCat => {
+                    uc("write strcat return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strcat",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strcat(uc)),
                     )?;
                 }
                 LegacyWin64Import::StrCpy => {

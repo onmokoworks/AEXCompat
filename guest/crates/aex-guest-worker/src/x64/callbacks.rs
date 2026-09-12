@@ -3847,3 +3847,46 @@ fn capture_popup_choices(
     }
     Err("popup choice text exceeds the 4096-byte setup bound".into())
 }
+
+fn emulate_crt_strcat(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        let prefix = read_crt_stdio_c_string(
+            unicorn,
+            destination,
+            MAX_CRT_STRING_BYTES,
+            "strcat destination",
+        )?;
+        let mut suffix =
+            read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strcat source")?;
+        suffix.push(0);
+        let total = (prefix.len() as u64)
+            .checked_add(suffix.len() as u64)
+            .ok_or("strcat length overflow")?;
+        if total > MAX_CRT_STRING_BYTES {
+            return Err("strcat result exceeds CRT string limit".into());
+        }
+        let end = destination
+            .checked_add(total)
+            .ok_or("strcat destination range overflow")?;
+        let source_end = source
+            .checked_add(suffix.len() as u64)
+            .ok_or("strcat source range overflow")?;
+        // Overlap is undefined by CRT; reject it before any write.
+        if destination < source_end && source < end {
+            return Err("strcat source and destination overlap".into());
+        }
+        let append = destination
+            .checked_add(prefix.len() as u64)
+            .ok_or("strcat append range overflow")?;
+        if !guest_range_has_permission(unicorn, append, suffix.len() as u64, Prot::WRITE)? {
+            return Err("strcat appended destination is not writable".into());
+        }
+        unicorn
+            .mem_write(append, &suffix)
+            .map_err(|e| format!("strcat destination write: {e}"))?;
+        Ok(destination)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
