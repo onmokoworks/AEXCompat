@@ -16056,3 +16056,57 @@ fn guest_asset_streams_read_real_bytes_and_close_without_reusing_tokens() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn copysign_preserves_payloads_and_uses_scalar_xmm_sign_bits() {
+    for dll in ["api-ms-win-crt-math-l1-1-0.dll", "ucrtbase.dll"] {
+        for symbol in ["_copysign", "copysign"] {
+            let mut engine = test_engine(&[0xc3]);
+            let entry = STUB_BASE + 0x100;
+            install_win64_import(&mut engine.unicorn, entry, dll, symbol).unwrap();
+            for bits in [
+                0u64,
+                1,
+                0x8000000000000000,
+                0x3ff4000000000000,
+                0xfff0000000000000,
+                0x7ff0000000001234,
+                0xfff8000000004321,
+            ] {
+                for sign_bits in [0u64, 0x8000000000000000, 0xfff8000000000000] {
+                    let mut left = [0xa5; 16];
+                    left[..8].copy_from_slice(&bits.to_le_bytes());
+                    let mut right = [0x5a; 16];
+                    right[..8].copy_from_slice(&sign_bits.to_le_bytes());
+                    engine
+                        .unicorn
+                        .reg_write_long(RegisterX86::XMM0, &left)
+                        .unwrap();
+                    engine
+                        .unicorn
+                        .reg_write_long(RegisterX86::XMM1, &right)
+                        .unwrap();
+                    engine.call_win64(entry, [0; 6]).unwrap();
+                    let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+                    assert_eq!(
+                        u64::from_le_bytes(result[..8].try_into().unwrap()),
+                        (bits & 0x7fffffffffffffff) | (sign_bits & 0x8000000000000000)
+                    );
+                    assert_eq!(&result[8..], &left[8..]);
+                    assert_eq!(
+                        engine
+                            .unicorn
+                            .reg_read_long(RegisterX86::XMM1)
+                            .unwrap()
+                            .as_ref(),
+                        &right
+                    );
+                }
+            }
+            assert!(matches!(
+                dispatch_win64_import("other.dll", symbol),
+                Win64ImportDispatch::UnsupportedLegacyImport
+            ));
+        }
+    }
+}

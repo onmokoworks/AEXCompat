@@ -63,6 +63,7 @@ enum LegacyWin64Import {
     VcruntimeExceptionCopy,
     VcruntimeExceptionDestroy,
     CxxThrowException,
+    CopySign,
     Cos,
     CosF,
     Ceil,
@@ -672,6 +673,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("api-ms-win-crt-environment-l1-1-0.dll", "_putenv") => LegacyWin64Import::CrtPutenv,
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv") => LegacyWin64Import::CrtGetenv,
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "_copysign" | "copysign") => {
+            LegacyWin64Import::CopySign
+        }
+        (_, "_copysign" | "copysign") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
         (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceil") => LegacyWin64Import::Ceil,
@@ -1238,6 +1243,35 @@ fn install_win64_import(
                     "install C++ throw trap",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_cxx_throw_exception(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CopySign => {
+                uc("write copysign return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install copysign",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let result = (|| -> Result<(), String> {
+                            let mut magnitude = unicorn
+                                .reg_read_long(RegisterX86::XMM0)
+                                .map_err(|e| e.to_string())?;
+                            let sign = unicorn
+                                .reg_read_long(RegisterX86::XMM1)
+                                .map_err(|e| e.to_string())?;
+                            // Copy only the IEEE binary64 sign bit, including NaNs,
+                            // signed zeros and subnormals, without FP arithmetic.
+                            magnitude[7] = (magnitude[7] & 0x7f) | (sign[7] & 0x80);
+                            unicorn
+                                .reg_write_long(RegisterX86::XMM0, &magnitude)
+                                .map_err(|e| e.to_string())
+                        })();
+                        if let Err(error) = result {
+                            if unicorn.get_data().callback_error.is_none() {
+                                unicorn.get_data_mut().callback_error =
+                                    Some(format!("copysign registers: {error}"));
+                            }
+                            let _ = unicorn.emu_stop();
+                        }
                     }),
                 )?;
             }
