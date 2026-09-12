@@ -40,6 +40,8 @@
 //!                        another: #777 access-violated at 16 while answering 4
 //!                        at 8 and 32)
 //!   --size <W>x<H>       session dimensions
+//!   --input-image <path> decode a primary image; dimensions must match --size.
+//!                        Default remains solid RGBA [32,64,128,255].
 //!   --time <n>           timeline position to render at, not the frame index.
 //!                        Every SmartFX plug-in rendered at 0 and failed
 //!                        elsewhere, which a fixed-0 sweep could not see (#828)
@@ -111,8 +113,16 @@ fn primary_pixels(width: u32, height: u32) -> Vec<u8> {
 }
 
 fn effective_input_policy(options: &Options) -> Value {
+    let primary = match &options.input_rgba {
+        Some(bytes) => json!({
+            "pattern": "decoded_image", "channel_order": "RGBA",
+            "pixel_sha256": format!("{:x}", Sha256::digest(bytes)),
+            "width": options.width, "height": options.height
+        }),
+        None => json!({ "pattern": "solid", "channel_order": "RGBA", "rgba8": PRIMARY_RGBA }),
+    };
     json!({
-        "primary": { "pattern": "solid", "channel_order": "RGBA", "rgba8": PRIMARY_RGBA },
+        "primary": primary,
         "parameter_assignments": "none",
         "secondary_layer_selection": if options.no_layer { "none" } else { "first_declared_layer_if_any" },
         "secondary_pattern": if options.no_layer { Value::Null } else { json!("rgba8_x_y_xor_opaque") },
@@ -280,6 +290,7 @@ const TOTAL_TIME: i32 = 300;
 
 #[derive(Clone)]
 struct Options {
+    input_rgba: Option<Vec<u8>>,
     json: Option<PathBuf>,
     limit: Option<usize>,
     skip: usize,
@@ -301,7 +312,9 @@ struct Options {
 }
 
 fn parse_options() -> Options {
+    let mut input_image = None;
     let mut options = Options {
+        input_rgba: None,
         json: None,
         limit: None,
         skip: 0,
@@ -328,6 +341,7 @@ fn parse_options() -> Options {
                 .unwrap_or_else(|| panic!("{argument} takes a value"))
         };
         match argument.as_str() {
+            "--input-image" => input_image = Some(PathBuf::from(value())),
             "--json" => options.json = Some(PathBuf::from(value())),
             "--limit" => options.limit = Some(value().parse().expect("--limit takes a count")),
             "--skip" => options.skip = value().parse().expect("--skip takes a count"),
@@ -392,7 +406,25 @@ fn parse_options() -> Options {
         last <= TOTAL_TIME.unsigned_abs() as u64,
         "--time plus --frames runs to {last}, past the session's total time of {TOTAL_TIME}",
     );
+    if let Some(path) = input_image {
+        options.input_rgba = Some(
+            load_primary_image(&path, options.width, options.height)
+                .unwrap_or_else(|error| panic!("--input-image: {error}")),
+        );
+    }
     options
+}
+
+fn load_primary_image(path: &Path, width: u32, height: u32) -> std::io::Result<Vec<u8>> {
+    let image =
+        aexcompat_broker::image_render::decode_bounded_image(path, "sweep primary")?.to_rgba8();
+    if image.dimensions() != (width, height) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "image dimensions must match --size; implicit resizing is disabled",
+        ));
+    }
+    Ok(image.into_raw())
 }
 
 fn main() {
@@ -485,7 +517,10 @@ fn main() {
 
     // Built once: they depend only on the session geometry, and rebuilding them
     // per plug-in would memcpy the same few hundred KB a few hundred times.
-    let input = primary_pixels(options.width, options.height);
+    let input = options
+        .input_rgba
+        .clone()
+        .unwrap_or_else(|| primary_pixels(options.width, options.height));
     // A map with structure, so an effect that samples it cannot answer
     // identically for every pixel by accident.
     let layer_pixels: Vec<u8> = (0..options.width * options.height)
@@ -1662,11 +1697,15 @@ mod tests {
         let no_layer = effective_input_policy(&options);
         assert_eq!(no_layer["secondary_layer_selection"], "none");
         assert!(no_layer["secondary_pattern"].is_null());
-        assert_eq!(policy["secondary_layer_selection"], "first_declared_layer_if_any");
+        assert_eq!(
+            policy["secondary_layer_selection"],
+            "first_declared_layer_if_any"
+        );
     }
 
     fn discovery_options(json: PathBuf) -> Options {
         Options {
+            input_rgba: None,
             json: Some(json),
             limit: None,
             skip: 0,
@@ -1686,6 +1725,35 @@ mod tests {
             dump_frames: None,
             dirs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn primary_image_decodes_exact_rgba_and_rejects_invalid_inputs() {
+        let path = std::env::temp_dir().join(format!("aex-sweep-input-{}.png", std::process::id()));
+        // Two independently encoded RGBA pixels, including transparent RGB.
+        let png = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 244, 34, 127, 138, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156, 99, 224, 81,
+            178, 248, 31, 21, 224, 198, 0, 0, 10, 134, 2, 86, 235, 24, 252, 245, 0, 0, 0, 0, 73,
+            69, 78, 68, 174, 66, 96, 130,
+        ];
+        std::fs::write(&path, png).unwrap();
+        let pixels = load_primary_image(&path, 2, 1).unwrap();
+        assert_eq!(pixels, [12, 34, 56, 255, 90, 80, 70, 0]);
+        assert!(load_primary_image(&path, 1, 2).is_err());
+        let mut options = discovery_options(PathBuf::new());
+        options.width = 2;
+        options.input_rgba = Some(pixels.clone());
+        let policy = effective_input_policy(&options);
+        assert_eq!(policy["primary"]["pattern"], "decoded_image");
+        assert_eq!(
+            policy["primary"]["pixel_sha256"],
+            format!("{:x}", Sha256::digest(&pixels))
+        );
+        std::fs::write(&path, b"not an image").unwrap();
+        assert!(load_primary_image(&path, 2, 1).is_err());
+        std::fs::remove_file(&path).unwrap();
+        assert!(load_primary_image(&path, 2, 1).is_err());
     }
 
     fn failed_discovery(path: PathBuf) -> DiagnosticDiscovery {
