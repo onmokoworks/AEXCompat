@@ -15454,3 +15454,51 @@ fn security_descriptor_initialization_writes_absolute_layout_and_validates_outpu
     );
     assert_eq!(engine.call_win64(entry, [0, 1, 0, 0, 0, 0]).unwrap(), 0);
 }
+
+#[test]
+fn descriptor_dacl_setter_preserves_references_and_unrelated_fields() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "advapi32.dll",
+        "SetSecurityDescriptorDacl",
+    )
+    .unwrap();
+    let output = engine.allocate(48, 8).unwrap();
+    let acl = engine.allocate(8, 8).unwrap();
+    engine.write(acl, &[2, 0, 8, 0, 0, 0, 0, 0]).unwrap();
+    let mut bytes = [0x5a; 48];
+    bytes[0] = 1;
+    bytes[2..4].copy_from_slice(&0x1010u16.to_le_bytes());
+    engine.write(output, &bytes).unwrap();
+    for (present, pointer, defaulted, control, stored) in [
+        (1, acl, 1, 0x101c, acl),
+        (0, u64::MAX, 0, 0x1018, acl),
+        (1, 0, 0, 0x1014, 0),
+    ] {
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, present, pointer, defaulted, 0, 0])
+                .unwrap(),
+            1
+        );
+        bytes[2..4].copy_from_slice(&(control as u16).to_le_bytes());
+        bytes[32..40].copy_from_slice(&stored.to_le_bytes());
+        let mut actual = [0; 48];
+        engine.read(output, &mut actual).unwrap();
+        assert_eq!(actual, bytes);
+    }
+    bytes[2..4].copy_from_slice(&0x8000u16.to_le_bytes());
+    engine.write(output, &bytes).unwrap();
+    assert_eq!(
+        engine.call_win64(entry, [output, 1, acl, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1338);
+    let mut actual = [0; 48];
+    engine.read(output, &mut actual).unwrap();
+    assert_eq!(actual, bytes);
+    assert_eq!(engine.call_win64(entry, [0, 1, acl, 0, 0, 0]).unwrap(), 0);
+}

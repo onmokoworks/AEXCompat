@@ -146,6 +146,7 @@ enum LegacyWin64Import {
     EnterCriticalSection,
     LeaveCriticalSection,
     DeleteCriticalSection,
+    SetSecurityDescriptorDacl,
     InitializeSecurityDescriptor,
     InitializeSrwLock,
     AcquireSrwLockExclusive,
@@ -349,6 +350,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         None => {}
     }
     let legacy = match (normalized_library.as_str(), symbol) {
+        ("advapi32.dll", "SetSecurityDescriptorDacl") => {
+            LegacyWin64Import::SetSecurityDescriptorDacl
+        }
+        (_, "SetSecurityDescriptorDacl") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "InitializeSecurityDescriptor") => {
             LegacyWin64Import::InitializeSecurityDescriptor
         }
@@ -1881,6 +1886,18 @@ fn install_win64_import(
                     "install critical-section import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                         emulate_windows_critical_section(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::SetSecurityDescriptorDacl => {
+                uc(
+                    "write descriptor DACL setter return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install descriptor DACL setter",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_set_security_descriptor_dacl(unicorn);
                     }),
                 )?;
             }
@@ -7881,5 +7898,55 @@ fn emulate_initialize_security_descriptor(unicorn: &mut Unicorn<'_, GuestState>)
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
     } else {
         let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+    }
+}
+
+fn emulate_set_security_descriptor_dacl(unicorn: &mut Unicorn<'_, GuestState>) {
+    let output = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let present = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default() as u32 != 0;
+    let dacl = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let defaulted = unicorn.reg_read(RegisterX86::R9).unwrap_or_default() as u32 != 0;
+    let result = (|| -> Result<(), u32> {
+        if output == 0
+            || !guest_range_has_permission(unicorn, output, 40, Prot::READ | Prot::WRITE)
+                .unwrap_or(false)
+        {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        let mut descriptor = [0u8; 40];
+        unicorn
+            .mem_read(output, &mut descriptor)
+            .map_err(|_| ERROR_INVALID_PARAMETER)?;
+        if descriptor[0] != 1 {
+            return Err(1305);
+        }
+        let mut control = u16::from_le_bytes([descriptor[2], descriptor[3]]);
+        if control & 0x8000 != 0 {
+            return Err(1338);
+        } // self-relative descriptor is not accepted
+        if present {
+            control = (control | 0x4) & !0x8;
+            if defaulted {
+                control |= 0x8;
+            }
+            // Preserve a reference, including NULL; this setter neither copies
+            // ACL bytes nor makes an access decision for any object.
+            descriptor[32..40].copy_from_slice(&dacl.to_le_bytes());
+        } else {
+            control &= !0x4; // pointer and defaulted arguments are ignored
+        }
+        descriptor[2..4].copy_from_slice(&control.to_le_bytes());
+        unicorn
+            .mem_write(output, &descriptor)
+            .map_err(|_| ERROR_INVALID_PARAMETER)
+    })();
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().windows_last_error = error;
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
     }
 }
