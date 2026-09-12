@@ -15147,6 +15147,15 @@ fn registry_open_empty_roots_and_missing_application_keys() {
             0
         );
     }
+    engine.unicorn.get_data_mut().windows_last_error = 1234;
+    for invalid in [0, 0x12345678, WINDOWS_KERNEL32_MODULE_TOKEN] {
+        assert_eq!(
+            engine.call_win64(CLOSE, [invalid, 0, 0, 0, 0, 0]).unwrap(),
+            u64::from(ERROR_INVALID_HANDLE)
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 1234);
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+    }
     for name in ["RegOpenKeyExA", "RegCloseKey"] {
         assert_eq!(
             dispatch_win64_import("other.dll", name),

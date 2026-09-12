@@ -7886,9 +7886,9 @@ fn emulate_reg_close_key(unicorn: &mut Unicorn<'_, GuestState>) {
         if guest_registry_predefined_key(key) {
             Ok(0)
         } else {
-            Err(format!(
-                "RegCloseKey unsupported or foreign registry handle {key:#x}"
-            ))
+            // RegCloseKey reports an LSTATUS error for a handle it cannot
+            // close. No registry object is created or successfully closed.
+            Ok(u64::from(ERROR_INVALID_HANDLE))
         }
     });
     finish_registry_import(unicorn, result);
