@@ -20547,3 +20547,86 @@ fn volume_information_reports_unavailable_metadata_without_fabricated_outputs() 
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn com_initialization_balances_repeated_calls_and_thread_models() {
+    const INIT: u64 = STUB_BASE + 0x410;
+    const END: u64 = STUB_BASE + 0x420;
+    for dll in ["ole32.dll", "combase.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, INIT, dll, "CoInitializeEx").unwrap();
+        install_win64_import(&mut engine.unicorn, END, dll, "CoUninitialize").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        assert_eq!(engine.call_win64(INIT, [0, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(
+            engine
+                .call_win64(INIT, [0, (1 << 32) | 12, 0, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.call_win64(INIT, [0, 2, 0, 0, 0, 0]).unwrap(),
+            0x80010106
+        );
+        engine.call_win64(END, [0; 6]).unwrap();
+        assert_eq!(
+            engine.call_win64(INIT, [0, 2, 0, 0, 0, 0]).unwrap(),
+            0x80010106
+        );
+        engine.call_win64(END, [0; 6]).unwrap();
+        assert!(engine.unicorn.get_data().com_apartments.is_empty());
+        assert_eq!(engine.call_win64(INIT, [0, 2, 0, 0, 0, 0]).unwrap(), 0);
+        let first = engine.unicorn.get_data().current_windows_thread_id;
+        engine.unicorn.get_data_mut().current_windows_thread_id = first + 1;
+        assert_eq!(engine.call_win64(INIT, [0, 0, 0, 0, 0, 0]).unwrap(), 0);
+        engine.call_win64(END, [0; 6]).unwrap();
+        engine.call_win64(END, [0; 6]).unwrap();
+        assert_eq!(engine.unicorn.get_data().com_apartments.len(), 1);
+        engine.unicorn.get_data_mut().current_windows_thread_id = first;
+        engine.call_win64(END, [0; 6]).unwrap();
+        assert!(engine.unicorn.get_data().com_apartments.is_empty());
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    }
+}
+
+#[test]
+fn com_initialization_rejects_invalid_arguments_and_bounded_exhaustion() {
+    const INIT: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, INIT, "ole32.dll", "CoInitializeEx").unwrap();
+    for (reserved, flags) in [(1, 0), (0, 1), (0, 16)] {
+        assert_eq!(
+            engine
+                .call_win64(INIT, [reserved, flags, 0, 0, 0, 0])
+                .unwrap(),
+            0x80070057
+        );
+        assert!(engine.unicorn.get_data().com_apartments.is_empty());
+    }
+    let thread = engine.unicorn.get_data().current_windows_thread_id;
+    engine
+        .unicorn
+        .get_data_mut()
+        .com_apartments
+        .insert(thread, (0, 1024));
+    assert_eq!(engine.call_win64(INIT, [0; 6]).unwrap(), 0x8007000e);
+    assert_eq!(engine.unicorn.get_data().com_apartments[&thread], (0, 1024));
+    engine.unicorn.get_data_mut().com_apartments.clear();
+    for id in 0..4096 {
+        engine
+            .unicorn
+            .get_data_mut()
+            .com_apartments
+            .insert(id, (0, 1));
+    }
+    engine.unicorn.get_data_mut().current_windows_thread_id = 5000;
+    assert_eq!(engine.call_win64(INIT, [0; 6]).unwrap(), 0x8007000e);
+    for name in ["CoInitializeEx", "CoUninitialize"] {
+        assert!(matches!(
+            dispatch_win64_import("foreign.dll", name),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+}

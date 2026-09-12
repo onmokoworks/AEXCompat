@@ -80,6 +80,8 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     GetVolumeInformationA,
+    CoInitializeEx,
+    CoUninitialize,
     Wstat64i32,
     Fullpath,
     AddAccessAllowedAceEx,
@@ -900,6 +902,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::Wstat64i32
         }
         (_, "_wstat64i32") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ole32.dll" | "combase.dll", "CoInitializeEx") => LegacyWin64Import::CoInitializeEx,
+        ("ole32.dll" | "combase.dll", "CoUninitialize") => LegacyWin64Import::CoUninitialize,
+        (_, "CoInitializeEx" | "CoUninitialize") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("kernel32.dll" | "kernelbase.dll", "GetVolumeInformationA") => {
             LegacyWin64Import::GetVolumeInformationA
         }
@@ -1400,6 +1407,20 @@ fn install_win64_import(
                         "install _wstat64i32",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_wstat64i32(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CoInitializeEx | LegacyWin64Import::CoUninitialize => {
+                    uc(
+                        "write COM lifecycle return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    let initialize = implementation == LegacyWin64Import::CoInitializeEx;
+                    uc(
+                        "install COM lifecycle",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = guest_com_lifecycle(unicorn, initialize);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;
@@ -9268,4 +9289,45 @@ fn emulate_sh_get_special_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+// Guest apartment state only. COM activation, marshaling and RPC remain
+// unsupported until their interfaces are implemented; no host COM is invoked.
+fn guest_com_lifecycle(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    initialize: bool,
+) -> Result<u64, String> {
+    let thread = unicorn.get_data().current_windows_thread_id;
+    if !initialize {
+        let apartments = &mut unicorn.get_data_mut().com_apartments;
+        if let Some((_, count)) = apartments.get_mut(&thread) {
+            *count -= 1;
+            if *count == 0 {
+                apartments.remove(&thread);
+            }
+        }
+        return Ok(0); // void; an unmatched uninitialize has no effect
+    }
+    let reserved = read_win64_import_argument(unicorn, 0)?;
+    let flags = read_win64_import_argument(unicorn, 1)? as u32;
+    if reserved != 0 || flags & !0x0e != 0 {
+        return Ok(0x80070057);
+    }
+    let mode = flags & 2; // COINIT_APARTMENTTHREADED; zero is MTA
+    let apartments = &mut unicorn.get_data_mut().com_apartments;
+    if let Some((current, count)) = apartments.get_mut(&thread) {
+        if *current != mode {
+            return Ok(0x80010106);
+        } // RPC_E_CHANGED_MODE
+        if *count >= 1024 {
+            return Ok(0x8007000e);
+        }
+        *count += 1;
+        return Ok(1); // S_FALSE still requires balancing CoUninitialize
+    }
+    if apartments.len() >= 4096 {
+        return Ok(0x8007000e);
+    }
+    apartments.insert(thread, (mode, 1));
+    Ok(0)
 }

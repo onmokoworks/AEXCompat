@@ -242,6 +242,7 @@ struct GuestState {
     windows_acl_issued: u64,
     next_windows_thread_id: u32,
     current_windows_thread_id: u32,
+    com_apartments: BTreeMap<u32, (u32, u32)>,
     pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
     crt_errno: u32,
