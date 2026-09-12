@@ -8141,94 +8141,51 @@ fn set_thread_error_mode_does_not_commit_after_an_unwritable_old_mode_output() {
 
 #[test]
 fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
-    const LOAD_LIBRARY: u64 = STUB_BASE + 0x1a0;
-    let mut engine = test_engine(&[0xc3]);
-    assert_eq!(
-        install_win64_import(
-            &mut engine.unicorn,
-            LOAD_LIBRARY,
-            "kernel32.dll",
-            "LoadLibraryExW",
-        )
-        .unwrap(),
-        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LoadLibraryExW)
-    );
-    assert_eq!(
-        dispatch_win64_import("fixture.dll", "LoadLibraryExW"),
-        Win64ImportDispatch::UnsupportedLegacyImport
-    );
-    let path = DATA_BASE + 0xe00;
-    let write_path = |engine: &mut GuestEngine<'static>, value: &str| {
-        let mut bytes = Vec::new();
-        for unit in value.encode_utf16().chain(std::iter::once(0)) {
-            bytes.extend_from_slice(&unit.to_le_bytes());
-        }
-        engine.write(path, &bytes).unwrap();
-    };
-    write_path(&mut engine, r"C:\Windows\System32\KERNEL32.DLL");
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 0, 0x0800, 0, 0, 0])
-            .unwrap(),
-        WINDOWS_KERNEL32_MODULE_TOKEN
-    );
+    for library in ["kernel32.dll", "api-ms-win-core-libraryloader-l1-2-0.dll"] {
+        const LOAD_LIBRARY: u64 = STUB_BASE + 0x1a0;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            install_win64_import(&mut engine.unicorn, LOAD_LIBRARY, library, "LoadLibraryExW",)
+                .unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::LoadLibraryExW)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "LoadLibraryExW"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        let path = DATA_BASE + 0xe00;
+        let write_path = |engine: &mut GuestEngine<'static>, value: &str| {
+            let mut bytes = Vec::new();
+            for unit in value.encode_utf16().chain(std::iter::once(0)) {
+                bytes.extend_from_slice(&unit.to_le_bytes());
+            }
+            engine.write(path, &bytes).unwrap();
+        };
+        write_path(&mut engine, r"C:\Windows\System32\KERNEL32.DLL");
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0x0800, 0, 0, 0])
+                .unwrap(),
+            WINDOWS_KERNEL32_MODULE_TOKEN
+        );
 
-    engine.unicorn.get_data_mut().windows_last_error = 0;
-    write_path(&mut engine, "dxgi.dll");
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 0, 0x1000, 0, 0, 0])
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        engine.unicorn.get_data().windows_last_error,
-        ERROR_MOD_NOT_FOUND
-    );
+        engine.unicorn.get_data_mut().windows_last_error = 0;
+        write_path(&mut engine, "dxgi.dll");
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0x1000, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_MOD_NOT_FOUND
+        );
 
-    engine.unicorn.get_data_mut().windows_last_error = 0;
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 0, 0x8000_0000, 0, 0, 0])
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        engine.unicorn.get_data().windows_last_error,
-        ERROR_INVALID_PARAMETER
-    );
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 0, 0x0808, 0, 0, 0])
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        engine.unicorn.get_data().windows_last_error,
-        ERROR_INVALID_PARAMETER
-    );
-    write_path(&mut engine, "kernel32.dll");
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 0, 0x0100, 0, 0, 0])
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        engine.unicorn.get_data().windows_last_error,
-        ERROR_INVALID_PARAMETER
-    );
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 0, 0x2000, 0, 0, 0])
-            .unwrap(),
-        WINDOWS_KERNEL32_MODULE_TOKEN
-    );
-    for non_executable_flag in [0x0002, 0x0020, 0x0040, 0x0062] {
         engine.unicorn.get_data_mut().windows_last_error = 0;
         assert_eq!(
             engine
-                .call_win64(LOAD_LIBRARY, [path, 0, non_executable_flag, 0, 0, 0])
+                .call_win64(LOAD_LIBRARY, [path, 0, 0x8000_0000, 0, 0, 0])
                 .unwrap(),
             0
         );
@@ -8236,9 +8193,17 @@ fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
             engine.unicorn.get_data().windows_last_error,
             ERROR_INVALID_PARAMETER
         );
-    }
-    for malformed_absolute in [r"1:\kernel32.dll", r"\\kernel32.dll"] {
-        write_path(&mut engine, malformed_absolute);
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0x0808, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+        write_path(&mut engine, "kernel32.dll");
         assert_eq!(
             engine
                 .call_win64(LOAD_LIBRARY, [path, 0, 0x0100, 0, 0, 0])
@@ -8249,38 +8214,70 @@ fn load_library_ex_w_is_allowlisted_bounded_and_library_scoped() {
             engine.unicorn.get_data().windows_last_error,
             ERROR_INVALID_PARAMETER
         );
-    }
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 1, 0, 0, 0, 0])
-            .unwrap(),
-        0
-    );
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0x2000, 0, 0, 0])
+                .unwrap(),
+            WINDOWS_KERNEL32_MODULE_TOKEN
+        );
+        for non_executable_flag in [0x0002, 0x0020, 0x0040, 0x0062] {
+            engine.unicorn.get_data_mut().windows_last_error = 0;
+            assert_eq!(
+                engine
+                    .call_win64(LOAD_LIBRARY, [path, 0, non_executable_flag, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                engine.unicorn.get_data().windows_last_error,
+                ERROR_INVALID_PARAMETER
+            );
+        }
+        for malformed_absolute in [r"1:\kernel32.dll", r"\\kernel32.dll"] {
+            write_path(&mut engine, malformed_absolute);
+            assert_eq!(
+                engine
+                    .call_win64(LOAD_LIBRARY, [path, 0, 0x0100, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                engine.unicorn.get_data().windows_last_error,
+                ERROR_INVALID_PARAMETER
+            );
+        }
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 1, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
 
-    write_path(&mut engine, "");
-    engine.unicorn.get_data_mut().callback_error = None;
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        engine.unicorn.get_data().windows_last_error,
-        ERROR_MOD_NOT_FOUND
-    );
-    assert!(engine.unicorn.get_data().callback_error.is_none());
-    write_path(&mut engine, r"C:\Windows\System32\");
-    assert_eq!(
-        engine
-            .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        engine.unicorn.get_data().windows_last_error,
-        ERROR_MOD_NOT_FOUND
-    );
+        write_path(&mut engine, "");
+        engine.unicorn.get_data_mut().callback_error = None;
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_MOD_NOT_FOUND
+        );
+        assert!(engine.unicorn.get_data().callback_error.is_none());
+        write_path(&mut engine, r"C:\Windows\System32\");
+        assert_eq!(
+            engine
+                .call_win64(LOAD_LIBRARY, [path, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_MOD_NOT_FOUND
+        );
+    }
 }
 
 #[test]
@@ -15235,4 +15232,82 @@ fn win64_strcpy_validates_complete_output_before_writing() {
         engine.unicorn.mem_read(PAGE + 4090, &mut actual).unwrap();
         assert_eq!(actual, [0xaa; 6]);
     }
+}
+
+#[test]
+fn system_time_api_set_executes_and_rejects_read_only_output() {
+    const ENTRY: u64 = STUB_BASE + 0x100;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        ENTRY,
+        "api-ms-win-core-sysinfo-l1-1-0.dll",
+        "GetSystemTimeAsFileTime",
+    )
+    .unwrap();
+    let output = engine.allocate(16, 8).unwrap();
+    engine.write(output, &[0x5a; 16]).unwrap();
+    engine.call_win64(ENTRY, [output, 0, 0, 0, 0, 0]).unwrap();
+    let mut bytes = [0; 16];
+    engine.read(output, &mut bytes).unwrap();
+    assert_eq!(&bytes[..8], &132_223_104_000_000_000u64.to_le_bytes());
+    assert_eq!(&bytes[8..], &[0x5a; 8]);
+    engine
+        .unicorn
+        .mem_protect(0x10000000, PAGE_SIZE, Prot::READ | Prot::EXEC)
+        .unwrap();
+    let mut before = [0; 8];
+    engine.read(0x10000000, &mut before).unwrap();
+    assert!(
+        engine
+            .call_win64(ENTRY, [0x10000000, 0, 0, 0, 0, 0])
+            .is_err()
+    );
+    let mut after = [0; 8];
+    engine.read(0x10000000, &mut after).unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn cuda_startup_identity_and_counter_api_sets_execute_existing_guest_semantics() {
+    let mut engine = test_engine(&[0xc3]);
+    let thread = STUB_BASE + 0x100;
+    let process = STUB_BASE + 0x110;
+    let counter = STUB_BASE + 0x120;
+    for (entry, dll, symbol) in [
+        (
+            thread,
+            "api-ms-win-core-processthreads-l1-1-0.dll",
+            "GetCurrentThreadId",
+        ),
+        (
+            process,
+            "api-ms-win-core-processthreads-l1-1-0.dll",
+            "GetCurrentProcessId",
+        ),
+        (
+            counter,
+            "api-ms-win-core-profile-l1-1-0.dll",
+            "QueryPerformanceCounter",
+        ),
+    ] {
+        install_win64_import(&mut engine.unicorn, entry, dll, symbol).unwrap();
+    }
+    engine.unicorn.get_data_mut().current_windows_thread_id = 73;
+    assert_eq!(engine.call_win64(thread, [0; 6]).unwrap(), 73);
+    engine.unicorn.get_data_mut().current_windows_thread_id = 81;
+    assert_eq!(engine.call_win64(thread, [0; 6]).unwrap(), 81);
+    assert_eq!(engine.call_win64(process, [0; 6]).unwrap(), 1);
+    let output = engine.allocate(8, 8).unwrap();
+    assert_eq!(
+        engine.call_win64(counter, [output, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    let mut bytes = [0; 8];
+    engine.read(output, &mut bytes).unwrap();
+    assert_eq!(u64::from_le_bytes(bytes), 1);
+    assert!(matches!(
+        dispatch_win64_import("fixture.dll", "GetCurrentThreadId"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
 }

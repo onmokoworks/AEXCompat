@@ -347,7 +347,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         None => {}
     }
     let legacy = match (normalized_library.as_str(), symbol) {
-        ("kernel32.dll", "GetSystemTimeAsFileTime") => LegacyWin64Import::GetSystemTimeAsFileTime,
+        ("kernel32.dll" | "api-ms-win-core-sysinfo-l1-1-0.dll", "GetSystemTimeAsFileTime") => {
+            LegacyWin64Import::GetSystemTimeAsFileTime
+        }
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetStartupInfoW") => LegacyWin64Import::GetStartupInfoW,
@@ -409,9 +411,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "OutputDebugStringA") => LegacyWin64Import::OutputDebugStringA,
         (_, "OutputDebugStringA") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
-        ("kernel32.dll", "GetCurrentProcessId") => LegacyWin64Import::GetCurrentProcessId,
-        ("kernel32.dll", "QueryPerformanceCounter") => LegacyWin64Import::QueryPerformanceCounter,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentThreadId") => {
+            LegacyWin64Import::GetCurrentThreadId
+        }
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentProcessId") => {
+            LegacyWin64Import::GetCurrentProcessId
+        }
+        ("kernel32.dll" | "api-ms-win-core-profile-l1-1-0.dll", "QueryPerformanceCounter") => {
+            LegacyWin64Import::QueryPerformanceCounter
+        }
         ("kernel32.dll", "QueryPerformanceFrequency") => {
             LegacyWin64Import::QueryPerformanceFrequency
         }
@@ -436,7 +444,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "SetThreadErrorMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "LoadLibraryA") => LegacyWin64Import::LoadLibraryA,
         (_, "LoadLibraryA") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "LoadLibraryExW") => LegacyWin64Import::LoadLibraryExW,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "LoadLibraryExW") => {
+            LegacyWin64Import::LoadLibraryExW
+        }
         (_, "LoadLibraryExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
@@ -4959,6 +4969,9 @@ fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
         if output == 0 {
             return Err("GetSystemTimeAsFileTime output pointer is null".to_string());
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err("GetSystemTimeAsFileTime output is not writable".into());
         }
         unicorn
             .mem_write(output, &FIXED_FILETIME.to_le_bytes())
