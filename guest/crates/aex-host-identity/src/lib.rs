@@ -128,3 +128,5 @@ fn hostname_matches_operating_system_command() {
     }
     assert_eq!(current_hostname().unwrap(), expected);
 }
+
+pub mod resolver;

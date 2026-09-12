@@ -80,6 +80,7 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     GetVolumeInformationA,
+    GetHostByName,
     ExitThread,
     CoCreateInstance,
     CoInitializeSecurity,
@@ -702,6 +703,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::GetHostname
         }
         (_, "gethostname" | "ORDINAL 57") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ws2_32.dll" | "wsock32.dll", "gethostbyname" | "ORDINAL 52") => {
+            LegacyWin64Import::GetHostByName
+        }
+        (_, "gethostbyname" | "ORDINAL 52") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ws2_32.dll" | "wsock32.dll", "WSAGetLastError" | "ORDINAL 111") => {
             LegacyWin64Import::GetLastError
         }
@@ -2154,6 +2159,19 @@ fn install_win64_import(
                         "install bounded FindFirstFileExW import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_find_first_file_ex_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetHostByName => {
+                    uc(
+                        "write gethostbyname return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install gethostbyname",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_gethostbyname(unicorn);
+                            finish_guest_stdio(unicorn, result);
                         }),
                     )?;
                 }
@@ -7659,6 +7677,8 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
 fn fail_windows_thread_callback(unicorn: &mut Unicorn<'_, GuestState>, error: String) {
     unicorn.get_data_mut().scheduler_parent_context = None;
     if let Some(pending) = unicorn.get_data_mut().pending_windows_thread.take() {
+        let exiting_id = unicorn.get_data().current_windows_thread_id;
+        let _ = release_guest_hostent(unicorn, exiting_id);
         let stack = unicorn
             .get_data()
             .windows_threads
@@ -7786,6 +7806,7 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
         }
         let exit_code = pending.exit_code.expect("thread entry completed");
         let exiting_id = unicorn.get_data().current_windows_thread_id;
+        release_guest_hostent(unicorn, exiting_id)?;
         unicorn.get_data_mut().windows_objects.abandon(exiting_id);
         let (stack_base, stack_size) = {
             let thread = unicorn
@@ -9496,4 +9517,166 @@ fn guest_exit_thread(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), String
         .reg_write(RegisterX86::R11, HOST_CREATE_THREAD_CONTINUE)
         .map_err(|error| format!("ExitThread completion target: {error}"))?;
     Ok(())
+}
+
+const WINDOWS_HOSTENT_BASE: u64 = 0xa00000000;
+const WINDOWS_HOSTENT_SLOT_SIZE: u64 = 65536;
+const MAX_WINDOWS_HOSTENT_SLOTS: u64 = 1024;
+
+fn release_guest_hostent(unicorn: &mut Unicorn<'_, GuestState>, thread: u32) -> Result<(), String> {
+    if let Some(address) = unicorn
+        .get_data()
+        .windows_hostent_buffers
+        .get(&thread)
+        .copied()
+    {
+        unicorn
+            .mem_unmap(address, WINDOWS_HOSTENT_SLOT_SIZE)
+            .map_err(|e| format!("hostent release: {e}"))?;
+        unicorn
+            .get_data_mut()
+            .windows_hostent_buffers
+            .remove(&thread);
+    }
+    Ok(())
+}
+
+fn serialize_guest_hostent(
+    host: &aex_host_identity::resolver::Ipv4Host,
+    base: u64,
+) -> Result<Vec<u8>, String> {
+    if host.name.is_empty()
+        || host.addresses.is_empty()
+        || host.aliases.len() > 256
+        || host.addresses.len() > 256
+    {
+        return Err("gethostbyname invalid or excessive host record".into());
+    }
+    let strings = std::iter::once(&host.name).chain(host.aliases.iter());
+    let mut length = 32
+        + (host.aliases.len() + 1) * 8
+        + (host.addresses.len() + 1) * 8
+        + host.addresses.len() * 4;
+    for name in strings {
+        if name.len() >= 4096 || name.contains(&0) {
+            return Err("gethostbyname invalid host record name".into());
+        }
+        length += name.len() + 1;
+    }
+    if length > WINDOWS_HOSTENT_SLOT_SIZE as usize
+        || base.checked_add(WINDOWS_HOSTENT_SLOT_SIZE).is_none()
+    {
+        return Err("gethostbyname host record exceeds bounded storage".into());
+    }
+    let alias_table = 32;
+    let address_table = alias_table + (host.aliases.len() + 1) * 8;
+    let mut cursor = address_table + (host.addresses.len() + 1) * 8;
+    let mut bytes = vec![0; length];
+    bytes[8..16].copy_from_slice(&(base + alias_table as u64).to_le_bytes());
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+    bytes[18..20].copy_from_slice(&4u16.to_le_bytes());
+    bytes[24..32].copy_from_slice(&(base + address_table as u64).to_le_bytes());
+    for (index, address) in host.addresses.iter().enumerate() {
+        let slot = address_table + index * 8;
+        bytes[slot..slot + 8].copy_from_slice(&(base + cursor as u64).to_le_bytes());
+        bytes[cursor..cursor + 4].copy_from_slice(address);
+        cursor += 4;
+    }
+    for (index, name) in std::iter::once(&host.name)
+        .chain(host.aliases.iter())
+        .enumerate()
+    {
+        let slot = if index == 0 {
+            0
+        } else {
+            alias_table + (index - 1) * 8
+        };
+        bytes[slot..slot + 8].copy_from_slice(&(base + cursor as u64).to_le_bytes());
+        bytes[cursor..cursor + name.len()].copy_from_slice(name);
+        cursor += name.len() + 1;
+    }
+    Ok(bytes)
+}
+
+fn store_guest_hostent(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    host: &aex_host_identity::resolver::Ipv4Host,
+) -> Result<u64, String> {
+    let thread = unicorn.get_data().current_windows_thread_id;
+    let previous = unicorn
+        .get_data()
+        .windows_hostent_buffers
+        .get(&thread)
+        .copied();
+    let address = match previous {
+        Some(address) => address,
+        None => (0..MAX_WINDOWS_HOSTENT_SLOTS)
+            .map(|slot| WINDOWS_HOSTENT_BASE + slot * WINDOWS_HOSTENT_SLOT_SIZE)
+            .find(|address| {
+                !unicorn
+                    .get_data()
+                    .windows_hostent_buffers
+                    .values()
+                    .any(|used| used == address)
+            })
+            .ok_or("gethostbyname thread storage exhausted")?,
+    };
+    let bytes = serialize_guest_hostent(host, address)?;
+    if previous.is_none() {
+        unicorn
+            .mem_map(address, WINDOWS_HOSTENT_SLOT_SIZE, Prot::READ)
+            .map_err(|e| format!("hostent allocation: {e}"))?;
+    } else if !guest_range_has_permission(unicorn, address, WINDOWS_HOSTENT_SLOT_SIZE, Prot::READ)?
+    {
+        return Err("gethostbyname borrowed storage is no longer readable".into());
+    }
+    // Host writes to its own borrowed read-only mapping. Guest writes and CRT
+    // free are prohibited; the mapping is outside all CRT allocation ranges.
+    if let Err(error) = unicorn.mem_write(address, &bytes) {
+        if previous.is_none() {
+            let _ = unicorn.mem_unmap(address, WINDOWS_HOSTENT_SLOT_SIZE);
+        }
+        return Err(format!("hostent record write: {error}"));
+    }
+    unicorn
+        .get_data_mut()
+        .windows_hostent_buffers
+        .insert(thread, address);
+    Ok(address)
+}
+
+fn guest_gethostbyname(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    if unicorn.get_data().windows_socket_startups == 0 {
+        unicorn.get_data_mut().windows_last_error = WINDOWS_WSANOTINITIALISED;
+        return Ok(0);
+    }
+    let pointer = read_win64_import_argument(unicorn, 0)?;
+    let mut name = if pointer == 0 {
+        Vec::new()
+    } else {
+        read_crt_stdio_c_string(unicorn, pointer, 4096, "gethostbyname input")?
+    };
+    if name.is_empty() {
+        name = aex_host_identity::current_hostname()?;
+    }
+    // Windows ANSI conversion beyond ASCII is not modeled by this resolver.
+    if !name.is_ascii() {
+        return Err("gethostbyname non-ASCII name conversion unsupported".into());
+    }
+    if std::str::from_utf8(&name)
+        .ok()
+        .and_then(|name| name.parse::<std::net::Ipv6Addr>().ok())
+        .is_some()
+    {
+        unicorn.get_data_mut().windows_last_error = 11004; // WSANO_DATA: IPv4-only API
+        return Ok(0);
+    }
+    match aex_host_identity::resolver::resolve_ipv4(&name) {
+        Ok(host) => store_guest_hostent(unicorn, &host),
+        Err(aex_host_identity::resolver::ResolveError::Winsock(error)) => {
+            unicorn.get_data_mut().windows_last_error = error;
+            Ok(0)
+        }
+        Err(aex_host_identity::resolver::ResolveError::Unsupported(error)) => Err(error),
+    }
 }

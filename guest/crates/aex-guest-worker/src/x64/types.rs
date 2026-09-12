@@ -168,6 +168,7 @@ struct GuestState {
     crt_locale_names_buffer: Option<u64>,
     crt_tm_buffers: BTreeMap<u32, u64>,
     crt_strerror_buffers: BTreeMap<u32, u64>,
+    windows_hostent_buffers: BTreeMap<u32, u64>,
     loaded_libraries: BTreeMap<String, GuestLibrary>,
     params: Vec<GuestParam>,
     popup_choice_pages: u64,

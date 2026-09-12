@@ -20918,3 +20918,141 @@ fn exit_thread_root_dispatch_is_a_diagnostic_and_foreign_dll_is_rejected() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+fn test_ipv4_host() -> aex_host_identity::resolver::Ipv4Host {
+    aex_host_identity::resolver::Ipv4Host {
+        name: b"example.test".to_vec(),
+        aliases: vec![b"alias.test".to_vec()],
+        addresses: vec![[192, 0, 2, 1], [192, 0, 2, 2]],
+    }
+}
+
+#[test]
+fn hostent_serialization_has_win64_layout_and_terminated_pointer_arrays() {
+    let host = test_ipv4_host();
+    let base = 0x12340000;
+    let bytes = serialize_guest_hostent(&host, base).unwrap();
+    let pointer = |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+    let name = (pointer(0) - base) as usize;
+    assert_eq!(&bytes[name..name + 13], b"example.test\0");
+    let aliases = (pointer(8) - base) as usize;
+    let alias = (pointer(aliases) - base) as usize;
+    assert_eq!(&bytes[alias..alias + 11], b"alias.test\0");
+    assert_eq!(pointer(aliases + 8), 0);
+    assert_eq!(&bytes[16..24], &[2, 0, 4, 0, 0, 0, 0, 0]);
+    let addresses = (pointer(24) - base) as usize;
+    for (index, expected) in host.addresses.iter().enumerate() {
+        let address = (pointer(addresses + index * 8) - base) as usize;
+        assert_eq!(&bytes[address..address + 4], expected);
+    }
+    assert_eq!(pointer(addresses + 16), 0);
+    let mut excessive = host.clone();
+    excessive.aliases = vec![vec![b'a'; 4095]; 256];
+    assert!(serialize_guest_hostent(&excessive, base).is_err());
+    assert!(serialize_guest_hostent(&host, u64::MAX - 4).is_err());
+}
+
+#[test]
+fn hostent_storage_is_borrowed_per_thread_and_released_on_thread_exit() {
+    const CREATE: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let parent = engine.unicorn.get_data().current_windows_thread_id;
+    let first = store_guest_hostent(&mut engine.unicorn, &test_ipv4_host()).unwrap();
+    assert!(guest_range_has_permission(&engine.unicorn, first, 32, Prot::READ).unwrap());
+    assert!(!guest_range_has_permission(&engine.unicorn, first, 32, Prot::WRITE).unwrap());
+    assert!(!guest_range_has_permission(&engine.unicorn, first, 32, Prot::EXEC).unwrap());
+    assert_eq!(
+        store_guest_hostent(&mut engine.unicorn, &test_ipv4_host()).unwrap(),
+        first
+    );
+    engine
+        .unicorn
+        .add_code_hook(TEST_CODE, TEST_CODE, |unicorn, _, _| {
+            let address = store_guest_hostent(unicorn, &test_ipv4_host()).unwrap();
+            unicorn
+                .mem_write(DATA_BASE + 0x300, &address.to_le_bytes())
+                .unwrap();
+        })
+        .unwrap();
+    install_win64_import(&mut engine.unicorn, CREATE, "kernel32.dll", "CreateThread").unwrap();
+    engine
+        .call_win64(CREATE, [0, 0, TEST_CODE, 0, 0, 0])
+        .unwrap();
+    let child = u64::from_le_bytes(
+        engine
+            .unicorn
+            .mem_read_as_vec(DATA_BASE + 0x300, 8)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    assert_ne!(first, child);
+    assert!(!guest_range_has_permission(&engine.unicorn, child, 8, Prot::READ).unwrap());
+    assert_eq!(engine.unicorn.get_data().windows_hostent_buffers.len(), 1);
+    assert_eq!(
+        engine.unicorn.get_data().windows_hostent_buffers[&parent],
+        first
+    );
+    release_guest_hostent(&mut engine.unicorn, parent).unwrap();
+    assert!(!guest_range_has_permission(&engine.unicorn, first, 8, Prot::READ).unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn gethostbyname_aliases_resolve_actual_ipv4_and_require_startup() {
+    const LOOKUP: u64 = STUB_BASE + 0x410;
+    for dll in ["wsock32.dll", "ws2_32.dll"] {
+        for symbol in ["gethostbyname", "ORDINAL 52"] {
+            let mut engine = test_engine(&[0xc3]);
+            install_win64_import(&mut engine.unicorn, LOOKUP, dll, symbol).unwrap();
+            let input = DATA_BASE + 0x100;
+            engine.write(input, b"192.0.2.37\0").unwrap();
+            assert_eq!(
+                engine.call_win64(LOOKUP, [input, 0, 0, 0, 0, 0]).unwrap(),
+                0
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 10093);
+            engine.unicorn.get_data_mut().windows_socket_startups = 1;
+            engine.unicorn.get_data_mut().crt_errno = 72;
+            let result = engine.call_win64(LOOKUP, [input, 0, 0, 0, 0, 0]).unwrap();
+            assert_ne!(result, 0);
+            let ptr_at = |engine: &GuestEngine, address| {
+                u64::from_le_bytes(
+                    engine
+                        .unicorn
+                        .mem_read_as_vec(address, 8)
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            let array = ptr_at(&engine, result + 24);
+            let address = ptr_at(&engine, array);
+            assert_eq!(
+                engine.unicorn.mem_read_as_vec(address, 4).unwrap(),
+                [192, 0, 2, 37]
+            );
+            assert_eq!(ptr_at(&engine, array + 8), 0);
+            engine.write(input, b"127.0.0.1\0").unwrap();
+            assert_eq!(
+                engine.call_win64(LOOKUP, [input, 0, 0, 0, 0, 0]).unwrap(),
+                result
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+            engine.write(input, b"::1\0").unwrap();
+            assert_eq!(
+                engine.call_win64(LOOKUP, [input, 0, 0, 0, 0, 0]).unwrap(),
+                0
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 11004);
+        }
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "gethostbyname"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
