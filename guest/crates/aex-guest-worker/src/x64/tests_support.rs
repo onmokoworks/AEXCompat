@@ -20260,3 +20260,88 @@ fn fullpath_preflights_capacity_and_rejects_unmodeled_namespaces() {
         assert!(canonical_guest_fullpath(path).is_err());
     }
 }
+
+#[test]
+fn wfopen_reads_and_closes_owned_streams_and_preserves_readonly_namespace() {
+    const OPEN: u64 = STUB_BASE + 0x410;
+    const GET: u64 = STUB_BASE + 0x420;
+    const CLOSE: u64 = STUB_BASE + 0x430;
+    let wide = |s: &str| {
+        s.encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        for (address, symbol) in [(OPEN, "_wfopen"), (GET, "fgetc"), (CLOSE, "fclose")] {
+            install_win64_import(&mut engine.unicorn, address, dll, symbol).unwrap();
+        }
+        let source = std::env::temp_dir().join(format!("aex-wfopen-{}-{dll}", std::process::id()));
+        std::fs::write(&source, b"A\r\nB").unwrap();
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .sources
+            .insert("c:/wide.txt".into(), source.clone());
+        let name = DATA_BASE + 0x100;
+        let mode = DATA_BASE + 0x300;
+        engine.write(name, &wide("C:\\Wide.txt")).unwrap();
+        engine.write(mode, &wide("rt")).unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        let token = engine.call_win64(OPEN, [name, mode, 0, 0, 0, 0]).unwrap();
+        assert_ne!(token, 0);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        for byte in [65, 10, 66, u32::MAX as u64] {
+            assert_eq!(
+                engine.call_win64(GET, [token, 0, 0, 0, 0, 0]).unwrap(),
+                byte
+            );
+        }
+        assert_eq!(engine.call_win64(CLOSE, [token, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert!(engine.unicorn.get_data().guest_files.streams.is_empty());
+        assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
+        engine.write(mode, &wide("wb")).unwrap();
+        assert_eq!(
+            engine.call_win64(OPEN, [name, mode, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 13);
+        assert_eq!(std::fs::read(&source).unwrap(), b"A\r\nB");
+        engine.write(name, &wide("c:/absent")).unwrap();
+        engine.write(mode, &wide("rb")).unwrap();
+        assert_eq!(
+            engine.call_win64(OPEN, [name, mode, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 2);
+        std::fs::remove_file(source).unwrap();
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "_wfopen"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn wfopen_rejects_unreadable_and_malformed_wide_strings_before_opening() {
+    const OPEN: u64 = STUB_BASE + 0x410;
+    for case in 0..3 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, OPEN, "ucrtbase.dll", "_wfopen").unwrap();
+        let name = DATA_BASE + 0x100;
+        let mode = DATA_BASE + 0x300;
+        engine.write(name, &[0, 0xd8, 0, 0]).unwrap();
+        engine.write(mode, &[b'r', 0, 0, 0]).unwrap();
+        let name = if case == 0 {
+            name
+        } else if case == 1 {
+            0
+        } else {
+            u64::MAX - 1
+        };
+        assert!(engine.call_win64(OPEN, [name, mode, 0, 0, 0, 0]).is_err());
+        assert!(engine.unicorn.get_data().guest_files.streams.is_empty());
+    }
+}

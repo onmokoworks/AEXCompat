@@ -1042,3 +1042,53 @@ fn guest_fullpath(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> 
     }
     Ok(destination)
 }
+
+fn read_guest_wide_file_string(
+    unicorn: &Unicorn<'_, GuestState>,
+    pointer: u64,
+    limit: u64,
+    label: &str,
+) -> Result<String, String> {
+    let mut units = Vec::new();
+    for index in 0..=limit {
+        let address = pointer
+            .checked_add(index.checked_mul(2).ok_or("wide string length overflow")?)
+            .ok_or("wide string address overflow")?;
+        if !guest_range_has_permission(unicorn, address, 2, Prot::READ)? {
+            return Err(format!("{label} is not readable"));
+        }
+        let bytes = unicorn
+            .mem_read_as_vec(address, 2)
+            .map_err(|e| e.to_string())?;
+        let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if unit == 0 {
+            return String::from_utf16(&units).map_err(|_| format!("{label} invalid UTF-16"));
+        }
+        if index == limit {
+            return Err(format!("{label} exceeds supported bound"));
+        }
+        units.push(unit);
+    }
+    unreachable!()
+}
+
+fn emulate_wfopen(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let name = read_win64_import_argument(unicorn, 0)?;
+        let mode = read_win64_import_argument(unicorn, 1)?;
+        if name == 0 || mode == 0 {
+            return Err("_wfopen requires an invalid parameter handler for null arguments".into());
+        }
+        let name = read_guest_wide_file_string(unicorn, name, 1024, "_wfopen filename")?;
+        let mode = read_guest_wide_file_string(unicorn, mode, 64, "_wfopen mode")?;
+        if !mode.is_ascii() {
+            return Err("_wfopen unsupported mode encoding".into());
+        }
+        let (stream, errno) = open_guest_stream(unicorn, name.as_bytes(), mode.as_bytes())?;
+        if errno != 0 {
+            unicorn.get_data_mut().crt_errno = errno;
+        }
+        Ok(stream)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
