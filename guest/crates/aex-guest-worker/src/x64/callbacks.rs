@@ -1665,6 +1665,7 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
                         "string argument",
                     )?),
                     b'd' => output.extend((value as u32 as i32).to_string().as_bytes()),
+                    b'c' => output.push(value as u8),
                     other => {
                         return Err(format!(
                             "stdio unsupported conversion '%{}'",

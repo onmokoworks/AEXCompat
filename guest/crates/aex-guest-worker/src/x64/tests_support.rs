@@ -16445,3 +16445,61 @@ fn avx_fallback_requires_registered_executable_code_and_complete_memory_permissi
         [0xa5; 32]
     );
 }
+
+#[test]
+fn stdio_char_conversion_preserves_embedded_nul_and_consumes_promoted_int_slots() {
+    for library in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        for secure in [false, true] {
+            let mut engine = test_engine(&[0xc3]);
+            let entry = STUB_BASE + 0x100;
+            let symbol = if secure {
+                "__stdio_common_vsnprintf_s"
+            } else {
+                "__stdio_common_vsprintf"
+            };
+            install_win64_import(&mut engine.unicorn, entry, library, symbol).unwrap();
+            let format = DATA_BASE + 0x100;
+            let arguments = DATA_BASE + 0x200;
+            let output = DATA_BASE + 0x300;
+            engine.write(format, b"%c%c%d\0").unwrap();
+            for (index, value) in [0xdeadbeef112233ffu64, 0, 7].iter().enumerate() {
+                engine
+                    .write(arguments + index as u64 * 8, &value.to_le_bytes())
+                    .unwrap();
+            }
+            engine.write(output, &[0xa5; 8]).unwrap();
+            let args = if secure {
+                vec![0x24, output, 8, u64::MAX, format, 0, arguments]
+            } else {
+                vec![0x25, output, 8, format, 0, arguments]
+            };
+            assert_eq!(
+                engine
+                    .call_win64_with_timeout(entry, &args, TIMEOUT_MICROSECONDS)
+                    .unwrap(),
+                3
+            );
+            assert_eq!(
+                engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+                [0xff, 0, b'7', 0, 0xa5, 0xa5, 0xa5, 0xa5]
+            );
+            if secure {
+                engine.write(output, &[0xa5; 8]).unwrap();
+                assert_eq!(
+                    engine
+                        .call_win64_with_timeout(
+                            entry,
+                            &[0x24, output, 3, u64::MAX, format, 0, arguments],
+                            TIMEOUT_MICROSECONDS
+                        )
+                        .unwrap() as u32,
+                    u32::MAX
+                );
+                assert_eq!(
+                    engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+                    [0xff, 0, 0, 0xa5]
+                );
+            }
+        }
+    }
+}

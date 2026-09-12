@@ -755,7 +755,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "memcmp") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        ("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsnprintf_s") => {
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsnprintf_s") => {
             LegacyWin64Import::StdioVsnprintfS
         }
         (_, "__stdio_common_vsnprintf_s") => {
