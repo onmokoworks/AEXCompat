@@ -22,6 +22,7 @@ enum LegacyWin64Import {
     Free,
     CrtStrdup,
     CrtStricmp,
+    CrtIsSpace,
     CrtToLower,
     CrtToUpper,
     AlignedMalloc,
@@ -814,6 +815,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "tolower") => {
             LegacyWin64Import::CrtToLower
         }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isspace") => {
+            LegacyWin64Import::CrtIsSpace
+        }
+        (_, "isspace") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "tolower") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "toupper") => {
             LegacyWin64Import::CrtToUpper
@@ -968,6 +973,23 @@ fn install_win64_import(
                     "install _stricmp import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_stricmp(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtIsSpace => {
+                uc("write isspace return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install isspace import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let result = (|| -> Result<u64, String> {
+                            let input = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+                            if !(-1..=255).contains(&input) {
+                                return Err("isspace input is neither unsigned char nor EOF".into());
+                            }
+                            // CRT starts in the C locale; locale mutation is unsupported.
+                            Ok(if matches!(input, 9..=13 | 32) { 8 } else { 0 })
+                        })();
+                        finish_guest_stdio(unicorn, result);
                     }),
                 )?;
             }
