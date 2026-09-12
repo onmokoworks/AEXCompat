@@ -63,6 +63,7 @@ enum LegacyWin64Import {
     MemoryCopy,
     MemChr,
     StrStr,
+    CrtLocaltime64,
     CrtTime64,
     StrCmp,
     StrNCmp,
@@ -803,6 +804,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtTime64
         }
         (_, "_time64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_localtime64") => {
+            LegacyWin64Import::CrtLocaltime64
+        }
+        (_, "_localtime64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcmp") => {
             LegacyWin64Import::StrCmp
         }
@@ -1331,6 +1337,16 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_crt_strcpy(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::CrtLocaltime64 => {
+                    uc(
+                        "write _localtime64 return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install _localtime64",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_localtime64(uc)),
                     )?;
                 }
                 LegacyWin64Import::CrtTime64 => {
@@ -8710,6 +8726,57 @@ fn emulate_get_process_affinity_mask(unicorn: &mut Unicorn<'_, GuestState>) {
                 .map_err(|e| e.to_string())?;
         }
         Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let input = read_win64_import_argument(unicorn, 0)?;
+        if input == 0 || !guest_range_has_permission(unicorn, input, 8, Prot::READ)? {
+            return Err("_localtime64 source is not readable".into());
+        }
+        let mut bytes = [0; 8];
+        unicorn
+            .mem_read(input, &mut bytes)
+            .map_err(|e| e.to_string())?;
+        let seconds = i64::from_le_bytes(bytes);
+        // Windows _localtime64 documented UTC range through 3000-12-31.
+        if !(0..=32_535_215_999).contains(&seconds) {
+            unicorn.get_data_mut().crt_errno = 22;
+            return Ok(0);
+        }
+        if guest_environment_value(unicorn.get_data(), b"TZ").is_some() {
+            return Err("guest CRT TZ override conversion is not implemented".into());
+        }
+        let fields = aex_host_time::localtime_fields(seconds)?;
+        let thread = unicorn.get_data().current_windows_thread_id;
+        let address = if let Some(address) = unicorn.get_data().crt_tm_buffers.get(&thread) {
+            *address
+        } else {
+            let count = unicorn.get_data().crt_tm_buffers.len() as u64;
+            if count >= 4096 {
+                return Err("CRT tm thread storage limit exceeded".into());
+            }
+            let address =
+                POPUP_CHOICES_BASE + MAX_POPUP_CHOICE_PAGES * PAGE_SIZE + count * PAGE_SIZE;
+            unicorn
+                .mem_map(address, PAGE_SIZE, Prot::READ | Prot::WRITE)
+                .map_err(|e| e.to_string())?;
+            unicorn
+                .get_data_mut()
+                .crt_tm_buffers
+                .insert(thread, address);
+            address
+        };
+        if !guest_range_has_permission(unicorn, address, 36, Prot::WRITE)? {
+            return Err("CRT tm result storage is not writable".into());
+        }
+        let bytes: Vec<u8> = fields.into_iter().flat_map(i32::to_le_bytes).collect();
+        unicorn
+            .mem_write(address, &bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(address)
     })();
     finish_guest_stdio(unicorn, result);
 }

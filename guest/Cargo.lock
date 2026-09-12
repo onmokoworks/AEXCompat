@@ -35,6 +35,7 @@ dependencies = [
  "aex-abi",
  "aex-apple-opencl",
  "aex-clspv",
+ "aex-host-time",
  "aex-unicorn-buffer",
  "aex-wgpu-compute",
  "encoding_rs",
@@ -55,6 +56,13 @@ dependencies = [
  "unicode-script",
  "unicode-width",
  "unicorn-engine",
+]
+
+[[package]]
+name = "aex-host-time"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

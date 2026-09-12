@@ -18270,3 +18270,82 @@ fn affinity_masks_match_guest_topology_and_preflight_both_outputs() {
         assert!(engine.call_win64(info + 32, [0; 6]).is_err());
     }
 }
+
+#[test]
+fn localtime64_converts_timestamp_and_keeps_independent_thread_storage() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-time-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "_localtime64").unwrap();
+        let mut previous = None;
+        for seconds in [0i64, 951_827_696, 2_147_483_648, 32_535_215_999] {
+            engine.write(DATA_BASE, &seconds.to_le_bytes()).unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 71;
+            let address = engine
+                .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                .unwrap();
+            assert_ne!(address, 0);
+            if let Some(previous) = previous {
+                assert_eq!(previous, address);
+            }
+            previous = Some(address);
+            let mut bytes = [0; 36];
+            engine.read(address, &mut bytes).unwrap();
+            let expected: Vec<u8> = aex_host_time::localtime_fields(seconds)
+                .unwrap()
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect();
+            assert_eq!(&bytes[..], &expected);
+            assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        }
+        let first = previous.unwrap();
+        let mut saved = [0; 36];
+        engine.read(first, &mut saved).unwrap();
+        engine.unicorn.get_data_mut().current_windows_thread_id = 9;
+        engine.write(DATA_BASE, &0i64.to_le_bytes()).unwrap();
+        let second = engine
+            .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+            .unwrap();
+        assert_ne!(first, second);
+        let mut bytes = [0; 36];
+        engine.read(first, &mut bytes).unwrap();
+        assert_eq!(bytes, saved);
+        for seconds in [-1i64, 32_535_216_000, i64::MAX] {
+            engine.write(DATA_BASE, &seconds.to_le_bytes()).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+        }
+        engine
+            .unicorn
+            .mem_protect(second, PAGE_SIZE, Prot::READ)
+            .unwrap();
+        let mut before = [0; 36];
+        engine.read(second, &mut before).unwrap();
+        engine
+            .write(DATA_BASE, &951_827_696i64.to_le_bytes())
+            .unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                .is_err()
+        );
+        engine.read(second, &mut bytes).unwrap();
+        assert_eq!(bytes, before);
+        assert!(engine.call_win64(entry, [0; 6]).is_err());
+        assert!(engine.call_win64(entry, [u64::MAX, 0, 0, 0, 0, 0]).is_err());
+        install_win64_import(
+            &mut engine.unicorn,
+            entry + 32,
+            "foreign.dll",
+            "_localtime64",
+        )
+        .unwrap();
+        assert!(engine.call_win64(entry + 32, [0; 6]).is_err());
+    }
+}

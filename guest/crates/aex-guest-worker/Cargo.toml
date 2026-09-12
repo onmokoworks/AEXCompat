@@ -19,6 +19,7 @@ aex-clspv = { path = "../aex-clspv", optional = true }
 aex-unicorn-buffer = { path = "../aex-unicorn-buffer" }
 aex-wgpu-compute = { path = "../aex-wgpu-compute", optional = true }
 encoding_rs = "0.8"
+aex-host-time = { path = "../aex-host-time" }
 icu_casemap = "=2.3.0"
 icu_collator = "=2.3.0"
 icu_locale_core = "=2.3.0"
