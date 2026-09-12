@@ -703,6 +703,49 @@ static AddressSpace *memory_region_to_address_space(MemoryRegion *mr)
 /* Render a memory region into the global view.  Ranges in @view obscure
  * ranges in @mr.
  */
+/* Disjoint siblings cannot occlude one another. Render those by address so
+ * rebuilding a flat view appends ranges instead of shifting the whole array.
+ * Keep the priority list untouched, and retain priority traversal on overlap.
+ */
+static int compare_subregion_addresses(const void *left, const void *right)
+{
+    const MemoryRegion *a = *(MemoryRegion *const *)left;
+    const MemoryRegion *b = *(MemoryRegion *const *)right;
+    return (a->addr > b->addr) - (a->addr < b->addr);
+}
+
+static MemoryRegion **disjoint_subregions_by_address(MemoryRegion *mr,
+                                                    size_t *count)
+{
+    MemoryRegion *child;
+    MemoryRegion **children;
+    size_t index = 0;
+    *count = 0;
+    QTAILQ_FOREACH(child, &mr->subregions, subregions_link) {
+        ++*count;
+    }
+    if (*count < 2 || *count > SIZE_MAX / sizeof(*children)) {
+        return NULL;
+    }
+    children = g_try_malloc(*count * sizeof(*children));
+    if (!children) {
+        return NULL;
+    }
+    QTAILQ_FOREACH(child, &mr->subregions, subregions_link) {
+        children[index++] = child;
+    }
+    qsort(children, *count, sizeof(*children), compare_subregion_addresses);
+    for (index = 1; index < *count; ++index) {
+        Int128 previous_end = int128_add(int128_make64(children[index - 1]->addr),
+                                        children[index - 1]->size);
+        if (int128_gt(previous_end, int128_make64(children[index]->addr))) {
+            g_free(children);
+            return NULL;
+        }
+    }
+    return children;
+}
+
 static void render_memory_region(FlatView *view,
                                  MemoryRegion *mr,
                                  Int128 base,
@@ -732,9 +775,18 @@ static void render_memory_region(FlatView *view,
 
     clip = addrrange_intersection(tmp, clip);
 
-    /* Render subregions in priority order. */
-    QTAILQ_FOREACH(subregion, &mr->subregions, subregions_link) {
-        render_memory_region(view, subregion, base, clip, readonly);
+    size_t child_count;
+    MemoryRegion **children = disjoint_subregions_by_address(mr, &child_count);
+    if (children) {
+        for (size_t child = 0; child < child_count; ++child) {
+            render_memory_region(view, children[child], base, clip, readonly);
+        }
+        g_free(children);
+    } else {
+        /* Overlapping siblings must retain their original priority order. */
+        QTAILQ_FOREACH(subregion, &mr->subregions, subregions_link) {
+            render_memory_region(view, subregion, base, clip, readonly);
+        }
     }
 
     if (!mr->terminates) {
@@ -748,8 +800,18 @@ static void render_memory_region(FlatView *view,
     fr.mr = mr;
     fr.readonly = readonly;
 
+    /* Flat ranges are disjoint and address-ordered: skip the covered prefix. */
+    unsigned low = 0, high = view->nr;
+    while (low < high) {
+        unsigned middle = low + (high - low) / 2;
+        if (int128_ge(base, addrrange_end(view->ranges[middle].addr))) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
     /* Render the region itself into any gaps left by the current view. */
-    for (i = 0; i < view->nr && int128_nz(remain); ++i) {
+    for (i = low; i < view->nr && int128_nz(remain); ++i) {
         if (int128_ge(base, addrrange_end(view->ranges[i].addr))) {
             continue;
         }
