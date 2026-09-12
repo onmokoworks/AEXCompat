@@ -9329,15 +9329,22 @@ fn private_heap_rejects_foreign_stale_and_cross_heap_ownership() {
 }
 
 #[test]
-fn system_time_import_writes_a_deterministic_validated_filetime() {
+fn system_time_import_writes_current_validated_filetime() {
     let mut engine = test_engine(&[0xc3]);
     let output = engine.allocate(8, 8).unwrap();
     engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
+    let before = windows_filetime(std::time::SystemTime::now()).unwrap();
     emulate_get_system_time_as_file_time(&mut engine.unicorn);
-    assert_eq!(
-        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
-        132_223_104_000_000_000u64.to_le_bytes()
+    let after = windows_filetime(std::time::SystemTime::now()).unwrap();
+    let value = u64::from_le_bytes(
+        engine
+            .unicorn
+            .mem_read_as_vec(output, 8)
+            .unwrap()
+            .try_into()
+            .unwrap(),
     );
+    assert!((before..=after).contains(&value));
     assert!(engine.unicorn.get_data().callback_error.is_none());
 
     engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
@@ -11885,9 +11892,12 @@ fn bounded_windows_runtime_imports_write_outputs_and_remain_library_scoped() {
     engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
     emulate_query_performance_counter(&mut engine.unicorn);
     assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
-    assert_eq!(
-        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
-        1u64.to_le_bytes()
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .performance_counter_origin
+            .is_some()
     );
     engine.unicorn.reg_write(RegisterX86::RCX, output).unwrap();
     emulate_query_performance_frequency(&mut engine.unicorn);
@@ -15269,7 +15279,9 @@ fn system_time_api_set_executes_and_rejects_read_only_output() {
     engine.call_win64(ENTRY, [output, 0, 0, 0, 0, 0]).unwrap();
     let mut bytes = [0; 16];
     engine.read(output, &mut bytes).unwrap();
-    assert_eq!(&bytes[..8], &132_223_104_000_000_000u64.to_le_bytes());
+    let filetime = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+    let now = windows_filetime(std::time::SystemTime::now()).unwrap();
+    assert!(filetime <= now && now - filetime < 100_000_000);
     assert_eq!(&bytes[8..], &[0x5a; 8]);
     engine
         .unicorn
@@ -15324,7 +15336,17 @@ fn cuda_startup_identity_and_counter_api_sets_execute_existing_guest_semantics()
     );
     let mut bytes = [0; 8];
     engine.read(output, &mut bytes).unwrap();
-    assert_eq!(u64::from_le_bytes(bytes), 1);
+    assert!(
+        u64::from_le_bytes(bytes)
+            <= engine
+                .unicorn
+                .get_data()
+                .performance_counter_origin
+                .unwrap()
+                .elapsed()
+                .as_nanos() as u64
+                / 100
+    );
     assert!(matches!(
         dispatch_win64_import("fixture.dll", "GetCurrentThreadId"),
         Win64ImportDispatch::UnsupportedLegacyImport
@@ -15757,6 +15779,59 @@ fn strcmp_uses_unsigned_case_sensitive_bytes_and_stops_at_decisive_byte() {
             engine
                 .call_win64(entry, [0x50000000, right, 0, 0, 0, 0])
                 .is_err()
+        );
+    }
+}
+
+#[test]
+fn guest_clocks_convert_epochs_and_counter_tracks_elapsed_time() {
+    use std::time::{Duration, Instant, UNIX_EPOCH};
+    assert_eq!(
+        windows_filetime(UNIX_EPOCH).unwrap(),
+        116_444_736_000_000_000
+    );
+    assert_eq!(
+        windows_filetime(UNIX_EPOCH + Duration::from_nanos(199)).unwrap(),
+        116_444_736_000_000_001
+    );
+    assert_eq!(
+        windows_filetime(UNIX_EPOCH - Duration::from_nanos(1)).unwrap(),
+        116_444_736_000_000_000 - 1
+    );
+    assert_eq!(
+        windows_filetime(UNIX_EPOCH - Duration::from_secs(11_644_473_600)).unwrap(),
+        0
+    );
+    assert!(windows_filetime(UNIX_EPOCH - Duration::from_secs(11_644_473_601)).is_err());
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "kernel32.dll",
+        "QueryPerformanceCounter",
+    )
+    .unwrap();
+    let output = engine.allocate(8, 8).unwrap();
+    let origin = Instant::now() - Duration::from_secs(2);
+    engine.unicorn.get_data_mut().performance_counter_origin = Some(origin);
+    let before = origin.elapsed().as_nanos() as u64 / 100;
+    engine.call_win64(entry, [output, 0, 0, 0, 0, 0]).unwrap();
+    let after = origin.elapsed().as_nanos() as u64 / 100;
+    let mut bytes = [0; 8];
+    engine.read(output, &mut bytes).unwrap();
+    let first = u64::from_le_bytes(bytes);
+    assert!((before..=after).contains(&first));
+    assert!(first >= 20_000_000);
+    engine.call_win64(entry, [output, 0, 0, 0, 0, 0]).unwrap();
+    engine.read(output, &mut bytes).unwrap();
+    assert!(u64::from_le_bytes(bytes) >= first);
+    install_win64_import(&mut engine.unicorn, entry + 16, "msvcp140.dll", "_Thrd_id").unwrap();
+    for id in [1, 123] {
+        engine.unicorn.get_data_mut().current_windows_thread_id = id;
+        assert_eq!(
+            engine.call_win64(entry + 16, [0; 6]).unwrap(),
+            u64::from(id)
         );
     }
 }

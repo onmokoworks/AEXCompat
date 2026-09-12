@@ -233,6 +233,7 @@ struct GuestState {
     pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
     crt_errno: u32,
+    performance_counter_origin: Option<std::time::Instant>,
     windows_module_refcounts: HashMap<u64, u32>,
     windows_thread_error_mode: u32,
     windows_socket_startups: u32,

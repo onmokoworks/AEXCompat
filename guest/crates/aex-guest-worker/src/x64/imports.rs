@@ -354,6 +354,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         None => {}
     }
     let legacy = match (normalized_library.as_str(), symbol) {
+        ("msvcp140.dll", "_Thrd_id") => LegacyWin64Import::GetCurrentThreadId,
+        (_, "_Thrd_id") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("msvcp140.dll", "??0_Lockit@std@@QEAA@H@Z") => LegacyWin64Import::MsvcpLockitCtor,
         ("msvcp140.dll", "??1_Lockit@std@@QEAA@XZ") => LegacyWin64Import::MsvcpLockitDtor,
         ("advapi32.dll", "SetSecurityDescriptorDacl") => {
@@ -5147,9 +5149,8 @@ fn ensure_windows_condition_variable(
 }
 
 fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
-    // A fixed, nonzero Windows FILETIME keeps compatibility deterministic and
-    // avoids exposing host wall-clock state to the emulated guest.
-    const FIXED_FILETIME: u64 = 132_223_104_000_000_000;
+    // Use the current wall clock. A fixed historical date would invalidate
+    // observations of expiration, licensing, and other time-dependent logic.
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
         if output == 0 {
             return Err("GetSystemTimeAsFileTime output pointer is null".to_string());
@@ -5157,8 +5158,9 @@ fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
         if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
             return Err("GetSystemTimeAsFileTime output is not writable".into());
         }
+        let filetime = windows_filetime(std::time::SystemTime::now())?;
         unicorn
-            .mem_write(output, &FIXED_FILETIME.to_le_bytes())
+            .mem_write(output, &filetime.to_le_bytes())
             .map_err(|error| {
                 format!("GetSystemTimeAsFileTime output {output:#x} is not writable: {error}")
             })
@@ -7384,12 +7386,24 @@ fn emulate_windows_thread_lifecycle(
 }
 
 fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
-    emulate_query_performance_value(unicorn, "QueryPerformanceCounter", 1);
+    let origin = *unicorn
+        .get_data_mut()
+        .performance_counter_origin
+        .get_or_insert_with(std::time::Instant::now);
+    match i64::try_from(origin.elapsed().as_nanos() / 100) {
+        Ok(value) => {
+            emulate_query_performance_value(unicorn, "QueryPerformanceCounter", value as u64)
+        }
+        Err(_) => {
+            unicorn.get_data_mut().callback_error = Some("performance counter overflow".into());
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+    }
 }
 
 fn emulate_query_performance_frequency(unicorn: &mut Unicorn<'_, GuestState>) {
-    // This fixed 10 MHz clock domain matches the 100 ns unit used by Windows
-    // FILETIME while remaining independent of host time and hardware timers.
+    // Monotonic host elapsed time is expressed in 100 ns ticks. Its epoch is
+    // private to the guest engine and independent of wall-clock corrections.
     emulate_query_performance_value(unicorn, "QueryPerformanceFrequency", 10_000_000);
 }
 
@@ -7401,6 +7415,9 @@ fn emulate_query_performance_value(
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
         if output == 0 {
             return Err(format!("{function} output pointer is null"));
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err(format!("{function} output {output:#x} is not writable"));
         }
         unicorn
             .mem_write(output, &value.to_le_bytes())
@@ -7986,4 +8003,14 @@ fn emulate_set_security_descriptor_dacl(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         }
     }
+}
+
+fn windows_filetime(time: std::time::SystemTime) -> Result<u64, String> {
+    const UNIX_EPOCH_FILETIME: u128 = 116_444_736_000_000_000;
+    let ticks = match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => UNIX_EPOCH_FILETIME.checked_add(duration.as_nanos() / 100),
+        Err(error) => UNIX_EPOCH_FILETIME.checked_sub(error.duration().as_nanos().div_ceil(100)),
+    }
+    .ok_or("wall clock is outside FILETIME range")?;
+    u64::try_from(ticks).map_err(|_| "wall clock exceeds FILETIME range".into())
 }
