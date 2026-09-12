@@ -172,6 +172,7 @@ impl GuestEngine<'static> {
             "create x86_64 engine",
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()),
         )?;
+        unicorn.get_data_mut().guest_files = GuestFiles::from_environment()?;
         install_avx_fallback(&mut unicorn)?;
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
         unicorn.get_data_mut().next_aegp_memory_handle = AEGP_MEMORY_HANDLE_BASE;
@@ -1430,7 +1431,12 @@ impl GuestEngine<'static> {
                 std::env::consts::OS,
                 std::env::consts::ARCH
             ),
-            modules: self.trace_modules.clone(),
+            modules: self
+                .trace_modules
+                .iter()
+                .chain(self.unicorn.get_data().guest_files.reports.iter())
+                .cloned()
+                .collect(),
             trace_configuration,
             selector: capture.selector,
             entry_rva: capture.entry_rva,

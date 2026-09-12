@@ -41,6 +41,9 @@ enum LegacyWin64Import {
     MemCmp,
     StdioVsnprintfS,
     StdioVsprintf,
+    Fread,
+    Fclose,
+    Fopen,
     FopenS,
     StrncpyS,
     MsvcpLockitCtor,
@@ -745,6 +748,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "__stdio_common_vsprintf") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fread") => LegacyWin64Import::Fread,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fclose") => LegacyWin64Import::Fclose,
+        (_, "fread" | "fclose") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen") => LegacyWin64Import::Fopen,
+        (_, "fopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen_s") => {
             LegacyWin64Import::FopenS
         }
@@ -2099,6 +2107,24 @@ fn install_win64_import(
                     "install OutputDebugStringA import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_output_debug_string_a(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::Fread | LegacyWin64Import::Fclose => {
+                uc("write stdio return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install stdio",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_guest_stdio(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::Fopen => {
+                uc("write fopen return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install fopen",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_fopen(unicorn);
                     }),
                 )?;
             }
@@ -5627,7 +5653,6 @@ fn emulate_output_debug_string_a(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
     const EINVAL: u32 = 22;
-    const ENOENT: u32 = 2;
 
     let result = (|| -> Result<u32, String> {
         let result_pointer = read_win64_import_argument(unicorn, 0)?;
@@ -5660,18 +5685,11 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
         const MAX_FOPEN_MODE_BYTES: u64 = 64;
         let mode =
             read_crt_stdio_c_string(unicorn, mode_pointer, MAX_FOPEN_MODE_BYTES, "fopen_s mode")?;
-        let ordinary_result = if filename.is_empty() || !valid_fopen_mode(&mode) {
-            EINVAL
-        } else {
-            // Guest paths are never resolved against the host.  A secure open
-            // failure is truthful until a bounded guest-owned stream and its
-            // complete observed lifecycle are implemented.
-            ENOENT
-        };
+        let (stream, errno) = open_guest_stream(unicorn, &filename, &mode)?;
         unicorn
-            .mem_write(result_pointer, &0u64.to_le_bytes())
+            .mem_write(result_pointer, &stream.to_le_bytes())
             .map_err(|error| format!("fopen_s result write failed: {error}"))?;
-        Ok(ordinary_result)
+        Ok(errno)
     })();
 
     match result {

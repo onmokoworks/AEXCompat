@@ -2465,13 +2465,13 @@ fn fopen_s_is_stdio_library_scoped_and_returns_secure_guest_only_failure() {
                 TIMEOUT_MICROSECONDS,
             )
             .unwrap(),
-        2
+        13
     );
     assert_eq!(
         engine.unicorn.mem_read_as_vec(result_pointer, 8).unwrap(),
         0u64.to_le_bytes()
     );
-    assert_eq!(engine.unicorn.get_data().crt_errno, 2);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 13);
 }
 
 #[test]
@@ -2521,7 +2521,7 @@ fn fopen_s_validates_arguments_modes_and_result_atomicity() {
                     TIMEOUT_MICROSECONDS,
                 )
                 .unwrap(),
-            2,
+            if valid == b"r" { 2 } else { 13 },
             "valid mode {:?}",
             String::from_utf8_lossy(valid)
         );
@@ -2692,7 +2692,7 @@ fn fopen_s_errno_is_thread_local_and_preserves_win32_last_error() {
         .unwrap();
     assert_ne!(handle, 0);
     assert_eq!(child_entry_errno.load(Ordering::SeqCst), 0);
-    assert_eq!(child_after_errno.load(Ordering::SeqCst), 2);
+    assert_eq!(child_after_errno.load(Ordering::SeqCst), 13);
     assert_eq!(engine.unicorn.get_data().crt_errno, 77);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
     assert_eq!(
@@ -15900,4 +15900,159 @@ fn crt_time64_returns_current_seconds_and_checks_optional_output() {
         dispatch_win64_import("other.dll", "_time64"),
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
+}
+
+#[test]
+fn guest_asset_streams_read_real_bytes_and_close_without_reusing_tokens() {
+    let dir = std::env::temp_dir().join(format!(
+        "aex-assets-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let raw = b"a\r\nb\x1az";
+    std::fs::write(dir.join("asset.bin"), raw).unwrap();
+    let manifest = dir.join("files.json");
+    std::fs::write(
+        &manifest,
+        r#"{"files":[{"name":"c:/Assets/data.bin","path":"asset.bin"}]}"#,
+    )
+    .unwrap();
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        engine.unicorn.get_data_mut().guest_files = GuestFiles::from_manifest(&manifest).unwrap();
+        let open = STUB_BASE + 0x100;
+        let read = open + 16;
+        let close = open + 32;
+        let secure = open + 48;
+        for (entry, name) in [
+            (open, "fopen"),
+            (read, "fread"),
+            (close, "fclose"),
+            (secure, "fopen_s"),
+        ] {
+            install_win64_import(&mut engine.unicorn, entry, dll, name).unwrap();
+        }
+        let name = DATA_BASE + 0x100;
+        let mode = DATA_BASE + 0x200;
+        let output = DATA_BASE + 0x300;
+        engine.write(name, b"C:\\ASSETS\\data.bin\0").unwrap();
+        let mut last_token = 0;
+        for (flags, expected) in [
+            (b"rb\0".as_slice(), raw.as_slice()),
+            (b"rt\0", b"a\nb".as_slice()),
+        ] {
+            engine.write(mode, flags).unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 77;
+            let token = engine.call_win64(open, [name, mode, 0, 0, 0, 0]).unwrap();
+            assert_ne!(token, 0);
+            assert_ne!(token, last_token);
+            last_token = token;
+            assert_eq!(engine.unicorn.get_data().crt_errno, 77);
+            assert!(!guest_range_has_permission(&engine.unicorn, token, 8, Prot::EXEC).unwrap());
+            if !guest_range_has_permission(&engine.unicorn, 0, 8, Prot::WRITE).unwrap() {
+                engine
+                    .unicorn
+                    .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+                    .unwrap();
+            }
+            engine.write(0, &[0xa5; 8]).unwrap();
+            assert!(engine.call_win64(read, [0, 1, 2, token, 0, 0]).is_err());
+            assert_eq!(engine.unicorn.mem_read_as_vec(0, 8).unwrap(), [0xa5; 8]);
+            assert_eq!(
+                engine.unicorn.get_data().guest_files.streams[&token].position,
+                0
+            );
+            let edge = DATA_BASE + PAGE_SIZE - 1;
+            engine.write(edge, &[0xa5]).unwrap();
+            assert!(engine.call_win64(read, [edge, 1, 6, token, 0, 0]).is_err());
+            assert_eq!(
+                engine.unicorn.get_data().guest_files.streams[&token].position,
+                0
+            );
+            engine.write(output, &[0xa5; 16]).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(read, [output, 2, 4, token, 0, 0])
+                    .unwrap(),
+                expected.len() as u64 / 2
+            );
+            let mut buffer = [0; 16];
+            engine.read(output, &mut buffer).unwrap();
+            assert_eq!(&buffer[..expected.len()], expected);
+            assert!(buffer[expected.len()..].iter().all(|b| *b == 0xa5));
+            assert_eq!(
+                engine
+                    .call_win64(read, [output, 1, 1, token, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(engine.call_win64(close, [token, 0, 0, 0, 0, 0]).unwrap(), 0);
+            assert!(engine.call_win64(close, [token, 0, 0, 0, 0, 0]).is_err());
+            assert!(
+                engine
+                    .call_win64(read, [output, 1, 1, token, 0, 0])
+                    .is_err()
+            );
+            assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
+        }
+        assert_eq!(
+            engine.unicorn.get_data().guest_files.reports[0]
+                .sha256
+                .as_deref(),
+            Some(format!("{:x}", Sha256::digest(raw)).as_str())
+        );
+        engine.write(mode, b"rb\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(secure, [output, name, mode, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut bytes = [0; 8];
+        engine.read(output, &mut bytes).unwrap();
+        let token = u64::from_le_bytes(bytes);
+        assert_ne!(token, 0);
+        engine.call_win64(close, [token, 0, 0, 0, 0, 0]).unwrap();
+        engine.write(mode, b"w\0").unwrap();
+        assert_eq!(
+            engine.call_win64(open, [name, mode, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 13);
+        assert_eq!(std::fs::read(dir.join("asset.bin")).unwrap(), raw);
+        engine.write(mode, b"r\0").unwrap();
+        engine.write(name, b"unmounted.file\0").unwrap();
+        assert_eq!(
+            engine.call_win64(open, [name, mode, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 2);
+        assert_eq!(engine.call_win64(open, [0, mode, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+        engine.write(name, b"c:/Assets/../data.bin\0").unwrap();
+        assert!(engine.call_win64(open, [name, mode, 0, 0, 0, 0]).is_err());
+        assert_eq!(engine.call_win64(read, [0, 0, 99, 0, 0, 0]).unwrap(), 0);
+        assert!(
+            engine
+                .call_win64(read, [output, u64::MAX, 2, 0, 0, 0])
+                .is_err()
+        );
+    }
+    std::fs::write(
+        &manifest,
+        r#"{"files":[{"name":"a","path":"asset.bin"},{"name":"A","path":"asset.bin"}]}"#,
+    )
+    .unwrap();
+    assert!(GuestFiles::from_manifest(&manifest).is_err());
+    for symbol in ["fopen", "fread", "fclose"] {
+        assert!(matches!(
+            dispatch_win64_import("other.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
