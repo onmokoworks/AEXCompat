@@ -1152,6 +1152,37 @@ fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        if destination == 0 {
+            return Err("strcpy destination is null".into());
+        }
+        let mut value =
+            read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strcpy source")?;
+        value.push(0);
+        if !guest_range_has_permission(unicorn, destination, value.len() as u64, Prot::WRITE)? {
+            return Err("strcpy destination is not writable".into());
+        }
+        unicorn
+            .mem_write(destination, &value)
+            .map_err(|error| format!("strcpy destination write: {error}"))?;
+        Ok(destination)
+    })();
+    match result {
+        Ok(destination) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, destination);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;

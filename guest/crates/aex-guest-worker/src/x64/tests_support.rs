@@ -15176,3 +15176,62 @@ fn registry_open_rejects_unsupported_handles_options_and_bad_pointers() {
         87
     );
 }
+
+#[test]
+fn win64_strcpy_copies_nul_and_returns_destination_without_overwrite() {
+    const COPY: u64 = STUB_BASE + 0x210;
+    for library in ["api-ms-win-crt-string-l1-1-0.dll", "UCRTBASE.DLL"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, COPY, library, "strcpy").unwrap();
+        let source = DATA_BASE + 0x300;
+        let destination = DATA_BASE + 0x400;
+        for value in [&b"abc\xff\0ignored"[..], &b"\0ignored"[..]] {
+            engine.unicorn.mem_write(source, value).unwrap();
+            engine.unicorn.mem_write(destination, &[0xaa; 16]).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(COPY, [destination, source, 0, 0, 0, 0])
+                    .unwrap(),
+                destination
+            );
+            let mut actual = [0; 16];
+            engine.unicorn.mem_read(destination, &mut actual).unwrap();
+            let length = value.iter().position(|byte| *byte == 0).unwrap() + 1;
+            assert_eq!(&actual[..length], &value[..length]);
+            assert!(actual[length..].iter().all(|byte| *byte == 0xaa));
+        }
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "strcpy"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn win64_strcpy_validates_complete_output_before_writing() {
+    const COPY: u64 = STUB_BASE + 0x210;
+    const PAGE: u64 = 0x30_0000_0000;
+    for protect in [false, true] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, COPY, "ucrtbase.dll", "strcpy").unwrap();
+        engine
+            .unicorn
+            .mem_map(PAGE, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let source = DATA_BASE + 0x300;
+        engine.unicorn.mem_write(source, b"abc\0").unwrap();
+        engine.unicorn.mem_write(PAGE + 4090, &[0xaa; 6]).unwrap();
+        let destination = if protect { PAGE + 4090 } else { PAGE + 4094 };
+        if protect {
+            engine.unicorn.mem_protect(PAGE, 4096, Prot::READ).unwrap();
+        }
+        assert!(
+            engine
+                .call_win64(COPY, [destination, source, 0, 0, 0, 0])
+                .is_err()
+        );
+        let mut actual = [0; 6];
+        engine.unicorn.mem_read(PAGE + 4090, &mut actual).unwrap();
+        assert_eq!(actual, [0xaa; 6]);
+    }
+}

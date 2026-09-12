@@ -33,6 +33,7 @@ enum LegacyWin64Import {
     MemChr,
     StrStr,
     StrLen,
+    StrCpy,
     RegOpenKeyExA,
     RegCloseKey,
     MemCmp,
@@ -576,6 +577,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::StrLen
         }
         (_, "strlen") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcpy") => {
+            LegacyWin64Import::StrCpy
+        }
+        (_, "strcpy") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "RegOpenKeyExA") => LegacyWin64Import::RegOpenKeyExA,
         ("advapi32.dll", "RegCloseKey") => LegacyWin64Import::RegCloseKey,
         (_, "RegOpenKeyExA" | "RegCloseKey") => {
@@ -883,6 +888,15 @@ fn install_win64_import(
                     "install RegCloseKey",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_reg_close_key(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::StrCpy => {
+                uc("write strcpy return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install strcpy import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_strcpy(unicorn);
                     }),
                 )?;
             }
