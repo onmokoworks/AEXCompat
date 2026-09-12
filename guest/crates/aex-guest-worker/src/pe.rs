@@ -5,6 +5,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod pipl;
+
 const AMD64_MACHINE: u16 = 0x8664;
 const MAX_FILE_SIZE: usize = 128 * 1024 * 1024;
 const MAX_IMAGE_SIZE: usize = 256 * 1024 * 1024;
@@ -47,6 +49,8 @@ pub enum PeError {
         "effect discovery export was not found (tried EffectMain, entryPointFunc, entry_point, PluginDataEntryFunction2, PluginDataEntryFunction)"
     )]
     MissingEntryExport,
+    #[error("invalid Effect PiPL resource: {0}")]
+    InvalidPipl(String),
     #[error("duplicate named export {0}")]
     DuplicateExport(String),
     #[error("export {0} does not point into an executable image section")]
@@ -240,16 +244,36 @@ impl PeImage {
             .transpose()?;
 
         let direct_candidates = ["EffectMain", "entryPointFunc", "entry_point"];
-        let direct_entry = direct_candidates
+        let mut direct_entry = direct_candidates
             .iter()
             .find(|candidate| exports.contains_key(**candidate))
             .map(|candidate| (*candidate).to_string());
-        let discovery_entry = direct_entry.clone().or_else(|| {
+        let mut discovery_entry = direct_entry.clone().or_else(|| {
             ["PluginDataEntryFunction2", "PluginDataEntryFunction"]
                 .into_iter()
                 .find(|candidate| exports.contains_key(*candidate))
                 .map(str::to_string)
         });
+        // Preserve the established export paths. PiPL supplies an additional,
+        // declared Effect entry only when no existing discovery export resolves.
+        if discovery_entry.is_none() {
+            if let Some(directory) = optional.data_directories.get_resource_table() {
+                direct_entry = pipl::effect_entry(
+                    &mapped,
+                    directory.virtual_address as usize,
+                    directory.size as usize,
+                )?;
+            }
+            if let Some(name) = &direct_entry {
+                let rva = exports.get(name).ok_or_else(|| {
+                    PeError::InvalidPipl(format!("declared export {name} is absent"))
+                })?;
+                if executable_export(name, *rva).is_none() {
+                    return Err(PeError::NonExecutableExport(name.clone()));
+                }
+            }
+            discovery_entry = direct_entry.clone();
+        }
         let entry_export = discovery_entry.ok_or(PeError::MissingEntryExport)?;
         let entry_rva = exports[&entry_export];
 
