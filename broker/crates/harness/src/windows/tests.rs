@@ -1201,6 +1201,186 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_SCATTERMAP and local Release worker"]
+    fn real_scattermap_gui_matches_recorded_argb8_reference() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_SCATTERMAP")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-scattermap");
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters.iter().find(|p| p.slot == 6).unwrap().name,
+            "Scatter Map"
+        );
+        // Recorded opaque ARGB8 AE 25.2 hashes, not deep/float reference claims.
+        for (name, amount, direction, seed, mix, map, expected) in [
+            (
+                "default",
+                5,
+                3,
+                0,
+                100,
+                None,
+                "19cea826f356e0d94bc29ff10cb9e7f5a770fe5b288cb3d190a58372353102d9",
+            ),
+            (
+                "identity",
+                0,
+                3,
+                0,
+                100,
+                None,
+                "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+            ),
+            (
+                "horizontal",
+                5,
+                1,
+                0,
+                100,
+                None,
+                "10a2a95a0ae27ca5fe3a6f6f92eeddfe611885fa72afa0902a24e8bea5d2198f",
+            ),
+            (
+                "vertical",
+                5,
+                2,
+                0,
+                100,
+                None,
+                "6d6198506967e18f619e57cf79e65c52c8f8c65c0ef89710344af2f1045e091c",
+            ),
+            (
+                "amount_max",
+                500,
+                3,
+                0,
+                100,
+                None,
+                "8e535435c74a9521d816a3b836db578a2ae942efbd80a55447b97610dc26b794",
+            ),
+            (
+                "seed_max",
+                5,
+                3,
+                10000,
+                100,
+                None,
+                "e31ba13264e801de7ccce4d6863215e54c0dc0c7ff4a918e45ee75bc59e817ec",
+            ),
+            (
+                "mix_zero",
+                5,
+                3,
+                0,
+                0,
+                None,
+                "863d238f52f81aba4017c198af4d748cb57fe369e6216fdbacf45fd94037ecf7",
+            ),
+            (
+                "connected",
+                5,
+                3,
+                0,
+                100,
+                Some((5u32, 3u32, 0)),
+                "a38568761441c209940f81a8c2792dad50566c66eda1463bdcf071cca614891b",
+            ),
+            (
+                "inverted",
+                5,
+                3,
+                0,
+                100,
+                Some((11, 7, 1)),
+                "3bc0c5172b880a8a83cec24177b78721e9f0619d5330f6a26aaa02b9cc057a08",
+            ),
+        ] {
+            let (width, height) = if map.is_some() {
+                (11u32, 7u32)
+            } else {
+                (16, 12)
+            };
+            let input = directory.join(format!("input-{name}.png"));
+            image::RgbaImage::from_fn(width, height, |x, y| {
+                image::Rgba([
+                    (x * 255 / (width - 1)) as u8,
+                    (y * 255 / (height - 1)) as u8,
+                    ((x + y) * 255 / (width + height - 2)) as u8,
+                    255,
+                ])
+            })
+            .save(&input)
+            .unwrap();
+            ctx.begin_pass(Default::default());
+            app.load_input_path(&ctx, input);
+            let _ = ctx.end_pass();
+            let mut assignments = [(1, amount), (2, direction), (3, seed), (5, mix)]
+                .into_iter()
+                .map(|(slot, value)| serde_json::json!({"slot":slot,"value":value}))
+                .collect::<Vec<_>>();
+            if let Some((mw, mh, invert)) = map {
+                let path = directory.join(format!("map-{name}.png"));
+                image::RgbaImage::from_fn(mw, mh, |x, y| {
+                    let v = ((x + y) * 255 / (mw + mh - 2)) as u8;
+                    image::Rgba([v, v, v, 255])
+                })
+                .save(&path)
+                .unwrap();
+                assignments.extend([
+                    serde_json::json!({"slot":6,"layer":path}),
+                    serde_json::json!({"slot":7,"value":invert}),
+                ]);
+            }
+            app.apply_debug_request_document(&serde_json::json!({"schema_version":1,"timing":{"frame":0,"fps":24,"duration_frames":1},"assignments":assignments}),&directory.join("request.json")).unwrap();
+            let output = directory.join(format!("output-{name}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{name}: {}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(
+                app.preview.as_ref().unwrap().size(),
+                [width as usize, height as usize]
+            );
+            let result = image::open(output).unwrap().to_rgba8();
+            assert_eq!(result.dimensions(), (width, height));
+            let argb = result
+                .pixels()
+                .flat_map(|p| [p[3], p[0], p[1], p[2]])
+                .collect::<Vec<_>>();
+            assert_eq!(format!("{:x}", Sha256::digest(&argb)), expected, "{name}");
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
             std::env::var(plugin_env)
