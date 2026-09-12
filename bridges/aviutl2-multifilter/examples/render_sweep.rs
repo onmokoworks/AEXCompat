@@ -50,9 +50,9 @@
 //!                        bridge renders continuously, so an effect whose frame
 //!                        0 fails and whose frame 1 renders is a working effect
 //!                        there and a failing one to a single-frame sweep
-//!   --plugin-defaults    send no parameters at all, leaving the plug-in on the
-//!                        values its own PARAMS_SETUP installed. The control for
-//!                        "is this about the host's parameter transport"
+//!   --plugin-defaults    compatibility flag: both flag values send no parameter
+//!                        edits, retaining PARAMS_SETUP defaults. Consult the
+//!                        report's effective_input_policy for actual inputs.
 //!   --close-report       carry each session's whole close report, not just the
 //!                        pruned failure fields. For drilling into one bucket;
 //!                        too large to hold for a whole sweep, and not
@@ -103,6 +103,22 @@ use sha2::{Digest, Sha256};
 /// a slow one (#354) — but a frame the caller is waiting on is exactly where a
 /// deadline belongs.
 const FRAME_DEADLINE: Duration = Duration::from_secs(60);
+
+const PRIMARY_RGBA: [u8; 4] = [32, 64, 128, 255];
+
+fn primary_pixels(width: u32, height: u32) -> Vec<u8> {
+    (0..width * height).flat_map(|_| PRIMARY_RGBA).collect()
+}
+
+fn effective_input_policy(options: &Options) -> Value {
+    json!({
+        "primary": { "pattern": "solid", "channel_order": "RGBA", "rgba8": PRIMARY_RGBA },
+        "parameter_assignments": "none",
+        "secondary_layer_selection": if options.no_layer { "none" } else { "first_declared_layer_if_any" },
+        "secondary_pattern": if options.no_layer { Value::Null } else { json!("rgba8_x_y_xor_opaque") },
+        "semantic_coverage": "execution_probe_not_effect_correctness"
+    })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct ExecutableFingerprint {
@@ -469,9 +485,7 @@ fn main() {
 
     // Built once: they depend only on the session geometry, and rebuilding them
     // per plug-in would memcpy the same few hundred KB a few hundred times.
-    let input: Vec<u8> = (0..options.width * options.height)
-        .flat_map(|_| [32u8, 64, 128, 255])
-        .collect();
+    let input = primary_pixels(options.width, options.height);
     // A map with structure, so an effect that samples it cannot answer
     // identically for every pixel by accident.
     let layer_pixels: Vec<u8> = (0..options.width * options.height)
@@ -1540,6 +1554,7 @@ fn report(
             "secondary_layer": !options.no_layer,
             "force_classic": options.force_classic,
             "plugin_defaults": options.plugin_defaults,
+            "effective_input_policy": effective_input_policy(options),
             "verify_pixel_determinism": options.verify_pixel_determinism,
             "frame_deadline_ms": FRAME_DEADLINE.as_millis(),
             "time_step": TIME_STEP,
@@ -1630,6 +1645,25 @@ mod tests {
     use super::*;
     use aexcompat_aviutl2_multifilter::DiscoveredPluginKind;
     use aexcompat_broker::image_render::InteractiveParameter;
+
+    #[test]
+    fn effective_policy_matches_pixels_and_legacy_default_flag() {
+        let mut options = discovery_options(PathBuf::new());
+        let policy = effective_input_policy(&options);
+        let bytes = primary_pixels(3, 2);
+        assert_eq!(bytes.len(), 24);
+        for pixel in bytes.chunks_exact(4) {
+            assert_eq!(json!(pixel), policy["primary"]["rgba8"]);
+        }
+        assert_eq!(policy["parameter_assignments"], "none");
+        options.plugin_defaults = true;
+        assert_eq!(effective_input_policy(&options), policy);
+        options.no_layer = true;
+        let no_layer = effective_input_policy(&options);
+        assert_eq!(no_layer["secondary_layer_selection"], "none");
+        assert!(no_layer["secondary_pattern"].is_null());
+        assert_eq!(policy["secondary_layer_selection"], "first_declared_layer_if_any");
+    }
 
     fn discovery_options(json: PathBuf) -> Options {
         Options {
@@ -1753,8 +1787,10 @@ mod tests {
             Some("changed_between_boundary_snapshots")
         );
         assert_eq!(first.cli, changed.cli);
-        assert_eq!(first.l2_worker, changed.l2_worker);
-        assert_eq!(first.classic_worker, changed.classic_worker);
+        // All routes share one worker image: changing it invalidates every
+        // route fingerprint, while the independent CLI image stays unchanged.
+        assert_eq!(changed.l2_worker, changed.smart_worker);
+        assert_eq!(changed.classic_worker, changed.smart_worker);
 
         // Boundary evidence deliberately cannot prove continuous identity or
         // actual per-launch admission. Restore the candidate bytes and pin that
@@ -1775,6 +1811,8 @@ mod tests {
         assert_eq!(missing.smart_worker.sha256, None);
         assert_eq!(missing.smart_worker.size_bytes, None);
         assert_eq!(missing.smart_worker.error, Some("open_failed"));
+        assert_eq!(missing.l2_worker, missing.smart_worker);
+        assert_eq!(missing.classic_worker, missing.smart_worker);
         let serialized = serde_json::to_string(&missing).unwrap();
         assert!(
             !serialized.contains(&root.to_string_lossy().to_string()),
