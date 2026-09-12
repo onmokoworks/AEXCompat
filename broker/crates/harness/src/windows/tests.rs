@@ -3,6 +3,87 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_OLM_BLUR and local Release worker"]
+    fn real_aex_gui_state_renders_and_publishes_preview() {
+        let plugin =
+            PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_OLM_BLUR").expect("explicit AEX path"));
+        let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let directory = temporary_directory("real-gui-render");
+        let input = directory.join("input.png");
+        let output = directory.join("output.png");
+        image::RgbaImage::from_fn(256, 144, |x, y| {
+            image::Rgba([
+                if ((x / 8) ^ (y / 8)) & 1 == 1 {
+                    240
+                } else {
+                    16
+                },
+                x as u8,
+                y as u8,
+                255,
+            ])
+        })
+        .save(&input)
+        .unwrap();
+        let mut app = HarnessApp::new(repository);
+        app.live_render = false;
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: fs::metadata(&plugin).unwrap().modified().ok(),
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert!(app.smart_render_capability.is_some(), "{}", app.report);
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input.clone());
+        let _ = ctx.end_pass();
+        app.render_to(output.clone());
+        drain(&mut app);
+        assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+        assert_eq!(app.output_image.as_ref(), Some(&output));
+        assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+        let pixels = image::open(&output).unwrap().to_rgba8();
+        assert!(pixels.pixels().all(|pixel| pixel.0[3] == 255));
+        let original = image::open(input).unwrap().to_rgba8();
+        assert_ne!(pixels, original);
+        let edge_energy = |image: &image::RgbaImage| -> u64 {
+            (0..144)
+                .flat_map(|y| (1..256).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    image.get_pixel(x, y).0[0].abs_diff(image.get_pixel(x - 1, y).0[0]) as u64
+                })
+                .sum()
+        };
+        assert!(edge_energy(&pixels) < edge_energy(&original));
+        let green_min = pixels.pixels().map(|p| p.0[1]).min().unwrap();
+        let green_max = pixels.pixels().map(|p| p.0[1]).max().unwrap();
+        assert!(
+            green_max - green_min > 64,
+            "blur must retain the input gradient"
+        );
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn repository_root_prefers_worktree_cwd_to_a_separated_binary_location() {
         let fixture = std::env::temp_dir().join(format!(
             "aexcompat-harness-root-{}-{}",
