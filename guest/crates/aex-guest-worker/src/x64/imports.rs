@@ -81,6 +81,7 @@ enum LegacyWin64Import {
     StdioVsprintf,
     EncodePointer,
     DecodePointer,
+    CrtLocaleCodePage,
     CrtSetLocale(bool),
     CrtLocaleLock,
     CrtLocaleUnlock,
@@ -859,6 +860,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "EncodePointer" | "DecodePointer") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___lc_codepage_func") => {
+            LegacyWin64Import::CrtLocaleCodePage
+        }
+        (_, "___lc_codepage_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_wsetlocale") => {
             LegacyWin64Import::CrtSetLocale(true)
         }
@@ -2444,6 +2449,15 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_output_debug_string_a(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::CrtLocaleCodePage => {
+                    // The CRT remains in C: its locale codepage is 0. This is
+                    // distinct from the Windows ANSI codepage and _getmbcp.
+                    // Non-C setlocale requests are rejected explicitly.
+                    uc(
+                        "install C locale codepage query",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(0)),
                     )?;
                 }
                 LegacyWin64Import::CrtSetLocale(wide) => {
