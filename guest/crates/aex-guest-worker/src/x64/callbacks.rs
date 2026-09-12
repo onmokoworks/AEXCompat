@@ -3547,3 +3547,153 @@ fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
     })();
     finish_callback(unicorn, result);
 }
+
+// C-locale decimal scanf. Other conversions remain explicit compatibility gaps.
+fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let options = read_win64_import_argument(unicorn, 0)?;
+        let buffer = read_win64_import_argument(unicorn, 1)?;
+        let count = read_win64_import_argument(unicorn, 2)?;
+        let format = read_win64_import_argument(unicorn, 3)?;
+        let locale = read_win64_import_argument(unicorn, 4)?;
+        let args = read_win64_import_argument(unicorn, 5)?;
+        if options & !2 != 0 || locale != 0 {
+            return Err(format!(
+                "unsupported scanf options={options:#x} locale={locale:#x}"
+            ));
+        }
+        if buffer == 0 || format == 0 {
+            unicorn.get_data_mut().crt_errno = 22;
+            return Ok(u32::MAX as u64);
+        }
+        let format = read_crt_stdio_c_string(unicorn, format, 4096, "scanf format")?;
+        let input = if count == u64::MAX {
+            read_crt_stdio_c_string(unicorn, buffer, MAX_CRT_STRING_BYTES, "scanf input")?
+        } else {
+            if count > MAX_CRT_STRING_BYTES {
+                return Err("scanf input count exceeds bound".into());
+            }
+            let mut input = Vec::new();
+            for offset in 0..count {
+                let address = buffer.checked_add(offset).ok_or("scanf input overflow")?;
+                if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                    return Err("scanf input unreadable".into());
+                }
+                let byte = unicorn
+                    .mem_read_as_vec(address, 1)
+                    .map_err(|e| e.to_string())?[0];
+                if byte == 0 {
+                    break;
+                }
+                input.push(byte);
+            }
+            input
+        };
+        let white = |b: u8| matches!(b, 9..=13 | 32);
+        let (mut fi, mut pos, mut assigned) = (0usize, 0usize, 0u64);
+        while fi < format.len() {
+            if white(format[fi]) {
+                fi += 1;
+                while pos < input.len() && white(input[pos]) {
+                    pos += 1;
+                }
+                continue;
+            }
+            if format[fi] != b'%' || format.get(fi + 1) == Some(&b'%') {
+                let literal = format[fi];
+                fi += if literal == b'%' { 2 } else { 1 };
+                if pos == input.len() {
+                    return Ok(if assigned != 0 {
+                        assigned
+                    } else {
+                        u32::MAX as u64
+                    });
+                }
+                if input[pos] != literal {
+                    return Ok(assigned);
+                }
+                pos += 1;
+                continue;
+            }
+            fi += 1;
+            let suppress = format.get(fi) == Some(&b'*');
+            if suppress {
+                fi += 1;
+            }
+            let mut width = 0usize;
+            let width_start = fi;
+            while fi < format.len() && format[fi].is_ascii_digit() {
+                width = width
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add((format[fi] - b'0') as usize))
+                    .ok_or("scanf width overflow")?;
+                fi += 1;
+            }
+            if fi == width_start {
+                width = usize::MAX;
+            }
+            if width == 0 || format.get(fi) != Some(&b'd') {
+                return Err(format!(
+                    "unsupported scanf conversion in {:?}",
+                    String::from_utf8_lossy(&format)
+                ));
+            }
+            fi += 1;
+            while pos < input.len() && white(input[pos]) {
+                pos += 1;
+            }
+            if pos == input.len() {
+                return Ok(if assigned != 0 {
+                    assigned
+                } else {
+                    u32::MAX as u64
+                });
+            }
+            let end = pos.saturating_add(width).min(input.len());
+            let negative = input[pos] == b'-';
+            if matches!(input[pos], b'+' | b'-') {
+                pos += 1;
+            }
+            let start = pos;
+            let mut magnitude = 0u64;
+            while pos < end && input[pos].is_ascii_digit() {
+                magnitude = magnitude
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add((input[pos] - b'0') as u64))
+                    .ok_or("scanf decimal overflow")?;
+                pos += 1;
+            }
+            if pos == start {
+                return Ok(assigned);
+            }
+            if !suppress {
+                let value = if negative {
+                    -(magnitude as i128)
+                } else {
+                    magnitude as i128
+                };
+                let value =
+                    i32::try_from(value).map_err(|_| "scanf decimal outside int32 range")?;
+                let slot = args
+                    .checked_add(assigned * 8)
+                    .ok_or("scanf va_list overflow")?;
+                if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
+                    return Err("scanf va_list unreadable".into());
+                }
+                let bytes = unicorn
+                    .mem_read_as_vec(slot, 8)
+                    .map_err(|e| e.to_string())?;
+                let output = u64::from_le_bytes(bytes.try_into().unwrap());
+                if output == 0 || !guest_range_has_permission(unicorn, output, 4, Prot::WRITE)? {
+                    return Err("scanf int output unwritable".into());
+                }
+                unicorn
+                    .mem_write(output, &value.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+                assigned += 1;
+            }
+        }
+        Ok(assigned)
+    })();
+    finish_guest_stdio(unicorn, result);
+}

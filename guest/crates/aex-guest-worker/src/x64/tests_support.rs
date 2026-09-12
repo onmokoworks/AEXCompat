@@ -16864,3 +16864,77 @@ fn isspace_classifies_all_c_locale_bytes_and_int_eof() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn scanf_decimal_assigns_values_and_distinguishes_eof_from_mismatch() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "__stdio_common_vsscanf").unwrap();
+        let (input, format, args, output) = (
+            DATA_BASE + 0x100,
+            DATA_BASE + 0x200,
+            DATA_BASE + 0x300,
+            DATA_BASE + 0x400,
+        );
+        engine.write(args, &output.to_le_bytes()).unwrap();
+        engine.write(args + 8, &(output + 4).to_le_bytes()).unwrap();
+        for (text, fmt, status, values) in [
+            (" \t-2147483648", "%d", 1, vec![i32::MIN]),
+            ("+2147483647tail", "%d", 1, vec![i32::MAX]),
+            ("12, -7", "%d, %d", 2, vec![12, -7]),
+            ("1234", "%2d%d", 2, vec![12, 34]),
+            ("99 8", "%*d%d", 1, vec![8]),
+            ("", "%d", u32::MAX as u64, vec![]),
+            (" \n", "%d", u32::MAX as u64, vec![]),
+            ("x", "%d", 0, vec![]),
+            ("+", "%d", 0, vec![]),
+            ("1", "%d%d", 1, vec![1]),
+            ("1", "%*d%d", u32::MAX as u64, vec![]),
+            ("1", "%*dx", u32::MAX as u64, vec![]),
+        ] {
+            engine.write(input, format!("{text}\0").as_bytes()).unwrap();
+            engine.write(format, format!("{fmt}\0").as_bytes()).unwrap();
+            engine.write(output, &[0xa5; 8]).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(entry, [2, input, u64::MAX, format, 0, args])
+                    .unwrap(),
+                status
+            );
+            let bytes = engine.unicorn.mem_read_as_vec(output, 8).unwrap();
+            for (i, value) in values.iter().enumerate() {
+                assert_eq!(&bytes[i * 4..i * 4 + 4], &value.to_le_bytes());
+            }
+            assert!(bytes[values.len() * 4..].iter().all(|b| *b == 0xa5));
+        }
+        engine.write(input, b"42xx\0").unwrap();
+        engine.write(format, b"%d\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(entry, [0, input, 2, format, 0, args])
+                .unwrap(),
+            1
+        );
+        engine
+            .write(args, &(DATA_BASE + PAGE_SIZE - 2).to_le_bytes())
+            .unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [2, input, u64::MAX, format, 0, args])
+                .is_err()
+        );
+        engine.write(args, &output.to_le_bytes()).unwrap();
+        engine.write(input, b"2147483648\0").unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [2, input, u64::MAX, format, 0, args])
+                .is_err()
+        );
+        assert!(
+            engine
+                .call_win64(entry, [1, input, u64::MAX, format, 0, args])
+                .is_err()
+        );
+    }
+}

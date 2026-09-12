@@ -46,6 +46,7 @@ enum LegacyWin64Import {
     RegCloseKey,
     MemCmp,
     StdioVsnprintfS,
+    StdioVsscanf,
     StdioVsprintf,
     Fgetc,
     Fread,
@@ -783,6 +784,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsprintf") => {
             LegacyWin64Import::StdioVsprintf
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsscanf") => {
+            LegacyWin64Import::StdioVsscanf
+        }
+        (_, "__stdio_common_vsscanf") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "__stdio_common_vsprintf") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
@@ -1192,6 +1197,15 @@ fn install_win64_import(
                     "install stdio formatter import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_stdio_common_vsnprintf_s(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::StdioVsscanf => {
+                uc("write vsscanf return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install vsscanf",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_stdio_common_vsscanf(unicorn);
                     }),
                 )?;
             }
