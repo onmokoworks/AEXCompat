@@ -1152,6 +1152,24 @@ fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        Ok(read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strlen")?.len() as u64)
+    })();
+    match result {
+        Ok(length) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, length);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_crt_strstr(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;

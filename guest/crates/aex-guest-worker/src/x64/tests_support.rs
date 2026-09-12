@@ -15021,3 +15021,71 @@ fn vcruntime_strstr_rejects_unterminated_strings_at_the_host_bound() {
         assert!(error.to_string().contains("exceeds"), "{error}");
     }
 }
+
+#[test]
+fn win64_strlen_counts_bytes_and_stops_at_page_edge_nul() {
+    const STRLEN: u64 = STUB_BASE + 0x1e0;
+    const PAGE: u64 = 0x30_0000_0000;
+    for library in ["api-ms-win-crt-string-l1-1-0.dll", "UCRTBASE.DLL"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, STRLEN, library, "strlen").unwrap();
+        engine
+            .unicorn
+            .mem_map(PAGE, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        engine.unicorn.mem_write(PAGE + 4092, b"a\xffb\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(STRLEN, [PAGE + 4092, 0, 0, 0, 0, 0])
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            engine
+                .call_win64(STRLEN, [PAGE + 4095, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        engine.unicorn.mem_write(PAGE + 4095, b"x").unwrap();
+        assert!(
+            engine
+                .call_win64(STRLEN, [PAGE + 4095, 0, 0, 0, 0, 0])
+                .is_err()
+        );
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "strlen"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn win64_strlen_rejects_null_unreadable_and_unterminated_input() {
+    const STRLEN: u64 = STUB_BASE + 0x1e0;
+    const REGION: u64 = 0x30_0000_0000;
+    for mode in 0..3 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, STRLEN, "ucrtbase.dll", "strlen").unwrap();
+        engine
+            .unicorn
+            .mem_map(REGION, MAX_CRT_STRING_BYTES, Prot::READ | Prot::WRITE)
+            .unwrap();
+        engine
+            .unicorn
+            .mem_write(REGION, &vec![b'x'; MAX_CRT_STRING_BYTES as usize])
+            .unwrap();
+        if mode == 1 {
+            engine
+                .unicorn
+                .mem_protect(REGION, MAX_CRT_STRING_BYTES, Prot::WRITE)
+                .unwrap();
+        }
+        let address = if mode == 0 { 0 } else { REGION };
+        let error = engine
+            .call_win64(STRLEN, [address, 0, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string();
+        let expected = ["null", "not readable", "exceeds"][mode];
+        assert!(error.contains(expected), "{error}");
+    }
+}
