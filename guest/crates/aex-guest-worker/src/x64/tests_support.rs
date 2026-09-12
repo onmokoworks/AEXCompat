@@ -19060,3 +19060,134 @@ fn get_user_name_w_sizes_utf16_buffer_and_preserves_failed_outputs() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn gethostname_ordinal_requires_startup_and_returns_actual_host_name() {
+    for dll in ["ws2_32.dll", "wsock32.dll"] {
+        for symbol in ["gethostname", "ORDINAL 57"] {
+            let mut engine = test_engine(&[0xc3]);
+            let (entry, startup, cleanup, error) = (
+                STUB_BASE + 0x100,
+                STUB_BASE + 0x110,
+                STUB_BASE + 0x120,
+                STUB_BASE + 0x130,
+            );
+            install_win64_import(&mut engine.unicorn, entry, dll, symbol).unwrap();
+            install_win64_import(&mut engine.unicorn, startup, dll, "WSAStartup").unwrap();
+            install_win64_import(&mut engine.unicorn, cleanup, dll, "WSACleanup").unwrap();
+            install_win64_import(&mut engine.unicorn, error, dll, "ORDINAL 111").unwrap();
+            let output = DATA_BASE + 0x400;
+            let mut expected = aex_host_identity::current_hostname().unwrap();
+            expected.push(0);
+            engine
+                .write(output, &vec![0xa5; expected.len() + 4])
+                .unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(entry, [output, 4096, 0, 0, 0, 0])
+                    .unwrap(),
+                u32::MAX as u64
+            );
+            assert_eq!(
+                engine.call_win64(error, [0; 6]).unwrap(),
+                WINDOWS_WSANOTINITIALISED as u64
+            );
+            assert_eq!(
+                engine
+                    .call_win64(startup, [0x202, DATA_BASE, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            for capacity in [0, expected.len() as u64 - 1, u64::MAX] {
+                assert_eq!(
+                    engine
+                        .call_win64(entry, [output, capacity, 0, 0, 0, 0])
+                        .unwrap(),
+                    u32::MAX as u64
+                );
+                assert_eq!(
+                    engine.call_win64(error, [0; 6]).unwrap(),
+                    WINDOWS_WSAEFAULT as u64
+                );
+                assert!(
+                    engine
+                        .unicorn
+                        .mem_read_as_vec(output, expected.len() + 4)
+                        .unwrap()
+                        .iter()
+                        .all(|b| *b == 0xa5)
+                );
+            }
+            engine.unicorn.get_data_mut().windows_last_error = 71;
+            engine.unicorn.get_data_mut().crt_errno = 72;
+            assert_eq!(
+                engine
+                    .call_win64(
+                        entry,
+                        [
+                            output,
+                            0x1234_0000_0000_0000 | expected.len() as u64,
+                            0,
+                            0,
+                            0,
+                            0
+                        ]
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                engine
+                    .unicorn
+                    .mem_read_as_vec(output, expected.len())
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(
+                engine
+                    .unicorn
+                    .mem_read_as_vec(output + expected.len() as u64, 4)
+                    .unwrap(),
+                [0xa5; 4]
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+            engine
+                .unicorn
+                .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+                .unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(entry, [output, 4096, 0, 0, 0, 0])
+                    .unwrap(),
+                u32::MAX as u64
+            );
+            assert_eq!(
+                engine.call_win64(error, [0; 6]).unwrap(),
+                WINDOWS_WSAEFAULT as u64
+            );
+            assert_eq!(engine.call_win64(cleanup, [0; 6]).unwrap(), 0);
+            assert_eq!(
+                engine
+                    .call_win64(entry, [output, 4096, 0, 0, 0, 0])
+                    .unwrap(),
+                u32::MAX as u64
+            );
+            assert_eq!(
+                engine.call_win64(error, [0; 6]).unwrap(),
+                WINDOWS_WSANOTINITIALISED as u64
+            );
+        }
+    }
+    for symbol in [
+        "gethostname",
+        "ORDINAL 57",
+        "WSAGetLastError",
+        "ORDINAL 111",
+    ] {
+        assert_eq!(
+            dispatch_win64_import("other.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+}

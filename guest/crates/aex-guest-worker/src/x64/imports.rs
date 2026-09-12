@@ -149,6 +149,7 @@ enum LegacyWin64Import {
     GetVersionExA,
     GetSystemMetrics,
     GetUserNameW,
+    GetHostname,
     GetStartupInfoW,
     RtlCaptureContext,
     GetStdHandle,
@@ -672,6 +673,16 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc" | "HeapCreate"
             | "HeapDestroy",
         ) => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("ws2_32.dll" | "wsock32.dll", "gethostname" | "ORDINAL 57") => {
+            LegacyWin64Import::GetHostname
+        }
+        (_, "gethostname" | "ORDINAL 57") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ws2_32.dll" | "wsock32.dll", "WSAGetLastError" | "ORDINAL 111") => {
+            LegacyWin64Import::GetLastError
+        }
+        (_, "WSAGetLastError" | "ORDINAL 111") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("ws2_32.dll" | "wsock32.dll", "WSAStartup" | "ORDINAL 115") => {
@@ -1813,6 +1824,13 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_get_system_time_as_file_time(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::GetHostname => {
+                    uc("write gethostname return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install gethostname",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_gethostname(uc)),
                     )?;
                 }
                 LegacyWin64Import::GetUserNameW => {
@@ -9002,6 +9020,37 @@ fn emulate_get_user_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
             .mem_write(size_pointer, &required.to_le_bytes())
             .map_err(|e| e.to_string())?;
         Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_gethostname(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        if unicorn.get_data().windows_socket_startups == 0 {
+            unicorn.get_data_mut().windows_last_error = WINDOWS_WSANOTINITIALISED;
+            return Ok(u32::MAX as u64);
+        }
+        let output = read_win64_import_argument(unicorn, 0)?;
+        let capacity = read_win64_import_argument(unicorn, 1)? as u32 as i32;
+        if output == 0 || capacity <= 0 {
+            unicorn.get_data_mut().windows_last_error = WINDOWS_WSAEFAULT;
+            return Ok(u32::MAX as u64);
+        }
+        let mut name = aex_host_identity::current_hostname()?;
+        if name.is_empty() || name.contains(&0) {
+            return Err("host name is not representable by gethostname".into());
+        }
+        name.push(0);
+        if name.len() > capacity as usize
+            || !guest_range_has_permission(unicorn, output, name.len() as u64, Prot::WRITE)?
+        {
+            unicorn.get_data_mut().windows_last_error = WINDOWS_WSAEFAULT;
+            return Ok(u32::MAX as u64);
+        }
+        unicorn
+            .mem_write(output, &name)
+            .map_err(|e| format!("gethostname output write: {e}"))?;
+        Ok(0)
     })();
     finish_guest_stdio(unicorn, result);
 }

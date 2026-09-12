@@ -75,3 +75,56 @@ mod tests {
         );
     }
 }
+
+#[cfg(unix)]
+pub fn current_hostname() -> Result<Vec<u8>, String> {
+    let mut name = vec![0u8; 4096];
+    if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } != 0 {
+        return Err(format!(
+            "host name lookup failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let length = name
+        .iter()
+        .position(|b| *b == 0)
+        .ok_or("host name exceeds lookup bound")?;
+    name.truncate(length);
+    Ok(name)
+}
+
+#[cfg(windows)]
+pub fn current_hostname() -> Result<Vec<u8>, String> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetComputerNameExA(kind: i32, buffer: *mut u8, size: *mut u32) -> i32;
+    }
+    let mut name = vec![0u8; 256];
+    let mut size = name.len() as u32;
+    // ComputerNameDnsHostname; local OS query needs no native Winsock startup.
+    if unsafe { GetComputerNameExA(1, name.as_mut_ptr(), &mut size) } == 0 {
+        return Err(format!(
+            "host name lookup failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if size as usize >= name.len() || name[size as usize] != 0 {
+        return Err("host name lookup returned an invalid length".into());
+    }
+    name.truncate(size as usize);
+    Ok(name)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn hostname_matches_operating_system_command() {
+    let result = std::process::Command::new("/bin/hostname")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let mut expected = result.stdout;
+    if expected.last() == Some(&b'\n') {
+        expected.pop();
+    }
+    assert_eq!(current_hostname().unwrap(), expected);
+}
