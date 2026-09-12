@@ -18470,3 +18470,33 @@ fn version_ex_a_checks_size_and_writes_unmanifested_process_view() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn system_metrics_reports_local_guest_session_and_rejects_unknown_metrics() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "user32.dll", "GetSystemMetrics").unwrap();
+    for argument in [0x1000, 0xabcd_1234_0000_1000] {
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        assert_eq!(
+            engine.call_win64(entry, [argument, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+    }
+    for index in [0u64, 1, 0x2001, u64::MAX] {
+        let error = engine
+            .call_win64(entry, [index, 0, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "unsupported GetSystemMetrics index: {}",
+            index as u32 as i32
+        )));
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "GetSystemMetrics"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}

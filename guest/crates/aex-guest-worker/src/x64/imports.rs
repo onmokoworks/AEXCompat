@@ -144,6 +144,7 @@ enum LegacyWin64Import {
     GetSystemTimeAsFileTime,
     GetSystemInfo,
     GetVersionExA,
+    GetSystemMetrics,
     GetStartupInfoW,
     RtlCaptureContext,
     GetStdHandle,
@@ -442,6 +443,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "GetVersionExA") => LegacyWin64Import::GetVersionExA,
         (_, "GetVersionExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("user32.dll", "GetSystemMetrics") => LegacyWin64Import::GetSystemMetrics,
+        (_, "GetSystemMetrics") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetStartupInfoW") => {
             LegacyWin64Import::GetStartupInfoW
         }
@@ -1773,6 +1776,17 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_get_system_time_as_file_time(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::GetSystemMetrics => {
+                    uc(
+                        "write GetSystemMetrics return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetSystemMetrics",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_get_system_metrics(uc)),
                     )?;
                 }
                 LegacyWin64Import::GetVersionExA => {
@@ -8876,6 +8890,23 @@ fn emulate_get_version_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
             .mem_write(output, &bytes[..size as usize])
             .map_err(|e| e.to_string())?;
         Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_system_metrics(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let index = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+        match index {
+            // SM_REMOTESESSION: this emulated process is not associated with a
+            // Windows Terminal Services client session. A host SSH connection
+            // does not create a guest RDP session. Revisit with guest WTS support.
+            0x1000 => Ok(0),
+            _ => Err(format!(
+                "unsupported GetSystemMetrics index: {index} ({:#x})",
+                index as u32
+            )),
+        }
     })();
     finish_guest_stdio(unicorn, result);
 }
