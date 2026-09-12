@@ -978,25 +978,49 @@ fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) ->
 fn msvc_throw_type_name(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) -> Option<String> {
     const MAX_TYPE_NAME_BYTES: u64 = 128;
 
-    let (image_start, image_end) = unicorn.get_data().image_region?;
-    if throw_info < image_start || throw_info.checked_add(16)? > image_end {
+    let state = unicorn.get_data();
+    let image_start = guest_module_from_address(state, throw_info)?;
+    let image_end = if state.image_region?.0 == image_start {
+        state.image_region?.1
+    } else {
+        state
+            .loaded_libraries
+            .values()
+            .find(|library| library.base == image_start)?
+            .end
+    };
+    let rva_address = |rva: u32, size: u64| {
+        let address = image_start.checked_add(u64::from(rva))?;
+        if address.checked_add(size)? > image_end
+            || !guest_range_has_permission(unicorn, address, size, Prot::READ).ok()?
+        {
+            return None;
+        }
+        Some(address)
+    };
+    if throw_info < image_start
+        || throw_info.checked_add(16)? > image_end
+        || !guest_range_has_permission(unicorn, throw_info, 16, Prot::READ).ok()?
+    {
         return None;
     }
     let catchable_array_rva = read_guest_u32(unicorn, throw_info.checked_add(12)?)?;
-    let catchable_array = image_rva_address(unicorn, catchable_array_rva, 8)?;
+    let catchable_array = rva_address(catchable_array_rva, 8)?;
     let catchable_count = read_guest_u32(unicorn, catchable_array)?;
     if catchable_count == 0 || catchable_count > 32 {
         return None;
     }
     let catchable_type_rva = read_guest_u32(unicorn, catchable_array.checked_add(4)?)?;
-    let catchable_type = image_rva_address(unicorn, catchable_type_rva, 28)?;
+    let catchable_type = rva_address(catchable_type_rva, 28)?;
     let type_descriptor_rva = read_guest_u32(unicorn, catchable_type.checked_add(4)?)?;
-    let type_descriptor = image_rva_address(unicorn, type_descriptor_rva, 17)?;
+    let type_descriptor = rva_address(type_descriptor_rva, 17)?;
     let name_start = type_descriptor.checked_add(16)?;
     let mut bytes = Vec::new();
     for offset in 0..MAX_TYPE_NAME_BYTES {
         let address = name_start.checked_add(offset)?;
-        if address >= image_end {
+        if address >= image_end
+            || !guest_range_has_permission(unicorn, address, 1, Prot::READ).ok()?
+        {
             return None;
         }
         let byte = unicorn.mem_read_as_vec(address, 1).ok()?[0];

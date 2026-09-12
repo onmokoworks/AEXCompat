@@ -577,6 +577,44 @@ mod library_tests {
     }
 
     #[test]
+    fn exception_type_names_resolve_within_the_owning_dll() {
+        let primary = fixture(0x180000000, "EffectMain", None, false);
+        let dep = fixture(0x1800000000, "answer", None, true);
+        let mut engine = GuestEngine::load_with_libraries(&primary, &[("dep.dll", dep)]).unwrap();
+        let base = 0x1800000000;
+        engine
+            .write(base + 0x220c, &0x2240u32.to_le_bytes())
+            .unwrap();
+        engine.write(base + 0x2240, &1u32.to_le_bytes()).unwrap();
+        engine
+            .write(base + 0x2244, &0x2260u32.to_le_bytes())
+            .unwrap();
+        engine
+            .write(base + 0x2264, &0x2280u32.to_le_bytes())
+            .unwrap();
+        engine
+            .write(base + 0x2290, b".?AVbad_alloc@std@@\0")
+            .unwrap();
+        assert_eq!(
+            msvc_throw_type_name(&engine.unicorn, base + 0x2200).as_deref(),
+            Some(".?AVbad_alloc@std@@")
+        );
+        engine
+            .write(base + 0x2264, &u32::MAX.to_le_bytes())
+            .unwrap();
+        assert_eq!(msvc_throw_type_name(&engine.unicorn, base + 0x2200), None);
+        engine
+            .write(base + 0x2264, &0x2280u32.to_le_bytes())
+            .unwrap();
+        engine
+            .unicorn
+            .mem_protect(base + 0x2000, PAGE_SIZE, Prot::WRITE)
+            .unwrap();
+        assert_eq!(msvc_throw_type_name(&engine.unicorn, base + 0x2200), None);
+        assert_eq!(msvc_throw_type_name(&engine.unicorn, 0), None);
+    }
+
+    #[test]
     fn load_ex_a_uses_loaded_basename_before_system32_search() {
         let primary = fixture(0x180000000, "EffectMain", None, false);
         let dep = fixture(0x1800000000, "answer", None, true);
