@@ -15360,3 +15360,49 @@ fn cuda_api_sets_share_error_tls_and_heap_state_with_kernel32() {
     assert_eq!(call(11, [heap, 0, 0, 0, 0, 0]), 1);
     assert!(engine.unicorn.get_data().windows_private_heaps.is_empty());
 }
+
+#[test]
+fn initialize_srw_lock_sets_storage_and_preserves_active_ownership() {
+    for dll in ["kernel32.dll", "api-ms-win-core-synch-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let init = STUB_BASE + 0x100;
+        let acquire = init + 16;
+        let release = init + 32;
+        for (entry, symbol) in [
+            (init, "InitializeSRWLock"),
+            (acquire, "AcquireSRWLockExclusive"),
+            (release, "ReleaseSRWLockExclusive"),
+        ] {
+            install_win64_import(&mut engine.unicorn, entry, dll, symbol).unwrap();
+        }
+        let address = engine.allocate(16, 8).unwrap();
+        engine.write(address, &[0x5a; 16]).unwrap();
+        engine.call_win64(init, [address, 0, 0, 0, 0, 0]).unwrap();
+        let mut bytes = [0; 16];
+        engine.read(address, &mut bytes).unwrap();
+        assert_eq!(&bytes[..8], &[0; 8]);
+        assert_eq!(&bytes[8..], &[0x5a; 8]);
+        engine
+            .call_win64(acquire, [address, 0, 0, 0, 0, 0])
+            .unwrap();
+        let state = engine.unicorn.get_data().windows_srw_locks[&address].clone();
+        assert!(engine.call_win64(init, [address, 0, 0, 0, 0, 0]).is_err());
+        assert_eq!(engine.unicorn.get_data().windows_srw_locks[&address], state);
+        engine
+            .call_win64(release, [address, 0, 0, 0, 0, 0])
+            .unwrap();
+        engine.call_win64(init, [address, 0, 0, 0, 0, 0]).unwrap();
+        assert!(
+            !engine
+                .unicorn
+                .get_data()
+                .windows_srw_locks
+                .contains_key(&address)
+        );
+        engine
+            .unicorn
+            .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+            .unwrap();
+        assert!(engine.call_win64(init, [DATA_BASE, 0, 0, 0, 0, 0]).is_err());
+    }
+}

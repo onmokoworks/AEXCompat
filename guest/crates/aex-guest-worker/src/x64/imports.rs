@@ -146,6 +146,7 @@ enum LegacyWin64Import {
     EnterCriticalSection,
     LeaveCriticalSection,
     DeleteCriticalSection,
+    InitializeSrwLock,
     AcquireSrwLockExclusive,
     TryAcquireSrwLockExclusive,
     ReleaseSrwLockExclusive,
@@ -577,6 +578,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "DeleteCriticalSection") => {
             LegacyWin64Import::DeleteCriticalSection
         }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "InitializeSRWLock") => {
+            LegacyWin64Import::InitializeSrwLock
+        }
+        (_, "InitializeSRWLock") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "AcquireSRWLockExclusive") => {
             LegacyWin64Import::AcquireSrwLockExclusive
         }
@@ -1874,7 +1879,8 @@ fn install_win64_import(
                     }),
                 )?;
             }
-            LegacyWin64Import::AcquireSrwLockExclusive
+            LegacyWin64Import::InitializeSrwLock
+            | LegacyWin64Import::AcquireSrwLockExclusive
             | LegacyWin64Import::TryAcquireSrwLockExclusive
             | LegacyWin64Import::ReleaseSrwLockExclusive => {
                 uc("write SRW return", unicorn.mem_write(stub, &[0xc3]))?;
@@ -4145,6 +4151,23 @@ fn emulate_windows_srw_lock(unicorn: &mut Unicorn<'_, GuestState>, operation: Le
             return Err(format!(
                 "SRW lock storage {address:#x} is not readable and writable"
             ));
+        }
+        if operation == LegacyWin64Import::InitializeSrwLock {
+            if unicorn
+                .get_data()
+                .windows_srw_locks
+                .get(&address)
+                .is_some_and(|lock| lock.owner.is_some() || !lock.waiters.is_empty())
+            {
+                return Err(format!("cannot initialize active SRW lock {address:#x}"));
+            }
+            unicorn
+                .mem_write(address, &[0; 8])
+                .map_err(|error| format!("initialize SRW storage failed: {error}"))?;
+            // A zero-initialized lock is registered lazily on first acquire,
+            // just like SRWLOCK_INIT; initialization needs no host allocation.
+            unicorn.get_data_mut().windows_srw_locks.remove(&address);
+            return Ok(());
         }
         if !unicorn.get_data().windows_srw_locks.contains_key(&address) {
             if unicorn.get_data().windows_srw_locks.len() >= MAX_WINDOWS_SRW_LOCKS {
