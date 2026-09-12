@@ -83,6 +83,7 @@ enum LegacyWin64Import {
     DecodePointer,
     CrtLocaleNames,
     CrtPctype,
+    CrtMbCurMax,
     CrtLocaleCodePage,
     CrtSetLocale(bool),
     CrtLocaleLock,
@@ -870,6 +871,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtPctype
         }
         (_, "__pctype_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___mb_cur_max_func") => {
+            LegacyWin64Import::CrtMbCurMax
+        }
+        (_, "___mb_cur_max_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___lc_codepage_func") => {
             LegacyWin64Import::CrtLocaleCodePage
         }
@@ -2483,6 +2488,14 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_crt_pctype(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::CrtMbCurMax => {
+                    // The supported C locale has single-byte characters.
+                    // Non-C locale mutations remain explicit failures.
+                    uc(
+                        "install C locale MB_CUR_MAX query",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(1)),
                     )?;
                 }
                 LegacyWin64Import::CrtLocaleCodePage => {

@@ -18022,3 +18022,32 @@ fn crt_locale_names_are_six_null_c_categories_distinct_from_printable_names() {
         assert!(engine.call_win64(set + 16, [0; 6]).is_err());
     }
 }
+
+#[test]
+fn crt_mb_cur_max_tracks_supported_c_locale_and_preserves_errno() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let query = STUB_BASE + 0x100;
+        let set = query + 32;
+        install_win64_import(&mut engine.unicorn, query, dll, "___mb_cur_max_func").unwrap();
+        install_win64_import(&mut engine.unicorn, set, dll, "setlocale").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        assert_eq!(engine.call_win64(query, [u64::MAX; 6]).unwrap(), 1);
+        let locale = engine.call_win64(set, [0; 6]).unwrap();
+        engine.call_win64(set, [0, locale, 0, 0, 0, 0]).unwrap();
+        assert_eq!(engine.call_win64(query, [0; 6]).unwrap(), 1);
+        engine.unicorn.mem_write(DATA_BASE, b"ja-JP\0").unwrap();
+        assert!(engine.call_win64(set, [0, DATA_BASE, 0, 0, 0, 0]).is_err());
+        engine.unicorn.get_data_mut().current_windows_thread_id = 9;
+        assert_eq!(engine.call_win64(query, [0; 6]).unwrap(), 1);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        install_win64_import(
+            &mut engine.unicorn,
+            set + 32,
+            "foreign.dll",
+            "___mb_cur_max_func",
+        )
+        .unwrap();
+        assert!(engine.call_win64(set + 32, [0; 6]).is_err());
+    }
+}
