@@ -842,6 +842,7 @@ enum FrameWait {
 
 pub struct RenderSession {
     process: Option<SecureSessionProcess>,
+    _render_service: Option<crate::render_service::RenderServiceLease>,
     collected: Option<CollectedExit>,
     transport: SessionTransport,
     receiver: mpsc::Receiver<SessionEvent>,
@@ -1317,6 +1318,11 @@ impl RenderSession {
             request.total_time.to_string(),
             request.time_scale.to_string(),
         ];
+        let mut service_plugins = vec![request.plugin_path];
+        if let Some(cluster) = &cluster {
+            service_plugins.extend(cluster.plugins.iter().map(|plugin| plugin.path.as_path()));
+        }
+        let render_service = crate::render_service::RenderServiceLease::acquire(&service_plugins)?;
         let companion_transport =
             crate::companion_manifest::write_transport(request.repository, &request.companions)?;
         // The secondary-layer trailer sits ahead of the context trailers in
@@ -1655,6 +1661,7 @@ impl RenderSession {
 
         Ok(RenderSession {
             process: Some(process),
+            _render_service: render_service,
             collected: None,
             transport,
             receiver,

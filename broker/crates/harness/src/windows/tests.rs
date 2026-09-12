@@ -1382,6 +1382,99 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_THREE, registered renderer and Release worker; no AE"]
+    fn real_three_gui_grid_and_bypass_pixels() {
+        let plugin = PathBuf::from(std::env::var("AEXCOMPAT_TEST_THREE").unwrap());
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-three");
+        let input = directory.join("input.png");
+        let source = image::RgbaImage::from_fn(256, 144, |x, y| {
+            image::Rgba([x as u8, y as u8, ((x + y) % 256) as u8, 255])
+        });
+        source.save(&input).unwrap();
+        let mut app = HarnessApp::new(repository);
+        app.live_render = false;
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp, rendering: bool| {
+            let deadline =
+                rendering.then(|| std::time::Instant::now() + std::time::Duration::from_secs(90));
+            while app.busy {
+                assert!(
+                    deadline.is_none_or(|limit| std::time::Instant::now() < limit),
+                    "GUI Three wait exceeded: {}",
+                    app.report
+                );
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app, false);
+        let scene = app.parameters.iter().find(|p| p.name == "Scene").unwrap();
+        let scene_slot = scene.slot;
+        let grid_value = scene.choices.iter().position(|v| v == "Test Grid").unwrap() + 1;
+        let bypass_slot = app
+            .parameters
+            .iter()
+            .find(|p| p.name == "Bypass")
+            .unwrap()
+            .slot;
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input);
+        let _ = ctx.end_pass();
+        for bypass in [0, 1] {
+            app.apply_debug_request_document(
+                &serde_json::json!({
+                    "schema_version":1,
+                    "timing":{"frame":0,"fps":30,"duration_frames":300},
+                    "assignments":[{"slot":scene_slot,"value":grid_value},{"slot":bypass_slot,"value":bypass}]
+                }),
+                &directory.join("request.json"),
+            )
+            .unwrap();
+            let output = directory.join(format!("bypass-{bypass}.png"));
+            app.render_to(output.clone());
+            drain(&mut app, true);
+            fs::write(
+                directory.join(format!("bypass-{bypass}-report.json")),
+                &app.report,
+            )
+            .unwrap();
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            let report: serde_json::Value = serde_json::from_str(&app.report).unwrap();
+            assert_eq!(report["passed"], true);
+            assert!(report["resident_session"].is_object());
+            assert!(report.get("resident_session_fallback").is_none());
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            let actual = image::open(output).unwrap().to_rgba8();
+            assert_eq!(actual.dimensions(), (256, 144));
+            if bypass == 1 {
+                assert_eq!(actual, source, "Bypass must copy every input pixel");
+            } else {
+                assert!(actual.pixels().all(|p| p[3] == 255));
+                assert!(actual.pixels().any(|p| p != actual.get_pixel(0, 0)));
+                assert_ne!(actual, source, "Grid must not silently pass input through");
+            }
+        }
+        app.close_selected_aex();
+        drop(app);
+        eprintln!("Three GUI evidence: {}", directory.display());
+    }
+
+    #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_AEGPULAB and local Release worker"]
     fn real_aegpulab_gui_copy_and_box_pixels() {
         let plugin = PathBuf::from(std::env::var("AEXCOMPAT_TEST_AEGPULAB").unwrap());

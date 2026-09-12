@@ -481,6 +481,7 @@ fn child_environment(
     minidump_ack_handle: Option<HANDLE>,
     session: Option<&SessionChildHandles>,
     overrides: &[(std::ffi::OsString, std::ffi::OsString)],
+    removals: &[std::ffi::OsString],
 ) -> Vec<u16> {
     let mut entries: Vec<(String, std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
         .filter_map(|(key, value)| {
@@ -539,6 +540,12 @@ fn child_environment(
         }
         entries.retain(|(existing, _, _)| *existing != normalized);
         entries.push((normalized, key.clone(), value.clone()));
+    }
+    for key in removals {
+        let normalized = key.to_string_lossy().to_ascii_uppercase();
+        if !is_broker_owned_variable(&normalized) {
+            entries.retain(|(existing, _, _)| *existing != normalized);
+        }
     }
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut block = Vec::new();
@@ -1165,6 +1172,27 @@ impl LaunchedIsolatedProcess {
 /// resident worker gets the same broker-created inherited dump pipe as the
 /// one-shot path, retained across the frame loop on the returned process and
 /// finalized when the caller collects it at close (`wait_and_collect`).
+/// Launch an owned external render service without fabricating worker session
+/// transport handles. The same private desktop, memory budget and kill-on-close
+/// job apply; the caller must retain this owner until its clients have closed.
+pub(crate) fn launch_isolated_render_service(
+    program: &Path,
+    args: &[String],
+    current_directory: &Path,
+    launch_environment: &LaunchEnvironment,
+) -> io::Result<LaunchedIsolatedProcess> {
+    launch_isolated_impl(
+        program,
+        args,
+        Some(current_directory),
+        None,
+        WorkerDesktopPolicy::Dedicated,
+        None,
+        launch_environment,
+        RENDER_SESSION_PROCESS_MEMORY_LIMIT,
+    )
+}
+
 pub fn launch_isolated_session_staged(
     program: &Path,
     args: &[String],
@@ -1390,6 +1418,7 @@ fn launch_isolated_impl(
         minidump_file.as_ref().map(|file| file.ack_raw()),
         session,
         launch_environment.child_overrides(),
+        launch_environment.child_removals(),
     );
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
@@ -1545,6 +1574,73 @@ impl Drop for SuspendedProcessCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_environment_removal_is_local_and_preserves_owned_handles() {
+        let before = std::env::var_os("PATH");
+        let handle = 123usize as HANDLE;
+        let environment = LaunchEnvironment::default()
+            .with_child_var("ELECTRON_RUN_AS_NODE", "1")
+            .without_child_var("electron_run_as_node")
+            .without_child_var("PATH")
+            .without_child_var("AEX_INSTRUMENT_TRACE_HANDLE");
+        let block = child_environment(
+            Some(handle),
+            None,
+            None,
+            None,
+            environment.child_overrides(),
+            environment.child_removals(),
+        );
+        let entries: Vec<String> = block
+            .split(|c| *c == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(String::from_utf16_lossy)
+            .collect();
+        assert!(
+            !entries
+                .iter()
+                .any(|v| v.to_ascii_uppercase().starts_with("ELECTRON_RUN_AS_NODE="))
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|v| v.to_ascii_uppercase().starts_with("PATH="))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|v| v == "AEX_INSTRUMENT_TRACE_HANDLE=123")
+        );
+        assert_eq!(std::env::var_os("PATH"), before);
+    }
+
+    #[test]
+    fn render_service_owner_drop_terminates_live_process() {
+        let system =
+            std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("Windows system root"));
+        let program = system.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let child = launch_isolated_render_service(
+            &program,
+            &[
+                "-NoProfile".into(),
+                "-NonInteractive".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 30".into(),
+            ],
+            &system,
+            &LaunchEnvironment::default(),
+        )
+        .expect("launch an owned service without worker transport");
+        assert!(!child.has_exited());
+        let process =
+            OwnedHandle::new(child.duplicated_process_handle().unwrap() as HANDLE).unwrap();
+        drop(child);
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.raw(), 5000) },
+            WAIT_OBJECT_0
+        );
+    }
 
     /// Feeds a capture one chunk at a time the way `reader` does, so the
     /// retention arithmetic is exercisable without a pipe handle.
@@ -1845,7 +1941,7 @@ mod tests {
             ("PATH".into(), "overridden".into()),
             ("AEXCOMPAT_TEST_ONLY_NEW".into(), "added".into()),
         ];
-        let block = child_environment(None, None, None, None, &overrides);
+        let block = child_environment(None, None, None, None, &overrides, &[]);
         let decoded = decode(&block);
         assert_eq!(
             decoded
@@ -1886,7 +1982,7 @@ mod tests {
 
         // No handles created for this launch: every broker-owned name must be
         // absent rather than carrying the caller's value.
-        let block = child_environment(None, None, None, None, &forged);
+        let block = child_environment(None, None, None, None, &forged, &[]);
         for (key, _) in &forged {
             let key = key.to_string_lossy();
             assert_eq!(
@@ -1898,7 +1994,7 @@ mod tests {
 
         // With a handle injected, the injected value stands.
         let handle = 0x2a as HANDLE;
-        let block = child_environment(Some(handle), None, None, None, &forged);
+        let block = child_environment(Some(handle), None, None, None, &forged, &[]);
         assert_eq!(
             value_of(&block, "AEX_INSTRUMENT_TRACE_HANDLE").as_deref(),
             Some("42")

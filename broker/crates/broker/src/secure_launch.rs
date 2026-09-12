@@ -16,10 +16,22 @@ use std::time::Duration;
 #[derive(Clone, Debug, Default)]
 pub struct LaunchEnvironment {
     child_overrides: Vec<(OsString, OsString)>,
+    child_removals: Vec<OsString>,
     minidump_directory: Option<PathBuf>,
 }
 
 impl LaunchEnvironment {
+    /// Removes a variable only in this child. Removal wins over a supplied
+    /// override, but cannot remove broker-owned transport handles.
+    pub fn without_child_var(mut self, key: impl Into<OsString>) -> Self {
+        self.child_removals.push(key.into());
+        self
+    }
+
+    pub(crate) fn child_removals(&self) -> &[OsString] {
+        &self.child_removals
+    }
+
     /// Sets one environment variable in the child, for this launch only.
     ///
     /// The override is applied after the inherited copy of the broker's

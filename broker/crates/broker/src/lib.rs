@@ -28,6 +28,9 @@ pub mod render_pixel_format;
 #[cfg(windows)]
 pub mod render_request;
 #[cfg(windows)]
+mod render_service;
+mod render_service_registration;
+#[cfg(windows)]
 pub mod render_session;
 pub mod runtime_module_authorization;
 pub mod runtime_module_identity;
