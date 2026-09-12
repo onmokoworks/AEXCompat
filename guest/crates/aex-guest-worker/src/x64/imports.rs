@@ -77,6 +77,7 @@ enum LegacyWin64Import {
     SetEntriesInAclA,
     InitializeAcl,
     CreateDirectoryA,
+    Wstat64i32,
     AddAccessAllowedAceEx,
     LocalFree,
     AllocateAndInitializeSid,
@@ -877,6 +878,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "SetNamedSecurityInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "AddAccessAllowedAceEx") => LegacyWin64Import::AddAccessAllowedAceEx,
         (_, "AddAccessAllowedAceEx") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_wstat64i32") => {
+            LegacyWin64Import::Wstat64i32
+        }
+        (_, "_wstat64i32") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "CreateDirectoryA") => {
             LegacyWin64Import::CreateDirectoryA
         }
@@ -1346,6 +1351,16 @@ fn install_win64_import(
                         "install CRT memory-copy import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_crt_memory_copy(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Wstat64i32 => {
+                    uc("write _wstat64i32 return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _wstat64i32",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_wstat64i32(unicorn);
+                            finish_guest_stdio(unicorn, result);
                         }),
                     )?;
                 }
@@ -9153,6 +9168,7 @@ fn emulate_sh_get_special_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {
             }
             // Only the two fixed special-folder names above can enter this set.
             // Session-local directories never create or modify host files.
+            files.record_directory_creation(&name);
             files.directories.insert(name);
         }
         unicorn.mem_write(output, path).map_err(|e| e.to_string())?;

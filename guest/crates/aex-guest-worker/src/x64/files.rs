@@ -10,6 +10,7 @@ struct GuestFiles {
     sources: BTreeMap<String, std::path::PathBuf>,
     directories: BTreeSet<String>,
     directory_dacls: BTreeMap<String, Vec<u8>>,
+    directory_times: BTreeMap<String, [std::time::SystemTime; 3]>,
     streams: BTreeMap<u64, GuestFileStream>,
     next_stream: u64,
     standard_streams: [Option<u64>; 3],
@@ -40,6 +41,22 @@ fn guest_file_name(name: &str) -> Result<String, String> {
 }
 
 impl GuestFiles {
+    fn record_directory_creation(&mut self, name: &str) {
+        let now = std::time::SystemTime::now();
+        let mut directory = Some(name);
+        while let Some(path) = directory {
+            self.directory_times
+                .entry(path.to_owned())
+                .or_insert([now; 3]);
+            directory = path.rsplit_once('/').map(|(parent, _)| parent);
+        }
+        if let Some((parent, _)) = name.rsplit_once('/') {
+            if let Some(times) = self.directory_times.get_mut(parent) {
+                times[1] = now;
+            }
+        }
+    }
+
     fn directory_exists(&self, name: &str) -> bool {
         let prefix = format!("{name}/");
         self.directories.contains(name)
@@ -94,6 +111,11 @@ impl GuestFiles {
                         .unwrap_or(std::path::Path::new("."))
                         .join(entry.path)
                 };
+                if let Some((parent, _)) = name.rsplit_once('/') {
+                    // These are virtual mount directories; their birth is the
+                    // namespace construction, not an inferred host directory.
+                    files.record_directory_creation(parent);
+                }
                 if files.sources.insert(name, source).is_some() {
                     return Err("duplicate guest asset path".into());
                 }
@@ -755,6 +777,7 @@ fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, 
     if let Some(dacl) = dacl {
         files.directory_dacls.insert(name.clone(), dacl);
     }
+    files.record_directory_creation(&name);
     files.directories.insert(name);
     Ok(1)
 }
@@ -764,4 +787,137 @@ fn inherit_guest_directory_dacl(parent: &Vec<u8>) -> Vec<u8> {
     // Stored policies have one validated inheritable access-allowed ACE.
     inherited[9] |= 0x10; // INHERITED_ACE
     inherited
+}
+
+// Windows _stat64i32: 32-bit dev/size, 16-bit inode/mode/link/uid/gid,
+// padding at 14..16, and three 64-bit times at 24, 32, 40.
+fn guest_wstat64i32(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let path = read_win64_import_argument(unicorn, 0)?;
+    let output = read_win64_import_argument(unicorn, 1)?;
+    if path == 0 || output == 0 {
+        return Err("_wstat64i32 requires an invalid parameter handler for null arguments".into());
+    }
+    if !guest_range_has_permission(unicorn, output, 48, Prot::WRITE)? {
+        return Err("_wstat64i32 output is not fully writable".into());
+    }
+    let mut units = Vec::new();
+    for index in 0..=1024u64 {
+        let address = path
+            .checked_add(index * 2)
+            .ok_or("_wstat64i32 path overflow")?;
+        if !guest_range_has_permission(unicorn, address, 2, Prot::READ)? {
+            return Err("_wstat64i32 path is not readable".into());
+        }
+        let bytes = unicorn
+            .mem_read_as_vec(address, 2)
+            .map_err(|e| e.to_string())?;
+        let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+        if unit == 0 {
+            break;
+        }
+        if index == 1024 {
+            return Err("_wstat64i32 path exceeds supported bound".into());
+        }
+        units.push(unit);
+    }
+    let text = String::from_utf16(&units).map_err(|_| "_wstat64i32 invalid UTF-16")?;
+    let mut record = [0u8; 48];
+    let result = guest_stat_record(&unicorn.get_data().guest_files, &text, &mut record)?;
+    unicorn
+        .mem_write(output, &record)
+        .map_err(|e| e.to_string())?;
+    if result != 0 {
+        unicorn.get_data_mut().crt_errno = result;
+        Ok(u32::MAX as u64)
+    } else {
+        Ok(0)
+    }
+}
+
+fn guest_stat_record(files: &GuestFiles, text: &str, record: &mut [u8; 48]) -> Result<u32, String> {
+    if text.is_empty() {
+        return Ok(2);
+    }
+    let trailing_slash = text.ends_with(['/', '\\']);
+    let name = guest_file_name(text.trim_end_matches(['/', '\\']))?;
+    if name.len() < 2
+        || !name.as_bytes()[0].is_ascii_alphabetic()
+        || name.as_bytes()[1] != b':'
+        || (name.len() > 2 && name.as_bytes()[2] != b'/')
+    {
+        return Err("_wstat64i32 requires an absolute guest drive path".into());
+    }
+    if name.len() == 2 && !trailing_slash {
+        return Err("_wstat64i32 drive-relative path is unsupported".into());
+    }
+    if name[2..].contains(['*', '?', ':', '<', '>', '|', '"']) {
+        return Ok(2);
+    }
+    let (mode, size, times) = if let Some(source) = files.sources.get(&name) {
+        if trailing_slash {
+            return Ok(2);
+        }
+        let metadata = match std::fs::metadata(source) {
+            Ok(value) => value,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(2),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(13),
+            Err(e) => return Err(format!("_wstat64i32 mounted metadata: {e}")),
+        };
+        if !metadata.is_file() {
+            return Err("_wstat64i32 mounted source is not a regular file".into());
+        }
+        if metadata.len() > i32::MAX as u64 {
+            return Ok(132);
+        } // UCRT EOVERFLOW
+        let executable = [".exe", ".cmd", ".bat", ".com"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix));
+        let mut times = [std::time::UNIX_EPOCH; 3];
+        for (index, value) in [metadata.accessed(), metadata.modified(), metadata.created()]
+            .into_iter()
+            .enumerate()
+        {
+            times[index] =
+                value.map_err(|e| format!("_wstat64i32 unavailable mounted timestamp: {e}"))?;
+        }
+        (
+            0x8000u16 | if executable { 0o555 } else { 0o444 },
+            metadata.len() as i32,
+            times,
+        )
+    } else if files.directory_exists(&name) {
+        let times = *files
+            .directory_times
+            .get(&name)
+            .ok_or("_wstat64i32 missing guest directory metadata")?;
+        (
+            0x4000u16
+                | if files.directories.contains(&name) {
+                    0o777
+                } else {
+                    0o555
+                },
+            0,
+            times,
+        )
+    } else {
+        return Ok(2);
+    };
+    let drive = (name.as_bytes()[0] - b'a') as u32;
+    record[0..4].copy_from_slice(&drive.to_le_bytes());
+    record[6..8].copy_from_slice(&mode.to_le_bytes());
+    record[8..10].copy_from_slice(&1u16.to_le_bytes());
+    record[16..20].copy_from_slice(&drive.to_le_bytes());
+    record[20..24].copy_from_slice(&size.to_le_bytes());
+    for (index, time) in times.into_iter().enumerate() {
+        let seconds = time
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "_wstat64i32 timestamp predates supported CRT epoch")?
+            .as_secs();
+        if seconds > 32535215999 {
+            return Err("_wstat64i32 timestamp exceeds CRT range".into());
+        }
+        record[24 + index * 8..32 + index * 8].copy_from_slice(&(seconds as i64).to_le_bytes());
+    }
+    Ok(0)
 }

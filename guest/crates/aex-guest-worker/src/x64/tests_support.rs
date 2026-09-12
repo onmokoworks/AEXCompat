@@ -19958,3 +19958,129 @@ fn create_directory_failures_do_not_publish_objects() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn wstat64i32_reports_guest_directory_and_mounted_file_metadata() {
+    const STAT: u64 = STUB_BASE + 0x410;
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-filesystem-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, STAT, dll, "_wstat64i32").unwrap();
+        let name = "c:/programdata/test";
+        let files = &mut engine.unicorn.get_data_mut().guest_files;
+        files.record_directory_creation(name);
+        files.directories.insert(name.into());
+        let expected_time = files.directory_times[name][0]
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let path = DATA_BASE + 0x100;
+        let output = DATA_BASE + 0x900;
+        let wide = |s: &str| {
+            s.encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        engine
+            .write(path, &wide("C:\\ProgramData\\test\\"))
+            .unwrap();
+        engine.write(output, &[0xa5; 56]).unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        assert_eq!(
+            engine.call_win64(STAT, [path, output, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        let result = engine.unicorn.mem_read_as_vec(output, 56).unwrap();
+        assert_eq!(&result[..4], &2u32.to_le_bytes());
+        assert_eq!(&result[6..8], &0x41ffu16.to_le_bytes());
+        assert_eq!(&result[8..10], &1u16.to_le_bytes());
+        assert_eq!(&result[16..20], &2u32.to_le_bytes());
+        assert_eq!(&result[20..24], &[0; 4]);
+        assert_eq!(&result[24..32], &expected_time.to_le_bytes());
+        assert_eq!(&result[48..], &[0xa5; 8]);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        engine.write(path, &wide("c:/missing")).unwrap();
+        assert_eq!(
+            engine.call_win64(STAT, [path, output, 0, 0, 0, 0]).unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 2);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 48).unwrap(),
+            vec![0; 48]
+        );
+
+        let source =
+            std::env::temp_dir().join(format!("aex-stat-{}-{}.bin", std::process::id(), dll));
+        std::fs::write(&source, b"stat-content").unwrap();
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .sources
+            .insert("c:/asset.exe".into(), source.clone());
+        engine.write(path, &wide("c:/asset.exe")).unwrap();
+        assert_eq!(
+            engine.call_win64(STAT, [path, output, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        let result = engine.unicorn.mem_read_as_vec(output, 48).unwrap();
+        assert_eq!(&result[6..8], &0x816du16.to_le_bytes());
+        assert_eq!(&result[20..24], &12i32.to_le_bytes());
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap();
+        file.set_len(i32::MAX as u64 + 1).unwrap();
+        assert_eq!(
+            engine.call_win64(STAT, [path, output, 0, 0, 0, 0]).unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 132);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 48).unwrap(),
+            vec![0; 48]
+        );
+        drop(file);
+        std::fs::remove_file(source).unwrap();
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "_wstat64i32"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn wstat64i32_preflights_output_and_rejects_invalid_wide_paths() {
+    const STAT: u64 = STUB_BASE + 0x410;
+    for case in 0..4 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, STAT, "ucrtbase.dll", "_wstat64i32").unwrap();
+        let path = DATA_BASE + 0x100;
+        let output = DATA_BASE + 0x900;
+        engine.write(path, &[0x00, 0xd8, 0, 0]).unwrap();
+        engine.write(output, &[0xa5; 48]).unwrap();
+        if case == 0 {
+            engine
+                .unicorn
+                .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        let actual_path = if case == 2 {
+            0
+        } else if case == 3 {
+            u64::MAX - 1
+        } else {
+            path
+        };
+        assert!(
+            engine
+                .call_win64(STAT, [actual_path, output, 0, 0, 0, 0])
+                .is_err()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 48).unwrap(),
+            vec![0xa5; 48]
+        );
+    }
+}
