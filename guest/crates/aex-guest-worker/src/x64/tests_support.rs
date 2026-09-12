@@ -16135,7 +16135,7 @@ fn windows_mutex_named_ownership_recursion_and_close_are_stateful() {
     let second = engine.call_win64(create, [0, 1, name, 0, 0, 0]).unwrap();
     assert_ne!(first, second);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
-    assert_eq!(engine.unicorn.get_data().windows_mutexes.objects.len(), 1);
+    assert_eq!(engine.unicorn.get_data().windows_objects.objects.len(), 1);
     assert_eq!(engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(), 0);
     engine.unicorn.get_data_mut().current_windows_thread_id = 2;
     assert_eq!(
@@ -16159,7 +16159,7 @@ fn windows_mutex_named_ownership_recursion_and_close_are_stateful() {
         engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(),
         258
     );
-    engine.unicorn.get_data_mut().windows_mutexes.abandon(1);
+    engine.unicorn.get_data_mut().windows_objects.abandon(1);
     assert_eq!(
         engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(),
         128
@@ -16185,13 +16185,13 @@ fn windows_mutex_named_ownership_recursion_and_close_are_stateful() {
         engine.call_win64(release, [second, 0, 0, 0, 0, 0]).unwrap(),
         0
     );
-    assert!(engine.unicorn.get_data().windows_mutexes.names.is_empty());
+    assert!(engine.unicorn.get_data().windows_objects.names.is_empty());
     let replacement = engine.call_win64(create, [0, 0, name, 0, 0, 0]).unwrap();
     assert_ne!(replacement, second);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0);
     engine.write(name, b"fixture\0").unwrap();
     engine.call_win64(create, [0, 0, name, 0, 0, 0]).unwrap();
-    assert_eq!(engine.unicorn.get_data().windows_mutexes.names.len(), 2);
+    assert_eq!(engine.unicorn.get_data().windows_objects.names.len(), 2);
     engine.write(name, b"Local\\Global\\bad\0").unwrap();
     assert!(engine.call_win64(create, [0, 0, name, 0, 0, 0]).is_err());
     assert!(
@@ -16199,7 +16199,7 @@ fn windows_mutex_named_ownership_recursion_and_close_are_stateful() {
             .call_win64(create, [DATA_BASE, 0, 0, 0, 0, 0])
             .is_err()
     );
-    engine.unicorn.get_data_mut().windows_mutexes.issued = 65536;
+    engine.unicorn.get_data_mut().windows_objects.issued = 65536;
     assert_eq!(engine.call_win64(create, [0, 0, 0, 0, 0, 0]).unwrap(), 0);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 8);
     for symbol in ["CreateMutexA", "ReleaseMutex"] {
@@ -16254,4 +16254,130 @@ fn windows_mutex_is_abandoned_when_guest_owner_thread_returns() {
         128
     );
     assert_eq!(engine.call_win64(WAIT, [mutex, 0, 0, 0, 0, 0]).unwrap(), 0);
+}
+
+#[test]
+fn windows_semaphore_counts_share_namespace_and_reject_invalid_release_atomically() {
+    let mut engine = test_engine(&[0xc3]);
+    let create = STUB_BASE + 0x100;
+    let release = create + 16;
+    let wait = create + 32;
+    let close = create + 48;
+    let mutex = create + 64;
+    let release_mutex = create + 80;
+    for (entry, name) in [
+        (create, "CreateSemaphoreA"),
+        (release, "ReleaseSemaphore"),
+        (wait, "WaitForSingleObject"),
+        (close, "CloseHandle"),
+        (mutex, "CreateMutexA"),
+        (release_mutex, "ReleaseMutex"),
+    ] {
+        install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", name).unwrap();
+    }
+    let name = DATA_BASE + 0x100;
+    let output = DATA_BASE + 0x200;
+    engine.write(name, b"Counter\0").unwrap();
+    let first = engine.call_win64(create, [0, 1, 2, name, 0, 0]).unwrap();
+    assert_ne!(first, 0);
+    let second = engine.call_win64(create, [0, 0, 99, name, 0, 0]).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
+    assert_eq!(engine.call_win64(mutex, [0, 0, name, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 6);
+    assert_eq!(
+        engine
+            .call_win64(release_mutex, [first, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 6);
+    assert_eq!(engine.call_win64(wait, [first, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(),
+        258
+    );
+    assert!(engine.call_win64(wait, [second, 10, 0, 0, 0, 0]).is_err());
+    engine.write(output, &[0xa5; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(release, [second, 2, output, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0, 0, 0, 0, 0xa5, 0xa5, 0xa5, 0xa5]
+    );
+    engine.write(output, &[0xa5; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(release, [second, 1, output, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 298);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0xa5; 8]
+    );
+    assert_eq!(engine.call_win64(wait, [first, 0, 0, 0, 0, 0]).unwrap(), 0);
+    let edge = DATA_BASE + PAGE_SIZE - 2;
+    engine.write(edge, &[0xa5; 2]).unwrap();
+    assert!(
+        engine
+            .call_win64(release, [first, 1, edge, 0, 0, 0])
+            .is_err()
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(edge, 2).unwrap(), [0xa5; 2]);
+    assert_eq!(engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(),
+        258
+    );
+    for amount in [0, u32::MAX as u64] {
+        assert_eq!(
+            engine
+                .call_win64(release, [first, amount, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+    }
+    engine.call_win64(close, [first, 0, 0, 0, 0, 0]).unwrap();
+    assert_eq!(
+        engine.call_win64(release, [first, 1, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 6);
+    assert_eq!(
+        engine.call_win64(release, [second, 1, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    engine.call_win64(close, [second, 0, 0, 0, 0, 0]).unwrap();
+    assert!(engine.unicorn.get_data().windows_objects.names.is_empty());
+    let owned = engine.call_win64(mutex, [0, 0, name, 0, 0, 0]).unwrap();
+    assert_ne!(owned, 0);
+    assert_eq!(engine.call_win64(create, [0, 0, 2, name, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 6);
+    assert_eq!(
+        engine.call_win64(release, [owned, 1, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 6);
+    for (initial, maximum) in [(0, 0), (3, 2), (u32::MAX as u64, 2)] {
+        assert_eq!(
+            engine
+                .call_win64(create, [0, initial, maximum, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+    }
+    for symbol in ["CreateSemaphoreA", "ReleaseSemaphore"] {
+        assert!(matches!(
+            dispatch_win64_import("other.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
 }
