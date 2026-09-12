@@ -79,6 +79,8 @@ enum LegacyWin64Import {
     StdioVsnprintfS,
     StdioVsscanf,
     StdioVsprintf,
+    EncodePointer,
+    DecodePointer,
     CrtLocaleLock,
     CrtLocaleUnlock,
     AcRtIobFunc,
@@ -846,6 +848,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::AcRtIobFunc
         }
         (_, "__acrt_iob_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "EncodePointer") => LegacyWin64Import::EncodePointer,
+        ("kernel32.dll" | "kernelbase.dll", "DecodePointer") => LegacyWin64Import::DecodePointer,
+        (_, "EncodePointer" | "DecodePointer") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_lock_locales") => {
             LegacyWin64Import::CrtLocaleLock
         }
@@ -2437,6 +2444,20 @@ fn install_win64_import(
                         "install CRT locale lock",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_crt_locale_lock(unicorn, release);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::EncodePointer
+                | LegacyWin64Import::DecodePointer) => {
+                    let decode = operation == LegacyWin64Import::DecodePointer;
+                    uc(
+                        "write pointer encoding return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install pointer encoding",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_pointer_encoding(unicorn, decode);
                         }),
                     )?;
                 }
@@ -8498,6 +8519,32 @@ fn emulate_load_library_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
         Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+// Windows exposes only an opaque reversible representation, scoped to a process.
+// Keep the guest process key in host state; never dereference either value.
+fn emulate_windows_pointer_encoding(unicorn: &mut Unicorn<'_, GuestState>, decode: bool) {
+    use std::hash::BuildHasher;
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let key = *unicorn
+            .get_data_mut()
+            .pointer_encoding_key
+            .get_or_insert_with(|| {
+                // RandomState obtains a fresh keyed hasher from the host's random
+                // seed machinery. The odd key cannot be zero, including for NULL.
+                std::collections::hash_map::RandomState::new()
+                    .hash_one("AEXCompat guest pointer encoding")
+                    | 1
+            });
+        let rotation = (key & 63) as u32;
+        Ok(if decode {
+            pointer.rotate_left(rotation) ^ key
+        } else {
+            (pointer ^ key).rotate_right(rotation)
+        })
     })();
     finish_guest_stdio(unicorn, result);
 }

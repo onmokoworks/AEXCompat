@@ -17561,3 +17561,87 @@ fn crt_locale_lock_balances_recursion_and_shares_lockit_locale_ownership() {
         ));
     }
 }
+
+#[test]
+fn pointer_encoding_round_trips_full_width_values_across_kernel_aliases() {
+    let mut engine = test_engine(&[0xc3]);
+    let encode = STUB_BASE + 0x100;
+    let decode = encode + 16;
+    install_win64_import(&mut engine.unicorn, encode, "kernel32.dll", "EncodePointer").unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        decode,
+        "kernelbase.dll",
+        "DecodePointer",
+    )
+    .unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 71;
+    let old_error = engine.unicorn.get_data().windows_last_error;
+    let inputs = [
+        0,
+        1,
+        DATA_BASE,
+        u64::MAX,
+        0x8000_0000_0000_0000,
+        0xdead_beef_1234_5678,
+    ];
+    let mut encodings = Vec::new();
+    for value in inputs {
+        let encoded = engine.call_win64(encode, [value, 0, 0, 0, 0, 0]).unwrap();
+        assert!(!encodings.contains(&encoded));
+        encodings.push(encoded);
+        assert_eq!(
+            engine.call_win64(encode, [value, 0, 0, 0, 0, 0]).unwrap(),
+            encoded
+        );
+        assert_eq!(
+            engine.call_win64(decode, [encoded, 0, 0, 0, 0, 0]).unwrap(),
+            value
+        );
+    }
+    assert_ne!(encodings[0], 0);
+    assert!(engine.unicorn.get_data().pointer_encoding_key.is_some());
+    assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, old_error);
+    let encode2 = encode + 32;
+    let decode2 = decode + 32;
+    install_win64_import(
+        &mut engine.unicorn,
+        encode2,
+        "kernelbase.dll",
+        "EncodePointer",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        decode2,
+        "kernel32.dll",
+        "DecodePointer",
+    )
+    .unwrap();
+    for (value, encoded) in inputs.into_iter().zip(encodings) {
+        assert_eq!(
+            engine.call_win64(encode2, [value, 0, 0, 0, 0, 0]).unwrap(),
+            encoded
+        );
+        assert_eq!(
+            engine
+                .call_win64(decode2, [encoded, 0, 0, 0, 0, 0])
+                .unwrap(),
+            value
+        );
+    }
+    let mut other = test_engine(&[0xc3]);
+    assert!(other.unicorn.get_data().pointer_encoding_key.is_none());
+    other.unicorn.get_data_mut().pointer_encoding_key = Some(0x1234_5678_9abc_def1);
+    install_win64_import(&mut other.unicorn, encode, "kernel32.dll", "EncodePointer").unwrap();
+    let original_key = engine.unicorn.get_data().pointer_encoding_key;
+    other.call_win64(encode, [0; 6]).unwrap();
+    assert_eq!(engine.unicorn.get_data().pointer_encoding_key, original_key);
+    for name in ["EncodePointer", "DecodePointer"] {
+        assert!(matches!(
+            dispatch_win64_import("foreign.dll", name),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+}
