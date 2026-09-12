@@ -348,6 +348,96 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_UNMULT_RS and local Release worker"]
+    fn real_unmult_gui_preserves_black_key_pixels() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_UNMULT_RS")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-unmult");
+        let input = directory.join("input.png");
+        let palette = [
+            [0, 0, 0],
+            [255, 255, 255],
+            [128, 128, 128],
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [64, 128, 192],
+            [192, 128, 64],
+        ];
+        let original = image::RgbaImage::from_fn(256, 144, |x, y| {
+            let rgb = palette[((x / 32 + y / 18) % 8) as usize];
+            image::Rgba([rgb[0], rgb[1], rgb[2], 255])
+        });
+        // Opaque-input black-key oracle only; no general rounding/AE claim.
+        let expected = image::RgbaImage::from_fn(256, 144, |x, y| {
+            let pixel = original.get_pixel(x, y).0;
+            let alpha = *pixel[..3].iter().max().unwrap();
+            let channel = |c: u8| {
+                if alpha == 0 {
+                    0
+                } else {
+                    ((u32::from(c) * 255 + u32::from(alpha) / 2) / u32::from(alpha)) as u8
+                }
+            };
+            image::Rgba([
+                channel(pixel[0]),
+                channel(pixel[1]),
+                channel(pixel[2]),
+                alpha,
+            ])
+        });
+        original.save(&input).unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters.iter().find(|p| p.slot == 1).unwrap().name,
+            "White Key"
+        );
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input);
+        let _ = ctx.end_pass();
+        app.apply_debug_request_document(&serde_json::json!({
+            "schema_version":1,"timing":{"frame":0,"fps":30,"duration_frames":300},
+            "assignments":[{"slot":1,"value":0},{"slot":2,"value":1},{"slot":3,"value":0},{"slot":4,"value":0}]
+        }), &directory.join("request.json")).unwrap();
+        let output = directory.join("output.png");
+        app.render_to(output.clone());
+        drain(&mut app);
+        assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+        assert_eq!(app.output_image.as_ref(), Some(&output));
+        assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+        assert_eq!(image::open(output).unwrap().to_rgba8(), expected);
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_MEDIAN_PRO and local Release worker"]
     fn real_median_pro_gui_preserves_structure_and_removes_impulses() {
         let plugin = PathBuf::from(
