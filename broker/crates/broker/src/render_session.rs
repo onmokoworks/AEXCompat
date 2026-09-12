@@ -597,14 +597,12 @@ pub struct SessionOpenRequest<'a> {
     /// runs PreRender→SmartRender per frame under the hoisted sequence.
     pub smart: bool,
     /// GPU backend for smart ARGB32f sessions, carried in the command word
-    /// like the one-shot smart dispatch. `Auto` without a runtime policy
-    /// degrades to the CPU command (a session cannot retry mid-flight, so the
-    /// one-shot's preflight fallback happens at open instead); an explicit
-    /// GPU backend without a policy fails closed.
+    /// like the one-shot smart dispatch. No runtime policy receipt is required
+    /// to select GPU negotiation; all routes use the ordinary execution floor.
     pub gpu_backend: RenderGpuBackend,
-    /// Session-bound authenticated runtime module policy inputs, required for
-    /// every GPU-backed launch, exactly like the one-shot GPU path. A policy is
-    /// inert, but accepted, for classic/CPU sessions that never attempt GPU.
+    /// Optional legacy session-bound runtime module policy inputs. Existing
+    /// explicit-policy callers retain their evidence path. A policy is inert
+    /// for classic/CPU sessions that never attempt GPU.
     pub gpu_runtime_policy: Option<GpuRuntimePolicyInput<'a>>,
     /// Per-launch environment inputs (issue #910): extra child environment
     /// variables and the opt-in minidump directory, carried explicitly so a
@@ -1140,26 +1138,12 @@ impl RenderSession {
         // (mask/spatial/render, issue #331): both ride the positional tail below
         // in the one-shot order, and the worker's smart session command peels
         // them exactly as the classic session command does.
-        // A session cannot retry mid-flight, so the one-shot's Auto GPU
-        // preflight fallback collapses to open time: Auto without a policy is
-        // a CPU session, Auto with a policy is a CUDA session with no CPU
-        // retry, and an explicit GPU backend without a policy fails closed
-        // here before any transport work.
+        // GPU selection follows the requested backend, not possession of a
+        // legacy module-policy receipt. The ordinary isolated session records
+        // loaded modules and keeps the same Job Object and output invariants.
         let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f;
-        let effective_backend = if gpu_capable
-            && request.gpu_backend == RenderGpuBackend::Auto
-            && request.gpu_runtime_policy.is_none()
-        {
-            RenderGpuBackend::Cpu
-        } else {
-            request.gpu_backend
-        };
+        let effective_backend = request.gpu_backend;
         let gpu_attempt = gpu_capable && runtime_backend(effective_backend).is_some();
-        if gpu_attempt && request.gpu_runtime_policy.is_none() {
-            return Err(invalid(
-                "GPU render requires a session-bound authenticated runtime module policy report; supply gpu_runtime_policy or select the CPU backend",
-            ));
-        }
         // Issue #816: resident render is in-place only. A non-empty search
         // root set is now part of the protocol rather than a mode selector.
         if request.dependency_search_dirs.is_empty() {
@@ -1474,7 +1458,7 @@ impl RenderSession {
         // device setup). The transport is retained by RenderSession so an
         // in-place worker can read it during admission without a launch/drop race.
         let mut dependencies = request.dependencies;
-        let _runtime_authorization = if gpu_attempt {
+        let _runtime_authorization = if gpu_attempt && request.gpu_runtime_policy.is_some() {
             let policy_input = request
                 .gpu_runtime_policy
                 .expect("gpu attempt was validated to carry a policy at open");
@@ -1564,7 +1548,7 @@ impl RenderSession {
                 timeout: Some(request.frame_deadline),
                 launch_environment: request.launch_environment.clone(),
             };
-            if gpu_attempt {
+            if gpu_attempt && request.gpu_runtime_policy.is_some() {
                 let policy_input = request
                     .gpu_runtime_policy
                     .expect("gpu attempt was validated to carry a policy at open");
@@ -3460,9 +3444,8 @@ struct VideoBatchRequest {
     /// Runs the batch through a SmartFX session (protocol v1.1).
     #[serde(default)]
     smart: bool,
-    /// GPU backend for smart ARGB32f batches. The batch CLI carries no
-    /// runtime module policy, so `auto` degrades to the CPU command at open
-    /// and the explicit GPU backends fail closed there.
+    /// GPU backend for smart ARGB32f batches. A legacy runtime module policy
+    /// is not a prerequisite for GPU negotiation.
     #[serde(default)]
     gpu_backend: RenderGpuBackend,
 }

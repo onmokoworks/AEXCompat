@@ -12,7 +12,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("mode", ["success", "setup-fail", "pre-cpu", "setup-drop-gpu",
+@pytest.mark.parametrize("mode", ["success", "success-auto", "setup-fail", "pre-cpu", "setup-drop-gpu",
+                                  "auto-setup-fail", "auto-pre-cpu", "auto-setup-drop-gpu",
                                   "cpu8", "cpu16", "cpu32"])
 def test_gpu_only_float_depth(tmp_path, mode):
     plugin = os.environ.get("AEXCOMPAT_TEST_GPU_DEPTH_PROBE")
@@ -43,14 +44,17 @@ def test_gpu_only_float_depth(tmp_path, mode):
                    "cpu16": "--render-experimental-smart-16",
                    "cpu32": "--render-experimental-smart-32-cpu"}[mode]
         args = args[:-2]
+    elif mode == "success-auto" or mode.startswith("auto-"):
+        args[2] = "--render-experimental-smart-32"
+        args = args[:-2]
     run = subprocess.run(args, cwd=ROOT, capture_output=True,
-        env=dict(os.environ, AEXCOMPAT_GPU_DEPTH_PROBE=mode))
+        env=dict(os.environ, AEXCOMPAT_GPU_DEPTH_PROBE=mode.removeprefix("auto-")))
     (tmp_path / "stdout.json").write_bytes(run.stdout)
     (tmp_path / "stderr.log").write_bytes(run.stderr)
-    if mode == "success" or mode.startswith("cpu"):
+    if mode.startswith("success") or mode.startswith("cpu"):
         assert run.returncode == 0, run.stderr.decode("utf-8")
         report = json.loads(run.stdout)
-        assert report["gpu_render_dispatched"] is (mode == "success")
+        assert report["gpu_render_dispatched"] is mode.startswith("success")
         with Image.open(output) as image:
             image.load()
             assert image.size == (32, 24)
@@ -69,7 +73,7 @@ def test_gpu_only_float_depth(tmp_path, mode):
         assert report["gpu_render_dispatched"] is False
         assert report["smart_render_error"] != 0
         assert report.get("return_message") is None
-        if mode == "setup-fail":
+        if mode.removeprefix("auto-") == "setup-fail":
             assert report["gpu_device_setup_error"] != 0
         else:
             assert report["gpu_device_setup_error"] == 0

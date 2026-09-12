@@ -439,9 +439,8 @@ fn render_with_artifact(
             custom_ui_action: custom_ui_action.as_ref(),
             smart,
             gpu_backend,
-            // `RenderSession::open` decides what to do with this: it folds Auto
-            // to CPU when the policy is absent, requires one for any real GPU
-            // attempt, and ignores it entirely below float32 or on classic.
+            // Optional legacy evidence input; absence does not change the GPU
+            // backend. It is ignored below float32 or on classic.
             gpu_runtime_policy,
             artifact_kind,
         });

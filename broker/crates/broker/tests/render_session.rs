@@ -660,9 +660,9 @@ mod windows_e2e {
     }
 
     #[test]
-    fn smart_session_with_an_explicit_gpu_backend_requires_a_policy() {
+    fn smart_session_with_an_explicit_gpu_backend_launches_without_a_policy() {
         let (repository, plugin, sha) = temp_repository();
-        let error = RenderSession::open(SessionOpenRequest {
+        let session = RenderSession::open(SessionOpenRequest {
             companions: Vec::new(),
             repository: &repository.0,
             plugin_path: &plugin,
@@ -694,18 +694,19 @@ mod windows_e2e {
             gpu_runtime_policy: None,
             launch_environment: LaunchEnvironment::default(),
         })
-        .map(|_| ())
-        .expect_err("an explicit GPU backend without a policy must fail closed");
-        assert!(
-            error.to_string().contains("runtime module policy"),
-            "{error}"
-        );
+        .expect("GPU backend must not require a legacy policy receipt");
+        // This protocol fixture deliberately supports only depth8 commands.
+        // Its actual exit2 proves launch was reached; native GPU image tests
+        // cover successful GPU output. Its close must not report success.
+        let close = session.close();
+        assert_eq!(close["session_clean"], false, "{close}");
+        assert_eq!(close["worker"]["exit_code"], 2, "{close}");
     }
 
     #[test]
-    fn smart_auto_backend_without_a_policy_degrades_to_the_cpu_session() {
+    fn smart_auto_backend_at_depth8_uses_the_cpu_session() {
         let (repository, plugin, sha) = temp_repository();
-        // Auto + no policy opens the CPU smart session command; the fixture
+        // Auto at depth8 opens the CPU smart session command; the fixture
         // rejects every command word except the two CPU session commands, so
         // reaching a rendered frame proves no GPU command was attempted.
         // (Argb8 keeps the fixture's depth-8 transport contract.)

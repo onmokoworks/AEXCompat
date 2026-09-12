@@ -1612,6 +1612,94 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_GPU_DEPTH_PROBE, CUDA and Release worker"]
+    fn gui_gpu_auto_without_runtime_policy_pixels() {
+        assert_gui_gpu_without_runtime_policy(
+            aexcompat_broker::image_render::RenderGpuBackend::Auto,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_GPU_DEPTH_PROBE, CUDA and Release worker"]
+    fn gui_gpu_cuda_without_runtime_policy_pixels() {
+        assert_gui_gpu_without_runtime_policy(
+            aexcompat_broker::image_render::RenderGpuBackend::Cuda,
+        );
+    }
+
+    fn assert_gui_gpu_without_runtime_policy(
+        backend: aexcompat_broker::image_render::RenderGpuBackend,
+    ) {
+        assert!(
+            std::env::var_os("AEXCOMPAT_GPU_DEPTH_PROBE").is_none(),
+            "GPU-only fixture mode must not be overridden by the parent environment"
+        );
+        let plugin = PathBuf::from(std::env::var("AEXCOMPAT_TEST_GPU_DEPTH_PROBE").unwrap());
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-gpu-auto");
+        let input = directory.join("input.png");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([11, 23, 37, 255]))
+            .save(&input)
+            .unwrap();
+        let mut app = HarnessApp::new(repository);
+        app.live_render = false;
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        app.pixel_format = aexcompat_broker::image_render::RenderPixelFormat::Argb32f;
+        app.gpu_backend = backend;
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input);
+        let _ = ctx.end_pass();
+        let output = directory.join("output.png");
+        app.render_to(output.clone());
+        drain(&mut app);
+        fs::write(directory.join("report.json"), &app.report).unwrap();
+        assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+        let report: serde_json::Value = serde_json::from_str(&app.report).unwrap();
+        assert_eq!(report["passed"], true);
+        assert_eq!(report["pixel_format"], "argb32f");
+        // The resident per-frame report omits GPU selector counters. This
+        // fixture rejects every CPU selector; its full spatial output below
+        // therefore proves GPU execution rather than relying on a UI status.
+        let pixels = image::open(output).unwrap().to_rgba8();
+        assert_eq!(pixels.dimensions(), (32, 24));
+        for (x, y, p) in pixels.enumerate_pixels() {
+            let expected = [
+                (x as f32 / 32.0 * 255.0) as u8,
+                (y as f32 / 24.0 * 255.0) as u8,
+                63,
+            ];
+            assert_eq!(p[3], 255);
+            for c in 0..3 {
+                assert!(p[c].abs_diff(expected[c]) <= 1, "x={x} y={y} c={c}");
+            }
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
             std::env::var(plugin_env)
