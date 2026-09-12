@@ -64,6 +64,7 @@ enum LegacyWin64Import {
     MemChr,
     StrStr,
     CrtLocaltime64,
+    CrtFtime64,
     CrtTime64,
     StrCmp,
     StrNCmp,
@@ -808,6 +809,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtLocaltime64
         }
         (_, "_localtime64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_ftime64") => {
+            LegacyWin64Import::CrtFtime64
+        }
+        (_, "_ftime64") => return Win64ImportDispatch::UnsupportedLegacyImport,
 
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcmp") => {
             LegacyWin64Import::StrCmp
@@ -1337,6 +1342,13 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_crt_strcpy(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::CrtFtime64 => {
+                    uc("write _ftime64 return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _ftime64",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_ftime64(uc)),
                     )?;
                 }
                 LegacyWin64Import::CrtLocaltime64 => {
@@ -8777,6 +8789,40 @@ fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>) {
             .mem_write(address, &bytes)
             .map_err(|e| e.to_string())?;
         Ok(address)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_ftime64(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        // Only the fourteen field bytes are written; trailing ABI padding is untouched.
+        if output == 0 || !guest_range_has_permission(unicorn, output, 14, Prot::WRITE)? {
+            return Err(
+                "_ftime64 output is not writable (invalid parameter handler is not implemented)"
+                    .into(),
+            );
+        }
+        if guest_environment_value(unicorn.get_data(), b"TZ").is_some() {
+            return Err("guest CRT TZ override conversion is not implemented".into());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "_ftime64 host time is before the supported epoch")?;
+        let seconds = i64::try_from(now.as_secs()).map_err(|_| "_ftime64 time overflow")?;
+        if seconds > 32_535_215_999 {
+            return Err("_ftime64 time exceeds supported range".into());
+        }
+        let (timezone, dstflag) = aex_host_time::timeb_zone(seconds)?;
+        let mut bytes = [0; 14];
+        bytes[..8].copy_from_slice(&seconds.to_le_bytes());
+        bytes[8..10].copy_from_slice(&(now.subsec_millis() as u16).to_le_bytes());
+        bytes[10..12].copy_from_slice(&timezone.to_le_bytes());
+        bytes[12..14].copy_from_slice(&dstflag.to_le_bytes());
+        unicorn
+            .mem_write(output, &bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(0) // void function; no CRT errno change on success.
     })();
     finish_guest_stdio(unicorn, result);
 }

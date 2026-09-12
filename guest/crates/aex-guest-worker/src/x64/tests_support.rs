@@ -18349,3 +18349,55 @@ fn localtime64_converts_timestamp_and_keeps_independent_thread_storage() {
         assert!(engine.call_win64(entry + 32, [0; 6]).is_err());
     }
 }
+
+#[test]
+fn ftime64_writes_current_time_and_preserves_padding() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-time-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "_ftime64").unwrap();
+        engine.write(DATA_BASE, &[0xa5; 16]).unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        engine
+            .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+            .unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let mut bytes = [0; 16];
+        engine.read(DATA_BASE, &mut bytes).unwrap();
+        let seconds = i64::from_le_bytes(bytes[..8].try_into().unwrap());
+        let millis = u16::from_le_bytes(bytes[8..10].try_into().unwrap());
+        assert!(millis < 1000);
+        let actual = seconds as u128 * 1000 + u128::from(millis);
+        assert!((before..=after).contains(&actual));
+        let (west, dst) = aex_host_time::timeb_zone(seconds).unwrap();
+        assert_eq!(&bytes[10..12], &west.to_le_bytes());
+        assert_eq!(&bytes[12..14], &dst.to_le_bytes());
+        assert_eq!(&bytes[14..], &[0xa5; 2]);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        engine
+            .unicorn
+            .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+            .unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                .is_err()
+        );
+        let mut unchanged = [0; 16];
+        engine.read(DATA_BASE, &mut unchanged).unwrap();
+        assert_eq!(bytes, unchanged);
+        assert!(engine.call_win64(entry, [0; 6]).is_err());
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "_ftime64"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
