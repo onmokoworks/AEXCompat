@@ -921,3 +921,124 @@ fn guest_stat_record(files: &GuestFiles, text: &str, record: &mut [u8; 48]) -> R
     }
     Ok(0)
 }
+
+// The guest process starts at the root of C:. Host cwd and per-drive host
+// environment variables never participate in guest path resolution.
+const GUEST_INITIAL_CURRENT_DIRECTORY: &str = "C:\\";
+
+fn canonical_guest_fullpath(path: &[u8]) -> Result<Vec<u8>, String> {
+    if !path.is_ascii() || path.contains(&0) {
+        return Err("_fullpath unsupported path encoding".into());
+    }
+    let text = std::str::from_utf8(path).unwrap().replace('/', "\\");
+    if text.starts_with("\\\\") {
+        return Err("_fullpath UNC/device namespaces are not implemented".into());
+    }
+    let bytes = text.as_bytes();
+    let (drive, rest) = if bytes.len() >= 2 && bytes[1] == b':' {
+        if !bytes[0].is_ascii_alphabetic() {
+            return Err("_fullpath invalid drive prefix".into());
+        }
+        if bytes.len() > 2 && bytes[2] == b'\\' {
+            (bytes[0] as char, &text[3..])
+        } else if bytes[0].eq_ignore_ascii_case(&b'c') {
+            (bytes[0] as char, &text[2..])
+        } else {
+            return Err("_fullpath current directory on another drive is not configured".into());
+        }
+    } else {
+        (
+            GUEST_INITIAL_CURRENT_DIRECTORY.as_bytes()[0] as char,
+            text.trim_start_matches('\\'),
+        )
+    };
+    let trailing_separator = text.ends_with('\\');
+    let mut parts = Vec::new();
+    for part in rest.split('\\') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => {
+                // Windows trims dots/spaces and recognizes DOS devices. Until
+                // those rules are modeled, stop rather than resolve another name.
+                let stem = part.split('.').next().unwrap().to_ascii_uppercase();
+                let device = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
+                    || (stem.len() == 4
+                        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                        && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+                if part.ends_with(['.', ' '])
+                    || part.starts_with(' ')
+                    || device
+                    || part.contains([':', '<', '>', '|', '"'])
+                    || part.bytes().any(|b| b < 32)
+                {
+                    return Err("_fullpath unsupported ambiguous or device path component".into());
+                }
+                parts.push(part);
+            }
+        }
+    }
+    let mut result = format!("{drive}:\\{}", parts.join("\\"));
+    if trailing_separator && !result.ends_with('\\') {
+        result.push('\\');
+    }
+    result.push('\0');
+    Ok(result.into_bytes())
+}
+
+fn guest_fullpath(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let output = read_win64_import_argument(unicorn, 0)?;
+    let input = read_win64_import_argument(unicorn, 1)?;
+    let capacity = read_win64_import_argument(unicorn, 2)?;
+    let path = if input == 0 {
+        Vec::new()
+    } else {
+        read_crt_stdio_c_string(unicorn, input, 1024, "_fullpath source")?
+    };
+    if output != 0 && capacity == 0 {
+        return Err("_fullpath requires an invalid parameter handler for zero capacity".into());
+    }
+    let result = canonical_guest_fullpath(&path)?;
+    let required = result.len() as u64;
+    if output != 0 && capacity < required {
+        unicorn.get_data_mut().crt_errno = 34; // ERANGE
+        return Ok(0);
+    }
+    let allocated = output == 0;
+    let destination = if allocated {
+        // Nonempty-path _fullpath ignores maxLength when allocating. Empty
+        // paths delegate to getcwd, whose requested capacity must also fit.
+        if path.is_empty() && capacity != 0 && capacity < required {
+            unicorn.get_data_mut().crt_errno = 34;
+            return Ok(0);
+        }
+        match allocate_crt_region(
+            unicorn,
+            if path.is_empty() {
+                capacity.max(required)
+            } else {
+                required
+            },
+        ) {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                unicorn.get_data_mut().crt_errno = 12;
+                return Ok(0);
+            }
+        }
+    } else {
+        if !guest_range_has_permission(unicorn, output, required, Prot::WRITE)? {
+            return Err("_fullpath output is not fully writable".into());
+        }
+        output
+    };
+    if let Err(error) = unicorn.mem_write(destination, &result) {
+        if allocated {
+            free_crt_region(unicorn, destination)?;
+        }
+        return Err(format!("_fullpath output write: {error}"));
+    }
+    Ok(destination)
+}

@@ -79,6 +79,7 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     Wstat64i32,
+    Fullpath,
     AddAccessAllowedAceEx,
     LocalFree,
     AllocateAndInitializeSid,
@@ -883,6 +884,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "SetNamedSecurityInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "AddAccessAllowedAceEx") => LegacyWin64Import::AddAccessAllowedAceEx,
         (_, "AddAccessAllowedAceEx") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_fullpath") => {
+            LegacyWin64Import::Fullpath
+        }
+        (_, "_fullpath") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_wstat64i32") => {
             LegacyWin64Import::Wstat64i32
         }
@@ -1356,6 +1361,16 @@ fn install_win64_import(
                         "install CRT memory-copy import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_crt_memory_copy(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Fullpath => {
+                    uc("write _fullpath return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _fullpath",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_fullpath(unicorn);
+                            finish_guest_stdio(unicorn, result);
                         }),
                     )?;
                 }

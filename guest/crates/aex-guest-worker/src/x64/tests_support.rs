@@ -20148,3 +20148,115 @@ fn strrchr_requires_terminator_even_after_match_and_refreshes_permissions() {
             .is_err()
     );
 }
+
+#[test]
+fn fullpath_resolves_paths_and_owns_allocated_buffers() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-filesystem-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, CALL, dll, "_fullpath").unwrap();
+        let input = DATA_BASE + 0x100;
+        let output = DATA_BASE + 0x900;
+        for (source, expected) in [
+            ("C:/alpha/../beta/./file", "C:\\beta\\file"),
+            ("alpha/../file", "C:\\file"),
+            ("\\root\\file", "C:\\root\\file"),
+            ("c:relative", "c:\\relative"),
+            ("D:/../../file", "D:\\file"),
+            ("C:/folder/", "C:\\folder\\"),
+            ("", "C:\\"),
+        ] {
+            engine
+                .write(input, format!("{source}\0").as_bytes())
+                .unwrap();
+            engine.write(output, &[0xa5; 128]).unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 72;
+            let count = expected.len() as u64 + 1;
+            assert_eq!(
+                engine
+                    .call_win64(CALL, [output, input, count, 0, 0, 0])
+                    .unwrap(),
+                output
+            );
+            assert_eq!(
+                engine
+                    .unicorn
+                    .mem_read_as_vec(output, count as usize)
+                    .unwrap(),
+                format!("{expected}\0").as_bytes()
+            );
+            assert_eq!(
+                engine.unicorn.mem_read_as_vec(output + count, 1).unwrap(),
+                [0xa5]
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+            let allocated = engine.call_win64(CALL, [0, input, 0, 0, 0, 0]).unwrap();
+            assert_ne!(allocated, 0);
+            assert_eq!(
+                engine
+                    .unicorn
+                    .mem_read_as_vec(allocated, count as usize)
+                    .unwrap(),
+                format!("{expected}\0").as_bytes()
+            );
+            free_crt_region(&mut engine.unicorn, allocated).unwrap();
+            assert!(free_crt_region(&mut engine.unicorn, allocated).is_err());
+        }
+        assert_eq!(
+            engine.call_win64(CALL, [output, 0, 128, 0, 0, 0]).unwrap(),
+            output
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+            b"C:\\\0"
+        );
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "_fullpath"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn fullpath_preflights_capacity_and_rejects_unmodeled_namespaces() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, CALL, "ucrtbase.dll", "_fullpath").unwrap();
+    let input = DATA_BASE + 0x100;
+    let output = DATA_BASE + 0x900;
+    engine.write(input, b"C:/folder/file\0").unwrap();
+    engine.write(output, &[0xa5; 32]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CALL, [output, input, 3, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 34);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 32).unwrap(),
+        [0xa5; 32]
+    );
+    engine
+        .unicorn
+        .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    assert!(
+        engine
+            .call_win64(CALL, [output, input, 32, 0, 0, 0])
+            .is_err()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 32).unwrap(),
+        [0xa5; 32]
+    );
+    for path in [
+        b"\\\\server\\share".as_slice(),
+        b"D:relative",
+        b"C:/NUL",
+        b"C:/trailing.",
+        &[0xff],
+    ] {
+        assert!(canonical_guest_fullpath(path).is_err());
+    }
+}
