@@ -133,7 +133,10 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
       (request.external_pixel_bytes == 8 &&
        (result.advertised_out_flags & (1u << 25)) != 0) ||
       (request.external_pixel_bytes == 16 &&
-       (result.advertised_out_flags2 & (1u << 12)) != 0);
+       ((result.advertised_out_flags2 & (1u << 12)) != 0 ||
+        (request.gpu_float_negotiation_allowed &&
+         (result.advertised_out_flags2 & ((1u << 10) | (1u << 25))) ==
+             ((1u << 10) | (1u << 25)))));
   result.smart_render_supported = (result.advertised_out_flags2 & (1u << 10)) != 0;
   result.update_params_ui_advertised = (result.advertised_out_flags & (1u << 26)) != 0;
   result.query_dynamic_flags_advertised = (result.advertised_out_flags2 & 1u) != 0;

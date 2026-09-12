@@ -1468,6 +1468,150 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_AEGPUPROBE and local Release worker"]
+    fn real_aegpuprobe_gui_float_invert_pixels() {
+        let plugin = PathBuf::from(std::env::var("AEXCOMPAT_TEST_AEGPUPROBE").unwrap());
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-aegpuprobe");
+        let input = directory.join("input.png");
+        let source = image::RgbaImage::from_fn(32, 24, |x, y| {
+            image::Rgba([(x * 7) as u8, (y * 9) as u8, ((x ^ y) * 5) as u8, 255])
+        });
+        source.save(&input).unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        app.pixel_format = aexcompat_broker::image_render::RenderPixelFormat::Argb32f;
+        app.gpu_backend = aexcompat_broker::image_render::RenderGpuBackend::Auto;
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input);
+        let _ = ctx.end_pass();
+        app.apply_debug_request_document(&serde_json::json!({"schema_version":1,
+            "assignments":[{"slot":1,"value":1},{"slot":2,"value":1},{"slot":3,"value":0},{"slot":4,"value":1}]}),&directory.join("request.json")).unwrap();
+        let output = directory.join("invert.png");
+        app.render_to(output.clone());
+        drain(&mut app);
+        fs::write(directory.join("report.txt"), &app.report).unwrap();
+        eprintln!("AeGpuProbe evidence: {}", directory.display());
+        assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+        let result = image::open(output).unwrap().to_rgba8();
+        assert_eq!(result.dimensions(), source.dimensions());
+        for (x, y, p) in result.enumerate_pixels() {
+            let original = source.get_pixel(x, y);
+            for c in 0..3 {
+                assert!(
+                    p[c].abs_diff(255 - original[c]) <= 1,
+                    "x={x} y={y} c={c} actual={} original={}",
+                    p[c],
+                    original[c]
+                );
+            }
+            assert_eq!(p[3], original[3]);
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_AEGPUPROBE, observed AEXCOMPAT_TEST_GPU_POLICY, CUDA and Release worker"]
+    fn real_aegpuprobe_explicit_cuda_invert_pixels() {
+        use aexcompat_broker::image_render as render;
+        let plugin = PathBuf::from(std::env::var("AEXCOMPAT_TEST_AEGPUPROBE").unwrap());
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("aegpuprobe-explicit-cuda");
+        let input = directory.join("input.png");
+        let output = directory.join("invert.png");
+        let source = image::RgbaImage::from_fn(32, 24, |x, y| {
+            image::Rgba([(x * 7) as u8, (y * 9) as u8, ((x ^ y) * 5) as u8, 255])
+        });
+        source.save(&input).unwrap();
+        let sha = format!("{:x}", Sha256::digest(read_bounded_pe(&plugin).unwrap()));
+        let mut parameters = render::inspect_experimental(&repository, &plugin, &sha).unwrap();
+        for (slot, name, value) in [
+            (1, "Enable GPU Probe", 1.0),
+            (2, "Request GPU SmartRender", 1.0),
+            (3, "CUDA Copy Output", 0.0),
+            (4, "CUDA Invert Output", 1.0),
+        ] {
+            let parameter = parameters.iter_mut().find(|p| p.slot == slot).unwrap();
+            assert_eq!(parameter.name, name);
+            parameter.value = value;
+        }
+        let policy = aexcompat_broker::runtime_module_policy::parse_and_validate(
+            &fs::read(std::env::var("AEXCOMPAT_TEST_GPU_POLICY").unwrap()).unwrap(),
+        )
+        .unwrap();
+        let prepared = render::prepare_gpu_runtime_policy(
+            &repository,
+            &plugin,
+            &sha,
+            render::RenderGpuBackend::Cuda,
+            policy,
+            Vec::new(),
+        )
+        .unwrap();
+        let result =
+            render::render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
+                &repository,
+                &plugin,
+                &sha,
+                &input,
+                &output,
+                &parameters,
+                render::RenderTiming::default(),
+                true,
+                render::RenderPixelFormat::Argb32f,
+                None,
+                None,
+                render::RenderGpuBackend::Cuda,
+                Vec::new(),
+                Some(prepared.as_input()),
+            );
+        fs::write(directory.join("report.txt"), format!("{result:#?}")).unwrap();
+        eprintln!("AeGpuProbe explicit CUDA evidence: {}", directory.display());
+        let report = result.unwrap();
+        assert_eq!(report["gpu_render_dispatched"], true);
+        let pixels = image::open(output).unwrap().to_rgba8();
+        assert_eq!(pixels.dimensions(), source.dimensions());
+        for (x, y, pixel) in pixels.enumerate_pixels() {
+            let original = source.get_pixel(x, y);
+            assert_eq!(pixel[3], original[3]);
+            for c in 0..3 {
+                assert!(
+                    pixel[c].abs_diff(255 - original[c]) <= 1,
+                    "x={x} y={y} c={c} actual={} original={}",
+                    pixel[c],
+                    original[c]
+                );
+            }
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
             std::env::var(plugin_env)

@@ -2152,6 +2152,9 @@ bool dispatch(const Request& request, const Hooks& hooks,
 
   const auto& plan = *request.plan;
   auto& runtime = smart::state();
+  // Snapshot before GPU_DEVICE_SETUP can change output capability flags.
+  const bool cpu_float_supported =
+      (read<uint32_t>(*request.output, 400) & (1u << 12)) != 0;
   auto& params = request.parameters->params;
   namespace transport = gpu_runtime::memory_world_transport;
 
@@ -2523,6 +2526,12 @@ bool dispatch(const Request& request, const Hooks& hooks,
 
   const int32_t render_selector = plan.gpu_negotiation && result.gpu_render_possible
       ? kSmartRenderGpu : kSmartRender;
+  // GPU-only F32 effects may enter negotiation without FLOAT_COLOR_AWARE.
+  // A declined GPU pre-render must never send their float worlds to CPU.
+  if (plan.float32 && !cpu_float_supported &&
+      render_selector != kSmartRenderGpu &&
+      result.pre_error == 0)
+    result.pre_error = -6;
   // One predicate drives the selector call, the GPU transport, and the
   // dispatch reporting, so a skipped render (empty result or rejected
   // geometry) never prepares device transport or claims a GPU dispatch.

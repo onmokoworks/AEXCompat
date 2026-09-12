@@ -65,6 +65,8 @@ struct Request {
   int32_t time_step{1};
   int32_t total_time{};
   uint32_t time_scale{1};
+  // GPU F32 admission is not permission to execute CPU float selectors.
+  bool gpu_float_negotiation_allowed{};
 };
 
 struct RuntimeHooks {

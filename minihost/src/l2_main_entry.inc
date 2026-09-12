@@ -2736,7 +2736,9 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
          // to be OR'd with the one-shot --render-audio mode, which #365 deleted.
          invocation.audio_session_mode, g_skip_about,
          invocation.external_current_time, invocation.external_time_step,
-         invocation.external_total_time, invocation.external_time_scale},
+         invocation.external_total_time, invocation.external_time_scale,
+         is_smart_worker() && invocation.render_session_mode &&
+             !invocation.smart_force_cpu},
         make_bootstrap_runtime_hooks());
   };
   aexcompat::worker_runtime::handles::HandleReclamationScope
