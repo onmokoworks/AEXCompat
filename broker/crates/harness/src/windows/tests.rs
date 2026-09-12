@@ -535,6 +535,87 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_POSTERIZE_TIME and local Release worker"]
+    fn real_posterize_time_gui_holds_quantized_frames() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_POSTERIZE_TIME")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-posterize-time");
+        let frame = |number: u8| {
+            image::RgbaImage::from_fn(256, 144, |x, y| {
+                image::Rgba([x as u8, y as u8, number * 30, 255])
+            })
+        };
+        for number in 4..9 {
+            frame(number)
+                .save(directory.join(format!("{number}.png")))
+                .unwrap();
+        }
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters.iter().find(|p| p.slot == 4).unwrap().name,
+            "Frame Separation"
+        );
+        for (current, separation, selected) in [(5, 1, 5), (5, 2, 4), (6, 2, 6), (7, 2, 6)] {
+            ctx.begin_pass(Default::default());
+            app.load_input_path(&ctx, directory.join(format!("{current}.png")));
+            let _ = ctx.end_pass();
+            let samples = (4..9)
+                .filter(|t| *t != current)
+                .map(|t| {
+                    serde_json::json!({
+                        "slot":0,"time":t,"time_scale":30,"image":directory.join(format!("{t}.png"))
+                    })
+                })
+                .collect::<Vec<_>>();
+            app.apply_debug_request_document(
+                &serde_json::json!({
+                    "schema_version":1,"timing":{"frame":current,"fps":30,"duration_frames":300},
+                    "assignments":[{"slot":4,"value":separation}],"timed_layers":samples
+                }),
+                &directory.join("request.json"),
+            )
+            .unwrap();
+            assert_eq!(app.timed_layers.len(), 4);
+            let output = directory.join(format!("output-{current}-{separation}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            assert_eq!(image::open(output).unwrap().to_rgba8(), frame(selected));
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
             std::env::var(plugin_env)
