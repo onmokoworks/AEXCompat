@@ -20400,3 +20400,112 @@ fn strerror_maps_windows_errors_and_keeps_thread_borrowed_storage() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn strncat_limits_reads_and_appends_one_terminator() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, CALL, dll, "strncat").unwrap();
+        let destination = DATA_BASE + 0x100;
+        let source = DATA_BASE + PAGE_SIZE - 3;
+        engine.write(source, b"xyz").unwrap();
+        engine.write(destination, b"ab\0?????").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        assert_eq!(
+            engine
+                .call_win64(CALL, [destination, source, 3, 0, 0, 0])
+                .unwrap(),
+            destination
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 8).unwrap(),
+            b"abxyz\0??"
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        engine.write(source, b"x\0z").unwrap();
+        engine.write(destination, b"ab\0?????").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(CALL, [destination, source, u64::MAX, 0, 0, 0])
+                .unwrap(),
+            destination
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 8).unwrap(),
+            b"abx\0????"
+        );
+        assert_eq!(
+            engine
+                .call_win64(CALL, [destination, u64::MAX, 0, 0, 0, 0])
+                .unwrap(),
+            destination
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 8).unwrap(),
+            b"abx\0????"
+        );
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "strncat"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn strncat_rejects_overlap_and_unwritable_append_without_partial_writes() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    for readonly in [false, true] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, CALL, "ucrtbase.dll", "strncat").unwrap();
+        let destination = DATA_BASE + 0x100;
+        let source = if readonly {
+            DATA_BASE + 0x300
+        } else {
+            destination + 1
+        };
+        engine.write(destination, b"abc\0????").unwrap();
+        if readonly {
+            engine.write(source, b"xy\0").unwrap();
+            engine
+                .unicorn
+                .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        assert!(
+            engine
+                .call_win64(CALL, [destination, source, 2, 0, 0, 0])
+                .is_err()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(destination, 8).unwrap(),
+            b"abc\0????"
+        );
+    }
+}
+
+#[test]
+fn strncat_rejects_null_source_even_when_zero_page_is_readable() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, CALL, "ucrtbase.dll", "strncat").unwrap();
+    if !guest_range_has_permission(&engine.unicorn, 0, 1, Prot::READ).unwrap() {
+        engine
+            .unicorn
+            .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .unwrap();
+    }
+    let destination = DATA_BASE + 0x100;
+    engine.write(destination, b"abc\0").unwrap();
+    assert!(
+        engine
+            .call_win64(CALL, [destination, 0, 1, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("source is null")
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(destination, 4).unwrap(),
+        b"abc\0"
+    );
+}

@@ -71,6 +71,7 @@ enum LegacyWin64Import {
     StrLen,
     StrCpy,
     StrCat,
+    StrNCat,
     StrChr,
     StrRChr,
     Atoi,
@@ -868,6 +869,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::StrCpy
         }
         (_, "strcpy") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strncat") => {
+            LegacyWin64Import::StrNCat
+        }
+        (_, "strncat") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcat") => {
             LegacyWin64Import::StrCat
         }
@@ -1471,6 +1476,13 @@ fn install_win64_import(
                     uc(
                         "install strchr",
                         unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strchr(uc)),
+                    )?;
+                }
+                LegacyWin64Import::StrNCat => {
+                    uc("write strncat return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strncat",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strncat(uc)),
                     )?;
                 }
                 LegacyWin64Import::StrCat => {

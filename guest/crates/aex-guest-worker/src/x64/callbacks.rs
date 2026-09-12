@@ -3986,6 +3986,73 @@ fn emulate_crt_strcat(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
+fn emulate_crt_strncat(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        let prefix = read_crt_stdio_c_string(
+            unicorn,
+            destination,
+            MAX_CRT_STRING_BYTES,
+            "strncat destination",
+        )?;
+        let count = read_win64_import_argument(unicorn, 2)?;
+        if count != 0 && source == 0 {
+            return Err("strncat source is null".into());
+        }
+        let mut suffix = Vec::new();
+        let mut read_count = 0u64;
+        for offset in 0..count {
+            if offset >= MAX_CRT_STRING_BYTES {
+                return Err("strncat source exceeds CRT string limit".into());
+            }
+            let address = source
+                .checked_add(offset)
+                .ok_or("strncat source range overflow")?;
+            if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                return Err("strncat source is not readable".into());
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|e| e.to_string())?;
+            read_count += 1;
+            if byte[0] == 0 {
+                break;
+            }
+            suffix.push(byte[0]);
+        }
+        suffix.push(0);
+        let total = (prefix.len() as u64)
+            .checked_add(suffix.len() as u64)
+            .ok_or("strncat length overflow")?;
+        if total > MAX_CRT_STRING_BYTES {
+            return Err("strncat result exceeds CRT string limit".into());
+        }
+        let end = destination
+            .checked_add(total)
+            .ok_or("strncat destination range overflow")?;
+        let source_end = source
+            .checked_add(read_count)
+            .ok_or("strncat source range overflow")?;
+        // Overlap is undefined by CRT; reject it before any write.
+        if read_count != 0 && destination < source_end && source < end {
+            return Err("strncat source and destination overlap".into());
+        }
+        let append = destination
+            .checked_add(prefix.len() as u64)
+            .ok_or("strncat append range overflow")?;
+        if !guest_range_has_permission(unicorn, append, suffix.len() as u64, Prot::WRITE)? {
+            return Err("strncat appended destination is not writable".into());
+        }
+        unicorn
+            .mem_write(append, &suffix)
+            .map_err(|e| format!("strncat destination write: {e}"))?;
+        Ok(destination)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn emulate_crt_strchr(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
