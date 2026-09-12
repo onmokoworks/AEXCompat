@@ -163,6 +163,7 @@ enum LegacyWin64Import {
     WaitForSingleObject,
     WaitForSingleObjectEx,
     CloseHandle,
+    GetCurrentProcess,
     GetCurrentThread,
     SetThreadStackGuarantee,
     SwitchToThread,
@@ -497,6 +498,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-handle-l1-1-0.dll", "CloseHandle") => {
             LegacyWin64Import::CloseHandle
         }
+        (
+            "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-processthreads-l1-1-0.dll",
+            "GetCurrentProcess",
+        ) => LegacyWin64Import::GetCurrentProcess,
+        (_, "GetCurrentProcess") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThread") => LegacyWin64Import::GetCurrentThread,
         ("kernel32.dll", "SetThreadStackGuarantee") => LegacyWin64Import::SetThreadStackGuarantee,
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "SwitchToThread") => {
@@ -1918,6 +1924,13 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_windows_thread_lifecycle(unicorn, implementation);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::GetCurrentProcess => {
+                    // Win64 current-process pseudo handle is sign-extended -1.
+                    uc(
+                        "install current-process pseudo handle",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(u64::MAX)),
                     )?;
                 }
                 LegacyWin64Import::GetCurrentThread => {

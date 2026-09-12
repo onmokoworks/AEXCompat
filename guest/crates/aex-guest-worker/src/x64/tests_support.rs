@@ -18177,3 +18177,33 @@ fn popup_choice_capture_bounds_null_and_failure_are_atomic() {
     assert!(capture_popup_choices(&mut engine.unicorn, &mut definition).is_err());
     assert_eq!(definition, original);
 }
+
+#[test]
+fn current_process_returns_full_width_pseudo_handle_without_allocating() {
+    for dll in [
+        "kernel32.dll",
+        "kernelbase.dll",
+        "api-ms-win-core-processthreads-l1-1-0.dll",
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        let query = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, query, dll, "GetCurrentProcess").unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 73;
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        for thread in [1, 9] {
+            engine.unicorn.get_data_mut().current_windows_thread_id = thread;
+            assert_eq!(engine.call_win64(query, [0; 6]).unwrap(), u64::MAX);
+        }
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 73);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        assert!(engine.unicorn.get_data().windows_threads.is_empty());
+        install_win64_import(
+            &mut engine.unicorn,
+            query + 32,
+            "foreign.dll",
+            "GetCurrentProcess",
+        )
+        .unwrap();
+        assert!(engine.call_win64(query + 32, [0; 6]).is_err());
+    }
+}
