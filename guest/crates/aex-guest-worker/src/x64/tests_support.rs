@@ -19473,3 +19473,118 @@ fn special_folder_creation_preflights_output_and_file_collisions() {
             .contains("CSIDL 0x1a")
     );
 }
+
+#[test]
+fn well_known_world_sid_uses_caller_buffer_and_reports_required_size() {
+    const CREATE: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CREATE,
+        "advapi32.dll",
+        "CreateWellKnownSid",
+    )
+    .unwrap();
+    let output = DATA_BASE + 0x900;
+    let size = DATA_BASE + 0xb00;
+    engine.write(output, &[0xa5; 68]).unwrap();
+    for capacity in [0u32, 11] {
+        engine.write(size, &capacity.to_le_bytes()).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(CREATE, [1, 0, output, size, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(size, 4).unwrap(),
+            12u32.to_le_bytes()
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 122);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 68).unwrap(),
+            vec![0xa5; 68]
+        );
+    }
+    engine.write(size, &0u32.to_le_bytes()).unwrap();
+    assert_eq!(engine.call_win64(CREATE, [1, 0, 0, size, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(size, 4).unwrap(),
+        12u32.to_le_bytes()
+    );
+    for capacity in [12u32, 68] {
+        engine.write(size, &capacity.to_le_bytes()).unwrap();
+        assert_eq!(engine.call_win64(CREATE, [1, 0, 0, size, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+    }
+    for capacity in [12u32, 68, u32::MAX] {
+        engine.write(size, &capacity.to_le_bytes()).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        assert_eq!(
+            engine
+                .call_win64(CREATE, [(1 << 32) | 1, u64::MAX, output, size, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 12).unwrap(),
+            [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output + 12, 56).unwrap(),
+            vec![0xa5; 56]
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(size, 4).unwrap(),
+            12u32.to_le_bytes()
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        assert!(engine.unicorn.get_data().windows_sids.is_empty());
+        assert_eq!(engine.unicorn.get_data().windows_sid_issued, 0);
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "CreateWellKnownSid"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn well_known_sid_rejects_unwritable_buffers_and_unimplemented_types() {
+    const CREATE: u64 = STUB_BASE + 0x410;
+    for case in 0..3 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            CREATE,
+            "advapi32.dll",
+            "CreateWellKnownSid",
+        )
+        .unwrap();
+        let size = DATA_BASE + 0x900;
+        engine.write(size, &68u32.to_le_bytes()).unwrap();
+        let output = if case == 0 {
+            u64::MAX
+        } else {
+            DATA_BASE + 0xb00
+        };
+        if case == 1 {
+            engine
+                .unicorn
+                .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        let kind = if case == 2 { 999 } else { 1 };
+        assert!(
+            engine
+                .call_win64(CREATE, [kind, 0, output, size, 0, 0])
+                .is_err()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(size, 4).unwrap(),
+            68u32.to_le_bytes()
+        );
+        assert!(engine.unicorn.get_data().windows_sids.is_empty());
+    }
+}

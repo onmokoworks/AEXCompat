@@ -77,6 +77,7 @@ enum LegacyWin64Import {
     SetEntriesInAclA,
     LocalFree,
     AllocateAndInitializeSid,
+    CreateWellKnownSid,
     FreeSid,
     RegOpenKeyExA,
     RegCloseKey,
@@ -877,6 +878,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("advapi32.dll", "AllocateAndInitializeSid") => LegacyWin64Import::AllocateAndInitializeSid,
+        ("advapi32.dll", "CreateWellKnownSid") => LegacyWin64Import::CreateWellKnownSid,
+        (_, "CreateWellKnownSid") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "FreeSid") => LegacyWin64Import::FreeSid,
         (_, "AllocateAndInitializeSid" | "FreeSid") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
@@ -1346,7 +1349,9 @@ fn install_win64_import(
                         }),
                     )?;
                 }
-                LegacyWin64Import::AllocateAndInitializeSid | LegacyWin64Import::FreeSid => {
+                LegacyWin64Import::AllocateAndInitializeSid
+                | LegacyWin64Import::FreeSid
+                | LegacyWin64Import::CreateWellKnownSid => {
                     uc("write SID return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
                         "install SID import",

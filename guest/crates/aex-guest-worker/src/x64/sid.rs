@@ -2,6 +2,9 @@ const WINDOWS_SID_BASE: u64 = 0x0000_0007_0000_0000;
 
 fn emulate_windows_sid(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
+        if operation == LegacyWin64Import::CreateWellKnownSid {
+            return create_well_known_sid(unicorn);
+        }
         if operation == LegacyWin64Import::FreeSid {
             let sid = read_win64_import_argument(unicorn, 0)?;
             if !unicorn.get_data().windows_sids.contains(&sid) {
@@ -79,4 +82,49 @@ fn emulate_windows_sid(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyW
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn create_well_known_sid(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let kind = read_win64_import_argument(unicorn, 0)? as u32;
+    let output = read_win64_import_argument(unicorn, 2)?;
+    let size_pointer = read_win64_import_argument(unicorn, 3)?;
+    // WinWorldSid (Everyone), S-1-1-0. This absolute SID does not use DomainSid.
+    // Domain-relative SID types need a separate validated construction path.
+    if kind != 1 {
+        return Err(format!("CreateWellKnownSid unsupported SID type {kind}"));
+    }
+    const WORLD_SID: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    if size_pointer == 0 {
+        unicorn.get_data_mut().windows_last_error = 87;
+        return Ok(0);
+    }
+    if !guest_range_has_permission(unicorn, size_pointer, 4, Prot::READ | Prot::WRITE)? {
+        return Err("CreateWellKnownSid size must be readable and writable".into());
+    }
+    let bytes = unicorn
+        .mem_read_as_vec(size_pointer, 4)
+        .map_err(|e| e.to_string())?;
+    let capacity = u32::from_le_bytes(bytes.try_into().unwrap());
+    if capacity < WORLD_SID.len() as u32 {
+        unicorn
+            .mem_write(size_pointer, &(WORLD_SID.len() as u32).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        unicorn.get_data_mut().windows_last_error = 122;
+        return Ok(0);
+    }
+    if output == 0 {
+        unicorn.get_data_mut().windows_last_error = 87;
+        return Ok(0);
+    }
+    if !guest_range_has_permission(unicorn, output, WORLD_SID.len() as u64, Prot::WRITE)? {
+        return Err("CreateWellKnownSid output is not writable".into());
+    }
+    unicorn
+        .mem_write(output, &WORLD_SID)
+        .map_err(|e| e.to_string())?;
+    unicorn
+        .mem_write(size_pointer, &(WORLD_SID.len() as u32).to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    // Caller owns this buffer: do not add it to the FreeSid allocation registry.
+    Ok(1)
 }
