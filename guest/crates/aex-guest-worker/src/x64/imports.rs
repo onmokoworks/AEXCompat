@@ -109,6 +109,7 @@ enum LegacyWin64Import {
     MsvcpMutexDestroy,
     MsvcpHardwareConcurrency,
     ShGetFolderPathA,
+    ShGetSpecialFolderPathA,
     MsvcpExceptionPtrCreate,
     MsvcpExceptionPtrCopy,
     MsvcpExceptionPtrAssign,
@@ -1046,6 +1047,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("shell32.dll", "SHGetFolderPathA") => LegacyWin64Import::ShGetFolderPathA,
         (_, "SHGetFolderPathA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("shell32.dll", "SHGetSpecialFolderPathA") => LegacyWin64Import::ShGetSpecialFolderPathA,
+        (_, "SHGetSpecialFolderPathA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, symbol)
             if matches!(
                 symbol,
@@ -1570,6 +1573,18 @@ fn install_win64_import(
                     uc(
                         "install deterministic hardware concurrency import",
                         unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                    )?;
+                }
+                LegacyWin64Import::ShGetSpecialFolderPathA => {
+                    uc(
+                        "write SHGetSpecialFolderPathA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install SHGetSpecialFolderPathA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_sh_get_special_folder_path_a(unicorn);
+                        }),
                     )?;
                 }
                 LegacyWin64Import::ShGetFolderPathA => {
@@ -9073,4 +9088,54 @@ fn emulate_gethostname(unicorn: &mut Unicorn<'_, GuestState>) {
         Ok(0)
     })();
     finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_sh_get_special_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 1)?;
+        let csidl = read_win64_import_argument(unicorn, 2)? as u32;
+        let create = read_win64_import_argument(unicorn, 3)? as u32 != 0;
+        // These are the same guest special-folder locations as SHGetFolderPathA.
+        // User-profile folders require a configured guest profile first.
+        let path: &[u8] = match csidl {
+            0x23 => b"C:\\ProgramData\0",
+            0x26 => b"C:\\Program Files\0",
+            _ => {
+                return Err(format!(
+                    "SHGetSpecialFolderPathA unsupported CSIDL {csidl:#x}"
+                ));
+            }
+        };
+        if output == 0
+            || !guest_range_has_permission(unicorn, output, WINDOWS_MAX_PATH_BYTES, Prot::WRITE)?
+        {
+            return Ok(0);
+        }
+        let name = guest_file_name(std::str::from_utf8(&path[..path.len() - 1]).unwrap())?;
+        let files = &mut unicorn.get_data_mut().guest_files;
+        if files.sources.contains_key(&name) {
+            return Ok(0);
+        }
+        if !files.directory_exists(&name) {
+            if !create {
+                return Ok(0);
+            }
+            // Only the two fixed special-folder names above can enter this set.
+            // Session-local directories never create or modify host files.
+            files.directories.insert(name);
+        }
+        unicorn.mem_write(output, path).map_err(|e| e.to_string())?;
+        Ok(1)
+    })();
+    match result {
+        Ok(value) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, value);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
 }

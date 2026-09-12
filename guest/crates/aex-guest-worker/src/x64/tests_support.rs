@@ -19333,3 +19333,143 @@ fn wgetenv_rejects_invalid_names_and_storage_exhaustion() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn special_folder_creation_is_session_local_and_visible_to_file_operations() {
+    const GET: u64 = STUB_BASE + 0x410;
+    const FIND: u64 = STUB_BASE + 0x420;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET,
+        "shell32.dll",
+        "SHGetSpecialFolderPathA",
+    )
+    .unwrap();
+    install_win64_import(&mut engine.unicorn, FIND, "kernel32.dll", "FindFirstFileA").unwrap();
+    let output = DATA_BASE + 0x900;
+    engine.write(output, &[0xa5; 260]).unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 72;
+    engine.unicorn.get_data_mut().windows_last_error = 71;
+    assert_eq!(
+        engine.call_win64(GET, [0, output, 0x23, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 260).unwrap(),
+        vec![0xa5; 260]
+    );
+    assert_eq!(
+        engine.call_win64(GET, [0, output, 0x23, 1, 0, 0]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 16).unwrap(),
+        b"C:\\ProgramData\0\xa5"
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .guest_files
+            .directory_exists("c:/programdata")
+    );
+    assert_eq!(
+        engine
+            .call_win64(GET, [0, output, (1 << 32) | 0x23, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    let records = guest_find_records(&engine.unicorn.get_data().guest_files, "C:/*").unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(&records[0][..4], &0x10u32.to_le_bytes());
+    assert_eq!(&records[0][44..56], b"programdata\0");
+    assert_eq!(
+        open_guest_stream(&mut engine.unicorn, b"C:\\ProgramData", b"r").unwrap(),
+        (0, 13)
+    );
+    let query = DATA_BASE + 0xb00;
+    engine.write(query, b"C:\\ProgramData\\*\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(FIND, [query, output, 0, 0, 0, 0])
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 2); // Exists but empty.
+    assert!(
+        test_engine(&[0xc3])
+            .unicorn
+            .get_data()
+            .guest_files
+            .directories
+            .is_empty()
+    );
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "SHGetSpecialFolderPathA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn special_folder_creation_preflights_output_and_file_collisions() {
+    const GET: u64 = STUB_BASE + 0x410;
+    for case in 0..3 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            GET,
+            "shell32.dll",
+            "SHGetSpecialFolderPathA",
+        )
+        .unwrap();
+        let output = if case == 0 { 0 } else { DATA_BASE + 0x900 };
+        if case == 1 {
+            engine
+                .unicorn
+                .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        if case == 2 {
+            engine
+                .unicorn
+                .get_data_mut()
+                .guest_files
+                .sources
+                .insert("c:/programdata".into(), std::path::PathBuf::from("unused"));
+        }
+        assert_eq!(
+            engine.call_win64(GET, [0, output, 0x23, 1, 0, 0]).unwrap(),
+            0
+        );
+        assert!(engine.unicorn.get_data().guest_files.directories.is_empty());
+    }
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        GET,
+        "shell32.dll",
+        "SHGetSpecialFolderPathA",
+    )
+    .unwrap();
+    engine.unicorn.get_data_mut().guest_files.sources.insert(
+        "c:/program files/mounted.bin".into(),
+        std::path::PathBuf::from("unused"),
+    );
+    assert_eq!(
+        engine
+            .call_win64(GET, [0, DATA_BASE + 0x900, 0x26, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert!(engine.unicorn.get_data().guest_files.directories.is_empty());
+    assert!(
+        engine
+            .call_win64(GET, [0, DATA_BASE + 0x900, 0x1a, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("CSIDL 0x1a")
+    );
+}

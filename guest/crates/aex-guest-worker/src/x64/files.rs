@@ -8,6 +8,7 @@ const GUEST_STREAM_BUFFER_BASE: u64 = GUEST_STREAM_BASE + MAX_GUEST_STREAM_OPENS
 #[derive(Default)]
 struct GuestFiles {
     sources: BTreeMap<String, std::path::PathBuf>,
+    directories: BTreeSet<String>,
     streams: BTreeMap<u64, GuestFileStream>,
     next_stream: u64,
     standard_streams: [Option<u64>; 3],
@@ -38,6 +39,16 @@ fn guest_file_name(name: &str) -> Result<String, String> {
 }
 
 impl GuestFiles {
+    fn directory_exists(&self, name: &str) -> bool {
+        let prefix = format!("{name}/");
+        self.directories.contains(name)
+            || self
+                .directories
+                .iter()
+                .any(|path| path.starts_with(&prefix))
+            || self.sources.keys().any(|path| path.starts_with(&prefix))
+    }
+
     fn from_environment() -> Result<Self, GuestError> {
         match std::env::var_os("AEXCOMPAT_GUEST_FILES") {
             Some(path) => Self::from_manifest(std::path::Path::new(&path)),
@@ -110,6 +121,9 @@ fn open_guest_stream(
         return Ok((0, 13));
     }
 
+    if unicorn.get_data().guest_files.directory_exists(&name) {
+        return Ok((0, 13));
+    }
     let Some(source) = unicorn.get_data().guest_files.sources.get(&name).cloned() else {
         return Ok((0, 2));
     };
@@ -499,6 +513,14 @@ fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>,
                 });
         }
     }
+    for name in &files.directories {
+        if let Some(rest) = name.strip_prefix(&prefix) {
+            let leaf = rest.split('/').next().unwrap();
+            if guest_star_match(pattern.as_bytes(), leaf.as_bytes()) {
+                candidates.entry(leaf.to_string()).or_insert(None);
+            }
+        }
+    }
     let mut records = Vec::new();
     for (name, source) in candidates {
         if name.len() >= 260 {
@@ -567,8 +589,7 @@ fn emulate_guest_file_search(unicorn: &mut Unicorn<'_, GuestState>, operation: L
                 .rsplit_once('/')
                 .ok_or("relative file search is unsupported")?
                 .0;
-            let prefix = format!("{directory}/");
-            if !files.sources.keys().any(|name| name.starts_with(&prefix)) {
+            if !files.directory_exists(directory) {
                 unicorn.get_data_mut().windows_last_error = 3;
                 return Ok(u64::MAX);
             }

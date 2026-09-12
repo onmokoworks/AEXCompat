@@ -94,21 +94,11 @@ fn emulate_windows_acl(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyW
                     Err(error) => Err(format!("security object metadata: {error}")),
                 };
             }
-            let prefix = format!("{name}/");
-            // Explicit leaf mounts imply their containing guest directories.
-            return Ok(
-                if unicorn
-                    .get_data()
-                    .guest_files
-                    .sources
-                    .keys()
-                    .any(|path| path.starts_with(&prefix))
-                {
-                    5
-                } else {
-                    2
-                },
-            );
+            return Ok(if unicorn.get_data().guest_files.directory_exists(&name) {
+                5 // No WRITE_DAC rights are granted in the guest namespace.
+            } else {
+                2
+            });
         }
         if operation == LegacyWin64Import::LocalFree {
             let pointer = read_win64_import_argument(unicorn, 0)?;
