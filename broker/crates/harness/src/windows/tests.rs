@@ -273,9 +273,11 @@ mod tests {
     #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_COMPOSITE and local Release worker"]
     fn real_composite_gui_preserves_cpu_matte_pixels() {
-        let plugin =
-            PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_COMPOSITE").expect("explicit AEX path"));
-        let plugin = canonical_deverbatim(&plugin).unwrap();
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_COMPOSITE")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
         let repository =
             canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
                 .unwrap();

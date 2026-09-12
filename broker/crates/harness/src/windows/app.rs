@@ -130,18 +130,23 @@ fn parameters_for_native_action(
                 return false;
             }
             if parameter.kind != "arbitrary_data" {
-                let native_outside_ui_range = matches!(parameter.kind.as_str(), "integer" | "float" | "path")
-                    && parameter.value.is_finite()
-                    && parameter.minimum.is_finite()
-                    && parameter.maximum.is_finite()
-                    && parameter.minimum <= parameter.maximum
-                    && (parameter.value < parameter.minimum || parameter.value > parameter.maximum);
-                if native_outside_ui_range && defaults.iter().any(|default| {
-                    default.slot == parameter.slot && default.kind == parameter.kind
-                        && default.value == parameter.value
-                        && default.minimum == parameter.minimum
-                        && default.maximum == parameter.maximum
-                }) {
+                let native_outside_ui_range =
+                    matches!(parameter.kind.as_str(), "integer" | "float" | "path")
+                        && parameter.value.is_finite()
+                        && parameter.minimum.is_finite()
+                        && parameter.maximum.is_finite()
+                        && parameter.minimum <= parameter.maximum
+                        && (parameter.value < parameter.minimum
+                            || parameter.value > parameter.maximum);
+                if native_outside_ui_range
+                    && defaults.iter().any(|default| {
+                        default.slot == parameter.slot
+                            && default.kind == parameter.kind
+                            && default.value == parameter.value
+                            && default.minimum == parameter.minimum
+                            && default.maximum == parameter.maximum
+                    })
+                {
                     return false;
                 }
                 return true;
@@ -1388,7 +1393,17 @@ impl HarnessApp {
             return;
         };
         let repository = self.repository.clone();
-        let plugin_path = selection.path.clone();
+        // Match the CLI path spelling; forward-slash selection paths caused
+        // an observed inspection failure even when canonical paths succeeded.
+        let plugin_path = match canonical_deverbatim(&selection.path) {
+            Ok(path) => path,
+            Err(error) => {
+                self.invalidate_effect_controls_for_dependency_change();
+                self.status = "Effect Controls inspection could not resolve the AEX path.".into();
+                self.report = error;
+                return;
+            }
+        };
         let hash = selection.sha256.clone();
         let plugin_size = selection.size;
         let dependency_search_dirs = match approved_dependency_search_dirs(
