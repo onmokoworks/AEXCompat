@@ -19797,3 +19797,164 @@ fn allowed_ace_failures_leave_acl_unchanged() {
         assert_eq!(engine.unicorn.mem_read_as_vec(acl, 64).unwrap(), before);
     }
 }
+
+#[test]
+fn create_directory_tracks_parents_duplicates_and_acl_snapshot() {
+    const CREATE: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CREATE,
+        "kernel32.dll",
+        "CreateDirectoryA",
+    )
+    .unwrap();
+    let path = DATA_BASE + 0x900;
+    let sa = DATA_BASE + 0xb00;
+    let sd = sa + 32;
+    let acl = sd + 48;
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .directories
+        .insert("c:/programdata".into());
+    engine.write(path, b"C:\\ProgramData\\BorisFX\0").unwrap();
+    let mut attrs = [0u8; 24];
+    attrs[..4].copy_from_slice(&24u32.to_le_bytes());
+    attrs[8..16].copy_from_slice(&sd.to_le_bytes());
+    engine.write(sa, &attrs).unwrap();
+    let mut desc = [0u8; 40];
+    desc[0] = 1;
+    desc[2] = 4;
+    desc[32..40].copy_from_slice(&acl.to_le_bytes());
+    engine.write(sd, &desc).unwrap();
+    let policy = [
+        2, 0, 28, 0, 1, 0, 0, 0, 0, 3, 20, 0, 0, 0, 0, 0x10, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+    ];
+    engine.write(acl, &policy).unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 71;
+    engine.unicorn.get_data_mut().crt_errno = 72;
+    assert_eq!(
+        engine.call_win64(CREATE, [path, sa, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+    engine.write(acl, &[0; 28]).unwrap();
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.directory_dacls["c:/programdata/borisfx"],
+        policy
+    );
+    assert_eq!(
+        engine.call_win64(CREATE, [path, sa, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
+    engine
+        .write(path, b"C:\\ProgramData\\BorisFX\\Child\0")
+        .unwrap();
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .guest_files
+            .directory_dacls
+            .contains_key("c:/programdata/borisfx/child")
+    );
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.directory_dacls["c:/programdata/borisfx"][9],
+        3
+    );
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.directory_dacls["c:/programdata/borisfx/child"][9],
+        0x13
+    );
+    engine
+        .write(path, b"C:\\ProgramData\\BorisFX\\Child\\Grandchild\0")
+        .unwrap();
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.directory_dacls["c:/programdata/borisfx/child/grandchild"]
+            [9],
+        0x13
+    );
+    let records =
+        guest_find_records(&engine.unicorn.get_data().guest_files, "c:/programdata/*").unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(&records[0][..4], &16u32.to_le_bytes());
+}
+
+#[test]
+fn create_directory_failures_do_not_publish_objects() {
+    const CREATE: u64 = STUB_BASE + 0x410;
+    for case in 0..4 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            CREATE,
+            "kernelbase.dll",
+            "CreateDirectoryA",
+        )
+        .unwrap();
+        let path = DATA_BASE + 0x900;
+        let sa = DATA_BASE + 0xb00;
+        engine.write(path, b"C:\\ProgramData\\New\0").unwrap();
+        if case != 0 {
+            engine
+                .unicorn
+                .get_data_mut()
+                .guest_files
+                .directories
+                .insert("c:/programdata".into());
+        }
+        if case == 1 {
+            engine.write(sa, &[0; 24]).unwrap();
+        }
+        if case == 2 {
+            for i in 0..MAX_GUEST_DIRECTORIES {
+                engine
+                    .unicorn
+                    .get_data_mut()
+                    .guest_files
+                    .directories
+                    .insert(format!("c:/other/{i}"));
+            }
+        }
+        if case == 3 {
+            engine
+                .unicorn
+                .get_data_mut()
+                .guest_files
+                .directories
+                .clear();
+            engine.unicorn.get_data_mut().guest_files.sources.insert(
+                "c:/programdata/mounted".into(),
+                std::path::PathBuf::from("unused"),
+            );
+        }
+        assert_eq!(
+            engine
+                .call_win64(CREATE, [path, if case == 1 { sa } else { 0 }, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            [3, 87, 8, 5][case]
+        );
+        assert!(
+            !engine
+                .unicorn
+                .get_data()
+                .guest_files
+                .directories
+                .contains("c:/programdata/new")
+        );
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "CreateDirectoryA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}

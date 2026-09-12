@@ -9,6 +9,7 @@ const GUEST_STREAM_BUFFER_BASE: u64 = GUEST_STREAM_BASE + MAX_GUEST_STREAM_OPENS
 struct GuestFiles {
     sources: BTreeMap<String, std::path::PathBuf>,
     directories: BTreeSet<String>,
+    directory_dacls: BTreeMap<String, Vec<u8>>,
     streams: BTreeMap<u64, GuestFileStream>,
     next_stream: u64,
     standard_streams: [Option<u64>; 3],
@@ -643,4 +644,124 @@ fn emulate_guest_file_search(unicorn: &mut Unicorn<'_, GuestState>, operation: L
         }
     })();
     finish_guest_stdio(unicorn, result);
+}
+
+const MAX_GUEST_DIRECTORIES: usize = 4096;
+
+fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let pointer = read_win64_import_argument(unicorn, 0)?;
+    let attributes = read_win64_import_argument(unicorn, 1)?;
+    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error| {
+        unicorn.get_data_mut().windows_last_error = error;
+        Ok(0)
+    };
+    if pointer == 0 {
+        return fail(unicorn, 87);
+    }
+    let bytes = read_crt_stdio_c_string(unicorn, pointer, 260, "CreateDirectoryA path")?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "unsupported directory path encoding")?;
+    let name = guest_file_name(text)?;
+    if name.len() < 4
+        || name.as_bytes()[1..3] != *b":/"
+        || !name.as_bytes()[0].is_ascii_alphabetic()
+        || name[3..].contains(['*', '?', ':', '<', '>', '|', '"'])
+        || name.split('/').any(|part| part.ends_with(['.', ' ']))
+    {
+        return Err("CreateDirectoryA requires an unambiguous absolute guest path".into());
+    }
+    let (parent, _) = name.rsplit_once('/').ok_or("directory has no parent")?;
+    let files = &unicorn.get_data().guest_files;
+    if files.directory_exists(&name) || files.sources.contains_key(&name) {
+        return fail(unicorn, 183);
+    }
+    if !files.directory_exists(parent) {
+        return fail(unicorn, 3);
+    }
+    // Only session-created directories accept children. Mounted assets remain
+    // read-only, including their implicit parent directories.
+    if !files.directories.contains(parent) {
+        return fail(unicorn, 5);
+    }
+    if files.directories.len() >= MAX_GUEST_DIRECTORIES {
+        return fail(unicorn, 8);
+    }
+    let mut dacl = None;
+    if attributes != 0 {
+        let sa = acl_read(unicorn, attributes, 24)?;
+        if u32::from_le_bytes(sa[..4].try_into().unwrap()) != 24 {
+            return fail(unicorn, 87);
+        }
+        let sd = u64::from_le_bytes(sa[8..16].try_into().unwrap());
+        // bInheritHandle has no effect: directory creation returns no handle.
+        if sd != 0 {
+            let descriptor = acl_read(unicorn, sd, 40)?;
+            let control = u16::from_le_bytes([descriptor[2], descriptor[3]]);
+            if descriptor[0] != 1 {
+                return fail(unicorn, 1305);
+            }
+            if control & !0x000c != 0 || descriptor[8..32].iter().any(|b| *b != 0) {
+                return Err(
+                    "CreateDirectoryA unsupported security descriptor owner/group/SACL/control"
+                        .into(),
+                );
+            }
+            if control & 4 != 0 {
+                let address = u64::from_le_bytes(descriptor[32..40].try_into().unwrap());
+                if address != 0 {
+                    let header = acl_read(unicorn, address, 8)?;
+                    let size = u16::from_le_bytes([header[2], header[3]]) as u64;
+                    if !(2..=4).contains(&header[0]) || size < 8 {
+                        return fail(unicorn, 1336);
+                    }
+                    let acl = acl_read(unicorn, address, size)?;
+                    // The current session namespace supports an unrestricted
+                    // inheritable Everyone grant. Restrictive or other-token
+                    // policies require access checking before we can accept them.
+                    if acl[4..6] != [1, 0]
+                        || acl.len() < 28
+                        || acl[8..12] != [0, 3, 20, 0]
+                        || acl[12..16] != 0x10000000u32.to_le_bytes()
+                        || acl[16..28] != [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]
+                    {
+                        return Err("CreateDirectoryA unsupported DACL access policy".into());
+                    }
+                    dacl = Some(acl);
+                }
+            } else {
+                dacl = unicorn
+                    .get_data()
+                    .guest_files
+                    .directory_dacls
+                    .get(parent)
+                    .map(inherit_guest_directory_dacl);
+            }
+        } else {
+            dacl = unicorn
+                .get_data()
+                .guest_files
+                .directory_dacls
+                .get(parent)
+                .map(inherit_guest_directory_dacl);
+        }
+    } else {
+        dacl = unicorn
+            .get_data()
+            .guest_files
+            .directory_dacls
+            .get(parent)
+            .map(inherit_guest_directory_dacl);
+    }
+    let files = &mut unicorn.get_data_mut().guest_files;
+    if let Some(dacl) = dacl {
+        files.directory_dacls.insert(name.clone(), dacl);
+    }
+    files.directories.insert(name);
+    Ok(1)
+}
+
+fn inherit_guest_directory_dacl(parent: &Vec<u8>) -> Vec<u8> {
+    let mut inherited = parent.clone();
+    // Stored policies have one validated inheritable access-allowed ACE.
+    inherited[9] |= 0x10; // INHERITED_ACE
+    inherited
 }
