@@ -3,6 +3,62 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_SIGNAL and local Release worker"]
+    fn real_gui_native_default_reset_matches_fresh_session_pixels() {
+        let plugin = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_SIGNAL").expect("explicit AEX"));
+        let repository = canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
+        let directory = temporary_directory("gui-native-default-reset");
+        let input = directory.join("input.png");
+        image::RgbaImage::from_pixel(256, 144, image::Rgba([32, 64, 128, 255])).save(&input).unwrap();
+        let mut app = HarnessApp::new(repository);
+        app.live_render = true;
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(), size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: fs::metadata(&plugin).unwrap().modified().ok(),
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default()); app.poll(&ctx); let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async(); drain(&mut app);
+        let seed = app.parameters.iter().position(|p| p.slot == 1).unwrap();
+        assert_eq!(app.parameters[seed].value, 0.0);
+        assert_eq!(app.parameter_defaults[seed].value, 0.0);
+        // Known row0 variability is a separate unresolved effect issue. This
+        // explicit comparison setting is not an automatic product workaround.
+        app.parameters.iter_mut().find(|p| p.slot == 38).unwrap().value = 0.0;
+        ctx.begin_pass(Default::default()); app.load_input_path(&ctx, input); let _ = ctx.end_pass();
+        let mut images = Vec::new();
+        for step in 0..3 {
+            if step == 0 { app.parameters[seed].value = 7.0; }
+            if step == 1 {
+                assert!(reset_parameter(&mut app.parameters[seed], &app.parameter_defaults[seed]));
+            }
+            if step == 2 { app.close_live_session(); }
+            let output = directory.join(format!("{step}.png"));
+            app.render_to(output.clone()); drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            let report: serde_json::Value = serde_json::from_str(&app.report).unwrap();
+            assert!(report.get("resident_session").is_some(), "{}", app.report);
+            let image = image::open(output).unwrap().to_rgba8();
+            assert_eq!(image.dimensions(), (256, 144));
+            assert!(image.pixels().all(|p| p[3] == 255));
+            images.push(image);
+        }
+        assert_ne!(images[0], images[1], "seed edit must affect pixels");
+        assert_eq!(images[1], images[2], "reset must match fresh native default");
+        app.close_selected_aex(); drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_OLM_BLUR and local Release worker"]
     fn real_aex_gui_state_renders_and_publishes_preview() {
         let plugin =
@@ -850,14 +906,14 @@ mod tests {
             descriptor(26, "layer"),
         ];
         let normalized = normalize_inspected_ui_parameters(&radial_blur_parameters);
-        assert_eq!(normalized[0].value, 1.0);
+        assert_eq!(normalized[0].value, 0.1);
         assert_eq!(normalized.len(), 5, "UI keeps every discovered descriptor");
         assert_eq!(normalized[1].kind, "arbitrary_data");
         let defaults = normalized.clone();
         let sendable = parameters_for_native_action(&normalized, &defaults);
         assert_eq!(
             sendable.len(),
-            1,
+            0,
             "render omits unsendable defaults and display-only descriptors"
         );
         assert!(
@@ -872,13 +928,13 @@ mod tests {
         displayed[1].debug_summary = Some(String::new());
         assert_eq!(
             parameters_for_native_action(&displayed, &defaults).len(),
-            1,
+            0,
             "opening an empty arbitrary editor does not make it sendable"
         );
         displayed[1].debug_summary = Some("edited ramp".to_owned());
         assert_eq!(
             parameters_for_native_action(&displayed, &defaults).len(),
-            2,
+            1,
             "an explicit printable arbitrary edit is retained"
         );
     }
@@ -1546,6 +1602,34 @@ mod tests {
                 .unwrap_err()
                 .contains("no parameter")
         );
+    }
+
+    #[test]
+    fn gui_unedited_native_default_is_not_replayed_as_a_clamped_edit() {
+        let mut seed = parameter(1, "float");
+        seed.minimum = 1.0;
+        seed.maximum = 1_000_000.0;
+        let displayed = normalize_inspected_ui_parameters(&[seed]);
+        let defaults = displayed.clone();
+        let payload = parameters_for_image_render(&displayed, &defaults);
+        assert!(payload.is_empty(), "opening controls must not author a seed edit");
+    }
+
+    #[test]
+    fn gui_saved_native_default_restores_after_a_later_edit() {
+        let mut seed = parameter(1, "float");
+        seed.minimum = 1.0;
+        seed.maximum = 100.0;
+        let mut app = HarnessApp::new(std::env::temp_dir());
+        app.parameters = vec![seed.clone()];
+        app.parameter_defaults = vec![seed];
+        let saved = typed_request_document(
+            &parameters_for_image_render(&app.parameters, &app.parameter_defaults),
+            0, 30, 1, 300, None,
+        );
+        app.parameters[0].value = 7.0;
+        app.apply_debug_request_document(&saved, &std::env::temp_dir().join("native-default.json")).unwrap();
+        assert_eq!(app.parameters[0].value, 0.0, "saved native default must replace later edit");
     }
 
     #[test]

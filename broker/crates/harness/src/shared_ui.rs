@@ -230,7 +230,8 @@ pub(crate) fn show_effect_controls(
                         "path" => {
                             ui.add(
                                 egui::DragValue::new(&mut parameter.value)
-                                    .range(0.0..=parameter.maximum),
+                                    .range(0.0..=parameter.maximum)
+                                    .clamp_existing_to_range(false),
                             );
                         }
                         "angle" | "point" | "point3d" => {
@@ -324,7 +325,7 @@ pub(crate) fn modern_slider(
     let maximum = *range.end();
     let previous = *value;
     let enabled = ui.is_enabled();
-    let mut displayed_value = value.clamp(minimum, maximum);
+    let mut displayed_value = *value;
     let (track_response, numeric_response) = ui
         .horizontal(|ui| {
             let desired = egui::vec2(ui.available_width().min(180.0).max(96.0), 28.0);
@@ -395,7 +396,7 @@ pub(crate) fn modern_slider(
                     }
                 });
             }
-            if response.enabled() {
+            if response.enabled() && *value != previous {
                 *value = value.clamp(minimum, maximum);
             }
             if *value != previous {
@@ -471,6 +472,7 @@ pub(crate) fn modern_slider(
             let numeric = ui.add(
                 egui::DragValue::new(numeric_value)
                     .range(range)
+                    .clamp_existing_to_range(false)
                     .speed(((maximum - minimum).abs() / 200.0).max(0.01)),
             );
             (response, numeric)
@@ -1112,12 +1114,31 @@ mod tests {
     }
 
     #[test]
-    fn modern_slider_clamps_enabled_values_but_not_disabled_state() {
+    fn path_control_preserves_native_values_without_user_input() {
+        for value in [-1.0, 150.0] {
+            let mut path = parameter(1, "path");
+            path.value = value;
+            path.maximum = 100.0;
+            let parameters = std::cell::RefCell::new(vec![path]);
+            let defaults = parameters.borrow().clone();
+            eframe::egui::__run_test_ui(|ui| {
+                let output = show_effect_controls(ui, &mut parameters.borrow_mut(), &defaults, false,
+                    EffectControlCapabilities { choose_layer: false, trigger_button: false },
+                    EffectControlsText::default());
+                assert_eq!(parameters.borrow()[0].value, value);
+                assert!(output.intents.is_empty());
+            });
+        }
+    }
+
+    #[test]
+    fn modern_slider_preserves_native_values_without_user_input() {
         eframe::egui::__run_test_ui(|ui| {
             let mut value = 150.0;
             let response = modern_slider(ui, &mut value, 0.0..=100.0, "Amount");
             assert!(response.enabled());
-            assert_eq!(value, 100.0);
+            assert_eq!(value, 150.0);
+            assert!(!response.changed());
 
             let mut disabled = 150.0;
             ui.add_enabled_ui(false, |ui| {

@@ -111,21 +111,9 @@ fn fit_size_to_aspect(available: egui::Vec2, aspect: f32) -> egui::Vec2 {
 fn normalize_inspected_ui_parameters(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
 ) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
-    parameters
-        .iter()
-        .cloned()
-        .map(|mut parameter| {
-            if matches!(parameter.kind.as_str(), "integer" | "float" | "path")
-                && parameter.value.is_finite()
-                && parameter.minimum.is_finite()
-                && parameter.maximum.is_finite()
-                && parameter.minimum <= parameter.maximum
-            {
-                parameter.value = parameter.value.clamp(parameter.minimum, parameter.maximum);
-            }
-            parameter
-        })
-        .collect()
+    // Inspection values are native defaults, not host-authored edits. A plug-in
+    // may intentionally publish a default outside its editable UI range.
+    parameters.to_vec()
 }
 
 fn parameters_for_native_action(
@@ -142,6 +130,20 @@ fn parameters_for_native_action(
                 return false;
             }
             if parameter.kind != "arbitrary_data" {
+                let native_outside_ui_range = matches!(parameter.kind.as_str(), "integer" | "float" | "path")
+                    && parameter.value.is_finite()
+                    && parameter.minimum.is_finite()
+                    && parameter.maximum.is_finite()
+                    && parameter.minimum <= parameter.maximum
+                    && (parameter.value < parameter.minimum || parameter.value > parameter.maximum);
+                if native_outside_ui_range && defaults.iter().any(|default| {
+                    default.slot == parameter.slot && default.kind == parameter.kind
+                        && default.value == parameter.value
+                        && default.minimum == parameter.minimum
+                        && default.maximum == parameter.maximum
+                }) {
+                    return false;
+                }
                 return true;
             }
             let default_was_unsendable = defaults.iter().any(|default| {
@@ -1194,6 +1196,11 @@ impl HarnessApp {
     ) -> Result<(), String> {
         let timing = typed_request_timing(document)?;
         let mut parameters = self.parameters.clone();
+        // A saved request describes state relative to native defaults, not a
+        // patch over whichever edits happen to be displayed when it is loaded.
+        // Reset values only, retaining current descriptor/UI metadata. Changes
+        // remain local until the entire request has validated successfully.
+        reset_all(&mut parameters, &self.parameter_defaults);
         let timed_layers = typed_request_timed_layers(document, path)?;
         let mut assignments = document.clone();
         if let Some(object) = assignments.as_object_mut() {
@@ -1233,7 +1240,7 @@ impl HarnessApp {
             return;
         };
         let mut document = typed_request_document(
-            &self.parameters,
+            &parameters_for_image_render(&self.parameters, &self.parameter_defaults),
             self.frame,
             self.frames_per_second,
             self.frame_time_step,

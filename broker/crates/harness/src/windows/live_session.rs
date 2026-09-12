@@ -347,7 +347,9 @@ fn live_render(
         }
     }
     let (_, session) = state.open.as_mut().expect("session just ensured");
-    let parameters = (!request.parameters.is_empty()).then_some(request.parameters.as_slice());
+    // An empty list is an explicit reset to native defaults. None would reuse
+    // launch-time edits if the resident session began before the GUI reset.
+    let parameters = Some(request.parameters.as_slice());
     match session.render(
         &rgba,
         request.timing.current_time,
