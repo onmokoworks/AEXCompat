@@ -219,6 +219,7 @@ enum LegacyWin64Import {
     CrtSetTerminate,
     CrtPutenv,
     CrtGetenv,
+    CrtWgetenv,
     InitializeCriticalSection,
     InitializeCriticalSectionAndSpinCount,
     InitializeCriticalSectionEx,
@@ -787,6 +788,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("api-ms-win-crt-environment-l1-1-0.dll", "_putenv") => LegacyWin64Import::CrtPutenv,
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv") => LegacyWin64Import::CrtGetenv,
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-environment-l1-1-0.dll", "_wgetenv") => {
+            LegacyWin64Import::CrtWgetenv
+        }
+        (_, "_wgetenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "_copysign" | "copysign") => {
             LegacyWin64Import::CopySign
         }
@@ -2432,6 +2437,18 @@ fn install_win64_import(
                         }),
                     )?;
                 }
+                LegacyWin64Import::CrtWgetenv => {
+                    uc(
+                        "write CRT _wgetenv return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT _wgetenv import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_wgetenv(unicorn);
+                        }),
+                    )?;
+                }
                 LegacyWin64Import::CrtGetenv => {
                     uc(
                         "write deterministic guest environment value",
@@ -3182,7 +3199,10 @@ fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), Strin
         .checked_add(ENVIRONMENT_STRINGS_NAMESPACE_SIZE)
         .filter(|end| *end <= ENVIRONMENT_STRINGS_END)
         .ok_or_else(|| "GetEnvironmentStringsW namespace exhausted".to_string())?;
-    Ok((state.environment_strings_base, end - PAGE_SIZE))
+    Ok((
+        state.environment_strings_base,
+        end - GUEST_ENVIRONMENT_BORROWED_BYTES,
+    ))
 }
 
 fn emulate_get_environment_strings_w(unicorn: &mut Unicorn<'_, GuestState>) {

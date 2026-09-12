@@ -19191,3 +19191,145 @@ fn gethostname_ordinal_requires_startup_and_returns_actual_host_name() {
         );
     }
 }
+
+#[test]
+fn wgetenv_preserves_borrowed_values_and_tracks_guest_environment() {
+    const WGETENV: u64 = STUB_BASE + 0x410;
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-environment-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, WGETENV, dll, "_wgetenv").unwrap();
+        let name = DATA_BASE + 0xa80;
+        let wide = |s: &str| {
+            s.encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        engine.write(name, &wide("opencv_for_threads_num")).unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        let first = engine.call_win64(WGETENV, [name, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(engine.unicorn.mem_read_as_vec(first, 4).unwrap(), wide("1"));
+        assert!(!guest_range_has_permission(&engine.unicorn, first, 4, Prot::EXEC).unwrap());
+        engine
+            .unicorn
+            .get_data_mut()
+            .environment_overrides
+            .insert(b"SECOND".to_vec(), Some(vec![b'z'; 4095]));
+        engine.write(name, &wide("second")).unwrap();
+        let second = engine.call_win64(WGETENV, [name, 0, 0, 0, 0, 0]).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(second, 8192).unwrap(),
+            wide(&"z".repeat(4095))
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(first, 4).unwrap(), wide("1"));
+        engine
+            .unicorn
+            .get_data_mut()
+            .environment_overrides
+            .insert(b"SECOND".to_vec(), Some(b"new".to_vec()));
+        assert_eq!(
+            engine.call_win64(WGETENV, [name, 0, 0, 0, 0, 0]).unwrap(),
+            second
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(second, 8).unwrap(),
+            wide("new")
+        );
+        engine
+            .unicorn
+            .get_data_mut()
+            .environment_overrides
+            .insert(b"SECOND".to_vec(), None);
+        assert_eq!(
+            engine.call_win64(WGETENV, [name, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        engine.write(name, &wide("HOME")).unwrap();
+        assert_eq!(
+            engine.call_win64(WGETENV, [name, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+        let (_, snapshot_end) = environment_strings_range(engine.unicorn.get_data_mut()).unwrap();
+        assert!(first >= snapshot_end + PAGE_SIZE);
+        let narrow = guest_getenv_buffer(&mut engine.unicorn).unwrap();
+        assert_eq!(narrow, snapshot_end);
+        assert!(
+            second + PAGE_SIZE * 2
+                <= engine.unicorn.get_data().environment_strings_base
+                    + ENVIRONMENT_STRINGS_NAMESPACE_SIZE
+        );
+        engine.write(name, &wide("OPENCV_FOR_THREADS_NUM")).unwrap();
+        engine
+            .unicorn
+            .mem_protect(first, PAGE_SIZE * 2, Prot::READ)
+            .unwrap();
+        assert!(
+            engine
+                .call_win64(WGETENV, [name, 0, 0, 0, 0, 0])
+                .unwrap_err()
+                .to_string()
+                .contains("not writable")
+        );
+    }
+}
+
+#[test]
+fn wgetenv_rejects_invalid_names_and_storage_exhaustion() {
+    const WGETENV: u64 = STUB_BASE + 0x410;
+    for case in 0..4 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, WGETENV, "ucrtbase.dll", "_wgetenv").unwrap();
+        let name = DATA_BASE + 0xa80;
+        let pointer = match case {
+            0 => 0,
+            1 => {
+                engine.write(name, &[0, 0xd8, 0, 0]).unwrap();
+                name
+            }
+            2 => u64::MAX,
+            _ => {
+                engine
+                    .write(
+                        name,
+                        &"OPENCV_FOR_THREADS_NUM"
+                            .encode_utf16()
+                            .chain([0])
+                            .flat_map(u16::to_le_bytes)
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                for i in 0..MAX_GUEST_WGETENV_BUFFERS {
+                    engine
+                        .unicorn
+                        .get_data_mut()
+                        .wgetenv_buffers
+                        .insert(i.to_string().into_bytes(), 0);
+                }
+                name
+            }
+        };
+        let error = engine
+            .call_win64(WGETENV, [pointer, 0, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                [
+                    "invalid parameter handler",
+                    "invalid UTF-16",
+                    "not readable",
+                    "storage exhausted"
+                ][case]
+            ),
+            "{error}"
+        );
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "_wgetenv"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}

@@ -266,6 +266,7 @@ struct GuestState {
     environment_strings_base: u64,
     environment_overrides: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
     getenv_buffer: Option<u64>,
+    wgetenv_buffers: BTreeMap<Vec<u8>, u64>,
     process_prng_state: u64,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
