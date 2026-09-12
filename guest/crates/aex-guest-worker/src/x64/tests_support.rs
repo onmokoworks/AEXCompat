@@ -15835,3 +15835,69 @@ fn guest_clocks_convert_epochs_and_counter_tracks_elapsed_time() {
         );
     }
 }
+
+#[test]
+fn crt_time64_returns_current_seconds_and_checks_optional_output() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    assert_eq!(crt_time64_seconds(UNIX_EPOCH), 0);
+    assert_eq!(
+        crt_time64_seconds(UNIX_EPOCH + Duration::from_millis(1999)),
+        1
+    );
+    assert_eq!(crt_time64_seconds(UNIX_EPOCH - Duration::from_nanos(1)), -1);
+    assert_eq!(
+        crt_time64_seconds(UNIX_EPOCH + Duration::from_secs(32_535_215_999)),
+        32_535_215_999
+    );
+    assert_eq!(
+        crt_time64_seconds(UNIX_EPOCH + Duration::from_secs(32_535_216_000)),
+        -1
+    );
+    for dll in ["api-ms-win-crt-time-l1-1-0.dll", "ucrtbase.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "_time64").unwrap();
+        let output = DATA_BASE + 0x100;
+        for pointer in [0, output] {
+            engine.write(output - 1, &[0xa5; 10]).unwrap();
+            let before = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let result = engine.call_win64(entry, [pointer, 0, 0, 0, 0, 0]).unwrap();
+            let after = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            assert!((before..=after).contains(&result));
+            let mut bytes = [0; 10];
+            engine.read(output - 1, &mut bytes).unwrap();
+            assert_eq!(bytes[0], 0xa5);
+            assert_eq!(bytes[9], 0xa5);
+            if pointer == 0 {
+                assert_eq!(bytes, [0xa5; 10]);
+            } else {
+                assert_eq!(u64::from_le_bytes(bytes[1..9].try_into().unwrap()), result);
+            }
+        }
+        let edge = DATA_BASE + PAGE_SIZE - 4;
+        engine.write(edge, &[0xa5; 4]).unwrap();
+        assert!(engine.call_win64(entry, [edge, 0, 0, 0, 0, 0]).is_err());
+        let mut bytes = [0; 4];
+        engine.read(edge, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xa5; 4]);
+        engine
+            .unicorn
+            .mem_map(0x50000000, PAGE_SIZE, Prot::READ | Prot::EXEC)
+            .unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [0x50000000, 0, 0, 0, 0, 0])
+                .is_err()
+        );
+    }
+    assert!(matches!(
+        dispatch_win64_import("other.dll", "_time64"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}

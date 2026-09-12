@@ -32,6 +32,7 @@ enum LegacyWin64Import {
     MemoryCopy,
     MemChr,
     StrStr,
+    CrtTime64,
     StrCmp,
     StrLen,
     StrCpy,
@@ -701,6 +702,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_vcomp_set_num_threads") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_time64") => {
+            LegacyWin64Import::CrtTime64
+        }
+        (_, "_time64") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcmp") => {
             LegacyWin64Import::StrCmp
         }
@@ -1029,6 +1034,15 @@ fn install_win64_import(
                     "install strcpy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_strcpy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CrtTime64 => {
+                uc("write _time64 return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install _time64",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_time64(unicorn);
                     }),
                 )?;
             }
@@ -8013,4 +8027,40 @@ fn windows_filetime(time: std::time::SystemTime) -> Result<u64, String> {
     }
     .ok_or("wall clock is outside FILETIME range")?;
     u64::try_from(ticks).map_err(|_| "wall clock exceeds FILETIME range".into())
+}
+
+// UCRT __time64_t supports UTC dates from 1970 through the end of 3000.
+fn crt_time64_seconds(time: std::time::SystemTime) -> i64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+        .filter(|seconds| *seconds <= 32_535_215_999)
+        .map_or(-1, |seconds| seconds as i64)
+}
+
+fn emulate_crt_time64(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<i64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        if output != 0 && !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err(format!("_time64 output {output:#x} is not writable"));
+        }
+        let seconds = crt_time64_seconds(std::time::SystemTime::now());
+        if output != 0 {
+            unicorn
+                .mem_write(output, &seconds.to_le_bytes())
+                .map_err(|error| format!("_time64 output write failed: {error}"))?;
+        }
+        Ok(seconds)
+    })();
+    match result {
+        Ok(seconds) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, seconds as u64);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
 }
