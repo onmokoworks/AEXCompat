@@ -109,6 +109,85 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_MAKE_ALPHA and local Release worker"]
+    fn real_multilayer_aex_gui_preserves_alpha_source_pixels() {
+        let plugin = PathBuf::from(
+            std::env::var_os("AEXCOMPAT_TEST_MAKE_ALPHA").expect("explicit AEX path"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-make-alpha");
+        let input = directory.join("input.png");
+        let secondary = directory.join("secondary.png");
+        image::RgbaImage::from_pixel(256, 144, image::Rgba([173, 57, 219, 255]))
+            .save(&input)
+            .unwrap();
+        image::RgbaImage::from_fn(256, 144, |x, y| image::Rgba([x as u8, y as u8, 37, 255]))
+            .save(&secondary)
+            .unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert!(app.smart_render_capability.is_some(), "{}", app.report);
+        for (slot, name) in [
+            (6, "Host Layer"),
+            (8, "Alpha Source Layer"),
+            (9, "Alpha From Channel"),
+        ] {
+            assert_eq!(
+                app.parameters.iter().find(|p| p.slot == slot).unwrap().name,
+                name
+            );
+        }
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input.clone());
+        let _ = ctx.end_pass();
+        for (choice, inverse) in [(2, false), (9, true)] {
+            app.apply_debug_request_document(&serde_json::json!({
+                "schema_version":1,"timing":{"frame":0,"fps":30,"duration_frames":300},
+                "assignments":[{"slot":6,"layer":input},{"slot":8,"layer":secondary},{"slot":9,"value":choice}]
+            }),&directory.join("request.json")).unwrap();
+            let output = directory.join(format!("output-{choice}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            let pixels = image::open(&output).unwrap().to_rgba8();
+            assert_eq!(pixels.dimensions(), (256, 144));
+            for (x, _, pixel) in pixels.enumerate_pixels() {
+                let alpha = if inverse { 255 - x as u8 } else { x as u8 };
+                assert_eq!(pixel.0[3], alpha);
+                if alpha > 0 {
+                    assert_eq!(&pixel.0[..3], &[173, 57, 219]);
+                }
+            }
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn aegp_roundtrip_gui_exposes_and_routes_each_shipping_action() {
         let ui_kit = AexUiKit::default();
         for expected in AegpRoundtripAction::ALL {
