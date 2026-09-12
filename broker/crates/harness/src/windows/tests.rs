@@ -1068,6 +1068,139 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_TIMESMEAR and local Release worker"]
+    fn real_timesmear_gui_preserves_history_bypass_and_spatial_map() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_TIMESMEAR")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-timesmear");
+        let pixels = |t: u32| {
+            image::RgbaImage::from_fn(256, 144, |x, y| {
+                image::Rgba([
+                    ((x + 30 * (4 - t)) % 256) as u8,
+                    ((y + 20 * (4 - t)) % 256) as u8,
+                    (t * 25) as u8,
+                    255,
+                ])
+            })
+        };
+        for t in 0..5 {
+            pixels(t).save(directory.join(format!("{t}.png"))).unwrap();
+        }
+        image::RgbaImage::from_pixel(256, 144, image::Rgba([255u8, 255, 255, 255]))
+            .save(directory.join("white.png"))
+            .unwrap();
+        image::RgbaImage::from_fn(256, 144, |x, _| {
+            if x < 128 {
+                image::Rgba([0u8, 0, 0, 255])
+            } else {
+                image::Rgba([255, 255, 255, 255])
+            }
+        })
+        .save(directory.join("split.png"))
+        .unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters.iter().find(|p| p.slot == 20).unwrap().name,
+            "Map Layer"
+        );
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, directory.join("4.png"));
+        let _ = ctx.end_pass();
+        let mut outputs = std::collections::HashMap::new();
+        for (name, same, amount, mix, map) in [
+            ("same", true, 100, 0, None),
+            ("full", false, 100, 0, None),
+            ("amount-zero", false, 0, 0, None),
+            ("original-full", false, 100, 100, None),
+            ("white", false, 100, 0, Some("white")),
+            ("split", false, 100, 0, Some("split")),
+        ] {
+            let mut assignments = [
+                (1, amount),
+                (2, 2),
+                (3, 3),
+                (4, 1),
+                (5, 360),
+                (6, 0),
+                (8, mix),
+                (17, 1),
+                (18, 0),
+                (21, if map.is_some() { 100 } else { 0 }),
+                (22, 0),
+                (23, 0),
+            ]
+            .into_iter()
+            .map(|(slot, value)| serde_json::json!({"slot":slot,"value":value}))
+            .collect::<Vec<_>>();
+            if let Some(map) = map {
+                assignments.push(
+                    serde_json::json!({"slot":20,"layer":directory.join(format!("{map}.png"))}),
+                );
+            }
+            let samples=(0..4).map(|t|serde_json::json!({"slot":0,"time":t,"time_scale":30,"image":directory.join(format!("{}.png",if same {4}else{t}))})).collect::<Vec<_>>();
+            app.apply_debug_request_document(&serde_json::json!({"schema_version":1,"timing":{"frame":4,"fps":30,"duration_frames":300},"assignments":assignments,"timed_layers":samples}),&directory.join("request.json")).unwrap();
+            assert_eq!(app.timed_layers.len(), 4);
+            let output = directory.join(format!("output-{name}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            let result = image::open(output).unwrap().to_rgba8();
+            assert_eq!(result.dimensions(), (256, 144));
+            assert!(result.pixels().any(|p| p[3] != 0));
+            outputs.insert(name, result);
+        }
+        let current = pixels(4);
+        assert_ne!(outputs["full"], outputs["same"]);
+        assert_eq!(outputs["amount-zero"], current);
+        assert_eq!(outputs["original-full"], current);
+        assert_eq!(outputs["white"], outputs["full"]);
+        for (left, right) in [(0, 128), (128, 256)] {
+            assert!((0..144).any(|y| {
+                (left..right).any(|x| outputs["full"].get_pixel(x, y) != current.get_pixel(x, y))
+            }));
+        }
+        let expected = image::RgbaImage::from_fn(256, 144, |x, y| {
+            *if x < 128 {
+                current.get_pixel(x, y)
+            } else {
+                outputs["full"].get_pixel(x, y)
+            }
+        });
+        assert_eq!(outputs["split"], expected);
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
             std::env::var(plugin_env)
