@@ -11,6 +11,8 @@ struct GuestFiles {
     next_stream: u64,
     live_bytes: usize,
     reports: Vec<TraceModule>,
+    searches: BTreeMap<u64, GuestFileSearch>,
+    next_search: u64,
 }
 struct GuestFileStream {
     bytes: Box<[u8]>,
@@ -285,4 +287,189 @@ fn finish_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, result: Result<u64,
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+struct GuestFileSearch {
+    records: Vec<[u8; 320]>,
+    position: usize,
+}
+
+fn guest_star_match(pattern: &[u8], name: &[u8]) -> bool {
+    // A trailing DOS dot-star also matches an absent extension.
+    if let Some(prefix) = pattern.strip_suffix(b".*") {
+        if guest_star_match(prefix, name) {
+            return true;
+        }
+    }
+    let (mut p, mut n, mut star, mut retry) = (0, 0, None, 0);
+    while n < name.len() {
+        if p < pattern.len() && pattern[p] == name[n] {
+            p += 1;
+            n += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            retry = n;
+        } else if let Some(s) = star {
+            retry += 1;
+            n = retry;
+            p = s + 1;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>, String> {
+    let query = guest_file_name(query)?;
+    let (directory, pattern) = query
+        .rsplit_once('/')
+        .ok_or("relative file search is unsupported")?;
+    if directory.contains(['*', '?']) || pattern.contains('?') || pattern.ends_with('.') {
+        return Err("unsupported DOS search pattern".into());
+    }
+    let prefix = format!("{directory}/");
+    let mut candidates: BTreeMap<String, Option<&std::path::PathBuf>> = BTreeMap::new();
+    for (name, source) in &files.sources {
+        if let Some(rest) = name.strip_prefix(&prefix) {
+            let leaf = rest.split('/').next().unwrap();
+            if !guest_star_match(pattern.as_bytes(), leaf.as_bytes()) {
+                continue;
+            }
+            candidates
+                .entry(leaf.to_string())
+                .or_insert(if rest.contains('/') {
+                    None
+                } else {
+                    Some(source)
+                });
+        }
+    }
+    let mut records = Vec::new();
+    for (name, source) in candidates {
+        if name.len() >= 260 {
+            return Err("search filename exceeds WIN32_FIND_DATAA capacity".into());
+        }
+        let mut record = [0u8; 320];
+        if let Some(source) = source {
+            let metadata = match std::fs::metadata(source) {
+                Ok(value) => value,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(format!("search metadata: {e}")),
+            };
+            if !metadata.is_file() {
+                return Err("mounted search asset is not a regular file".into());
+            }
+            record[..4].copy_from_slice(&1u32.to_le_bytes()); // read-only guest mount
+            for (offset, time) in [
+                (4, metadata.created()),
+                (12, metadata.accessed()),
+                (20, metadata.modified()),
+            ] {
+                if let Ok(time) = time {
+                    record[offset..offset + 8]
+                        .copy_from_slice(&windows_filetime(time)?.to_le_bytes());
+                }
+            }
+            record[28..32].copy_from_slice(&((metadata.len() >> 32) as u32).to_le_bytes());
+            record[32..36].copy_from_slice(&(metadata.len() as u32).to_le_bytes());
+        } else {
+            record[..4].copy_from_slice(&0x10u32.to_le_bytes()); // virtual containing directory
+        }
+        record[44..44 + name.len()].copy_from_slice(name.as_bytes());
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn emulate_guest_file_search(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<u64, String> {
+        let first = operation == LegacyWin64Import::FindFirstFileA;
+        let token_or_name = read_win64_import_argument(unicorn, 0)?;
+        if operation == LegacyWin64Import::FindClose {
+            if unicorn
+                .get_data_mut()
+                .guest_files
+                .searches
+                .remove(&token_or_name)
+                .is_some()
+            {
+                return Ok(1);
+            }
+            unicorn.get_data_mut().windows_last_error = 6;
+            return Ok(0);
+        }
+        let output = read_win64_import_argument(unicorn, 1)?;
+        let (token, record, new_records) = if first {
+            let query = read_crt_stdio_c_string(unicorn, token_or_name, 1025, "file search")?;
+            let query =
+                std::str::from_utf8(&query).map_err(|_| "unsupported file search encoding")?;
+            let files = &unicorn.get_data().guest_files;
+            if files.searches.len() >= 64 || files.next_search >= 4096 {
+                return Err("file search handle capacity exceeded".into());
+            }
+            let normalized = guest_file_name(query)?;
+            let directory = normalized
+                .rsplit_once('/')
+                .ok_or("relative file search is unsupported")?
+                .0;
+            let prefix = format!("{directory}/");
+            if !files.sources.keys().any(|name| name.starts_with(&prefix)) {
+                unicorn.get_data_mut().windows_last_error = 3;
+                return Ok(u64::MAX);
+            }
+            let records = guest_find_records(files, query)?;
+            let Some(record) = records.first().copied() else {
+                unicorn.get_data_mut().windows_last_error = 2;
+                return Ok(u64::MAX);
+            };
+            if records.len()
+                + files
+                    .searches
+                    .values()
+                    .map(|s| s.records.len())
+                    .sum::<usize>()
+                > 32768
+            {
+                return Err("file search record capacity exceeded".into());
+            }
+            (0x900000000 + files.next_search * 16, record, Some(records))
+        } else {
+            let Some(search) = unicorn.get_data().guest_files.searches.get(&token_or_name) else {
+                unicorn.get_data_mut().windows_last_error = 6;
+                return Ok(0);
+            };
+            let Some(record) = search.records.get(search.position).copied() else {
+                unicorn.get_data_mut().windows_last_error = 18;
+                return Ok(0);
+            };
+            (token_or_name, record, None)
+        };
+        if output == 0 || !guest_range_has_permission(unicorn, output, 320, Prot::WRITE)? {
+            return Err("file search output is not fully writable".into());
+        }
+        unicorn
+            .mem_write(output, &record)
+            .map_err(|e| format!("file search output: {e}"))?;
+        let files = &mut unicorn.get_data_mut().guest_files;
+        if let Some(records) = new_records {
+            files.searches.insert(
+                token,
+                GuestFileSearch {
+                    records,
+                    position: 1,
+                },
+            );
+            files.next_search += 1;
+            Ok(token)
+        } else {
+            files.searches.get_mut(&token).unwrap().position += 1;
+            Ok(1)
+        }
+    })();
+    finish_guest_stdio(unicorn, result);
 }

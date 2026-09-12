@@ -104,6 +104,9 @@ enum LegacyWin64Import {
     GetConsoleMode,
     GetFileType,
     CreateFileW,
+    FindFirstFileA,
+    FindNextFileA,
+    FindClose,
     FindFirstFileExW,
     CreateThread,
     NtWriteFile,
@@ -414,6 +417,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         (_, "CreateFileW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "FindFirstFileExW") => LegacyWin64Import::FindFirstFileExW,
+        ("kernel32.dll", "FindFirstFileA") => LegacyWin64Import::FindFirstFileA,
+        ("kernel32.dll", "FindNextFileA") => LegacyWin64Import::FindNextFileA,
+        ("kernel32.dll", "FindClose") => LegacyWin64Import::FindClose,
+        (_, "FindNextFileA" | "FindClose") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (_, "FindFirstFileA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "FindFirstFileExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "CreateThread") => LegacyWin64Import::CreateThread,
         (_, "CreateThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
@@ -1610,6 +1618,17 @@ fn install_win64_import(
                         "install bounded CreateFileW import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_create_file_w(unicorn);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::FindFirstFileA
+                | LegacyWin64Import::FindNextFileA
+                | LegacyWin64Import::FindClose) => {
+                    uc("write file search return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install file search",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_guest_file_search(unicorn, operation);
                         }),
                     )?;
                 }

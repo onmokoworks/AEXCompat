@@ -16990,3 +16990,124 @@ fn load_library_ex_a_system32_search_reports_missing_driver() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn guest_file_search_returns_real_metadata_and_owns_cursor_and_handles() {
+    let source = std::env::temp_dir().join(format!(
+        "aex-find-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&source, b"actual bytes").unwrap();
+    let mut engine = test_engine(&[0xc3]);
+    for name in [
+        "c:/assets/nvrtc64_a.dll",
+        "c:/assets/nvrtc64_b.dll",
+        "c:/assets/nested/other.dll",
+    ] {
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .sources
+            .insert(name.into(), source.clone());
+    }
+    let (first, next, close) = (STUB_BASE + 0x100, STUB_BASE + 0x110, STUB_BASE + 0x120);
+    for (entry, name) in [
+        (first, "FindFirstFileA"),
+        (next, "FindNextFileA"),
+        (close, "FindClose"),
+    ] {
+        install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", name).unwrap();
+        assert!(matches!(
+            dispatch_win64_import("foreign.dll", name),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+    let (query, output) = (DATA_BASE + 0x100, DATA_BASE + 0x300);
+    engine.write(query, b"C:\\ASSETS\\nvrtc64_*.dll\0").unwrap();
+    let edge = DATA_BASE + PAGE_SIZE - 319;
+    assert!(engine.call_win64(first, [query, edge, 0, 0, 0, 0]).is_err());
+    assert!(engine.unicorn.get_data().guest_files.searches.is_empty());
+    let token = engine
+        .call_win64(first, [query, output, 0, 0, 0, 0])
+        .unwrap();
+    let record = engine.unicorn.mem_read_as_vec(output, 320).unwrap();
+    assert_eq!(&record[..4], &1u32.to_le_bytes());
+    assert_eq!(&record[32..36], &12u32.to_le_bytes());
+    assert_eq!(&record[44..58], b"nvrtc64_a.dll\0");
+    assert!(engine.call_win64(next, [token, edge, 0, 0, 0, 0]).is_err());
+    assert_eq!(
+        engine
+            .call_win64(next, [token, output, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output + 44, 14).unwrap(),
+        b"nvrtc64_b.dll\0"
+    );
+    assert_eq!(
+        engine
+            .call_win64(next, [token, output, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 18);
+    assert_eq!(engine.call_win64(close, [token, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.call_win64(close, [token, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 6);
+    let second = engine
+        .call_win64(first, [query, output, 0, 0, 0, 0])
+        .unwrap();
+    assert_ne!(second, token);
+    assert_eq!(
+        engine
+            .call_win64(next, [token, output, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine.call_win64(close, [second, 0, 0, 0, 0, 0]).unwrap();
+    engine.write(query, b"c:/assets/absent*\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(first, [query, output, 0, 0, 0, 0])
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 2);
+    engine.write(query, b"c:/missing/*.dll\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(first, [query, output, 0, 0, 0, 0])
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 3);
+    let records =
+        guest_find_records(&engine.unicorn.get_data().guest_files, "c:/assets/*.*").unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(&records[0][..4], &16u32.to_le_bytes());
+    std::fs::remove_file(source).unwrap();
+}
+
+#[test]
+fn guest_search_dos_dot_star_accepts_absent_extensions() {
+    for (pattern, name, expected) in [
+        ("name.*", "name", true),
+        ("na*.*", "name", true),
+        ("name.*", "name.dll", true),
+        ("name.*", "named", false),
+        ("*.*", "plain", true),
+        ("nvrtc64_*.dll", "nvrtc64_120_0.dll", true),
+        ("nvrtc64_*.dll", "nvrtc-builtins.dll", false),
+    ] {
+        assert_eq!(
+            guest_star_match(pattern.as_bytes(), name.as_bytes()),
+            expected
+        );
+    }
+}
