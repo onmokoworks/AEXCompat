@@ -50,6 +50,7 @@ struct State {
   void* input_checkout_view_world{};
   void* map_checkout_view_world{};
   std::vector<HostedLayer> hosted_layers;
+  std::vector<int32_t> default_self_layers;
   std::vector<PixelCheckout> pixel_checkouts;
   int32_t width{16};
   int32_t height{12};

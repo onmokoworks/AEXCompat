@@ -960,13 +960,26 @@ mod windows_e2e {
 
     #[test]
     fn smart_timed_primary_pixels_and_missing_samples_reach_plugin() {
+        assert_timed_primary_or_default_self(false);
+    }
+
+    #[test]
+    fn default_self_layer_resolves_primary_times_and_missing_samples() {
+        assert_timed_primary_or_default_self(true);
+    }
+
+    fn assert_timed_primary_or_default_self(default_self: bool) {
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let root = repository_root();
-        let aex = root.join("target/pf-timed-primary-probe-build/pf_smart_timed_primary_probe.aex");
+        let aex = root.join(if default_self {
+            "target/pf-default-self-probe-build/pf_smart_timed_multilayer_probe.aex"
+        } else {
+            "target/pf-timed-primary-probe-build/pf_smart_timed_primary_probe.aex"
+        });
         if !aex.is_file() {
-            eprintln!("skipping primary probe: build pf_smart_timed_primary_probe");
+            eprintln!("skipping timed input probe: build {}", aex.display());
             return;
         }
         let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
@@ -1026,6 +1039,81 @@ mod windows_e2e {
                 actual,
                 image::RgbaImage::from_pixel(48, 32, image::Rgba([50, 50, 50, 255]))
             );
+        }
+        if default_self {
+            let secondary = scratch.join("override.png");
+            image::RgbaImage::from_pixel(48, 32, image::Rgba([9, 18, 27, 255]))
+                .save(&secondary)
+                .unwrap();
+            let parameter: InteractiveParameter = serde_json::from_value(serde_json::json!({
+                "slot":1,"name":"Timed Layer","kind":"layer",
+                "minimum":0.0,"maximum":0.0,"value":0.0,"choices":[],
+                "color":[0,0,0,0],"components":[0.0,0.0,0.0],"component_count":0,
+                "layer_path":secondary,"enabled":true,"visible":true,"supervised":false
+            }))
+            .unwrap();
+            let overrides = layers
+                .iter()
+                .map(|sample| TimedLayerImage {
+                    slot: 1,
+                    time: sample.time,
+                    image_path: secondary.clone(),
+                })
+                .collect::<Vec<_>>();
+            for smart in [true, false] {
+                for timed in [false, true] {
+                    let mut inputs = layers.clone();
+                    if timed {
+                        inputs.extend(overrides.clone());
+                    }
+                    let mut declared = parameter.clone();
+                    if timed {
+                        declared.layer_path = None;
+                    }
+                    let params = vec![declared];
+                    let output = scratch.join(format!("override-{smart}-{timed}.png"));
+                    let report = render_experimental_image_with_timed_layers(
+                        &root,
+                        &aex,
+                        &sha,
+                        &input,
+                        &output,
+                        &params,
+                        &inputs,
+                        timing,
+                        smart,
+                        RenderPixelFormat::Argb8,
+                    )
+                    .unwrap();
+                    assert_session_render_is_healthy(&report, "default-self-explicit-override");
+                    let actual = image::open(output).unwrap().to_rgba8();
+                    assert_eq!(actual.dimensions(), (48, 32));
+                    assert!(actual.pixels().all(|p| p.0 == [9, 18, 27, 255]));
+                }
+                // A partial explicit timed binding must not borrow a missing
+                // sample from primary history, even though primary has it.
+                let mut partial = layers.clone();
+                partial.extend(overrides[..2].iter().cloned());
+                let mut declared = parameter.clone();
+                declared.layer_path = None;
+                let output = scratch.join(format!("override-missing-{smart}.png"));
+                assert!(
+                    render_experimental_image_with_timed_layers(
+                        &root,
+                        &aex,
+                        &sha,
+                        &input,
+                        &output,
+                        &[declared],
+                        &partial,
+                        timing,
+                        smart,
+                        RenderPixelFormat::Argb8
+                    )
+                    .is_err()
+                );
+                assert!(!output.exists());
+            }
         }
         // The first requested time is now current: omit its explicit sample.
         // Only that time may use the primary red input. Missing noncurrent

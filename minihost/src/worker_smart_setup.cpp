@@ -253,10 +253,15 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
           *request.requested)) return false;
   parameter_execution::probe_arbitrary_scan(
       request.entry, *request.input, *request.output, definitions);
+  smart::state().default_self_layers.clear();
   for (std::size_t slot = 1; slot < definitions.size(); ++slot) {
     if (runtime.records[slot - 1].type == 0 &&
-        runtime.records[slot - 1].layer_default == -1)
+        runtime.records[slot - 1].layer_default == -1) {
       copy_world_into_param_def(definitions[slot], *request.input_world);
+      if (!(plan.connected_map && static_cast<int32_t>(slot) ==
+              smart::state().secondary_layer_slot))
+        smart::state().default_self_layers.push_back(static_cast<int32_t>(slot));
+    }
   }
   auto& smart_state = smart::state();
   smart_state.hosted_layers.clear();

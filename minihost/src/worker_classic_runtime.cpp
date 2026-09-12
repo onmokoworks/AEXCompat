@@ -87,6 +87,8 @@ bool Context::copy_timed_layer(int32_t slot, int32_t time, uint32_t time_scale,
                                std::size_t destination_size) const {
   if (!destination || destination_size < kParameterDefinitionSize ||
       time_scale == 0) return false;
+  if (std::find(default_self_layers_.begin(), default_self_layers_.end(), slot) !=
+      default_self_layers_.end()) slot = 0;
   const auto found = std::find_if(timed_layers_.begin(), timed_layers_.end(),
       [slot, time, time_scale](const TimedLayerDefinition& layer) {
         return layer.slot == slot &&
@@ -105,8 +107,16 @@ bool Context::copy_timed_layer(int32_t slot, int32_t time, uint32_t time_scale,
 }
 
 bool Context::has_timed_slot(int32_t slot) const {
+  if (std::find(default_self_layers_.begin(), default_self_layers_.end(), slot) !=
+      default_self_layers_.end()) slot = 0;
   return std::any_of(timed_layers_.begin(), timed_layers_.end(),
       [slot](const TimedLayerDefinition& layer) { return layer.slot == slot; });
+}
+
+void Context::set_default_self_layer(int32_t slot, bool enabled) {
+  default_self_layers_.erase(std::remove(default_self_layers_.begin(),
+      default_self_layers_.end(), slot), default_self_layers_.end());
+  if (enabled && slot > 0) default_self_layers_.push_back(slot);
 }
 
 void Context::set_definition(int32_t slot,

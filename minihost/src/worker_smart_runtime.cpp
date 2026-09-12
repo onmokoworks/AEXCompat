@@ -147,6 +147,7 @@ void State::clear_transient() {
   input_checkout_view_world = nullptr;
   map_checkout_view_world = nullptr;
   hosted_layers.clear();
+  default_self_layers.clear();
   pixel_checkouts.clear();
   map_width = 0;
   map_height = 0;
@@ -185,6 +186,12 @@ const void* timed_parameter_world(int32_t slot, int32_t time, uint32_t scale,
   timed_slot = false;
   if (!g_active_state || scale == 0) return nullptr;
   const auto& layers = g_active_state->hosted_layers;
+  if (std::find(g_active_state->default_self_layers.begin(),
+                g_active_state->default_self_layers.end(), slot) !=
+          g_active_state->default_self_layers.end() &&
+      std::none_of(layers.begin(), layers.end(),
+          [slot](const auto& layer) { return layer.slot == slot; }))
+    slot = 0;
   timed_slot = std::any_of(layers.begin(), layers.end(),
       [slot](const auto& layer) { return layer.slot == slot && layer.timed; });
   if (!timed_slot) return nullptr;
@@ -259,6 +266,15 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   const bool current_time =
       static_cast<int64_t>(what_time) * runtime.current_time_scale ==
       static_cast<int64_t>(runtime.current_time) * time_scale;
+  // Only declared MYSELF layers alias the primary input. Any explicit static
+  // or timed binding owns its slot and suppresses the default completely.
+  if (std::find(runtime.default_self_layers.begin(),
+                runtime.default_self_layers.end(), index) !=
+          runtime.default_self_layers.end() &&
+      std::none_of(runtime.hosted_layers.begin(), runtime.hosted_layers.end(),
+          [index](const auto& layer) { return layer.slot == index; }) &&
+      !(index == runtime.secondary_layer_slot && runtime.map_world))
+    index = 0;
   // An explicitly supplied temporal image is available regardless of the
   // plug-in's dependency flag. Do not extend that to absent-time fallback.
   const bool explicit_time = std::any_of(runtime.hosted_layers.begin(),
@@ -834,6 +850,37 @@ bool checkout_intersection_self_test() {
                               empty_result.data()) == 0 &&
       pre_checkout_layer(nullptr, 10, 23, nullptr, 7, 1, 30,
                          empty_result.data()) == 4 && passed;
+  // Default-self is a selective alias, not a fallback for every empty layer.
+  runtime.default_self_layers = {1, 6};
+  passed = pre_checkout_layer(nullptr, 1, 30, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 && passed;
+  std::memcpy(empty_maximum.data(), empty_result.data() + 16, sizeof(empty_maximum));
+  passed = empty_maximum == std::array<int32_t, 4>{0, 0, 640, 360} &&
+      checkout_pixels(nullptr, 30, &checked_out) == 0 &&
+      checked_out == input_view.data() && checkin_pixels(nullptr, 30) == 0 && passed;
+  passed = pre_checkout_layer(nullptr, 5, 31, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 && passed;
+  std::memcpy(empty_maximum.data(), empty_result.data() + 16, sizeof(empty_maximum));
+  passed = empty_maximum == nothing && checkin_pixels(nullptr, 31) == 0 && passed;
+  // An actual connected map wins even if its slot declares MYSELF.
+  runtime.map_world = hosted_world.data();
+  runtime.map_checkout_view_world = hosted_view.data();
+  runtime.map_width = 50; runtime.map_height = 40;
+  passed = pre_checkout_layer(nullptr, 6, 32, nullptr, 7, 1, 30,
+                              empty_result.data()) == 0 && passed;
+  std::memcpy(empty_maximum.data(), empty_result.data() + 16, sizeof(empty_maximum));
+  passed = empty_maximum == std::array<int32_t, 4>{0, 0, 50, 40} &&
+      checkout_pixels(nullptr, 32, &checked_out) == 0 &&
+      checked_out == hosted_view.data() && checkin_pixels(nullptr, 32) == 0 && passed;
+  {
+    Session nested;
+    passed = state().default_self_layers.empty() && passed;
+    state().default_self_layers.push_back(4);
+  }
+  passed = &state() == &runtime && runtime.default_self_layers ==
+      std::vector<int32_t>{1, 6} && passed;
+  runtime.clear_transient();
+  passed = runtime.default_self_layers.empty() && passed;
   return passed;
 }
 

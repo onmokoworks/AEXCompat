@@ -46,6 +46,7 @@ class Context final {
   bool copy_timed_layer(int32_t slot, int32_t time, uint32_t time_scale,
                         void* destination, std::size_t destination_size) const;
   bool has_timed_slot(int32_t slot) const;
+  void set_default_self_layer(int32_t slot, bool enabled);
   void set_definition(int32_t slot, const ParameterDefinition& definition);
   bool copy_definition(int32_t slot, void* destination,
                        std::size_t destination_size) const;
@@ -75,6 +76,7 @@ class Context final {
  private:
   Context* previous_{};
   std::vector<TimedLayerDefinition> timed_layers_;
+  std::vector<int32_t> default_self_layers_;
   std::map<int32_t, ParameterDefinition> definitions_;
   std::map<int32_t, ParameterDefinition> fallback_definitions_;
   std::unordered_map<void*, uint32_t> live_checkouts_;

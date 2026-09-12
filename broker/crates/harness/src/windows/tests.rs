@@ -824,6 +824,16 @@ mod tests {
     #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_TRAILS and local Release worker"]
     fn real_trails_gui_composites_explicit_input_history() {
+        assert_real_trails_history(false);
+    }
+
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_TRAILS and local Release worker"]
+    fn real_trails_gui_composites_default_self_history() {
+        assert_real_trails_history(true);
+    }
+
+    fn assert_real_trails_history(default_self: bool) {
         let plugin = PathBuf::from(
             std::env::var("AEXCOMPAT_TEST_TRAILS")
                 .expect("explicit AEX path")
@@ -878,7 +888,8 @@ mod tests {
         app.load_input_path(&ctx, directory.join("5.png"));
         let _ = ctx.end_pass();
         for (count, mode) in [(0, 1), (1, 1), (2, 1), (1, 3), (2, 3)] {
-            let samples = [3,4].into_iter().map(|t| serde_json::json!({"slot":2,"time":t,"time_scale":30,"image":directory.join(format!("{t}.png"))})).collect::<Vec<_>>();
+            let sample_slot = if default_self { 0 } else { 2 };
+            let samples = [3,4].into_iter().map(|t| serde_json::json!({"slot":sample_slot,"time":t,"time_scale":30,"image":directory.join(format!("{t}.png"))})).collect::<Vec<_>>();
             let mut assignments = [
                 (17, 1),
                 (18, count),
@@ -898,7 +909,9 @@ mod tests {
             .into_iter()
             .map(|(slot, value)| serde_json::json!({"slot":slot,"value":value}))
             .collect::<Vec<_>>();
-            assignments.push(serde_json::json!({"slot":2,"layer":directory.join("5.png")}));
+            if !default_self {
+                assignments.push(serde_json::json!({"slot":2,"layer":directory.join("5.png")}));
+            }
             app.apply_debug_request_document(&serde_json::json!({"schema_version":1,"timing":{"frame":5,"fps":30,"duration_frames":300},"assignments":assignments,"timed_layers":samples}), &directory.join("request.json")).unwrap();
             assert_eq!(app.timed_layers.len(), 2);
             let output = directory.join(format!("output-{count}-{mode}.png"));

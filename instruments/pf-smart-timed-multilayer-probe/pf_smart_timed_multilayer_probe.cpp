@@ -192,8 +192,7 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
     case PF_Cmd_SMART_RENDER:
       return SmartRender(in_data, static_cast<PF_SmartRenderExtra*>(extra));
     case PF_Cmd_RENDER:
-      if constexpr (kLayerSlot == 0) return ClassicRender(in_data, output);
-      return PF_Err_NONE;
+      return ClassicRender(in_data, output);
     default:
       return PF_Err_NONE;
   }

@@ -748,10 +748,14 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (requested && !apply_arbitrary_text_assignments(entry, input, command_output, definitions, *requested)) return -5;
   probe_arbitrary_scan(entry, input, command_output, definitions);
   for (std::size_t slot = 1; slot < definitions.size(); ++slot)
-    if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1)
+    if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1) {
       copy_world_into_param_def(definitions[slot], input_world);
+      classic_context->set_default_self_layer(static_cast<int32_t>(slot),
+          !(connected_map && static_cast<int32_t>(slot) == g_secondary_layer_slot));
+    }
   if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
     const auto& layer = (*external_layers)[layer_index];
+    classic_context->set_default_self_layer(layer.slot, false);
     if (layer.slot < 0 || (layer.slot == 0 && !layer.timed) ||
         static_cast<std::size_t>(layer.slot) >= definitions.size() ||
         (layer.slot > 0 && g_params[layer.slot - 1].type != 0) || layer.rgba.size() !=

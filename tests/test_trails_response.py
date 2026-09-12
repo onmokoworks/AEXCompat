@@ -1,4 +1,4 @@
-"""BCC Trails explicit Input Layer history, bounded disjoint-patch oracle."""
+"""BCC Trails explicit/default-self history, bounded disjoint-patch oracle."""
 import hashlib
 import json
 import os
@@ -42,7 +42,8 @@ def test_trails_oracle_rejects_corruption(fault):
         assert_trails(actual, 2, 3)
 
 
-def test_real_trails_count_and_source_exclusion(tmp_path):
+@pytest.mark.parametrize('binding', ['explicit', 'default-self'])
+def test_real_trails_count_and_source_exclusion(tmp_path, binding):
     plugin = os.environ.get('AEXCOMPAT_TEST_TRAILS')
     if not plugin:
         pytest.skip('set AEXCOMPAT_TEST_TRAILS to local BCCTrails.aex')
@@ -55,10 +56,12 @@ def test_real_trails_count_and_source_exclusion(tmp_path):
         assignments = [{'slot': s, 'value': v} for s, v in
             ((17,1),(18,count),(19,1),(20,100),(21,0),(22,100),(23,1),(26,100),
              (37,100),(117,1),(118,100),(120,1),(121,mode),(123,100))]
-        assignments.append({'slot': 2, 'layer': str(tmp_path/'5.png')})
+        if binding == 'explicit':
+            assignments.append({'slot': 2, 'layer': str(tmp_path/'5.png')})
+        sample_slot = 2 if binding == 'explicit' else 0
         request.write_text(json.dumps({'schema_version': 1,
             'timing': {'frame': 5, 'fps': 30, 'duration_frames': 300}, 'assignments': assignments,
-            'timed_layers': [{'slot': 2, 'time': t, 'time_scale': 30, 'image': str(tmp_path/f'{t}.png')}
+            'timed_layers': [{'slot': sample_slot, 'time': t, 'time_scale': 30, 'image': str(tmp_path/f'{t}.png')}
                              for t in (3, 4)]}), encoding='utf-8')
         run = subprocess.run([str(harness),'--headless','--render-experimental-smart-request',
                               plugin,str(tmp_path/'5.png'),str(output),str(request)],
