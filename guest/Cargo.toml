@@ -5,6 +5,7 @@ members = [
     "crates/aex-clspv",
     "crates/aex-guest-worker",
     "crates/aex-host-time",
+    "crates/aex-host-identity",
     "crates/aex-unicorn-buffer",
     "crates/aex-wgpu-compute",
 ]

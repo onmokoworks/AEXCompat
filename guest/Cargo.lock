@@ -35,6 +35,7 @@ dependencies = [
  "aex-abi",
  "aex-apple-opencl",
  "aex-clspv",
+ "aex-host-identity",
  "aex-host-time",
  "aex-unicorn-buffer",
  "aex-wgpu-compute",
@@ -56,6 +57,13 @@ dependencies = [
  "unicode-script",
  "unicode-width",
  "unicorn-engine",
+]
+
+[[package]]
+name = "aex-host-identity"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

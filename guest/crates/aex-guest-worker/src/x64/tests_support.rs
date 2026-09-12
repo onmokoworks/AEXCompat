@@ -18948,3 +18948,115 @@ fn scanf_hexadecimal_accepts_sign_prefix_width_and_full_unsigned_word() {
         );
     }
 }
+
+#[test]
+fn get_user_name_w_sizes_utf16_buffer_and_preserves_failed_outputs() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "advapi32.dll", "GetUserNameW").unwrap();
+    let output = DATA_BASE + 0x100;
+    let size = DATA_BASE + 0x800;
+    let mut name = aex_host_identity::current_username().unwrap();
+    name.push(0);
+    let required = name.len() as u32;
+    let expected: Vec<u8> = name.into_iter().flat_map(u16::to_le_bytes).collect();
+    engine.write(output, &[0xa5; 520]).unwrap();
+    for capacity in [0u32, required - 1] {
+        engine.write(size, &capacity.to_le_bytes()).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, size, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 122);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(size, 4).unwrap(),
+            required.to_le_bytes()
+        );
+        assert!(
+            engine
+                .unicorn
+                .mem_read_as_vec(output, 520)
+                .unwrap()
+                .iter()
+                .all(|b| *b == 0xa5)
+        );
+    }
+    for capacity in [required, u32::MAX] {
+        engine.write(size, &capacity.to_le_bytes()).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, size, 0, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(output, expected.len())
+                .unwrap(),
+            expected
+        );
+        assert!(
+            engine
+                .unicorn
+                .mem_read_as_vec(output + expected.len() as u64, 520 - expected.len())
+                .unwrap()
+                .iter()
+                .all(|b| *b == 0xa5)
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(size, 4).unwrap(),
+            required.to_le_bytes()
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+    }
+    const PAGE: u64 = 0x30_0000_0000;
+    engine
+        .unicorn
+        .mem_map(PAGE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.write(PAGE, &required.to_le_bytes()).unwrap();
+    engine
+        .unicorn
+        .mem_protect(PAGE, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    engine.write(output, &[0xa5; 520]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(entry, [output, PAGE, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 998);
+    assert!(
+        engine
+            .unicorn
+            .mem_read_as_vec(output, 520)
+            .unwrap()
+            .iter()
+            .all(|b| *b == 0xa5)
+    );
+    engine.write(size, &required.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine.call_win64(entry, [PAGE, size, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 998);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(size, 4).unwrap(),
+        required.to_le_bytes()
+    );
+    assert_eq!(
+        engine.call_win64(entry, [output, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        dispatch_win64_import("other.dll", "GetUserNameW"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

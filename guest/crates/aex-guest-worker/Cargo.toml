@@ -20,6 +20,7 @@ aex-unicorn-buffer = { path = "../aex-unicorn-buffer" }
 aex-wgpu-compute = { path = "../aex-wgpu-compute", optional = true }
 encoding_rs = "0.8"
 aex-host-time = { path = "../aex-host-time" }
+aex-host-identity = { path = "../aex-host-identity" }
 icu_casemap = "=2.3.0"
 icu_collator = "=2.3.0"
 icu_locale_core = "=2.3.0"
