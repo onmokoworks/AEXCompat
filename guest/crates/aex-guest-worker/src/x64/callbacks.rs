@@ -3649,7 +3649,7 @@ fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
     finish_callback(unicorn, result);
 }
 
-// C-locale scanf for decimal integers, byte strings and scansets.
+// C-locale scanf for decimal/hex integers, byte strings and scansets.
 // Other conversions remain explicit compatibility gaps.
 fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
@@ -3794,12 +3794,13 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                 }
                 continue;
             }
-            if width == 0 || format.get(fi) != Some(&b'd') {
+            if width == 0 || !matches!(format.get(fi), Some(b'd' | b'x' | b'X')) {
                 return Err(format!(
                     "unsupported scanf conversion in {:?}",
                     String::from_utf8_lossy(&format)
                 ));
             }
+            let hexadecimal = matches!(format[fi], b'x' | b'X');
             fi += 1;
             while pos < input.len() && white(input[pos]) {
                 pos += 1;
@@ -3816,26 +3817,59 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
             if matches!(input[pos], b'+' | b'-') {
                 pos += 1;
             }
+            if hexadecimal
+                && pos + 1 < end
+                && input[pos] == b'0'
+                && matches!(input[pos + 1], b'x' | b'X')
+            {
+                pos += 2;
+            }
             let start = pos;
             let mut magnitude = 0u64;
-            while pos < end && input[pos].is_ascii_digit() {
-                magnitude = magnitude
-                    .checked_mul(10)
-                    .and_then(|n| n.checked_add((input[pos] - b'0') as u64))
-                    .ok_or("scanf decimal overflow")?;
+            let mut overflow = false;
+            while pos < end {
+                let digit = match input[pos] {
+                    b'0'..=b'9' => u64::from(input[pos] - b'0'),
+                    b'a'..=b'f' if hexadecimal => u64::from(input[pos] - b'a' + 10),
+                    b'A'..=b'F' if hexadecimal => u64::from(input[pos] - b'A' + 10),
+                    _ => break,
+                };
+                let next = magnitude
+                    .checked_mul(if hexadecimal { 16 } else { 10 })
+                    .and_then(|n| n.checked_add(digit));
+                magnitude = match next {
+                    Some(value) => value,
+                    None if hexadecimal => {
+                        overflow = true;
+                        u64::MAX
+                    }
+                    None => return Err("scanf decimal overflow".into()),
+                };
                 pos += 1;
             }
             if pos == start {
                 return Ok(assigned);
             }
+            if hexadecimal && overflow {
+                unicorn.get_data_mut().crt_errno = 34;
+            }
             if !suppress {
-                let value = if negative {
-                    -(magnitude as i128)
+                // MS UCRT scanf parses unsigned conversions through uint64_t,
+                // then stores the requested width (32 bits for unmodified %x).
+                let value = if hexadecimal {
+                    if negative && !overflow {
+                        magnitude.wrapping_neg() as u32
+                    } else {
+                        magnitude as u32
+                    }
                 } else {
-                    magnitude as i128
+                    let value = if negative {
+                        -(magnitude as i128)
+                    } else {
+                        magnitude as i128
+                    };
+                    i32::try_from(value).map_err(|_| "scanf decimal outside int32 range")? as u32
                 };
-                let value =
-                    i32::try_from(value).map_err(|_| "scanf decimal outside int32 range")?;
                 let slot = args
                     .checked_add(assigned * 8)
                     .ok_or("scanf va_list overflow")?;

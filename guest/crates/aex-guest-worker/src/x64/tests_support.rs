@@ -18877,3 +18877,74 @@ fn atoi_stops_at_first_non_digit_without_reading_next_page() {
         .unwrap();
     assert!(engine.call_win64(entry, [source, 0, 0, 0, 0, 0]).is_err());
 }
+
+#[test]
+fn scanf_hexadecimal_accepts_sign_prefix_width_and_full_unsigned_word() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "__stdio_common_vsscanf").unwrap();
+        let (input, format, args, output) = (
+            DATA_BASE + 0x100,
+            DATA_BASE + 0x200,
+            DATA_BASE + 0x300,
+            DATA_BASE + 0x400,
+        );
+        engine.write(args, &output.to_le_bytes()).unwrap();
+        engine.write(args + 8, &(output + 4).to_le_bytes()).unwrap();
+        for (text, fmt, status, errno, values) in [
+            ("aBcD", "%x", 1, 71, vec![0xabcd]),
+            ("  +0Xff", "%X", 1, 71, vec![255]),
+            ("ffffffff", "%x", 1, 71, vec![u32::MAX]),
+            ("-1", "%x", 1, 71, vec![u32::MAX]),
+            ("-0x80000000", "%x", 1, 71, vec![0x80000000]),
+            ("100000001", "%x", 1, 71, vec![1]),
+            ("fffffffffffffffff", "%x", 1, 34, vec![u32::MAX]),
+            ("-fffffffffffffffff", "%x", 1, 34, vec![u32::MAX]),
+            ("1234", "%2x%x", 2, 71, vec![0x12, 0x34]),
+            ("0x12", "%3x%x", 2, 71, vec![1, 2]),
+            ("0x12", "%1x", 1, 71, vec![0]),
+            ("0x12", "%2x", 0, 71, vec![]),
+            ("ff 10", "%*x%d", 1, 71, vec![10]),
+            ("g", "%x", 0, 71, vec![]),
+            ("0x", "%x", 0, 71, vec![]),
+            ("", "%x", u32::MAX as u64, 71, vec![]),
+        ] {
+            engine.write(input, format!("{text}\0").as_bytes()).unwrap();
+            engine.write(format, format!("{fmt}\0").as_bytes()).unwrap();
+            engine.write(output, &[0xa5; 12]).unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 71;
+            assert_eq!(
+                engine
+                    .call_win64(entry, [2, input, u64::MAX, format, 0, args])
+                    .unwrap(),
+                status,
+                "{text} {fmt}"
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, errno);
+            let bytes = engine.unicorn.mem_read_as_vec(output, 12).unwrap();
+            for (index, value) in values.iter().enumerate() {
+                assert_eq!(&bytes[index * 4..index * 4 + 4], &value.to_le_bytes());
+            }
+            assert!(bytes[values.len() * 4..].iter().all(|b| *b == 0xa5));
+        }
+        engine.write(input, b"ff\0").unwrap();
+        engine.write(format, b"%x\0").unwrap();
+        engine
+            .write(args, &(DATA_BASE + PAGE_SIZE - 2).to_le_bytes())
+            .unwrap();
+        engine.write(DATA_BASE + PAGE_SIZE - 2, &[0xa5; 2]).unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [2, input, u64::MAX, format, 0, args])
+                .is_err()
+        );
+        assert_eq!(
+            engine
+                .unicorn
+                .mem_read_as_vec(DATA_BASE + PAGE_SIZE - 2, 2)
+                .unwrap(),
+            [0xa5; 2]
+        );
+    }
+}
