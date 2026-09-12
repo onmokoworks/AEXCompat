@@ -3705,6 +3705,17 @@ fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
         if !terminated {
             return Err("LoadLibraryA path exceeds 259 bytes".into());
         }
+        if let Ok(requested) = std::str::from_utf8(&path) {
+            if let Some(library) = guest_library_by_name(unicorn.get_data(), requested) {
+                if !library.initialized {
+                    return Err(
+                        "LoadLibraryA requested a DLL while its initialization is incomplete"
+                            .into(),
+                    );
+                }
+                return Ok(Some(library.base));
+            }
+        }
         let Some(module) = path
             .rsplit(|byte| matches!(byte, b'\\' | b'/'))
             .next()
@@ -4192,7 +4203,7 @@ fn emulate_get_module_handle_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 }
                 // This API-set lookup is an optional capability probe. Keep
                 // it unavailable so the guest takes its modeled fallback.
-                _ => None,
+                _ => guest_library_by_name(unicorn.get_data(), &name).map(|library| library.base),
             }
         } else {
             None
@@ -4228,11 +4239,7 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 
     let module = if flags & FROM_ADDRESS != 0 {
-        unicorn
-            .get_data()
-            .image_region
-            .filter(|(start, end)| (*start..*end).contains(&name_or_address))
-            .map(|(start, _)| start)
+        guest_module_from_address(unicorn.get_data(), name_or_address)
     } else if name_or_address == 0 {
         unicorn.get_data().image_region.map(|(start, _)| start)
     } else {
@@ -4253,6 +4260,11 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         if terminated && bytes.eq_ignore_ascii_case(b"kernel32.dll") {
             Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+        } else if terminated {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|name| guest_library_by_name(unicorn.get_data(), name))
+                .map(|library| library.base)
         } else {
             None
         }
@@ -4262,7 +4274,9 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     };
-    if unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
+    if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false)
+        || unicorn.mem_write(output, &module.to_le_bytes()).is_err()
+    {
         fail(unicorn, ERROR_INVALID_PARAMETER);
         return;
     }
@@ -4299,11 +4313,7 @@ fn emulate_get_module_handle_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 
     let module = if flags & FROM_ADDRESS != 0 {
-        unicorn
-            .get_data()
-            .image_region
-            .filter(|(start, end)| (*start..*end).contains(&name_or_address))
-            .map(|(start, _)| start)
+        guest_module_from_address(unicorn.get_data(), name_or_address)
     } else if name_or_address == 0 {
         unicorn.get_data().image_region.map(|(start, _)| start)
     } else {
@@ -4333,7 +4343,10 @@ fn emulate_get_module_handle_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
         {
             Some(WINDOWS_KERNEL32_MODULE_TOKEN)
         } else {
-            None
+            String::from_utf16(&units)
+                .ok()
+                .and_then(|name| guest_library_by_name(unicorn.get_data(), &name))
+                .map(|library| library.base)
         }
     };
 
@@ -4356,6 +4369,12 @@ fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
     let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let capacity = unicorn.reg_read(RegisterX86::R8).unwrap_or_default() as u32;
     let image_base = unicorn.get_data().image_region.map(|region| region.0);
+    let real_path = unicorn
+        .get_data()
+        .loaded_libraries
+        .iter()
+        .find(|(_, library)| library.base == module)
+        .map(|(name, _)| name.replace('/', "\\"));
     let path = if (module == 0 && image_base.is_some()) || Some(module) == image_base {
         Some(r"C:\AEXCompat\guest-plugin.aex")
     } else if module == WINDOWS_KERNEL32_MODULE_TOKEN {
@@ -4363,7 +4382,7 @@ fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
     } else if module == WINDOWS_NTDLL_MODULE_TOKEN {
         Some(r"C:\Windows\System32\ntdll.dll")
     } else {
-        None
+        real_path.as_deref()
     };
     let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
         unicorn.get_data_mut().windows_last_error = error;
@@ -4390,7 +4409,10 @@ fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
     bytes.extend_from_slice(&0u16.to_le_bytes());
-    if unicorn.mem_write(output, &bytes).is_err() {
+    if !guest_range_has_permission(unicorn, output, bytes.len() as u64, Prot::WRITE)
+        .unwrap_or(false)
+        || unicorn.mem_write(output, &bytes).is_err()
+    {
         fail(unicorn, ERROR_INVALID_PARAMETER);
         return;
     }
@@ -4559,7 +4581,15 @@ fn emulate_get_proc_address(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
     };
 
-    if module != WINDOWS_KERNEL32_MODULE_TOKEN && module != WINDOWS_NTDLL_MODULE_TOKEN {
+    let real_module = unicorn
+        .get_data()
+        .loaded_libraries
+        .values()
+        .find(|library| library.base == module);
+    if real_module.is_none()
+        && module != WINDOWS_KERNEL32_MODULE_TOKEN
+        && module != WINDOWS_NTDLL_MODULE_TOKEN
+    {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     }
@@ -4585,6 +4615,28 @@ fn emulate_get_proc_address(unicorn: &mut Unicorn<'_, GuestState>) {
             break;
         }
         bytes.push(value[0]);
+    }
+    if let Some(library) = unicorn
+        .get_data()
+        .loaded_libraries
+        .values()
+        .find(|library| library.base == module)
+    {
+        let address = if terminated {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|name| library.exports.get(name))
+                .filter(|address| (library.base..library.end).contains(address))
+                .copied()
+        } else {
+            None
+        };
+        if let Some(address) = address {
+            let _ = unicorn.reg_write(RegisterX86::RAX, address);
+        } else {
+            fail(unicorn, ERROR_PROC_NOT_FOUND);
+        }
+        return;
     }
     let dynamic = if module == WINDOWS_KERNEL32_MODULE_TOKEN && terminated {
         match bytes.as_slice() {
@@ -7485,11 +7537,7 @@ fn emulate_rtl_pc_to_file_header(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
-    let module = unicorn
-        .get_data()
-        .image_region
-        .filter(|(start, end)| (*start..*end).contains(&pc))
-        .map(|(start, _)| start)
+    let module = guest_module_from_address(unicorn.get_data(), pc)
         .or_else(|| (pc == WINDOWS_KERNEL32_MODULE_TOKEN).then_some(WINDOWS_KERNEL32_MODULE_TOKEN))
         .unwrap_or_default();
     if output != 0 && unicorn.mem_write(output, &module.to_le_bytes()).is_err() {

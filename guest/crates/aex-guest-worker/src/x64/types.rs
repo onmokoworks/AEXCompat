@@ -162,6 +162,7 @@ fn record_named_unsupported_suite_call(
 
 #[derive(Default)]
 struct GuestState {
+    loaded_libraries: BTreeMap<String, GuestLibrary>,
     params: Vec<GuestParam>,
     custom_ui_registration: Option<CustomUiRegistration>,
     callback_error: Option<String>,
@@ -458,6 +459,7 @@ pub struct GuestEngine<'a> {
     scheduler_deferred_ready: VecDeque<u32>,
     parked_main_context: Option<Context>,
     next_data: u64,
+    next_import_stub: u64,
     image_base: u64,
     image_end: u64,
     census_hook: Option<UcHookId>,

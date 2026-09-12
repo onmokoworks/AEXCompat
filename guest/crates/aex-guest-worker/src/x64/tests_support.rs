@@ -394,6 +394,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         scheduler_deferred_ready: VecDeque::new(),
         parked_main_context: None,
         next_data: DATA_BASE,
+        next_import_stub: 0,
         image_base: TEST_CODE,
         image_end: TEST_CODE + PAGE_SIZE,
         census_hook: None,

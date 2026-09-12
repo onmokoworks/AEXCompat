@@ -433,6 +433,7 @@ include!("x64/types.rs");
 include!("x64/imports.rs");
 include!("x64/opencl_imports.rs");
 include!("x64/engine.rs");
+include!("x64/libraries.rs");
 include!("x64/callbacks.rs");
 include!("x64/iterate_and_suites.rs");
 include!("x64/tail.rs");

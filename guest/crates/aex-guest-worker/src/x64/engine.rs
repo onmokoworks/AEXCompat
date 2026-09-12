@@ -139,6 +139,13 @@ impl GuestEngine<'static> {
     }
 
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
+        match std::env::var_os("AEXCOMPAT_GUEST_LIBRARIES") {
+            Some(path) => Self::load_with_library_manifest(image, std::path::Path::new(&path)),
+            None => Self::load_primary(image, true),
+        }
+    }
+
+    fn load_primary(image: &PeImage, attach: bool) -> Result<Self, GuestError> {
         let trace_points = discover_trace_points(image);
         let image_report = image.report();
         let mut trace_modules = vec![TraceModule {
@@ -914,6 +921,7 @@ impl GuestEngine<'static> {
             scheduler_deferred_ready: VecDeque::new(),
             parked_main_context: None,
             next_data,
+            next_import_stub: stub_index,
             image_base: image.image_base(),
             image_end: image.image_base() + image_size,
             census_hook: None,
@@ -940,11 +948,13 @@ impl GuestEngine<'static> {
             state.extended_empty_string = empty;
             state.extended_string_table_valid = true;
         }
-        engine.run_process_attach_addresses(
-            image.image_base(),
-            image.tls_callbacks(),
-            image.dll_entry_address(),
-        )?;
+        if attach {
+            engine.run_process_attach_addresses(
+                image.image_base(),
+                image.tls_callbacks(),
+                image.dll_entry_address(),
+            )?;
+        }
         Ok(engine)
     }
 

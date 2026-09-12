@@ -1551,6 +1551,34 @@ enum AvxStateSync {
     AllRegisters,
 }
 
+fn native_avx_state_sync(
+    instruction: &iced_x86::Instruction,
+    info_factory: &mut InstructionInfoFactory,
+) -> Option<AvxStateSync> {
+    if instruction.is_invalid() || instruction.encoding() != EncodingKind::VEX {
+        return None;
+    }
+    match instruction.mnemonic() {
+        Mnemonic::Vzeroupper => Some(AvxStateSync::AllUpper),
+        Mnemonic::Vzeroall => Some(AvxStateSync::AllRegisters),
+        // The invalid-instruction fallback must observe the complete YMM
+        // source before it writes an aliased XMM destination.
+        Mnemonic::Vextractf128 => None,
+        _ if instruction.op0_kind() == OpKind::Register
+            && matches!(
+                info_factory.info(&instruction).op_access(0),
+                OpAccess::Write
+                    | OpAccess::CondWrite
+                    | OpAccess::ReadWrite
+                    | OpAccess::ReadCondWrite
+            ) =>
+        {
+            iced_xmm_index(instruction.op0_register()).map(AvxStateSync::RegisterUpper)
+        }
+        _ => None,
+    }
+}
+
 fn discover_avx_state_sync_points(
     bytes: &[u8],
     address: u64,
@@ -1578,25 +1606,7 @@ fn discover_avx_state_sync_points(
         if instruction.is_invalid() || instruction.encoding() != EncodingKind::VEX {
             continue;
         }
-        let sync = match instruction.mnemonic() {
-            Mnemonic::Vzeroupper => Some(AvxStateSync::AllUpper),
-            Mnemonic::Vzeroall => Some(AvxStateSync::AllRegisters),
-            // The invalid-instruction fallback must observe the complete YMM
-            // source before it writes an aliased XMM destination.
-            Mnemonic::Vextractf128 => None,
-            _ if instruction.op0_kind() == OpKind::Register
-                && matches!(
-                    info_factory.info(&instruction).op_access(0),
-                    OpAccess::Write
-                        | OpAccess::CondWrite
-                        | OpAccess::ReadWrite
-                        | OpAccess::ReadCondWrite
-                ) =>
-            {
-                iced_xmm_index(instruction.op0_register()).map(AvxStateSync::RegisterUpper)
-            }
-            _ => None,
-        };
+        let sync = native_avx_state_sync(&instruction, &mut info_factory);
         if let Some(sync) = sync {
             if points.len() >= MAX_AVX_STATE_SYNC_POINTS {
                 return Err(GuestError::AvxStateCapacity {
@@ -1698,6 +1708,47 @@ fn install_avx_state_sync_points(
             }),
         )?;
     }
+    Ok(())
+}
+
+// Large dependency DLLs can contain more VEX candidates than the bounded
+// eager map permits. Inspect only the current instruction, using fixed scratch
+// space and one hook per executable section. This also avoids replacing the
+// primary image's dense synchronization map when another module is loaded.
+fn install_runtime_avx_state_sync(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    start: u64,
+    end: u64,
+) -> Result<(), GuestError> {
+    if start >= end {
+        return Err(GuestError::ImageAlignment);
+    }
+    uc(
+        "install runtime native AVX state sync",
+        unicorn.add_code_hook(start, end - 1, |unicorn, address, size| {
+            // Unicorn may report a sentinel size for an invalid instruction. Its
+            // bounded invalid-instruction handler owns that case.
+            if size == 0 || size > 15 {
+                return;
+            }
+            let mut bytes = [0u8; 15];
+            let bytes = &mut bytes[..size as usize];
+            if unicorn.mem_read(address, bytes).is_err() {
+                unicorn.get_data_mut().callback_error =
+                    Some("cannot read AVX synchronization instruction".into());
+                let _ = unicorn.emu_stop();
+                return;
+            }
+            // Decode from the executed PC, including valid legacy prefixes
+            // before VEX (address-size and segment overrides).
+            let mut decoder = Decoder::with_ip(64, bytes, address, DecoderOptions::NONE);
+            let instruction = decoder.decode();
+            let mut factory = InstructionInfoFactory::new();
+            if let Some(sync) = native_avx_state_sync(&instruction, &mut factory) {
+                synchronize_native_avx_state(unicorn, sync);
+            }
+        }),
+    )?;
     Ok(())
 }
 
