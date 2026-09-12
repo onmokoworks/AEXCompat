@@ -3890,3 +3890,51 @@ fn emulate_crt_strcat(unicorn: &mut Unicorn<'_, GuestState>) {
     })();
     finish_guest_stdio(unicorn, result);
 }
+
+fn emulate_crt_strchr(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let needle = read_win64_import_argument(unicorn, 1)? as u8;
+        if source == 0 {
+            return Err("strchr source is null".into());
+        }
+        // Fresh map snapshot, valid for this synchronous read; never read past
+        // the first matching byte or NUL, even when it ends a mapped region.
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|e| format!("guest memory-map query failed: {e}"))?;
+        let mut readable_end = None;
+        for offset in 0..MAX_CRT_STRING_BYTES {
+            let address = source
+                .checked_add(offset)
+                .ok_or("strchr source range overflow")?;
+            if readable_end.is_none_or(|end| address > end) {
+                readable_end = regions
+                    .iter()
+                    .find(|r| {
+                        r.begin <= address && address <= r.end && r.perms & Prot::READ.0 as u32 != 0
+                    })
+                    .map(|r| r.end);
+                if readable_end.is_none() {
+                    return Err(format!(
+                        "strchr source address {address:#x} is not readable"
+                    ));
+                }
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|e| format!("strchr source read: {e}"))?;
+            if byte[0] == needle {
+                return Ok(address);
+            }
+            if byte[0] == 0 {
+                return Ok(0);
+            }
+        }
+        Err(format!(
+            "strchr source exceeds {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+        ))
+    })();
+    finish_guest_stdio(unicorn, result);
+}

@@ -18602,3 +18602,84 @@ fn strcat_preflights_full_append_and_requires_terminated_inputs() {
         );
     }
 }
+
+#[test]
+fn strchr_finds_first_byte_including_nul_and_preserves_source() {
+    for dll in [
+        "vcruntime140.dll",
+        "ucrtbase.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "strchr").unwrap();
+        engine.write(DATA_BASE, b"abac\xff\0z").unwrap();
+        for (needle, expected) in [
+            (b'a' as u64, DATA_BASE),
+            (b'c' as u64, DATA_BASE + 3),
+            (u64::MAX, DATA_BASE + 4),
+            (0x1234_0000_0000_0100, DATA_BASE + 5),
+            (b'z' as u64, 0),
+        ] {
+            engine.unicorn.get_data_mut().crt_errno = 71;
+            engine.unicorn.get_data_mut().windows_last_error = 72;
+            assert_eq!(
+                engine
+                    .call_win64(entry, [DATA_BASE, needle, 0, 0, 0, 0])
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 72);
+        }
+        let mut actual = [0; 7];
+        engine.read(DATA_BASE, &mut actual).unwrap();
+        assert_eq!(&actual, b"abac\xff\0z");
+        assert!(engine.call_win64(entry, [0; 6]).is_err());
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "strchr"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn strchr_stops_at_boundary_match_and_rechecks_read_permissions() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    const PAGE: u64 = 0x30_0000_0000;
+    let last = PAGE + PAGE_SIZE - 1;
+    install_win64_import(&mut engine.unicorn, entry, "vcruntime140.dll", "strchr").unwrap();
+    engine
+        .unicorn
+        .mem_map(PAGE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.write(last, b"X").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(entry, [last, b'X' as u64, 0, 0, 0, 0])
+            .unwrap(),
+        last
+    );
+    assert!(
+        engine
+            .call_win64(entry, [last, b'Y' as u64, 0, 0, 0, 0])
+            .is_err()
+    );
+    engine.write(last, &[0]).unwrap();
+    assert_eq!(
+        engine.call_win64(entry, [last, 0, 0, 0, 0, 0]).unwrap(),
+        last
+    );
+    assert_eq!(
+        engine
+            .call_win64(entry, [last, b'X' as u64, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine
+        .unicorn
+        .mem_protect(PAGE, PAGE_SIZE, Prot::WRITE)
+        .unwrap();
+    assert!(engine.call_win64(entry, [last, 0, 0, 0, 0, 0]).is_err());
+}
