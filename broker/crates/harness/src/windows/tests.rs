@@ -440,15 +440,25 @@ mod tests {
     #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_FRAMESLICE and local Release worker"]
     fn real_frameslice_gui_renders_timed_primary_bands() {
+        assert_real_temporal_bands("AEXCOMPAT_TEST_FRAMESLICE", "gui-frameslice");
+    }
+
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_TIMESLICE and local Release worker"]
+    fn real_timeslice_gui_renders_timed_primary_bands() {
+        assert_real_temporal_bands("AEXCOMPAT_TEST_TIMESLICE", "gui-timeslice");
+    }
+
+    fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
-            std::env::var("AEXCOMPAT_TEST_FRAMESLICE")
+            std::env::var(plugin_env)
                 .expect("explicit AEX path")
                 .replace('\\', "/"),
         );
         let repository =
             canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
                 .unwrap();
-        let directory = temporary_directory("gui-frameslice");
+        let directory = temporary_directory(temporary_prefix);
         let input = directory.join("current.png");
         let past = directory.join("past.png");
         image::RgbaImage::from_fn(256, 144, |x, y| image::Rgba([x as u8, y as u8, 193, 255]))

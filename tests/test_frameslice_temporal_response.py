@@ -36,10 +36,11 @@ def test_frameslice_oracle_rejects_corruption(fault):
     assert actual != wanted
 
 
-def test_real_frameslice_temporal_bands(tmp_path):
-    plugin = os.environ.get('AEXCOMPAT_TEST_FRAMESLICE')
+@pytest.mark.parametrize('plugin_env', ['AEXCOMPAT_TEST_FRAMESLICE', 'AEXCOMPAT_TEST_TIMESLICE'])
+def test_real_frameslice_temporal_bands(tmp_path, plugin_env):
+    plugin = os.environ.get(plugin_env)
     if not plugin:
-        pytest.skip('set AEXCOMPAT_TEST_FRAMESLICE to local FrameSlice.aex')
+        pytest.skip(f'set {plugin_env} to the corresponding local AEX')
     harness = ROOT/'broker/target/release/aexcompat-harness.exe'
     source, past = tmp_path/'current.png', tmp_path/'past.png'
     Image.frombytes('RGBA', (WIDTH, HEIGHT), frame(False)).save(source)
