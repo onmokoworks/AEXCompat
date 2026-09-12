@@ -821,6 +821,103 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_TRAILS and local Release worker"]
+    fn real_trails_gui_composites_explicit_input_history() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_TRAILS")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-trails");
+        let pixels = |times: &[u8]| {
+            image::RgbaImage::from_fn(256, 144, |x, y| {
+                for &time in times {
+                    let left = 16 + u32::from(time - 3) * 80;
+                    if (left..left + 32).contains(&x) && (40..104).contains(&y) {
+                        return image::Rgba([x as u8, y as u8, time * 30, 255]);
+                    }
+                }
+                image::Rgba([0, 0, 0, 0])
+            })
+        };
+        for time in [3, 4, 5] {
+            pixels(&[time])
+                .save(directory.join(format!("{time}.png")))
+                .unwrap();
+        }
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters.iter().find(|p| p.slot == 2).unwrap().name,
+            "Input Layer"
+        );
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, directory.join("5.png"));
+        let _ = ctx.end_pass();
+        for (count, mode) in [(0, 1), (1, 1), (2, 1), (1, 3), (2, 3)] {
+            let samples = [3,4].into_iter().map(|t| serde_json::json!({"slot":2,"time":t,"time_scale":30,"image":directory.join(format!("{t}.png"))})).collect::<Vec<_>>();
+            let mut assignments = [
+                (17, 1),
+                (18, count),
+                (19, 1),
+                (20, 100),
+                (21, 0),
+                (22, 100),
+                (23, 1),
+                (26, 100),
+                (37, 100),
+                (117, 1),
+                (118, 100),
+                (120, 1),
+                (121, mode),
+                (123, 100),
+            ]
+            .into_iter()
+            .map(|(slot, value)| serde_json::json!({"slot":slot,"value":value}))
+            .collect::<Vec<_>>();
+            assignments.push(serde_json::json!({"slot":2,"layer":directory.join("5.png")}));
+            app.apply_debug_request_document(&serde_json::json!({"schema_version":1,"timing":{"frame":5,"fps":30,"duration_frames":300},"assignments":assignments,"timed_layers":samples}), &directory.join("request.json")).unwrap();
+            assert_eq!(app.timed_layers.len(), 2);
+            let output = directory.join(format!("output-{count}-{mode}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            let mut times = ((5 - count) as u8..5).collect::<Vec<_>>();
+            if mode == 1 {
+                times.push(5);
+            }
+            assert_eq!(image::open(output).unwrap().to_rgba8(), pixels(&times));
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
             std::env::var(plugin_env)
