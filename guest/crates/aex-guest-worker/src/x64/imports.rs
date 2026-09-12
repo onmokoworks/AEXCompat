@@ -112,6 +112,7 @@ enum LegacyWin64Import {
     MsvcpExceptionPtrRethrow,
     VcruntimeExceptionCopy,
     VcruntimeExceptionDestroy,
+    UncaughtExceptions,
     CxxThrowException,
     CopySign,
     Cos,
@@ -1018,6 +1019,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, symbol) if symbol.contains("__ExceptionPtr") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("vcruntime140.dll", "__uncaught_exceptions") => LegacyWin64Import::UncaughtExceptions,
+        (_, "__uncaught_exceptions") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("vcruntime140.dll", "__std_exception_copy") => LegacyWin64Import::VcruntimeExceptionCopy,
         ("vcruntime140.dll", "__std_exception_destroy") => {
             LegacyWin64Import::VcruntimeExceptionDestroy
@@ -1522,6 +1525,17 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_vcruntime_exception_destroy(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::UncaughtExceptions => {
+                    // No guest execution occurs during C++ unwinding today:
+                    // throws stop emulation or transfer directly to selector
+                    // abort. Thus every reachable query has zero in-flight
+                    // exceptions. Update this with per-thread state when real
+                    // unwinding/catch dispatch is implemented.
+                    uc(
+                        "install uncaught exception count",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(0)),
                     )?;
                 }
                 LegacyWin64Import::CxxThrowException => {

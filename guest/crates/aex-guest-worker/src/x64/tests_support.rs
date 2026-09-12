@@ -18051,3 +18051,35 @@ fn crt_mb_cur_max_tracks_supported_c_locale_and_preserves_errno() {
         assert!(engine.call_win64(set + 32, [0; 6]).is_err());
     }
 }
+
+#[test]
+fn uncaught_exception_count_is_zero_at_normal_boundaries_without_suppressing_throws() {
+    const CODE: u64 = 0x1000_0000;
+    let code = selector_throw_fixture(false, 0xdead_beef, TEST_THROW_INFO, 0);
+    let mut engine = test_engine(&code);
+    install_test_cxx_throw(&mut engine);
+    let query = STUB_BASE + 0x700;
+    install_win64_import(
+        &mut engine.unicorn,
+        query,
+        "vcruntime140.dll",
+        "__uncaught_exceptions",
+    )
+    .unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 71;
+    for thread in [1, 9] {
+        engine.unicorn.get_data_mut().current_windows_thread_id = thread;
+        assert_eq!(engine.call_win64(query, [u64::MAX; 6]).unwrap(), 0);
+    }
+    assert!(matches!(engine.call_win64(CODE, [0; 6]),
+        Err(GuestError::Callback(message)) if message.contains("_CxxThrowException")));
+    assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+    install_win64_import(
+        &mut engine.unicorn,
+        query + 32,
+        "foreign.dll",
+        "__uncaught_exceptions",
+    )
+    .unwrap();
+    assert!(engine.call_win64(query + 32, [0; 6]).is_err());
+}
