@@ -17139,3 +17139,46 @@ fn guest_search_dos_dot_star_accepts_absent_extensions() {
         );
     }
 }
+
+#[test]
+fn crt_ascii_classes_cover_bytes_eof_and_reject_invalid_ints() {
+    let upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let lower = "abcdefghijklmnopqrstuvwxyz";
+    let digits = "0123456789";
+    let punct = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+    let cases = [
+        ("isalpha", format!("{upper}{lower}")),
+        ("isdigit", digits.to_owned()),
+        ("isgraph", format!("{upper}{lower}{digits}{punct}")),
+        ("islower", lower.to_owned()),
+        ("isprint", format!(" {upper}{lower}{digits}{punct}")),
+        ("ispunct", punct.to_owned()),
+        ("isupper", upper.to_owned()),
+        ("isxdigit", "0123456789ABCDEFabcdef".to_owned()),
+    ];
+    for (name, accepted) in cases {
+        for dll in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {
+            let mut engine = test_engine(&[0xc3]);
+            let entry = STUB_BASE + 0x100;
+            install_win64_import(&mut engine.unicorn, entry, dll, name).unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 77;
+            for input in -1i32..=255 {
+                let argument = 0x1234_5678_0000_0000 | u64::from(input as u32);
+                let result = engine.call_win64(entry, [argument, 0, 0, 0, 0, 0]).unwrap();
+                assert_eq!(
+                    result != 0,
+                    accepted.bytes().any(|byte| i32::from(byte) == input),
+                    "{dll}!{name}({input})"
+                );
+            }
+            assert_eq!(engine.unicorn.get_data().crt_errno, 77);
+            for input in [256u64, 0xffff_fffe, 0x8000_0000] {
+                assert!(engine.call_win64(entry, [input, 0, 0, 0, 0, 0]).is_err());
+            }
+        }
+        assert!(matches!(
+            dispatch_win64_import("foreign.dll", name),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+}

@@ -15,6 +15,34 @@ enum OpenClBridgeSymbol {
     ReleaseKernel,
 }
 
+// The guest CRT remains in its initial C locale; locale mutation is unsupported.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CrtAsciiClass {
+    Alpha,
+    Digit,
+    Graph,
+    Lower,
+    Print,
+    Punct,
+    Upper,
+    Xdigit,
+}
+
+impl CrtAsciiClass {
+    fn contains(self, byte: u8) -> bool {
+        match self {
+            Self::Alpha => byte.is_ascii_alphabetic(),
+            Self::Digit => byte.is_ascii_digit(),
+            Self::Graph => byte.is_ascii_graphic(),
+            Self::Lower => byte.is_ascii_lowercase(),
+            Self::Print => byte.is_ascii_graphic() || byte == b' ',
+            Self::Punct => byte.is_ascii_punctuation(),
+            Self::Upper => byte.is_ascii_uppercase(),
+            Self::Xdigit => byte.is_ascii_hexdigit(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegacyWin64Import {
     Malloc,
@@ -24,6 +52,7 @@ enum LegacyWin64Import {
     CrtStricmp,
     CrtIsSpace,
     CrtIsAlnum,
+    CrtAsciiClass(CrtAsciiClass),
     CrtToLower,
     CrtToUpper,
     AlignedMalloc,
@@ -842,6 +871,36 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtIsAlnum
         }
         (_, "isalnum") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isalpha") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Alpha)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isdigit") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Digit)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isgraph") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Graph)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "islower") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Lower)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isprint") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Print)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "ispunct") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Punct)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isupper") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Upper)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isxdigit") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Xdigit)
+        }
+        (
+            _,
+            "isalpha" | "isdigit" | "isgraph" | "islower" | "isprint" | "ispunct" | "isupper"
+            | "isxdigit",
+        ) => return Win64ImportDispatch::UnsupportedLegacyImport,
+
         (_, "tolower") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "toupper") => {
             LegacyWin64Import::CrtToUpper
@@ -1035,6 +1094,27 @@ fn install_win64_import(
                                 Ok(u64::from(
                                     input >= 0 && (input as u8).is_ascii_alphanumeric(),
                                 ))
+                            })();
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtAsciiClass(class) => {
+                    uc(
+                        "write CRT character classification return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT character classification import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let input = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+                                if !(-1..=255).contains(&input) {
+                                    return Err(format!(
+                                        "CRT {class:?} classification input is neither unsigned char nor EOF"
+                                    ));
+                                }
+                                Ok(u64::from(input >= 0 && class.contains(input as u8)))
                             })();
                             finish_guest_stdio(unicorn, result);
                         }),
