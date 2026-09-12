@@ -1381,6 +1381,93 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_AEGPULAB and local Release worker"]
+    fn real_aegpulab_gui_copy_and_box_pixels() {
+        let plugin = PathBuf::from(std::env::var("AEXCOMPAT_TEST_AEGPULAB").unwrap());
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-aegpulab");
+        let input = directory.join("input.png");
+        let source = image::RgbaImage::from_fn(32, 24, |x, y| {
+            image::Rgba([
+                ((x * 7 + y * 3) % 256) as u8,
+                ((y * 9 + x * 2) % 256) as u8,
+                ((x * 5 + y * 11) % 256) as u8,
+                255,
+            ])
+        });
+        source.save(&input).unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters.iter().find(|p| p.slot == 1).unwrap().name,
+            "Effect"
+        );
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input);
+        let _ = ctx.end_pass();
+        for mode in [1, 3] {
+            app.apply_debug_request_document(
+                &serde_json::json!({"schema_version":1,
+                "timing":{"frame":0,"fps":30,"duration_frames":300},
+                "assignments":[{"slot":1,"value":mode},{"slot":2,"value":1},
+                    {"slot":4,"value":3},{"slot":5,"value":1}]}),
+                &directory.join("request.json"),
+            )
+            .unwrap();
+            let output = directory.join(format!("mode-{mode}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [32, 24]);
+            let result = image::open(output).unwrap().to_rgba8();
+            assert_eq!(result.dimensions(), (32, 24));
+            for (x, y, actual) in result.enumerate_pixels() {
+                let mut expected = *source.get_pixel(x, y);
+                if mode == 3 {
+                    for c in 0..4 {
+                        let mut sum = 0u32;
+                        for dy in -3..=3 {
+                            for dx in -3..=3 {
+                                sum += source.get_pixel(
+                                    (x as i32 + dx).clamp(0, 31) as u32,
+                                    (y as i32 + dy).clamp(0, 23) as u32,
+                                )[c] as u32;
+                            }
+                        }
+                        expected[c] = (sum / 49) as u8;
+                    }
+                }
+                assert_eq!(*actual, expected, "mode={mode} x={x} y={y}");
+            }
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
             std::env::var(plugin_env)
