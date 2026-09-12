@@ -3649,7 +3649,8 @@ fn emulate_checkout_output(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
     finish_callback(unicorn, result);
 }
 
-// C-locale decimal scanf. Other conversions remain explicit compatibility gaps.
+// C-locale scanf for decimal integers, byte strings and scansets.
+// Other conversions remain explicit compatibility gaps.
 fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let options = read_win64_import_argument(unicorn, 0)?;
@@ -3732,6 +3733,66 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
             }
             if fi == width_start {
                 width = usize::MAX;
+            }
+            if width != 0 && matches!(format.get(fi), Some(b's' | b'[')) {
+                let conversion = format[fi];
+                fi += 1;
+                let set = if conversion == b'[' {
+                    Some(scanf_byte_set(&format, &mut fi)?)
+                } else {
+                    while pos < input.len() && white(input[pos]) {
+                        pos += 1;
+                    }
+                    None
+                };
+                if pos == input.len() {
+                    return Ok(if assigned != 0 {
+                        assigned
+                    } else {
+                        u32::MAX as u64
+                    });
+                }
+                let start = pos;
+                let end = pos.saturating_add(width).min(input.len());
+                while pos < end
+                    && set
+                        .as_ref()
+                        .map_or_else(|| !white(input[pos]), |set| set[input[pos] as usize])
+                {
+                    pos += 1;
+                }
+                if pos == start {
+                    return Ok(assigned);
+                }
+                if !suppress {
+                    let slot = args
+                        .checked_add(assigned * 8)
+                        .ok_or("scanf va_list overflow")?;
+                    if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
+                        return Err("scanf va_list unreadable".into());
+                    }
+                    let pointer = unicorn
+                        .mem_read_as_vec(slot, 8)
+                        .map_err(|e| e.to_string())?;
+                    let output = u64::from_le_bytes(pointer.try_into().unwrap());
+                    let mut bytes = input[start..pos].to_vec();
+                    bytes.push(0);
+                    if output == 0
+                        || !guest_range_has_permission(
+                            unicorn,
+                            output,
+                            bytes.len() as u64,
+                            Prot::WRITE,
+                        )?
+                    {
+                        return Err("scanf string output unwritable".into());
+                    }
+                    unicorn
+                        .mem_write(output, &bytes)
+                        .map_err(|e| e.to_string())?;
+                    assigned += 1;
+                }
+                continue;
             }
             if width == 0 || format.get(fi) != Some(&b'd') {
                 return Err(format!(
@@ -3937,4 +3998,41 @@ fn emulate_crt_strchr(unicorn: &mut Unicorn<'_, GuestState>) {
         ))
     })();
     finish_guest_stdio(unicorn, result);
+}
+
+// `position` starts immediately after `[`, and finishes after its closing `]`.
+fn scanf_byte_set(format: &[u8], position: &mut usize) -> Result<[bool; 256], String> {
+    let inverted = format.get(*position) == Some(&b'^');
+    if inverted {
+        *position += 1;
+    }
+    let mut set = [false; 256];
+    let mut first = true;
+    loop {
+        let byte = *format.get(*position).ok_or("unterminated scanf scanset")?;
+        if byte == b']' && !first {
+            *position += 1;
+            break;
+        }
+        first = false;
+        *position += 1;
+        if format.get(*position) == Some(&b'-')
+            && format.get(*position + 1).is_some_and(|b| *b != b']')
+        {
+            let last = format[*position + 1];
+            // MS CRT accepts both ascending and descending inclusive ranges.
+            for item in byte.min(last)..=byte.max(last) {
+                set[item as usize] = true;
+            }
+            *position += 2;
+        } else {
+            set[byte as usize] = true;
+        }
+    }
+    if inverted {
+        for item in &mut set {
+            *item = !*item;
+        }
+    }
+    Ok(set)
 }

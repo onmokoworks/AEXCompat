@@ -18683,3 +18683,112 @@ fn strchr_stops_at_boundary_match_and_rechecks_read_permissions() {
         .unwrap();
     assert!(engine.call_win64(entry, [last, 0, 0, 0, 0, 0]).is_err());
 }
+
+#[test]
+fn scanf_strings_and_scansets_honor_width_sets_and_suppression() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "ucrtbase.dll",
+        "__stdio_common_vsscanf",
+    )
+    .unwrap();
+    let (input, format, args, output) = (
+        DATA_BASE + 0x100,
+        DATA_BASE + 0x200,
+        DATA_BASE + 0x300,
+        DATA_BASE + 0x400,
+    );
+    engine.write(args, &output.to_le_bytes()).unwrap();
+    engine
+        .write(args + 8, &(output + 32).to_le_bytes())
+        .unwrap();
+    for (text, fmt, status, expected) in [
+        (
+            "key value with spaces\nnext",
+            "%s %[^\n]",
+            2,
+            vec!["key", "value with spaces"],
+        ),
+        ("  abcdef", "%2s%s", 2, vec!["ab", "cdef"]),
+        ("aBcdefZ0", "%[a-zA-Z]", 1, vec!["aBcdefZ"]),
+        ("zyxa!", "%[z-a]", 1, vec!["zyxa"]),
+        ("]]-x", "%[]-]", 1, vec!["]]-"]),
+        ("abc]tail", "%[^]]", 1, vec!["abc"]),
+        ("skip rest here", "%*s %[^\n]", 1, vec!["rest here"]),
+        ("abc123", "%*[a-z]%s", 1, vec!["123"]),
+        (" a", "%[a-z]", 0, vec![]),
+        ("", "%[^\n]", u32::MAX as u64, vec![]),
+        (" \t", "%s", u32::MAX as u64, vec![]),
+        ("123", "%[a-z]", 0, vec![]),
+    ] {
+        engine.write(input, format!("{text}\0").as_bytes()).unwrap();
+        engine.write(format, format!("{fmt}\0").as_bytes()).unwrap();
+        engine.write(output, &[0xa5; 64]).unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        assert_eq!(
+            engine
+                .call_win64(entry, [2, input, u64::MAX, format, 0, args])
+                .unwrap(),
+            status,
+            "{fmt}"
+        );
+        let mut actual = [0; 64];
+        engine.read(output, &mut actual).unwrap();
+        for index in 0..2 {
+            let field = &actual[index * 32..index * 32 + 32];
+            if let Some(value) = expected.get(index) {
+                let value = format!("{value}\0");
+                assert_eq!(&field[..value.len()], value.as_bytes(), "{fmt}");
+                assert!(field[value.len()..].iter().all(|b| *b == 0xa5));
+            } else {
+                assert!(field.iter().all(|b| *b == 0xa5));
+            }
+        }
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+    }
+}
+
+#[test]
+fn scanf_scanset_rejects_malformed_format_and_preflights_output() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "api-ms-win-crt-stdio-l1-1-0.dll",
+        "__stdio_common_vsscanf",
+    )
+    .unwrap();
+    let (input, format, args) = (DATA_BASE + 0x100, DATA_BASE + 0x200, DATA_BASE + 0x300);
+    const PAGE: u64 = 0x30_0000_0000;
+    engine
+        .unicorn
+        .mem_map(PAGE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.write(input, b"abc\0").unwrap();
+    engine
+        .write(args, &(PAGE + PAGE_SIZE - 2).to_le_bytes())
+        .unwrap();
+    for fmt in [
+        b"%[a-z]\0".as_slice(),
+        b"%s\0",
+        b"%[\0",
+        b"%[]\0",
+        b"%[^\0",
+        b"%0s\0",
+    ] {
+        engine.write(format, fmt).unwrap();
+        engine.write(PAGE + PAGE_SIZE - 2, &[0xa5; 2]).unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [2, input, u64::MAX, format, 0, args])
+                .is_err()
+        );
+        let mut actual = [0; 2];
+        engine.read(PAGE + PAGE_SIZE - 2, &mut actual).unwrap();
+        assert_eq!(actual, [0xa5; 2]);
+    }
+}
