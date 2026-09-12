@@ -80,6 +80,7 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     GetVolumeInformationA,
+    Errno,
     GetHostByName,
     ExitThread,
     CoCreateInstance,
@@ -699,6 +700,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ) => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("ucrtbase.dll" | "api-ms-win-crt-runtime-l1-1-0.dll", "_errno") => {
+            LegacyWin64Import::Errno
+        }
+        (_, "_errno") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ws2_32.dll" | "wsock32.dll", "gethostname" | "ORDINAL 57") => {
             LegacyWin64Import::GetHostname
         }
@@ -2159,6 +2164,16 @@ fn install_win64_import(
                         "install bounded FindFirstFileExW import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_find_first_file_ex_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Errno => {
+                    uc("write _errno return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _errno",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_errno_pointer(unicorn);
+                            finish_guest_stdio(unicorn, result);
                         }),
                     )?;
                 }
@@ -6547,10 +6562,8 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
         }
 
         // UCRT's invalid-parameter path preserves a non-null result slot when
-        // either string pointer is NULL.  There is no guest-visible `_errno`
-        // import in this backend, so the ABI-observable contract here is the
-        // returned `errno_t`; the internal errno remains thread-logical and
-        // must not be exposed as process-global guest storage.
+        // either string pointer is NULL. Return errno_t and update the calling
+        // thread's errno through the same storage used by the _errno pointer.
         if filename_pointer == 0 || mode_pointer == 0 {
             return Ok(EINVAL);
         }
@@ -6572,7 +6585,10 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
 
     match result {
         Ok(errno) => {
-            unicorn.get_data_mut().crt_errno = errno;
+            if let Err(error) = set_guest_crt_errno(unicorn, errno) {
+                finish_guest_stdio(unicorn, Err(error));
+                return;
+            }
             let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(errno));
         }
         Err(error) => {
@@ -6672,7 +6688,10 @@ fn emulate_strncpy_s(unicorn: &mut Unicorn<'_, GuestState>) {
     match result {
         Ok((errno, set_errno)) => {
             if set_errno {
-                unicorn.get_data_mut().crt_errno = errno;
+                if let Err(error) = set_guest_crt_errno(unicorn, errno) {
+                    finish_guest_stdio(unicorn, Err(error));
+                    return;
+                }
             }
             let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(errno));
         }
@@ -7679,6 +7698,7 @@ fn fail_windows_thread_callback(unicorn: &mut Unicorn<'_, GuestState>, error: St
     if let Some(pending) = unicorn.get_data_mut().pending_windows_thread.take() {
         let exiting_id = unicorn.get_data().current_windows_thread_id;
         let _ = release_guest_hostent(unicorn, exiting_id);
+        let _ = release_guest_errno(unicorn, exiting_id);
         let stack = unicorn
             .get_data()
             .windows_threads
@@ -7807,6 +7827,7 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
         let exit_code = pending.exit_code.expect("thread entry completed");
         let exiting_id = unicorn.get_data().current_windows_thread_id;
         release_guest_hostent(unicorn, exiting_id)?;
+        release_guest_errno(unicorn, exiting_id)?;
         unicorn.get_data_mut().windows_objects.abandon(exiting_id);
         let (stack_base, stack_size) = {
             let thread = unicorn
@@ -7927,7 +7948,7 @@ fn dispatch_windows_thread(
         caller_tls_values,
         caller_fls_values,
         caller_last_error: unicorn.get_data().windows_last_error,
-        caller_crt_errno: unicorn.get_data().crt_errno,
+        caller_crt_errno: get_guest_crt_errno(unicorn)?,
         caller_thread_error_mode: unicorn.get_data().windows_thread_error_mode,
         caller_thread_id: unicorn.get_data().current_windows_thread_id,
         completion_return,
@@ -9105,7 +9126,7 @@ fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>) {
         let seconds = i64::from_le_bytes(bytes);
         // Windows _localtime64 documented UTC range through 3000-12-31.
         if !(0..=32_535_215_999).contains(&seconds) {
-            unicorn.get_data_mut().crt_errno = 22;
+            set_guest_crt_errno(unicorn, 22)?;
             return Ok(0);
         }
         if guest_environment_value(unicorn.get_data(), b"TZ").is_some() {
@@ -9679,4 +9700,87 @@ fn guest_gethostbyname(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, Str
         }
         Err(aex_host_identity::resolver::ResolveError::Unsupported(error)) => Err(error),
     }
+}
+
+const CRT_ERRNO_BASE: u64 = 0xb00000000;
+const MAX_CRT_ERRNO_SLOTS: u64 = 4096;
+
+fn get_guest_crt_errno(unicorn: &Unicorn<'_, GuestState>) -> Result<u32, String> {
+    let state = unicorn.get_data();
+    if let Some(address) = state
+        .crt_errno_buffers
+        .get(&state.current_windows_thread_id)
+    {
+        if !guest_range_has_permission(unicorn, *address, 4, Prot::READ)? {
+            return Err("errno storage is not readable".into());
+        }
+        let mut bytes = [0; 4];
+        unicorn
+            .mem_read(*address, &mut bytes)
+            .map_err(|e| format!("errno read: {e}"))?;
+        Ok(u32::from_le_bytes(bytes))
+    } else {
+        Ok(state.crt_errno)
+    }
+}
+
+fn set_guest_crt_errno(unicorn: &mut Unicorn<'_, GuestState>, value: u32) -> Result<(), String> {
+    let state = unicorn.get_data();
+    if let Some(address) = state
+        .crt_errno_buffers
+        .get(&state.current_windows_thread_id)
+        .copied()
+    {
+        if !guest_range_has_permission(unicorn, address, 4, Prot::WRITE)? {
+            return Err("errno storage is not writable".into());
+        }
+        unicorn
+            .mem_write(address, &value.to_le_bytes())
+            .map_err(|e| format!("errno write: {e}"))?;
+    }
+    unicorn.get_data_mut().crt_errno = value;
+    Ok(())
+}
+
+fn guest_errno_pointer(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let thread = unicorn.get_data().current_windows_thread_id;
+    if let Some(address) = unicorn.get_data().crt_errno_buffers.get(&thread).copied() {
+        if !guest_range_has_permission(unicorn, address, 4, Prot::READ | Prot::WRITE)? {
+            return Err("_errno borrowed storage permissions changed".into());
+        }
+        return Ok(address);
+    }
+    let value = unicorn.get_data().crt_errno;
+    let address = (0..MAX_CRT_ERRNO_SLOTS)
+        .map(|slot| CRT_ERRNO_BASE + slot * PAGE_SIZE)
+        .find(|address| {
+            !unicorn
+                .get_data()
+                .crt_errno_buffers
+                .values()
+                .any(|used| used == address)
+        })
+        .ok_or("_errno thread storage exhausted")?;
+    unicorn
+        .mem_map(address, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .map_err(|e| format!("_errno allocation: {e}"))?;
+    if let Err(error) = unicorn.mem_write(address, &value.to_le_bytes()) {
+        let _ = unicorn.mem_unmap(address, PAGE_SIZE);
+        return Err(format!("_errno initial value: {error}"));
+    }
+    unicorn
+        .get_data_mut()
+        .crt_errno_buffers
+        .insert(thread, address);
+    Ok(address)
+}
+
+fn release_guest_errno(unicorn: &mut Unicorn<'_, GuestState>, thread: u32) -> Result<(), String> {
+    if let Some(address) = unicorn.get_data().crt_errno_buffers.get(&thread).copied() {
+        unicorn
+            .mem_unmap(address, PAGE_SIZE)
+            .map_err(|e| format!("_errno release: {e}"))?;
+        unicorn.get_data_mut().crt_errno_buffers.remove(&thread);
+    }
+    Ok(())
 }

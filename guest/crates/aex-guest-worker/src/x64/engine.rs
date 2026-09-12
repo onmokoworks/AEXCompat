@@ -2016,6 +2016,8 @@ impl GuestEngine<'static> {
                         .map(|(index, slot)| (*index, slot.value))
                         .collect();
                     let last_error = self.unicorn.get_data().windows_last_error;
+                    let crt_errno =
+                        get_guest_crt_errno(&self.unicorn).map_err(GuestError::Callback)?;
                     let thread_error_mode = self.unicorn.get_data().windows_thread_error_mode;
                     let mut teb_stack = [0u8; 16];
                     uc(
@@ -2060,6 +2062,7 @@ impl GuestEngine<'static> {
                         .insert(
                             thread_id,
                             ParkedWindowsThread {
+                                crt_errno,
                                 context,
                                 pending,
                                 tls_values,
@@ -2123,6 +2126,8 @@ impl GuestEngine<'static> {
                         .map(|(index, slot)| (*index, slot.value))
                         .collect();
                     child.pending.caller_last_error = self.unicorn.get_data().windows_last_error;
+                    child.pending.caller_crt_errno =
+                        get_guest_crt_errno(&self.unicorn).map_err(GuestError::Callback)?;
                     child.pending.caller_thread_error_mode =
                         self.unicorn.get_data().windows_thread_error_mode;
                     child.pending.caller_thread_id =
@@ -2139,6 +2144,7 @@ impl GuestEngine<'static> {
                         slot.value = child.fls_values.get(index).copied().unwrap_or(0);
                     }
                     self.unicorn.get_data_mut().windows_last_error = child.last_error;
+                    self.unicorn.get_data_mut().crt_errno = child.crt_errno;
                     self.unicorn.get_data_mut().windows_thread_error_mode = child.thread_error_mode;
                     self.unicorn.get_data_mut().current_windows_thread_id = self
                         .unicorn

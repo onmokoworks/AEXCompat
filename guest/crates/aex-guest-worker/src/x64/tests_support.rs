@@ -21056,3 +21056,83 @@ fn gethostbyname_aliases_resolve_actual_ipv4_and_require_startup() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn errno_pointer_is_coherent_with_crt_errors_and_memory_operations() {
+    const ERRNO: u64 = STUB_BASE + 0x410;
+    const OPEN: u64 = STUB_BASE + 0x420;
+    const SET: u64 = STUB_BASE + 0x430;
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-runtime-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, ERRNO, dll, "_errno").unwrap();
+        install_win64_import(&mut engine.unicorn, OPEN, "ucrtbase.dll", "fopen").unwrap();
+        install_win64_import(&mut engine.unicorn, SET, "ucrtbase.dll", "memset").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 77;
+        let pointer = engine.call_win64(ERRNO, [0; 6]).unwrap();
+        assert_eq!(get_guest_crt_errno(&engine.unicorn).unwrap(), 77);
+        assert_eq!(engine.call_win64(ERRNO, [0; 6]).unwrap(), pointer);
+        engine.call_win64(SET, [pointer, 0x11, 4, 0, 0, 0]).unwrap();
+        assert_eq!(get_guest_crt_errno(&engine.unicorn).unwrap(), 0x11111111);
+        engine.call_win64(OPEN, [0; 6]).unwrap();
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(pointer, 4).unwrap(),
+            22u32.to_le_bytes()
+        );
+        assert_eq!(get_guest_crt_errno(&engine.unicorn).unwrap(), 22);
+        assert!(!guest_range_has_permission(&engine.unicorn, pointer, 4, Prot::EXEC).unwrap());
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "_errno"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn errno_pointer_survives_thread_yield_and_child_storage_is_released() {
+    const ERRNO: u64 = STUB_BASE + 0x410;
+    const CREATE: u64 = STUB_BASE + 0x420;
+    const SWITCH: u64 = STUB_BASE + 0x430;
+    let mut code = vec![0x48, 0x83, 0xec, 0x28];
+    push_mov_imm64(&mut code, [0x48, 0xb8], ERRNO);
+    code.extend_from_slice(&[0xff, 0xd0, 0xc7, 0x00, 42, 0, 0, 0]);
+    push_mov_imm64(&mut code, [0x48, 0xb9], DATA_BASE + 0x300);
+    code.extend_from_slice(&[0x48, 0x89, 0x01]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+    code.extend_from_slice(&[0xff, 0xd0]);
+    push_mov_imm64(&mut code, [0x48, 0xb8], ERRNO);
+    code.extend_from_slice(&[0xff, 0xd0, 0x8b, 0x00, 0x48, 0x83, 0xc4, 0x28, 0xc3]);
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for (stub, dll, symbol) in [
+        (ERRNO, "ucrtbase.dll", "_errno"),
+        (CREATE, "kernel32.dll", "CreateThread"),
+        (SWITCH, "kernel32.dll", "SwitchToThread"),
+    ] {
+        install_win64_import(&mut engine.unicorn, stub, dll, symbol).unwrap();
+    }
+    let parent = engine.call_win64(ERRNO, [0; 6]).unwrap();
+    engine.write(parent, &77u32.to_le_bytes()).unwrap();
+    let handle = engine
+        .call_win64(CREATE, [0, 0, TEST_CODE, 0, 0, 0])
+        .unwrap();
+    assert_eq!(
+        engine.unicorn.get_data().windows_threads[&handle].exit_code,
+        42
+    );
+    assert_eq!(get_guest_crt_errno(&engine.unicorn).unwrap(), 77);
+    assert_eq!(engine.call_win64(ERRNO, [0; 6]).unwrap(), parent);
+    let child = u64::from_le_bytes(
+        engine
+            .unicorn
+            .mem_read_as_vec(DATA_BASE + 0x300, 8)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    assert_ne!(child, parent);
+    assert!(!guest_range_has_permission(&engine.unicorn, child, 4, Prot::READ).unwrap());
+    assert_eq!(engine.unicorn.get_data().crt_errno_buffers.len(), 1);
+}

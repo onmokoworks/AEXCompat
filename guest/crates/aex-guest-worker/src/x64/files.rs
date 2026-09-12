@@ -355,14 +355,14 @@ fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
         let name = read_win64_import_argument(unicorn, 0)?;
         let mode = read_win64_import_argument(unicorn, 1)?;
         if name == 0 || mode == 0 {
-            unicorn.get_data_mut().crt_errno = 22;
+            set_guest_crt_errno(unicorn, 22)?;
             return Ok(0);
         }
         let name = read_crt_stdio_c_string(unicorn, name, MAX_CRT_STRING_BYTES, "fopen filename")?;
         let mode = read_crt_stdio_c_string(unicorn, mode, 64, "fopen mode")?;
         let (stream, errno) = open_guest_stream(unicorn, &name, &mode)?;
         if errno != 0 {
-            unicorn.get_data_mut().crt_errno = errno;
+            set_guest_crt_errno(unicorn, errno)?;
         }
         Ok(stream)
     })();
@@ -827,7 +827,7 @@ fn guest_wstat64i32(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String
         .mem_write(output, &record)
         .map_err(|e| e.to_string())?;
     if result != 0 {
-        unicorn.get_data_mut().crt_errno = result;
+        set_guest_crt_errno(unicorn, result)?;
         Ok(u32::MAX as u64)
     } else {
         Ok(0)
@@ -1003,7 +1003,7 @@ fn guest_fullpath(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> 
     let result = canonical_guest_fullpath(&path)?;
     let required = result.len() as u64;
     if output != 0 && capacity < required {
-        unicorn.get_data_mut().crt_errno = 34; // ERANGE
+        set_guest_crt_errno(unicorn, 34)?; // ERANGE
         return Ok(0);
     }
     let allocated = output == 0;
@@ -1011,7 +1011,7 @@ fn guest_fullpath(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> 
         // Nonempty-path _fullpath ignores maxLength when allocating. Empty
         // paths delegate to getcwd, whose requested capacity must also fit.
         if path.is_empty() && capacity != 0 && capacity < required {
-            unicorn.get_data_mut().crt_errno = 34;
+            set_guest_crt_errno(unicorn, 34)?;
             return Ok(0);
         }
         match allocate_crt_region(
@@ -1024,7 +1024,7 @@ fn guest_fullpath(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> 
         ) {
             Ok(pointer) => pointer,
             Err(_) => {
-                unicorn.get_data_mut().crt_errno = 12;
+                set_guest_crt_errno(unicorn, 12)?;
                 return Ok(0);
             }
         }
@@ -1086,7 +1086,7 @@ fn emulate_wfopen(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         let (stream, errno) = open_guest_stream(unicorn, name.as_bytes(), mode.as_bytes())?;
         if errno != 0 {
-            unicorn.get_data_mut().crt_errno = errno;
+            set_guest_crt_errno(unicorn, errno)?;
         }
         Ok(stream)
     })();

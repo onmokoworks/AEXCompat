@@ -250,6 +250,7 @@ struct GuestState {
     pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
     crt_errno: u32,
+    crt_errno_buffers: BTreeMap<u32, u64>,
     guest_files: GuestFiles,
     performance_counter_origin: Option<std::time::Instant>,
     windows_module_refcounts: HashMap<u64, u32>,
@@ -496,6 +497,7 @@ pub struct GuestEngine<'a> {
 }
 
 struct ParkedWindowsThread {
+    crt_errno: u32,
     context: Context,
     pending: PendingWindowsThread,
     tls_values: BTreeMap<u32, u64>,

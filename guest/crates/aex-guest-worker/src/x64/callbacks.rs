@@ -3665,7 +3665,7 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
             ));
         }
         if buffer == 0 || format == 0 {
-            unicorn.get_data_mut().crt_errno = 22;
+            set_guest_crt_errno(unicorn, 22)?;
             return Ok(u32::MAX as u64);
         }
         let format = read_crt_stdio_c_string(unicorn, format, 4096, "scanf format")?;
@@ -3851,7 +3851,7 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                 return Ok(assigned);
             }
             if hexadecimal && overflow {
-                unicorn.get_data_mut().crt_errno = 34;
+                set_guest_crt_errno(unicorn, 34)?;
             }
             if !suppress {
                 // MS UCRT scanf parses unsigned conversions through uint64_t,
@@ -4241,7 +4241,7 @@ fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
                 2_147_483_647
             };
             if magnitude > limit {
-                unicorn.get_data_mut().crt_errno = 34;
+                set_guest_crt_errno(unicorn, 34)?;
             } // ERANGE
             let magnitude = magnitude.min(limit) as i64;
             let value = if negative { -magnitude } else { magnitude } as i32;

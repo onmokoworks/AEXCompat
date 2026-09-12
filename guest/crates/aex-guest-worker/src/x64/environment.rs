@@ -98,7 +98,10 @@ fn emulate_crt_putenv(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         }
         Err(errno) => {
-            unicorn.get_data_mut().crt_errno = errno;
+            if let Err(error) = set_guest_crt_errno(unicorn, errno) {
+                finish_guest_stdio(unicorn, Err(error));
+                return;
+            }
             let _ = unicorn.reg_write(RegisterX86::RAX, u32::MAX as u64);
         }
     }
