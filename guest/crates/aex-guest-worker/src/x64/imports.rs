@@ -79,6 +79,7 @@ enum LegacyWin64Import {
     StdioVsnprintfS,
     StdioVsscanf,
     StdioVsprintf,
+    AcRtIobFunc,
     Fgetc,
     Fread,
     Fclose,
@@ -839,6 +840,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "__stdio_common_vsprintf") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__acrt_iob_func") => {
+            LegacyWin64Import::AcRtIobFunc
+        }
+        (_, "__acrt_iob_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fread") => LegacyWin64Import::Fread,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fclose") => LegacyWin64Import::Fclose,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "getc" | "fgetc") => {
@@ -2407,6 +2412,18 @@ fn install_win64_import(
                         "install OutputDebugStringA import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_output_debug_string_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::AcRtIobFunc => {
+                    uc(
+                        "write standard FILE return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install standard FILE import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_acrt_iob_func(unicorn);
                         }),
                     )?;
                 }

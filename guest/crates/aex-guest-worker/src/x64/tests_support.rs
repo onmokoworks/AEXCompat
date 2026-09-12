@@ -16796,6 +16796,7 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
             GuestFileStream {
                 bytes: vec![0, 127, 128, 255].into_boxed_slice(),
                 position: 0,
+                readable: true,
             },
         );
         engine.unicorn.get_data_mut().crt_errno = 77;
@@ -17385,4 +17386,99 @@ fn strcmp_tracks_each_readable_span_and_refreshes_changed_mappings() {
         .unwrap();
     engine.unicorn.mem_write(LEFT + 4096, b"c\0").unwrap();
     assert_eq!(compare(&mut engine).unwrap(), 0);
+}
+
+#[test]
+fn standard_files_are_stable_owned_typed_and_not_reopened_after_close() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let iob = STUB_BASE + 0x100;
+        let getc = iob + 16;
+        let read = getc + 16;
+        let close = read + 16;
+        for (entry, name) in [
+            (iob, "__acrt_iob_func"),
+            (getc, "getc"),
+            (read, "fread"),
+            (close, "fclose"),
+        ] {
+            install_win64_import(&mut engine.unicorn, entry, dll, name).unwrap();
+        }
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        let mut tokens = Vec::new();
+        for index in 0..3 {
+            let token = engine.call_win64(iob, [index, 0, 0, 0, 0, 0]).unwrap();
+            assert_eq!(
+                token,
+                engine
+                    .call_win64(iob, [0xabcd_0000_0000_0000 | index, 0, 0, 0, 0, 0])
+                    .unwrap()
+            );
+            assert!(!tokens.contains(&token));
+            assert!(guest_range_has_permission(&engine.unicorn, token, 8, Prot::READ).unwrap());
+            assert!(!guest_range_has_permission(&engine.unicorn, token, 8, Prot::WRITE).unwrap());
+            assert!(!guest_range_has_permission(&engine.unicorn, token, 8, Prot::EXEC).unwrap());
+            tokens.push(token);
+        }
+        assert_eq!(engine.unicorn.get_data().guest_files.next_stream, 3);
+        assert_eq!(
+            engine.call_win64(getc, [tokens[0], 0, 0, 0, 0, 0]).unwrap(),
+            u32::MAX as u64
+        );
+        engine.write(DATA_BASE, &[0x5a; 8]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(read, [DATA_BASE, 1, 8, tokens[0], 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut output = [0; 8];
+        engine.read(DATA_BASE, &mut output).unwrap();
+        assert_eq!(output, [0x5a; 8]);
+        for token in &tokens[1..] {
+            assert!(
+                engine
+                    .call_win64(getc, [*token, 0, 0, 0, 0, 0])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("output-only")
+            );
+            assert!(
+                engine
+                    .call_win64(read, [DATA_BASE, 1, 8, *token, 0, 0])
+                    .unwrap_err()
+                    .to_string()
+                    .contains("output-only")
+            );
+        }
+        assert!(
+            engine
+                .call_win64(close, [tokens[0] + 8, 0, 0, 0, 0, 0])
+                .is_err()
+        );
+        for (index, token) in tokens.iter().enumerate() {
+            assert_eq!(
+                engine.call_win64(close, [*token, 0, 0, 0, 0, 0]).unwrap(),
+                0
+            );
+            assert_eq!(
+                engine
+                    .call_win64(iob, [index as u64, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                *token
+            );
+            assert!(engine.call_win64(getc, [*token, 0, 0, 0, 0, 0]).is_err());
+            assert!(engine.call_win64(close, [*token, 0, 0, 0, 0, 0]).is_err());
+        }
+        assert!(engine.unicorn.get_data().guest_files.streams.is_empty());
+        assert_eq!(engine.unicorn.get_data().guest_files.next_stream, 3);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        for index in [3, u32::MAX as u64] {
+            assert!(engine.call_win64(iob, [index, 0, 0, 0, 0, 0]).is_err());
+        }
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "__acrt_iob_func"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
 }

@@ -9,6 +9,7 @@ struct GuestFiles {
     sources: BTreeMap<String, std::path::PathBuf>,
     streams: BTreeMap<u64, GuestFileStream>,
     next_stream: u64,
+    standard_streams: [Option<u64>; 3],
     live_bytes: usize,
     reports: Vec<TraceModule>,
     searches: BTreeMap<u64, GuestFileSearch>,
@@ -17,6 +18,7 @@ struct GuestFiles {
 struct GuestFileStream {
     bytes: Box<[u8]>,
     position: usize,
+    readable: bool,
 }
 
 fn guest_file_name(name: &str) -> Result<String, String> {
@@ -172,6 +174,7 @@ fn open_guest_stream(
         GuestFileStream {
             bytes: bytes.into_boxed_slice(),
             position: 0,
+            readable: true,
         },
     );
     files.reports.push(TraceModule {
@@ -181,6 +184,42 @@ fn open_guest_stream(
         symbols: vec![],
     });
     Ok((token, 0))
+}
+
+// Standard FILE objects have stable identities, including after fclose. The
+// worker has no guest stdin input; stdout/stderr are output-only. Output calls
+// remain explicit unsupported imports until their capture semantics are provided.
+fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let index = read_win64_import_argument(unicorn, 0)? as u32 as usize;
+        if index >= 3 {
+            return Err("__acrt_iob_func index is outside the three standard streams".into());
+        }
+        let files = &unicorn.get_data().guest_files;
+        if let Some(token) = files.standard_streams[index] {
+            return Ok(token);
+        }
+        if files.streams.len() >= 64 || files.next_stream >= MAX_GUEST_STREAM_OPENS {
+            return Err("standard FILE token capacity exceeded".into());
+        }
+        let token = GUEST_STREAM_BASE + files.next_stream * PAGE_SIZE;
+        unicorn
+            .mem_map(token, PAGE_SIZE, Prot::READ)
+            .map_err(|e| format!("standard FILE token allocation: {e}"))?;
+        let files = &mut unicorn.get_data_mut().guest_files;
+        files.next_stream += 1;
+        files.standard_streams[index] = Some(token);
+        files.streams.insert(
+            token,
+            GuestFileStream {
+                bytes: Box::default(),
+                position: 0,
+                readable: index == 0,
+            },
+        );
+        Ok(token)
+    })();
+    finish_guest_stdio(unicorn, result);
 }
 
 fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -212,6 +251,9 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
                 .streams
                 .get_mut(&token)
                 .ok_or("getc received stale or foreign FILE")?;
+            if !stream.readable {
+                return Err("getc received an output-only FILE".into());
+            }
             return Ok(match stream.bytes.get(stream.position) {
                 Some(byte) => {
                     let value = u64::from(*byte);
@@ -226,9 +268,16 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
             if !unicorn.get_data().guest_files.streams.contains_key(&token) {
                 return Err("fclose received stale or foreign FILE".into());
             }
-            unicorn
-                .mem_unmap(token, PAGE_SIZE)
-                .map_err(|e| format!("fclose token unmap: {e}"))?;
+            if !unicorn
+                .get_data()
+                .guest_files
+                .standard_streams
+                .contains(&Some(token))
+            {
+                unicorn
+                    .mem_unmap(token, PAGE_SIZE)
+                    .map_err(|e| format!("fclose token unmap: {e}"))?;
+            }
             let files = &mut unicorn.get_data_mut().guest_files;
             let stream = files.streams.remove(&token).unwrap();
             files.live_bytes -= stream.bytes.len();
@@ -251,6 +300,9 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
             .streams
             .get(&token)
             .ok_or("fread received stale or foreign FILE")?;
+        if !stream.readable {
+            return Err("fread received an output-only FILE".into());
+        }
         let actual = (wanted as usize).min(stream.bytes.len() - stream.position);
         if actual == 0 {
             return Ok(0);
