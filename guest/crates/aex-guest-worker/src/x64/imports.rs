@@ -41,6 +41,8 @@ enum LegacyWin64Import {
     StdioVsprintf,
     FopenS,
     StrncpyS,
+    MsvcpLockitCtor,
+    MsvcpLockitDtor,
     MsvcpMutexInit,
     MsvcpMutexLock,
     MsvcpMutexUnlock,
@@ -350,6 +352,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         None => {}
     }
     let legacy = match (normalized_library.as_str(), symbol) {
+        ("msvcp140.dll", "??0_Lockit@std@@QEAA@H@Z") => LegacyWin64Import::MsvcpLockitCtor,
+        ("msvcp140.dll", "??1_Lockit@std@@QEAA@XZ") => LegacyWin64Import::MsvcpLockitDtor,
         ("advapi32.dll", "SetSecurityDescriptorDacl") => {
             LegacyWin64Import::SetSecurityDescriptorDacl
         }
@@ -1073,6 +1077,17 @@ fn install_win64_import(
                     "install vsprintf import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_stdio_common_vsprintf(unicorn);
+                    }),
+                )?;
+            }
+            operation @ (LegacyWin64Import::MsvcpLockitCtor
+            | LegacyWin64Import::MsvcpLockitDtor) => {
+                let destroy = operation == LegacyWin64Import::MsvcpLockitDtor;
+                uc("write Lockit return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install Lockit",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_msvcp_lockit(unicorn, destroy);
                     }),
                 )?;
             }

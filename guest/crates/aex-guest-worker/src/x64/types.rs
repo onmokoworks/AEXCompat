@@ -214,6 +214,8 @@ struct GuestState {
     vcomp_requested_threads: Option<u32>,
     omp_dynamic_requested: Option<bool>,
     msvcp_mutexes: HashMap<u64, MsvcpMutex>,
+    msvcp_lockit_locks: [Option<(u32, u32)>; 8],
+    msvcp_lockit_objects: HashMap<u64, (i32, u32)>,
     pending_crt_initterm: Option<PendingCrtInitterm>,
     crt_onexit_tables: HashMap<u64, Vec<u64>>,
     crt_terminate_handler: u64,

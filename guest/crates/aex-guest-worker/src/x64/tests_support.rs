@@ -15509,3 +15509,64 @@ fn descriptor_dacl_setter_preserves_references_and_unrelated_fields() {
     assert_eq!(actual, bytes);
     assert_eq!(engine.call_win64(entry, [0, 1, acl, 0, 0, 0]).unwrap(), 0);
 }
+
+#[test]
+fn msvcp_lockit_tracks_recursive_ownership_and_balances_destructors() {
+    let mut engine = test_engine(&[0xc3]);
+    let ctor = STUB_BASE + 0x100;
+    let dtor = ctor + 16;
+    install_win64_import(
+        &mut engine.unicorn,
+        ctor,
+        "msvcp140.dll",
+        "??0_Lockit@std@@QEAA@H@Z",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        dtor,
+        "msvcp140.dll",
+        "??1_Lockit@std@@QEAA@XZ",
+    )
+    .unwrap();
+    let a = engine.allocate(8, 8).unwrap();
+    let b = engine.allocate(8, 8).unwrap();
+    let c = engine.allocate(8, 8).unwrap();
+    engine.write(a, &[0x5a; 8]).unwrap();
+    assert_eq!(engine.call_win64(ctor, [a, 2, 0, 0, 0, 0]).unwrap(), a);
+    engine.call_win64(ctor, [b, 2, 0, 0, 0, 0]).unwrap();
+    assert_eq!(
+        engine.unicorn.get_data().msvcp_lockit_locks[2],
+        Some((1, 2))
+    );
+    let mut actual = [0; 8];
+    engine.read(a, &mut actual).unwrap();
+    assert_eq!(actual, [2, 0, 0, 0, 0x5a, 0x5a, 0x5a, 0x5a]);
+    engine.unicorn.get_data_mut().current_windows_thread_id = 2;
+    assert!(engine.call_win64(ctor, [c, 2, 0, 0, 0, 0]).is_err());
+    assert!(engine.call_win64(dtor, [a, 0, 0, 0, 0, 0]).is_err());
+    assert_eq!(
+        engine.unicorn.get_data().msvcp_lockit_locks[2],
+        Some((1, 2))
+    );
+    engine.unicorn.get_data_mut().current_windows_thread_id = 1;
+    engine.call_win64(dtor, [b, 0, 0, 0, 0, 0]).unwrap();
+    engine.call_win64(dtor, [a, 0, 0, 0, 0, 0]).unwrap();
+    assert!(engine.unicorn.get_data().msvcp_lockit_objects.is_empty());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .msvcp_lockit_locks
+            .iter()
+            .all(Option::is_none)
+    );
+    assert!(engine.call_win64(dtor, [a, 0, 0, 0, 0, 0]).is_err());
+    engine.call_win64(ctor, [a, 8, 0, 0, 0, 0]).unwrap();
+    engine.call_win64(dtor, [a, 0, 0, 0, 0, 0]).unwrap();
+    assert!(
+        engine
+            .call_win64(ctor, [a, u32::MAX as u64, 0, 0, 0, 0])
+            .is_err()
+    );
+}
