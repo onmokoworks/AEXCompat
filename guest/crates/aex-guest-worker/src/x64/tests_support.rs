@@ -16785,3 +16785,59 @@ fn named_file_dacl_updates_report_readonly_or_missing_without_changing_host_file
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let token = GUEST_STREAM_BASE;
+        engine.unicorn.get_data_mut().guest_files.streams.insert(
+            token,
+            GuestFileStream {
+                bytes: vec![0, 127, 128, 255].into_boxed_slice(),
+                position: 0,
+            },
+        );
+        engine.unicorn.get_data_mut().crt_errno = 77;
+        for (offset, name) in [(0x100, "getc"), (0x110, "fgetc")] {
+            install_win64_import(&mut engine.unicorn, STUB_BASE + offset, dll, name).unwrap();
+        }
+        for (index, expected) in [0, 127, 128, 255, u32::MAX as u64, u32::MAX as u64]
+            .into_iter()
+            .enumerate()
+        {
+            let entry = STUB_BASE + if index % 2 == 0 { 0x100 } else { 0x110 };
+            assert_eq!(
+                engine.call_win64(entry, [token, 0, 0, 0, 0, 0]).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            engine.unicorn.get_data().guest_files.streams[&token].position,
+            4
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 77);
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .streams
+            .remove(&token);
+        assert!(
+            engine
+                .call_win64(STUB_BASE + 0x100, [token, 0, 0, 0, 0, 0])
+                .is_err()
+        );
+        assert!(
+            engine
+                .call_win64(STUB_BASE + 0x110, [0, 0, 0, 0, 0, 0])
+                .is_err()
+        );
+    }
+    for name in ["getc", "fgetc"] {
+        assert!(matches!(
+            dispatch_win64_import("foreign.dll", name),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+}

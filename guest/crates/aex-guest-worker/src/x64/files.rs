@@ -202,6 +202,23 @@ fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
+        if import == LegacyWin64Import::Fgetc {
+            let token = read_win64_import_argument(unicorn, 0)?;
+            let stream = unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&token)
+                .ok_or("getc received stale or foreign FILE")?;
+            return Ok(match stream.bytes.get(stream.position) {
+                Some(byte) => {
+                    let value = u64::from(*byte);
+                    stream.position += 1;
+                    value
+                }
+                None => u64::from(u32::MAX), // EOF is an int, not a signed byte.
+            });
+        }
         if import == LegacyWin64Import::Fclose {
             let token = read_win64_import_argument(unicorn, 0)?;
             if !unicorn.get_data().guest_files.streams.contains_key(&token) {

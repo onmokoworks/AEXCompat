@@ -46,6 +46,7 @@ enum LegacyWin64Import {
     MemCmp,
     StdioVsnprintfS,
     StdioVsprintf,
+    Fgetc,
     Fread,
     Fclose,
     Fopen,
@@ -786,7 +787,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fread") => LegacyWin64Import::Fread,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fclose") => LegacyWin64Import::Fclose,
-        (_, "fread" | "fclose") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "getc" | "fgetc") => {
+            LegacyWin64Import::Fgetc
+        }
+        (_, "getc" | "fgetc" | "fread" | "fclose") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen") => LegacyWin64Import::Fopen,
         (_, "fopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen_s") => {
@@ -2207,7 +2213,7 @@ fn install_win64_import(
                     }),
                 )?;
             }
-            LegacyWin64Import::Fread | LegacyWin64Import::Fclose => {
+            LegacyWin64Import::Fgetc | LegacyWin64Import::Fread | LegacyWin64Import::Fclose => {
                 uc("write stdio return", unicorn.mem_write(stub, &[0xc3]))?;
                 uc(
                     "install stdio",
