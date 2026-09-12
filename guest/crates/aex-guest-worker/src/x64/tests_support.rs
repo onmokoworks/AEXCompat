@@ -14911,3 +14911,113 @@ fn typed_iterate_suites_acquire_and_invoke_their_pixel_callbacks() {
         }
     }
 }
+
+#[test]
+fn vcruntime_strstr_searches_bytes_and_preserves_guest_pointer_identity() {
+    const STRSTR: u64 = STUB_BASE + 0x1d0;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(&mut engine.unicorn, STRSTR, "VCRUNTIME140.DLL", "strstr").unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::StrStr)
+    );
+    let source = DATA_BASE + 0x100;
+    let needle = DATA_BASE + 0x200;
+    for (haystack, query, expected) in [
+        (&b"abababac\0"[..], &b"ababac\0"[..], Some(2)),
+        (&b"aaa\0"[..], &b"aa\0"[..], Some(0)),
+        (&b"ABC\0abc\0"[..], &b"abc\0"[..], None),
+        (&b"a\xffb\0"[..], &b"\xffb\0"[..], Some(1)),
+        (&b"\0"[..], &b"\0"[..], Some(0)),
+        (&b"\0"[..], &b"a\0"[..], None),
+    ] {
+        engine.unicorn.mem_write(source, haystack).unwrap();
+        engine.unicorn.mem_write(needle, query).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(STRSTR, [source, needle, 0, 0, 0, 0])
+                .unwrap(),
+            expected.map_or(0, |offset| source + offset)
+        );
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "strstr"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn vcruntime_strstr_does_not_read_past_match_or_string_terminator() {
+    const STRSTR: u64 = STUB_BASE + 0x1d0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, STRSTR, "vcruntime140.dll", "strstr").unwrap();
+    const PAGE: u64 = 0x30_0000_0000;
+    engine
+        .unicorn
+        .mem_map(PAGE, 4096, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let needle = DATA_BASE + 0x200;
+    engine.unicorn.mem_write(needle, b"z\0").unwrap();
+    engine.unicorn.mem_write(PAGE + 4095, b"z").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STRSTR, [PAGE + 4095, needle, 0, 0, 0, 0])
+            .unwrap(),
+        PAGE + 4095
+    );
+    engine.unicorn.mem_write(PAGE + 4095, b"\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STRSTR, [PAGE + 4095, needle, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine.unicorn.mem_write(PAGE + 4095, b"x").unwrap();
+    assert!(
+        engine
+            .call_win64(STRSTR, [PAGE + 4095, needle, 0, 0, 0, 0])
+            .is_err()
+    );
+}
+
+#[test]
+fn vcruntime_strstr_rejects_null_and_unreadable_needle() {
+    const STRSTR: u64 = STUB_BASE + 0x1d0;
+    for (source, needle) in [(0, DATA_BASE), (DATA_BASE, 0), (DATA_BASE, 0xdead_beef)] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, STRSTR, "vcruntime140.dll", "strstr").unwrap();
+        assert!(
+            engine
+                .call_win64(STRSTR, [source, needle, 0, 0, 0, 0])
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn vcruntime_strstr_rejects_unterminated_strings_at_the_host_bound() {
+    const STRSTR: u64 = STUB_BASE + 0x1d0;
+    const REGION: u64 = 0x30_0000_0000;
+    for needle_unterminated in [false, true] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, STRSTR, "vcruntime140.dll", "strstr").unwrap();
+        engine
+            .unicorn
+            .mem_map(REGION, MAX_CRT_STRING_BYTES, Prot::READ | Prot::WRITE)
+            .unwrap();
+        engine
+            .unicorn
+            .mem_write(REGION, &vec![b'x'; MAX_CRT_STRING_BYTES as usize])
+            .unwrap();
+        let short = DATA_BASE + 0x200;
+        engine.unicorn.mem_write(short, b"z\0").unwrap();
+        let (source, needle) = if needle_unterminated {
+            (short, REGION)
+        } else {
+            (REGION, short)
+        };
+        let error = engine
+            .call_win64(STRSTR, [source, needle, 0, 0, 0, 0])
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds"), "{error}");
+    }
+}

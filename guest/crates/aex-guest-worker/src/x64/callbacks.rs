@@ -1152,6 +1152,76 @@ fn emulate_crt_memory_copy(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_crt_strstr(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let needle_pointer = read_win64_import_argument(unicorn, 1)?;
+        if source == 0 || needle_pointer == 0 {
+            return Err("strstr received a null string pointer".into());
+        }
+        let needle = read_crt_stdio_c_string(
+            unicorn,
+            needle_pointer,
+            MAX_CRT_STRING_BYTES,
+            "strstr needle",
+        )?;
+        if needle.is_empty() {
+            return Ok(source);
+        }
+        // KMP bounds host work linearly even for repetitive adversarial strings.
+        let mut prefix = vec![0usize; needle.len()];
+        let mut matched = 0;
+        for index in 1..needle.len() {
+            while matched > 0 && needle[index] != needle[matched] {
+                matched = prefix[matched - 1];
+            }
+            if needle[index] == needle[matched] {
+                matched += 1;
+            }
+            prefix[index] = matched;
+        }
+        matched = 0;
+        for offset in 0..MAX_CRT_STRING_BYTES {
+            let address = source
+                .checked_add(offset)
+                .ok_or("strstr source range overflow")?;
+            if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                return Err("strstr source is not readable".into());
+            }
+            let mut byte = [0u8];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|error| format!("strstr source read: {error}"))?;
+            if byte[0] == 0 {
+                return Ok(0);
+            }
+            while matched > 0 && byte[0] != needle[matched] {
+                matched = prefix[matched - 1];
+            }
+            if byte[0] == needle[matched] {
+                matched += 1;
+            }
+            if matched == needle.len() {
+                return Ok(address - (needle.len() as u64 - 1));
+            }
+        }
+        Err(format!(
+            "strstr source exceeds {MAX_CRT_STRING_BYTES} bytes"
+        ))
+    })();
+    match result {
+        Ok(address) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, address);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_crt_memchr(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let source = unicorn

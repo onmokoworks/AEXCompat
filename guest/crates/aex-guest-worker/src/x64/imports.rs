@@ -31,6 +31,7 @@ enum LegacyWin64Import {
     Memset,
     MemoryCopy,
     MemChr,
+    StrStr,
     MemCmp,
     StdioVsnprintfS,
     StdioVsprintf,
@@ -568,6 +569,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_vcomp_set_num_threads") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("vcruntime140.dll", "strstr") => LegacyWin64Import::StrStr,
+        (_, "strstr") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("vcruntime140.dll", "memchr") => LegacyWin64Import::MemChr,
         (_, "memchr") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
@@ -847,6 +850,15 @@ fn install_win64_import(
                     "install CRT memory-copy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_memory_copy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::StrStr => {
+                uc("write strstr return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install strstr import",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_strstr(unicorn);
                     }),
                 )?;
             }
