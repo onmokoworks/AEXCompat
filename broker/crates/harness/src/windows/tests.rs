@@ -430,6 +430,101 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_MINIMAX_MAP and local Release worker"]
+    fn real_minimax_gui_applies_radius_map_and_signed_extrema() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_MINIMAX_MAP")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-minimax-map");
+        let input = directory.join("input.png");
+        let clean = image::RgbaImage::from_fn(256, 144, |x, _| {
+            image::Rgba(if x < 128 {
+                [83, 127, 191, 255]
+            } else {
+                [173, 61, 107, 255]
+            })
+        });
+        let mut original = clean.clone();
+        for (x, y, v) in [(32, 32, 0), (96, 64, 255), (160, 96, 0), (224, 112, 255)] {
+            original.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+        }
+        original.save(&input).unwrap();
+        let map_path = directory.join("map.png");
+        image::RgbaImage::from_pixel(256, 144, image::Rgba([255, 255, 255, 255]))
+            .save(&map_path)
+            .unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters
+                .iter()
+                .find(|p| p.slot == 8)
+                .expect("Radius map parameter")
+                .name,
+            "Radius Map"
+        );
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input.clone());
+        let _ = ctx.end_pass();
+        for amount in [-1, 1] {
+            app.apply_debug_request_document(&serde_json::json!({
+                "schema_version":1,"timing":{"frame":0,"fps":30,"duration_frames":300},
+                "assignments":[{"slot":1,"value":amount},{"slot":2,"value":1},{"slot":3,"value":1},{"slot":4,"value":1},{"slot":5,"value":1},{"slot":6,"value":1},{"slot":7,"value":100},{"slot":8,"layer":map_path}]
+            }), &directory.join("request.json")).unwrap();
+            let output = directory.join(format!("output-{amount}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            let expected = image::RgbaImage::from_fn(256, 144, |x, y| {
+                let mut pixel = *original.get_pixel(x, y);
+                for c in 0..3 {
+                    let values = [-1_i32, 0, 1].map(|dx| {
+                        original
+                            .get_pixel((x as i32 + dx).clamp(0, 255) as u32, y)
+                            .0[c]
+                    });
+                    pixel.0[c] = if amount > 0 {
+                        *values.iter().max().unwrap()
+                    } else {
+                        *values.iter().min().unwrap()
+                    };
+                }
+                pixel
+            });
+            assert_eq!(image::open(&output).unwrap().to_rgba8(), expected);
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn aegp_roundtrip_gui_exposes_and_routes_each_shipping_action() {
         let ui_kit = AexUiKit::default();
         for expected in AegpRoundtripAction::ALL {
