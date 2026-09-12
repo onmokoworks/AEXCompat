@@ -20509,3 +20509,41 @@ fn strncat_rejects_null_source_even_when_zero_page_is_readable() {
         b"abc\0"
     );
 }
+
+#[test]
+fn volume_information_reports_unavailable_metadata_without_fabricated_outputs() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, CALL, dll, "GetVolumeInformationA").unwrap();
+        let root = DATA_BASE + 0x100;
+        let output = DATA_BASE + 0x900;
+        engine.write(root, b"C:\\\0").unwrap();
+        engine.write(output, &[0xa5; 32]).unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        for pointer in [root, 0] {
+            assert_eq!(
+                engine
+                    .call_win64(
+                        CALL,
+                        [pointer, output, 32, output + 8, output + 12, output + 16]
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 50);
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+            assert_eq!(
+                engine.unicorn.mem_read_as_vec(output, 32).unwrap(),
+                [0xa5; 32]
+            );
+        }
+        engine.write(root, b"Z:\\\0").unwrap();
+        assert_eq!(engine.call_win64(CALL, [root, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 15);
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "GetVolumeInformationA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}

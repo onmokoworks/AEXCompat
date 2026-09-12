@@ -79,6 +79,7 @@ enum LegacyWin64Import {
     SetEntriesInAclA,
     InitializeAcl,
     CreateDirectoryA,
+    GetVolumeInformationA,
     Wstat64i32,
     Fullpath,
     AddAccessAllowedAceEx,
@@ -899,6 +900,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::Wstat64i32
         }
         (_, "_wstat64i32") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GetVolumeInformationA") => {
+            LegacyWin64Import::GetVolumeInformationA
+        }
+        (_, "GetVolumeInformationA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "CreateDirectoryA") => {
             LegacyWin64Import::CreateDirectoryA
         }
@@ -1395,6 +1400,19 @@ fn install_win64_import(
                         "install _wstat64i32",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_wstat64i32(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetVolumeInformationA => {
+                    uc(
+                        "write GetVolumeInformationA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetVolumeInformationA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_volume_information(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;

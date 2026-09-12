@@ -1092,3 +1092,24 @@ fn emulate_wfopen(unicorn: &mut Unicorn<'_, GuestState>) {
     })();
     finish_guest_stdio(unicorn, result);
 }
+
+fn guest_volume_information(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let root = read_win64_import_argument(unicorn, 0)?;
+    let path = if root == 0 {
+        GUEST_INITIAL_CURRENT_DIRECTORY.as_bytes().to_vec()
+    } else {
+        read_crt_stdio_c_string(unicorn, root, 260, "GetVolumeInformationA root")?
+    };
+    if path.len() != 3 || !path[0].is_ascii_alphabetic() || path[1..] != *b":\\" {
+        return Err("GetVolumeInformationA supports only guest drive roots".into());
+    }
+    let drive = format!("{}:", (path[0] as char).to_ascii_lowercase());
+    let exists = drive == "c:" || unicorn.get_data().guest_files.directory_exists(&drive);
+    // The overlay namespace contains individually mounted assets and transient
+    // directories, not a formatted backing volume. No volume serial, label or
+    // filesystem capability record is available. Preserve all optional outputs
+    // and report the ordinary Win32 failure so callers can handle this absence.
+    // A future volume provider must supply actual metadata before returning TRUE.
+    unicorn.get_data_mut().windows_last_error = if exists { 50 } else { 15 }; // NOT_SUPPORTED / INVALID_DRIVE
+    Ok(0)
+}
