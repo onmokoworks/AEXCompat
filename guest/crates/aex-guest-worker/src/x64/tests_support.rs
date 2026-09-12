@@ -6446,7 +6446,10 @@ fn deterministic_getenv_and_openmp_dynamic_policy_are_bounded() {
     let name = DATA_BASE + 0xa80;
     engine.write(name, b"opencv_for_threads_num\0").unwrap();
     let value = engine.call_win64(GETENV, [name, 0, 0, 0, 0, 0]).unwrap();
-    assert_eq!(value, HOST_ENVIRONMENT_VALUE);
+    assert!(
+        guest_range_has_permission(&engine.unicorn, value, 2, Prot::READ | Prot::WRITE).unwrap()
+    );
+    assert!(!guest_range_has_permission(&engine.unicorn, value, 2, Prot::EXEC).unwrap());
     assert_eq!(engine.unicorn.mem_read_as_vec(value, 2).unwrap(), b"1\0");
     engine.write(name, b"HOME\0").unwrap();
     assert_eq!(engine.call_win64(GETENV, [name, 0, 0, 0, 0, 0]).unwrap(), 0);
@@ -15569,4 +15572,140 @@ fn msvcp_lockit_tracks_recursive_ownership_and_balances_destructors() {
             .call_win64(ctor, [a, u32::MAX as u64, 0, 0, 0, 0])
             .is_err()
     );
+}
+
+#[test]
+fn putenv_updates_all_guest_readers_and_preserves_snapshots() {
+    let mut engine = test_engine(&[0xc3]);
+    let entries = [
+        ("api-ms-win-crt-environment-l1-1-0.dll", "_putenv"),
+        ("api-ms-win-crt-environment-l1-1-0.dll", "getenv"),
+        ("kernel32.dll", "GetEnvironmentVariableA"),
+        ("kernel32.dll", "GetEnvironmentVariableW"),
+        ("kernel32.dll", "GetEnvironmentStringsW"),
+        ("kernel32.dll", "FreeEnvironmentStringsW"),
+    ];
+    for (i, (dll, symbol)) in entries.iter().enumerate() {
+        install_win64_import(
+            &mut engine.unicorn,
+            STUB_BASE + 0x100 + i as u64 * 16,
+            dll,
+            symbol,
+        )
+        .unwrap();
+    }
+    let text = engine.allocate(256, 8).unwrap();
+    let out = engine.allocate(256, 8).unwrap();
+    engine.write(text, b"TEST_AEX=alpha=beta\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STUB_BASE + 0x100, [text, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine.write(text, b"test_aex\0").unwrap();
+    let value = engine
+        .call_win64(STUB_BASE + 0x110, [text, 0, 0, 0, 0, 0])
+        .unwrap();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(value, 11).unwrap(),
+        b"alpha=beta\0"
+    );
+    assert_eq!(
+        engine
+            .call_win64(STUB_BASE + 0x120, [text, out, 256, 0, 0, 0])
+            .unwrap(),
+        10
+    );
+    engine
+        .unicorn
+        .mem_map(0x50000000, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.unicorn.mem_write(0x50000ffc, &[0x5a; 4]).unwrap();
+    assert!(
+        engine
+            .call_win64(STUB_BASE + 0x120, [text, 0x50000ffc, 256, 0, 0, 0])
+            .is_err()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(0x50000ffc, 4).unwrap(),
+        [0x5a; 4]
+    );
+    engine
+        .unicorn
+        .mem_protect(0x50000000, PAGE_SIZE, Prot::READ | Prot::EXEC)
+        .unwrap();
+    assert!(
+        engine
+            .call_win64(STUB_BASE + 0x120, [text, 0x50000000, 256, 0, 0, 0])
+            .is_err()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(0x50000000, 11).unwrap(),
+        [0; 11]
+    );
+    let wide: Vec<u8> = "TeSt_AeX\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    engine.write(text, &wide).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STUB_BASE + 0x130, [text, out, 128, 0, 0, 0])
+            .unwrap(),
+        10
+    );
+    let snapshot = engine.call_win64(STUB_BASE + 0x140, [0; 6]).unwrap();
+    let before = guest_environment_block_w(engine.unicorn.get_data());
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(snapshot, before.len())
+            .unwrap(),
+        before
+    );
+    engine.write(text, b"TEST_AEX=\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STUB_BASE + 0x100, [text, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine.write(text, b"test_aex\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STUB_BASE + 0x110, [text, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(snapshot, before.len())
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        engine
+            .call_win64(STUB_BASE + 0x150, [snapshot, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    engine.write(text, b"OPENCV_FOR_THREADS_NUM=\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STUB_BASE + 0x100, [text, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), [0; 4]);
+    engine.write(text, b"INVALID\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STUB_BASE + 0x100, [text, 0, 0, 0, 0, 0])
+            .unwrap(),
+        u32::MAX as u64
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+    assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), [0; 4]);
 }

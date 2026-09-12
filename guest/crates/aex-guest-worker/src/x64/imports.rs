@@ -141,6 +141,7 @@ enum LegacyWin64Import {
     CrtRegisterOnexitFunction,
     CrtExecuteOnexitTable,
     CrtSetTerminate,
+    CrtPutenv,
     CrtGetenv,
     InitializeCriticalSection,
     InitializeCriticalSectionAndSpinCount,
@@ -661,6 +662,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtSetTerminate
         }
         (_, "set_terminate") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-environment-l1-1-0.dll", "_putenv") => LegacyWin64Import::CrtPutenv,
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv") => LegacyWin64Import::CrtGetenv,
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
@@ -1863,6 +1865,15 @@ fn install_win64_import(
                     }),
                 )?;
             }
+            LegacyWin64Import::CrtPutenv => {
+                uc("write putenv return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install putenv",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_putenv(unicorn);
+                    }),
+                )?;
+            }
             LegacyWin64Import::CrtGetenv => {
                 uc(
                     "write deterministic guest environment value",
@@ -2408,14 +2419,15 @@ fn emulate_crt_getenv(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let pointer = read_win64_import_argument(unicorn, 0)?;
         let name = read_windows_environment_name(unicorn, pointer, "CRT getenv")?;
-        let returned = if let Some(value) = deterministic_guest_environment_value(&name) {
+        let returned = if let Some(value) = guest_environment_value(unicorn.get_data(), &name) {
             let mut terminated = Vec::with_capacity(value.len() + 1);
-            terminated.extend_from_slice(value);
+            terminated.extend_from_slice(&value);
             terminated.push(0);
+            let buffer = guest_getenv_buffer(unicorn)?;
             unicorn
-                .mem_write(HOST_ENVIRONMENT_VALUE, &terminated)
+                .mem_write(buffer, &terminated)
                 .map_err(|error| format!("CRT getenv value write failed: {error}"))?;
-            HOST_ENVIRONMENT_VALUE
+            buffer
         } else {
             0
         };
@@ -2472,24 +2484,6 @@ fn deterministic_guest_environment_entries() -> &'static [(&'static [u8], &'stat
     &[(b"OPENCV_FOR_THREADS_NUM", b"1")]
 }
 
-fn deterministic_guest_environment_block_w() -> Vec<u8> {
-    let mut block = Vec::new();
-    for (name, value) in deterministic_guest_environment_entries() {
-        for byte in name
-            .iter()
-            .copied()
-            .chain(std::iter::once(b'='))
-            .chain(value.iter().copied())
-            .chain(std::iter::once(0))
-        {
-            block.extend_from_slice(&u16::from(byte).to_le_bytes());
-        }
-    }
-    // The final entry terminator plus this unit form the required double NUL.
-    block.extend_from_slice(&0u16.to_le_bytes());
-    block
-}
-
 fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), String> {
     if state.environment_strings_base == 0 {
         let namespace = NEXT_ENVIRONMENT_STRINGS_NAMESPACE
@@ -2509,13 +2503,13 @@ fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), Strin
         .checked_add(ENVIRONMENT_STRINGS_NAMESPACE_SIZE)
         .filter(|end| *end <= ENVIRONMENT_STRINGS_END)
         .ok_or_else(|| "GetEnvironmentStringsW namespace exhausted".to_string())?;
-    Ok((state.environment_strings_base, end))
+    Ok((state.environment_strings_base, end - PAGE_SIZE))
 }
 
 fn emulate_get_environment_strings_w(unicorn: &mut Unicorn<'_, GuestState>) {
     const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
     let result = (|| -> Result<u64, String> {
-        let block = deterministic_guest_environment_block_w();
+        let block = guest_environment_block_w(unicorn.get_data());
         let allocation = unicorn
             .get_data()
             .crt_heap
@@ -3587,7 +3581,7 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
         let buffer = read_win64_import_argument(unicorn, 1)?;
         let size = read_win64_import_argument(unicorn, 2)? as u32;
         let name = read_windows_environment_name(unicorn, name_pointer, "GetEnvironmentVariableA")?;
-        let Some(value) = deterministic_guest_environment_value(&name) else {
+        let Some(value) = guest_environment_value(unicorn.get_data(), &name) else {
             unicorn.get_data_mut().windows_last_error = ERROR_ENVVAR_NOT_FOUND;
             return Ok(0);
         };
@@ -3600,8 +3594,13 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
             return Err("GetEnvironmentVariableA output pointer is null".into());
         }
         let mut terminated = Vec::with_capacity(value.len() + 1);
-        terminated.extend_from_slice(value);
+        terminated.extend_from_slice(&value);
         terminated.push(0);
+        if !guest_range_has_permission(unicorn, buffer, terminated.len() as u64, Prot::WRITE)? {
+            return Err(format!(
+                "environment variable output {buffer:#x} is not writable"
+            ));
+        }
         unicorn.mem_write(buffer, &terminated).map_err(|error| {
             format!("GetEnvironmentVariableA output {buffer:#x} is not writable: {error}")
         })?;
@@ -3650,7 +3649,7 @@ fn emulate_get_environment_variable_w(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         let name = String::from_utf16(&units)
             .map_err(|_| "GetEnvironmentVariableW name is invalid UTF-16".to_string())?;
-        let Some(value) = deterministic_guest_environment_value(name.as_bytes()) else {
+        let Some(value) = guest_environment_value(unicorn.get_data(), name.as_bytes()) else {
             unicorn.get_data_mut().windows_last_error = ERROR_ENVVAR_NOT_FOUND;
             return Ok(0);
         };
@@ -3666,6 +3665,11 @@ fn emulate_get_environment_variable_w(unicorn: &mut Unicorn<'_, GuestState>) {
         let mut terminated = Vec::with_capacity((value.len() + 1) * 2);
         for unit in value.iter().copied().chain(std::iter::once(0)) {
             terminated.extend_from_slice(&unit.to_le_bytes());
+        }
+        if !guest_range_has_permission(unicorn, buffer, terminated.len() as u64, Prot::WRITE)? {
+            return Err(format!(
+                "environment variable output {buffer:#x} is not writable"
+            ));
         }
         unicorn.mem_write(buffer, &terminated).map_err(|error| {
             format!("GetEnvironmentVariableW output {buffer:#x} is not writable: {error}")

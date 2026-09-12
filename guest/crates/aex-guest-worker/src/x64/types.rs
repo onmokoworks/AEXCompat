@@ -251,6 +251,8 @@ struct GuestState {
     windows_command_line_a: u64,
     windows_command_line_w: u64,
     environment_strings_base: u64,
+    environment_overrides: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    getenv_buffer: Option<u64>,
     process_prng_state: u64,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
