@@ -36,6 +36,8 @@ enum LegacyWin64Import {
     StrCmp,
     StrLen,
     StrCpy,
+    SetEntriesInAclA,
+    LocalFree,
     AllocateAndInitializeSid,
     FreeSid,
     RegOpenKeyExA,
@@ -742,6 +744,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::StrCpy
         }
         (_, "strcpy") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "SetEntriesInAclA") => LegacyWin64Import::SetEntriesInAclA,
+        ("kernel32.dll", "LocalFree") => LegacyWin64Import::LocalFree,
+        (_, "SetEntriesInAclA" | "LocalFree") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("advapi32.dll", "AllocateAndInitializeSid") => LegacyWin64Import::AllocateAndInitializeSid,
         ("advapi32.dll", "FreeSid") => LegacyWin64Import::FreeSid,
         (_, "AllocateAndInitializeSid" | "FreeSid") => {
@@ -1038,6 +1045,15 @@ fn install_win64_import(
                     "install CRT memory-copy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_memory_copy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::SetEntriesInAclA | LegacyWin64Import::LocalFree => {
+                uc("write ACL return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install ACL import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_windows_acl(unicorn, implementation);
                     }),
                 )?;
             }

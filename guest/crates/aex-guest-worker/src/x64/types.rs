@@ -231,6 +231,8 @@ struct GuestState {
     windows_objects: WindowsKernelObjects,
     windows_sids: BTreeSet<u64>,
     windows_sid_issued: u64,
+    windows_acl_allocations: BTreeMap<u64, u64>,
+    windows_acl_issued: u64,
     next_windows_thread_id: u32,
     current_windows_thread_id: u32,
     pending_windows_thread: Option<PendingWindowsThread>,

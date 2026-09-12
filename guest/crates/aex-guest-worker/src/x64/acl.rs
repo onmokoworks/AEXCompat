@@ -1,0 +1,151 @@
+const WINDOWS_ACL_BASE: u64 = 0x0000_0008_0000_0000;
+
+fn acl_read(unicorn: &Unicorn<'_, GuestState>, address: u64, size: u64) -> Result<Vec<u8>, String> {
+    if address == 0 || !guest_range_has_permission(unicorn, address, size, Prot::READ)? {
+        return Err("ACL input is not readable".into());
+    }
+    unicorn
+        .mem_read_as_vec(address, size as usize)
+        .map_err(|e| format!("ACL input read: {e}"))
+}
+
+fn build_new_guest_acl(
+    unicorn: &Unicorn<'_, GuestState>,
+    entries: u64,
+    count: u32,
+) -> Result<Vec<u8>, String> {
+    if count > 1024 {
+        return Err("ACL explicit entry count exceeds 1024".into());
+    }
+    let input = acl_read(unicorn, entries, u64::from(count) * 48)?;
+    let mut denied = Vec::new();
+    let mut allowed = Vec::new();
+    let mut seen = BTreeSet::new();
+    for entry in input.chunks_exact(48) {
+        let dword = |at| u32::from_le_bytes(entry[at..at + 4].try_into().unwrap());
+        let pointer = |at| u64::from_le_bytes(entry[at..at + 8].try_into().unwrap());
+        let mode = dword(4);
+        let flags = dword(8);
+        if pointer(16) != 0 || dword(24) != 0 || dword(28) != 0 || dword(32) > 8 {
+            return Err("ACL requires a single SID trustee".into());
+        }
+        if !matches!(mode, 1..=3) || flags & !0x1f != 0 {
+            return Err(format!(
+                "unsupported ACL access mode {mode} or inheritance {flags:#x}"
+            ));
+        }
+        let sid_pointer = pointer(40);
+        let header = acl_read(unicorn, sid_pointer, 8)?;
+        if header[0] != 1 || header[1] > 15 {
+            return Err("invalid ACL trustee SID".into());
+        }
+        let sid = acl_read(unicorn, sid_pointer, 8 + u64::from(header[1]) * 4)?;
+        if !seen.insert(sid.clone()) {
+            return Err("merging repeated ACL trustees is not implemented".into());
+        }
+        let size = (8 + sid.len()) as u16;
+        let mut ace = vec![u8::from(mode == 3), flags as u8];
+        ace.extend_from_slice(&size.to_le_bytes());
+        ace.extend_from_slice(&dword(0).to_le_bytes());
+        ace.extend(sid);
+        if mode == 3 {
+            denied.extend(ace);
+        } else {
+            allowed.extend(ace);
+        }
+    }
+    let size =
+        u16::try_from(8 + denied.len() + allowed.len()).map_err(|_| "ACL exceeds 65535 bytes")?;
+    let mut result = vec![2, 0];
+    result.extend_from_slice(&size.to_le_bytes());
+    result.extend_from_slice(&(count as u16).to_le_bytes());
+    result.extend_from_slice(&[0, 0]);
+    result.extend(denied);
+    result.extend(allowed);
+    Ok(result)
+}
+
+fn emulate_windows_acl(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<u64, String> {
+        if operation == LegacyWin64Import::LocalFree {
+            let pointer = read_win64_import_argument(unicorn, 0)?;
+            if pointer == 0 {
+                return Ok(0);
+            }
+            let Some(size) = unicorn
+                .get_data()
+                .windows_acl_allocations
+                .get(&pointer)
+                .copied()
+            else {
+                unicorn.get_data_mut().windows_last_error = 6;
+                return Ok(pointer);
+            };
+            unicorn
+                .mem_unmap(pointer, size)
+                .map_err(|e| format!("LocalFree ACL: {e}"))?;
+            unicorn
+                .get_data_mut()
+                .windows_acl_allocations
+                .remove(&pointer);
+            return Ok(0);
+        }
+        let count = read_win64_import_argument(unicorn, 0)? as u32;
+        let entries = read_win64_import_argument(unicorn, 1)?;
+        let old = read_win64_import_argument(unicorn, 2)?;
+        let output = read_win64_import_argument(unicorn, 3)?;
+        if output == 0 {
+            return Ok(87);
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err("ACL output is not writable".into());
+        }
+        if old != 0 {
+            return Err("merging an existing ACL is not implemented".into());
+        }
+        if count == 0 {
+            unicorn
+                .mem_write(output, &0u64.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+            return Ok(0);
+        }
+        let bytes = build_new_guest_acl(unicorn, entries, count)?;
+        if unicorn.get_data().windows_acl_allocations.len() >= 256
+            || unicorn.get_data().windows_acl_issued >= 1024
+        {
+            return Ok(8);
+        }
+        let pointer = WINDOWS_ACL_BASE + unicorn.get_data().windows_acl_issued * 65536;
+        let size = (bytes.len() as u64 + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        if unicorn
+            .mem_map(pointer, size, Prot::READ | Prot::WRITE)
+            .is_err()
+        {
+            return Ok(8);
+        }
+        if let Err(error) = unicorn
+            .mem_write(pointer, &bytes)
+            .and_then(|_| unicorn.mem_write(output, &pointer.to_le_bytes()))
+        {
+            let _ = unicorn.mem_unmap(pointer, size);
+            return Err(format!("ACL output write: {error}"));
+        }
+        unicorn.get_data_mut().windows_acl_issued += 1;
+        unicorn
+            .get_data_mut()
+            .windows_acl_allocations
+            .insert(pointer, size);
+        Ok(0)
+    })();
+    match result {
+        Ok(value) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, value);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}

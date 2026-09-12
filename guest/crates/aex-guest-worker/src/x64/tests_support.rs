@@ -16597,3 +16597,102 @@ fn allocated_sids_encode_authority_and_stack_arguments_and_free_only_owned_stora
         ));
     }
 }
+
+#[test]
+fn acl_builder_encodes_deny_before_allow_and_localfree_owns_the_buffer() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    let free = entry + 16;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "advapi32.dll",
+        "SetEntriesInAclA",
+    )
+    .unwrap();
+    install_win64_import(&mut engine.unicorn, free, "kernel32.dll", "LocalFree").unwrap();
+    let entries = DATA_BASE + 0x100;
+    let sid1 = DATA_BASE + 0x200;
+    let sid2 = sid1 + 32;
+    let output = DATA_BASE + 0x300;
+    let first = [1, 1, 0, 0, 0, 0, 0, 5, 1, 0, 0, 0];
+    let second = [1, 1, 0, 0, 0, 0, 0, 5, 2, 0, 0, 0];
+    engine.write(sid1, &first).unwrap();
+    engine.write(sid2, &second).unwrap();
+    let mut input = [0u8; 96];
+    for (index, mask, mode, flags, sid) in [
+        (0, 0x11u32, 1u32, 1u32, sid1),
+        (1, 0x22u32, 3u32, 2u32, sid2),
+    ] {
+        let offset = index * 48;
+        input[offset..offset + 4].copy_from_slice(&mask.to_le_bytes());
+        input[offset + 4..offset + 8].copy_from_slice(&mode.to_le_bytes());
+        input[offset + 8..offset + 12].copy_from_slice(&flags.to_le_bytes());
+        input[offset + 40..offset + 48].copy_from_slice(&sid.to_le_bytes());
+    }
+    engine.write(entries, &input).unwrap();
+    engine.write(output - 1, &[0xa5; 10]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(entry, [2, entries, 0, output, 0, 0])
+            .unwrap(),
+        0
+    );
+    let slot = engine.unicorn.mem_read_as_vec(output - 1, 10).unwrap();
+    assert_eq!(slot[0], 0xa5);
+    assert_eq!(slot[9], 0xa5);
+    let acl = u64::from_le_bytes(slot[1..9].try_into().unwrap());
+    assert_ne!(acl, 0);
+    let mut expected = vec![2, 0, 48, 0, 2, 0, 0, 0, 1, 2, 20, 0, 0x22, 0, 0, 0];
+    expected.extend(second);
+    expected.extend([0, 1, 20, 0, 0x11, 0, 0, 0]);
+    expected.extend(first);
+    assert_eq!(engine.unicorn.mem_read_as_vec(acl, 48).unwrap(), expected);
+    engine.write(sid1, &[0; 12]).unwrap();
+    assert_eq!(engine.unicorn.mem_read_as_vec(acl, 48).unwrap(), expected);
+    assert!(!guest_range_has_permission(&engine.unicorn, acl, 48, Prot::EXEC).unwrap());
+    assert_eq!(
+        engine.call_win64(free, [acl + 4, 0, 0, 0, 0, 0]).unwrap(),
+        acl + 4
+    );
+    assert_eq!(engine.call_win64(free, [acl, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert!(engine.unicorn.mem_read_as_vec(acl, 1).is_err());
+    assert_eq!(engine.call_win64(free, [acl, 0, 0, 0, 0, 0]).unwrap(), acl);
+    engine.write(sid1, &first).unwrap();
+    let edge = DATA_BASE + PAGE_SIZE - 4;
+    engine.write(edge, &[0xa5; 4]).unwrap();
+    assert!(
+        engine
+            .call_win64(entry, [2, entries, 0, edge, 0, 0])
+            .is_err()
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(edge, 4).unwrap(), [0xa5; 4]);
+    assert!(engine.unicorn.get_data().windows_acl_allocations.is_empty());
+    assert!(
+        engine
+            .call_win64(entry, [1025, entries, 0, output, 0, 0])
+            .is_err()
+    );
+    assert!(
+        engine
+            .call_win64(entry, [2, entries, sid1, output, 0, 0])
+            .is_err()
+    );
+    engine
+        .write(entries + 48 + 40, &sid1.to_le_bytes())
+        .unwrap();
+    assert!(
+        engine
+            .call_win64(entry, [2, entries, 0, output, 0, 0])
+            .is_err()
+    );
+    assert_eq!(
+        engine.call_win64(entry, [0, 0, 0, output, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), [0; 8]);
+    assert!(matches!(
+        dispatch_win64_import("other.dll", "SetEntriesInAclA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
