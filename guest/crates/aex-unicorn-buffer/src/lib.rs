@@ -74,4 +74,54 @@ mod tests {
             Err(uc_error::ARG)
         );
     }
+    #[test]
+    fn fragmented_ram_remaps_preserve_contents_and_page_permissions() {
+        use unicorn_engine::Prot;
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(0x1000, 4096, Prot::ALL).unwrap();
+        unicorn.mem_write(0x1000, &[0xc6, 0x00, 7]).unwrap(); // mov byte [rax],7
+        unicorn
+            .mem_protect(0x1000, 4096, Prot::READ | Prot::EXEC)
+            .unwrap();
+        for index in 0..128u64 {
+            let address = 0x100000 + index * 4096;
+            unicorn
+                .mem_map(address, 4096, Prot::READ | Prot::WRITE)
+                .unwrap();
+            unicorn.mem_write(address, &index.to_le_bytes()).unwrap();
+        }
+        for index in (0..128u64).step_by(2) {
+            unicorn.mem_unmap(0x100000 + index * 4096, 4096).unwrap();
+        }
+        for index in (1..128u64).step_by(2) {
+            unicorn
+                .mem_protect(0x100000 + index * 4096, 4096, Prot::READ)
+                .unwrap();
+        }
+        unicorn.reg_write(RegisterX86::RAX, 0x100000).unwrap();
+        assert_eq!(
+            unicorn.emu_start(0x1000, 0x1003, 1000000, 1),
+            Err(uc_error::WRITE_UNMAPPED)
+        );
+        unicorn.reg_write(RegisterX86::RAX, 0x101000).unwrap();
+        assert_eq!(
+            unicorn.emu_start(0x1000, 0x1003, 1000000, 1),
+            Err(uc_error::WRITE_PROT)
+        );
+        for index in (0..128u64).step_by(2) {
+            let address = 0x100000 + index * 4096;
+            unicorn
+                .mem_map(address, 4096, Prot::READ | Prot::WRITE)
+                .unwrap();
+            unicorn.reg_write(RegisterX86::RAX, address).unwrap();
+            unicorn.emu_start(0x1000, 0x1003, 1000000, 1).unwrap();
+            assert_eq!(unicorn.mem_read_as_vec(address, 1).unwrap(), [7]);
+        }
+        for index in (1..128u64).step_by(2) {
+            assert_eq!(
+                unicorn.mem_read_as_vec(0x100000 + index * 4096, 8).unwrap(),
+                index.to_le_bytes()
+            );
+        }
+    }
 }
