@@ -348,6 +348,88 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_MEDIAN_PRO and local Release worker"]
+    fn real_median_pro_gui_preserves_structure_and_removes_impulses() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_MEDIAN_PRO")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-median-pro");
+        let input = directory.join("input.png");
+        let clean = image::RgbaImage::from_fn(256, 144, |x, _| {
+            image::Rgba(if x < 128 {
+                [83, 127, 191, 255]
+            } else {
+                [173, 61, 107, 255]
+            })
+        });
+        let mut original = clean.clone();
+        for (x, y, v) in [(32, 32, 0), (96, 64, 255), (160, 96, 0), (224, 112, 255)] {
+            original.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+        }
+        original.save(&input).unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters
+                .iter()
+                .find(|p| p.slot == 5)
+                .expect("Mix parameter")
+                .name,
+            "Mix with Original"
+        );
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input.clone());
+        let _ = ctx.end_pass();
+        for mix in [0, 100] {
+            app.apply_debug_request_document(&serde_json::json!({
+                "schema_version":1,"timing":{"frame":0,"fps":30,"duration_frames":300},
+                "assignments":[{"slot":1,"value":1},{"slot":2,"value":1},{"slot":3,"value":0},{"slot":4,"value":1},{"slot":5,"value":mix}]
+            }), &directory.join("request.json")).unwrap();
+            let output = directory.join(format!("output-{mix}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            assert_eq!(
+                image::open(&output).unwrap().to_rgba8(),
+                if mix == 0 {
+                    original.clone()
+                } else {
+                    clean.clone()
+                }
+            );
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn aegp_roundtrip_gui_exposes_and_routes_each_shipping_action() {
         let ui_kit = AexUiKit::default();
         for expected in AegpRoundtripAction::ALL {
