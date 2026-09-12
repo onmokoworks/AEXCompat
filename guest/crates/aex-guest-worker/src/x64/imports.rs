@@ -80,6 +80,7 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     GetVolumeInformationA,
+    CoInitializeSecurity,
     CoInitializeEx,
     CoUninitialize,
     Wstat64i32,
@@ -904,7 +905,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_wstat64i32") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ole32.dll" | "combase.dll", "CoInitializeEx") => LegacyWin64Import::CoInitializeEx,
         ("ole32.dll" | "combase.dll", "CoUninitialize") => LegacyWin64Import::CoUninitialize,
-        (_, "CoInitializeEx" | "CoUninitialize") => {
+        ("ole32.dll" | "combase.dll", "CoInitializeSecurity") => {
+            LegacyWin64Import::CoInitializeSecurity
+        }
+        (_, "CoInitializeEx" | "CoUninitialize" | "CoInitializeSecurity") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("kernel32.dll" | "kernelbase.dll", "GetVolumeInformationA") => {
@@ -1407,6 +1411,19 @@ fn install_win64_import(
                         "install _wstat64i32",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_wstat64i32(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CoInitializeSecurity => {
+                    uc(
+                        "write COM security return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install COM security",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_com_security(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;
@@ -9329,5 +9346,46 @@ fn guest_com_lifecycle(
         return Ok(0x8007000e);
     }
     apartments.insert(thread, (mode, 1));
+    Ok(0)
+}
+
+// Store process defaults only: this does not authenticate, impersonate, register
+// an RPC endpoint or authorize a call. Activation/marshaling remain explicit
+// gaps, and any future transport must implement the recorded security policy.
+fn guest_com_security(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    if unicorn.get_data().com_security.is_some() {
+        return Ok(0x80010119); // RPC_E_TOO_LATE, process-wide, survives apartment teardown
+    }
+    let descriptor = read_win64_import_argument(unicorn, 0)?;
+    let services = read_win64_import_argument(unicorn, 1)? as u32 as i32;
+    let service_list = read_win64_import_argument(unicorn, 2)?;
+    let reserved1 = read_win64_import_argument(unicorn, 3)?;
+    let authentication = read_win64_import_argument(unicorn, 4)? as u32;
+    let impersonation = read_win64_import_argument(unicorn, 5)? as u32;
+    let auth_list = read_win64_import_argument(unicorn, 6)?;
+    let capabilities = read_win64_import_argument(unicorn, 7)? as u32;
+    let reserved3 = read_win64_import_argument(unicorn, 8)?;
+    if reserved1 != 0 || reserved3 != 0 {
+        return Ok(0x80070057);
+    }
+    // AppID and IAccessControl flags change interpretation/validation of the
+    // other arguments; reject unmodeled capabilities before normal validation.
+    if capabilities != 0 || descriptor != 0 || auth_list != 0 {
+        return Err("CoInitializeSecurity explicit security descriptors, credentials or capabilities unsupported".to_string());
+    }
+    if services < -1
+        || authentication > 6
+        || !(1..=4).contains(&impersonation)
+        || (services == -1 && service_list != 0)
+    {
+        return Ok(0x80070057);
+    }
+    if services > 0 || service_list != 0 {
+        return Err(
+            "CoInitializeSecurity explicit authentication service registration unsupported"
+                .to_string(),
+        );
+    }
+    unicorn.get_data_mut().com_security = Some((services, authentication, impersonation));
     Ok(0)
 }

@@ -20630,3 +20630,101 @@ fn com_initialization_rejects_invalid_arguments_and_bounded_exhaustion() {
         ));
     }
 }
+
+#[test]
+fn com_security_defaults_are_process_wide_and_survive_apartment_teardown() {
+    const SECURITY: u64 = STUB_BASE + 0x410;
+    const INIT: u64 = STUB_BASE + 0x420;
+    const END: u64 = STUB_BASE + 0x430;
+    for dll in ["ole32.dll", "combase.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, SECURITY, dll, "CoInitializeSecurity").unwrap();
+        install_win64_import(&mut engine.unicorn, INIT, dll, "CoInitializeEx").unwrap();
+        install_win64_import(&mut engine.unicorn, END, dll, "CoUninitialize").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        engine.call_win64(INIT, [0; 6]).unwrap();
+        let args = [0, u64::MAX, 0, 0, 0, (1 << 32) | 3, 0, 0, 0];
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(SECURITY, &args, TIMEOUT_MICROSECONDS)
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().com_security, Some((-1, 0, 3)));
+        engine.call_win64(END, [0; 6]).unwrap();
+        assert!(engine.unicorn.get_data().com_apartments.is_empty());
+        engine.unicorn.get_data_mut().current_windows_thread_id += 1;
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(SECURITY, &[0; 9], TIMEOUT_MICROSECONDS)
+                .unwrap(),
+            0x80010119
+        );
+        assert_eq!(engine.unicorn.get_data().com_security, Some((-1, 0, 3)));
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "CoInitializeSecurity"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn com_security_validates_arguments_without_committing_failed_configuration() {
+    const SECURITY: u64 = STUB_BASE + 0x410;
+    for (index, value) in [
+        (1, 0xffff_fffe),
+        (2, 1),
+        (3, 1),
+        (4, 7),
+        (5, 0),
+        (5, 5),
+        (8, 1),
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            SECURITY,
+            "ole32.dll",
+            "CoInitializeSecurity",
+        )
+        .unwrap();
+        let mut args = [0, u64::MAX, 0, 0, 0, 3, 0, 0, 0];
+        args[index] = value;
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(SECURITY, &args, TIMEOUT_MICROSECONDS)
+                .unwrap(),
+            0x80070057
+        );
+        assert_eq!(engine.unicorn.get_data().com_security, None);
+        args = [0, 0, 0, 0, 1, 2, 0, 0, 0];
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(SECURITY, &args, TIMEOUT_MICROSECONDS)
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().com_security, Some((0, 1, 2)));
+    }
+    for (index, value) in [(0, 1), (1, 1), (6, 1), (7, 8)] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            SECURITY,
+            "ole32.dll",
+            "CoInitializeSecurity",
+        )
+        .unwrap();
+        let mut args = [0, u64::MAX, 0, 0, 0, 3, 0, 0, 0];
+        args[index] = value;
+        assert!(
+            engine
+                .call_win64_with_timeout(SECURITY, &args, TIMEOUT_MICROSECONDS)
+                .is_err()
+        );
+        assert_eq!(engine.unicorn.get_data().com_security, None);
+    }
+}
