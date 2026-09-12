@@ -461,6 +461,27 @@ fn typed_request_timed_layers(
     Ok(result)
 }
 
+fn write_timed_layers_to_document(
+    document: &mut serde_json::Value,
+    samples: &[aexcompat_broker::image_render::TimedLayerImage],
+) {
+    if samples.is_empty() {
+        if let Some(object) = document.as_object_mut() {
+            object.remove("timed_layers");
+        }
+    } else {
+        document["timed_layers"] = serde_json::json!(
+            samples
+                .iter()
+                .map(|sample| {
+                    serde_json::json!({"slot":sample.slot,"time":sample.time.value,
+                "time_scale":sample.time.scale,"image":sample.image_path})
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
 fn apply_typed_assignments(
     parameters: &mut Vec<aexcompat_broker::image_render::InteractiveParameter>,
     document: &serde_json::Value,

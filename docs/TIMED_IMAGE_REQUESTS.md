@@ -29,8 +29,13 @@ resolve from the request directory's parent. Absolute image paths are accepted.
 
 Host context, dependency declarations, render settings and CPU selection retain
 their existing meaning. Omit the array for ordinary single-image requests.
-GUI debug-request loading and declarative render fixtures do not yet accept this
-field: use the typed image CLI. Audio requests do not accept it either.
+The Harness GUI also accepts this field through **Load debug request** and
+preserves it through **Save debug request**. The imported sample count is shown
+with a clear action. Loading an ordinary request replaces/clears prior samples;
+changing the selected AEX clears them as well. Both manual rendering and live
+updates use the timed one-shot path, not the static resident-session path.
+Automatic dependency search roots, host context and custom UI actions are retained.
+Audio requests and declarative render fixtures do not accept timed samples.
 
 Supplying samples does not prove an effect rendered correctly. Verify decoded
 output and the effect's response; sample delivery alone is not AE equivalence.

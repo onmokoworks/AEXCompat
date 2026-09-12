@@ -174,6 +174,18 @@ fn canonical_runtime_dependency_root(path: &Path) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+fn parameters_for_image_render(
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+    defaults: &[aexcompat_broker::image_render::InteractiveParameter],
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    let mut result = parameters_for_native_action(parameters, defaults);
+    // UI selector actions do not carry images; image rendering must retain both
+    // explicit static layers and null-path declarations used by timed samples.
+    result.extend(parameters.iter().filter(|p| p.kind == "layer").cloned());
+    result.sort_by_key(|p| p.slot);
+    result
+}
+
 fn same_windows_path(left: &Path, right: &Path) -> bool {
     left.as_os_str()
         .to_string_lossy()
@@ -241,6 +253,7 @@ struct HarnessApp {
     parameter_defaults: Vec<aexcompat_broker::image_render::InteractiveParameter>,
     parameter_inspection_state: ParameterInspectionState,
     host_context: Option<aexcompat_broker::render_request::HostContext>,
+    timed_layers: Vec<aexcompat_broker::image_render::TimedLayerImage>,
     smart_render: bool,
     smart_render_advertised: Option<bool>,
     smart_render_capability: Option<InspectedRenderCapability>,
@@ -321,6 +334,7 @@ impl HarnessApp {
             parameter_defaults: Vec::new(),
             parameter_inspection_state: ParameterInspectionState::NotSelected,
             host_context: None,
+            timed_layers: Vec::new(),
             smart_render: false,
             smart_render_advertised: None,
             smart_render_capability: None,
@@ -389,6 +403,7 @@ impl HarnessApp {
         self.diagnostic_warning = None;
         self.preflight_warnings.clear();
         self.parameters.clear();
+        self.timed_layers.clear();
         self.parameter_defaults.clear();
         self.parameter_inspection_state = ParameterInspectionState::NotSelected;
         self.audio_input = None;
@@ -982,6 +997,7 @@ impl HarnessApp {
     fn invalidate_effect_controls_for_dependency_change(&mut self) {
         self.close_live_session();
         self.parameters.clear();
+        self.timed_layers.clear();
         self.parameter_defaults.clear();
         self.parameter_inspection_state = if self.selection.is_some() {
             ParameterInspectionState::Failed
@@ -1158,20 +1174,10 @@ impl HarnessApp {
             }
             let document: serde_json::Value =
                 serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-            let timing = typed_request_timing(&document)?;
-            let mut parameters = self.parameters.clone();
-            apply_typed_assignments(&mut parameters, &document, Some(path.as_path()))?;
-            let host_context = typed_request_host_context(&document)?;
-            Ok((parameters, timing, host_context))
+            self.apply_debug_request_document(&document, &path)
         })();
         match result {
-            Ok((parameters, timing, host_context)) => {
-                self.parameters = parameters;
-                self.host_context = host_context;
-                self.frame = timing.current_time / timing.time_step;
-                self.frames_per_second = timing.time_scale;
-                self.frame_time_step = timing.time_step;
-                self.duration_frames = timing.total_time / timing.time_step;
+            Ok(()) => {
                 self.status = format!("Loaded debug request: {}", path.display());
             }
             Err(error) => {
@@ -1179,6 +1185,43 @@ impl HarnessApp {
                 self.report = error;
             }
         }
+    }
+
+    fn apply_debug_request_document(
+        &mut self,
+        document: &serde_json::Value,
+        path: &Path,
+    ) -> Result<(), String> {
+        let timing = typed_request_timing(document)?;
+        let mut parameters = self.parameters.clone();
+        let timed_layers = typed_request_timed_layers(document, path)?;
+        let mut assignments = document.clone();
+        if let Some(object) = assignments.as_object_mut() {
+            object.remove("timed_layers");
+        }
+        apply_typed_assignments(&mut parameters, &assignments, Some(path))?;
+        for sample in &timed_layers {
+            if !parameters
+                .iter()
+                .any(|p| p.slot == sample.slot && p.kind == "layer")
+            {
+                return Err(format!(
+                    "AEX exposes no layer parameter at slot {}",
+                    sample.slot
+                ));
+            }
+        }
+        let host_context = typed_request_host_context(document)?;
+        self.parameters = parameters;
+        self.timed_layers = timed_layers;
+        self.host_context = host_context;
+        self.frame = timing.current_time / timing.time_step;
+        self.frames_per_second = timing.time_scale;
+        self.frame_time_step = timing.time_step;
+        self.duration_frames = timing.total_time / timing.time_step;
+        self.close_live_session();
+        self.clear_render_output();
+        Ok(())
     }
 
     fn save_debug_request(&mut self) {
@@ -1189,7 +1232,7 @@ impl HarnessApp {
         else {
             return;
         };
-        let document = typed_request_document(
+        let mut document = typed_request_document(
             &self.parameters,
             self.frame,
             self.frames_per_second,
@@ -1197,6 +1240,7 @@ impl HarnessApp {
             self.duration_frames,
             self.host_context.as_ref(),
         );
+        write_timed_layers_to_document(&mut document, &self.timed_layers);
         match serde_json::to_vec_pretty(&document)
             .map_err(|error| error.to_string())
             .and_then(|bytes| fs::write(&path, bytes).map_err(|error| error.to_string()))
@@ -1239,6 +1283,7 @@ impl HarnessApp {
                 });
                 self.selection_stale = false;
                 self.parameters.clear();
+                self.timed_layers.clear();
                 self.parameter_defaults.clear();
                 self.audio_input = None;
                 self.audio_effect_only = false;
@@ -1915,9 +1960,10 @@ impl HarnessApp {
             return;
         }
         let repository = self.repository.clone();
-        let parameters = parameters_for_native_action(&self.parameters, &self.parameter_defaults);
+        let parameters = parameters_for_image_render(&self.parameters, &self.parameter_defaults);
         let host_context = self.host_context.clone();
         let smart = interactive_selection.path.is_smart();
+        let timed_layers = self.timed_layers.clone();
         let pixel_format = self.pixel_format;
         let gpu_backend = self.gpu_backend;
         let audio_sidecar = self.audio_input.clone();
@@ -1959,6 +2005,7 @@ impl HarnessApp {
         };
         if audio_sidecar.is_some()
             && (smart
+                || !timed_layers.is_empty()
                 || pixel_format != aexcompat_broker::image_render::RenderPixelFormat::Argb8
                 || host_context.is_some()
                 || custom_ui_action.is_some())
@@ -1984,6 +2031,7 @@ impl HarnessApp {
         #[cfg(windows)]
         {
             let live_eligible = host_context.is_none()
+                && timed_layers.is_empty()
                 && custom_ui_action.is_none()
                 && audio_sidecar.is_none()
                 && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::Auto
@@ -2050,6 +2098,12 @@ impl HarnessApp {
                     &output,
                     &parameters,
                     timing,
+                )
+            } else if !timed_layers.is_empty() {
+                aexcompat_broker::image_render::render_experimental_image_with_timed_layers_context_and_search_dirs(
+                    &repository, &plugin_path, &hash, &input, &output, &parameters,
+                    &timed_layers, timing, smart, pixel_format, host_context.as_ref(),
+                    custom_ui_action, gpu_backend, dependencies, dependency_search_dirs,
                 )
             } else {
                 aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
@@ -2674,6 +2728,9 @@ impl HarnessApp {
         let mut effect_controls_ready = false;
         let mut inspection_blocker = None;
         if task_kind == TaskKind::InspectParameters {
+            // Reinspection replaces the parameter model, including its image
+            // bindings, whether the new inspection succeeds or fails.
+            self.timed_layers.clear();
             // Inspection is the sole capability authority.  Clear every
             // path/source/override before accepting new facts so a failed,
             // missing, malformed, or contradictory result cannot inherit the
@@ -3690,6 +3747,27 @@ impl eframe::App for HarnessApp {
                                 self.save_debug_request();
                             }
                         });
+                        if !self.timed_layers.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.label(format!(
+                                    "Timed layer samples: {}",
+                                    self.timed_layers.len()
+                                ));
+                                if ui
+                                    .add_enabled(
+                                        !self.busy,
+                                        egui::Button::new(
+                                            self.ui_kit
+                                                .text("Clear timed samples", "時刻別画像を消去"),
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    self.timed_layers.clear();
+                                    self.clear_render_output();
+                                }
+                            });
+                        }
                         if let Some(mask_count) = self
                             .host_context
                             .as_ref()

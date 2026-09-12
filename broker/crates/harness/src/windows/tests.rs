@@ -1573,6 +1573,247 @@ mod tests {
     }
 
     #[test]
+    fn gui_debug_request_accepts_temporal_samples() {
+        let mut app = HarnessApp::new(PathBuf::from("C:/repo"));
+        app.parameters = vec![parameter(8, "layer")];
+        app.apply_debug_request_document(
+            &serde_json::json!({
+                "schema_version":1, "assignments":[],
+                "timing":{"frame":30,"fps":30,"duration_frames":300},
+                "timed_layers":[
+                    {"slot":8,"time":29,"time_scale":30,"image":"29.png"},
+                    {"slot":8,"time":30,"time_scale":30,"image":"30.png"}
+                ]
+            }),
+            Path::new("C:/samples/request.json"),
+        )
+        .unwrap();
+        assert_eq!(app.frame, 30);
+        assert_eq!(app.timed_layers.len(), 2);
+        assert_eq!(app.timed_layers[0].time.value, 29);
+        assert_eq!(app.timed_layers[1].time.value, 30);
+        assert_eq!(
+            app.timed_layers[0].image_path,
+            Path::new("C:/samples/29.png")
+        );
+        let mut saved = typed_request_document(
+            &app.parameters,
+            app.frame,
+            app.frames_per_second,
+            app.frame_time_step,
+            app.duration_frames,
+            None,
+        );
+        write_timed_layers_to_document(&mut saved, &app.timed_layers);
+        let mut restored = HarnessApp::new(PathBuf::from("C:/repo"));
+        restored.parameters = app.parameters.clone();
+        restored
+            .apply_debug_request_document(&saved, Path::new("C:/elsewhere/copy.json"))
+            .unwrap();
+        assert_eq!(
+            restored.timed_layers[1].image_path,
+            Path::new("C:/samples/30.png")
+        );
+        assert_eq!(restored.timed_layers[1].time.scale, 30);
+        let before = saved.clone();
+        for slot in [0, 9] {
+            let mut invalid = saved.clone();
+            invalid["timed_layers"][0]["slot"] = slot.into();
+            invalid["timing"]["frame"] = 31.into();
+            assert!(
+                app.apply_debug_request_document(&invalid, Path::new("C:/bad.json"))
+                    .is_err()
+            );
+            assert_eq!(app.frame, 30);
+            let mut after = typed_request_document(
+                &app.parameters,
+                app.frame,
+                app.frames_per_second,
+                app.frame_time_step,
+                app.duration_frames,
+                None,
+            );
+            write_timed_layers_to_document(&mut after, &app.timed_layers);
+            assert_eq!(before, after);
+        }
+        saved.as_object_mut().unwrap().remove("timed_layers");
+        app.apply_debug_request_document(&saved, Path::new("C:/static.json"))
+            .unwrap();
+        assert!(app.timed_layers.is_empty());
+        restored.close_selected_aex();
+        assert!(restored.timed_layers.is_empty());
+    }
+
+    #[test]
+    fn reinspection_replaces_temporal_state_on_success_and_failure() {
+        for outcome in ["success", "failure", "malformed"] {
+            let mut app = HarnessApp::new(PathBuf::from("C:/repo"));
+            app.timed_layers
+                .push(aexcompat_broker::image_render::TimedLayerImage {
+                    slot: 8,
+                    time: aexcompat_broker::image_render::AnimationTime {
+                        value: 1,
+                        scale: 30,
+                    },
+                    image_path: PathBuf::from("C:/old.png"),
+                });
+            let body = if outcome == "success" {
+                serde_json::json!({"parameters":[],"worker_diagnostics":{
+                    "advertised_out_flags2":0,"smart_render_advertised":false,
+                    "parameter_metadata":[]
+                }})
+                .to_string()
+            } else {
+                "{}".into()
+            };
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(TaskResult {
+                    success: outcome != "failure",
+                    body,
+                    output: None,
+                    identity: None,
+                    operation: None,
+                    diagnostic_eligible: false,
+                })
+                .unwrap();
+            app.receiver = Some(receiver);
+            app.busy = true;
+            app.task_kind = TaskKind::InspectParameters;
+            let ctx = egui::Context::default();
+            ctx.begin_pass(Default::default());
+            app.poll(&ctx);
+            let _ = ctx.end_pass();
+            assert!(
+                app.timed_layers.is_empty(),
+                "{outcome}: stale samples survived"
+            );
+            assert_eq!(
+                app.parameter_inspection_state,
+                if outcome == "success" {
+                    ParameterInspectionState::ZeroParameters
+                } else {
+                    ParameterInspectionState::Failed
+                }
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local Release worker and timed multilayer probe"]
+    fn gui_temporal_samples_reach_native_pixels() {
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let plugin = repository.join("target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex");
+        assert!(plugin.is_file());
+        let directory = temporary_directory("gui-temporal");
+        let input = directory.join("input.png");
+        image::RgbaImage::from_pixel(48, 32, image::Rgba([11, 22, 33, 255]))
+            .save(&input)
+            .unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert!(app.smart_render_capability.is_some(), "{}", app.report);
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input);
+        let _ = ctx.end_pass();
+        let mut outputs = Vec::new();
+        for shift in [0u8, 17] {
+            let samples: Vec<_> = [(6, 8, 10u8), (1, 3, 40), (5, 4, 70)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (time, scale, seed))| {
+                    let path = directory.join(format!("sample-{shift}-{index}.png"));
+                    image::RgbaImage::from_fn(48, 32, |x, y| {
+                        image::Rgba([
+                            x as u8 + seed + shift,
+                            y as u8 * 2 + seed + shift,
+                            seed + shift,
+                            255,
+                        ])
+                    })
+                    .save(&path)
+                    .unwrap();
+                    serde_json::json!({"slot":1,"time":time,"time_scale":scale,"image":path})
+                })
+                .collect();
+            app.apply_debug_request_document(
+                &serde_json::json!({
+                    "schema_version":1,"assignments":[],
+                    "timing":{"frame":0,"fps":30,"duration_frames":300},
+                    "timed_layers":samples
+                }),
+                &directory.join("request.json"),
+            )
+            .unwrap();
+            let output = directory.join(format!("output-{shift}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [48, 32]);
+            let pixels = image::open(output).unwrap().to_rgba8();
+            assert!(pixels.pixels().all(|p| p.0[3] == 255));
+            for (x, y, pixel) in pixels.enumerate_pixels() {
+                assert_eq!(
+                    pixel.0,
+                    [
+                        x as u8 + 50 + shift,
+                        y as u8 * 2 + 50 + shift,
+                        50 + shift,
+                        255
+                    ]
+                );
+            }
+            outputs.push(pixels);
+        }
+        assert_ne!(
+            outputs[0], outputs[1],
+            "temporal image changes must reach the AEX"
+        );
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn image_render_projection_keeps_static_and_temporal_layer_declarations() {
+        let mut static_layer = parameter(2, "layer");
+        static_layer.layer_path = Some(PathBuf::from("C:/sample.png"));
+        let parameters = vec![parameter(1, "layer"), static_layer, parameter(3, "float")];
+        let native = parameters_for_native_action(&parameters, &parameters);
+        assert_eq!(native.len(), 1);
+        let image = parameters_for_image_render(&parameters, &parameters);
+        assert_eq!(image.len(), 3);
+        assert!(image[0].layer_path.is_none());
+        assert_eq!(
+            image[1].layer_path.as_deref(),
+            Some(Path::new("C:/sample.png"))
+        );
+        assert_eq!(image[2].slot, 3);
+    }
+
+    #[test]
     fn typed_assignment_document_is_strict_typed_and_atomic() {
         let mut parameters = vec![
             parameter(1, "integer"),

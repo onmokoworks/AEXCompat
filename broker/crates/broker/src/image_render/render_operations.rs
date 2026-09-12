@@ -757,6 +757,44 @@ pub fn render_experimental_image_with_timed_layers_and_context(
     gpu_backend: RenderGpuBackend,
     dependencies: Vec<ApprovedImageArtifact>,
 ) -> io::Result<Value> {
+    render_experimental_image_with_timed_layers_context_and_search_dirs(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timed_layers,
+        timing,
+        smart,
+        pixel_format,
+        host_context,
+        None,
+        gpu_backend,
+        dependencies,
+        Vec::new(),
+    )
+}
+
+/// GUI timed-image dispatch with the same context and dependency roots as an
+/// ordinary one-shot render. No sample is routed through the static resident API.
+pub fn render_experimental_image_with_timed_layers_context_and_search_dirs(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timed_layers: &[TimedLayerImage],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    host_context: Option<&crate::render_request::HostContext>,
+    custom_ui_action: Option<RenderUiAction>,
+    gpu_backend: RenderGpuBackend,
+    dependencies: Vec<ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<PathBuf>,
+) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
     let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
     render_with_artifact(
@@ -774,12 +812,12 @@ pub fn render_experimental_image_with_timed_layers_and_context(
         smart,
         pixel_format,
         gpu_backend,
-        None,
+        custom_ui_action,
         None,
         None,
         Some(timed_layers),
         dependencies,
-        Vec::new(),
+        dependency_search_dirs,
         None,
         false,
         None,
