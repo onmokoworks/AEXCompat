@@ -17482,3 +17482,82 @@ fn standard_files_are_stable_owned_typed_and_not_reopened_after_close() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn crt_locale_lock_balances_recursion_and_shares_lockit_locale_ownership() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let lock = STUB_BASE + 0x100;
+        let unlock = lock + 16;
+        let ctor = unlock + 16;
+        let dtor = ctor + 16;
+        install_win64_import(&mut engine.unicorn, lock, dll, "_lock_locales").unwrap();
+        install_win64_import(&mut engine.unicorn, unlock, dll, "_unlock_locales").unwrap();
+        install_win64_import(
+            &mut engine.unicorn,
+            ctor,
+            "msvcp140.dll",
+            "??0_Lockit@std@@QEAA@H@Z",
+        )
+        .unwrap();
+        install_win64_import(
+            &mut engine.unicorn,
+            dtor,
+            "msvcp140.dll",
+            "??1_Lockit@std@@QEAA@XZ",
+        )
+        .unwrap();
+        engine.unicorn.get_data_mut().current_windows_thread_id = 7;
+        assert!(engine.call_win64(unlock, [0; 6]).is_err());
+        engine.call_win64(lock, [0; 6]).unwrap();
+        engine.call_win64(lock, [0; 6]).unwrap();
+        engine.call_win64(ctor, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(
+            engine.unicorn.get_data().msvcp_lockit_locks[0],
+            Some((7, 3))
+        );
+        engine.unicorn.get_data_mut().current_windows_thread_id = 8;
+        assert!(
+            engine
+                .call_win64(lock, [0; 6])
+                .unwrap_err()
+                .to_string()
+                .contains("contended")
+        );
+        assert!(engine.call_win64(unlock, [0; 6]).is_err());
+        assert_eq!(
+            engine.unicorn.get_data().msvcp_lockit_locks[0],
+            Some((7, 3))
+        );
+        engine.unicorn.get_data_mut().current_windows_thread_id = 7;
+        engine.call_win64(dtor, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap();
+        engine.call_win64(unlock, [0; 6]).unwrap();
+        assert_eq!(
+            engine.unicorn.get_data().msvcp_lockit_locks[0],
+            Some((7, 1))
+        );
+        engine.call_win64(unlock, [0; 6]).unwrap();
+        assert_eq!(engine.unicorn.get_data().msvcp_lockit_locks[0], None);
+        engine.unicorn.get_data_mut().current_windows_thread_id = 8;
+        engine.call_win64(lock, [0; 6]).unwrap();
+        engine.call_win64(unlock, [0; 6]).unwrap();
+        engine.unicorn.get_data_mut().msvcp_lockit_locks[0] = Some((8, u32::MAX));
+        assert!(
+            engine
+                .call_win64(lock, [0; 6])
+                .unwrap_err()
+                .to_string()
+                .contains("overflow")
+        );
+        assert_eq!(
+            engine.unicorn.get_data().msvcp_lockit_locks[0],
+            Some((8, u32::MAX))
+        );
+    }
+    for name in ["_lock_locales", "_unlock_locales"] {
+        assert!(matches!(
+            dispatch_win64_import("foreign.dll", name),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+}

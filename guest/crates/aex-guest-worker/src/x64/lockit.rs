@@ -85,3 +85,34 @@ fn emulate_msvcp_lockit(unicorn: &mut Unicorn<'_, GuestState>, destroy: bool) {
         let _ = unicorn.emu_stop();
     }
 }
+
+// The CRT locale lock is recursive and shared with _Lockit(_LOCK_LOCALE=0).
+// See Microsoft STL xlock.cpp and yvals.h. Contention stays explicit until
+// blocking guest-thread scheduling is available for this internal CRT API.
+fn emulate_crt_locale_lock(unicorn: &mut Unicorn<'_, GuestState>, release: bool) {
+    let result = (|| -> Result<u64, String> {
+        let thread = unicorn.get_data().current_windows_thread_id;
+        let current = unicorn.get_data().msvcp_lockit_locks[0];
+        let next = if release {
+            match current {
+                Some((owner, 1)) if owner == thread => None,
+                Some((owner, depth)) if owner == thread && depth > 1 => Some((owner, depth - 1)),
+                _ => return Err("CRT locale unlock has no matching thread ownership".into()),
+            }
+        } else {
+            match current {
+                None => Some((thread, 1)),
+                Some((owner, depth)) if owner == thread => Some((
+                    owner,
+                    depth
+                        .checked_add(1)
+                        .ok_or("CRT locale lock depth overflow")?,
+                )),
+                Some(_) => return Err("contended CRT locale lock is not implemented".into()),
+            }
+        };
+        unicorn.get_data_mut().msvcp_lockit_locks[0] = next;
+        Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}

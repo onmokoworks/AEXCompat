@@ -79,6 +79,8 @@ enum LegacyWin64Import {
     StdioVsnprintfS,
     StdioVsscanf,
     StdioVsprintf,
+    CrtLocaleLock,
+    CrtLocaleUnlock,
     AcRtIobFunc,
     Fgetc,
     Fread,
@@ -844,6 +846,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::AcRtIobFunc
         }
         (_, "__acrt_iob_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_lock_locales") => {
+            LegacyWin64Import::CrtLocaleLock
+        }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_unlock_locales") => {
+            LegacyWin64Import::CrtLocaleUnlock
+        }
+        (_, "_lock_locales" | "_unlock_locales") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fread") => LegacyWin64Import::Fread,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fclose") => LegacyWin64Import::Fclose,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "getc" | "fgetc") => {
@@ -2412,6 +2423,20 @@ fn install_win64_import(
                         "install OutputDebugStringA import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_output_debug_string_a(unicorn);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::CrtLocaleLock
+                | LegacyWin64Import::CrtLocaleUnlock) => {
+                    let release = operation == LegacyWin64Import::CrtLocaleUnlock;
+                    uc(
+                        "write CRT locale lock return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT locale lock",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_locale_lock(unicorn, release);
                         }),
                     )?;
                 }
