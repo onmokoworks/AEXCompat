@@ -33,6 +33,8 @@ enum LegacyWin64Import {
     MemChr,
     StrStr,
     StrLen,
+    RegOpenKeyExA,
+    RegCloseKey,
     MemCmp,
     StdioVsnprintfS,
     StdioVsprintf,
@@ -574,6 +576,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::StrLen
         }
         (_, "strlen") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "RegOpenKeyExA") => LegacyWin64Import::RegOpenKeyExA,
+        ("advapi32.dll", "RegCloseKey") => LegacyWin64Import::RegCloseKey,
+        (_, "RegOpenKeyExA" | "RegCloseKey") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("vcruntime140.dll", "strstr") => LegacyWin64Import::StrStr,
         (_, "strstr") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("vcruntime140.dll", "memchr") => LegacyWin64Import::MemChr,
@@ -855,6 +862,27 @@ fn install_win64_import(
                     "install CRT memory-copy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_memory_copy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::RegOpenKeyExA => {
+                uc(
+                    "write RegOpenKeyExA return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install RegOpenKeyExA",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_reg_open_key_ex_a(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::RegCloseKey => {
+                uc("write RegCloseKey return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install RegCloseKey",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_reg_close_key(unicorn);
                     }),
                 )?;
             }
@@ -7544,4 +7572,79 @@ fn read_win64_import_argument(
     Ok(u64::from_le_bytes(bytes.try_into().map_err(|_| {
         "Win64 import stack argument returned the wrong size".to_string()
     })?))
+}
+
+// The guest begins with an empty application registry. No host registry,
+// installation records or activation data are synthesized. Mutating APIs and
+// special performance pseudo-keys remain explicit unsupported imports/paths.
+fn guest_registry_predefined_key(key: u64) -> bool {
+    matches!(
+        key,
+        0xffff_ffff_8000_0000..=0xffff_ffff_8000_0003 | 0xffff_ffff_8000_0005
+    )
+}
+
+fn emulate_reg_open_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let key = read_win64_import_argument(unicorn, 0)?;
+        let subkey = read_win64_import_argument(unicorn, 1)?;
+        let options = read_win64_import_argument(unicorn, 2)? as u32;
+        let access = read_win64_import_argument(unicorn, 3)? as u32;
+        let output = read_win64_import_argument(unicorn, 4)?;
+        if !guest_registry_predefined_key(key) {
+            return Err(format!(
+                "RegOpenKeyExA unsupported or foreign registry handle {key:#x}"
+            ));
+        }
+        if options != 0 {
+            return Err(format!("RegOpenKeyExA unsupported options {options:#x}"));
+        }
+        if access & 0x300 == 0x300 {
+            return Ok(87);
+        }
+        if output == 0 {
+            return Ok(87);
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err("RegOpenKeyExA result is not writable".into());
+        }
+        let name = if subkey == 0 {
+            Vec::new()
+        } else {
+            read_crt_stdio_c_string(unicorn, subkey, 32768, "RegOpenKeyExA subkey")?
+        };
+        let (status, handle) = if name.is_empty() { (0, key) } else { (2, 0) };
+        unicorn
+            .mem_write(output, &u64::to_le_bytes(handle))
+            .map_err(|error| format!("RegOpenKeyExA output: {error}"))?;
+        Ok(status)
+    })();
+    finish_registry_import(unicorn, result);
+}
+
+fn emulate_reg_close_key(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = read_win64_import_argument(unicorn, 0).and_then(|key| {
+        if guest_registry_predefined_key(key) {
+            Ok(0)
+        } else {
+            Err(format!(
+                "RegCloseKey unsupported or foreign registry handle {key:#x}"
+            ))
+        }
+    });
+    finish_registry_import(unicorn, result);
+}
+
+fn finish_registry_import(unicorn: &mut Unicorn<'_, GuestState>, result: Result<u64, String>) {
+    match result {
+        Ok(status) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, status);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
 }

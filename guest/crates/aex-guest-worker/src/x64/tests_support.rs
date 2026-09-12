@@ -15089,3 +15089,90 @@ fn win64_strlen_rejects_null_unreadable_and_unterminated_input() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[test]
+fn registry_open_empty_roots_and_missing_application_keys() {
+    const OPEN: u64 = STUB_BASE + 0x1f0;
+    const CLOSE: u64 = STUB_BASE + 0x200;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, OPEN, "ADVAPI32.DLL", "RegOpenKeyExA").unwrap();
+    install_win64_import(&mut engine.unicorn, CLOSE, "advapi32.dll", "RegCloseKey").unwrap();
+    let name = DATA_BASE + 0x300;
+    let output = DATA_BASE + 0x400;
+    for root in [
+        0xffff_ffff_8000_0000,
+        0xffff_ffff_8000_0001,
+        0xffff_ffff_8000_0002,
+        0xffff_ffff_8000_0003,
+        0xffff_ffff_8000_0005,
+    ] {
+        engine.unicorn.mem_write(name, b"\0").unwrap();
+        for subkey in [0, name] {
+            assert_eq!(
+                engine
+                    .call_win64(OPEN, [root, subkey, 0, 0x20019, output, 0])
+                    .unwrap(),
+                0
+            );
+            let mut handle = [0; 8];
+            engine.unicorn.mem_read(output, &mut handle).unwrap();
+            assert_eq!(u64::from_le_bytes(handle), root);
+        }
+        engine
+            .unicorn
+            .mem_write(name, b"Software\\Example\\Missing\0")
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(OPEN, [root, name, 0, 0x20019, output, 0])
+                .unwrap(),
+            2
+        );
+        let mut handle = [0xff; 8];
+        engine.unicorn.mem_read(output, &mut handle).unwrap();
+        assert_eq!(handle, [0; 8]);
+        assert_eq!(engine.call_win64(CLOSE, [root, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(
+            engine
+                .call_win64(OPEN, [root, 0, 0, 0x20019, output, 0])
+                .unwrap(),
+            0
+        );
+    }
+    for name in ["RegOpenKeyExA", "RegCloseKey"] {
+        assert_eq!(
+            dispatch_win64_import("other.dll", name),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+}
+
+#[test]
+fn registry_open_rejects_unsupported_handles_options_and_bad_pointers() {
+    const OPEN: u64 = STUB_BASE + 0x1f0;
+    const ROOT: u64 = 0xffff_ffff_8000_0002;
+    for args in [
+        [123, 0, 0, 0x20019, DATA_BASE, 0],
+        [ROOT, 0, 8, 0x20019, DATA_BASE, 0],
+        [ROOT, 0xdead_beef, 0, 0x20019, DATA_BASE, 0],
+        [ROOT, 0, 0, 0x20019, 0xdead_beef, 0],
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, OPEN, "advapi32.dll", "RegOpenKeyExA").unwrap();
+        assert!(engine.call_win64(OPEN, args).is_err());
+    }
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, OPEN, "advapi32.dll", "RegOpenKeyExA").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(OPEN, [ROOT, 0, 0, 0x20019, 0, 0])
+            .unwrap(),
+        87
+    );
+    assert_eq!(
+        engine
+            .call_win64(OPEN, [ROOT, 0, 0, 0x20319, DATA_BASE, 0])
+            .unwrap(),
+        87
+    );
+}
