@@ -214,3 +214,24 @@ fn emulate_crt_pctype(unicorn: &mut Unicorn<'_, GuestState>) {
     })();
     finish_guest_stdio(unicorn, result);
 }
+
+// ___lc_locale_name_func returns wchar_t*[6], indexed by LC_ALL..LC_TIME.
+// UCRT nlsdata.cpp initializes all six Windows locale names to NULL for C;
+// these differ from the printable "C" strings returned by setlocale.
+fn emulate_crt_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        if let Some(address) = unicorn.get_data().crt_locale_names_buffer {
+            return Ok(address);
+        }
+        let address = GUEST_STREAM_BUFFER_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE + 2 * PAGE_SIZE;
+        unicorn
+            .mem_map(address, PAGE_SIZE, Prot::READ)
+            .map_err(|e| e.to_string())?;
+        unicorn
+            .mem_write(address, &[0; 6 * 8])
+            .map_err(|e| e.to_string())?;
+        unicorn.get_data_mut().crt_locale_names_buffer = Some(address);
+        Ok(address)
+    })();
+    finish_guest_stdio(unicorn, result);
+}

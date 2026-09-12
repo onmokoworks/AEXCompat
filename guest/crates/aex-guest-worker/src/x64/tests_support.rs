@@ -17984,3 +17984,41 @@ fn pctype_exposes_c_masks_signed_prefix_and_stable_readonly_storage() {
         assert!(engine.call_win64(entry + 16, [0; 6]).is_err());
     }
 }
+
+#[test]
+fn crt_locale_names_are_six_null_c_categories_distinct_from_printable_names() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let query = STUB_BASE + 0x100;
+        let set = query + 16;
+        install_win64_import(&mut engine.unicorn, query, dll, "___lc_locale_name_func").unwrap();
+        install_win64_import(&mut engine.unicorn, set, dll, "_wsetlocale").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        let address = engine.call_win64(query, [u64::MAX; 6]).unwrap();
+        assert_ne!(address, 0);
+        let mut values = [0xff; 48];
+        engine.unicorn.mem_read(address, &mut values).unwrap();
+        assert_eq!(values, [0; 48]);
+        for category in 0..=5 {
+            let printable = engine.call_win64(set, [category, 0, 0, 0, 0, 0]).unwrap();
+            assert_ne!(printable, address);
+            engine
+                .call_win64(set, [category, printable, 0, 0, 0, 0])
+                .unwrap();
+        }
+        engine.unicorn.get_data_mut().current_windows_thread_id = 9;
+        assert_eq!(engine.call_win64(query, [0; 6]).unwrap(), address);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        assert!(guest_range_has_permission(&engine.unicorn, address, 48, Prot::READ).unwrap());
+        assert!(!guest_range_has_permission(&engine.unicorn, address, 48, Prot::WRITE).unwrap());
+        assert!(!guest_range_has_permission(&engine.unicorn, address, 48, Prot::EXEC).unwrap());
+        install_win64_import(
+            &mut engine.unicorn,
+            set + 16,
+            "foreign.dll",
+            "___lc_locale_name_func",
+        )
+        .unwrap();
+        assert!(engine.call_win64(set + 16, [0; 6]).is_err());
+    }
+}
