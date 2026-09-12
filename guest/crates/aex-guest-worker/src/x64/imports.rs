@@ -36,6 +36,7 @@ enum LegacyWin64Import {
     StrCmp,
     StrLen,
     StrCpy,
+    SetNamedSecurityInfoA,
     SetEntriesInAclA,
     LocalFree,
     AllocateAndInitializeSid,
@@ -744,6 +745,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::StrCpy
         }
         (_, "strcpy") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "SetNamedSecurityInfoA") => LegacyWin64Import::SetNamedSecurityInfoA,
+        (_, "SetNamedSecurityInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetEntriesInAclA") => LegacyWin64Import::SetEntriesInAclA,
         ("kernel32.dll", "LocalFree") => LegacyWin64Import::LocalFree,
         (_, "SetEntriesInAclA" | "LocalFree") => {
@@ -1048,7 +1051,9 @@ fn install_win64_import(
                     }),
                 )?;
             }
-            LegacyWin64Import::SetEntriesInAclA | LegacyWin64Import::LocalFree => {
+            LegacyWin64Import::SetNamedSecurityInfoA
+            | LegacyWin64Import::SetEntriesInAclA
+            | LegacyWin64Import::LocalFree => {
                 uc("write ACL return", unicorn.mem_write(stub, &[0xc3]))?;
                 uc(
                     "install ACL import",

@@ -16696,3 +16696,92 @@ fn acl_builder_encodes_deny_before_allow_and_localfree_owns_the_buffer() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn named_file_dacl_updates_report_readonly_or_missing_without_changing_host_files() {
+    let path = std::env::temp_dir().join(format!(
+        "aex-security-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, b"original").unwrap();
+    let original_readonly = std::fs::metadata(&path).unwrap().permissions().readonly();
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    let name = DATA_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "advapi32.dll",
+        "SetNamedSecurityInfoA",
+    )
+    .unwrap();
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .sources
+        .insert("c:/assets/config.text".into(), path.clone());
+    engine.unicorn.get_data_mut().windows_last_error = 77;
+    for (filename, expected) in [
+        ("C:\\Assets\\config.text", 5),
+        ("c:/assets", 5),
+        ("c:/missing", 2),
+    ] {
+        engine
+            .write(name, format!("{filename}\0").as_bytes())
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(
+                    entry,
+                    &[name, 1, 4, u64::MAX, u64::MAX, u64::MAX, u64::MAX],
+                    TIMEOUT_MICROSECONDS
+                )
+                .unwrap(),
+            expected
+        );
+    }
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 77);
+    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().readonly(),
+        original_readonly
+    );
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(entry, &[0, 1, 4, 0, 0, 0, 0], TIMEOUT_MICROSECONDS)
+            .unwrap(),
+        87
+    );
+    assert!(
+        engine
+            .call_win64_with_timeout(entry, &[name, 6, 4, 0, 0, 0, 0], TIMEOUT_MICROSECONDS)
+            .is_err()
+    );
+    engine.write(name, b"c:/assets/config.text\0").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(entry, &[name, 1, 4, 0, 0, 0, 0], TIMEOUT_MICROSECONDS)
+            .unwrap(),
+        2
+    );
+    engine
+        .unicorn
+        .mem_map(0x55000000, PAGE_SIZE, Prot::WRITE)
+        .unwrap();
+    engine.write(0x55000000, b"x\0").unwrap();
+    assert!(
+        engine
+            .call_win64_with_timeout(entry, &[0x55000000, 1, 4, 0, 0, 0, 0], TIMEOUT_MICROSECONDS)
+            .is_err()
+    );
+    assert!(matches!(
+        dispatch_win64_import("other.dll", "SetNamedSecurityInfoA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}

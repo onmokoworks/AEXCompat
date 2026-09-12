@@ -67,6 +67,49 @@ fn build_new_guest_acl(
 
 fn emulate_windows_acl(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
+        if operation == LegacyWin64Import::SetNamedSecurityInfoA {
+            let address = read_win64_import_argument(unicorn, 0)?;
+            let kind = read_win64_import_argument(unicorn, 1)? as u32;
+            let flags = read_win64_import_argument(unicorn, 2)? as u32;
+            if address == 0 {
+                return Ok(87);
+            }
+            let name = read_crt_stdio_c_string(unicorn, address, 32768, "security object name")?;
+            if kind != 1 || flags != 4 {
+                return Err(format!(
+                    "unsupported named security object type={kind} flags={flags:#x}"
+                ));
+            }
+            let name =
+                std::str::from_utf8(&name).map_err(|_| "unsupported security object encoding")?;
+            let name = guest_file_name(name)?;
+            // The asset namespace is read-only. No WRITE_DAC access is granted;
+            // never mutate source permissions or pretend that a DACL was set.
+            // Optional security pointers are not consumed when access is denied.
+            if let Some(source) = unicorn.get_data().guest_files.sources.get(&name) {
+                return match std::fs::metadata(source) {
+                    Ok(_) => Ok(5),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(2),
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(5),
+                    Err(error) => Err(format!("security object metadata: {error}")),
+                };
+            }
+            let prefix = format!("{name}/");
+            // Explicit leaf mounts imply their containing guest directories.
+            return Ok(
+                if unicorn
+                    .get_data()
+                    .guest_files
+                    .sources
+                    .keys()
+                    .any(|path| path.starts_with(&prefix))
+                {
+                    5
+                } else {
+                    2
+                },
+            );
+        }
         if operation == LegacyWin64Import::LocalFree {
             let pointer = read_win64_import_argument(unicorn, 0)?;
             if pointer == 0 {
