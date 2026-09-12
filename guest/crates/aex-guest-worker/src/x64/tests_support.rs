@@ -8477,38 +8477,45 @@ fn rtl_pc_to_file_header_rejects_invalid_outputs_without_mutation() {
 
 #[test]
 fn wsa_startup_ordinal_writes_deterministic_x64_wsadata() {
-    const STARTUP: u64 = STUB_BASE + 0x1a8;
-    let mut engine = test_engine(&[0xc3]);
-    assert_eq!(
-        install_win64_import(&mut engine.unicorn, STARTUP, "WS2_32.DLL", "ORDINAL 115").unwrap(),
-        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WsaStartup)
-    );
-    assert_eq!(
-        dispatch_win64_import("ws2_32.dll", "WSAStartup"),
-        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WsaStartup)
-    );
-    assert_eq!(
-        dispatch_win64_import("fixture.dll", "ORDINAL 115"),
-        Win64ImportDispatch::UnsupportedLegacyImport
-    );
-    let output = DATA_BASE + 0xc00;
-    engine.write(output, &[0xaa; 408]).unwrap();
-    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
-    assert_eq!(
-        engine
-            .call_win64(STARTUP, [0x0002, output, 0, 0, 0, 0])
-            .unwrap(),
-        0
-    );
-    let mut data = vec![0; 408];
-    engine.read(output, &mut data).unwrap();
-    assert_eq!(&data[0..4], &[0x02, 0x00, 0x02, 0x02]);
-    assert_eq!(&data[4..45], b"AEXCompat deterministic Winsock 2.2 guest");
-    assert_eq!(&data[261..268], b"Running");
-    assert!(data[45..261].iter().all(|byte| *byte == 0));
-    assert!(data[268..].iter().all(|byte| *byte == 0));
-    assert_eq!(engine.unicorn.get_data().windows_socket_startups, 1);
-    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    for library in ["ws2_32.dll", "wsock32.dll"] {
+        const STARTUP: u64 = STUB_BASE + 0x1a8;
+        let mut engine = test_engine(&[0xc3]);
+        assert_eq!(
+            install_win64_import(&mut engine.unicorn, STARTUP, library, "ORDINAL 115").unwrap(),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WsaStartup)
+        );
+        assert_eq!(
+            dispatch_win64_import("ws2_32.dll", "WSAStartup"),
+            Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::WsaStartup)
+        );
+        assert_eq!(
+            dispatch_win64_import("fixture.dll", "ORDINAL 115"),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+        let output = DATA_BASE + 0xc00;
+        engine.write(output, &[0xaa; 408]).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+        assert_eq!(
+            engine
+                .call_win64(STARTUP, [0x0002, output, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut data = vec![0; 408];
+        engine.read(output, &mut data).unwrap();
+        assert_eq!(&data[0..4], &[0x02, 0x00, 0x02, 0x02]);
+        assert_eq!(&data[16..57], b"AEXCompat deterministic Winsock 2.2 guest");
+        assert_eq!(&data[273..280], b"Running");
+        assert!(data[57..273].iter().all(|byte| *byte == 0));
+        assert!(data[280..].iter().all(|byte| *byte == 0));
+        assert_eq!(engine.unicorn.get_data().windows_socket_startups, 1);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+        assert_eq!(&data[4..16], &[0; 12]); // Win64 limits and vendor pointer
+        let cleanup = STARTUP + 16;
+        install_win64_import(&mut engine.unicorn, cleanup, library, "ORDINAL 116").unwrap();
+        assert_eq!(engine.call_win64(cleanup, [0; 6]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().windows_socket_startups, 0);
+    }
 }
 
 #[test]

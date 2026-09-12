@@ -558,8 +558,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ) => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        ("ws2_32.dll", "WSAStartup" | "ORDINAL 115") => LegacyWin64Import::WsaStartup,
-        ("ws2_32.dll", "WSACleanup" | "ORDINAL 116") => LegacyWin64Import::WsaCleanup,
+        ("ws2_32.dll" | "wsock32.dll", "WSAStartup" | "ORDINAL 115") => {
+            LegacyWin64Import::WsaStartup
+        }
+        ("ws2_32.dll" | "wsock32.dll", "WSACleanup" | "ORDINAL 116") => {
+            LegacyWin64Import::WsaCleanup
+        }
         (_, "WSAStartup" | "ORDINAL 115" | "WSACleanup" | "ORDINAL 116") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
@@ -7654,9 +7658,9 @@ fn emulate_wsa_startup(unicorn: &mut Unicorn<'_, GuestState>) {
         data[0..2].copy_from_slice(&requested.to_le_bytes());
         data[2..4].copy_from_slice(&WINDOWS_WSA_VERSION_2_2.to_le_bytes());
         let description = b"AEXCompat deterministic Winsock 2.2 guest";
-        data[4..4 + description.len()].copy_from_slice(description);
+        data[16..16 + description.len()].copy_from_slice(description);
         let status = b"Running";
-        data[261..261 + status.len()].copy_from_slice(status);
+        data[273..273 + status.len()].copy_from_slice(status);
         unicorn
             .mem_write(output, &data)
             .map_err(|error| format!("write WSAStartup WSADATA: {error}"))?;
