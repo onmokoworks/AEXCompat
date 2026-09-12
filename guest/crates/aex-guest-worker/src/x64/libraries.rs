@@ -1,3 +1,8 @@
+// Keep dependency images outside all lazy heap, PF/world, environment, and
+// thread-stack arenas, even when those regions have not been mapped yet.
+const DEPENDENCY_IMAGE_BASE: u64 = 0x0000_0018_0000_0000;
+const DEPENDENCY_IMAGE_END: u64 = ENVIRONMENT_STRINGS_BASE;
+
 /// A real mapped DLL, pinned for the lifetime of the explicit library set.
 #[derive(Clone)]
 struct GuestLibrary {
@@ -120,6 +125,11 @@ impl GuestEngine<'static> {
             let size = library.mapped_bytes().len() as u64;
             let base = library.image_base();
             let end = base.checked_add(size).ok_or(GuestError::ImageAlignment)?;
+            if base < DEPENDENCY_IMAGE_BASE || end > DEPENDENCY_IMAGE_END {
+                return Err(GuestError::Callback(
+                    "DLL overlaps reserved guest address space".into(),
+                ));
+            }
             if base % PAGE_SIZE != 0 || size % PAGE_SIZE != 0 {
                 return Err(GuestError::ImageAlignment);
             }
@@ -331,7 +341,7 @@ impl GuestEngine<'static> {
             return Err(GuestError::Callback("DLL count exceeds 64".into()));
         }
         let mut libraries = Vec::new();
-        let mut base = 0x10_0000_0000u64;
+        let mut base = DEPENDENCY_IMAGE_BASE;
         let mut total = image.mapped_bytes().len();
         for entry in manifest.libraries {
             normalized_library_name(&entry.name)?;
@@ -489,7 +499,7 @@ mod library_tests {
     #[test]
     fn links_real_dependency_code_and_initializes_it_before_primary() {
         let primary = fixture(0x180000000, "EffectMain", Some(("dep.dll", "answer")), true);
-        let dependency = fixture(0x1000000000, "answer", None, true);
+        let dependency = fixture(0x1800000000, "answer", None, true);
         let expected_sha = dependency.report().sha256;
         let mut engine =
             GuestEngine::load_with_libraries(&primary, &[("C:/runtime/dep.dll", dependency)])
@@ -505,13 +515,13 @@ mod library_tests {
         engine
             .read(primary.image_base() + 0x2180, &mut pointer)
             .unwrap();
-        assert_eq!(u64::from_le_bytes(pointer), 0x1000001000);
+        assert_eq!(u64::from_le_bytes(pointer), 0x1800001000);
     }
 
     #[test]
     fn dynamic_lookup_resolves_only_mapped_module_and_exact_export() {
         let primary = fixture(0x180000000, "EffectMain", None, false);
-        let dep = fixture(0x1000000000, "answer", None, true);
+        let dep = fixture(0x1800000000, "answer", None, true);
         let mut engine =
             GuestEngine::load_with_libraries(&primary, &[("C:/runtime/dep.dll", dep)]).unwrap();
         let load = STUB_BASE + 0x100;
@@ -521,7 +531,7 @@ mod library_tests {
         let name = engine.allocate(128, 8).unwrap();
         engine.write(name, b"c:\\runtime\\DEP.dll\0").unwrap();
         let handle = engine.call_win64(load, [name, 0, 0, 0, 0, 0]).unwrap();
-        assert_eq!(handle, 0x1000000000);
+        assert_eq!(handle, 0x1800000000);
         engine.write(name, b"answer\0").unwrap();
         let entry = engine.call_win64(get, [handle, name, 0, 0, 0, 0]).unwrap();
         assert_eq!(engine.call_win64(entry, [0; 6]).unwrap(), 42);
@@ -537,7 +547,7 @@ mod library_tests {
     #[test]
     fn mapped_module_queries_resolve_names_addresses_and_paths() {
         let primary = fixture(0x180000000, "EffectMain", None, false);
-        let dep = fixture(0x1000000000, "answer", None, true);
+        let dep = fixture(0x1800000000, "answer", None, true);
         let mut engine =
             GuestEngine::load_with_libraries(&primary, &[("C:/runtime/dep.dll", dep)]).unwrap();
         let output = engine.allocate(256, 8).unwrap();
@@ -564,18 +574,18 @@ mod library_tests {
         for entry in [stub, stub + 16] {
             assert_eq!(
                 engine
-                    .call_win64(entry, [6, 0x1000001000, output, 0, 0, 0])
+                    .call_win64(entry, [6, 0x1800001000, output, 0, 0, 0])
                     .unwrap(),
                 1
             );
             let mut value = [0; 8];
             engine.read(output, &mut value).unwrap();
-            assert_eq!(u64::from_le_bytes(value), 0x1000000000);
+            assert_eq!(u64::from_le_bytes(value), 0x1800000000);
             assert_eq!(
                 engine
                     .call_win64(
                         entry,
-                        [6, 0x1000001000, primary.image_base() + 0x1000, 0, 0, 0]
+                        [6, 0x1800001000, primary.image_base() + 0x1000, 0, 0, 0]
                     )
                     .unwrap(),
                 0
@@ -599,13 +609,13 @@ mod library_tests {
         );
         assert_eq!(
             engine.call_win64(stub + 32, [name, 0, 0, 0, 0, 0]).unwrap(),
-            0x1000000000
+            0x1800000000
         );
         assert_eq!(
             engine
-                .call_win64(stub + 64, [0x1000001000, output, 0, 0, 0, 0])
+                .call_win64(stub + 64, [0x1800001000, output, 0, 0, 0, 0])
                 .unwrap(),
-            0x1000000000
+            0x1800000000
         );
         let expected: Vec<u8> = "c:\\runtime\\dep.dll\0"
             .encode_utf16()
@@ -613,7 +623,7 @@ mod library_tests {
             .collect();
         assert_eq!(
             engine
-                .call_win64(stub + 48, [0x1000000000, output, 128, 0, 0, 0])
+                .call_win64(stub + 48, [0x1800000000, output, 128, 0, 0, 0])
                 .unwrap(),
             (expected.len() / 2 - 1) as u64
         );
@@ -625,13 +635,13 @@ mod library_tests {
     #[test]
     fn runtime_sync_preserves_lower_lanes_and_clears_upper_lanes_in_real_dll() {
         let primary = fixture(0x180000000, "EffectMain", None, false);
-        let dep = fixture(0x1000000000, "answer", None, false);
+        let dep = fixture(0x1800000000, "answer", None, false);
         let mut engine = GuestEngine::load_with_libraries(&primary, &[("dep.dll", dep)]).unwrap();
         // Replace the fixture export before execution; the runtime hook must
         // inspect the executed bytes rather than a stale discovery snapshot.
         engine
             .unicorn
-            .mem_write(0x1000001000, &[0x67, 0xc5, 0xf8, 0x77, 0xc3])
+            .mem_write(0x1800001000, &[0x67, 0xc5, 0xf8, 0x77, 0xc3])
             .unwrap();
         for index in 0..16 {
             engine
@@ -639,7 +649,7 @@ mod library_tests {
                 .reg_write_long(unicorn_ymm_register(index).unwrap(), &[index as u8 + 1; 32])
                 .unwrap();
         }
-        engine.call_win64(0x1000001000, [0; 6]).unwrap();
+        engine.call_win64(0x1800001000, [0; 6]).unwrap();
         for index in 0..16 {
             let value = engine
                 .unicorn
@@ -665,13 +675,13 @@ mod library_tests {
             PeImage::parse_library(&bytes).unwrap()
         };
         let primary = make(0x180000000, "EffectMain", 0x11);
-        let dep = make(0x1000000000, "answer", 0x22);
+        let dep = make(0x1800000000, "answer", 0x22);
         let engine = GuestEngine::load_with_libraries(&primary, &[("dep.dll", dep)]).unwrap();
         let mut pointer = [0; 8];
         engine.read(0x58, &mut pointer).unwrap();
         let array = u64::from_le_bytes(pointer);
         let mut blocks = Vec::new();
-        for (index, base, byte) in [(0u32, 0x180000000, 0x11), (1, 0x1000000000, 0x22)] {
+        for (index, base, byte) in [(0u32, 0x180000000, 0x11), (1, 0x1800000000, 0x22)] {
             let mut slot = [0; 4];
             engine.read(base + 0x22b0, &mut slot).unwrap();
             assert_eq!(u32::from_le_bytes(slot), index);
@@ -689,13 +699,13 @@ mod library_tests {
     #[test]
     fn rejects_cycles_and_dll_attach_failure() {
         let primary = fixture(0x180000000, "EffectMain", None, false);
-        let a = fixture(0x1000000000, "answer", Some(("b.dll", "answer")), true);
-        let b = fixture(0x1100000000, "answer", Some(("a.dll", "answer")), true);
+        let a = fixture(0x1800000000, "answer", Some(("b.dll", "answer")), true);
+        let b = fixture(0x1900000000, "answer", Some(("a.dll", "answer")), true);
         let error = GuestEngine::load_with_libraries(&primary, &[("a.dll", a), ("b.dll", b)])
             .err()
             .unwrap();
         assert!(error.to_string().contains("cyclic DLL"));
-        let mut bytes = fixture_bytes(0x1000000000, "answer", None, true);
+        let mut bytes = fixture_bytes(0x1800000000, "answer", None, true);
         bytes[0x240..0x243].copy_from_slice(&[0x31, 0xc0, 0xc3]);
         let dep = PeImage::parse_library(&bytes).unwrap();
         let error = GuestEngine::load_with_libraries(&primary, &[("dep.dll", dep)])
@@ -709,14 +719,43 @@ mod library_tests {
     }
 
     #[test]
+    fn dependency_images_leave_lazy_heap_space_available() {
+        let primary = fixture(0x180000000, "EffectMain", None, false);
+        let colliding = fixture(CRT_HEAP_BASE, "answer", None, false);
+        assert!(
+            GuestEngine::load_with_libraries(&primary, &[("dep.dll", colliding)])
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("reserved guest address")
+        );
+        let dep = fixture(DEPENDENCY_IMAGE_BASE, "answer", None, false);
+        let mut engine = GuestEngine::load_with_libraries(&primary, &[("dep.dll", dep)]).unwrap();
+        let pointer =
+            allocate_process_heap_region(&mut engine.unicorn, PROCESS_HEAP_HANDLE, 968).unwrap();
+        assert_eq!(pointer, CRT_HEAP_BASE);
+        free_process_heap_region(&mut engine.unicorn, PROCESS_HEAP_HANDLE, pointer).unwrap();
+    }
+
+    #[test]
     fn rejects_overlapping_images_missing_exports_and_ambiguous_names() {
         let primary = fixture(0x180000000, "EffectMain", Some(("dep.dll", "answer")), true);
-        let overlap = fixture(0x180000000, "answer", None, true);
-        assert!(GuestEngine::load_with_libraries(&primary, &[("dep.dll", overlap)]).is_err());
-        let missing = fixture(0x1000000000, "wrong", None, true);
+        let overlap_a = fixture(DEPENDENCY_IMAGE_BASE, "answer", None, true);
+        let overlap_b = fixture(DEPENDENCY_IMAGE_BASE, "answer", None, true);
+        let collision = GuestEngine::load_with_libraries(
+            &primary,
+            &[("dep.dll", overlap_a), ("other.dll", overlap_b)],
+        )
+        .err()
+        .unwrap();
+        assert!(
+            collision.to_string().contains("map dependency DLL"),
+            "{collision}"
+        );
+        let missing = fixture(0x1800000000, "wrong", None, true);
         assert!(GuestEngine::load_with_libraries(&primary, &[("dep.dll", missing)]).is_err());
-        let a = fixture(0x1000000000, "answer", None, true);
-        let b = fixture(0x1100000000, "answer", None, true);
+        let a = fixture(0x1800000000, "answer", None, true);
+        let b = fixture(0x1900000000, "answer", None, true);
         assert!(
             GuestEngine::load_with_libraries(&primary, &[("A/dep.dll", a), ("B/dep.dll", b)])
                 .is_err()

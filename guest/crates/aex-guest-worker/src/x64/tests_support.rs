@@ -15311,3 +15311,52 @@ fn cuda_startup_identity_and_counter_api_sets_execute_existing_guest_semantics()
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn cuda_api_sets_share_error_tls_and_heap_state_with_kernel32() {
+    let mut engine = test_engine(&[0xc3]);
+    let apis = [
+        ("api-ms-win-core-errorhandling-l1-1-0.dll", "SetLastError"),
+        ("kernel32.dll", "GetLastError"),
+        ("api-ms-win-core-errorhandling-l1-1-0.dll", "GetLastError"),
+        ("api-ms-win-core-processthreads-l1-1-0.dll", "TlsAlloc"),
+        ("api-ms-win-core-processthreads-l1-1-0.dll", "TlsSetValue"),
+        ("kernel32.dll", "TlsGetValue"),
+        ("api-ms-win-core-processthreads-l1-1-0.dll", "TlsFree"),
+        ("api-ms-win-core-heap-l1-1-0.dll", "HeapCreate"),
+        ("api-ms-win-core-heap-l1-1-0.dll", "HeapAlloc"),
+        ("api-ms-win-core-heap-l1-1-0.dll", "HeapReAlloc"),
+        ("kernel32.dll", "HeapFree"),
+        ("api-ms-win-core-heap-l1-1-0.dll", "HeapDestroy"),
+    ];
+    for (index, (dll, symbol)) in apis.iter().enumerate() {
+        install_win64_import(
+            &mut engine.unicorn,
+            STUB_BASE + 0x100 + index as u64 * 16,
+            dll,
+            symbol,
+        )
+        .unwrap();
+    }
+    let mut call = |index: u64, args| {
+        engine
+            .call_win64(STUB_BASE + 0x100 + index * 16, args)
+            .unwrap()
+    };
+    call(0, [1234, 0, 0, 0, 0, 0]);
+    assert_eq!(call(1, [0; 6]), 1234);
+    assert_eq!(call(2, [0; 6]), 1234);
+    let slot = call(3, [0; 6]);
+    assert_eq!(call(4, [slot, 0x12345678, 0, 0, 0, 0]), 1);
+    assert_eq!(call(5, [slot, 0, 0, 0, 0, 0]), 0x12345678);
+    assert_eq!(call(6, [slot, 0, 0, 0, 0, 0]), 1);
+    let heap = call(7, [0; 6]);
+    assert_ne!(heap, 0);
+    let block = call(8, [heap, 8, 16, 0, 0, 0]);
+    assert_ne!(block, 0);
+    let resized = call(9, [heap, 8, block, 32, 0, 0]);
+    assert_ne!(resized, 0);
+    assert_eq!(call(10, [heap, 0, resized, 0, 0, 0]), 1);
+    assert_eq!(call(11, [heap, 0, 0, 0, 0, 0]), 1);
+    assert!(engine.unicorn.get_data().windows_private_heaps.is_empty());
+}

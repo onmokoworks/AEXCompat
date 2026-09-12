@@ -16,7 +16,8 @@ Run the ordinary worker command with this environment variable set. The library
 set is loaded before the primary AEX's process initialization. Unset the variable
 to retain primary-only loading. Do not include private runtime files in the repo.
 
-Each library is parsed as PE32+, rebased at a separate guest address, linked to
+Each library is parsed as PE32+, rebased within the dedicated guest range
+`[0x1800000000, 0x2000000000)`, linked to
 supplied named exports or existing emulated imports, protected, and initialized
 in dependency order. Static TLS templates receive distinct indices and slots.
 `LoadLibraryA` and `GetProcAddress` can return these actual guest modules/exports.
@@ -26,7 +27,9 @@ SHA-256 values are available through `library_reports()` and trace module data.
 These identify bytes, not permission to execute or proof of rendering success.
 
 Bounds: 1 MiB manifest, 64 libraries, 128 MiB per input file, 1 GiB total mapped
-images. Existing PE parser limits also apply. Guest mapping collisions, missing
+images. Existing PE parser limits also apply. This range avoids reserved lazy allocation arenas, including the CRT heap, even
+before they contain mapped pages. Explicit-image callers must use the same range.
+Guest mapping collisions, missing
 exports from supplied libraries, cycles, and failed initializers are errors.
 Large DLLs synchronize AVX state by decoding executed instructions with bounded
 scratch space, without creating an unbounded table of candidate instruction PCs.

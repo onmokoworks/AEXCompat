@@ -352,17 +352,29 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetStartupInfoW") => LegacyWin64Import::GetStartupInfoW,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetStartupInfoW") => {
+            LegacyWin64Import::GetStartupInfoW
+        }
         (_, "GetStartupInfoW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "RtlCaptureContext") => LegacyWin64Import::RtlCaptureContext,
+        ("kernel32.dll" | "api-ms-win-core-rtlsupport-l1-1-0.dll", "RtlCaptureContext") => {
+            LegacyWin64Import::RtlCaptureContext
+        }
         (_, "RtlCaptureContext") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetStdHandle") => LegacyWin64Import::GetStdHandle,
+        ("kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll", "GetStdHandle") => {
+            LegacyWin64Import::GetStdHandle
+        }
         (_, "GetStdHandle") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetConsoleMode") => LegacyWin64Import::GetConsoleMode,
+        ("kernel32.dll" | "api-ms-win-core-console-l1-1-0.dll", "GetConsoleMode") => {
+            LegacyWin64Import::GetConsoleMode
+        }
         (_, "GetConsoleMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetFileType") => LegacyWin64Import::GetFileType,
+        ("kernel32.dll" | "api-ms-win-core-file-l1-1-0.dll", "GetFileType") => {
+            LegacyWin64Import::GetFileType
+        }
         (_, "GetFileType") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "CreateFileW") => LegacyWin64Import::CreateFileW,
+        ("kernel32.dll" | "api-ms-win-core-file-l1-1-0.dll", "CreateFileW") => {
+            LegacyWin64Import::CreateFileW
+        }
         (_, "CreateFileW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "FindFirstFileExW") => LegacyWin64Import::FindFirstFileExW,
         (_, "FindFirstFileExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
@@ -384,10 +396,14 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "WaitOnAddress") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "WaitForSingleObject") => LegacyWin64Import::WaitForSingleObject,
         ("kernel32.dll", "WaitForSingleObjectEx") => LegacyWin64Import::WaitForSingleObjectEx,
-        ("kernel32.dll", "CloseHandle") => LegacyWin64Import::CloseHandle,
+        ("kernel32.dll" | "api-ms-win-core-handle-l1-1-0.dll", "CloseHandle") => {
+            LegacyWin64Import::CloseHandle
+        }
         ("kernel32.dll", "GetCurrentThread") => LegacyWin64Import::GetCurrentThread,
         ("kernel32.dll", "SetThreadStackGuarantee") => LegacyWin64Import::SetThreadStackGuarantee,
-        ("kernel32.dll", "SwitchToThread") => LegacyWin64Import::SwitchToThread,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "SwitchToThread") => {
+            LegacyWin64Import::SwitchToThread
+        }
         ("kernel32.dll", "ResumeThread") => LegacyWin64Import::ResumeThread,
         (
             _,
@@ -399,15 +415,25 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             | "SwitchToThread"
             | "ResumeThread",
         ) => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetCommandLineA") => LegacyWin64Import::GetCommandLineA,
+        ("kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll", "GetCommandLineA") => {
+            LegacyWin64Import::GetCommandLineA
+        }
         (_, "GetCommandLineA") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetCommandLineW") => LegacyWin64Import::GetCommandLineW,
+        ("kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll", "GetCommandLineW") => {
+            LegacyWin64Import::GetCommandLineW
+        }
         (_, "GetCommandLineW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetACP") => LegacyWin64Import::GetACP,
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "GetACP") => {
+            LegacyWin64Import::GetACP
+        }
         (_, "GetACP") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetCPInfo") => LegacyWin64Import::GetCPInfo,
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "GetCPInfo") => {
+            LegacyWin64Import::GetCPInfo
+        }
         (_, "GetCPInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
+        ("kernel32.dll" | "api-ms-win-core-debug-l1-1-0.dll", "IsDebuggerPresent") => {
+            LegacyWin64Import::IsDebuggerPresent
+        }
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "OutputDebugStringA") => LegacyWin64Import::OutputDebugStringA,
         (_, "OutputDebugStringA") => return Win64ImportDispatch::UnsupportedLegacyImport,
@@ -423,23 +449,44 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "QueryPerformanceFrequency") => {
             LegacyWin64Import::QueryPerformanceFrequency
         }
-        ("kernel32.dll", "GetEnvironmentVariableA") => LegacyWin64Import::GetEnvironmentVariableA,
+        (
+            "kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll",
+            "GetEnvironmentVariableA",
+        ) => LegacyWin64Import::GetEnvironmentVariableA,
         ("kernel32.dll", "GetEnvironmentVariableW") => LegacyWin64Import::GetEnvironmentVariableW,
         (_, "GetEnvironmentVariableW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetEnvironmentStringsW") => LegacyWin64Import::GetEnvironmentStringsW,
+        (
+            "kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll",
+            "GetEnvironmentStringsW",
+        ) => LegacyWin64Import::GetEnvironmentStringsW,
         (_, "GetEnvironmentStringsW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "FreeEnvironmentStringsW") => LegacyWin64Import::FreeEnvironmentStringsW,
+        (
+            "kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll",
+            "FreeEnvironmentStringsW",
+        ) => LegacyWin64Import::FreeEnvironmentStringsW,
         (_, "FreeEnvironmentStringsW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "WideCharToMultiByte") => LegacyWin64Import::WideCharToMultiByte,
+        ("kernel32.dll" | "api-ms-win-core-string-l1-1-0.dll", "WideCharToMultiByte") => {
+            LegacyWin64Import::WideCharToMultiByte
+        }
         (_, "WideCharToMultiByte") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "MultiByteToWideChar") => LegacyWin64Import::MultiByteToWideChar,
+        ("kernel32.dll" | "api-ms-win-core-string-l1-1-0.dll", "MultiByteToWideChar") => {
+            LegacyWin64Import::MultiByteToWideChar
+        }
         (_, "MultiByteToWideChar") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetStringTypeW") => LegacyWin64Import::GetStringTypeW,
+        ("kernel32.dll" | "api-ms-win-core-string-l1-1-0.dll", "GetStringTypeW") => {
+            LegacyWin64Import::GetStringTypeW
+        }
         (_, "GetStringTypeW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "LCMapStringW") => LegacyWin64Import::LCMapStringW,
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "LCMapStringW") => {
+            LegacyWin64Import::LCMapStringW
+        }
         (_, "LCMapStringW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
-        ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
+        ("kernel32.dll" | "api-ms-win-core-errorhandling-l1-1-0.dll", "GetLastError") => {
+            LegacyWin64Import::GetLastError
+        }
+        ("kernel32.dll" | "api-ms-win-core-errorhandling-l1-1-0.dll", "SetLastError") => {
+            LegacyWin64Import::SetLastError
+        }
         ("kernel32.dll", "SetThreadErrorMode") => LegacyWin64Import::SetThreadErrorMode,
         (_, "SetThreadErrorMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "LoadLibraryA") => LegacyWin64Import::LoadLibraryA,
@@ -452,25 +499,47 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
         ("kernel32.dll", "FlsSetValue") => LegacyWin64Import::FlsSetValue,
         ("kernel32.dll", "FlsFree") => LegacyWin64Import::FlsFree,
-        ("kernel32.dll", "TlsAlloc") => LegacyWin64Import::TlsAlloc,
-        ("kernel32.dll", "TlsGetValue") => LegacyWin64Import::TlsGetValue,
-        ("kernel32.dll", "TlsSetValue") => LegacyWin64Import::TlsSetValue,
-        ("kernel32.dll", "TlsFree") => LegacyWin64Import::TlsFree,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "TlsAlloc") => {
+            LegacyWin64Import::TlsAlloc
+        }
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "TlsGetValue") => {
+            LegacyWin64Import::TlsGetValue
+        }
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "TlsSetValue") => {
+            LegacyWin64Import::TlsSetValue
+        }
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "TlsFree") => {
+            LegacyWin64Import::TlsFree
+        }
         (_, "TlsAlloc" | "TlsGetValue" | "TlsSetValue" | "TlsFree") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        ("kernel32.dll", "InitializeSListHead") => LegacyWin64Import::InitializeSListHead,
+        ("kernel32.dll" | "api-ms-win-core-interlocked-l1-1-0.dll", "InitializeSListHead") => {
+            LegacyWin64Import::InitializeSListHead
+        }
         ("kernel32.dll", "DisableThreadLibraryCalls") => {
             LegacyWin64Import::DisableThreadLibraryCalls
         }
         ("bcryptprimitives.dll", "ProcessPrng") => LegacyWin64Import::ProcessPrng,
         (_, "ProcessPrng") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetProcessHeap") => LegacyWin64Import::GetProcessHeap,
-        ("kernel32.dll", "HeapAlloc") => LegacyWin64Import::HeapAlloc,
-        ("kernel32.dll", "HeapFree") => LegacyWin64Import::HeapFree,
-        ("kernel32.dll", "HeapReAlloc") => LegacyWin64Import::HeapReAlloc,
-        ("kernel32.dll", "HeapCreate") => LegacyWin64Import::HeapCreate,
-        ("kernel32.dll", "HeapDestroy") => LegacyWin64Import::HeapDestroy,
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "GetProcessHeap") => {
+            LegacyWin64Import::GetProcessHeap
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapAlloc") => {
+            LegacyWin64Import::HeapAlloc
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapFree") => {
+            LegacyWin64Import::HeapFree
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapReAlloc") => {
+            LegacyWin64Import::HeapReAlloc
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapCreate") => {
+            LegacyWin64Import::HeapCreate
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapDestroy") => {
+            LegacyWin64Import::HeapDestroy
+        }
         (
             _,
             "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc" | "HeapCreate"
@@ -485,31 +554,52 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "RtlPcToFileHeader") => LegacyWin64Import::RtlPcToFileHeader,
         (_, "RtlPcToFileHeader") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "RaiseException") => LegacyWin64Import::RaiseException,
+        ("kernel32.dll" | "api-ms-win-core-errorhandling-l1-1-0.dll", "RaiseException") => {
+            LegacyWin64Import::RaiseException
+        }
         (_, "RaiseException") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "InitializeCriticalSection") => {
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "InitializeCriticalSection") => {
             LegacyWin64Import::InitializeCriticalSection
         }
-        ("kernel32.dll", "InitializeCriticalSectionAndSpinCount") => {
-            LegacyWin64Import::InitializeCriticalSectionAndSpinCount
-        }
+        (
+            "kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll",
+            "InitializeCriticalSectionAndSpinCount",
+        ) => LegacyWin64Import::InitializeCriticalSectionAndSpinCount,
         ("kernel32.dll", "InitializeCriticalSectionEx") => {
             LegacyWin64Import::InitializeCriticalSectionEx
         }
-        ("kernel32.dll", "EnterCriticalSection") => LegacyWin64Import::EnterCriticalSection,
-        ("kernel32.dll", "LeaveCriticalSection") => LegacyWin64Import::LeaveCriticalSection,
-        ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
-        ("kernel32.dll", "AcquireSRWLockExclusive") => LegacyWin64Import::AcquireSrwLockExclusive,
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "EnterCriticalSection") => {
+            LegacyWin64Import::EnterCriticalSection
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "LeaveCriticalSection") => {
+            LegacyWin64Import::LeaveCriticalSection
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "DeleteCriticalSection") => {
+            LegacyWin64Import::DeleteCriticalSection
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "AcquireSRWLockExclusive") => {
+            LegacyWin64Import::AcquireSrwLockExclusive
+        }
         ("kernel32.dll", "TryAcquireSRWLockExclusive") => {
             LegacyWin64Import::TryAcquireSrwLockExclusive
         }
-        ("kernel32.dll", "ReleaseSRWLockExclusive") => LegacyWin64Import::ReleaseSrwLockExclusive,
-        ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "ReleaseSRWLockExclusive") => {
+            LegacyWin64Import::ReleaseSrwLockExclusive
+        }
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleHandleW") => {
+            LegacyWin64Import::GetModuleHandleW
+        }
         ("kernel32.dll", "GetModuleHandleExA") => LegacyWin64Import::GetModuleHandleExA,
-        ("kernel32.dll", "GetModuleHandleExW") => LegacyWin64Import::GetModuleHandleExW,
-        ("kernel32.dll", "GetModuleFileNameW") => LegacyWin64Import::GetModuleFileNameW,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleHandleExW") => {
+            LegacyWin64Import::GetModuleHandleExW
+        }
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleFileNameW") => {
+            LegacyWin64Import::GetModuleFileNameW
+        }
         ("kernel32.dll", "LoadLibraryW") => LegacyWin64Import::LoadLibraryW,
-        ("kernel32.dll", "GetProcAddress") => LegacyWin64Import::GetProcAddress,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetProcAddress") => {
+            LegacyWin64Import::GetProcAddress
+        }
         (
             _,
             "InitializeCriticalSection"
