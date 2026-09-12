@@ -13,7 +13,9 @@ const MAX_FILE_SIZE: usize = 128 * 1024 * 1024;
 const MAX_IMAGE_SIZE: usize = 256 * 1024 * 1024;
 const MAX_SECTIONS: usize = 96;
 const MAX_IMPORTS: usize = 4096;
-const MAX_EXPORTS: usize = 4096;
+// Vector math runtimes ship roughly 15,000 named entry points. Keep a finite
+// parser budget large enough for these real dependency tables.
+const MAX_EXPORTS: usize = 16_384;
 const MAX_TLS_CALLBACKS: usize = 64;
 const MAX_STATIC_TLS_BYTES: usize = 1024 * 1024;
 const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
@@ -831,5 +833,96 @@ mod tests {
             StringCandidate::Lstr { .. } => panic!("expected ordinal candidate"),
         }
         assert!(parse_string_candidate(b"$$$/AE/Test/LStr/x=no", 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod export_capacity_tests {
+    use super::*;
+    fn many_exports(count: usize) -> Vec<u8> {
+        fn p16(b: &mut [u8], at: usize, v: u16) {
+            b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        fn p32(b: &mut [u8], at: usize, v: usize) {
+            b[at..at + 4].copy_from_slice(&(v as u32).to_le_bytes());
+        }
+        let functions = 0x200;
+        let names = functions + count * 4;
+        let ordinals = names + count * 4;
+        let strings = ordinals + count * 2;
+        let raw_size = (strings + count * 16 + 511) & !511;
+        let mut file = vec![0u8; 0x200 + raw_size];
+        file[..2].copy_from_slice(b"MZ");
+        p32(&mut file, 60, 0x80);
+        file[0x80..0x84].copy_from_slice(b"PE\0\0");
+        p16(&mut file, 0x84, 0x8664);
+        p16(&mut file, 0x86, 1);
+        p16(&mut file, 0x94, 240);
+        p16(&mut file, 0x96, 0x2022);
+        let op = 0x98;
+        p16(&mut file, op, 0x20b);
+        file[op + 24..op + 32].copy_from_slice(&0x180000000u64.to_le_bytes());
+        for (offset, value) in [
+            (32, 4096),
+            (36, 512),
+            (56, (0x1000 + raw_size + 4095) & !4095),
+            (60, 0x200),
+            (108, 16),
+            (112, 0x1100),
+            (116, raw_size - 0x100),
+        ] {
+            p32(&mut file, op + offset, value);
+        }
+        let section = op + 240;
+        file[section..section + 5].copy_from_slice(b".text");
+        for (offset, value) in [
+            (8, raw_size),
+            (12, 0x1000),
+            (16, raw_size),
+            (20, 0x200),
+            (36, 0x60000020),
+        ] {
+            p32(&mut file, section + offset, value);
+        }
+        file[0x200] = 0xc3;
+        for (offset, value) in [
+            (12, 0x1180),
+            (16, 1),
+            (20, count),
+            (24, count),
+            (28, 0x1000 + functions),
+            (32, 0x1000 + names),
+            (36, 0x1000 + ordinals),
+        ] {
+            p32(&mut file, 0x300 + offset, value);
+        }
+        file[0x380..0x389].copy_from_slice(b"math.dll\0");
+        for index in 0..count {
+            p32(&mut file, 0x200 + functions + index * 4, 0x1000);
+            p32(
+                &mut file,
+                0x200 + names + index * 4,
+                0x1000 + strings + index * 16,
+            );
+            p16(&mut file, 0x200 + ordinals + index * 2, index as u16);
+            let name = format!("entry{index:05}\0");
+            let at = 0x200 + strings + index * 16;
+            file[at..at + name.len()].copy_from_slice(name.as_bytes());
+        }
+        file
+    }
+    #[test]
+    fn large_runtime_export_tables_resolve_at_capacity_and_reject_overflow() {
+        let image = PeImage::parse_library(&many_exports(MAX_EXPORTS)).unwrap();
+        assert_eq!(image.exports().len(), MAX_EXPORTS);
+        for index in [0, 4096, 14924, MAX_EXPORTS - 1] {
+            assert_eq!(
+                image.export_address(&format!("entry{index:05}")),
+                Some(0x180001000)
+            );
+        }
+        assert!(
+            matches!(PeImage::parse_library(&many_exports(MAX_EXPORTS+1)),Err(PeError::ExportCount(count)) if count==MAX_EXPORTS+1)
+        );
     }
 }
