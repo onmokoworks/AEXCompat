@@ -264,8 +264,9 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
     for (std::size_t layer_index = 0;
          layer_index < request.external_layers->size(); ++layer_index) {
       const auto& layer = (*request.external_layers)[layer_index];
-      if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
-          runtime.records[layer.slot - 1].type != 0 || layer.rgba.size() !=
+      if (layer.slot < 0 || (layer.slot == 0 && !layer.timed) ||
+          static_cast<std::size_t>(layer.slot) >= definitions.size() ||
+          (layer.slot > 0 && runtime.records[layer.slot - 1].type != 0) || layer.rgba.size() !=
               static_cast<std::size_t>(layer.width) * layer.height * 4) return false;
       auto& pixels = prepared.hosted_pixels[layer_index];
       pixels.resize(static_cast<std::size_t>(layer.width) * layer.height *

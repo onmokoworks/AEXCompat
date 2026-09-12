@@ -438,6 +438,87 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_FRAMESLICE and local Release worker"]
+    fn real_frameslice_gui_renders_timed_primary_bands() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_FRAMESLICE")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-frameslice");
+        let input = directory.join("current.png");
+        let past = directory.join("past.png");
+        image::RgbaImage::from_fn(256, 144, |x, y| image::Rgba([x as u8, y as u8, 193, 255]))
+            .save(&input)
+            .unwrap();
+        image::RgbaImage::from_fn(256, 144, |x, y| image::Rgba([x as u8, y as u8, 71, 255]))
+            .save(&past)
+            .unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters.iter().find(|p| p.slot == 1).unwrap().name,
+            "Time Frames"
+        );
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input);
+        let _ = ctx.end_pass();
+        for mode in [1, 2] {
+            app.apply_debug_request_document(&serde_json::json!({
+                "schema_version":1,"timing":{"frame":2,"fps":30,"duration_frames":300},
+                "assignments":[{"slot":1,"value":2},{"slot":2,"value":1},{"slot":3,"value":1},
+                    {"slot":4,"value":mode},{"slot":5,"value":0},{"slot":7,"value":1},{"slot":8,"value":100}],
+                "timed_layers":[{"slot":0,"time":1,"time_scale":30,"image":past}]
+            }),&directory.join("request.json")).unwrap();
+            assert_eq!(app.timed_layers.len(), 1);
+            let output = directory.join(format!("output{mode}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            let expected = image::RgbaImage::from_fn(256, 144, |x, y| {
+                image::Rgba([
+                    x as u8,
+                    y as u8,
+                    if (mode == 1 && x < 128) || (mode == 2 && y < 72) {
+                        71
+                    } else {
+                        193
+                    },
+                    255,
+                ])
+            });
+            assert_eq!(image::open(output).unwrap().to_rgba8(), expected);
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_MEDIAN_PRO and local Release worker"]
     fn real_median_pro_gui_preserves_structure_and_removes_impulses() {
         let plugin = PathBuf::from(
@@ -2112,7 +2193,7 @@ mod tests {
                 .is_empty()
         );
         for (field, value) in [
-            ("slot", serde_json::json!(0)),
+            ("slot", serde_json::json!(1025)),
             ("time_scale", serde_json::json!(0)),
             ("time", serde_json::json!(1.5)),
             ("time", serde_json::json!(2147483648_i64)),
@@ -2196,7 +2277,7 @@ mod tests {
         );
         assert_eq!(restored.timed_layers[1].time.scale, 30);
         let before = saved.clone();
-        for slot in [0, 9] {
+        for slot in [9, 1025] {
             let mut invalid = saved.clone();
             invalid["timed_layers"][0]["slot"] = slot.into();
             invalid["timing"]["frame"] = 31.into();
@@ -2222,6 +2303,26 @@ mod tests {
         assert!(app.timed_layers.is_empty());
         restored.close_selected_aex();
         assert!(restored.timed_layers.is_empty());
+    }
+
+    #[test]
+    fn gui_imports_primary_time_samples_without_secondary_metadata() {
+        let mut app = HarnessApp::new(PathBuf::from("C:/repo"));
+        app.apply_debug_request_document(
+            &serde_json::json!({
+                "schema_version":1,"assignments":[],
+                "timed_layers":[{"slot":0,"time":-1,"time_scale":30,"image":"past.png"}]
+            }),
+            Path::new("C:/samples/request.json"),
+        )
+        .unwrap();
+        assert_eq!(app.timed_layers.len(), 1);
+        assert_eq!(app.timed_layers[0].slot, 0);
+        assert_eq!(app.timed_layers[0].time.value, -1);
+        assert_eq!(
+            app.timed_layers[0].image_path,
+            Path::new("C:/samples/past.png")
+        );
     }
 
     #[test]

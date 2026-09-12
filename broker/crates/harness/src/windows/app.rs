@@ -1213,9 +1213,10 @@ impl HarnessApp {
         }
         apply_typed_assignments(&mut parameters, &assignments, Some(path))?;
         for sample in &timed_layers {
-            if !parameters
-                .iter()
-                .any(|p| p.slot == sample.slot && p.kind == "layer")
+            if sample.slot != 0
+                && !parameters
+                    .iter()
+                    .any(|p| p.slot == sample.slot && p.kind == "layer")
             {
                 return Err(format!(
                     "AEX exposes no layer parameter at slot {}",

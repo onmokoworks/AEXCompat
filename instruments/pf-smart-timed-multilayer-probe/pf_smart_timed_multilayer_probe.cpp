@@ -9,7 +9,10 @@
 #include <cstring>
 
 namespace {
-constexpr A_long kLayerSlot = 1;
+#ifndef AEX_TIMED_PROBE_SLOT
+#define AEX_TIMED_PROBE_SLOT 1
+#endif
+constexpr A_long kLayerSlot = AEX_TIMED_PROBE_SLOT;
 constexpr std::array<A_long, 3> kCheckoutIds{101, 202, 303};
 constexpr std::array<A_long, 3> kTimes{6, 1, 5};
 constexpr std::array<A_u_long, 3> kScales{8, 3, 4};
@@ -138,29 +141,59 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
     err = PF_Err_INTERNAL_STRUCT_DAMAGED;
   return err;
 }
+PF_Err ClassicRender(PF_InData* in_data, PF_LayerDef* output) {
+  if (!in_data || !output) return PF_Err_BAD_CALLBACK_PARAM;
+  PF_ParamDef parameters[3]{};
+  PF_EffectWorld* worlds[3]{};
+  PF_Err err = PF_Err_NONE;
+  std::size_t acquired = 0;
+  for (std::size_t i = 0; i < kTimes.size(); ++i) {
+    err = in_data->inter.checkout_param(in_data->effect_ref, kLayerSlot,
+        kTimes[i], 1, kScales[i], &parameters[i]);
+    if (err) break;
+    ++acquired;
+    worlds[i] = &parameters[i].u.ld;
+  }
+  if (!err) {
+    if (PF_WORLD_IS_DEEP(output))
+      err = Composite<PF_Pixel16, A_u_short, PF_MAX_CHAN16>(worlds, output);
+    else
+      err = Composite<PF_Pixel8, A_u_char, PF_MAX_CHAN8>(worlds, output);
+  }
+  for (std::size_t i = 0; i < acquired; ++i) {
+    const auto result = in_data->inter.checkin_param(in_data->effect_ref, &parameters[i]);
+    if (!err) err = result;
+  }
+  return err;
+}
 }  // namespace
 
 extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
                                         PF_OutData* out_data, PF_ParamDef*[],
-                                        PF_LayerDef*, void* extra) {
+                                        PF_LayerDef* output, void* extra) {
   switch (cmd) {
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
       out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE |
-                            PF_OutFlag_WIDE_TIME_INPUT;
+                            (kLayerSlot == 0 ? 0 : PF_OutFlag_WIDE_TIME_INPUT);
       out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
                              PF_OutFlag2_FLOAT_COLOR_AWARE;
       return PF_Err_NONE;
     case PF_Cmd_PARAMS_SETUP: {
       PF_ParamDef def{};
-      PF_ADD_LAYER("Timed Layer", PF_LayerDefault_MYSELF, 1);
-      out_data->num_params = 2;
+      if constexpr (kLayerSlot != 0) {
+        PF_ADD_LAYER("Timed Layer", PF_LayerDefault_MYSELF, 1);
+      }
+      out_data->num_params = kLayerSlot == 0 ? 1 : 2;
       return PF_Err_NONE;
     }
     case PF_Cmd_SMART_PRE_RENDER:
       return SmartPreRender(in_data, static_cast<PF_PreRenderExtra*>(extra));
     case PF_Cmd_SMART_RENDER:
       return SmartRender(in_data, static_cast<PF_SmartRenderExtra*>(extra));
+    case PF_Cmd_RENDER:
+      if constexpr (kLayerSlot == 0) return ClassicRender(in_data, output);
+      return PF_Err_NONE;
     default:
       return PF_Err_NONE;
   }

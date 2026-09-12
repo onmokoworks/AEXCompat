@@ -381,6 +381,21 @@ mod tests {
     }
 
     #[test]
+    fn timed_primary_identity_is_valid_without_a_secondary_parameter() {
+        let slots = HashSet::new();
+        validate_timed_layer_identities(&[timed_layer(0, -1, 30)], &slots).unwrap();
+        assert!(
+            validate_timed_layer_identities(
+                &[timed_layer(0, 1, 30), timed_layer(0, 2, 60)],
+                &slots
+            )
+            .is_err()
+        );
+        assert!(validate_timed_layer_identities(&[timed_layer(0, 1, 0)], &slots).is_err());
+        assert!(validate_timed_layer_identities(&[timed_layer(1, 1, 30)], &slots).is_err());
+    }
+
+    #[test]
     fn timed_layer_identities_are_slot_bound_bounded_and_rationally_unique() {
         let slots = HashSet::from([6]);
         validate_timed_layer_identities(&[timed_layer(6, 1, 2), timed_layer(6, 3, 4)], &slots)

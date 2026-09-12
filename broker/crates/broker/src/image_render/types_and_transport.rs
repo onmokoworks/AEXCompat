@@ -295,14 +295,13 @@ fn validate_timed_layer_identities(
                 && i64::from(prior.time.value) * i64::from(layer.time.scale)
                     == i64::from(layer.time.value) * i64::from(prior.time.scale)
         });
-        if layer.slot == 0
-            || layer.slot > MAX_PARAMETERS
+        if layer.slot > MAX_PARAMETERS
             || layer.time.scale == 0
-            || !layer_slots.contains(&layer.slot)
+            || (layer.slot != 0 && !layer_slots.contains(&layer.slot))
             || duplicate
         {
             return Err(invalid(
-                "timed secondary layers require a known layer slot, valid rational time, and unique slot/time",
+                "timed layers require primary slot 0 or a known layer slot, valid rational time, and unique slot/time",
             ));
         }
     }

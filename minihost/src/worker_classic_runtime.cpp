@@ -77,7 +77,7 @@ Context::~Context() {
 }
 
 bool Context::add_timed_layer(TimedLayerDefinition layer) {
-  if (layer.slot <= 0) return false;
+  if (layer.slot < 0 || layer.time_scale == 0) return false;
   timed_layers_.push_back(std::move(layer));
   return true;
 }
@@ -92,7 +92,14 @@ bool Context::copy_timed_layer(int32_t slot, int32_t time, uint32_t time_scale,
         return layer.slot == slot &&
             same_rational_time(layer.time, layer.time_scale, time, time_scale);
       });
-  if (found == timed_layers_.end()) return false;
+  if (found == timed_layers_.end()) {
+    // The primary image supplies only the current time, not arbitrary missing
+    // temporal samples. Secondary fallback policy remains unchanged.
+    if (slot == 0 && has_timed_slot(0) &&
+        same_rational_time(time, time_scale, current_time_, current_time_scale_))
+      return copy_definition(0, destination, destination_size);
+    return false;
+  }
   std::memcpy(destination, found->definition.data(), found->definition.size());
   return true;
 }

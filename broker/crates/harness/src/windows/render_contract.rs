@@ -421,7 +421,7 @@ fn typed_request_timed_layers(
         let slot = value["slot"]
             .as_u64()
             .and_then(|v| u32::try_from(v).ok())
-            .filter(|v| *v > 0)
+            .filter(|v| *v <= 1024)
             .ok_or("invalid timed layer slot")?;
         let time = value["time"]
             .as_i64()

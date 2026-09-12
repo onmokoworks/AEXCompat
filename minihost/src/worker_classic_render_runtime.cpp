@@ -752,8 +752,9 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       copy_world_into_param_def(definitions[slot], input_world);
   if (external_layers) for (std::size_t layer_index = 0; layer_index < external_layers->size(); ++layer_index) {
     const auto& layer = (*external_layers)[layer_index];
-    if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
-        g_params[layer.slot - 1].type != 0 || layer.rgba.size() !=
+    if (layer.slot < 0 || (layer.slot == 0 && !layer.timed) ||
+        static_cast<std::size_t>(layer.slot) >= definitions.size() ||
+        (layer.slot > 0 && g_params[layer.slot - 1].type != 0) || layer.rgba.size() !=
             static_cast<std::size_t>(layer.width) * layer.height * 4) return -3;
     auto& pixels = hosted_pixels[layer_index];
       pixels.resize(static_cast<std::size_t>(layer.width) * layer.height * pixel_bytes);

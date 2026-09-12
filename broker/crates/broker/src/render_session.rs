@@ -1076,7 +1076,7 @@ impl RenderSession {
         // other times, so it is admitted.
         for (index, layer) in request.layers.iter().enumerate() {
             // Same slot and dimension bounds the worker parser enforces.
-            if layer.slot == 0
+            if (layer.slot == 0 && (layer.timed.is_none() || layer.dynamic))
                 || layer.slot > 1024
                 || layer.width == 0
                 || layer.height == 0

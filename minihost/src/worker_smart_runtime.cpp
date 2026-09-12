@@ -195,7 +195,11 @@ const void* timed_parameter_world(int32_t slot, int32_t time, uint32_t scale,
   if (found == layers.end())
     found = std::find_if(layers.begin(), layers.end(),
         [slot](const auto& layer) { return layer.slot == slot && !layer.timed; });
-  return found == layers.end() ? nullptr : found->world;
+  if (found != layers.end()) return found->world;
+  if (slot == 0 && same_rational_time(time, scale,
+          g_active_state->current_time, g_active_state->current_time_scale))
+    return g_active_state->input_world;
+  return nullptr;
 }
 int32_t __cdecl width() { return g_active_state ? g_active_state->width : 0; }
 int32_t __cdecl height() { return g_active_state ? g_active_state->height : 0; }
@@ -255,7 +259,14 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   const bool current_time =
       static_cast<int64_t>(what_time) * runtime.current_time_scale ==
       static_cast<int64_t>(runtime.current_time) * time_scale;
-  if (!current_time && !runtime.wide_time_checkout_allowed) {
+  // An explicitly supplied temporal image is available regardless of the
+  // plug-in's dependency flag. Do not extend that to absent-time fallback.
+  const bool explicit_time = std::any_of(runtime.hosted_layers.begin(),
+      runtime.hosted_layers.end(), [=](const auto& layer) {
+        return layer.slot == index && layer.timed &&
+            same_rational_time(layer.time, layer.time_scale, what_time, time_scale);
+      });
+  if (!current_time && !runtime.wide_time_checkout_allowed && !explicit_time) {
     ++runtime.rejected_temporal_checkouts;
     return finish_callback(
         Callback::PreCheckoutLayer, 4, Reason::TemporalCheckoutDenied);
@@ -317,7 +328,7 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         hosted->view_world, hosted->checkout_rect, false});
     return finish_callback(Callback::PreCheckoutLayer, 0);
   }
-  if (timed_slot)
+  if (timed_slot && !(index == 0 && current_time))
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::UnknownLayer);
   if (request && index == 0)
     std::memcpy(runtime.input_checkout_request.data(), request,

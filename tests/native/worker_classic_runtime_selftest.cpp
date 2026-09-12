@@ -4,6 +4,7 @@
 #include "generated/aex_abi_contract.hpp"
 #include "worker_invocation_orchestration.hpp"
 #include "worker_selector_dispatch.hpp"
+#include "worker_request_parser.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -200,6 +201,61 @@ int32_t __cdecl mutate_out_data_after_frame_setup(
 }  // namespace
 
 int main() {
+  {
+    namespace parser = aexcompat::worker_runtime::request_parser;
+    const auto parse_layers = [](parser::Kind kind, const wchar_t* trailer) {
+      std::vector<std::wstring> args{L"worker", kind == parser::Kind::Smart ?
+          L"--smart-session-v1" : L"--render-session-v1", L"unused.aex",
+          std::wstring(64, L'0'), L"none", L"48", L"32", L"1", L"300", L"30", trailer};
+      std::vector<wchar_t*> argv;
+      for (auto& arg : args) argv.push_back(arg.data());
+      parser::Hooks hooks{};
+      // The dispatcher requires auxiliary hooks even when no auxiliary flags
+      // are present. Reject any unexpected option in this parser-only fixture.
+      const auto reject_option = [](void*, const wchar_t*) { return false; };
+      hooks.auxiliary.set_dump_worlds_dir = reject_option;
+      hooks.auxiliary.enable_checksum_detail = [](void*) { return false; };
+      hooks.auxiliary.load_aux_manifest = reject_option;
+      hooks.auxiliary.parse_alpha_coverage = reject_option;
+      hooks.auxiliary.load_parameter_animation = reject_option;
+      hooks.auxiliary.parse_conformance_render_settings = reject_option;
+      hooks.parse_parameters = [](const wchar_t*, void*) { return true; };
+      return parser::parse(kind, static_cast<int>(argv.size()), argv.data(), hooks);
+    };
+    for (const auto kind : {parser::Kind::Classic, parser::Kind::Smart}) {
+      const auto accepted = parse_layers(kind, L"session-layers:v2|0,48,32,1,30,123");
+      if (accepted.error || accepted.invocation.layers.size() != 1 ||
+          accepted.invocation.layers[0].slot != 0 ||
+          !accepted.invocation.layers[0].timed) return 90;
+      for (const auto* invalid : {
+          L"session-layers:v2|0,48,32,123",
+          L"session-layers:v2|0,48,32,123,1",
+          L"session-layers:v2|0,48,32,1,0,123",
+          L"session-layers:v2|0,48,32,1,30,0",
+          L"session-layers:v2|0,48,32,1,30,123;0,48,32,2,60,124",
+          L"session-layers:v2|-1,48,32,1,30,123",
+          L"session-layers:v2|0,0,32,1,30,123"}) {
+        if (parse_layers(kind, invalid).error != 3) return 91;
+      }
+    }
+  }
+  {
+    Context context;
+    context.configure_checkout_time(2, 30, true, false);
+    ParameterDefinition current{}, past{}, actual{};
+    current[64] = std::byte{23};
+    past[64] = std::byte{71};
+    context.set_definition(0, current);
+    if (!context.add_timed_layer({0, 1, 30, past})) return 80;
+    if (!context.copy_timed_layer(0, 2, 60, actual.data(), actual.size()) ||
+        actual != past) return 81;
+    if (!context.copy_timed_layer(0, 4, 60, actual.data(), actual.size()) ||
+        actual != current) return 82;
+    if (context.copy_timed_layer(0, 3, 30, actual.data(), actual.size())) return 83;
+    if (context.copy_timed_layer(0, 1, 0, actual.data(), actual.size())) return 84;
+    if (context.add_timed_layer({-1, 1, 30, past}) ||
+        context.add_timed_layer({0, 1, 0, past})) return 85;
+  }
   // PF_PROGRESS is an abort poll, not a validated ratio: AE-shipped effects
   // report current=-1 (PW, issue #1079), total=0 (Write-on, issue #1055), and
   // current>total (Wave Warp, issue #1037), and all render in AE. The host

@@ -958,6 +958,183 @@ mod windows_e2e {
         let _ = std::fs::remove_dir_all(&scratch);
     }
 
+    #[test]
+    fn smart_timed_primary_pixels_and_missing_samples_reach_plugin() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let root = repository_root();
+        let aex = root.join("target/pf-timed-primary-probe-build/pf_smart_timed_primary_probe.aex");
+        if !aex.is_file() {
+            eprintln!("skipping primary probe: build pf_smart_timed_primary_probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch =
+            std::env::temp_dir().join(format!("aex-primary-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_pixel(48, 32, image::Rgba([200, 0, 0, 255]))
+            .save(&input)
+            .unwrap();
+        let layers = [(6, 8, 10), (1, 3, 40), (5, 4, 70)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (time, scale, v))| {
+                let path = scratch.join(format!("sample{i}.png"));
+                image::RgbaImage::from_pixel(48, 32, image::Rgba([v, v, v, 255]))
+                    .save(&path)
+                    .unwrap();
+                TimedLayerImage {
+                    slot: 0,
+                    time: AnimationTime { value: time, scale },
+                    image_path: path,
+                }
+            })
+            .collect::<Vec<_>>();
+        let timing = RenderTiming {
+            current_time: 0,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        for (i, format) in [
+            RenderPixelFormat::Argb8,
+            RenderPixelFormat::Argb16,
+            RenderPixelFormat::Argb32f,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let output = scratch.join(format!("out{i}.png"));
+            let report = render_experimental_image_with_timed_layers(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                &output,
+                &[],
+                &layers,
+                timing,
+                true,
+                format,
+            )
+            .unwrap();
+            assert_session_render_is_healthy(&report, "timed-primary");
+            let actual = image::open(output).unwrap().to_rgba8();
+            assert_eq!(
+                actual,
+                image::RgbaImage::from_pixel(48, 32, image::Rgba([50, 50, 50, 255]))
+            );
+        }
+        // The first requested time is now current: omit its explicit sample.
+        // Only that time may use the primary red input. Missing noncurrent
+        // samples remain errors (below).
+        let current_output = scratch.join("current.png");
+        let current_report = render_experimental_image_with_timed_layers(
+            &root,
+            &aex,
+            &sha,
+            &input,
+            &current_output,
+            &[],
+            &layers[1..],
+            RenderTiming {
+                current_time: 6,
+                time_scale: 8,
+                ..timing
+            },
+            true,
+            RenderPixelFormat::Argb8,
+        )
+        .unwrap();
+        assert_session_render_is_healthy(&current_report, "primary-current-fallback");
+        assert_eq!(
+            image::open(current_output).unwrap().to_rgba8(),
+            image::RgbaImage::from_pixel(48, 32, image::Rgba([82, 48, 48, 255]))
+        );
+        for (i, format) in [RenderPixelFormat::Argb8, RenderPixelFormat::Argb16]
+            .into_iter()
+            .enumerate()
+        {
+            let output = scratch.join(format!("classic{i}.png"));
+            render_experimental_image_with_timed_layers(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                &output,
+                &[],
+                &layers,
+                timing,
+                false,
+                format,
+            )
+            .unwrap();
+            assert_eq!(
+                image::open(output).unwrap().to_rgba8(),
+                image::RgbaImage::from_pixel(48, 32, image::Rgba([50, 50, 50, 255]))
+            );
+            let fallback = scratch.join(format!("classic-current{i}.png"));
+            render_experimental_image_with_timed_layers(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                &fallback,
+                &[],
+                &layers[1..],
+                RenderTiming {
+                    current_time: 6,
+                    time_scale: 8,
+                    ..timing
+                },
+                false,
+                format,
+            )
+            .unwrap();
+            assert_eq!(
+                image::open(fallback).unwrap().to_rgba8(),
+                image::RgbaImage::from_pixel(48, 32, image::Rgba([82, 48, 48, 255]))
+            );
+            let missing = scratch.join(format!("classic-missing{i}.png"));
+            assert!(
+                render_experimental_image_with_timed_layers(
+                    &root,
+                    &aex,
+                    &sha,
+                    &input,
+                    &missing,
+                    &[],
+                    &layers[..2],
+                    timing,
+                    false,
+                    format
+                )
+                .is_err()
+            );
+            assert!(!missing.exists());
+        }
+        let absent_output = scratch.join("missing.png");
+        assert!(
+            render_experimental_image_with_timed_layers(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                &absent_output,
+                &[],
+                &layers[..2],
+                timing,
+                true,
+                RenderPixelFormat::Argb8
+            )
+            .is_err()
+        );
+        assert!(!absent_output.exists());
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
     fn layer_parameter(slot: u32, path: &Path) -> InteractiveParameter {
         serde_json::from_value(serde_json::json!({
             "slot": slot, "name": "layer", "kind": "layer",
