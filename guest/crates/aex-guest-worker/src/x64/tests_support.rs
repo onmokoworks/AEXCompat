@@ -16797,6 +16797,7 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
                 bytes: vec![0, 127, 128, 255].into_boxed_slice(),
                 position: 0,
                 readable: true,
+                buffer_state: None,
             },
         );
         engine.unicorn.get_data_mut().crt_errno = 77;
@@ -17644,4 +17645,173 @@ fn pointer_encoding_round_trips_full_width_values_across_kernel_aliases() {
             Win64ImportDispatch::UnsupportedLegacyImport
         ));
     }
+}
+
+#[test]
+fn stream_buffer_pointer_queries_are_stable_optional_and_preflight_outputs() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let query = STUB_BASE + 0x100;
+        let iob = query + 16;
+        let close = iob + 16;
+        install_win64_import(
+            &mut engine.unicorn,
+            query,
+            dll,
+            "_get_stream_buffer_pointers",
+        )
+        .unwrap();
+        install_win64_import(&mut engine.unicorn, iob, dll, "__acrt_iob_func").unwrap();
+        install_win64_import(&mut engine.unicorn, close, dll, "fclose").unwrap();
+        let token = engine.call_win64(iob, [0; 6]).unwrap();
+        let out = DATA_BASE + 0x100;
+        engine.write(out, &[0x5a; 24]).unwrap();
+        assert_eq!(engine.call_win64(query, [token, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert!(
+            engine.unicorn.get_data().guest_files.streams[&token]
+                .buffer_state
+                .is_none()
+        );
+        assert!(
+            engine
+                .call_win64(query, [token, out, out + 8, token, 0, 0])
+                .is_err()
+        );
+        let mut unchanged = [0; 24];
+        engine.read(out, &mut unchanged).unwrap();
+        assert_eq!(unchanged, [0x5a; 24]);
+        assert!(
+            engine.unicorn.get_data().guest_files.streams[&token]
+                .buffer_state
+                .is_none()
+        );
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        assert_eq!(
+            engine
+                .call_win64(query, [token, out, out + 8, out + 16, 0, 0])
+                .unwrap(),
+            0
+        );
+        let mut values = [0; 24];
+        engine.read(out, &mut values).unwrap();
+        let addresses: Vec<u64> = values
+            .chunks_exact(8)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            addresses,
+            [
+                GUEST_STREAM_BUFFER_BASE,
+                GUEST_STREAM_BUFFER_BASE + 8,
+                GUEST_STREAM_BUFFER_BASE + 16
+            ]
+        );
+        let mut cells = [1; 20];
+        engine.read(addresses[0], &mut cells).unwrap();
+        assert_eq!(cells, [0; 20]);
+        assert!(
+            guest_range_has_permission(&engine.unicorn, addresses[0], 20, Prot::READ | Prot::WRITE)
+                .unwrap()
+        );
+        assert!(
+            !guest_range_has_permission(&engine.unicorn, addresses[0], 20, Prot::EXEC).unwrap()
+        );
+        for mask in 0..8 {
+            let args = [
+                token,
+                if mask & 1 != 0 { out } else { 0 },
+                if mask & 2 != 0 { out + 8 } else { 0 },
+                if mask & 4 != 0 { out + 16 } else { 0 },
+                0,
+                0,
+            ];
+            assert_eq!(engine.call_win64(query, args).unwrap(), 0);
+            engine.read(out, &mut unchanged).unwrap();
+            assert_eq!(unchanged, values);
+        }
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        assert!(
+            engine
+                .call_win64(query, [token + 8, out, 0, 0, 0, 0])
+                .is_err()
+        );
+        assert_eq!(engine.call_win64(close, [token, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert!(
+            !guest_range_has_permission(&engine.unicorn, addresses[0], 20, Prot::READ).unwrap()
+        );
+        assert!(engine.call_win64(query, [token, out, 0, 0, 0, 0]).is_err());
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "_get_stream_buffer_pointers"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn exposed_file_cells_preserve_unbuffered_reads_and_reject_unknown_buffering() {
+    let mut engine = test_engine(&[0xc3]);
+    let token = GUEST_STREAM_BASE + 32 * PAGE_SIZE;
+    engine
+        .unicorn
+        .mem_map(token, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    engine.unicorn.get_data_mut().guest_files.live_bytes = 3;
+    engine.unicorn.get_data_mut().guest_files.streams.insert(
+        token,
+        GuestFileStream {
+            bytes: Box::from(&b"abc"[..]),
+            position: 0,
+            readable: true,
+            buffer_state: None,
+        },
+    );
+    let query = STUB_BASE + 0x100;
+    let getc = query + 16;
+    let read = getc + 16;
+    let close = read + 16;
+    for (entry, name) in [
+        (query, "_get_stream_buffer_pointers"),
+        (getc, "getc"),
+        (read, "fread"),
+        (close, "fclose"),
+    ] {
+        install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", name).unwrap();
+    }
+    let out = DATA_BASE + 0x100;
+    engine
+        .call_win64(query, [token, out, out + 8, out + 16, 0, 0])
+        .unwrap();
+    let state = engine.unicorn.get_data().guest_files.streams[&token]
+        .buffer_state
+        .unwrap();
+    assert_eq!(
+        engine.call_win64(getc, [token, 0, 0, 0, 0, 0]).unwrap(),
+        b'a' as u64
+    );
+    engine.write(state + 16, &1i32.to_le_bytes()).unwrap();
+    assert!(
+        engine
+            .call_win64(getc, [token, 0, 0, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("buffering state")
+    );
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.streams[&token].position,
+        1
+    );
+    engine.write(state + 16, &0i32.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(read, [out + 32, 1, 8, token, 0, 0])
+            .unwrap(),
+        2
+    );
+    let mut bytes = [0; 2];
+    engine.read(out + 32, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"bc");
+    engine.call_win64(close, [token, 0, 0, 0, 0, 0]).unwrap();
+    assert!(!guest_range_has_permission(&engine.unicorn, state, 20, Prot::READ).unwrap());
+    assert!(!guest_range_has_permission(&engine.unicorn, token, 1, Prot::READ).unwrap());
+    assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
 }

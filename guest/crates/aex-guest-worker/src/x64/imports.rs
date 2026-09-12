@@ -83,6 +83,7 @@ enum LegacyWin64Import {
     DecodePointer,
     CrtLocaleLock,
     CrtLocaleUnlock,
+    StreamBufferPointers,
     AcRtIobFunc,
     Fgetc,
     Fread,
@@ -848,6 +849,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::AcRtIobFunc
         }
         (_, "__acrt_iob_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_get_stream_buffer_pointers") => {
+            LegacyWin64Import::StreamBufferPointers
+        }
+        (_, "_get_stream_buffer_pointers") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "EncodePointer") => LegacyWin64Import::EncodePointer,
         ("kernel32.dll" | "kernelbase.dll", "DecodePointer") => LegacyWin64Import::DecodePointer,
         (_, "EncodePointer" | "DecodePointer") => {
@@ -2458,6 +2463,18 @@ fn install_win64_import(
                         "install pointer encoding",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_windows_pointer_encoding(unicorn, decode);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StreamBufferPointers => {
+                    uc(
+                        "write stream buffer pointers return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install stream buffer pointers",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_stream_buffer_pointers(unicorn);
                         }),
                     )?;
                 }

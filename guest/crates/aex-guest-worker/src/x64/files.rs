@@ -3,6 +3,7 @@ const MAX_GUEST_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GUEST_STREAM_BYTES: usize = 128 * 1024 * 1024;
 const GUEST_STREAM_BASE: u64 = WORLD_DATA_END;
 const MAX_GUEST_STREAM_OPENS: u64 = 4096;
+const GUEST_STREAM_BUFFER_BASE: u64 = GUEST_STREAM_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE;
 
 #[derive(Default)]
 struct GuestFiles {
@@ -19,6 +20,7 @@ struct GuestFileStream {
     bytes: Box<[u8]>,
     position: usize,
     readable: bool,
+    buffer_state: Option<u64>,
 }
 
 fn guest_file_name(name: &str) -> Result<String, String> {
@@ -175,6 +177,7 @@ fn open_guest_stream(
             bytes: bytes.into_boxed_slice(),
             position: 0,
             readable: true,
+            buffer_state: None,
         },
     );
     files.reports.push(TraceModule {
@@ -215,11 +218,99 @@ fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
                 bytes: Box::default(),
                 position: 0,
                 readable: index == 0,
+                buffer_state: None,
             },
         );
         Ok(token)
     })();
     finish_guest_stdio(unicorn, result);
+}
+
+// _get_stream_buffer_pointers returns addresses of the FILE's char* base,
+// char* cursor and int remaining-count cells, not the buffer values themselves.
+// The current guest streams are unbuffered: all three values start at zero.
+fn emulate_get_stream_buffer_pointers(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let token = read_win64_import_argument(unicorn, 0)?;
+        let outputs = [
+            read_win64_import_argument(unicorn, 1)?,
+            read_win64_import_argument(unicorn, 2)?,
+            read_win64_import_argument(unicorn, 3)?,
+        ];
+        let state = unicorn
+            .get_data()
+            .guest_files
+            .streams
+            .get(&token)
+            .ok_or("stream buffer query received stale or foreign FILE")?
+            .buffer_state;
+        // Validate every output before allocating or writing anything.
+        for output in outputs {
+            if output != 0 && !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+                return Err("stream buffer pointer output is not writable".into());
+            }
+        }
+        if outputs.iter().all(|output| *output == 0) {
+            return Ok(0);
+        }
+        let state = match state {
+            Some(state) => state,
+            None => {
+                let offset = token
+                    .checked_sub(GUEST_STREAM_BASE)
+                    .filter(|offset| {
+                        *offset < MAX_GUEST_STREAM_OPENS * PAGE_SIZE && *offset % PAGE_SIZE == 0
+                    })
+                    .ok_or("stream buffer FILE token is outside its namespace")?;
+                let state = GUEST_STREAM_BUFFER_BASE + offset;
+                unicorn
+                    .mem_map(state, PAGE_SIZE, Prot::READ | Prot::WRITE)
+                    .map_err(|error| format!("stream buffer state allocation: {error}"))?;
+                unicorn
+                    .get_data_mut()
+                    .guest_files
+                    .streams
+                    .get_mut(&token)
+                    .unwrap()
+                    .buffer_state = Some(state);
+                state
+            }
+        };
+        for (output, offset) in outputs.into_iter().zip([0u64, 8, 16]) {
+            if output != 0 {
+                unicorn
+                    .mem_write(output, &(state + offset).to_le_bytes())
+                    .map_err(|error| format!("stream buffer pointer output: {error}"))?;
+            }
+        }
+        Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn require_unbuffered_guest_stream(
+    unicorn: &Unicorn<'_, GuestState>,
+    token: u64,
+) -> Result<(), String> {
+    let stream = unicorn
+        .get_data()
+        .guest_files
+        .streams
+        .get(&token)
+        .ok_or("stdio received stale or foreign FILE")?;
+    if let Some(state) = stream.buffer_state {
+        if !guest_range_has_permission(unicorn, state, 20, Prot::READ)? {
+            return Err("FILE buffer state is not readable".into());
+        }
+        let mut values = [0u8; 20];
+        unicorn
+            .mem_read(state, &mut values)
+            .map_err(|error| format!("FILE buffer state read: {error}"))?;
+        if values != [0; 20] {
+            return Err("guest-modified FILE buffering state is not implemented".into());
+        }
+    }
+    Ok(())
 }
 
 fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -245,6 +336,7 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
     let result = (|| -> Result<u64, String> {
         if import == LegacyWin64Import::Fgetc {
             let token = read_win64_import_argument(unicorn, 0)?;
+            require_unbuffered_guest_stream(unicorn, token)?;
             let stream = unicorn
                 .get_data_mut()
                 .guest_files
@@ -278,6 +370,11 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
                     .mem_unmap(token, PAGE_SIZE)
                     .map_err(|e| format!("fclose token unmap: {e}"))?;
             }
+            if let Some(state) = unicorn.get_data().guest_files.streams[&token].buffer_state {
+                unicorn
+                    .mem_unmap(state, PAGE_SIZE)
+                    .map_err(|error| format!("fclose buffer state unmap: {error}"))?;
+            }
             let files = &mut unicorn.get_data_mut().guest_files;
             let stream = files.streams.remove(&token).unwrap();
             files.live_bytes -= stream.bytes.len();
@@ -294,6 +391,7 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
         if wanted > MAX_GUEST_FILE_BYTES as u64 {
             return Err("fread request exceeds byte bound".into());
         }
+        require_unbuffered_guest_stream(unicorn, token)?;
         let stream = unicorn
             .get_data()
             .guest_files
