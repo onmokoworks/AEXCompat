@@ -577,6 +577,29 @@ mod library_tests {
     }
 
     #[test]
+    fn load_ex_a_uses_loaded_basename_before_system32_search() {
+        let primary = fixture(0x180000000, "EffectMain", None, false);
+        let dep = fixture(0x1800000000, "answer", None, true);
+        let mut engine =
+            GuestEngine::load_with_libraries(&primary, &[("C:/runtime/dep.dll", dep)]).unwrap();
+        let load = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, load, "kernel32.dll", "LoadLibraryExA").unwrap();
+        let name = engine.allocate(128, 8).unwrap();
+        for path in [b"DEP\0".as_slice(), b"C:/runtime/dep.dll\0"] {
+            engine.write(name, path).unwrap();
+            assert_eq!(
+                engine.call_win64(load, [name, 0, 0x800, 0, 0, 0]).unwrap(),
+                0x1800000000
+            );
+        }
+        engine.write(name, b"C:/other/dep.dll\0").unwrap();
+        assert_eq!(
+            engine.call_win64(load, [name, 0, 0x800, 0, 0, 0]).unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn mapped_module_queries_resolve_names_addresses_and_paths() {
         let primary = fixture(0x180000000, "EffectMain", None, false);
         let dep = fixture(0x1800000000, "answer", None, true);

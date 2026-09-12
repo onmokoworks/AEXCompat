@@ -16938,3 +16938,55 @@ fn scanf_decimal_assigns_values_and_distinguishes_eof_from_mismatch() {
         );
     }
 }
+
+#[test]
+fn load_library_ex_a_system32_search_reports_missing_driver() {
+    for dll in ["kernel32.dll", "api-ms-win-core-libraryloader-l1-2-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        let name = DATA_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "LoadLibraryExA").unwrap();
+        for (path, flags, expected) in [
+            ("nvcuda.dll", 0x800, 0),
+            ("KERNEL32", 0x800, WINDOWS_KERNEL32_MODULE_TOKEN),
+            ("kernel32.dll", 0, WINDOWS_KERNEL32_MODULE_TOKEN),
+            (
+                "C:\\Windows\\System32\\kernel32.dll",
+                0x800,
+                WINDOWS_KERNEL32_MODULE_TOKEN,
+            ),
+            ("c:/wrong/kernel32.dll", 0x800, 0),
+            ("", 0, 0),
+        ] {
+            engine.write(name, format!("{path}\0").as_bytes()).unwrap();
+            engine.unicorn.get_data_mut().windows_last_error = 77;
+            assert_eq!(
+                engine.call_win64(entry, [name, 0, flags, 0, 0, 0]).unwrap(),
+                expected
+            );
+            assert_eq!(
+                engine.unicorn.get_data().windows_last_error,
+                if expected == 0 {
+                    ERROR_MOD_NOT_FOUND
+                } else {
+                    77
+                }
+            );
+        }
+        assert_eq!(engine.call_win64(entry, [name, 1, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            ERROR_INVALID_PARAMETER
+        );
+        assert!(engine.call_win64(entry, [name, 0, 2, 0, 0, 0]).is_err());
+        engine
+            .unicorn
+            .mem_protect(DATA_BASE, PAGE_SIZE, Prot::WRITE)
+            .unwrap();
+        assert!(engine.call_win64(entry, [name, 0, 0, 0, 0, 0]).is_err());
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "LoadLibraryExA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
