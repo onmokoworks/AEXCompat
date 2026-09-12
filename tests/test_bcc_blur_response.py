@@ -32,6 +32,47 @@ def assert_blur_response(zero,small,large):
     assert edge_width(large)>edge_width(small)>0
 
 
+def assert_axis_response(raw, horizontal):
+    assert len(raw)==WIDTH*HEIGHT*4
+    assert raw[3::4]==bytes([255])*WIDTH*HEIGHT
+    assert raw[0::4]==raw[1::4]==raw[2::4]
+    red=raw[0::4]
+    row=red[72*WIDTH:73*WIDTH]
+    column=red[128::WIDTH]
+    source=source_pixels()[0::4]
+    active=row if horizontal else column
+    inactive=column if horizontal else row
+    expected=source[128::WIDTH] if horizontal else source[72*WIDTH:73*WIDTH]
+    assert inactive==expected
+    start,end=(64,192) if horizontal else (36,108)
+    assert active[0]==0 and active[-1]==0 and active[(start+end)//2]==255
+    gray=[i for i,v in enumerate(active) if 0<v<255]
+    assert all(start-8<=i<start+8 or end-8<=i<end+8 for i in gray)
+    for lo,hi in ((start-8,start),(start,start+8),(end-8,end),(end,end+8)):
+        assert any(lo<=i<hi for i in gray)
+    assert all(a<=b for a,b in zip(active[start-8:start+7],active[start-7:start+8]))
+    assert all(a>=b for a,b in zip(active[end-8:end+7],active[end-7:end+8]))
+
+
+@pytest.mark.parametrize('fault',['swapped','cross_axis','no_vertical'])
+def test_axis_validator_rejects_corruption(fault):
+    raw=bytearray(source_pixels())
+    for y in (35,36,107,108):
+        for x in range(64,192):
+            v=64 if y in (35,108) else 192
+            i=(y*WIDTH+x)*4
+            raw[i:i+3]=bytes([v])*3
+    assert_axis_response(raw,False)
+    if fault=='swapped':
+        with pytest.raises(AssertionError): assert_axis_response(raw,True)
+        return
+    if fault=='cross_axis':
+        i=(72*WIDTH+63)*4
+        raw[i:i+3]=bytes([64])*3
+    else: raw=source_pixels()
+    with pytest.raises(AssertionError): assert_axis_response(raw,False)
+
+
 def synthetic(width):
     raw=bytearray(source_pixels())
     for y in range(HEIGHT):
@@ -86,3 +127,13 @@ def test_installed_bcc_blur_radius_response(tmp_path):
         assert image.size==(WIDTH,HEIGHT)
         outputs.append(image.tobytes())
     assert_blur_response(*outputs)
+    for horizontal in (True,False):
+        req=tmp_path/f'axis-{horizontal}.json';out=tmp_path/f'axis-{horizontal}.png'
+        req.write_text(json.dumps({'schema_version':1,'timing':{'frame':0,'fps':30,'duration_frames':300},
+            'assignments':[{'slot':3,'value':0},{'slot':4,'value':20 if horizontal else 0},
+                           {'slot':5,'value':0 if horizontal else 20}]}),encoding='utf-8')
+        report=run('--render-experimental-smart-request',plugin,src,out,req)
+        assert report['passed'] and report['output_pixels_valid']
+        image=Image.open(out).convert('RGBA')
+        assert image.size==(WIDTH,HEIGHT)
+        assert_axis_response(image.tobytes(),horizontal)
