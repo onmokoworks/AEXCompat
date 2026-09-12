@@ -163,6 +163,7 @@ enum LegacyWin64Import {
     WaitForSingleObject,
     WaitForSingleObjectEx,
     CloseHandle,
+    GetProcessAffinityMask,
     GetCurrentProcess,
     GetCurrentThread,
     SetThreadStackGuarantee,
@@ -503,6 +504,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             "GetCurrentProcess",
         ) => LegacyWin64Import::GetCurrentProcess,
         (_, "GetCurrentProcess") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GetProcessAffinityMask") => {
+            LegacyWin64Import::GetProcessAffinityMask
+        }
+        (_, "GetProcessAffinityMask") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThread") => LegacyWin64Import::GetCurrentThread,
         ("kernel32.dll", "SetThreadStackGuarantee") => LegacyWin64Import::SetThreadStackGuarantee,
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "SwitchToThread") => {
@@ -1923,6 +1928,18 @@ fn install_win64_import(
                         "install Windows thread lifecycle import",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_windows_thread_lifecycle(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetProcessAffinityMask => {
+                    uc(
+                        "write process affinity return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install process affinity",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_get_process_affinity_mask(uc)
                         }),
                     )?;
                 }
@@ -8667,6 +8684,32 @@ fn emulate_windows_pointer_encoding(unicorn: &mut Unicorn<'_, GuestState>, decod
         } else {
             (pointer ^ key).rotate_right(rotation)
         })
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_process_affinity_mask(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let process = read_win64_import_argument(unicorn, 0)?;
+        let process_output = read_win64_import_argument(unicorn, 1)?;
+        let system_output = read_win64_import_argument(unicorn, 2)?;
+        if process != u64::MAX {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+            return Ok(0);
+        }
+        for output in [process_output, system_output] {
+            if output == 0 || !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+                unicorn.get_data_mut().windows_last_error = 998; // ERROR_NOACCESS
+                return Ok(0);
+            }
+        }
+        // Same single logical CPU and active mask as GetSystemInfo.
+        for output in [process_output, system_output] {
+            unicorn
+                .mem_write(output, &1u64.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(1)
     })();
     finish_guest_stdio(unicorn, result);
 }

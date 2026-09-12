@@ -18207,3 +18207,66 @@ fn current_process_returns_full_width_pseudo_handle_without_allocating() {
         assert!(engine.call_win64(query + 32, [0; 6]).is_err());
     }
 }
+
+#[test]
+fn affinity_masks_match_guest_topology_and_preflight_both_outputs() {
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "GetProcessAffinityMask").unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 73;
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        let output = DATA_BASE + 0x100;
+        engine.write(output, &[0xaa; 24]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(entry, [u64::MAX, output, output + 8, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        let mut bytes = [0; 24];
+        engine.read(output, &mut bytes).unwrap();
+        assert_eq!(&bytes[..8], &1u64.to_le_bytes());
+        assert_eq!(&bytes[8..16], &1u64.to_le_bytes());
+        assert_eq!(&bytes[16..], &[0xaa; 8]);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 73);
+        for handle in [0, u32::MAX as u64, u64::MAX - 1] {
+            assert_eq!(
+                engine
+                    .call_win64(entry, [handle, output, output + 8, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                engine.unicorn.get_data().windows_last_error,
+                ERROR_INVALID_HANDLE
+            );
+        }
+        engine.write(output, &[0xaa; 24]).unwrap();
+        for invalid in [0, u64::MAX, DATA_BASE + PAGE_SIZE - 4] {
+            assert_eq!(
+                engine
+                    .call_win64(entry, [u64::MAX, output, invalid, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            engine.read(output, &mut bytes).unwrap();
+            assert_eq!(bytes, [0xaa; 24]);
+        }
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        let info = entry + 32;
+        install_win64_import(&mut engine.unicorn, info, "kernel32.dll", "GetSystemInfo").unwrap();
+        engine.call_win64(info, [output, 0, 0, 0, 0, 0]).unwrap();
+        let mut mask = [0; 8];
+        engine.read(output + 24, &mut mask).unwrap();
+        assert_eq!(mask, 1u64.to_le_bytes());
+        install_win64_import(
+            &mut engine.unicorn,
+            info + 32,
+            "foreign.dll",
+            "GetProcessAffinityMask",
+        )
+        .unwrap();
+        assert!(engine.call_win64(info + 32, [0; 6]).is_err());
+    }
+}
