@@ -80,6 +80,7 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     GetVolumeInformationA,
+    ExitThread,
     CoCreateInstance,
     CoInitializeSecurity,
     CoInitializeEx,
@@ -502,6 +503,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "FindFirstFileExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "CreateThread") => LegacyWin64Import::CreateThread,
         (_, "CreateThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (
+            "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-processthreads-l1-1-0.dll",
+            "ExitThread",
+        ) => LegacyWin64Import::ExitThread,
+        (_, "ExitThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ntdll.dll", "NtWriteFile") => LegacyWin64Import::NtWriteFile,
         (_, "NtWriteFile") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressAll") => {
@@ -2148,6 +2154,20 @@ fn install_win64_import(
                         "install bounded FindFirstFileExW import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_find_first_file_ex_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ExitThread => {
+                    uc(
+                        "write ExitThread tail jump",
+                        unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                    )?;
+                    uc(
+                        "install ExitThread",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            if let Err(error) = guest_exit_thread(unicorn) {
+                                fail_windows_thread_callback(unicorn, error);
+                            }
                         }),
                     )?;
                 }
@@ -9442,4 +9462,38 @@ fn guest_com_create_instance(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u6
         .mem_write(output, &[0; 8])
         .map_err(|error| format!("CoCreateInstance output: {error}"))?;
     Ok(result)
+}
+
+// ExitThread skips the caller's stack frames and enters the same owned-thread
+// completion path as returning from the start routine. DLL thread notifications
+// are a pre-existing gap in that common path; this does not claim to add them.
+fn guest_exit_thread(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), String> {
+    let exit_code = read_win64_import_argument(unicorn, 0)? as u32;
+    let state = unicorn.get_data();
+    let pending = state.pending_windows_thread.as_ref().ok_or_else(|| {
+        format!(
+            "ExitThread on the host-dispatched root thread is unsupported (exit code {exit_code})"
+        )
+    })?;
+    let thread = state
+        .windows_threads
+        .get(&pending.handle)
+        .ok_or_else(|| "ExitThread pending thread handle is missing".to_string())?;
+    if thread.id != state.current_windows_thread_id || thread.completed || !thread.stack_mapped {
+        return Err("ExitThread does not own the active guest thread".into());
+    }
+    if pending.exit_code.is_some() {
+        return Err("ExitThread from a thread cleanup callback is unsupported".into());
+    }
+    let return_rsp = pending.callback_return_rsp;
+    unicorn
+        .reg_write(RegisterX86::RSP, return_rsp)
+        .map_err(|error| format!("ExitThread completion stack: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RAX, u64::from(exit_code))
+        .map_err(|error| format!("ExitThread exit code: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::R11, HOST_CREATE_THREAD_CONTINUE)
+        .map_err(|error| format!("ExitThread completion target: {error}"))?;
+    Ok(())
 }

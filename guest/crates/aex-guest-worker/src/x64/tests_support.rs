@@ -20823,3 +20823,98 @@ fn com_create_instance_rejects_unsafe_pointers_and_unmodeled_contexts() {
     install_win64_import(&mut engine.unicorn, CREATE, "ole32.dll", "CoCreateInstance").unwrap();
     assert_eq!(engine.call_win64(CREATE, [0; 6]).unwrap(), 0x80004003);
 }
+
+#[test]
+fn exit_thread_never_returns_and_preserves_exit_code_through_fls_cleanup() {
+    const EXIT: u64 = STUB_BASE + 0x410;
+    const CREATE: u64 = STUB_BASE + 0x420;
+    const FLS_ALLOC: u64 = STUB_BASE + 0x430;
+    const FLS_SET: u64 = STUB_BASE + 0x440;
+    const SWITCH: u64 = STUB_BASE + 0x450;
+    const DESTRUCTOR: usize = 0x100;
+    for dll in [
+        "kernel32.dll",
+        "kernelbase.dll",
+        "api-ms-win-core-processthreads-l1-1-0.dll",
+    ] {
+        for yielding in [false, true] {
+            let mut code = vec![0x48, 0x83, 0xec, 0x28, 0x31, 0xc9, 0xba, 0x34, 0x12, 0, 0];
+            push_mov_imm64(&mut code, [0x48, 0xb8], FLS_SET);
+            code.extend_from_slice(&[0xff, 0xd0]);
+            if yielding {
+                push_mov_imm64(&mut code, [0x48, 0xb8], SWITCH);
+                code.extend_from_slice(&[0xff, 0xd0]);
+            }
+            push_mov_imm64(&mut code, [0x48, 0xb9], 0xfeed_beef_1234_5678);
+            push_mov_imm64(&mut code, [0x48, 0xb8], EXIT);
+            code.extend_from_slice(&[0xff, 0xd0, 0x0f, 0x0b]); // UD2 must never execute
+            code.resize(DESTRUCTOR, 0x90);
+            push_mov_imm64(&mut code, [0x48, 0xb8], DATA_BASE + 0x380);
+            code.extend_from_slice(&[0x48, 0x89, 0x08, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]);
+            let mut engine = test_engine(&code);
+            engine
+                .unicorn
+                .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+                .unwrap();
+            install_win64_import(&mut engine.unicorn, EXIT, dll, "ExitThread").unwrap();
+            for (address, name) in [
+                (CREATE, "CreateThread"),
+                (FLS_ALLOC, "FlsAlloc"),
+                (FLS_SET, "FlsSetValue"),
+                (SWITCH, "SwitchToThread"),
+            ] {
+                install_win64_import(&mut engine.unicorn, address, "kernel32.dll", name).unwrap();
+            }
+            assert_eq!(
+                engine
+                    .call_win64(FLS_ALLOC, [TEST_CODE + DESTRUCTOR as u64, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            let caller = engine.unicorn.get_data().current_windows_thread_id;
+            engine.unicorn.get_data_mut().crt_errno = 72;
+            engine.unicorn.get_data_mut().windows_last_error = 71;
+            let handle = engine
+                .call_win64(CREATE, [0, 0, TEST_CODE, 0, 0, 0])
+                .unwrap();
+            let thread = &engine.unicorn.get_data().windows_threads[&handle];
+            assert!(thread.completed);
+            assert_eq!(thread.exit_code, 0x1234_5678);
+            assert!(!thread.stack_mapped);
+            assert!(
+                !guest_range_has_permission(&engine.unicorn, thread.stack_base, 8, Prot::READ)
+                    .unwrap()
+            );
+            assert_eq!(
+                engine
+                    .unicorn
+                    .mem_read_as_vec(DATA_BASE + 0x380, 8)
+                    .unwrap(),
+                0x1234u64.to_le_bytes()
+            );
+            assert!(engine.unicorn.get_data().pending_windows_thread.is_none());
+            assert_eq!(engine.unicorn.get_data().current_windows_thread_id, caller);
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+        }
+    }
+}
+
+#[test]
+fn exit_thread_root_dispatch_is_a_diagnostic_and_foreign_dll_is_rejected() {
+    const EXIT: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, EXIT, "kernel32.dll", "ExitThread").unwrap();
+    let error = engine
+        .call_win64(EXIT, [9, 0, 0, 0, 0, 0])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("root thread") && error.contains("exit code 9"),
+        "{error}"
+    );
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "ExitThread"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
