@@ -410,6 +410,34 @@ mod library_tests {
         }
     }
 
+    #[test]
+    fn dll_avx_fallback_executes_real_export_with_wrapping_negative_index() {
+        let primary = fixture(0x180000000, "EffectMain", None, false);
+        let base = DEPENDENCY_IMAGE_BASE;
+        let mut bytes = fixture_bytes(base, "vector_copy", None, false);
+        let code = [
+            0x48, 0x89, 0xc8, 0xc4, 0xc1, 0x7c, 0x10, 0x04, 0x00, 0xc5, 0xfc, 0x11, 0x02, 0xc3,
+        ];
+        bytes[0x200..0x200 + code.len()].copy_from_slice(&code);
+        let dll = PeImage::parse_library(&bytes).unwrap();
+        let mut engine =
+            GuestEngine::load_with_libraries(&primary, &[("vector.dll", dll)]).unwrap();
+        let source = engine.allocate(32, 8).unwrap();
+        let destination = engine.allocate(32, 8).unwrap();
+        let expected = std::array::from_fn::<_, 32, _>(|i| i as u8 ^ 0xa5);
+        engine.write(source, &expected).unwrap();
+        engine
+            .call_win64(
+                base + 0x1000,
+                [source + 8192, destination, (-8192i64) as u64, 0, 0, 0],
+            )
+            .unwrap();
+        let mut actual = [0; 32];
+        engine.read(destination, &mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(engine.unicorn.get_data().avx_fallback_instructions, 2);
+    }
+
     fn fixture_bytes(
         base: u64,
         symbol: &str,

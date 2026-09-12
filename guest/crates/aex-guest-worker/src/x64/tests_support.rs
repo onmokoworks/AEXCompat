@@ -16381,3 +16381,67 @@ fn windows_semaphore_counts_share_namespace_and_reject_invalid_release_atomicall
         ));
     }
 }
+
+#[test]
+fn avx_fallback_requires_registered_executable_code_and_complete_memory_permissions() {
+    let mut engine = test_engine(&[0xc5, 0xfc, 0x10, 0x01, 0xc5, 0xfc, 0x11, 0x02, 0xc3]);
+    let source = 0x51000000;
+    let target = 0x52000000;
+    engine
+        .unicorn
+        .mem_map(source, PAGE_SIZE, Prot::WRITE)
+        .unwrap();
+    engine
+        .unicorn
+        .mem_map(target, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    engine.write(source, &[0x5a; 32]).unwrap();
+    engine.write(target, &[0xa5; 32]).unwrap();
+    assert!(
+        engine
+            .call_win64(TEST_CODE, [source, target, 0, 0, 0, 0])
+            .is_err()
+    );
+    engine
+        .unicorn
+        .mem_protect(source, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    assert!(
+        engine
+            .call_win64(TEST_CODE, [source, target, 0, 0, 0, 0])
+            .is_err()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(target, 32).unwrap(),
+        [0xa5; 32]
+    );
+    engine
+        .unicorn
+        .mem_protect(target, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let edge = target + PAGE_SIZE - 16;
+    engine.write(edge, &[0xa5; 16]).unwrap();
+    assert!(
+        engine
+            .call_win64(TEST_CODE, [source, edge, 0, 0, 0, 0])
+            .is_err()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(edge, 16).unwrap(),
+        [0xa5; 16]
+    );
+    engine
+        .unicorn
+        .get_data_mut()
+        .image_executable_ranges
+        .clear();
+    assert!(
+        engine
+            .call_win64(TEST_CODE, [source, target, 0, 0, 0, 0])
+            .is_err()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(target, 32).unwrap(),
+        [0xa5; 32]
+    );
+}

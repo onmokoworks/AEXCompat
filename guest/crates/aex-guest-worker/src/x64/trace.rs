@@ -1780,9 +1780,11 @@ fn read_avx256_operand(
             value.copy_from_slice(bytes.as_ref());
         }
         OpKind::Memory => {
-            unicorn
-                .mem_read(iced_memory_address(unicorn, instruction)?, &mut value)
-                .ok()?;
+            let address = iced_memory_address(unicorn, instruction)?;
+            if !guest_range_has_permission(unicorn, address, value.len() as u64, Prot::READ).ok()? {
+                return None;
+            }
+            unicorn.mem_read(address, &mut value).ok()?;
         }
         _ => return None,
     }
@@ -1810,7 +1812,9 @@ fn write_avx256_operand(
             let Some(address) = iced_memory_address(unicorn, instruction) else {
                 return false;
             };
-            unicorn.mem_write(address, value).is_ok()
+            guest_range_has_permission(unicorn, address, value.len() as u64, Prot::WRITE)
+                .unwrap_or(false)
+                && unicorn.mem_write(address, value).is_ok()
         }
         _ => false,
     }
@@ -1829,9 +1833,11 @@ fn read_avx128_operand(
             value.copy_from_slice(bytes.get(..16)?);
         }
         OpKind::Memory => {
-            unicorn
-                .mem_read(iced_memory_address(unicorn, instruction)?, &mut value)
-                .ok()?;
+            let address = iced_memory_address(unicorn, instruction)?;
+            if !guest_range_has_permission(unicorn, address, value.len() as u64, Prot::READ).ok()? {
+                return None;
+            }
+            unicorn.mem_read(address, &mut value).ok()?;
         }
         _ => return None,
     }
@@ -1865,7 +1871,9 @@ fn write_avx128_operand(
             let Some(address) = iced_memory_address(unicorn, instruction) else {
                 return false;
             };
-            unicorn.mem_write(address, value).is_ok()
+            guest_range_has_permission(unicorn, address, value.len() as u64, Prot::WRITE)
+                .unwrap_or(false)
+                && unicorn.mem_write(address, value).is_ok()
         }
         _ => false,
     }
@@ -2003,13 +2011,19 @@ fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> boo
     let Ok(rip) = unicorn.reg_read(RegisterX86::RIP) else {
         return false;
     };
-    let Some((image_base, image_end)) = unicorn.get_data().image_region else {
+    let Some((_, executable_end)) = unicorn
+        .get_data()
+        .image_executable_ranges
+        .iter()
+        .find(|(start, end)| (*start..*end).contains(&rip))
+        .copied()
+    else {
         return false;
     };
-    if !(image_base..image_end).contains(&rip) {
+    let byte_count = usize::try_from((executable_end - rip).min(15)).unwrap_or(15);
+    if !guest_range_has_permission(unicorn, rip, byte_count as u64, Prot::EXEC).unwrap_or(false) {
         return false;
     }
-    let byte_count = usize::try_from((image_end - rip).min(15)).unwrap_or(15);
     let mut bytes = [0u8; 15];
     if unicorn.mem_read(rip, &mut bytes[..byte_count]).is_err() {
         return false;

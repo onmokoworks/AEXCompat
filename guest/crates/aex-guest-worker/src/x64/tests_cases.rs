@@ -2141,6 +2141,7 @@ fn avx_fallback_decodes_a_complete_instruction_at_the_mapped_image_end() {
     const CODE: u64 = 0x1000_0000;
     let mut engine = test_engine(&[0xc3]);
     let instruction = CODE + PAGE_SIZE - 4;
+    engine.unicorn.get_data_mut().image_executable_ranges = vec![(CODE, CODE + PAGE_SIZE)];
     let expected = [0x5a; 32];
     engine.write(DATA_BASE, &expected).unwrap();
     engine
@@ -2637,18 +2638,11 @@ fn duplicate_avx_sync_points_do_not_consume_the_dense_budget() {
 #[test]
 fn dense_avx_sync_map_preserves_vex128_upper_zeroing() {
     const CODE: u64 = 0x1000_0000;
-    let mut engine = test_engine(&[0x90, 0xc3]);
-    engine
-        .unicorn
-        .mem_write(
-            CODE,
-            &[
-                0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
-                0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
-                0xc3,
-            ],
-        )
-        .unwrap();
+    let mut engine = test_engine(&[
+        0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+        0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
+        0xc3,
+    ]);
     let points = (0..=MAX_SPARSE_AVX_STATE_SYNC_HOOKS)
         .map(|offset| (CODE + offset as u64, AvxStateSync::RegisterUpper(0)))
         .collect::<Vec<_>>();
