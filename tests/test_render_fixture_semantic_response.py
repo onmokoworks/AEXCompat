@@ -114,3 +114,82 @@ def test_installed_olmblur_fixture_parameter_response(tmp_path):
         assert output == read_artifact(destination / 'final', report['final_artifact'])
         outputs.append(output)
     assert_blur_response(*outputs)
+
+
+def assert_color_keep_response(default, selected, source):
+    assert len(default) == len(selected) == len(source) == WIDTH * HEIGHT * 4
+    assert set(default[0::4]) == {0}
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            offset = (y * WIDTH + x) * 4
+            if x < WIDTH // 2:
+                assert selected[offset:offset + 4] == source[offset:offset + 4]
+            else:
+                assert selected[offset] == 0
+
+
+def two_color_argb():
+    return (bytes([255, 32, 64, 128]) * (WIDTH // 2)
+            + bytes([255, 190, 40, 80]) * (WIDTH // 2)) * HEIGHT
+
+
+@pytest.mark.parametrize('fault', ['empty', 'noop', 'wrong_color', 'truncated'])
+def test_color_keep_check_rejects_invalid_response(fault):
+    source = two_color_argb()
+    selected = bytearray(source)
+    for y in range(HEIGHT):
+        for x in range(WIDTH // 2, WIDTH):
+            selected[(y * WIDTH + x) * 4] = 0
+    wrong = bytearray(selected)
+    wrong[1] ^= 1
+    candidate = {'empty': bytes(len(source)), 'noop': source,
+                 'wrong_color': bytes(wrong), 'truncated': bytes(selected[:-4])}[fault]
+    with pytest.raises(AssertionError):
+        assert_color_keep_response(bytes(len(source)), candidate, source)
+
+
+def test_installed_colorkeep_fixture_color_response(tmp_path):
+    plugin_value = os.environ.get('AEXCOMPAT_TEST_COLOR_KEEP')
+    if not plugin_value:
+        pytest.skip('real AEX execution requires AEXCOMPAT_TEST_COLOR_KEEP')
+    assert os.name == 'nt', 'opted-in native test requires Windows'
+    plugin = Path(plugin_value).resolve()
+    harness = ROOT / 'broker/target/release/aexcompat-harness.exe'
+    assert plugin.is_file() and harness.is_file()
+    assert (ROOT / 'target/minihost-build/aex_worker.exe').is_file()
+
+    def run(*args):
+        result = subprocess.run([str(harness), '--headless', *map(str, args)],
+                                cwd=ROOT, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
+        return json.loads(result.stdout)
+
+    parameters = run('--inspect-experimental', plugin)
+    count = next(p for p in parameters if p['name'] == 'Enabled Color Num')
+    color = next(p for p in parameters if p['kind'] == 'color')
+    assert count['value'] == 1 and color['color'] == [255, 0, 0, 0]
+    source = two_color_argb()
+    rgba = bytes(c for i in range(0, len(source), 4)
+                 for c in (*source[i + 1:i + 4], source[i]))
+    Image.frombytes('RGBA', (WIDTH, HEIGHT), rgba).save(tmp_path / 'input.png')
+    outputs = []
+    for variant, value in [('default', [255, 0, 0, 0]), ('selected', [255, 32, 64, 128])]:
+        edited = copy.deepcopy(parameters)
+        next(p for p in edited if p['slot'] == color['slot'])['color'] = value
+        fixture = dict(schema='aexcompat.render_fixture', schema_version=1,
+                       primary_layer='input.png', parameters=edited,
+                       pixel_format='argb8', render_path='smart', premultiplication='straight',
+                       timing=dict(current_time=0, time_step=1, total_time=300, time_scale=30),
+                       final_artifact='raw', checkpoints=[
+                           dict(id='input', stage='smart-input'),
+                           dict(id='output', stage='smart-output')])
+        fixture_path = tmp_path / f'{variant}.json'
+        fixture_path.write_text(json.dumps(fixture), encoding='utf-8')
+        destination = tmp_path / variant
+        report = run('--render-fixture', plugin, fixture_path, destination)
+        checkpoints = report['checkpoints']
+        assert read_artifact(destination / 'checkpoints/input', checkpoints['input']) == source
+        output = read_artifact(destination / 'checkpoints/output', checkpoints['output'])
+        assert output == read_artifact(destination / 'final', report['final_artifact'])
+        outputs.append(output)
+    assert_color_keep_response(*outputs, source)
