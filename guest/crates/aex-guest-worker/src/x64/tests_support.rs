@@ -18792,3 +18792,88 @@ fn scanf_scanset_rejects_malformed_format_and_preflights_output() {
         assert_eq!(actual, [0xa5; 2]);
     }
 }
+
+#[test]
+fn atoi_converts_decimal_and_saturates_windows_int_overflow() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-convert-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "atoi").unwrap();
+        for (text, expected, errno) in [
+            (" \t\r\n\u{b}\u{c}-42tail", -42, 71),
+            ("+17", 17, 71),
+            ("", 0, 71),
+            ("word", 0, 71),
+            ("--2", 0, 71),
+            ("+ 2", 0, 71),
+            ("0x20", 0, 71),
+            ("00123", 123, 71),
+            ("2147483647", i32::MAX, 71),
+            ("-2147483648", i32::MIN, 71),
+            ("2147483648", i32::MAX, 34),
+            ("-2147483649", i32::MIN, 34),
+            ("999999999999999999999999999999999999", i32::MAX, 34),
+            ("-999999999999999999999999999999999999", i32::MIN, 34),
+        ] {
+            let bytes = format!("{text}\0");
+            engine.write(DATA_BASE, bytes.as_bytes()).unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 71;
+            engine.unicorn.get_data_mut().windows_last_error = 72;
+            assert_eq!(
+                engine
+                    .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                    .unwrap() as u32 as i32,
+                expected,
+                "{text}"
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, errno);
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 72);
+            assert_eq!(
+                engine
+                    .unicorn
+                    .mem_read_as_vec(DATA_BASE, bytes.len())
+                    .unwrap(),
+                bytes.as_bytes()
+            );
+        }
+        assert!(engine.call_win64(entry, [0; 6]).is_err());
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "atoi"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn atoi_stops_at_first_non_digit_without_reading_next_page() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    const PAGE: u64 = 0x30_0000_0000;
+    install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", "atoi").unwrap();
+    engine
+        .unicorn
+        .mem_map(PAGE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    let source = PAGE + PAGE_SIZE - 3;
+    engine.write(source, b"12x").unwrap();
+    assert_eq!(
+        engine.call_win64(entry, [source, 0, 0, 0, 0, 0]).unwrap(),
+        12
+    );
+    engine.write(source, b"123").unwrap();
+    assert!(engine.call_win64(entry, [source, 0, 0, 0, 0, 0]).is_err());
+    engine.write(source, b"12\0").unwrap();
+    engine
+        .unicorn
+        .mem_protect(PAGE, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    assert_eq!(
+        engine.call_win64(entry, [source, 0, 0, 0, 0, 0]).unwrap(),
+        12
+    );
+    engine
+        .unicorn
+        .mem_protect(PAGE, PAGE_SIZE, Prot::WRITE)
+        .unwrap();
+    assert!(engine.call_win64(entry, [source, 0, 0, 0, 0, 0]).is_err());
+}

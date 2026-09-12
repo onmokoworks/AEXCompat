@@ -4036,3 +4036,70 @@ fn scanf_byte_set(format: &[u8], position: &mut usize) -> Result<[bool; 256], St
     }
     Ok(set)
 }
+
+fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        if source == 0 {
+            return Err("atoi null source: invalid parameter handler is not implemented".into());
+        }
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|e| format!("guest memory-map query failed: {e}"))?;
+        let mut readable_end = None;
+        let mut leading = true;
+        let mut negative = false;
+        let mut magnitude = 0u64;
+        for offset in 0..MAX_CRT_STRING_BYTES {
+            let address = source
+                .checked_add(offset)
+                .ok_or("atoi source range overflow")?;
+            if readable_end.is_none_or(|end| address > end) {
+                readable_end = regions
+                    .iter()
+                    .find(|r| {
+                        r.begin <= address && address <= r.end && r.perms & Prot::READ.0 as u32 != 0
+                    })
+                    .map(|r| r.end);
+                if readable_end.is_none() {
+                    return Err(format!("atoi source address {address:#x} is not readable"));
+                }
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|e| format!("atoi source read: {e}"))?;
+            let byte = byte[0];
+            if leading {
+                if matches!(byte, 9..=13 | 32) {
+                    continue;
+                }
+                leading = false;
+                if matches!(byte, b'+' | b'-') {
+                    negative = byte == b'-';
+                    continue;
+                }
+            }
+            if byte.is_ascii_digit() {
+                // Preserve overflow evidence without allowing host arithmetic overflow.
+                magnitude = (magnitude * 10 + u64::from(byte - b'0')).min(2_147_483_649);
+                continue;
+            }
+            let limit = if negative {
+                2_147_483_648
+            } else {
+                2_147_483_647
+            };
+            if magnitude > limit {
+                unicorn.get_data_mut().crt_errno = 34;
+            } // ERANGE
+            let magnitude = magnitude.min(limit) as i64;
+            let value = if negative { -magnitude } else { magnitude } as i32;
+            return Ok(u64::from(value as u32));
+        }
+        Err(format!(
+            "atoi source exceeds {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+        ))
+    })();
+    finish_guest_stdio(unicorn, result);
+}

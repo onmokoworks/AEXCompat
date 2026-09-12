@@ -72,6 +72,7 @@ enum LegacyWin64Import {
     StrCpy,
     StrCat,
     StrChr,
+    Atoi,
     SetNamedSecurityInfoA,
     SetEntriesInAclA,
     LocalFree,
@@ -846,6 +847,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::StrChr
         }
         (_, "strchr") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "atoi") => LegacyWin64Import::Atoi,
+        (_, "atoi") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetNamedSecurityInfoA") => LegacyWin64Import::SetNamedSecurityInfoA,
         (_, "SetNamedSecurityInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetEntriesInAclA") => LegacyWin64Import::SetEntriesInAclA,
@@ -1349,6 +1352,13 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_reg_close_key(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::Atoi => {
+                    uc("write atoi return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install atoi",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_atoi(uc)),
                     )?;
                 }
                 LegacyWin64Import::StrChr => {
