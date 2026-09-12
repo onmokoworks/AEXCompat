@@ -146,6 +146,7 @@ enum LegacyWin64Import {
     EnterCriticalSection,
     LeaveCriticalSection,
     DeleteCriticalSection,
+    InitializeSecurityDescriptor,
     InitializeSrwLock,
     AcquireSrwLockExclusive,
     TryAcquireSrwLockExclusive,
@@ -348,6 +349,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         None => {}
     }
     let legacy = match (normalized_library.as_str(), symbol) {
+        ("advapi32.dll", "InitializeSecurityDescriptor") => {
+            LegacyWin64Import::InitializeSecurityDescriptor
+        }
+        (_, "InitializeSecurityDescriptor") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-sysinfo-l1-1-0.dll", "GetSystemTimeAsFileTime") => {
             LegacyWin64Import::GetSystemTimeAsFileTime
         }
@@ -1876,6 +1881,18 @@ fn install_win64_import(
                     "install critical-section import",
                     unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                         emulate_windows_critical_section(unicorn, implementation);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::InitializeSecurityDescriptor => {
+                uc(
+                    "write security descriptor initializer return",
+                    unicorn.mem_write(stub, &[0xc3]),
+                )?;
+                uc(
+                    "install security descriptor initializer",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_initialize_security_descriptor(unicorn);
                     }),
                 )?;
             }
@@ -7834,5 +7851,35 @@ fn finish_registry_import(unicorn: &mut Unicorn<'_, GuestState>, result: Result<
             }
             let _ = unicorn.emu_stop();
         }
+    }
+}
+
+// Win64 absolute SECURITY_DESCRIPTOR: four header bytes, four padding bytes,
+// followed by owner/group/SACL/DACL pointers. This initializes guest data only;
+// it does not change host permissions or grant access to a kernel object.
+fn emulate_initialize_security_descriptor(unicorn: &mut Unicorn<'_, GuestState>) {
+    let output = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let revision = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default() as u32;
+    let error = if revision != 1 {
+        Some(1305u32)
+    }
+    // ERROR_UNKNOWN_REVISION
+    else if output == 0
+        || !guest_range_has_permission(unicorn, output, 40, Prot::WRITE).unwrap_or(false)
+    {
+        Some(ERROR_INVALID_PARAMETER)
+    } else {
+        let mut descriptor = [0u8; 40];
+        descriptor[0] = 1;
+        unicorn
+            .mem_write(output, &descriptor)
+            .err()
+            .map(|_| ERROR_INVALID_PARAMETER)
+    };
+    if let Some(error) = error {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 1);
     }
 }

@@ -15406,3 +15406,51 @@ fn initialize_srw_lock_sets_storage_and_preserves_active_ownership() {
         assert!(engine.call_win64(init, [DATA_BASE, 0, 0, 0, 0, 0]).is_err());
     }
 }
+
+#[test]
+fn security_descriptor_initialization_writes_absolute_layout_and_validates_output() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "advapi32.dll",
+        "InitializeSecurityDescriptor",
+    )
+    .unwrap();
+    let output = engine.allocate(48, 8).unwrap();
+    engine.write(output, &[0x5a; 48]).unwrap();
+    assert_eq!(
+        engine.call_win64(entry, [output, 1, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    let mut actual = [0; 48];
+    engine.read(output, &mut actual).unwrap();
+    assert_eq!(actual[0], 1);
+    assert_eq!(&actual[1..40], &[0; 39]);
+    assert_eq!(&actual[40..], &[0x5a; 8]);
+    assert_eq!(
+        engine.call_win64(entry, [output, 2, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1305);
+    let mut after = [0; 48];
+    engine.read(output, &mut after).unwrap();
+    assert_eq!(after, actual);
+    engine
+        .unicorn
+        .mem_map(0x50000000, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.unicorn.mem_write(0x50000ff0, &[0x5a; 16]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(entry, [0x50000ff0, 1, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(0x50000ff0, 16).unwrap(),
+        [0x5a; 16]
+    );
+    assert_eq!(engine.call_win64(entry, [0, 1, 0, 0, 0, 0]).unwrap(), 0);
+}
