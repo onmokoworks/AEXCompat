@@ -32,6 +32,7 @@ enum LegacyWin64Import {
     MemoryCopy,
     MemChr,
     StrStr,
+    StrCmp,
     StrLen,
     StrCpy,
     RegOpenKeyExA,
@@ -698,6 +699,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_vcomp_set_num_threads") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcmp") => {
+            LegacyWin64Import::StrCmp
+        }
+        (_, "strcmp") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strlen") => {
             LegacyWin64Import::StrLen
         }
@@ -1022,6 +1027,15 @@ fn install_win64_import(
                     "install strcpy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_strcpy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::StrCmp => {
+                uc("write strcmp return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install strcmp",
+                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_crt_strcmp(unicorn);
                     }),
                 )?;
             }

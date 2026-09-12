@@ -15709,3 +15709,45 @@ fn putenv_updates_all_guest_readers_and_preserves_snapshots() {
     assert_eq!(engine.unicorn.get_data().crt_errno, 22);
     assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), [0; 4]);
 }
+
+#[test]
+fn strcmp_uses_unsigned_case_sensitive_bytes_and_stops_at_decisive_byte() {
+    for dll in ["api-ms-win-crt-string-l1-1-0.dll", "ucrtbase.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "strcmp").unwrap();
+        let left = DATA_BASE + 0x100;
+        let right = DATA_BASE + 0x200;
+        for (a, b, expected) in [
+            (&b"abc\0"[..], &b"abc\0"[..], 0),
+            (b"A\0", b"a\0", -1),
+            (b"\xff\0", b"\x7f\0", 1),
+            (b"\0", b"a\0", -1),
+            (b"abc\0", b"ab\0", 1),
+        ] {
+            engine.write(left, a).unwrap();
+            engine.write(right, b).unwrap();
+            let result = engine.call_win64(entry, [left, right, 0, 0, 0, 0]).unwrap() as u32 as i32;
+            assert_eq!(result.signum(), expected);
+        }
+        let edge = DATA_BASE + PAGE_SIZE - 1;
+        engine.write(edge, b"a").unwrap();
+        engine.write(right, b"b\0").unwrap();
+        assert_eq!(
+            engine.call_win64(entry, [edge, right, 0, 0, 0, 0]).unwrap() as u32 as i32,
+            -1
+        );
+        engine.write(right, b"a\0").unwrap();
+        assert!(engine.call_win64(entry, [edge, right, 0, 0, 0, 0]).is_err());
+        assert!(engine.call_win64(entry, [0, right, 0, 0, 0, 0]).is_err());
+        engine
+            .unicorn
+            .mem_map(0x50000000, PAGE_SIZE, Prot::WRITE)
+            .unwrap();
+        assert!(
+            engine
+                .call_win64(entry, [0x50000000, right, 0, 0, 0, 0])
+                .is_err()
+        );
+    }
+}
