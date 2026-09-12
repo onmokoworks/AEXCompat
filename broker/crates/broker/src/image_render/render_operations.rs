@@ -723,6 +723,40 @@ pub fn render_experimental_image_with_timed_layers(
     smart: bool,
     pixel_format: RenderPixelFormat,
 ) -> io::Result<Value> {
+    render_experimental_image_with_timed_layers_and_context(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timed_layers,
+        timing,
+        smart,
+        pixel_format,
+        None,
+        RenderGpuBackend::Auto,
+        Vec::new(),
+    )
+}
+
+/// Timed image inputs without discarding the caller's host context or runtime
+/// dependencies. Uses the same bounded sample validation and worker transport.
+pub fn render_experimental_image_with_timed_layers_and_context(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timed_layers: &[TimedLayerImage],
+    timing: RenderTiming,
+    smart: bool,
+    pixel_format: RenderPixelFormat,
+    host_context: Option<&crate::render_request::HostContext>,
+    gpu_backend: RenderGpuBackend,
+    dependencies: Vec<ApprovedImageArtifact>,
+) -> io::Result<Value> {
     let bytes = fs::read(plugin_path)?;
     let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
     render_with_artifact(
@@ -735,16 +769,16 @@ pub fn render_experimental_image_with_timed_layers(
         output_path,
         Some(encode_interactive_payload(parameters)?),
         Some(parameters),
-        None,
+        host_context,
         timing,
         smart,
         pixel_format,
-        RenderGpuBackend::Auto,
+        gpu_backend,
         None,
         None,
         None,
         Some(timed_layers),
-        Vec::new(),
+        dependencies,
         Vec::new(),
         None,
         false,

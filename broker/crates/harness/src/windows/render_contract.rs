@@ -397,6 +397,70 @@ fn assign_layer_paths(
     Ok(())
 }
 
+fn typed_request_timed_layers(
+    document: &serde_json::Value,
+    request_path: &Path,
+) -> Result<Vec<aexcompat_broker::image_render::TimedLayerImage>, String> {
+    use aexcompat_broker::image_render::{AnimationTime, TimedLayerImage};
+    let Some(value) = document.get("timed_layers") else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .filter(|v| v.len() <= 64)
+        .ok_or("timed_layers must be an array of at most 64 samples")?;
+    let mut result: Vec<TimedLayerImage> = Vec::new();
+    for value in values {
+        let obj = value.as_object().ok_or("timed layer must be an object")?;
+        if obj
+            .keys()
+            .any(|k| !matches!(k.as_str(), "slot" | "time" | "time_scale" | "image"))
+        {
+            return Err("unknown timed layer field".into());
+        }
+        let slot = value["slot"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .ok_or("invalid timed layer slot")?;
+        let time = value["time"]
+            .as_i64()
+            .and_then(|v| i32::try_from(v).ok())
+            .ok_or("invalid timed layer time")?;
+        let scale = value["time_scale"]
+            .as_u64()
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .ok_or("invalid timed layer time_scale")?;
+        let path = value["image"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .ok_or("timed layer image is required")?;
+        if result.iter().any(|p| {
+            p.slot == slot
+                && i64::from(p.time.value) * i64::from(scale)
+                    == i64::from(time) * i64::from(p.time.scale)
+        }) {
+            return Err("duplicate timed layer slot/time".into());
+        }
+        let path = Path::new(path);
+        let image_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            request_path
+                .parent()
+                .ok_or("request has no parent")?
+                .join(path)
+        };
+        result.push(TimedLayerImage {
+            slot,
+            time: AnimationTime { value: time, scale },
+            image_path,
+        });
+    }
+    Ok(result)
+}
+
 fn apply_typed_assignments(
     parameters: &mut Vec<aexcompat_broker::image_render::InteractiveParameter>,
     document: &serde_json::Value,

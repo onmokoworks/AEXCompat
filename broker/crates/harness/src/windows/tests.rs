@@ -1516,6 +1516,63 @@ mod tests {
     }
 
     #[test]
+    fn timed_request_samples_are_bounded_typed_and_rationally_unique() {
+        let path = Path::new("C:/bundle/request.json");
+        let sample = serde_json::json!({"slot":1,"time":1,"time_scale":3,"image":"frame.png"});
+        let document = serde_json::json!({"timed_layers":[sample.clone()]});
+        let parsed = typed_request_timed_layers(&document, path).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].slot, 1);
+        assert_eq!(parsed[0].time.value, 1);
+        assert_eq!(parsed[0].time.scale, 3);
+        assert_eq!(parsed[0].image_path, Path::new("C:/bundle/frame.png"));
+        assert!(
+            typed_request_timed_layers(&serde_json::json!({}), path)
+                .unwrap()
+                .is_empty()
+        );
+        for (field, value) in [
+            ("slot", serde_json::json!(0)),
+            ("time_scale", serde_json::json!(0)),
+            ("time", serde_json::json!(1.5)),
+            ("time", serde_json::json!(2147483648_i64)),
+            ("image", serde_json::json!("")),
+            ("extra", serde_json::json!(true)),
+        ] {
+            let mut invalid = sample.clone();
+            invalid[field] = value;
+            assert!(
+                typed_request_timed_layers(&serde_json::json!({"timed_layers":[invalid]}), path)
+                    .is_err()
+            );
+        }
+        let mut equivalent = sample.clone();
+        equivalent["time"] = 2.into();
+        equivalent["time_scale"] = 6.into();
+        assert!(
+            typed_request_timed_layers(
+                &serde_json::json!({"timed_layers":[sample.clone(),equivalent]}),
+                path
+            )
+            .is_err()
+        );
+        assert!(
+            typed_request_timed_layers(&serde_json::json!({"timed_layers":vec![sample;65]}), path)
+                .is_err()
+        );
+        for invalid in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            serde_json::json!([null]),
+        ] {
+            assert!(
+                typed_request_timed_layers(&serde_json::json!({"timed_layers":invalid}), path)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn typed_assignment_document_is_strict_typed_and_atomic() {
         let mut parameters = vec![
             parameter(1, "integer"),

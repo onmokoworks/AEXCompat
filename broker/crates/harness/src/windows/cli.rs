@@ -1253,25 +1253,35 @@ fn main() -> eframe::Result {
             emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         });
-        if let Err(error) = apply_typed_assignments(&mut parameters, &document, Some(request_path))
+        let timed_layers =
+            typed_request_timed_layers(&document, request_path).unwrap_or_else(|error| {
+                emit_host_request_validation_failure(&error, &parameter_metadata);
+                std::process::exit(1);
+            });
+        let mut assignment_document = document.clone();
+        if let Some(object) = assignment_document.as_object_mut() {
+            object.remove("timed_layers");
+        }
+        if let Err(error) =
+            apply_typed_assignments(&mut parameters, &assignment_document, Some(request_path))
         {
             emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         }
         let parameters = typed_parameters_for_render(&parameters);
         let report =
-            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+            aexcompat_broker::image_render::render_experimental_image_with_timed_layers_and_context(
                 &repository,
                 plugin,
                 &hash,
                 Path::new(&args[3]),
                 Path::new(&args[4]),
                 &parameters,
+                &timed_layers,
                 timing,
                 smart,
                 pixel_format,
                 host_context.as_ref(),
-                None,
                 if command.ends_with("-32-cpu") {
                     RenderGpuBackend::Cpu
                 } else {

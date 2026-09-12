@@ -884,7 +884,11 @@ mod windows_e2e {
             time_scale: 30,
         };
 
-        for pixel_format in [RenderPixelFormat::Argb16, RenderPixelFormat::Argb32f] {
+        for pixel_format in [
+            RenderPixelFormat::Argb8,
+            RenderPixelFormat::Argb16,
+            RenderPixelFormat::Argb32f,
+        ] {
             let label = match pixel_format {
                 RenderPixelFormat::Argb8 => "argb8",
                 RenderPixelFormat::Argb16 => "argb16",
