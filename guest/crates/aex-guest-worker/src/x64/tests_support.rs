@@ -20084,3 +20084,67 @@ fn wstat64i32_preflights_output_and_rejects_invalid_wide_paths() {
         );
     }
 }
+
+#[test]
+fn strrchr_returns_last_match_and_includes_terminator() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    for dll in [
+        "vcruntime140.dll",
+        "ucrtbase.dll",
+        "api-ms-win-crt-string-l1-1-0.dll",
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, CALL, dll, "strrchr").unwrap();
+        let source = DATA_BASE + PAGE_SIZE - 7;
+        engine.write(source, b"abac\xffa\0").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        for (needle, expected) in [
+            (b'a' as u64, source + 5),
+            (0, source + 6),
+            (0x1ff, source + 4),
+            (b'z' as u64, 0),
+        ] {
+            assert_eq!(
+                engine
+                    .call_win64(CALL, [source, needle, 0, 0, 0, 0])
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        }
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(source, 7).unwrap(),
+            b"abac\xffa\0"
+        );
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "strrchr"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn strrchr_requires_terminator_even_after_match_and_refreshes_permissions() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, CALL, "vcruntime140.dll", "strrchr").unwrap();
+    let source = DATA_BASE + PAGE_SIZE - 1;
+    engine.write(source, &[0]).unwrap();
+    assert_eq!(
+        engine.call_win64(CALL, [source, 0, 0, 0, 0, 0]).unwrap(),
+        source
+    );
+    engine.write(source, b"a").unwrap();
+    // Make the following page unavailable even if the fixture maps it.
+    if guest_range_has_permission(&engine.unicorn, source + 1, 1, Prot::READ).unwrap() {
+        engine
+            .unicorn
+            .mem_protect(source + 1, PAGE_SIZE, Prot::NONE)
+            .unwrap();
+    }
+    assert!(
+        engine
+            .call_win64(CALL, [source, b'a' as u64, 0, 0, 0, 0])
+            .is_err()
+    );
+}
