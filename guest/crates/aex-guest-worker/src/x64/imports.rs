@@ -102,6 +102,8 @@ enum LegacyWin64Import {
     WakeByAddressAll,
     WakeByAddressSingle,
     WaitOnAddress,
+    CreateMutexA,
+    ReleaseMutex,
     WaitForSingleObject,
     WaitForSingleObjectEx,
     CloseHandle,
@@ -418,6 +420,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::WaitOnAddress
         }
         (_, "WaitOnAddress") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "CreateMutexA") => LegacyWin64Import::CreateMutexA,
+        ("kernel32.dll", "ReleaseMutex") => LegacyWin64Import::ReleaseMutex,
+        (_, "CreateMutexA" | "ReleaseMutex") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("kernel32.dll", "WaitForSingleObject") => LegacyWin64Import::WaitForSingleObject,
         ("kernel32.dll", "WaitForSingleObjectEx") => LegacyWin64Import::WaitForSingleObjectEx,
         ("kernel32.dll" | "api-ms-win-core-handle-l1-1-0.dll", "CloseHandle") => {
@@ -1578,6 +1585,15 @@ fn install_win64_import(
                     "install cooperative WaitOnAddress import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_wait_on_address(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::CreateMutexA | LegacyWin64Import::ReleaseMutex => {
+                uc("write mutex return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install mutex",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_windows_mutex(unicorn, implementation);
                     }),
                 )?;
             }
@@ -6959,6 +6975,8 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
             pending.fls_processed.clear();
         }
         let exit_code = pending.exit_code.expect("thread entry completed");
+        let exiting_id = unicorn.get_data().current_windows_thread_id;
+        unicorn.get_data_mut().windows_mutexes.abandon(exiting_id);
         let (stack_base, stack_size) = {
             let thread = unicorn
                 .get_data_mut()
@@ -7372,6 +7390,22 @@ fn emulate_windows_thread_lifecycle(
     const WAIT_OBJECT_0: u64 = 0;
     const WAIT_TIMEOUT: u64 = 258;
     const WAIT_FAILED: u64 = u32::MAX as u64;
+    let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+    if unicorn
+        .get_data()
+        .windows_mutexes
+        .handles
+        .contains_key(&handle)
+        && matches!(
+            operation,
+            LegacyWin64Import::WaitForSingleObject
+                | LegacyWin64Import::WaitForSingleObjectEx
+                | LegacyWin64Import::CloseHandle
+        )
+    {
+        emulate_windows_mutex(unicorn, operation);
+        return;
+    }
     let returned = match operation {
         LegacyWin64Import::WaitForSingleObject | LegacyWin64Import::WaitForSingleObjectEx => {
             let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();

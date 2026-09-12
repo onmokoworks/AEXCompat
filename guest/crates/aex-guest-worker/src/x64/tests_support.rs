@@ -16110,3 +16110,148 @@ fn copysign_preserves_payloads_and_uses_scalar_xmm_sign_bits() {
         }
     }
 }
+
+#[test]
+fn windows_mutex_named_ownership_recursion_and_close_are_stateful() {
+    let mut engine = test_engine(&[0xc3]);
+    let create = STUB_BASE + 0x100;
+    let wait = create + 16;
+    let release = create + 32;
+    let close = create + 48;
+    for (entry, name) in [
+        (create, "CreateMutexA"),
+        (wait, "WaitForSingleObject"),
+        (release, "ReleaseMutex"),
+        (close, "CloseHandle"),
+    ] {
+        install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", name).unwrap();
+    }
+    engine.unicorn.get_data_mut().current_windows_thread_id = 1;
+    let name = DATA_BASE + 0x100;
+    engine.write(name, b"Local\\Fixture\0").unwrap();
+    let first = engine.call_win64(create, [0, 1, name, 0, 0, 0]).unwrap();
+    assert_ne!(first, 0);
+    engine.write(name, b"Fixture\0").unwrap();
+    let second = engine.call_win64(create, [0, 1, name, 0, 0, 0]).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
+    assert_eq!(engine.unicorn.get_data().windows_mutexes.objects.len(), 1);
+    assert_eq!(engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(), 0);
+    engine.unicorn.get_data_mut().current_windows_thread_id = 2;
+    assert_eq!(
+        engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(),
+        258
+    );
+    assert!(engine.call_win64(wait, [second, 100, 0, 0, 0, 0]).is_err());
+    assert_eq!(
+        engine.call_win64(release, [second, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 288);
+    engine.unicorn.get_data_mut().current_windows_thread_id = 1;
+    assert_eq!(
+        engine.call_win64(release, [second, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    engine.call_win64(close, [first, 0, 0, 0, 0, 0]).unwrap();
+    engine.unicorn.get_data_mut().current_windows_thread_id = 2;
+    assert_eq!(
+        engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(),
+        258
+    );
+    engine.unicorn.get_data_mut().windows_mutexes.abandon(1);
+    assert_eq!(
+        engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(),
+        128
+    );
+    assert_eq!(
+        engine.call_win64(release, [second, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.call_win64(close, [second, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.call_win64(close, [second, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 6);
+    assert_eq!(
+        engine.call_win64(wait, [second, 0, 0, 0, 0, 0]).unwrap(),
+        u32::MAX as u64
+    );
+    assert_eq!(
+        engine.call_win64(release, [second, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert!(engine.unicorn.get_data().windows_mutexes.names.is_empty());
+    let replacement = engine.call_win64(create, [0, 0, name, 0, 0, 0]).unwrap();
+    assert_ne!(replacement, second);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0);
+    engine.write(name, b"fixture\0").unwrap();
+    engine.call_win64(create, [0, 0, name, 0, 0, 0]).unwrap();
+    assert_eq!(engine.unicorn.get_data().windows_mutexes.names.len(), 2);
+    engine.write(name, b"Local\\Global\\bad\0").unwrap();
+    assert!(engine.call_win64(create, [0, 0, name, 0, 0, 0]).is_err());
+    assert!(
+        engine
+            .call_win64(create, [DATA_BASE, 0, 0, 0, 0, 0])
+            .is_err()
+    );
+    engine.unicorn.get_data_mut().windows_mutexes.issued = 65536;
+    assert_eq!(engine.call_win64(create, [0, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 8);
+    for symbol in ["CreateMutexA", "ReleaseMutex"] {
+        assert!(matches!(
+            dispatch_win64_import("other.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+}
+
+#[test]
+fn windows_mutex_is_abandoned_when_guest_owner_thread_returns() {
+    const CREATE_MUTEX: u64 = STUB_BASE + 0x100;
+    const CREATE_THREAD: u64 = STUB_BASE + 0x200;
+    const WAIT: u64 = STUB_BASE + 0x300;
+    const OUT: u64 = DATA_BASE + 0x100;
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, 0x31, 0xc9, 0xba, 1, 0, 0, 0, 0x45, 0x31, 0xc0, 0x48, 0xb8,
+    ];
+    code.extend_from_slice(&CREATE_MUTEX.to_le_bytes());
+    code.extend_from_slice(&[0xff, 0xd0, 0x49, 0xbb]);
+    code.extend_from_slice(&OUT.to_le_bytes());
+    code.extend_from_slice(&[0x49, 0x89, 0x03, 0x48, 0x83, 0xc4, 0x28, 0x31, 0xc0, 0xc3]);
+    let mut engine = test_engine(&code);
+    engine
+        .unicorn
+        .mem_map(0, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine
+        .write(8, &(STACK_BASE + STACK_SIZE).to_le_bytes())
+        .unwrap();
+    engine.write(16, &STACK_BASE.to_le_bytes()).unwrap();
+    engine.unicorn.get_data_mut().current_windows_thread_id = 1;
+    engine.unicorn.get_data_mut().next_windows_thread_id = 2;
+
+    for (entry, name) in [
+        (CREATE_MUTEX, "CreateMutexA"),
+        (CREATE_THREAD, "CreateThread"),
+        (WAIT, "WaitForSingleObject"),
+    ] {
+        install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", name).unwrap();
+    }
+    engine
+        .call_win64(CREATE_THREAD, [0, STACK_SIZE, TEST_CODE, 0, 0, 0])
+        .unwrap();
+    let mut bytes = [0; 8];
+    engine.read(OUT, &mut bytes).unwrap();
+    let mutex = u64::from_le_bytes(bytes);
+    assert_ne!(mutex, 0);
+    assert_eq!(
+        engine.call_win64(WAIT, [mutex, 0, 0, 0, 0, 0]).unwrap(),
+        128
+    );
+    assert_eq!(engine.call_win64(WAIT, [mutex, 0, 0, 0, 0, 0]).unwrap(), 0);
+}

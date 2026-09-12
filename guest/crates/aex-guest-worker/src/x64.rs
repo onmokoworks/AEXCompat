@@ -457,3 +457,5 @@ include!("x64/import_data.rs");
 include!("x64/environment.rs");
 
 include!("x64/files.rs");
+
+include!("x64/mutex.rs");
