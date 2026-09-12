@@ -17815,3 +17815,55 @@ fn exposed_file_cells_preserve_unbuffered_reads_and_reject_unknown_buffering() {
     assert!(!guest_range_has_permission(&engine.unicorn, token, 1, Prot::READ).unwrap());
     assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
 }
+
+#[test]
+fn wsetlocale_queries_all_c_categories_and_rejects_unimplemented_mutation() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "_wsetlocale").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        let address = engine.call_win64(entry, [0; 6]).unwrap();
+        let mut bytes = [0; 4];
+        engine.unicorn.mem_read(address, &mut bytes).unwrap();
+        assert_eq!(bytes, [b'C', 0, 0, 0]);
+        assert!(guest_range_has_permission(&engine.unicorn, address, 4, Prot::READ).unwrap());
+        assert!(!guest_range_has_permission(&engine.unicorn, address, 4, Prot::WRITE).unwrap());
+        assert!(!guest_range_has_permission(&engine.unicorn, address, 4, Prot::EXEC).unwrap());
+        for category in 0..=5 {
+            assert_eq!(
+                engine.call_win64(entry, [category, 0, 0, 0, 0, 0]).unwrap(),
+                address
+            );
+            assert_eq!(
+                engine
+                    .call_win64(entry, [category, address, 0, 0, 0, 0])
+                    .unwrap(),
+                address
+            );
+        }
+        assert_eq!(
+            engine
+                .call_win64(entry, [0xffff_ffff_0000_0001, 0, 0, 0, 0, 0])
+                .unwrap(),
+            address
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        for category in [6, u32::MAX as u64] {
+            assert!(engine.call_win64(entry, [category, 0, 0, 0, 0, 0]).is_err());
+        }
+        for value in [[0, 0, 0, 0], [b'J', 0, 0, 0], [b'C', 0, b'x', 0]] {
+            engine.unicorn.mem_write(DATA_BASE, &value).unwrap();
+            assert!(
+                engine
+                    .call_win64(entry, [0, DATA_BASE, 0, 0, 0, 0])
+                    .is_err()
+            );
+        }
+        assert!(engine.call_win64(entry, [0, u64::MAX, 0, 0, 0, 0]).is_err());
+        assert_eq!(engine.call_win64(entry, [0; 6]).unwrap(), address);
+        let foreign = entry + 16;
+        install_win64_import(&mut engine.unicorn, foreign, "foreign.dll", "_wsetlocale").unwrap();
+        assert!(engine.call_win64(foreign, [0; 6]).is_err());
+    }
+}

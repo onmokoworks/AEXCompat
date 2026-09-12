@@ -81,6 +81,7 @@ enum LegacyWin64Import {
     StdioVsprintf,
     EncodePointer,
     DecodePointer,
+    CrtWSetLocale,
     CrtLocaleLock,
     CrtLocaleUnlock,
     StreamBufferPointers,
@@ -858,6 +859,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "EncodePointer" | "DecodePointer") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_wsetlocale") => {
+            LegacyWin64Import::CrtWSetLocale
+        }
+        (_, "_wsetlocale") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_lock_locales") => {
             LegacyWin64Import::CrtLocaleLock
         }
@@ -2435,6 +2440,15 @@ fn install_win64_import(
                         "install OutputDebugStringA import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_output_debug_string_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtWSetLocale => {
+                    uc("write _wsetlocale return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _wsetlocale",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_wsetlocale(unicorn);
                         }),
                     )?;
                 }

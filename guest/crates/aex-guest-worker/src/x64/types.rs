@@ -163,6 +163,7 @@ fn record_named_unsupported_suite_call(
 #[derive(Default)]
 struct GuestState {
     pointer_encoding_key: Option<u64>,
+    crt_wlocale_buffer: Option<u64>,
     loaded_libraries: BTreeMap<String, GuestLibrary>,
     params: Vec<GuestParam>,
     custom_ui_registration: Option<CustomUiRegistration>,
