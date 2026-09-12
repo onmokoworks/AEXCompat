@@ -20345,3 +20345,58 @@ fn wfopen_rejects_unreadable_and_malformed_wide_strings_before_opening() {
         assert!(engine.unicorn.get_data().guest_files.streams.is_empty());
     }
 }
+
+#[test]
+fn strerror_maps_windows_errors_and_keeps_thread_borrowed_storage() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-runtime-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, CALL, dll, "strerror").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        let mut first = 0;
+        for (error, expected) in [
+            (0, "No error"),
+            (2, "No such file or directory"),
+            (13, "Permission denied"),
+            (34, "Result too large"),
+            (132, "value too large"),
+            (u32::MAX as u64, "Unknown error"),
+            (99, "Unknown error"),
+        ] {
+            let pointer = engine
+                .call_win64(CALL, [error | (1 << 32), 0, 0, 0, 0, 0])
+                .unwrap();
+            if first == 0 {
+                first = pointer;
+            }
+            assert_eq!(pointer, first);
+            assert_eq!(
+                engine
+                    .unicorn
+                    .mem_read_as_vec(pointer, expected.len() + 1)
+                    .unwrap(),
+                format!("{expected}\0").as_bytes()
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+        }
+        engine.unicorn.get_data_mut().current_windows_thread_id += 1;
+        let second = engine.call_win64(CALL, [2, 0, 0, 0, 0, 0]).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(first, 14).unwrap(),
+            b"Unknown error\0"
+        );
+        assert!(free_crt_region(&mut engine.unicorn, first).is_err());
+        engine
+            .unicorn
+            .mem_protect(second, PAGE_SIZE, Prot::READ)
+            .unwrap();
+        assert!(engine.call_win64(CALL, [13, 0, 0, 0, 0, 0]).is_err());
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "strerror"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}

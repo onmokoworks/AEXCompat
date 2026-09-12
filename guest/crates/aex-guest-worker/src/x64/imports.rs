@@ -107,6 +107,7 @@ enum LegacyWin64Import {
     Fclose,
     Fopen,
     Wfopen,
+    Strerror,
     FopenS,
     StrncpyS,
     MsvcpLockitCtor,
@@ -995,6 +996,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "getc" | "fgetc" | "fread" | "fclose") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "strerror") => {
+            LegacyWin64Import::Strerror
+        }
+        (_, "strerror") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_wfopen") => {
             LegacyWin64Import::Wfopen
         }
@@ -2848,6 +2853,15 @@ fn install_win64_import(
                         "install stdio",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_guest_stdio(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Strerror => {
+                    uc("write strerror return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strerror",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_strerror(unicorn)
                         }),
                     )?;
                 }

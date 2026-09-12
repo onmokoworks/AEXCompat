@@ -4186,3 +4186,124 @@ fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
     })();
     finish_guest_stdio(unicorn, result);
 }
+
+fn crt_error_message(error: i32) -> &'static str {
+    match error {
+        0 => "No error",
+        1 => "Operation not permitted",
+        2 => "No such file or directory",
+        3 => "No such process",
+        4 => "Interrupted function call",
+        5 => "Input/output error",
+        6 => "No such device or address",
+        7 => "Arg list too long",
+        8 => "Exec format error",
+        9 => "Bad file descriptor",
+        10 => "No child processes",
+        11 => "Resource temporarily unavailable",
+        12 => "Not enough space",
+        13 => "Permission denied",
+        14 => "Bad address",
+        16 => "Resource device",
+        17 => "File exists",
+        18 => "Improper link",
+        19 => "No such device",
+        20 => "Not a directory",
+        21 => "Is a directory",
+        22 => "Invalid argument",
+        23 => "Too many open files in system",
+        24 => "Too many open files",
+        25 => "Inappropriate I/O control operation",
+        27 => "File too large",
+        28 => "No space left on device",
+        29 => "Invalid seek",
+        30 => "Read-only file system",
+        31 => "Too many links",
+        32 => "Broken pipe",
+        33 => "Domain error",
+        34 => "Result too large",
+        36 => "Resource deadlock avoided",
+        38 => "Filename too long",
+        39 => "No locks available",
+        40 => "Function not implemented",
+        41 => "Directory not empty",
+        42 => "Illegal byte sequence",
+        100 => "address in use",
+        101 => "address not available",
+        102 => "address family not supported",
+        103 => "connection already in progress",
+        104 => "bad message",
+        105 => "operation canceled",
+        106 => "connection aborted",
+        107 => "connection refused",
+        108 => "connection reset",
+        109 => "destination address required",
+        110 => "host unreachable",
+        111 => "identifier removed",
+        112 => "operation in progress",
+        113 => "already connected",
+        114 => "too many symbolic link levels",
+        115 => "message size",
+        116 => "network down",
+        117 => "network reset",
+        118 => "network unreachable",
+        119 => "no buffer space",
+        120 => "no message available",
+        121 => "no link",
+        122 => "no message",
+        123 => "no protocol option",
+        124 => "no stream resources",
+        125 => "not a stream",
+        126 => "not connected",
+        127 => "state not recoverable",
+        128 => "not a socket",
+        129 => "not supported",
+        130 => "operation not supported",
+        132 => "value too large",
+        133 => "owner dead",
+        134 => "protocol error",
+        135 => "protocol not supported",
+        136 => "wrong protocol type",
+        137 => "stream timeout",
+        138 => "timed out",
+        139 => "text file busy",
+        140 => "operation would block",
+        _ => "Unknown error",
+    }
+}
+
+fn emulate_crt_strerror(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let error = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+        let message = crt_error_message(error);
+        let thread = unicorn.get_data().current_windows_thread_id;
+        let address = if let Some(address) = unicorn.get_data().crt_strerror_buffers.get(&thread) {
+            *address
+        } else {
+            let count = unicorn.get_data().crt_strerror_buffers.len() as u64;
+            if count >= 4096 {
+                return Err("strerror thread storage limit exceeded".into());
+            }
+            // The preceding 4096 pages are the CRT tm thread buffers.
+            let address = POPUP_CHOICES_BASE + (MAX_POPUP_CHOICE_PAGES + 4096 + count) * PAGE_SIZE;
+            unicorn
+                .mem_map(address, PAGE_SIZE, Prot::READ | Prot::WRITE)
+                .map_err(|e| e.to_string())?;
+            unicorn
+                .get_data_mut()
+                .crt_strerror_buffers
+                .insert(thread, address);
+            address
+        };
+        let mut bytes = message.as_bytes().to_vec();
+        bytes.push(0);
+        if !guest_range_has_permission(unicorn, address, bytes.len() as u64, Prot::WRITE)? {
+            return Err("strerror result storage is not writable".into());
+        }
+        unicorn
+            .mem_write(address, &bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(address)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
