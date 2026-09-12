@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace {
 constexpr A_long kLayerSlot = 1;
@@ -96,6 +97,28 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
   PF_Err err = PF_Err_NONE;
   for (std::size_t i = 0; i < kCheckoutIds.size() && !err; ++i)
     err = extra->cb->checkout_layer_pixels(in_data->effect_ref, kCheckoutIds[i], &worlds[i]);
+  // Both legal checkout APIs must resolve the same timed image. Keeping all
+  // pixel leases alive also exposes accidental reuse of one mutable world.
+  for (std::size_t i = 0; i < kCheckoutIds.size() && !err; ++i) {
+    PF_ParamDef parameter{};
+    err = in_data->inter.checkout_param(in_data->effect_ref, kLayerSlot,
+        kTimes[i], 1, kScales[i], &parameter);
+    if (err) break;
+    const auto& layer = parameter.u.ld;
+    if (!layer.data || layer.width != worlds[i]->width ||
+        layer.height != worlds[i]->height || layer.rowbytes != worlds[i]->rowbytes) {
+      err = PF_Err_INTERNAL_STRUCT_DAMAGED;
+    } else {
+      for (A_long y = 0; y < layer.height && !err; ++y) {
+        if (std::memcmp(reinterpret_cast<const char*>(layer.data) + y * layer.rowbytes,
+                reinterpret_cast<const char*>(worlds[i]->data) + y * worlds[i]->rowbytes,
+                static_cast<std::size_t>(layer.rowbytes)) != 0)
+          err = PF_Err_INTERNAL_STRUCT_DAMAGED;
+      }
+    }
+    const PF_Err checked_in = in_data->inter.checkin_param(in_data->effect_ref, &parameter);
+    if (!err) err = checked_in;
+  }
   if (!err) err = extra->cb->checkout_output(in_data->effect_ref, &output);
   if (!err) {
     if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_PixelFloat)))

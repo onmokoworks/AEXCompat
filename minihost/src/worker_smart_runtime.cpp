@@ -18,6 +18,7 @@ thread_local State g_default_state;
 // stub is a plain function pointer, so it needs somewhere to record that.
 thread_local int g_empty_layer_allocations_for_self_test;
 thread_local State* g_active_state{};
+std::atomic_uint32_t g_active_session_count{};
 
 int32_t finish_callback(callback_diagnostics::Callback callback, int32_t result,
                         callback_diagnostics::Reason reason =
@@ -177,10 +178,32 @@ HostTelemetry& host_telemetry() {
 }
 
 State& state() { return g_active_state ? *g_active_state : g_default_state; }
+bool dispatch_active() { return g_active_session_count.load(std::memory_order_acquire) != 0; }
+bool current_thread_has_session() { return g_active_state != nullptr; }
+const void* timed_parameter_world(int32_t slot, int32_t time, uint32_t scale,
+                                  bool& timed_slot) {
+  timed_slot = false;
+  if (!g_active_state || scale == 0) return nullptr;
+  const auto& layers = g_active_state->hosted_layers;
+  timed_slot = std::any_of(layers.begin(), layers.end(),
+      [slot](const auto& layer) { return layer.slot == slot && layer.timed; });
+  if (!timed_slot) return nullptr;
+  auto found = std::find_if(layers.begin(), layers.end(),
+      [=](const auto& layer) { return layer.slot == slot && layer.timed &&
+          static_cast<int64_t>(layer.time) * scale ==
+          static_cast<int64_t>(time) * layer.time_scale; });
+  if (found == layers.end())
+    found = std::find_if(layers.begin(), layers.end(),
+        [slot](const auto& layer) { return layer.slot == slot && !layer.timed; });
+  return found == layers.end() ? nullptr : found->world;
+}
 int32_t __cdecl width() { return g_active_state ? g_active_state->width : 0; }
 int32_t __cdecl height() { return g_active_state ? g_active_state->height : 0; }
 
-Session::Session() : previous_(g_active_state) { g_active_state = &state_; }
+Session::Session() : previous_(g_active_state) {
+  g_active_state = &state_;
+  g_active_session_count.fetch_add(1, std::memory_order_release);
+}
 
 Session::~Session() {
   snapshot_->width = state_.width;
@@ -205,6 +228,7 @@ Session::~Session() {
   snapshot_->pixel_checkouts_balanced = pixel_checkouts_balanced();
   state_.clear_transient();
   g_active_state = previous_;
+  g_active_session_count.fetch_sub(1, std::memory_order_release);
 }
 
 int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,

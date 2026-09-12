@@ -140,6 +140,11 @@ struct Snapshot {
 };
 
 State& state();
+bool dispatch_active();
+bool current_thread_has_session();
+// Only the calling thread's active SmartFX session owns these worlds.
+const void* timed_parameter_world(int32_t slot, int32_t time, uint32_t scale,
+                                  bool& timed_slot);
 
 // Smart host telemetry (issue #126 Phase D): comp-bg-color and GUID mix-in
 // counters recorded by worker_main's AEGP callbacks during smart pre-render

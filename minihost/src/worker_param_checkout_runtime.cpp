@@ -4,6 +4,7 @@
 #include "worker_callback_diagnostics.hpp"
 #include "worker_extended_diag.hpp"
 #include "worker_parameter_runtime.hpp"
+#include "worker_smart_runtime.hpp"
 
 #include <cstddef>
 #include <cstring>
@@ -83,6 +84,9 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::InvalidArguments);
   }
   auto* classic_context = aexcompat::worker_runtime::classic::active_context();
+  if (aexcompat::worker_runtime::smart::dispatch_active() &&
+      !aexcompat::worker_runtime::smart::current_thread_has_session())
+    return finish_param_callback(Callback::CheckoutParam, 4, Reason::NoActiveState);
   if (!classic_context && aexcompat::worker_runtime::classic::dispatch_active())
     return finish_param_callback(Callback::CheckoutParam, 4, Reason::NoActiveState);
   if (classic_context &&
@@ -149,6 +153,19 @@ int32_t __cdecl checkout_param(void*, int32_t index, int32_t what_time, int32_t 
       ++g_rejected_temporal_param_checkouts;
       return finish_param_callback(
           Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
+    }
+    bool timed_slot = false;
+    const void* timed_world = aexcompat::worker_runtime::smart::timed_parameter_world(
+        index, what_time, time_scale, timed_slot);
+    if (timed_slot) {
+      if (!timed_world) {
+        ++g_rejected_temporal_param_checkouts;
+        return finish_param_callback(Callback::CheckoutParam, 4, Reason::TemporalCheckoutDenied);
+      }
+      constexpr std::size_t kLayerUnionOffset = 56;
+      constexpr auto kWorldSize = aexcompat::world_safety::kEffectWorldSize;
+      static_assert(kLayerUnionOffset + kWorldSize <= kParamSize);
+      std::memcpy(evaluated.data() + kLayerUnionOffset, timed_world, kWorldSize);
     }
     std::memcpy(definition, evaluated.data(), evaluated.size());
     record_checkout();

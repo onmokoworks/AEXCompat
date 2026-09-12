@@ -546,6 +546,7 @@ add_executable(worker_param_checkout_time_selftest
   src/worker_param_checkout_runtime.cpp
   src/worker_classic_runtime.cpp
   src/worker_parameter_runtime.cpp
+  src/worker_smart_runtime.cpp
 )
 target_compile_features(worker_param_checkout_time_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_param_checkout_time_selftest PRIVATE

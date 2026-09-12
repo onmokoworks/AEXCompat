@@ -5,11 +5,13 @@
 #include "worker_classic_runtime.hpp"
 #include "worker_param_checkout_runtime.hpp"
 #include "worker_parameter_runtime.hpp"
+#include "worker_smart_runtime.hpp"
 
 #include <array>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <thread>
 
 namespace params = aexcompat::worker_runtime::parameters;
 
@@ -189,6 +191,62 @@ void classic_zero_configured_scale_fails_closed() {
         "failed classic checkout leaves the ledger balanced");
 }
 
+void smart_timed_world_boundaries() {
+  namespace smart = aexcompat::worker_runtime::smart;
+  seed_definition();
+  params::state().records[kSlot - 1].type = 0;
+  std::array<std::byte, 120> timed{}, fallback{};
+  timed.fill(std::byte{0x31});
+  fallback.fill(std::byte{0x72});
+  {
+    smart::Session session;
+    smart::HostedLayer layer{};
+    layer.slot = kSlot;
+    layer.time = 1;
+    layer.time_scale = 2;
+    layer.timed = true;
+    layer.world = timed.data();
+    smart::state().hosted_layers.push_back(layer);
+    params::Definition result{};
+    auto checkout = [&](int time, unsigned scale) {
+      return aexcompat::l2_detail::checkout_param(nullptr, kSlot, time, 1, scale,
+                                                 result.data());
+    };
+    check(checkout(15, 30) == 0, "Smart exact rational sample succeeds");
+    check(std::memcmp(result.data() + 56, timed.data(), timed.size()) == 0,
+          "Smart checkout copies the requested sample world");
+    check(aexcompat::l2_detail::checkin_param(nullptr, result.data()) == 0,
+          "Smart timed sample checks in");
+    result.fill(std::byte{0x5a});
+    const auto untouched = result;
+    auto calls = params::state().checkout.checkout_calls;
+    check(checkout(16, 30) == 4, "timed-only missing sample is refused");
+    check(result == untouched && params::state().checkout.checkout_calls == calls &&
+              params::state().checkout.live.empty(),
+          "missing sample preserves output and live checkout ledger");
+    layer.timed = false;
+    layer.world = fallback.data();
+    smart::state().hosted_layers.push_back(layer);
+    check(checkout(16, 30) == 0, "explicit static fallback succeeds");
+    check(std::memcmp(result.data() + 56, fallback.data(), fallback.size()) == 0,
+          "missing time uses the explicit static world");
+    aexcompat::l2_detail::checkin_param(nullptr, result.data());
+    result = untouched;
+    calls = params::state().checkout.checkout_calls;
+    int status = 0;
+    std::thread foreign([&] { status = checkout(15, 30); });
+    foreign.join();
+    check(status == 4 && result == untouched &&
+              params::state().checkout.checkout_calls == calls &&
+              params::state().checkout.live.empty(),
+          "foreign thread cannot fall through to the global current-frame world");
+    smart::state().hosted_layers.clear();
+    timeline_is_evaluated_at_requested_time();
+  }
+  check(!smart::dispatch_active(), "Smart session activity ends with its scope");
+  another_time_is_answered_without_wide_time();
+}
+
 }  // namespace
 
 int main() {
@@ -201,6 +259,7 @@ int main() {
   zero_time_step_is_accepted_negative_is_refused();
   classic_static_value_is_answered_without_wide_time();
   classic_zero_configured_scale_fails_closed();
+  smart_timed_world_boundaries();
   if (failures == 0) std::printf("{\"param_checkout_time_selftest\":\"passed\"}\n");
   return failures == 0 ? 0 : 1;
 }
