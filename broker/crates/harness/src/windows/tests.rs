@@ -5,16 +5,22 @@ mod tests {
     #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_SIGNAL and local Release worker"]
     fn real_gui_native_default_reset_matches_fresh_session_pixels() {
-        let plugin = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_SIGNAL").expect("explicit AEX"));
-        let repository = canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")).unwrap();
+        let plugin =
+            PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_SIGNAL").expect("explicit AEX"));
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
         let directory = temporary_directory("gui-native-default-reset");
         let input = directory.join("input.png");
-        image::RgbaImage::from_pixel(256, 144, image::Rgba([32, 64, 128, 255])).save(&input).unwrap();
+        image::RgbaImage::from_pixel(256, 144, image::Rgba([32, 64, 128, 255]))
+            .save(&input)
+            .unwrap();
         let mut app = HarnessApp::new(repository);
         app.live_render = true;
         let bytes = read_bounded_pe(&plugin).unwrap();
         app.selection = Some(Selection {
-            path: plugin.clone(), size: bytes.len() as u64,
+            path: plugin.clone(),
+            size: bytes.len() as u64,
             sha256: format!("{:X}", Sha256::digest(&bytes)),
             modified: fs::metadata(&plugin).unwrap().modified().ok(),
         });
@@ -23,27 +29,44 @@ mod tests {
         let ctx = egui::Context::default();
         let drain = |app: &mut HarnessApp| {
             while app.busy {
-                ctx.begin_pass(Default::default()); app.poll(&ctx); let _ = ctx.end_pass();
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         };
-        app.inspect_parameters_async(); drain(&mut app);
+        app.inspect_parameters_async();
+        drain(&mut app);
         let seed = app.parameters.iter().position(|p| p.slot == 1).unwrap();
         assert_eq!(app.parameters[seed].value, 0.0);
         assert_eq!(app.parameter_defaults[seed].value, 0.0);
         // Known row0 variability is a separate unresolved effect issue. This
         // explicit comparison setting is not an automatic product workaround.
-        app.parameters.iter_mut().find(|p| p.slot == 38).unwrap().value = 0.0;
-        ctx.begin_pass(Default::default()); app.load_input_path(&ctx, input); let _ = ctx.end_pass();
+        app.parameters
+            .iter_mut()
+            .find(|p| p.slot == 38)
+            .unwrap()
+            .value = 0.0;
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input);
+        let _ = ctx.end_pass();
         let mut images = Vec::new();
         for step in 0..3 {
-            if step == 0 { app.parameters[seed].value = 7.0; }
-            if step == 1 {
-                assert!(reset_parameter(&mut app.parameters[seed], &app.parameter_defaults[seed]));
+            if step == 0 {
+                app.parameters[seed].value = 7.0;
             }
-            if step == 2 { app.close_live_session(); }
+            if step == 1 {
+                assert!(reset_parameter(
+                    &mut app.parameters[seed],
+                    &app.parameter_defaults[seed]
+                ));
+            }
+            if step == 2 {
+                app.close_live_session();
+            }
             let output = directory.join(format!("{step}.png"));
-            app.render_to(output.clone()); drain(&mut app);
+            app.render_to(output.clone());
+            drain(&mut app);
             assert_eq!(app.status, "AEX output ready.", "{}", app.report);
             let report: serde_json::Value = serde_json::from_str(&app.report).unwrap();
             assert!(report.get("resident_session").is_some(), "{}", app.report);
@@ -53,8 +76,12 @@ mod tests {
             images.push(image);
         }
         assert_ne!(images[0], images[1], "seed edit must affect pixels");
-        assert_eq!(images[1], images[2], "reset must match fresh native default");
-        app.close_selected_aex(); drop(app);
+        assert_eq!(
+            images[1], images[2],
+            "reset must match fresh native default"
+        );
+        app.close_selected_aex();
+        drop(app);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -221,6 +248,81 @@ mod tests {
             app.apply_debug_request_document(&serde_json::json!({
                 "schema_version":1,"timing":{"frame":0,"fps":30,"duration_frames":300},
                 "assignments":[{"slot":6,"layer":input},{"slot":8,"layer":secondary},{"slot":9,"value":choice}]
+            }),&directory.join("request.json")).unwrap();
+            let output = directory.join(format!("output-{choice}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            let pixels = image::open(&output).unwrap().to_rgba8();
+            assert_eq!(pixels.dimensions(), (256, 144));
+            for (x, _, pixel) in pixels.enumerate_pixels() {
+                let alpha = if inverse { 255 - x as u8 } else { x as u8 };
+                assert_eq!(pixel.0[3], alpha);
+                if alpha > 0 {
+                    assert_eq!(&pixel.0[..3], &[173, 57, 219]);
+                }
+            }
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_COMPOSITE and local Release worker"]
+    fn real_composite_gui_preserves_cpu_matte_pixels() {
+        let plugin =
+            PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_COMPOSITE").expect("explicit AEX path"));
+        let plugin = canonical_deverbatim(&plugin).unwrap();
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-composite");
+        let input = directory.join("input.png");
+        let secondary = directory.join("secondary.png");
+        image::RgbaImage::from_pixel(256, 144, image::Rgba([173, 57, 219, 255]))
+            .save(&input)
+            .unwrap();
+        image::RgbaImage::from_fn(256, 144, |x, y| image::Rgba([x as u8, y as u8, 37, 255]))
+            .save(&secondary)
+            .unwrap();
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert!(app.smart_render_capability.is_some(), "{}", app.report);
+        for (slot, name) in [(181, "Host Layer"), (329, "Input"), (330, "Use")] {
+            assert_eq!(
+                app.parameters.iter().find(|p| p.slot == slot).unwrap().name,
+                name
+            );
+        }
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, input.clone());
+        let _ = ctx.end_pass();
+        for (choice, inverse) in [(0, false), (1, true)] {
+            app.apply_debug_request_document(&serde_json::json!({
+                "schema_version":1,"timing":{"frame":0,"fps":30,"duration_frames":300},
+                "assignments":[{"slot":181,"layer":input},{"slot":329,"layer":secondary},{"slot":330,"value":2},{"slot":331,"value":choice},{"slot":402,"value":4}]
             }),&directory.join("request.json")).unwrap();
             let output = directory.join(format!("output-{choice}.png"));
             app.render_to(output.clone());
@@ -1612,7 +1714,10 @@ mod tests {
         let displayed = normalize_inspected_ui_parameters(&[seed]);
         let defaults = displayed.clone();
         let payload = parameters_for_image_render(&displayed, &defaults);
-        assert!(payload.is_empty(), "opening controls must not author a seed edit");
+        assert!(
+            payload.is_empty(),
+            "opening controls must not author a seed edit"
+        );
     }
 
     #[test]
@@ -1625,11 +1730,19 @@ mod tests {
         app.parameter_defaults = vec![seed];
         let saved = typed_request_document(
             &parameters_for_image_render(&app.parameters, &app.parameter_defaults),
-            0, 30, 1, 300, None,
+            0,
+            30,
+            1,
+            300,
+            None,
         );
         app.parameters[0].value = 7.0;
-        app.apply_debug_request_document(&saved, &std::env::temp_dir().join("native-default.json")).unwrap();
-        assert_eq!(app.parameters[0].value, 0.0, "saved native default must replace later edit");
+        app.apply_debug_request_document(&saved, &std::env::temp_dir().join("native-default.json"))
+            .unwrap();
+        assert_eq!(
+            app.parameters[0].value, 0.0,
+            "saved native default must replace later edit"
+        );
     }
 
     #[test]
@@ -1641,18 +1754,30 @@ mod tests {
         let document = serde_json::json!({"schema_version":1,"assignments":[]});
         let payload = typed_render_request_parameters(&parameters, &document, None).unwrap();
         assert_eq!(payload.len(), 1, "unassigned scalar must stay native");
-        assert_eq!(payload[0].kind, "layer", "timed layer declaration must survive");
+        assert_eq!(
+            payload[0].kind, "layer",
+            "timed layer declaration must survive"
+        );
         assert!(aexcompat_broker::image_render::encode_interactive_payload(&payload).is_ok());
         assert_eq!(parameters[0].value, 0.0, "inspection model is unchanged");
         for value in [0.0, 1_000_001.0] {
-            let invalid = serde_json::json!({"schema_version":1,"assignments":[{"slot":1,"value":value}]});
-            assert!(typed_render_request_parameters(&parameters, &invalid, None).unwrap_err().contains("out of range"));
+            let invalid =
+                serde_json::json!({"schema_version":1,"assignments":[{"slot":1,"value":value}]});
+            assert!(
+                typed_render_request_parameters(&parameters, &invalid, None)
+                    .unwrap_err()
+                    .contains("out of range")
+            );
         }
         let valid = serde_json::json!({"schema_version":1,"assignments":[{"slot":1,"value":7.0}]});
         let edited = typed_render_request_parameters(&parameters, &valid, None).unwrap();
         assert_eq!(edited.len(), 2);
         assert_eq!(edited[0].value, 7.0);
-        assert!(aexcompat_broker::image_render::encode_interactive_payload(&edited).unwrap().contains("f64=7"));
+        assert!(
+            aexcompat_broker::image_render::encode_interactive_payload(&edited)
+                .unwrap()
+                .contains("f64=7")
+        );
     }
 
     #[test]
