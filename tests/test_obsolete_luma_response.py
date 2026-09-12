@@ -54,6 +54,40 @@ def test_key_validator_rejects_corruption(fault):
         assert_key(pixels, 2, 100)
 
 
+def assert_defaults(outputs):
+    assert len(outputs) == 4
+    dark = bytes((32, 64, 128, 255))*(WIDTH*HEIGHT)
+    bright = bytes((200, 200, 200, 255))*(WIDTH*HEIGHT)
+    for pixels in outputs[:2]:
+        assert len(pixels) == len(dark)
+        assert pixels[3::4] == bytes(WIDTH*HEIGHT)
+    assert outputs[2] == dark and outputs[3] == bright
+
+
+@pytest.mark.parametrize('fault', ['passthrough', 'all_region_opaque', 'threshold_ignored',
+                                  'all_transparent', 'rgb', 'truncated'])
+def test_defaults_validator_rejects_corruption(fault):
+    transparent = bytes((32, 64, 128, 0))*(WIDTH*HEIGHT)
+    dark = bytes((32, 64, 128, 255))*(WIDTH*HEIGHT)
+    bright = bytes((200, 200, 200, 255))*(WIDTH*HEIGHT)
+    outputs = [transparent, transparent, dark, bright]
+    assert_defaults(outputs)
+    if fault == 'passthrough':
+        outputs[0] = dark
+    elif fault == 'all_region_opaque':
+        outputs[1] = dark
+    elif fault == 'threshold_ignored':
+        outputs[2] = transparent
+    elif fault == 'all_transparent':
+        outputs[3] = transparent
+    elif fault == 'rgb':
+        outputs[2] = bytes((31, 64, 128, 255))*(WIDTH*HEIGHT)
+    else:
+        outputs[0] = transparent[:-4]
+    with pytest.raises(AssertionError):
+        assert_defaults(outputs)
+
+
 def test_real_obsolete_luma(tmp_path):
     plugin = os.environ.get('AEXCOMPAT_TEST_OBSOLETE_LUMA')
     if not plugin:
@@ -93,3 +127,29 @@ def test_real_obsolete_luma(tmp_path):
         argb[2::4], argb[3::4] = pixels[1::4], pixels[2::4]
         assert hashlib.sha256(argb).hexdigest() == report['output_sha256']
         assert_key(pixels, kind, threshold)
+    default_outputs = []
+    for name, color, extra in (
+        ('dark-default', (32, 64, 128, 255), []),
+        ('dark-all', (32, 64, 128, 255), [(19, 5)]),
+        ('dark-threshold0', (32, 64, 128, 255), [(11, 0)]),
+        ('bright-default', (200, 200, 200, 255), []),
+    ):
+        source = tmp_path/f'{name}-input.png'
+        Image.new('RGBA', (WIDTH, HEIGHT), color).save(source)
+        request, output = tmp_path/f'{name}.json', tmp_path/f'{name}.png'
+        request.write_text(json.dumps({'schema_version': 1,
+            'timing': {'frame': 0, 'fps': 30, 'duration_frames': 300},
+            'assignments': [{'slot': 6, 'layer': str(source)}]+[
+                {'slot': s, 'value': v} for s, v in extra]}), encoding='utf-8')
+        report = run('--render-experimental-smart-request', plugin, source, output, request)
+        (tmp_path/f'{name}-report.json').write_text(json.dumps(report), encoding='utf-8')
+        assert report['passed'] and report['output_pixels_valid']
+        with Image.open(output) as image:
+            assert image.size == (WIDTH, HEIGHT)
+            pixels = image.convert('RGBA').tobytes()
+        argb = bytearray(len(pixels))
+        argb[0::4], argb[1::4] = pixels[3::4], pixels[0::4]
+        argb[2::4], argb[3::4] = pixels[1::4], pixels[2::4]
+        assert hashlib.sha256(argb).hexdigest() == report['output_sha256']
+        default_outputs.append(pixels)
+    assert_defaults(default_outputs)
