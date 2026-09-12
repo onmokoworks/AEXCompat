@@ -23,6 +23,7 @@ enum LegacyWin64Import {
     CrtStrdup,
     CrtStricmp,
     CrtIsSpace,
+    CrtIsAlnum,
     CrtToLower,
     CrtToUpper,
     AlignedMalloc,
@@ -837,6 +838,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtIsSpace
         }
         (_, "isspace") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isalnum") => {
+            LegacyWin64Import::CrtIsAlnum
+        }
+        (_, "isalnum") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "tolower") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "toupper") => {
             LegacyWin64Import::CrtToUpper
@@ -1009,6 +1014,27 @@ fn install_win64_import(
                                 }
                                 // CRT starts in the C locale; locale mutation is unsupported.
                                 Ok(if matches!(input, 9..=13 | 32) { 8 } else { 0 })
+                            })();
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtIsAlnum => {
+                    uc("write isalnum return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install isalnum import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let input = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+                                if !(-1..=255).contains(&input) {
+                                    return Err(
+                                        "isalnum input is neither unsigned char nor EOF".into()
+                                    );
+                                }
+                                // CRT starts in the C locale; locale mutation is unsupported.
+                                Ok(u64::from(
+                                    input >= 0 && (input as u8).is_ascii_alphanumeric(),
+                                ))
                             })();
                             finish_guest_stdio(unicorn, result);
                         }),
