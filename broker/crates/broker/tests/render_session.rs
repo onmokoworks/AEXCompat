@@ -229,6 +229,63 @@ mod windows_e2e {
     }
 
     #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_SMART_MESSAGE_PROBE and Release native worker"]
+    fn native_smart_message_is_cleared_before_next_frame() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_SMART_MESSAGE_PROBE")
+                .expect("explicit native message probe"),
+        );
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&plugin).unwrap()));
+        let mut session = open_smart_session(
+            &root,
+            &plugin,
+            &sha,
+            LaunchEnvironment::default().with_child_var("AEXCOMPAT_PROBE_RETURN_MESSAGE", "first"),
+        );
+        let input = input_pattern(37);
+        let first = session
+            .render_frame(0, 0, &input)
+            .expect("first frame response");
+        match first.status {
+            FrameStatus::FrameError {
+                render_error,
+                return_message: Some(message),
+                ..
+            } => {
+                assert_eq!(render_error, -6);
+                assert_eq!(message.selector, "SMART_RENDER");
+                assert_eq!(message.text, "synthetic Smart prerequisite missing");
+                assert_eq!(message.error, 0);
+                assert!(message.display_requested);
+            }
+            other => panic!("expected diagnostic frame error, got {other:?}"),
+        }
+        // Same object and resident worker: no close/reopen or fallback adapter.
+        let second = session
+            .render_frame(1, 1, &input)
+            .expect("second frame response");
+        assert!(
+            matches!(second.status, FrameStatus::SmartOutputUntouched),
+            "{second:?}"
+        );
+        let close = session.close();
+        assert_eq!(close["invalidated"], false, "{close}");
+        assert_eq!(close["worker"]["classification"], "ok", "{close}");
+        assert_eq!(close["frames_errored"], 2);
+        assert_eq!(close["frames_ok"], 0);
+        assert_eq!(close["smart_output_untouched_frames"], 1);
+        // Two failed frames must not qualify for the one-frame fallback gate.
+        assert_eq!(
+            validate_abandoned_smart_untouched_close(&close),
+            Err("unexpected_frame_history")
+        );
+    }
+
+    #[test]
     fn plugin_data_secondary_selector_reaches_the_resident_render_worker() {
         let (repository, plugin, sha) = temp_repository();
         let selector = PluginDataEffectSelector {

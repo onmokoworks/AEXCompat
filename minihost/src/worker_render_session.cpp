@@ -1501,7 +1501,12 @@ SmartRenderSessionOutcome run_smart_render_session(
                                                  : frame_result.gpu_setdown_error;
         frame.smart_output_untouched = frame_result.selector_error == 0 &&
             frame_result.pre_error == 0 && frame_result.render_error == -6 &&
-            frame_result.output_untouched && !frame_result.empty_result_rect;
+            frame_result.output_untouched && !frame_result.empty_result_rect &&
+            // A plug-in explanation is a frame error, not the silent no-op
+            // signal that permits a Classic fallback. The protocol deliberately
+            // forbids attaching a message to that fallback-only signal.
+            aexcompat::worker_runtime::selector_dispatch_telemetry()
+                .return_message.empty();
         return frame;
       },
       // Smart sessions are out of cluster-swap scope (design §1): no hook.

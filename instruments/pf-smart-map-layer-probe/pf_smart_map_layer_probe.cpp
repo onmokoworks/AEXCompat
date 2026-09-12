@@ -256,6 +256,27 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       if (params && params[kStageSlot]) g_stage = params[kStageSlot]->u.pd.value;
       return SmartPreRender(in_data, static_cast<PF_PreRenderExtra*>(extra));
     case PF_Cmd_SMART_RENDER: {
+      // Deliberately successful selector with untouched output: completion
+      // diagnostics must preserve the message without accepting the image.
+      char message_probe[16]{};
+      if (out_data && GetEnvironmentVariableA("AEXCOMPAT_PROBE_RETURN_MESSAGE",
+                                             message_probe, sizeof(message_probe))) {
+        const bool silent = std::strcmp(message_probe, "silent") == 0 ||
+            (std::strcmp(message_probe, "first") == 0 && in_data->current_time != 0);
+        if (!silent) {
+          if (std::strcmp(message_probe, "long") == 0) {
+            std::memset(out_data->return_msg, 'x', sizeof(out_data->return_msg));
+          } else if (std::strcmp(message_probe, "private") == 0) {
+            std::snprintf(out_data->return_msg, sizeof(out_data->return_msg),
+                          "cannot load C:\\private-probe\\model.onnx");
+          } else {
+            std::snprintf(out_data->return_msg, sizeof(out_data->return_msg),
+                        "synthetic Smart prerequisite missing");
+          }
+          out_data->out_flags |= PF_OutFlag_DISPLAY_ERROR_MESSAGE;
+        }
+        return PF_Err_NONE;
+      }
       const PF_Err err = SmartRender(in_data, out_data,
                                      static_cast<PF_SmartRenderExtra*>(extra));
       if (err && out_data) {

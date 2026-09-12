@@ -740,12 +740,22 @@ fn render_classic_via_length_one_session(
     // deadline/crash/invalidation or rejected final report cannot leak a live
     // worker, its lease state, or the frame pixels into a subsequent render.
     let close = session.close();
-    let final_report = match validated_wrapper_final_report(&close, request.smart) {
+    let mut final_report = match validated_wrapper_final_report(&close, request.smart) {
         Ok(report) => report,
         Err(invariant) => {
             return SessionWrapperOutcome::Fallback(close_failure_diagnostic(&close, invariant));
         }
     };
+    // This message crossed the typed, bounded FRAME_ERROR validation already.
+    // Preserve it before the final image gate returns its diagnostic failure;
+    // the worker's completion report does not carry frame-local messages.
+    if let FrameStatus::FrameError {
+        return_message: Some(message),
+        ..
+    } = &outcome.status
+    {
+        final_report["return_message"] = json!(message);
+    }
     let classification = close["worker"]["classification"]
         .as_str()
         .unwrap_or("unknown")
