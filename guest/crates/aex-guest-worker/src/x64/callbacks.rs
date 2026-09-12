@@ -1505,6 +1505,67 @@ fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_crt_strncmp(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<i32, String> {
+        let left = read_win64_import_argument(unicorn, 0)?;
+        let right = read_win64_import_argument(unicorn, 1)?;
+        let count = read_win64_import_argument(unicorn, 2)?;
+        if count == 0 {
+            return Ok(0);
+        }
+        if left == 0 || right == 0 {
+            return Err("strncmp received a null string pointer".into());
+        }
+        for offset in 0..count.min(MAX_CRT_STRING_BYTES) {
+            let read = |unicorn: &Unicorn<'_, GuestState>, base: u64, side: &str| {
+                let address = base
+                    .checked_add(offset)
+                    .ok_or_else(|| format!("strncmp {side} string range overflow"))?;
+                if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                    return Err(format!(
+                        "strncmp {side} string address {address:#x} is not readable"
+                    ));
+                }
+                let mut byte = [0u8; 1];
+                unicorn
+                    .mem_read(address, &mut byte)
+                    .map_err(|error| format!("strncmp {side} string read failed: {error}"))?;
+                Ok(byte[0])
+            };
+            let left_byte = read(unicorn, left, "left")?;
+            let right_byte = read(unicorn, right, "right")?;
+            let ordering = left_byte.cmp(&right_byte);
+            if !ordering.is_eq() {
+                return Ok(match ordering {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                });
+            }
+            if left_byte == 0 {
+                return Ok(0);
+            }
+        }
+        if count <= MAX_CRT_STRING_BYTES {
+            return Ok(0);
+        }
+        Err(format!(
+            "strncmp strings exceed {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+        ))
+    })();
+    match result {
+        Ok(ordering) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(ordering as u32));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<i32, String> {
         let left = read_win64_import_argument(unicorn, 0)?;

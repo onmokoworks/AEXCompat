@@ -17227,3 +17227,106 @@ fn crt_string_read_refreshes_permissions_and_crosses_only_readable_spans() {
     engine.unicorn.mem_write(PAGE + 4096, b"d\0").unwrap();
     assert_eq!(read(&engine).unwrap(), b"abd");
 }
+
+#[test]
+fn strncmp_obeys_count_nul_unsigned_ordering_and_read_boundaries() {
+    const ENTRY: u64 = STUB_BASE + 0x100;
+    const PAGE: u64 = 0x30_0000_0000;
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, ENTRY, dll, "strncmp").unwrap();
+        engine
+            .unicorn
+            .mem_map(PAGE, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let left = DATA_BASE + 0x100;
+        let right = DATA_BASE + 0x200;
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        for (a, b, count, expected) in [
+            (&b"abcX\0"[..], &b"abcY\0"[..], 3, 0i32),
+            (&b"abcX\0"[..], &b"abcY\0"[..], 4, -1),
+            (&b"a\0z"[..], &b"a\0b"[..], u64::MAX, 0),
+            (&b"\xff\0"[..], &b"\x7f\0"[..], 1, 1),
+            (&b"\0"[..], &b"A\0"[..], 1, -1),
+            (&b"b\0"[..], &b"A\0"[..], 0x1_0000_0000, 1),
+        ] {
+            engine.write(left, a).unwrap();
+            engine.write(right, b).unwrap();
+            let got = engine
+                .call_win64(ENTRY, [left, right, count, 0, 0, 0])
+                .unwrap();
+            assert_eq!((got as u32 as i32).signum(), expected);
+            assert_eq!(got >> 32, 0);
+        }
+        assert_eq!(
+            engine.call_win64(ENTRY, [0, u64::MAX, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        engine.unicorn.mem_write(PAGE + 4095, b"x").unwrap();
+        engine.write(right, b"xy\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(ENTRY, [PAGE + 4095, right, 1, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert!(
+            engine
+                .call_win64(ENTRY, [PAGE + 4095, right, 2, 0, 0, 0])
+                .unwrap_err()
+                .to_string()
+                .contains("not readable")
+        );
+        engine.unicorn.mem_write(PAGE + 4095, b"\0").unwrap();
+        engine.write(right, b"\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(ENTRY, [PAGE + 4095, right, u64::MAX, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        engine.unicorn.mem_protect(PAGE, 4096, Prot::WRITE).unwrap();
+        assert!(
+            engine
+                .call_win64(ENTRY, [right, PAGE + 4095, 1, 0, 0, 0])
+                .unwrap_err()
+                .to_string()
+                .contains("not readable")
+        );
+        assert!(engine.call_win64(ENTRY, [0, right, 1, 0, 0, 0]).is_err());
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "strncmp"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn strncmp_distinguishes_exact_count_from_exhausted_host_bound() {
+    const PAGE: u64 = 0x30_0000_0000;
+    const ENTRY: u64 = STUB_BASE + 0x100;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, ENTRY, "ucrtbase.dll", "strncmp").unwrap();
+    engine
+        .unicorn
+        .mem_map(PAGE, MAX_CRT_STRING_BYTES, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(PAGE, &vec![b'x'; MAX_CRT_STRING_BYTES as usize])
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(ENTRY, [PAGE, PAGE, MAX_CRT_STRING_BYTES, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert!(
+        engine
+            .call_win64(ENTRY, [PAGE, PAGE, MAX_CRT_STRING_BYTES + 1, 0, 0, 0])
+            .unwrap_err()
+            .to_string()
+            .contains("exceed")
+    );
+}
