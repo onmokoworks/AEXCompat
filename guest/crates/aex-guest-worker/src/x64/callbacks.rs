@@ -1458,15 +1458,35 @@ fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
         if left == 0 || right == 0 {
             return Err("strcmp received a null string pointer".into());
         }
+        // This synchronous comparison cannot run guest code between reads.
+        // Refresh the map for each call and track each input's readable span.
+        let regions = unicorn
+            .mem_regions()
+            .map_err(|error| format!("guest memory-map query failed: {error}"))?;
+        let mut left_end = None;
+        let mut right_end = None;
         for offset in 0..MAX_CRT_STRING_BYTES {
-            let read = |unicorn: &Unicorn<'_, GuestState>, base: u64, side: &str| {
+            let read = |unicorn: &Unicorn<'_, GuestState>,
+                        base: u64,
+                        side: &str,
+                        readable_end: &mut Option<u64>| {
                 let address = base
                     .checked_add(offset)
                     .ok_or_else(|| format!("strcmp {side} string range overflow"))?;
-                if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
-                    return Err(format!(
-                        "strcmp {side} string address {address:#x} is not readable"
-                    ));
+                if readable_end.is_none_or(|end| address > end) {
+                    *readable_end = regions
+                        .iter()
+                        .find(|region| {
+                            region.begin <= address
+                                && address <= region.end
+                                && region.perms & Prot::READ.0 as u32 != 0
+                        })
+                        .map(|region| region.end);
+                    if readable_end.is_none() {
+                        return Err(format!(
+                            "strcmp {side} string address {address:#x} is not readable"
+                        ));
+                    }
                 }
                 let mut byte = [0u8; 1];
                 unicorn
@@ -1474,8 +1494,8 @@ fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
                     .map_err(|error| format!("strcmp {side} string read failed: {error}"))?;
                 Ok(byte[0])
             };
-            let left_byte = read(unicorn, left, "left")?;
-            let right_byte = read(unicorn, right, "right")?;
+            let left_byte = read(unicorn, left, "left", &mut left_end)?;
+            let right_byte = read(unicorn, right, "right", &mut right_end)?;
             let ordering = left_byte.cmp(&right_byte);
             if !ordering.is_eq() {
                 return Ok(match ordering {

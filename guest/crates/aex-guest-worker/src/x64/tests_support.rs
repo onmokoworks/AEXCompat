@@ -17330,3 +17330,59 @@ fn strncmp_distinguishes_exact_count_from_exhausted_host_bound() {
             .contains("exceed")
     );
 }
+
+#[test]
+fn strcmp_tracks_each_readable_span_and_refreshes_changed_mappings() {
+    const LEFT: u64 = 0x30_0000_0000;
+    const RIGHT: u64 = LEFT + 0x10000;
+    const ENTRY: u64 = STUB_BASE + 0x100;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, ENTRY, "ucrtbase.dll", "strcmp").unwrap();
+    for base in [LEFT, RIGHT] {
+        for offset in [0, 4096] {
+            engine
+                .unicorn
+                .mem_map(base + offset, 4096, Prot::READ | Prot::WRITE)
+                .unwrap();
+        }
+    }
+    engine.unicorn.mem_write(LEFT + 4094, b"ab").unwrap();
+    engine.unicorn.mem_write(LEFT + 4096, b"c\0").unwrap();
+    engine.unicorn.mem_write(RIGHT + 4095, b"a").unwrap();
+    engine.unicorn.mem_write(RIGHT + 4096, b"bc\0").unwrap();
+    let compare = |engine: &mut GuestEngine<'static>| {
+        engine.call_win64(ENTRY, [LEFT + 4094, RIGHT + 4095, 0, 0, 0, 0])
+    };
+    assert_eq!(compare(&mut engine).unwrap(), 0);
+    engine
+        .unicorn
+        .mem_protect(RIGHT + 4096, 4096, Prot::WRITE)
+        .unwrap();
+    assert!(
+        compare(&mut engine)
+            .unwrap_err()
+            .to_string()
+            .contains("right string address")
+    );
+    engine.unicorn.mem_write(LEFT + 4094, b"z").unwrap();
+    assert!((compare(&mut engine).unwrap() as u32 as i32) > 0);
+    engine.unicorn.mem_write(LEFT + 4094, b"a").unwrap();
+    engine
+        .unicorn
+        .mem_protect(RIGHT + 4096, 4096, Prot::READ)
+        .unwrap();
+    assert_eq!(compare(&mut engine).unwrap(), 0);
+    engine.unicorn.mem_unmap(LEFT + 4096, 4096).unwrap();
+    assert!(
+        compare(&mut engine)
+            .unwrap_err()
+            .to_string()
+            .contains("left string address")
+    );
+    engine
+        .unicorn
+        .mem_map(LEFT + 4096, 4096, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.unicorn.mem_write(LEFT + 4096, b"c\0").unwrap();
+    assert_eq!(compare(&mut engine).unwrap(), 0);
+}
