@@ -22,6 +22,9 @@ fn capture_add_param(unicorn: &mut Unicorn<'_, GuestState>) {
             .position(|byte| *byte == 0)
             .unwrap_or(name_bytes.len());
         let name = String::from_utf8_lossy(&name_bytes[..name_end]).into_owned();
+        if param_type == 7 {
+            capture_popup_choices(unicorn, &mut bytes)?;
+        }
         Ok(GuestParam {
             index,
             param_type,
@@ -3794,4 +3797,53 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
         Ok(assigned)
     })();
     finish_guest_stdio(unicorn, result);
+}
+
+// AddParam borrows its input. Persist pointed-to popup text as well as the
+// descriptor, since plug-ins can release temporary text before setup returns.
+// Stored descriptors used for both reports and rendering point at this copy.
+const POPUP_CHOICES_BASE: u64 =
+    GUEST_STREAM_BUFFER_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE + 3 * PAGE_SIZE;
+const MAX_POPUP_CHOICE_PAGES: u64 = 4096;
+fn capture_popup_choices(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    definition: &mut [u8],
+) -> Result<(), String> {
+    let offset = abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET;
+    let source = u64::from_le_bytes(definition[offset..offset + 8].try_into().unwrap());
+    if source == 0 {
+        return Ok(());
+    }
+    let page = unicorn.get_data().popup_choice_pages;
+    if page >= MAX_POPUP_CHOICE_PAGES {
+        return Err("popup choice storage limit exceeded".into());
+    }
+    let mut text = Vec::new();
+    for index in 0..4096u64 {
+        let address = source
+            .checked_add(index)
+            .ok_or("popup choice address overflow")?;
+        if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+            return Err(format!("popup choice text at {address:#x} is not readable"));
+        }
+        let mut byte = [0];
+        unicorn
+            .mem_read(address, &mut byte)
+            .map_err(|e| e.to_string())?;
+        text.push(byte[0]);
+        if byte[0] == 0 {
+            let destination = POPUP_CHOICES_BASE + page * PAGE_SIZE;
+            unicorn
+                .mem_map(destination, PAGE_SIZE, Prot::READ)
+                .map_err(|e| e.to_string())?;
+            if let Err(error) = unicorn.mem_write(destination, &text) {
+                let _ = unicorn.mem_unmap(destination, PAGE_SIZE);
+                return Err(error.to_string());
+            }
+            definition[offset..offset + 8].copy_from_slice(&destination.to_le_bytes());
+            unicorn.get_data_mut().popup_choice_pages += 1;
+            return Ok(());
+        }
+    }
+    Err("popup choice text exceeds the 4096-byte setup bound".into())
 }

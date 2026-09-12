@@ -18096,3 +18096,84 @@ fn host_read_failure_reports_address_and_extent() {
     assert!(error.contains("address=0xdeadbeef, length=7"));
     assert!(error.contains("UC_ERR_READ_UNMAPPED"));
 }
+
+#[test]
+fn popup_choices_survive_source_release_and_preserve_borrowed_descriptor() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.mem_write(HOST_ADD_PARAM, &[0xc3]).unwrap();
+    engine
+        .unicorn
+        .add_code_hook(HOST_ADD_PARAM, HOST_ADD_PARAM, |uc, _, _| {
+            capture_add_param(uc)
+        })
+        .unwrap();
+    let source = 0x5000_0000;
+    engine
+        .unicorn
+        .mem_map(source, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(source, b"Union|Intersect\0")
+        .unwrap();
+    let mut definition = vec![0; abi::PF_PARAM_DEF_SIZE];
+    definition[abi::PARAM_PARAM_TYPE_OFFSET..abi::PARAM_PARAM_TYPE_OFFSET + 4]
+        .copy_from_slice(&7i32.to_le_bytes());
+    let offset = abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET;
+    definition[offset..offset + 8].copy_from_slice(&source.to_le_bytes());
+    engine.write(DATA_BASE, &definition).unwrap();
+    engine
+        .call_win64(HOST_ADD_PARAM, [1, u32::MAX as u64, DATA_BASE, 0, 0, 0])
+        .unwrap();
+    let captured = &engine.parameters()[0].bytes;
+    let owned = u64::from_le_bytes(captured[offset..offset + 8].try_into().unwrap());
+    assert_ne!(owned, source);
+    let mut original = vec![0; definition.len()];
+    engine.read(DATA_BASE, &mut original).unwrap();
+    assert_eq!(original, definition);
+    engine.unicorn.mem_unmap(source, PAGE_SIZE).unwrap();
+    let mut text = [0; 16];
+    engine.read(owned, &mut text).unwrap();
+    assert_eq!(&text, b"Union|Intersect\0");
+    assert!(!guest_range_has_permission(&engine.unicorn, owned, 16, Prot::WRITE).unwrap());
+    assert!(!guest_range_has_permission(&engine.unicorn, owned, 16, Prot::EXEC).unwrap());
+    // A stale source fails before publishing a parameter or consuming storage.
+    assert!(
+        engine
+            .call_win64(HOST_ADD_PARAM, [1, 0, DATA_BASE, 0, 0, 0])
+            .is_err()
+    );
+    assert_eq!(engine.parameters().len(), 1);
+    assert_eq!(engine.unicorn.get_data().popup_choice_pages, 1);
+}
+
+#[test]
+fn popup_choice_capture_bounds_null_and_failure_are_atomic() {
+    let mut engine = test_engine(&[0xc3]);
+    let mut definition = vec![0; abi::PF_PARAM_DEF_SIZE];
+    let offset = abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET;
+    capture_popup_choices(&mut engine.unicorn, &mut definition).unwrap();
+    assert_eq!(engine.unicorn.get_data().popup_choice_pages, 0);
+    let source = 0x5000_0000u64;
+    engine
+        .unicorn
+        .mem_map(source, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    definition[offset..offset + 8].copy_from_slice(&source.to_le_bytes());
+    let original = definition.clone();
+    engine.write(source, &[b'x'; 4096]).unwrap();
+    assert!(capture_popup_choices(&mut engine.unicorn, &mut definition).is_err());
+    assert_eq!(definition, original);
+    assert_eq!(engine.unicorn.get_data().popup_choice_pages, 0);
+    engine.write(source + 4095, &[0]).unwrap();
+    capture_popup_choices(&mut engine.unicorn, &mut definition).unwrap();
+    let owned = u64::from_le_bytes(definition[offset..offset + 8].try_into().unwrap());
+    let mut bytes = [0; 4096];
+    engine.read(owned, &mut bytes).unwrap();
+    assert_eq!(bytes[4094], b'x');
+    assert_eq!(bytes[4095], 0);
+    engine.unicorn.get_data_mut().popup_choice_pages = MAX_POPUP_CHOICE_PAGES;
+    definition = original.clone();
+    assert!(capture_popup_choices(&mut engine.unicorn, &mut definition).is_err());
+    assert_eq!(definition, original);
+}

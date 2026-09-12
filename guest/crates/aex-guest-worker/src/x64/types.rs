@@ -168,6 +168,7 @@ struct GuestState {
     crt_locale_names_buffer: Option<u64>,
     loaded_libraries: BTreeMap<String, GuestLibrary>,
     params: Vec<GuestParam>,
+    popup_choice_pages: u64,
     custom_ui_registration: Option<CustomUiRegistration>,
     callback_error: Option<String>,
     unsupported_import: Option<(String, String)>,
