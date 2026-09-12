@@ -143,6 +143,7 @@ enum LegacyWin64Import {
     VcompNoOp,
     GetSystemTimeAsFileTime,
     GetSystemInfo,
+    GetVersionExA,
     GetStartupInfoW,
     RtlCaptureContext,
     GetStdHandle,
@@ -439,6 +440,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GetVersionExA") => LegacyWin64Import::GetVersionExA,
+        (_, "GetVersionExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetStartupInfoW") => {
             LegacyWin64Import::GetStartupInfoW
         }
@@ -1770,6 +1773,16 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_get_system_time_as_file_time(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::GetVersionExA => {
+                    uc(
+                        "write GetVersionExA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetVersionExA",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_get_version_ex_a(uc)),
                     )?;
                 }
                 LegacyWin64Import::GetSystemInfo => {
@@ -8823,6 +8836,46 @@ fn emulate_crt_ftime64(unicorn: &mut Unicorn<'_, GuestState>) {
             .mem_write(output, &bytes)
             .map_err(|e| e.to_string())?;
         Ok(0) // void function; no CRT errno change on success.
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_version_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        if output == 0 || !guest_range_has_permission(unicorn, output, 4, Prot::READ)? {
+            unicorn.get_data_mut().windows_last_error = 998; // ERROR_NOACCESS
+            return Ok(0);
+        }
+        let mut size = [0; 4];
+        unicorn
+            .mem_read(output, &mut size)
+            .map_err(|e| e.to_string())?;
+        let size = u32::from_le_bytes(size);
+        if size != 148 && size != 156 {
+            unicorn.get_data_mut().windows_last_error = 87; // ERROR_INVALID_PARAMETER
+            return Ok(0);
+        }
+        if !guest_range_has_permission(unicorn, output, u64::from(size), Prot::WRITE)? {
+            unicorn.get_data_mut().windows_last_error = 998;
+            return Ok(0);
+        }
+        // This guest process has no supportedOS activation-context manifest.
+        // GetVersionEx therefore exposes the documented Windows 8 compatibility
+        // view (6.2), not the macOS host version or a promise of API availability.
+        // Add manifest-aware version selection if activation contexts are supported.
+        let mut bytes = [0; 156];
+        for (index, value) in [size, 6, 2, 9200, 2].into_iter().enumerate() {
+            bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        // Empty CSD string, no service pack or server suites, NT workstation.
+        if size == 156 {
+            bytes[154] = 1;
+        }
+        unicorn
+            .mem_write(output, &bytes[..size as usize])
+            .map_err(|e| e.to_string())?;
+        Ok(1)
     })();
     finish_guest_stdio(unicorn, result);
 }

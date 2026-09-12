@@ -18401,3 +18401,72 @@ fn ftime64_writes_current_time_and_preserves_padding() {
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }
+
+#[test]
+fn version_ex_a_checks_size_and_writes_unmanifested_process_view() {
+    for dll in ["kernel32.dll", "kernelbase.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "GetVersionExA").unwrap();
+        for size in [148u32, 156] {
+            engine.write(DATA_BASE, &[0xa5; 160]).unwrap();
+            engine.write(DATA_BASE, &size.to_le_bytes()).unwrap();
+            engine.unicorn.get_data_mut().windows_last_error = 71;
+            engine.unicorn.get_data_mut().crt_errno = 72;
+            assert_eq!(
+                engine
+                    .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                1
+            );
+            let mut bytes = [0; 160];
+            engine.read(DATA_BASE, &mut bytes).unwrap();
+            let words: Vec<u32> = bytes[..20]
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            assert_eq!(words, [size, 6, 2, 9200, 2]);
+            assert!(bytes[20..148].iter().all(|b| *b == 0));
+            if size == 156 {
+                assert_eq!(&bytes[148..156], &[0, 0, 0, 0, 0, 0, 1, 0]);
+            }
+            assert!(bytes[size as usize..].iter().all(|b| *b == 0xa5));
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+            assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        }
+        for size in [0u32, 147, 149, 155, 157, u32::MAX] {
+            engine.write(DATA_BASE, &[0xa5; 160]).unwrap();
+            engine.write(DATA_BASE, &size.to_le_bytes()).unwrap();
+            let mut before = [0; 160];
+            engine.read(DATA_BASE, &mut before).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                0
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+            let mut after = [0; 160];
+            engine.read(DATA_BASE, &mut after).unwrap();
+            assert_eq!(after, before);
+        }
+        engine.write(DATA_BASE, &148u32.to_le_bytes()).unwrap();
+        engine
+            .unicorn
+            .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+            .unwrap();
+        assert_eq!(
+            engine
+                .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 998);
+        assert_eq!(engine.call_win64(entry, [0; 6]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 998);
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "GetVersionExA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
