@@ -5,7 +5,9 @@ pub(crate) const CRT_HEAP_ALIGNMENT: u64 = 16;
 pub(crate) const CRT_HEAP_PAGE_SIZE: u64 = 4096;
 pub(crate) const MAX_CRT_ALLOCATION_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_CRT_HEAP_BYTES: u64 = 128 * 1024 * 1024;
-pub(crate) const MAX_CRT_ALLOCATIONS: usize = 4096;
+// Sapphire setup holds more than 4096 small C++ objects concurrently. Keep
+// a finite metadata/page-overhead bound while retaining the byte-size limits.
+pub(crate) const MAX_CRT_ALLOCATIONS: usize = 32_768;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CrtAllocation {
@@ -353,6 +355,14 @@ mod tests {
             heap.insert(0x1000 + index as u64 * CRT_HEAP_PAGE_SIZE, allocation)
                 .unwrap();
         }
+        assert_eq!(
+            heap.prepare_allocation(1),
+            Err(CrtHeapError::AllocationCountExceeded)
+        );
+        // Releasing one live object restores exactly one allocation slot.
+        heap.remove(0x1000).unwrap();
+        let replacement = heap.prepare_allocation(32).unwrap();
+        heap.insert(0x1000, replacement).unwrap();
         assert_eq!(
             heap.prepare_allocation(1),
             Err(CrtHeapError::AllocationCountExceeded)
