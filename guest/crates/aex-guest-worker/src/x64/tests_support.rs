@@ -20728,3 +20728,98 @@ fn com_security_validates_arguments_without_committing_failed_configuration() {
         assert_eq!(engine.unicorn.get_data().com_security, None);
     }
 }
+
+#[test]
+fn com_create_instance_reports_empty_registration_and_clears_output() {
+    const CREATE: u64 = STUB_BASE + 0x410;
+    const INIT: u64 = STUB_BASE + 0x420;
+    const END: u64 = STUB_BASE + 0x430;
+    for dll in ["ole32.dll", "combase.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, CREATE, dll, "CoCreateInstance").unwrap();
+        install_win64_import(&mut engine.unicorn, INIT, dll, "CoInitializeEx").unwrap();
+        install_win64_import(&mut engine.unicorn, END, dll, "CoUninitialize").unwrap();
+        let class = DATA_BASE + 0x100;
+        engine.write(class, &[0x31; 16]).unwrap();
+        let iid = DATA_BASE + 0x200;
+        engine.write(iid, &[0x42; 16]).unwrap();
+        let output = DATA_BASE + 0x300;
+        engine.write(output, &[0xa5; 16]).unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        assert_eq!(
+            engine
+                .call_win64(CREATE, [class, 0, 1, iid, output, 0])
+                .unwrap(),
+            0x800401f0
+        );
+        engine.call_win64(INIT, [0, 2, 0, 0, 0, 0]).unwrap();
+        for context in [1, 2, 3, 4, 5, 7, (1 << 32) | 1] {
+            engine.write(output, &[0xa5; 16]).unwrap();
+            assert_eq!(
+                engine
+                    .call_win64(CREATE, [class, 0, context, iid, output, 0])
+                    .unwrap(),
+                0x80040154
+            );
+            let mut actual = [0; 16];
+            engine.unicorn.mem_read(output, &mut actual).unwrap();
+            assert_eq!(&actual[..8], &[0; 8]);
+            assert_eq!(&actual[8..], &[0xa5; 8]);
+        }
+        engine.call_win64(END, [0; 6]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(CREATE, [class, 0, 1, iid, output, 0])
+                .unwrap(),
+            0x800401f0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "CoCreateInstance"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn com_create_instance_rejects_unsafe_pointers_and_unmodeled_contexts() {
+    const CREATE: u64 = STUB_BASE + 0x410;
+    for case in 0..7 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, CREATE, "ole32.dll", "CoCreateInstance").unwrap();
+        let guid = DATA_BASE + 0x100;
+        engine.write(guid, &[0x31; 16]).unwrap();
+        let output = DATA_BASE + 0x300;
+        engine.write(output, &[0xa5; 8]).unwrap();
+        let mut args = [guid, 0, 1, guid, output, 0];
+        match case {
+            0 => args[0] = 0,
+            1 => args[3] = u64::MAX - 7,
+            2 => args[1] = 1,
+            3 => args[2] = 16,
+            4 => args[2] = 0,
+            5 => {
+                engine
+                    .unicorn
+                    .mem_protect(output & !(PAGE_SIZE - 1), PAGE_SIZE, Prot::READ)
+                    .unwrap();
+            }
+            _ => {
+                engine
+                    .unicorn
+                    .get_data_mut()
+                    .com_apartments
+                    .insert(99999, (0, 1));
+            }
+        }
+        assert!(engine.call_win64(CREATE, args).is_err());
+        let mut actual = [0; 8];
+        engine.unicorn.mem_read(output, &mut actual).unwrap();
+        assert_eq!(actual, [0xa5; 8]);
+    }
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, CREATE, "ole32.dll", "CoCreateInstance").unwrap();
+    assert_eq!(engine.call_win64(CREATE, [0; 6]).unwrap(), 0x80004003);
+}

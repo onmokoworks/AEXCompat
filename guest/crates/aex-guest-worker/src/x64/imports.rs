@@ -80,6 +80,7 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     GetVolumeInformationA,
+    CoCreateInstance,
     CoInitializeSecurity,
     CoInitializeEx,
     CoUninitialize,
@@ -908,7 +909,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("ole32.dll" | "combase.dll", "CoInitializeSecurity") => {
             LegacyWin64Import::CoInitializeSecurity
         }
-        (_, "CoInitializeEx" | "CoUninitialize" | "CoInitializeSecurity") => {
+        ("ole32.dll" | "combase.dll", "CoCreateInstance") => LegacyWin64Import::CoCreateInstance,
+        (_, "CoInitializeEx" | "CoUninitialize" | "CoInitializeSecurity" | "CoCreateInstance") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("kernel32.dll" | "kernelbase.dll", "GetVolumeInformationA") => {
@@ -1411,6 +1413,19 @@ fn install_win64_import(
                         "install _wstat64i32",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_wstat64i32(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CoCreateInstance => {
+                    uc(
+                        "write CoCreateInstance return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CoCreateInstance",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_com_create_instance(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;
@@ -9388,4 +9403,43 @@ fn guest_com_security(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, Stri
     }
     unicorn.get_data_mut().com_security = Some((services, authentication, impersonation));
     Ok(0)
+}
+
+// The guest application registry is empty and no COM factories or activation
+// contexts are installed. This implements local lookup failure, not a COM/WMI
+// provider. Registration APIs and remote activation remain explicit gaps.
+fn guest_com_create_instance(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let class = read_win64_import_argument(unicorn, 0)?;
+    let outer = read_win64_import_argument(unicorn, 1)?;
+    let context = read_win64_import_argument(unicorn, 2)? as u32;
+    let interface = read_win64_import_argument(unicorn, 3)?;
+    let output = read_win64_import_argument(unicorn, 4)?;
+    if output == 0 {
+        return Ok(0x80004003);
+    } // E_POINTER
+    if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+        return Err("CoCreateInstance output is not writable".into());
+    }
+    for (name, address) in [("CLSID", class), ("IID", interface)] {
+        if address == 0 || !guest_range_has_permission(unicorn, address, 16, Prot::READ)? {
+            return Err(format!("CoCreateInstance {name} is not readable"));
+        }
+    }
+    if outer != 0 || context == 0 || context & !7 != 0 {
+        return Err(
+            "CoCreateInstance aggregation or nonlocal/extended class context unsupported".into(),
+        );
+    }
+    let state = unicorn.get_data();
+    let initialized = state
+        .com_apartments
+        .contains_key(&state.current_windows_thread_id);
+    if !initialized && state.com_apartments.values().any(|(mode, _)| *mode == 0) {
+        return Err("CoCreateInstance implicit MTA association unsupported".into());
+    }
+    let result = if initialized { 0x80040154 } else { 0x800401f0 };
+    unicorn
+        .mem_write(output, &[0; 8])
+        .map_err(|error| format!("CoCreateInstance output: {error}"))?;
+    Ok(result)
 }
