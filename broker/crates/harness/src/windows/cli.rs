@@ -1258,6 +1258,7 @@ fn main() -> eframe::Result {
             emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
         }
+        let parameters = typed_parameters_for_render(&parameters);
         let report =
             aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
                 &repository,

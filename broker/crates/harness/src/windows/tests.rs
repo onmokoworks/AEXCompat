@@ -1470,6 +1470,52 @@ mod tests {
     }
 
     #[test]
+    fn typed_assignment_preserves_opaque_native_defaults_and_explicit_edits() {
+        let defaults = vec![parameter(1, "arbitrary_data"), parameter(2, "layer")];
+        let mut omitted = defaults.clone();
+        apply_typed_assignments(
+            &mut omitted,
+            &serde_json::json!({
+                "schema_version": 1, "assignments": [{"slot": 2, "layer": "map.png"}]
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(omitted.len(), 2);
+        let payload = typed_parameters_for_render(&omitted);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0].slot, 2);
+        assert_eq!(payload[0].layer_path.as_deref(), Some(Path::new("map.png")));
+
+        let mut edited = omitted;
+        apply_typed_assignments(
+            &mut edited,
+            &serde_json::json!({
+                "schema_version": 1, "assignments": [{"slot": 1, "text": "curve=7"}]
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(edited.len(), 2);
+        assert_eq!(edited[0].debug_summary.as_deref(), Some("curve=7"));
+        assert_eq!(typed_parameters_for_render(&edited).len(), 2);
+
+        let mut rejected = defaults.clone();
+        assert!(
+            apply_typed_assignments(
+                &mut rejected,
+                &serde_json::json!({
+                    "schema_version": 1, "assignments": [{"slot": 1, "text": ""}]
+                }),
+                None
+            )
+            .is_err()
+        );
+        assert_eq!(rejected.len(), 2);
+        assert!(rejected[0].debug_summary.is_none());
+    }
+
+    #[test]
     fn typed_assignment_document_is_strict_typed_and_atomic() {
         let mut parameters = vec![
             parameter(1, "integer"),

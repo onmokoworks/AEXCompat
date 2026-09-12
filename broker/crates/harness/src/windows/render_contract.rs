@@ -579,6 +579,17 @@ fn apply_typed_assignments(
     Ok(())
 }
 
+fn typed_parameters_for_render(
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {
+    // Omit opaque defaults only from transport, not the editable model.
+    parameters
+        .iter()
+        .filter(|parameter| parameter.kind != "arbitrary_data" || parameter.debug_summary.is_some())
+        .cloned()
+        .collect()
+}
+
 const CONFORMANCE_RENDER_SETTINGS_ENV: &str = "AEXCOMPAT_CONFORMANCE_RENDER_SETTINGS";
 
 fn typed_request_render_settings(document: &serde_json::Value) -> Result<Option<String>, String> {
