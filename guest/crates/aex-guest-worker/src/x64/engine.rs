@@ -2391,7 +2391,12 @@ impl GuestEngine<'static> {
     }
 
     pub fn read(&self, address: u64, bytes: &mut [u8]) -> Result<(), GuestError> {
-        uc("read guest data", self.unicorn.mem_read(address, bytes))
+        self.unicorn
+            .mem_read(address, bytes)
+            .map_err(|error| GuestError::Unicorn {
+                operation: "read guest data",
+                detail: format!("address={address:#x}, length={}: {error}", bytes.len()),
+            })
     }
 
     pub fn write_u64(&mut self, address: u64, value: u64) -> Result<(), GuestError> {

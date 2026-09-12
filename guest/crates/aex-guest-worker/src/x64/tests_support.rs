@@ -18083,3 +18083,16 @@ fn uncaught_exception_count_is_zero_at_normal_boundaries_without_suppressing_thr
     .unwrap();
     assert!(engine.call_win64(query + 32, [0; 6]).is_err());
 }
+
+#[test]
+fn host_read_failure_reports_address_and_extent() {
+    let engine = test_engine(&[0xc3]);
+    let mut bytes = [0; 7];
+    let error = engine
+        .read(0xdead_beef, &mut bytes)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("read guest data"));
+    assert!(error.contains("address=0xdeadbeef, length=7"));
+    assert!(error.contains("UC_ERR_READ_UNMAPPED"));
+}

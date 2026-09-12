@@ -783,13 +783,19 @@ impl ClassicHost {
                     color_descriptor(&param.bytes, param.param_type);
                 let (current_components, default_components) =
                     component_descriptor(&param.bytes, param.param_type);
-                let choices = if param.param_type == PARAM_POPUP {
-                    let pointer =
-                        read_u64(&param.bytes, abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET);
-                    Some(self.read_guest_text(pointer, 4096)?)
-                } else {
-                    None
-                };
+                let choices =
+                    if param.param_type == PARAM_POPUP {
+                        let pointer =
+                            read_u64(&param.bytes, abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET);
+                        Some(self.read_guest_text(pointer, 4096).map_err(|error| {
+                        ClassicError::Input(format!(
+                            "popup choices for slot {} index {} name {:?} at {pointer:#x}: {error}",
+                            offset + 1, param.index, param.name
+                        ))
+                    })?)
+                    } else {
+                        None
+                    };
                 Ok(ParameterReport {
                     slot: offset + 1,
                     index: param.index,
