@@ -16503,3 +16503,97 @@ fn stdio_char_conversion_preserves_embedded_nul_and_consumes_promoted_int_slots(
         }
     }
 }
+
+#[test]
+fn allocated_sids_encode_authority_and_stack_arguments_and_free_only_owned_storage() {
+    let mut engine = test_engine(&[0xc3]);
+    let allocate = STUB_BASE + 0x100;
+    let free = allocate + 16;
+    install_win64_import(
+        &mut engine.unicorn,
+        allocate,
+        "advapi32.dll",
+        "AllocateAndInitializeSid",
+    )
+    .unwrap();
+    install_win64_import(&mut engine.unicorn, free, "advapi32.dll", "FreeSid").unwrap();
+    let authority = DATA_BASE + 0x100;
+    let output = DATA_BASE + 0x200;
+    let authority_bytes = [1, 2, 3, 4, 5, 6];
+    engine.write(authority, &authority_bytes).unwrap();
+    let mut previous = 0;
+    for count in [0u64, 1, 8] {
+        let mut args = vec![authority, count];
+        args.extend((0..8).map(|i| 0x1122334400000100u64 + i));
+        args.push(output);
+        engine.write(output - 1, &[0xa5; 10]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(allocate, &args, TIMEOUT_MICROSECONDS)
+                .unwrap(),
+            1
+        );
+        let mut slot = [0; 10];
+        engine.read(output - 1, &mut slot).unwrap();
+        assert_eq!(slot[0], 0xa5);
+        assert_eq!(slot[9], 0xa5);
+        let sid = u64::from_le_bytes(slot[1..9].try_into().unwrap());
+        assert_ne!(sid, previous);
+        previous = sid;
+        let mut expected = vec![1, count as u8];
+        expected.extend(authority_bytes);
+        for i in 0..count {
+            expected.extend_from_slice(&(0x100u32 + i as u32).to_le_bytes());
+        }
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(sid, expected.len()).unwrap(),
+            expected
+        );
+        assert!(!guest_range_has_permission(&engine.unicorn, sid, 8, Prot::EXEC).unwrap());
+        assert!(engine.call_win64(free, [sid + 4, 0, 0, 0, 0, 0]).is_err());
+        assert_eq!(engine.call_win64(free, [sid, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert!(engine.unicorn.mem_read_as_vec(sid, 1).is_err());
+        assert!(engine.call_win64(free, [sid, 0, 0, 0, 0, 0]).is_err());
+    }
+    let mut args = vec![authority, 9, 0, 0, 0, 0, 0, 0, 0, 0, output];
+    engine.write(output, &[0xa5; 8]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(allocate, &args, TIMEOUT_MICROSECONDS)
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1337);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0xa5; 8]
+    );
+    args[1] = 1;
+    args[10] = DATA_BASE + PAGE_SIZE - 4;
+    engine.write(args[10], &[0xa5; 4]).unwrap();
+    assert!(
+        engine
+            .call_win64_with_timeout(allocate, &args, TIMEOUT_MICROSECONDS)
+            .is_err()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(args[10], 4).unwrap(),
+        [0xa5; 4]
+    );
+    assert!(engine.unicorn.get_data().windows_sids.is_empty());
+    args[10] = output;
+    engine.unicorn.get_data_mut().windows_sid_issued = 4096;
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(allocate, &args, TIMEOUT_MICROSECONDS)
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 8);
+    for symbol in ["AllocateAndInitializeSid", "FreeSid"] {
+        assert!(matches!(
+            dispatch_win64_import("other.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
+}

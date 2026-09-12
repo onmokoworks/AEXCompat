@@ -229,6 +229,8 @@ struct GuestState {
     pending_fls_free: Option<PendingFlsFree>,
     windows_threads: BTreeMap<u64, WindowsThread>,
     windows_objects: WindowsKernelObjects,
+    windows_sids: BTreeSet<u64>,
+    windows_sid_issued: u64,
     next_windows_thread_id: u32,
     current_windows_thread_id: u32,
     pending_windows_thread: Option<PendingWindowsThread>,

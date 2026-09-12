@@ -36,6 +36,8 @@ enum LegacyWin64Import {
     StrCmp,
     StrLen,
     StrCpy,
+    AllocateAndInitializeSid,
+    FreeSid,
     RegOpenKeyExA,
     RegCloseKey,
     MemCmp,
@@ -740,6 +742,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::StrCpy
         }
         (_, "strcpy") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "AllocateAndInitializeSid") => LegacyWin64Import::AllocateAndInitializeSid,
+        ("advapi32.dll", "FreeSid") => LegacyWin64Import::FreeSid,
+        (_, "AllocateAndInitializeSid" | "FreeSid") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("advapi32.dll", "RegOpenKeyExA") => LegacyWin64Import::RegOpenKeyExA,
         ("advapi32.dll", "RegCloseKey") => LegacyWin64Import::RegCloseKey,
         (_, "RegOpenKeyExA" | "RegCloseKey") => {
@@ -1031,6 +1038,15 @@ fn install_win64_import(
                     "install CRT memory-copy import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         emulate_crt_memory_copy(unicorn);
+                    }),
+                )?;
+            }
+            LegacyWin64Import::AllocateAndInitializeSid | LegacyWin64Import::FreeSid => {
+                uc("write SID return", unicorn.mem_write(stub, &[0xc3]))?;
+                uc(
+                    "install SID import",
+                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                        emulate_windows_sid(unicorn, implementation);
                     }),
                 )?;
             }
