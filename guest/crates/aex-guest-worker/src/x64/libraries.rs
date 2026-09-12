@@ -204,6 +204,10 @@ impl GuestEngine<'static> {
                                         import.name, symbol.name
                                     ))
                                 })?
+                        } else if let Some(data) =
+                            engine.resolve_emulated_import_data(&import.name, &symbol.name)?
+                        {
+                            data
                         } else if std::ptr::eq(target, image) {
                             continue; // primary's emulated imports already installed
                         } else {
@@ -759,6 +763,77 @@ mod library_tests {
         assert!(
             GuestEngine::load_with_libraries(&primary, &[("A/dep.dll", a), ("B/dep.dll", b)])
                 .is_err()
+        );
+    }
+    #[test]
+    fn imported_cpp_data_is_shared_writable_and_not_executable() {
+        let make = |base, symbol| {
+            let mut bytes = fixture_bytes(
+                base,
+                symbol,
+                Some(("msvcp140.dll", "?_Index@ios_base@std@@0HA")),
+                true,
+            );
+            // DllMain increments the imported int and returns TRUE.
+            bytes[0x240..0x24f].copy_from_slice(&[
+                0x48, 0x8b, 0x05, 0x39, 0x11, 0, 0, 0xff, 0x00, 0xb8, 1, 0, 0, 0, 0xc3,
+            ]);
+            // Export increments the same imported int and returns its value.
+            bytes[0x200..0x20c].copy_from_slice(&[
+                0x48, 0x8b, 0x05, 0x79, 0x11, 0, 0, 0xff, 0x00, 0x8b, 0x00, 0xc3,
+            ]);
+            PeImage::parse_library(&bytes).unwrap()
+        };
+        let primary = make(0x180000000, "EffectMain");
+        let dep = make(DEPENDENCY_IMAGE_BASE, "answer");
+        let mut engine = GuestEngine::load_with_libraries(&primary, &[("dep.dll", dep)]).unwrap();
+        let mut primary_iat = [0; 8];
+        let mut dep_iat = [0; 8];
+        engine
+            .read(primary.image_base() + 0x2180, &mut primary_iat)
+            .unwrap();
+        engine
+            .read(DEPENDENCY_IMAGE_BASE + 0x2180, &mut dep_iat)
+            .unwrap();
+        assert_eq!(primary_iat, dep_iat);
+        let address = u64::from_le_bytes(primary_iat);
+        assert!(
+            guest_range_has_permission(&engine.unicorn, address, 4, Prot::READ | Prot::WRITE)
+                .unwrap()
+        );
+        assert!(!guest_range_has_permission(&engine.unicorn, address, 1, Prot::EXEC).unwrap());
+        assert_eq!(
+            engine
+                .call_win64(primary.image_base() + 0x1000, [0; 6])
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            engine
+                .call_win64(DEPENDENCY_IMAGE_BASE + 0x1000, [0; 6])
+                .unwrap(),
+            4
+        );
+        assert!(!guest_range_has_permission(&engine.unicorn, STUB_BASE, 1, Prot::WRITE).unwrap());
+        let mut independent = GuestEngine::load_with_libraries(&primary, &[]).unwrap();
+        assert_eq!(
+            independent
+                .call_win64(primary.image_base() + 0x1000, [0; 6])
+                .unwrap(),
+            2
+        );
+        let sync = engine
+            .resolve_emulated_import_data("MSVCP140.DLL", "?_Sync@ios_base@std@@0_NA")
+            .unwrap()
+            .unwrap();
+        let mut byte = [0];
+        engine.read(sync, &mut byte).unwrap();
+        assert_eq!(byte, [1]);
+        assert!(
+            engine
+                .resolve_emulated_import_data("fixture.dll", "?_Index@ios_base@std@@0HA")
+                .unwrap()
+                .is_none()
         );
     }
 }

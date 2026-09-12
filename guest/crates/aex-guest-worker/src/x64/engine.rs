@@ -931,6 +931,7 @@ impl GuestEngine<'static> {
             entry_export: image_report.entry_export,
             trace_modules,
         };
+        engine.link_emulated_import_data(image)?;
         initialize_windows_command_line_a(&mut engine)?;
         initialize_windows_command_line_w(&mut engine)?;
         if let Some(table) = image.string_table() {

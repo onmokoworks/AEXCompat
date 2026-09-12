@@ -213,6 +213,7 @@ struct GuestState {
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     vcomp_requested_threads: Option<u32>,
     omp_dynamic_requested: Option<bool>,
+    imported_data: BTreeMap<&'static str, u64>,
     msvcp_mutexes: HashMap<u64, MsvcpMutex>,
     msvcp_lockit_locks: [Option<(u32, u32)>; 8],
     msvcp_lockit_objects: HashMap<u64, (i32, u32)>,
