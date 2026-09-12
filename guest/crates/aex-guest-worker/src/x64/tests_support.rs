@@ -19679,3 +19679,121 @@ fn initialize_acl_rejects_inaccessible_headers_without_partial_writes() {
         );
     }
 }
+
+#[test]
+fn allowed_ace_append_preserves_existing_entries_and_capacity() {
+    const ADD: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        ADD,
+        "advapi32.dll",
+        "AddAccessAllowedAceEx",
+    )
+    .unwrap();
+    let acl = DATA_BASE + 0x900;
+    let sid = DATA_BASE + 0xb00;
+    engine.write(acl, &[0xa5; 64]).unwrap();
+    engine.write(acl, &[2, 0, 48, 0, 0, 0, 0, 0]).unwrap();
+    let world = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    engine.write(sid, &world).unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 71;
+    engine.unicorn.get_data_mut().crt_errno = 72;
+    assert_eq!(
+        engine
+            .call_win64(ADD, [acl, 2, 3, 0x10000000, sid, 0])
+            .unwrap(),
+        1
+    );
+    let first = engine.unicorn.mem_read_as_vec(acl + 8, 20).unwrap();
+    let mut expected = vec![0, 3, 20, 0, 0, 0, 0, 0x10];
+    expected.extend_from_slice(&world);
+    assert_eq!(first, expected);
+    assert_eq!(
+        engine
+            .call_win64(ADD, [acl, (1 << 32) | 4, 0x110, 0x12345678, sid, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(acl, 8).unwrap(),
+        [4, 0, 48, 0, 2, 0, 0, 0]
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(acl + 8, 20).unwrap(), first);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(acl + 28, 8).unwrap(),
+        [0, 0x10, 20, 0, 0x78, 0x56, 0x34, 0x12]
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(acl + 48, 16).unwrap(),
+        vec![0xa5; 16]
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+    let full = engine.unicorn.mem_read_as_vec(acl, 64).unwrap();
+    assert_eq!(engine.call_win64(ADD, [acl, 2, 3, 0, sid, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1344);
+    assert_eq!(engine.unicorn.mem_read_as_vec(acl, 64).unwrap(), full);
+    assert!(engine.unicorn.get_data().windows_acl_allocations.is_empty());
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "AddAccessAllowedAceEx"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn allowed_ace_failures_leave_acl_unchanged() {
+    const ADD: u64 = STUB_BASE + 0x410;
+    for case in 0..5 {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            ADD,
+            "advapi32.dll",
+            "AddAccessAllowedAceEx",
+        )
+        .unwrap();
+        let acl = DATA_BASE + 0x900;
+        let sid = DATA_BASE + 0xb00;
+        engine.write(acl, &[0xa5; 64]).unwrap();
+        engine.write(acl, &[2, 0, 48, 0, 0, 0, 0, 0]).unwrap();
+        engine
+            .write(sid, &[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0])
+            .unwrap();
+        if case == 0 {
+            engine.write(sid, &[2]).unwrap();
+        }
+        if case == 1 {
+            engine.write(acl + 4, &1u16.to_le_bytes()).unwrap();
+            engine.write(acl + 8, &[0, 0, 60, 0]).unwrap();
+        }
+        if case == 3 {
+            engine
+                .unicorn
+                .mem_protect(DATA_BASE, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        let before = engine.unicorn.mem_read_as_vec(acl, 64).unwrap();
+        let result = engine.call_win64(
+            ADD,
+            [
+                acl,
+                if case == 2 { 5 } else { 2 },
+                3,
+                1,
+                if case == 4 { 0 } else { sid },
+                0,
+            ],
+        );
+        if case == 3 {
+            assert!(result.unwrap_err().to_string().contains("not writable"));
+        } else {
+            assert_eq!(result.unwrap(), 0);
+            assert_eq!(
+                engine.unicorn.get_data().windows_last_error,
+                [1337, 1336, 1306, 0, 1337][case]
+            );
+        }
+        assert_eq!(engine.unicorn.mem_read_as_vec(acl, 64).unwrap(), before);
+    }
+}

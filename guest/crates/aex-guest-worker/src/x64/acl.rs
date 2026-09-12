@@ -67,6 +67,9 @@ fn build_new_guest_acl(
 
 fn emulate_windows_acl(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
+        if operation == LegacyWin64Import::AddAccessAllowedAceEx {
+            return append_guest_allowed_ace(unicorn);
+        }
         if operation == LegacyWin64Import::InitializeAcl {
             let output = read_win64_import_argument(unicorn, 0)?;
             let size = read_win64_import_argument(unicorn, 1)? as u32;
@@ -211,4 +214,71 @@ fn emulate_windows_acl(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyW
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn append_guest_allowed_ace(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let acl = read_win64_import_argument(unicorn, 0)?;
+    let revision = read_win64_import_argument(unicorn, 1)? as u32;
+    let flags = read_win64_import_argument(unicorn, 2)? as u32;
+    let mask = read_win64_import_argument(unicorn, 3)? as u32;
+    let sid = read_win64_import_argument(unicorn, 4)?;
+    let failure = |unicorn: &mut Unicorn<'_, GuestState>, error| {
+        unicorn.get_data_mut().windows_last_error = error;
+        Ok(0)
+    };
+    if sid == 0 {
+        return failure(unicorn, 1337);
+    }
+    let sid_header = acl_read(unicorn, sid, 8)?;
+    if sid_header[0] != 1 || sid_header[1] > 15 {
+        return failure(unicorn, 1337);
+    }
+    let sid_bytes = acl_read(unicorn, sid, 8 + u64::from(sid_header[1]) * 4)?;
+    let mut header = acl_read(unicorn, acl, 8)?;
+    if header[0] > 4 || revision > 4 {
+        return failure(unicorn, 1306);
+    }
+    let capacity = u16::from_le_bytes([header[2], header[3]]) as usize;
+    let count = u16::from_le_bytes([header[4], header[5]]);
+    if header[0] < 2 || capacity < 8 {
+        return failure(unicorn, 1336);
+    }
+    let mut offset = 8usize;
+    for _ in 0..count {
+        if offset + 4 > capacity {
+            return failure(unicorn, 1336);
+        }
+        let address = acl
+            .checked_add(offset as u64)
+            .ok_or("ACL address overflow")?;
+        let entry = acl_read(unicorn, address, 4)?;
+        let size = u16::from_le_bytes([entry[2], entry[3]]) as usize;
+        if size < 4 || size % 4 != 0 || offset + size > capacity {
+            return failure(unicorn, 1336);
+        }
+        offset += size;
+    }
+    let size = 8 + sid_bytes.len();
+    if offset + size > capacity || count == u16::MAX {
+        return failure(unicorn, 1344);
+    }
+    let address = acl
+        .checked_add(offset as u64)
+        .ok_or("ACL append address overflow")?;
+    if !guest_range_has_permission(unicorn, acl, 8, Prot::WRITE)?
+        || !guest_range_has_permission(unicorn, address, size as u64, Prot::WRITE)?
+    {
+        return Err("AddAccessAllowedAceEx output is not writable".into());
+    }
+    let mut ace = vec![0, flags as u8];
+    ace.extend_from_slice(&(size as u16).to_le_bytes());
+    ace.extend_from_slice(&mask.to_le_bytes());
+    ace.extend_from_slice(&sid_bytes);
+    header[0] = header[0].max(revision as u8);
+    header[4..6].copy_from_slice(&(count + 1).to_le_bytes());
+    unicorn
+        .mem_write(address, &ace)
+        .map_err(|e| e.to_string())?;
+    unicorn.mem_write(acl, &header).map_err(|e| e.to_string())?;
+    Ok(1)
 }

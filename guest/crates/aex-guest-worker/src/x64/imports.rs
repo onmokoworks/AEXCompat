@@ -76,6 +76,7 @@ enum LegacyWin64Import {
     SetNamedSecurityInfoA,
     SetEntriesInAclA,
     InitializeAcl,
+    AddAccessAllowedAceEx,
     LocalFree,
     AllocateAndInitializeSid,
     CreateWellKnownSid,
@@ -873,6 +874,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "atoi") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetNamedSecurityInfoA") => LegacyWin64Import::SetNamedSecurityInfoA,
         (_, "SetNamedSecurityInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "AddAccessAllowedAceEx") => LegacyWin64Import::AddAccessAllowedAceEx,
+        (_, "AddAccessAllowedAceEx") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "InitializeAcl") => LegacyWin64Import::InitializeAcl,
         (_, "InitializeAcl") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetEntriesInAclA") => LegacyWin64Import::SetEntriesInAclA,
@@ -1344,6 +1347,7 @@ fn install_win64_import(
                 LegacyWin64Import::SetNamedSecurityInfoA
                 | LegacyWin64Import::SetEntriesInAclA
                 | LegacyWin64Import::InitializeAcl
+                | LegacyWin64Import::AddAccessAllowedAceEx
                 | LegacyWin64Import::LocalFree => {
                     uc("write ACL return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
