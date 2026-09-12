@@ -11,6 +11,19 @@ from test_render_fixture_semantic_response import ROOT, WIDTH, HEIGHT
 COLORS = ((48, 24, 24, 255), (144, 120, 120, 255), (240, 216, 216, 255))
 
 
+def mirror(pixels):
+    assert len(pixels) == WIDTH*HEIGHT*4
+    return Image.frombytes('RGBA', (WIDTH, HEIGHT), pixels).transpose(
+        Image.Transpose.FLIP_LEFT_RIGHT).tobytes()
+
+
+def assert_mirrored(forward, reversed_outputs):
+    assert len(forward) == len(reversed_outputs) == 4
+    assert_selective(*forward)
+    for original, reversed_output in zip(forward, reversed_outputs):
+        assert reversed_output == mirror(original)
+
+
 def band_pixels(colors):
     return bytes(c for y in range(HEIGHT) for x in range(WIDTH)
                  for c in colors[min(x*3//WIDTH, 2)])
@@ -71,6 +84,28 @@ def test_selective_validator_rejects_corruption(fault):
         assert_selective(neutral, *outputs)
 
 
+@pytest.mark.parametrize('fault', ['fixed_position', 'copy', 'one_pixel'])
+def test_mirrored_validator_rejects_corruption(fault):
+    forward = [band_pixels(COLORS)]
+    for selected in range(3):
+        colors = list(COLORS)
+        base = sum(colors[selected][:3])//3
+        colors[selected] = (base, base, base, 255)
+        forward.append(band_pixels(colors))
+    reversed_outputs = [mirror(p) for p in forward]
+    assert_mirrored(forward, reversed_outputs)
+    if fault == 'fixed_position':
+        reversed_outputs[1] = forward[1]
+    elif fault == 'copy':
+        reversed_outputs[1] = reversed_outputs[0]
+    else:
+        corrupted = bytearray(reversed_outputs[1])
+        corrupted[0] ^= 1
+        reversed_outputs[1] = corrupted
+    with pytest.raises(AssertionError):
+        assert_mirrored(forward, reversed_outputs)
+
+
 def test_real_selective_saturation(tmp_path):
     plugin = os.environ.get('AEXCOMPAT_TEST_SELECTIVE_SATURATION')
     if not plugin:
@@ -113,3 +148,26 @@ def test_real_selective_saturation(tmp_path):
         assert hashlib.sha256(argb).hexdigest() == report['output_sha256']
         outputs.append(pixels)
     assert_selective(*outputs)
+    reverse_source = tmp_path / 'reverse-source.png'
+    Image.frombytes('RGBA', (WIDTH, HEIGHT), mirror(band_pixels(COLORS))).save(reverse_source)
+    reversed_outputs = []
+    for name, selected in (('neutral', None), ('shadows', 188), ('midtones', 193),
+                           ('highlights', 198)):
+        request, output = tmp_path / f'reverse-{name}.json', tmp_path / f'reverse-{name}.png'
+        assignments = [{'slot': 181, 'layer': str(reverse_source)}]
+        assignments.extend({'slot': slot, 'value': -100 if slot == selected else 0}
+                           for slot in (188, 193, 198))
+        request.write_text(json.dumps({'schema_version': 1,
+            'timing': {'frame': 0, 'fps': 30, 'duration_frames': 300},
+            'assignments': assignments}), encoding='utf-8')
+        report = run('--render-experimental-smart-request', plugin, reverse_source, output, request)
+        assert report['passed'] and report['output_pixels_valid']
+        with Image.open(output) as image:
+            assert image.size == (WIDTH, HEIGHT)
+            pixels = image.convert('RGBA').tobytes()
+        argb = bytearray(len(pixels))
+        argb[0::4], argb[1::4] = pixels[3::4], pixels[0::4]
+        argb[2::4], argb[3::4] = pixels[1::4], pixels[2::4]
+        assert hashlib.sha256(argb).hexdigest() == report['output_sha256']
+        reversed_outputs.append(pixels)
+    assert_mirrored(outputs, reversed_outputs)
