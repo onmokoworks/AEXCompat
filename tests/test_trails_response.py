@@ -1,4 +1,4 @@
-"""BCC Trails explicit/default-self history, bounded disjoint-patch oracle."""
+"""BCC Trails/Trails Basic history, bounded disjoint-patch oracle."""
 import hashlib
 import json
 import os
@@ -43,19 +43,24 @@ def test_trails_oracle_rejects_corruption(fault):
 
 
 @pytest.mark.parametrize('binding', ['explicit', 'default-self'])
-def test_real_trails_count_and_source_exclusion(tmp_path, binding):
-    plugin = os.environ.get('AEXCOMPAT_TEST_TRAILS')
+@pytest.mark.parametrize('basic', [False, True], ids=['trails', 'trails-basic'])
+def test_real_trails_count_and_source_exclusion(tmp_path, binding, basic):
+    plugin_env = 'AEXCOMPAT_TEST_TRAILS_BASIC' if basic else 'AEXCOMPAT_TEST_TRAILS'
+    plugin = os.environ.get(plugin_env)
     if not plugin:
-        pytest.skip('set AEXCOMPAT_TEST_TRAILS to local BCCTrails.aex')
+        pytest.skip(f'set {plugin_env} to the corresponding local AEX')
     harness = ROOT/'broker/target/release/aexcompat-harness.exe'
     for time in (3, 4, 5):
         Image.frombytes('RGBA', (WIDTH, HEIGHT), patches([time])).save(tmp_path/f'{time}.png')
     for count, mode in ((0, 1), (1, 1), (2, 1), (1, 3), (2, 3)):
         stem = f'{count}-{mode}'
         request, output = tmp_path/f'{stem}.json', tmp_path/f'{stem}-output.png'
-        assignments = [{'slot': s, 'value': v} for s, v in
+        values = (
+            ((18,1),(19,count),(20,1),(21,100),(22,0),(24,0),(25,100),(28,100),
+             (36,1),(37,100),(38,1),(39,1),(40,mode),(41,1),(42,100)) if basic else
             ((17,1),(18,count),(19,1),(20,100),(21,0),(22,100),(23,1),(26,100),
-             (37,100),(117,1),(118,100),(120,1),(121,mode),(123,100))]
+             (37,100),(117,1),(118,100),(120,1),(121,mode),(123,100)))
+        assignments = [{'slot': s, 'value': v} for s, v in values]
         if binding == 'explicit':
             assignments.append({'slot': 2, 'layer': str(tmp_path/'5.png')})
         sample_slot = 2 if binding == 'explicit' else 0

@@ -824,18 +824,35 @@ mod tests {
     #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_TRAILS and local Release worker"]
     fn real_trails_gui_composites_explicit_input_history() {
-        assert_real_trails_history(false);
+        assert_real_trails_history(false, false);
     }
 
     #[test]
     #[ignore = "requires explicit AEXCOMPAT_TEST_TRAILS and local Release worker"]
     fn real_trails_gui_composites_default_self_history() {
-        assert_real_trails_history(true);
+        assert_real_trails_history(true, false);
     }
 
-    fn assert_real_trails_history(default_self: bool) {
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_TRAILS_BASIC and local Release worker"]
+    fn real_trails_basic_gui_composites_explicit_input_history() {
+        assert_real_trails_history(false, true);
+    }
+
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_TRAILS_BASIC and local Release worker"]
+    fn real_trails_basic_gui_composites_default_self_history() {
+        assert_real_trails_history(true, true);
+    }
+
+    fn assert_real_trails_history(default_self: bool, basic: bool) {
+        let plugin_env = if basic {
+            "AEXCOMPAT_TEST_TRAILS_BASIC"
+        } else {
+            "AEXCOMPAT_TEST_TRAILS"
+        };
         let plugin = PathBuf::from(
-            std::env::var("AEXCOMPAT_TEST_TRAILS")
+            std::env::var(plugin_env)
                 .expect("explicit AEX path")
                 .replace('\\', "/"),
         );
@@ -890,25 +907,46 @@ mod tests {
         for (count, mode) in [(0, 1), (1, 1), (2, 1), (1, 3), (2, 3)] {
             let sample_slot = if default_self { 0 } else { 2 };
             let samples = [3,4].into_iter().map(|t| serde_json::json!({"slot":sample_slot,"time":t,"time_scale":30,"image":directory.join(format!("{t}.png"))})).collect::<Vec<_>>();
-            let mut assignments = [
-                (17, 1),
-                (18, count),
-                (19, 1),
-                (20, 100),
-                (21, 0),
-                (22, 100),
-                (23, 1),
-                (26, 100),
-                (37, 100),
-                (117, 1),
-                (118, 100),
-                (120, 1),
-                (121, mode),
-                (123, 100),
-            ]
-            .into_iter()
-            .map(|(slot, value)| serde_json::json!({"slot":slot,"value":value}))
-            .collect::<Vec<_>>();
+            let values = if basic {
+                vec![
+                    (18, 1),
+                    (19, count),
+                    (20, 1),
+                    (21, 100),
+                    (22, 0),
+                    (24, 0),
+                    (25, 100),
+                    (28, 100),
+                    (36, 1),
+                    (37, 100),
+                    (38, 1),
+                    (39, 1),
+                    (40, mode),
+                    (41, 1),
+                    (42, 100),
+                ]
+            } else {
+                vec![
+                    (17, 1),
+                    (18, count),
+                    (19, 1),
+                    (20, 100),
+                    (21, 0),
+                    (22, 100),
+                    (23, 1),
+                    (26, 100),
+                    (37, 100),
+                    (117, 1),
+                    (118, 100),
+                    (120, 1),
+                    (121, mode),
+                    (123, 100),
+                ]
+            };
+            let mut assignments = values
+                .into_iter()
+                .map(|(slot, value)| serde_json::json!({"slot":slot,"value":value}))
+                .collect::<Vec<_>>();
             if !default_self {
                 assignments.push(serde_json::json!({"slot":2,"layer":directory.join("5.png")}));
             }
