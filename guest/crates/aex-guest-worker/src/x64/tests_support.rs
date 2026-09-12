@@ -17182,3 +17182,48 @@ fn crt_ascii_classes_cover_bytes_eof_and_reject_invalid_ints() {
         ));
     }
 }
+
+#[test]
+fn crt_string_read_refreshes_permissions_and_crosses_only_readable_spans() {
+    const PAGE: u64 = 0x30_0000_0000;
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .mem_map(PAGE, 4096, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine
+        .unicorn
+        .mem_map(PAGE + 4096, 4096, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.unicorn.mem_write(PAGE + 4094, b"ab").unwrap();
+    engine.unicorn.mem_write(PAGE + 4096, b"c\0").unwrap();
+    let read =
+        |engine: &GuestEngine| read_crt_stdio_c_string(&engine.unicorn, PAGE + 4094, 4, "test");
+    assert_eq!(read(&engine).unwrap(), b"abc");
+    assert!(
+        read_crt_stdio_c_string(&engine.unicorn, PAGE + 4094, 3, "test")
+            .unwrap_err()
+            .contains("exceeds")
+    );
+    engine
+        .unicorn
+        .mem_protect(PAGE + 4096, 4096, Prot::WRITE)
+        .unwrap();
+    assert!(read(&engine).unwrap_err().contains("not readable"));
+    engine.unicorn.mem_write(PAGE + 4095, b"\0").unwrap();
+    assert_eq!(read(&engine).unwrap(), b"a");
+    engine.unicorn.mem_write(PAGE + 4095, b"b").unwrap();
+    engine
+        .unicorn
+        .mem_protect(PAGE + 4096, 4096, Prot::READ)
+        .unwrap();
+    assert_eq!(read(&engine).unwrap(), b"abc");
+    engine.unicorn.mem_unmap(PAGE + 4096, 4096).unwrap();
+    assert!(read(&engine).unwrap_err().contains("not readable"));
+    engine
+        .unicorn
+        .mem_map(PAGE + 4096, 4096, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.unicorn.mem_write(PAGE + 4096, b"d\0").unwrap();
+    assert_eq!(read(&engine).unwrap(), b"abd");
+}

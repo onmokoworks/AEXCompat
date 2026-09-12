@@ -1412,15 +1412,32 @@ fn read_crt_stdio_c_string(
     if address == 0 {
         return Err(format!("stdio {label} pointer is null"));
     }
+    // No guest code runs during this read. Take a fresh map snapshot per call,
+    // then reuse the current readable span instead of enumerating all mappings
+    // for every byte. Keep byte reads so a NUL never reads into the next region.
+    let regions = unicorn
+        .mem_regions()
+        .map_err(|error| format!("guest memory-map query failed: {error}"))?;
+    let mut readable_end = None;
     let mut bytes = Vec::new();
     for offset in 0..limit {
         let address = address
             .checked_add(offset)
             .ok_or_else(|| format!("stdio {label} range overflow"))?;
-        if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
-            return Err(format!(
-                "stdio {label} address {address:#x} is not readable"
-            ));
+        if readable_end.is_none_or(|end| address > end) {
+            readable_end = regions
+                .iter()
+                .find(|region| {
+                    region.begin <= address
+                        && address <= region.end
+                        && region.perms & Prot::READ.0 as u32 != 0
+                })
+                .map(|region| region.end);
+            if readable_end.is_none() {
+                return Err(format!(
+                    "stdio {label} address {address:#x} is not readable"
+                ));
+            }
         }
         let mut byte = [0u8; 1];
         unicorn
