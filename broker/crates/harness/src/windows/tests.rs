@@ -712,6 +712,115 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    #[test]
+    #[ignore = "requires explicit AEXCOMPAT_TEST_TIME_DISPLACEMENT and local Release worker"]
+    fn real_time_displacement_gui_combines_map_and_primary_times() {
+        let plugin = PathBuf::from(
+            std::env::var("AEXCOMPAT_TEST_TIME_DISPLACEMENT")
+                .expect("explicit AEX path")
+                .replace('\\', "/"),
+        );
+        let repository =
+            canonical_deverbatim(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.."))
+                .unwrap();
+        let directory = temporary_directory("gui-time-displacement");
+        for time in 3..=7 {
+            image::RgbaImage::from_fn(256, 144, |x, y| {
+                image::Rgba([x as u8, y as u8, time * 30, 255])
+            })
+            .save(directory.join(format!("{time}.png")))
+            .unwrap();
+        }
+        for reverse in [false, true] {
+            image::RgbaImage::from_fn(256, 144, |x, _| {
+                let value = if (x >= 128) != reverse { 255 } else { 0 };
+                image::Rgba([value, value, value, 255])
+            })
+            .save(directory.join(format!("map-{reverse}.png")))
+            .unwrap();
+        }
+        let mut app = HarnessApp::new(repository);
+        let bytes = read_bounded_pe(&plugin).unwrap();
+        app.selection = Some(Selection {
+            path: plugin.clone(),
+            size: bytes.len() as u64,
+            sha256: format!("{:X}", Sha256::digest(&bytes)),
+            modified: None,
+        });
+        app.accept_adjacent_discovery(discover_adjacent_imports(&plugin).unwrap());
+        app.approve_session().unwrap();
+        let ctx = egui::Context::default();
+        let drain = |app: &mut HarnessApp| {
+            while app.busy {
+                ctx.begin_pass(Default::default());
+                app.poll(&ctx);
+                let _ = ctx.end_pass();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        app.inspect_parameters_async();
+        drain(&mut app);
+        assert_eq!(
+            app.parameters.iter().find(|p| p.slot == 3).unwrap().name,
+            "Map Layer"
+        );
+        ctx.begin_pass(Default::default());
+        app.load_input_path(&ctx, directory.join("5.png"));
+        let _ = ctx.end_pass();
+        for (amount, reverse) in [(0, false), (2, false), (2, true), (-2, false), (-2, true)] {
+            let samples = [3, 4, 6, 7].into_iter().map(|t| {
+                serde_json::json!({"slot":0,"time":t,"time_scale":30,"image":directory.join(format!("{t}.png"))})
+            }).collect::<Vec<_>>();
+            let mut assignments = [
+                (5, 0.0),
+                (7, 0.0),
+                (8, 255.0),
+                (9, 1.0),
+                (11, 0.0),
+                (12, 4.0),
+                (13, amount as f64),
+                (14, 127.5),
+                (15, 0.0),
+                (16, 0.0),
+                (17, 3.0),
+                (18, 1.0),
+                (20, 1.0),
+            ]
+            .into_iter()
+            .map(|(slot, value)| serde_json::json!({"slot":slot,"value":value}))
+            .collect::<Vec<_>>();
+            assignments.push(
+                serde_json::json!({"slot":3,"layer":directory.join(format!("map-{reverse}.png"))}),
+            );
+            app.apply_debug_request_document(
+                &serde_json::json!({"schema_version":1,"timing":{"frame":5,"fps":30,"duration_frames":300},"assignments":assignments,"timed_layers":samples}),
+                &directory.join("request.json"),
+            ).unwrap();
+            assert_eq!(app.timed_layers.len(), 4);
+            let output = directory.join(format!("output-{amount}-{reverse}.png"));
+            app.render_to(output.clone());
+            drain(&mut app);
+            assert_eq!(app.status, "AEX output ready.", "{}", app.report);
+            assert_eq!(app.output_image.as_ref(), Some(&output));
+            assert_eq!(app.preview.as_ref().unwrap().size(), [256, 144]);
+            let expected = image::RgbaImage::from_fn(256, 144, |x, y| {
+                let later = ((x >= 128) != reverse) != (amount < 0);
+                let time = if amount == 0 {
+                    5
+                } else if later {
+                    6
+                } else {
+                    4
+                };
+                image::Rgba([x as u8, y as u8, time * 30, 255])
+            });
+            assert_eq!(image::open(output).unwrap().to_rgba8(), expected);
+        }
+        app.close_selected_aex();
+        drop(app);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn assert_real_temporal_bands(plugin_env: &str, temporary_prefix: &str) {
         let plugin = PathBuf::from(
             std::env::var(plugin_env)
