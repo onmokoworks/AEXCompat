@@ -664,6 +664,29 @@ fn apply_typed_assignments(
     Ok(())
 }
 
+fn typed_render_request_parameters(
+    parameters: &[aexcompat_broker::image_render::InteractiveParameter],
+    document: &serde_json::Value,
+    request_path: Option<&Path>,
+) -> Result<Vec<aexcompat_broker::image_render::InteractiveParameter>, String> {
+    let mut updated = parameters.to_vec();
+    apply_typed_assignments(&mut updated, document, request_path)?;
+    // Validation above establishes the assignments schema and rejects explicit
+    // invalid edits. Omitted values belong to PARAMS_SETUP, not a host-authored
+    // edit: replaying them can reject legal native defaults outside UI ranges.
+    let slots: std::collections::HashSet<u64> = document["assignments"]
+        .as_array()
+        .expect("validated assignments")
+        .iter()
+        .filter_map(|assignment| assignment["slot"].as_u64())
+        .collect();
+    updated.retain(|parameter| {
+        // Null-path layer declarations identify slots accepted by timed inputs.
+        parameter.kind == "layer" || slots.contains(&u64::from(parameter.slot))
+    });
+    Ok(typed_parameters_for_render(&updated))
+}
+
 fn typed_parameters_for_render(
     parameters: &[aexcompat_broker::image_render::InteractiveParameter],
 ) -> Vec<aexcompat_broker::image_render::InteractiveParameter> {

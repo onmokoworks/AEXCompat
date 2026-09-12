@@ -23,6 +23,14 @@ the transport's 64-image limit. Duplicate equivalent slot/time pairs and zero
 time scales are rejected. An unprovided time for a timed-only slot is not
 silently substituted; an explicitly supplied static layer can act as fallback.
 
+In typed CLI requests, `assignments` lists edits, not a replacement for the
+plug-in's entire parameter state. Omitted values retain the native defaults
+established during parameter setup, even when a plug-in reports a default outside
+its UI range. Explicit values are still range-checked and rejected when invalid;
+the host does not clamp them. Layer declarations remain available to timed inputs
+without requiring a static layer assignment. The GUI's editable-state behavior
+is separate from this CLI omission rule.
+
 Relative `timed_layers[].image` paths resolve from the request file's directory.
 This differs from existing relative `assignments[].layer` bundle paths, which
 resolve from the request directory's parent. Absolute image paths are accepted.

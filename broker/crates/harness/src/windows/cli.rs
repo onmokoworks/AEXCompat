@@ -1222,7 +1222,7 @@ fn main() -> eframe::Result {
             });
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
-        let (mut parameters, inspection_diagnostics) =
+        let (parameters, inspection_diagnostics) =
             aexcompat_broker::image_render::inspect_experimental_with_approved_dependencies_and_diagnostics(
                 &repository,
                 plugin,
@@ -1262,13 +1262,12 @@ fn main() -> eframe::Result {
         if let Some(object) = assignment_document.as_object_mut() {
             object.remove("timed_layers");
         }
-        if let Err(error) =
-            apply_typed_assignments(&mut parameters, &assignment_document, Some(request_path))
-        {
+        let parameters = typed_render_request_parameters(
+            &parameters, &assignment_document, Some(request_path),
+        ).unwrap_or_else(|error| {
             emit_host_request_validation_failure(&error, &parameter_metadata);
             std::process::exit(1);
-        }
-        let parameters = typed_parameters_for_render(&parameters);
+        });
         let report =
             aexcompat_broker::image_render::render_experimental_image_with_timed_layers_and_context(
                 &repository,

@@ -1549,6 +1549,29 @@ mod tests {
     }
 
     #[test]
+    fn typed_request_omitted_scalar_defaults_are_not_replayed() {
+        let mut seed = parameter(1, "float");
+        seed.minimum = 1.0;
+        seed.maximum = 1_000_000.0;
+        let parameters = vec![seed, parameter(2, "layer")];
+        let document = serde_json::json!({"schema_version":1,"assignments":[]});
+        let payload = typed_render_request_parameters(&parameters, &document, None).unwrap();
+        assert_eq!(payload.len(), 1, "unassigned scalar must stay native");
+        assert_eq!(payload[0].kind, "layer", "timed layer declaration must survive");
+        assert!(aexcompat_broker::image_render::encode_interactive_payload(&payload).is_ok());
+        assert_eq!(parameters[0].value, 0.0, "inspection model is unchanged");
+        for value in [0.0, 1_000_001.0] {
+            let invalid = serde_json::json!({"schema_version":1,"assignments":[{"slot":1,"value":value}]});
+            assert!(typed_render_request_parameters(&parameters, &invalid, None).unwrap_err().contains("out of range"));
+        }
+        let valid = serde_json::json!({"schema_version":1,"assignments":[{"slot":1,"value":7.0}]});
+        let edited = typed_render_request_parameters(&parameters, &valid, None).unwrap();
+        assert_eq!(edited.len(), 2);
+        assert_eq!(edited[0].value, 7.0);
+        assert!(aexcompat_broker::image_render::encode_interactive_payload(&edited).unwrap().contains("f64=7"));
+    }
+
+    #[test]
     fn typed_assignment_preserves_opaque_native_defaults_and_explicit_edits() {
         let defaults = vec![parameter(1, "arbitrary_data"), parameter(2, "layer")];
         let mut omitted = defaults.clone();
