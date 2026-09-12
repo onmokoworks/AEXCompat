@@ -120,7 +120,7 @@ fn emulate_crt_locale_lock(unicorn: &mut Unicorn<'_, GuestState>, release: bool)
 // Microsoft setlocale/_wsetlocale: NULL queries the current category. All CRT
 // categories start in C. Non-C mutation must not silently leave ctype in C.
 // https://learn.microsoft.com/cpp/c-runtime-library/reference/setlocale-wsetlocale
-fn emulate_crt_wsetlocale(unicorn: &mut Unicorn<'_, GuestState>) {
+fn emulate_crt_setlocale(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
     let result = (|| -> Result<u64, String> {
         let category = read_win64_import_argument(unicorn, 0)? as i32;
         let locale = read_win64_import_argument(unicorn, 1)?;
@@ -129,17 +129,19 @@ fn emulate_crt_wsetlocale(unicorn: &mut Unicorn<'_, GuestState>) {
                 "_wsetlocale invalid category requires CRT invalid-parameter handling".into(),
             );
         }
+        let width = if wide { 2 } else { 1 };
+        let result_offset = if wide { 0 } else { 4 };
         if locale != 0 {
             for (index, expected) in [u16::from(b'C'), 0].into_iter().enumerate() {
                 let address = locale
-                    .checked_add((index * 2) as u64)
+                    .checked_add((index * width) as u64)
                     .ok_or("_wsetlocale string address overflow")?;
-                if !guest_range_has_permission(unicorn, address, 2, Prot::READ)? {
+                if !guest_range_has_permission(unicorn, address, width as u64, Prot::READ)? {
                     return Err("_wsetlocale string is inaccessible".into());
                 }
                 let mut bytes = [0; 2];
                 unicorn
-                    .mem_read(address, &mut bytes)
+                    .mem_read(address, &mut bytes[..width])
                     .map_err(|e| e.to_string())?;
                 if u16::from_le_bytes(bytes) != expected {
                     return Err("_wsetlocale non-C locale selection is not implemented".into());
@@ -147,7 +149,7 @@ fn emulate_crt_wsetlocale(unicorn: &mut Unicorn<'_, GuestState>) {
             }
         }
         if let Some(address) = unicorn.get_data().crt_wlocale_buffer {
-            return Ok(address);
+            return Ok(address + result_offset);
         }
         // One borrowed read-only page after both reserved FILE namespaces.
         let address = GUEST_STREAM_BUFFER_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE;
@@ -155,10 +157,10 @@ fn emulate_crt_wsetlocale(unicorn: &mut Unicorn<'_, GuestState>) {
             .mem_map(address, PAGE_SIZE, Prot::READ)
             .map_err(|e| e.to_string())?;
         unicorn
-            .mem_write(address, &[b'C', 0, 0, 0])
+            .mem_write(address, &[b'C', 0, 0, 0, b'C', 0])
             .map_err(|e| e.to_string())?;
         unicorn.get_data_mut().crt_wlocale_buffer = Some(address);
-        Ok(address)
+        Ok(address + result_offset)
     })();
     finish_guest_stdio(unicorn, result);
 }

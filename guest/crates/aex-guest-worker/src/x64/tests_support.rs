@@ -17867,3 +17867,46 @@ fn wsetlocale_queries_all_c_categories_and_rejects_unimplemented_mutation() {
         assert!(engine.call_win64(foreign, [0; 6]).is_err());
     }
 }
+
+#[test]
+fn setlocale_ansi_and_wide_queries_share_c_locale_state() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let narrow = STUB_BASE + 0x100;
+        let wide = narrow + 16;
+        install_win64_import(&mut engine.unicorn, narrow, dll, "setlocale").unwrap();
+        install_win64_import(&mut engine.unicorn, wide, dll, "_wsetlocale").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        let address = engine.call_win64(narrow, [0; 6]).unwrap();
+        let mut bytes = [0; 2];
+        engine.unicorn.mem_read(address, &mut bytes).unwrap();
+        assert_eq!(bytes, *b"C\0");
+        for category in 0..=5 {
+            assert_eq!(
+                engine
+                    .call_win64(narrow, [category, address, 0, 0, 0, 0])
+                    .unwrap(),
+                address
+            );
+            assert_eq!(
+                engine
+                    .call_win64(narrow, [category, 0, 0, 0, 0, 0])
+                    .unwrap(),
+                address
+            );
+        }
+        assert_eq!(engine.call_win64(wide, [0; 6]).unwrap() + 4, address);
+        for value in [b"\0\0", b"Cx", b"ja"] {
+            engine.unicorn.mem_write(DATA_BASE, value).unwrap();
+            assert!(
+                engine
+                    .call_win64(narrow, [0, DATA_BASE, 0, 0, 0, 0])
+                    .is_err()
+            );
+        }
+        assert_eq!(engine.call_win64(narrow, [0; 6]).unwrap(), address);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        install_win64_import(&mut engine.unicorn, wide + 16, "foreign.dll", "setlocale").unwrap();
+        assert!(engine.call_win64(wide + 16, [0; 6]).is_err());
+    }
+}
