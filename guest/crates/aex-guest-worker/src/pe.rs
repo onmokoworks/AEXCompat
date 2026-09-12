@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod pipl;
+mod relocation;
 
 const AMD64_MACHINE: u16 = 0x8664;
 const MAX_FILE_SIZE: usize = 128 * 1024 * 1024;
@@ -51,6 +52,8 @@ pub enum PeError {
     MissingEntryExport,
     #[error("invalid Effect PiPL resource: {0}")]
     InvalidPipl(String),
+    #[error("invalid PE base relocation: {0}")]
+    Relocation(String),
     #[error("duplicate named export {0}")]
     DuplicateExport(String),
     #[error("export {0} does not point into an executable image section")]
@@ -103,6 +106,8 @@ pub struct PeReport {
 #[derive(Debug)]
 pub struct PeImage {
     bytes: Vec<u8>,
+    base_relocations: Option<(usize, usize)>,
+    static_tls_raw_range: Option<(usize, usize)>,
     sha256: String,
     image_base: u64,
     entry_export: String,
@@ -137,6 +142,15 @@ pub struct StaticTlsImage {
 
 impl PeImage {
     pub fn parse_and_map(file: &[u8]) -> Result<Self, PeError> {
+        Self::parse_image(file, true)
+    }
+
+    /// Parse a dependency DLL without claiming that it implements the Effect ABI.
+    pub fn parse_library(file: &[u8]) -> Result<Self, PeError> {
+        Self::parse_image(file, false)
+    }
+
+    fn parse_image(file: &[u8], require_effect: bool) -> Result<Self, PeError> {
         if file.is_empty() || file.len() > MAX_FILE_SIZE {
             return Err(PeError::FileSize(file.len()));
         }
@@ -218,10 +232,11 @@ impl PeImage {
             rva_is_executable(&section_protections, rva).then_some((name.to_string(), rva))
         };
         for (name, rva) in &exports {
-            if ["EffectMain", "entryPointFunc", "entry_point"]
-                .into_iter()
-                .chain(["PluginDataEntryFunction2", "PluginDataEntryFunction"])
-                .any(|candidate| candidate == name)
+            if require_effect
+                && ["EffectMain", "entryPointFunc", "entry_point"]
+                    .into_iter()
+                    .chain(["PluginDataEntryFunction2", "PluginDataEntryFunction"])
+                    .any(|candidate| candidate == name)
                 && executable_export(name, *rva).is_none()
             {
                 return Err(PeError::NonExecutableExport(name.clone()));
@@ -256,7 +271,7 @@ impl PeImage {
         });
         // Preserve the established export paths. PiPL supplies an additional,
         // declared Effect entry only when no existing discovery export resolves.
-        if discovery_entry.is_none() {
+        if require_effect && discovery_entry.is_none() {
             if let Some(directory) = optional.data_directories.get_resource_table() {
                 direct_entry = pipl::effect_entry(
                     &mapped,
@@ -274,8 +289,14 @@ impl PeImage {
             }
             discovery_entry = direct_entry.clone();
         }
-        let entry_export = discovery_entry.ok_or(PeError::MissingEntryExport)?;
-        let entry_rva = exports[&entry_export];
+        let (entry_export, entry_rva) = if require_effect {
+            let name = discovery_entry.ok_or(PeError::MissingEntryExport)?;
+            let rva = exports[&name];
+            (name, rva)
+        } else {
+            direct_entry = None;
+            (String::new(), 0)
+        };
 
         let mut grouped: BTreeMap<String, Vec<ImportSymbol>> = BTreeMap::new();
         for import in &pe.imports {
@@ -298,6 +319,20 @@ impl PeImage {
 
         Ok(Self {
             bytes: mapped,
+            base_relocations: optional
+                .data_directories
+                .get_base_relocation_table()
+                .map(|table| (table.virtual_address as usize, table.size as usize)),
+            static_tls_raw_range: pe.tls_data.as_ref().and_then(|tls| {
+                let directory = &tls.image_tls_directory;
+                let length = directory
+                    .end_address_of_raw_data
+                    .checked_sub(directory.start_address_of_raw_data)?;
+                let start = directory
+                    .start_address_of_raw_data
+                    .checked_sub(pe.image_base)?;
+                Some((usize::try_from(start).ok()?, usize::try_from(length).ok()?))
+            }),
             sha256: format!("{:x}", Sha256::digest(file)),
             image_base: pe.image_base,
             entry_export,
@@ -317,6 +352,48 @@ impl PeImage {
         })
     }
 
+    /// Move a mapped DLL to a non-overlapping guest address using its own
+    /// relocation records. No source file bytes or provenance hashes are changed.
+    pub fn rebase(mut self, base: u64) -> Result<Self, PeError> {
+        if base == self.image_base {
+            return Ok(self);
+        }
+        if base % 65536 != 0 || base.checked_add(self.bytes.len() as u64).is_none() {
+            return Err(PeError::Relocation(
+                "unaligned or overflowing image base".into(),
+            ));
+        }
+        relocation::apply(
+            &mut self.bytes,
+            self.base_relocations,
+            self.image_base,
+            base,
+        )?;
+        let delta = base.wrapping_sub(self.image_base);
+        for callback in &mut self.tls_callbacks {
+            *callback = callback.wrapping_add(delta);
+        }
+        if let Some(tls) = &mut self.static_tls {
+            tls.index_address = tls.index_address.wrapping_add(delta);
+            if let Some((start, length)) = self.static_tls_raw_range {
+                let end = start
+                    .checked_add(length)
+                    .ok_or_else(|| PeError::Relocation("TLS range overflow".into()))?;
+                let raw = self
+                    .bytes
+                    .get(start..end)
+                    .ok_or_else(|| PeError::Relocation("TLS template outside image".into()))?;
+                let target = tls
+                    .bytes
+                    .get_mut(..length)
+                    .ok_or_else(|| PeError::Relocation("TLS template length mismatch".into()))?;
+                target.copy_from_slice(raw);
+            }
+        }
+        self.image_base = base;
+        Ok(self)
+    }
+
     pub fn mapped_bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -333,6 +410,9 @@ impl PeImage {
 
     pub fn export_address(&self, name: &str) -> Option<u64> {
         let rva = *self.exports.get(name)?;
+        if rva >= self.bytes.len() {
+            return None;
+        }
         self.section_protections
             .iter()
             .any(|section| {
@@ -342,6 +422,27 @@ impl PeImage {
             })
             .then(|| self.image_base.checked_add(rva as u64))
             .flatten()
+    }
+
+    /// Resolve named code or data exports. Forwarders require a loader and are
+    /// deliberately absent from this image-local lookup.
+    pub fn symbol_address(&self, name: &str) -> Option<u64> {
+        let rva = *self.exports.get(name)?;
+        if rva >= self.bytes.len() {
+            return None;
+        }
+        self.section_protections
+            .iter()
+            .any(|section| {
+                rva >= section.virtual_address
+                    && rva < section.virtual_address.saturating_add(section.virtual_size)
+            })
+            .then(|| self.image_base.checked_add(rva as u64))
+            .flatten()
+    }
+
+    pub fn exports(&self) -> &BTreeMap<String, usize> {
+        &self.exports
     }
 
     pub fn dll_entry_address(&self) -> Option<u64> {

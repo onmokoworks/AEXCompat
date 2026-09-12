@@ -350,4 +350,94 @@ mod tests {
             assert!(PeImage::parse_and_map(&file).is_ok(), "{export}");
         }
     }
+    #[test]
+    fn dependency_parse_and_rebase_preserve_exports_and_tls_pointers() {
+        use super::super::PeImage;
+        let mut file = pe_fixture("customEntry", b"customEntry\0");
+        let optional = 0x98;
+        let put32 = |file: &mut [u8], offset, value: u32| {
+            file[offset..offset + 4].copy_from_slice(&value.to_le_bytes())
+        };
+        let put64 = |file: &mut [u8], offset, value: u64| {
+            file[offset..offset + 8].copy_from_slice(&value.to_le_bytes())
+        };
+        put32(&mut file, optional + 16, 0x1000);
+        put32(&mut file, optional + 240 + 40 + 36, 0xc0000040); // writable TLS data
+        put32(&mut file, optional + 112 + 9 * 8, 0x2100);
+        put32(&mut file, optional + 112 + 9 * 8 + 4, 40);
+        for (offset, address) in [
+            (0x500, 0x180002140),
+            (0x508, 0x180002148),
+            (0x510, 0x180002180),
+            (0x518, 0x180002160),
+            (0x540, 0x180002188),
+            (0x560, 0x180001000),
+        ] {
+            put64(&mut file, offset, address);
+        }
+        put32(&mut file, 0x520, 8); // zero-fill after the pointer template
+        put32(&mut file, optional + 112 + 5 * 8, 0x21a0);
+        put32(&mut file, optional + 112 + 5 * 8 + 4, 20);
+        put32(&mut file, 0x5a0, 0x2000);
+        put32(&mut file, 0x5a4, 20);
+        for (index, target) in [0xa100u16, 0xa108, 0xa110, 0xa118, 0xa140, 0xa160]
+            .into_iter()
+            .enumerate()
+        {
+            file[0x5a8 + index * 2..0x5aa + index * 2].copy_from_slice(&target.to_le_bytes());
+        }
+        let original_hash = PeImage::parse_library(&file).unwrap().report().sha256;
+        let image = PeImage::parse_library(&file)
+            .unwrap()
+            .rebase(0x1000000000)
+            .unwrap();
+        assert_eq!(image.report().sha256, original_hash);
+        assert!(image.entry_address().is_none());
+        assert_eq!(image.export_address("customEntry"), Some(0x1000001000));
+        assert_eq!(image.dll_entry_address(), Some(0x1000001000));
+        assert_eq!(image.tls_callbacks(), &[0x1000001000]);
+        let tls = image.static_tls().unwrap();
+        assert_eq!(tls.index_address, 0x1000002180);
+        assert_eq!(
+            u64::from_le_bytes(tls.bytes[..8].try_into().unwrap()),
+            0x1000002188
+        );
+        assert_eq!(&tls.bytes[8..], &[0; 8]);
+        assert!(
+            PeImage::parse_library(&file)
+                .unwrap()
+                .rebase(u64::MAX)
+                .is_err()
+        );
+        let without_reloc = pe_fixture("customEntry", b"customEntry\0");
+        assert!(
+            PeImage::parse_library(&without_reloc)
+                .unwrap()
+                .rebase(0x1000000000)
+                .is_err()
+        );
+    }
+    #[test]
+    fn generic_dll_data_exports_do_not_claim_effect_abi() {
+        use super::super::PeImage;
+        let mut file = pe_fixture("EffectMain", b"EffectMain\0");
+        file[0x328..0x32c].copy_from_slice(&0x2080u32.to_le_bytes());
+        assert!(PeImage::parse_and_map(&file).is_err());
+        let library = PeImage::parse_library(&file).unwrap();
+        assert!(library.entry_address().is_none());
+        assert!(library.export_address("EffectMain").is_none());
+        assert_eq!(library.symbol_address("EffectMain"), Some(0x180002080));
+        assert_eq!(library.exports()["EffectMain"], 0x2080);
+    }
+    #[test]
+    fn oversized_section_does_not_expose_export_outside_mapped_image() {
+        use super::super::PeImage;
+        let mut file = pe_fixture("customEntry", b"customEntry\0");
+        let section = 0x98 + 240 + 40;
+        file[section + 8..section + 12].copy_from_slice(&0x4000u32.to_le_bytes());
+        file[0x328..0x32c].copy_from_slice(&0x4000u32.to_le_bytes());
+        let image = PeImage::parse_library(&file).unwrap();
+        assert!(image.symbol_address("customEntry").is_none());
+        assert!(image.export_address("customEntry").is_none());
+    }
 }
