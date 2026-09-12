@@ -17939,3 +17939,48 @@ fn crt_locale_codepage_tracks_supported_c_locale_and_preserves_errno() {
         assert!(engine.call_win64(set + 32, [0; 6]).is_err());
     }
 }
+
+#[test]
+fn pctype_exposes_c_masks_signed_prefix_and_stable_readonly_storage() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "__pctype_func").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        let address = engine.call_win64(entry, [u64::MAX; 6]).unwrap();
+        let mut table = [0; 768];
+        engine.unicorn.mem_read(address - 256, &mut table).unwrap();
+        for value in -128i32..=255 {
+            let offset = ((value + 128) * 2) as usize;
+            let mask = u16::from_le_bytes(table[offset..offset + 2].try_into().unwrap());
+            let expected = match value {
+                9..=13 => 0x28,
+                0..=31 | 127 => 0x20,
+                32 => 0x48,
+                48..=57 => 0x84,
+                65..=70 => 0x81,
+                71..=90 => 0x01,
+                97..=102 => 0x82,
+                103..=122 => 0x02,
+                33..=126 => 0x10,
+                _ => 0,
+            };
+            assert_eq!(mask, expected, "character {value}");
+        }
+        assert!(
+            guest_range_has_permission(&engine.unicorn, address - 256, 768, Prot::READ).unwrap()
+        );
+        assert!(!guest_range_has_permission(&engine.unicorn, address, 512, Prot::WRITE).unwrap());
+        assert!(!guest_range_has_permission(&engine.unicorn, address, 512, Prot::EXEC).unwrap());
+        assert_eq!(engine.call_win64(entry, [0; 6]).unwrap(), address);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        install_win64_import(
+            &mut engine.unicorn,
+            entry + 16,
+            "foreign.dll",
+            "__pctype_func",
+        )
+        .unwrap();
+        assert!(engine.call_win64(entry + 16, [0; 6]).is_err());
+    }
+}

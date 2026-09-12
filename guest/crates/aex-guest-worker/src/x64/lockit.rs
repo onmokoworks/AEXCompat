@@ -164,3 +164,53 @@ fn emulate_crt_setlocale(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
     })();
     finish_guest_stdio(unicorn, result);
 }
+
+// UCRT ctype.h permits signed-char indexing down to -127. Reserve -128 too;
+// all negative entries (including EOF -1) and high bytes are unclassified in C.
+// Mask ABI: Microsoft WinSDK ucrt/corecrt_wctype.h; _BLANK excludes tab.
+fn emulate_crt_pctype(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        if let Some(address) = unicorn.get_data().crt_pctype_buffer {
+            return Ok(address);
+        }
+        let base = GUEST_STREAM_BUFFER_BASE + MAX_GUEST_STREAM_OPENS * PAGE_SIZE + PAGE_SIZE;
+        let address = base + 256;
+        let mut table = [0u8; 768];
+        for byte in 0u8..=127 {
+            let mut mask: u16 = 0;
+            if byte.is_ascii_uppercase() {
+                mask |= 0x01;
+            }
+            if byte.is_ascii_lowercase() {
+                mask |= 0x02;
+            }
+            if byte.is_ascii_digit() {
+                mask |= 0x04;
+            }
+            if matches!(byte, 9..=13 | 32) {
+                mask |= 0x08;
+            }
+            if byte.is_ascii_punctuation() {
+                mask |= 0x10;
+            }
+            if byte.is_ascii_control() {
+                mask |= 0x20;
+            }
+            if byte == b' ' {
+                mask |= 0x40;
+            }
+            if byte.is_ascii_hexdigit() {
+                mask |= 0x80;
+            }
+            let offset = 256 + usize::from(byte) * 2;
+            table[offset..offset + 2].copy_from_slice(&mask.to_le_bytes());
+        }
+        unicorn
+            .mem_map(base, PAGE_SIZE, Prot::READ)
+            .map_err(|e| e.to_string())?;
+        unicorn.mem_write(base, &table).map_err(|e| e.to_string())?;
+        unicorn.get_data_mut().crt_pctype_buffer = Some(address);
+        Ok(address)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
