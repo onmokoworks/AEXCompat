@@ -20077,9 +20077,14 @@ fn create_directory_failures_do_not_publish_objects() {
 #[test]
 fn wstat64i32_reports_guest_directory_and_mounted_file_metadata() {
     const STAT: u64 = STUB_BASE + 0x410;
-    for dll in ["ucrtbase.dll", "api-ms-win-crt-filesystem-l1-1-0.dll"] {
+    for (dll, symbol) in [
+        ("ucrtbase.dll", "_wstat64i32"),
+        ("api-ms-win-crt-filesystem-l1-1-0.dll", "_wstat64i32"),
+        ("ucrtbase.dll", "_stat64i32"),
+        ("api-ms-win-crt-filesystem-l1-1-0.dll", "_stat64i32"),
+    ] {
         let mut engine = test_engine(&[0xc3]);
-        install_win64_import(&mut engine.unicorn, STAT, dll, "_wstat64i32").unwrap();
+        install_win64_import(&mut engine.unicorn, STAT, dll, symbol).unwrap();
         let name = "c:/programdata/test";
         let files = &mut engine.unicorn.get_data_mut().guest_files;
         files.record_directory_creation(name);
@@ -20091,6 +20096,9 @@ fn wstat64i32_reports_guest_directory_and_mounted_file_metadata() {
         let path = DATA_BASE + 0x100;
         let output = DATA_BASE + 0x900;
         let wide = |s: &str| {
+            if symbol == "_stat64i32" {
+                return s.bytes().chain([0]).collect::<Vec<_>>();
+            }
             s.encode_utf16()
                 .chain([0])
                 .flat_map(u16::to_le_bytes)

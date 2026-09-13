@@ -89,6 +89,7 @@ enum LegacyWin64Import {
     CoInitializeSecurity,
     CoInitializeEx,
     CoUninitialize,
+    Stat64i32,
     Wstat64i32,
     Fullpath,
     AddAccessAllowedAceEx,
@@ -995,6 +996,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::Fullpath
         }
         (_, "_fullpath") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_stat64i32") => {
+            LegacyWin64Import::Stat64i32
+        }
+        (_, "_stat64i32") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_wstat64i32") => {
             LegacyWin64Import::Wstat64i32
         }
@@ -1523,12 +1528,15 @@ fn install_win64_import(
                         }),
                     )?;
                 }
-                LegacyWin64Import::Wstat64i32 => {
+                LegacyWin64Import::Stat64i32 | LegacyWin64Import::Wstat64i32 => {
                     uc("write _wstat64i32 return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
                         "install _wstat64i32",
-                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                            let result = guest_wstat64i32(unicorn);
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = guest_stat64i32(
+                                unicorn,
+                                matches!(implementation, LegacyWin64Import::Wstat64i32),
+                            );
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;

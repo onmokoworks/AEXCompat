@@ -807,7 +807,7 @@ fn inherit_guest_directory_dacl(parent: &Vec<u8>) -> Vec<u8> {
 
 // Windows _stat64i32: 32-bit dev/size, 16-bit inode/mode/link/uid/gid,
 // padding at 14..16, and three 64-bit times at 24, 32, 40.
-fn guest_wstat64i32(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+fn guest_stat64i32(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) -> Result<u64, String> {
     let path = read_win64_import_argument(unicorn, 0)?;
     let output = read_win64_import_argument(unicorn, 1)?;
     if path == 0 || output == 0 {
@@ -816,27 +816,36 @@ fn guest_wstat64i32(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String
     if !guest_range_has_permission(unicorn, output, 48, Prot::WRITE)? {
         return Err("_wstat64i32 output is not fully writable".into());
     }
-    let mut units = Vec::new();
-    for index in 0..=1024u64 {
-        let address = path
-            .checked_add(index * 2)
-            .ok_or("_wstat64i32 path overflow")?;
-        if !guest_range_has_permission(unicorn, address, 2, Prot::READ)? {
-            return Err("_wstat64i32 path is not readable".into());
+    let text = if wide {
+        let mut units = Vec::new();
+        for index in 0..=1024u64 {
+            let address = path
+                .checked_add(index * 2)
+                .ok_or("_wstat64i32 path overflow")?;
+            if !guest_range_has_permission(unicorn, address, 2, Prot::READ)? {
+                return Err("_wstat64i32 path is not readable".into());
+            }
+            let bytes = unicorn
+                .mem_read_as_vec(address, 2)
+                .map_err(|e| e.to_string())?;
+            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if unit == 0 {
+                break;
+            }
+            if index == 1024 {
+                return Err("_wstat64i32 path exceeds supported bound".into());
+            }
+            units.push(unit);
         }
-        let bytes = unicorn
-            .mem_read_as_vec(address, 2)
-            .map_err(|e| e.to_string())?;
-        let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
-        if unit == 0 {
-            break;
+        String::from_utf16(&units).map_err(|_| "_wstat64i32 invalid UTF-16")?
+    } else {
+        let bytes = read_crt_stdio_c_string(unicorn, path, 2049, "_stat64i32 path")?;
+        let (text, _, invalid) = encoding_rs::SHIFT_JIS.decode(&bytes);
+        if invalid {
+            return Err("_stat64i32 invalid CP932 path".into());
         }
-        if index == 1024 {
-            return Err("_wstat64i32 path exceeds supported bound".into());
-        }
-        units.push(unit);
-    }
-    let text = String::from_utf16(&units).map_err(|_| "_wstat64i32 invalid UTF-16")?;
+        text.into_owned()
+    };
     let mut record = [0u8; 48];
     let result = guest_stat_record(&unicorn.get_data().guest_files, &text, &mut record)?;
     unicorn
