@@ -177,6 +177,7 @@ enum LegacyWin64Import {
     GetFileType,
     CreateFileW,
     CreateFileA,
+    WsPrintfA,
     ReadFile,
     GetFileSizeEx,
     SetFilePointerEx,
@@ -501,6 +502,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CreateFileW
         }
         (_, "CreateFileW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("user32.dll", "wsprintfA") => LegacyWin64Import::WsPrintfA,
+        (_, "wsprintfA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (
             "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-file-l1-1-0.dll",
             symbol @ ("CreateFileA" | "ReadFile" | "GetFileSizeEx" | "SetFilePointerEx"),
@@ -2152,6 +2155,16 @@ fn install_win64_import(
                         "install GetFileType import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_get_file_type(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WsPrintfA => {
+                    uc("write wsprintfA return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install wsprintfA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_wsprintf_a(unicorn);
+                            finish_guest_stdio(unicorn, result);
                         }),
                     )?;
                 }

@@ -5,7 +5,6 @@ fn format_guest_stdio(
     format: &[u8],
     va_list: u64,
 ) -> Result<Vec<u8>, String> {
-    let limit = MAX_CRT_STDIO_BUFFER_BYTES as usize;
     let mut argument = 0usize;
     let mut next = || -> Result<u64, String> {
         if argument >= MAX_CRT_STDIO_ARGUMENTS {
@@ -23,6 +22,20 @@ fn format_guest_stdio(
             .map_err(|e| format!("stdio va_list read: {e}"))?;
         argument += 1;
         Ok(u64::from_le_bytes(bytes))
+    };
+    format_guest_values(unicorn, format, &mut next, false)
+}
+
+fn format_guest_values(
+    unicorn: &Unicorn<'_, GuestState>,
+    format: &[u8],
+    next: &mut impl FnMut() -> Result<u64, String>,
+    winuser: bool,
+) -> Result<Vec<u8>, String> {
+    let limit = if winuser {
+        1023
+    } else {
+        MAX_CRT_STDIO_BUFFER_BYTES as usize
     };
     fn number(format: &[u8], at: &mut usize, limit: usize) -> Result<usize, String> {
         let mut value = 0usize;
@@ -63,6 +76,9 @@ fn format_guest_stdio(
                     }
                     at += 1;
                 }
+                if winuser && (plus || blank || format.get(at) == Some(&b'*')) {
+                    return Err("wsprintfA unsupported flag or dynamic width".into());
+                }
                 let width = if format.get(at) == Some(&b'*') {
                     at += 1;
                     let value = next()? as u32 as i32;
@@ -73,8 +89,11 @@ fn format_guest_stdio(
                 } else {
                     number(format, &mut at, limit)?
                 };
-                let precision = if format.get(at) == Some(&b'.') {
+                let mut precision = if format.get(at) == Some(&b'.') {
                     at += 1;
+                    if winuser && format.get(at) == Some(&b'*') {
+                        return Err("wsprintfA dynamic precision is not supported".into());
+                    }
                     if format.get(at) == Some(&b'*') {
                         at += 1;
                         let value = next()? as u32 as i32;
@@ -100,10 +119,41 @@ fn format_guest_stdio(
                         break;
                     }
                 }
-                let conversion = *format
+                let mut conversion = *format
                     .get(at)
                     .ok_or("stdio format ends before conversion")?;
                 at += 1;
+                if winuser {
+                    if length == "h" && matches!(conversion, b'S' | b'C') {
+                        conversion = conversion.to_ascii_lowercase();
+                    }
+                    let supported = match conversion {
+                        b'd' | b'i' | b'u' => matches!(length, "" | "h" | "l"),
+                        b'x' | b'X' => matches!(length, "" | "l" | "I"),
+                        b's' | b'c' => matches!(length, "" | "h"),
+                        _ => false,
+                    };
+                    if !supported {
+                        return Err(format!(
+                            "wsprintfA unsupported conversion %{length}{}",
+                            char::from(conversion)
+                        ));
+                    }
+                    if matches!(conversion, b'd' | b'i' | b'u' | b'x' | b'X')
+                        && precision == Some(0)
+                    {
+                        precision = Some(1);
+                    }
+                    if conversion == b's' && precision == Some(0) {
+                        precision = None;
+                    }
+                    if zero && precision.is_some() {
+                        return Err(
+                            "wsprintfA combined zero padding and precision is not implemented"
+                                .into(),
+                        );
+                    }
+                }
                 let mut prefix = Vec::new();
                 let mut content;
                 let numeric = matches!(conversion, b'd' | b'i' | b'u' | b'o' | b'x' | b'X');
@@ -151,7 +201,8 @@ fn format_guest_stdio(
                     if precision == Some(0) && magnitude == 0 {
                         content.clear();
                     }
-                    let zeros = precision.unwrap_or(0).saturating_sub(content.len());
+                    let measured = content.len() + if winuser { prefix.len() } else { 0 };
+                    let zeros = precision.unwrap_or(0).saturating_sub(measured);
                     if zeros > 0 {
                         let mut padded = vec![b'0'; zeros];
                         padded.extend(content);
@@ -161,14 +212,18 @@ fn format_guest_stdio(
                         if conversion == b'o' && content.first() != Some(&b'0') {
                             prefix.push(b'0');
                         }
-                        if magnitude != 0 && matches!(conversion, b'x' | b'X') {
+                        if (winuser || magnitude != 0) && matches!(conversion, b'x' | b'X') {
                             prefix.extend(if conversion == b'x' { b"0x" } else { b"0X" });
                         }
                     }
                 } else if matches!(conversion, b's' | b'c') && matches!(length, "" | "h") {
                     let value = next()?;
                     if conversion == b'c' {
-                        content = vec![value as u8];
+                        if winuser && value as u8 == 0 {
+                            content = Vec::new();
+                        } else {
+                            content = vec![value as u8];
+                        }
                     } else if let Some(maximum) = precision {
                         if value == 0 {
                             return Err("stdio null string argument is unsupported".into());
@@ -208,7 +263,7 @@ fn format_guest_stdio(
                         content = read_crt_stdio_c_string(
                             unicorn,
                             value,
-                            MAX_CRT_STDIO_BUFFER_BYTES,
+                            limit as u64 + u64::from(winuser),
                             "string argument",
                         )?;
                     }
@@ -246,4 +301,36 @@ fn format_guest_stdio(
         }
     }
     Ok(out)
+}
+
+fn guest_wsprintf_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let destination = read_win64_import_argument(unicorn, 0)?;
+    let format_address = read_win64_import_argument(unicorn, 1)?;
+    let format = read_crt_stdio_c_string(
+        unicorn,
+        format_address,
+        MAX_CRT_STDIO_FORMAT_BYTES,
+        "wsprintfA format",
+    )?;
+    let mut argument = 2usize;
+    let mut next = || {
+        if argument - 2 >= MAX_CRT_STDIO_ARGUMENTS {
+            return Err("wsprintfA argument count exceeds bound".into());
+        }
+        let value = read_win64_import_argument(unicorn, argument)?;
+        argument += 1;
+        Ok(value)
+    };
+    let mut output = format_guest_values(unicorn, &format, &mut next, true)?;
+    let count = output.len() as u64;
+    output.push(0);
+    if destination == 0
+        || !guest_range_has_permission(unicorn, destination, output.len() as u64, Prot::WRITE)?
+    {
+        return Err("wsprintfA output is not writable".into());
+    }
+    unicorn
+        .mem_write(destination, &output)
+        .map_err(|error| format!("wsprintfA output: {error}"))?;
+    Ok(count)
 }

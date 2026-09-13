@@ -22037,3 +22037,130 @@ fn windows_critical_sections_support_multi_runtime_capacity_and_reclaim_slots() 
     engine.call_win64(init, [storage, 0, 0, 0, 0, 0]).unwrap();
     assert_eq!(engine.unicorn.get_data().windows_critical_sections.len(), 1);
 }
+
+#[test]
+fn wsprintf_a_formats_register_and_stack_arguments_with_winuser_precision() {
+    let mut engine = test_engine(&[0xc3]);
+    let stub = STUB_BASE + 0x400;
+    install_win64_import(&mut engine.unicorn, stub, "user32.dll", "wsprintfA").unwrap();
+    let output = DATA_BASE + 0x100;
+    let format = DATA_BASE + 0x500;
+    let string = DATA_BASE + 0x700;
+    engine.write(format, b"%s|%08X|%ld|%.0u|%Ix|%hs\0").unwrap();
+    engine.write(string, b"abc\0").unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 71;
+    engine.unicorn.get_data_mut().windows_last_error = 72;
+    let expected = b"abc|0000002A|-1|0|123456789abcdef0|abc\0";
+    let count = engine
+        .call_win64_with_timeout(
+            stub,
+            &[
+                output,
+                format,
+                string,
+                42,
+                u64::MAX,
+                0,
+                0x123456789abcdef0,
+                string,
+            ],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_eq!(count, (expected.len() - 1) as u64);
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(output, expected.len())
+            .unwrap(),
+        expected
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 72);
+    assert!(matches!(
+        dispatch_win64_import("ucrtbase.dll", "wsprintfA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn wsprintf_a_preflights_output_and_enforces_1024_byte_buffer_bound() {
+    for (format_bytes, readonly, succeeds) in [
+        (b"%1023s".as_slice(), false, true),
+        (b"%1024s".as_slice(), false, false),
+        (b"%s".as_slice(), true, false),
+        (b"%ls".as_slice(), false, false),
+        (b"%*s".as_slice(), false, false),
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        let stub = STUB_BASE + 0x400;
+        install_win64_import(&mut engine.unicorn, stub, "user32.dll", "wsprintfA").unwrap();
+        let output = allocate_crt_region(&mut engine.unicorn, PAGE_SIZE).unwrap();
+        engine.write(output, &[0xa5; 1024]).unwrap();
+        let mut format = format_bytes.to_vec();
+        format.push(0);
+        engine.write(DATA_BASE + 0x100, &format).unwrap();
+        engine.write(DATA_BASE + 0x200, b"a\0").unwrap();
+        if readonly {
+            engine
+                .unicorn
+                .mem_protect(output, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        let result = engine.call_win64(
+            stub,
+            [output, DATA_BASE + 0x100, DATA_BASE + 0x200, 0, 0, 0],
+        );
+        if succeeds {
+            assert_eq!(result.unwrap(), 1023);
+            let bytes = engine.unicorn.mem_read_as_vec(output, 1024).unwrap();
+            assert!(bytes[..1022].iter().all(|byte| *byte == b' '));
+            assert_eq!(&bytes[1022..], b"a\0");
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                engine.unicorn.mem_read_as_vec(output, 1024).unwrap(),
+                [0xa5; 1024]
+            );
+        }
+    }
+}
+
+#[test]
+fn wsprintf_a_long_string_and_winuser_precision_differ_from_crt() {
+    let mut engine = test_engine(&[0xc3]);
+    let stub = STUB_BASE + 0x400;
+    install_win64_import(&mut engine.unicorn, stub, "user32.dll", "wsprintfA").unwrap();
+    let output = allocate_crt_region(&mut engine.unicorn, PAGE_SIZE).unwrap();
+    let string = allocate_crt_region(&mut engine.unicorn, PAGE_SIZE).unwrap();
+    let mut bytes = vec![b'a'; 1023];
+    bytes.push(0);
+    engine.write(string, &bytes).unwrap();
+    engine.write(DATA_BASE + 0x100, b"%s\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(stub, [output, DATA_BASE + 0x100, string, 0, 0, 0])
+            .unwrap(),
+        1023
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 1024).unwrap(), bytes);
+    engine.write(string, b"abc\0").unwrap();
+    engine.write(DATA_BASE + 0x100, b"%.0s|%.4d|%#x\0").unwrap();
+    let expected = b"abc|-012|0x0\0";
+    assert_eq!(
+        engine
+            .call_win64(
+                stub,
+                [output, DATA_BASE + 0x100, string, (-12i64) as u64, 0, 0]
+            )
+            .unwrap(),
+        expected.len() as u64 - 1
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(output, expected.len())
+            .unwrap(),
+        expected
+    );
+}
