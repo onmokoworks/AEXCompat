@@ -282,3 +282,160 @@ fn append_guest_allowed_ace(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64
     unicorn.mem_write(acl, &header).map_err(|e| e.to_string())?;
     Ok(1)
 }
+
+// Copy caller-owned security data before attaching it to a virtual object.
+// SID/access evaluation remains the responsibility of the object backend.
+#[derive(Clone, Debug)]
+struct GuestObjectSecurity {
+    inherit_handle: bool,
+    control: u16,
+    owner: Option<Vec<u8>>,
+    group: Option<Vec<u8>>,
+    dacl: Option<Vec<u8>>,
+}
+
+fn read_guest_object_security(
+    unicorn: &Unicorn<'_, GuestState>,
+    attributes: u64,
+) -> Result<Option<GuestObjectSecurity>, String> {
+    if attributes == 0 {
+        return Ok(None);
+    }
+    let attrs = acl_read(unicorn, attributes, 24)?;
+    if u32::from_le_bytes(attrs[..4].try_into().unwrap()) != 24 {
+        return Err("invalid SECURITY_ATTRIBUTES size".into());
+    }
+    let pointer = u64::from_le_bytes(attrs[8..16].try_into().unwrap());
+    let inherit_handle = u32::from_le_bytes(attrs[16..20].try_into().unwrap()) != 0;
+    if pointer == 0 {
+        return Ok(Some(GuestObjectSecurity {
+            inherit_handle,
+            control: 0,
+            owner: None,
+            group: None,
+            dacl: None,
+        }));
+    }
+    let header = acl_read(unicorn, pointer, 4)?;
+    let control = u16::from_le_bytes([header[2], header[3]]);
+    if header[0] != 1 {
+        return Err("invalid security descriptor revision".into());
+    }
+    if control & 0x10 != 0 {
+        return Err("object SACL support is not implemented".into());
+    }
+    let relative = control & 0x8000 != 0;
+    let descriptor = acl_read(unicorn, pointer, if relative { 20 } else { 40 })?;
+    let member = |relative_offset, absolute_offset| -> Result<u64, String> {
+        if relative {
+            let offset = u32::from_le_bytes(
+                descriptor[relative_offset..relative_offset + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            if offset == 0 {
+                Ok(0)
+            } else {
+                pointer
+                    .checked_add(offset as u64)
+                    .ok_or_else(|| "security descriptor offset overflow".into())
+            }
+        } else {
+            Ok(u64::from_le_bytes(
+                descriptor[absolute_offset..absolute_offset + 8]
+                    .try_into()
+                    .unwrap(),
+            ))
+        }
+    };
+    let sid = |address| -> Result<Option<Vec<u8>>, String> {
+        if address == 0 {
+            return Ok(None);
+        }
+        let header = acl_read(unicorn, address, 8)?;
+        if header[0] != 1 || header[1] > 15 {
+            return Err("invalid security descriptor SID".into());
+        }
+        Ok(Some(acl_read(unicorn, address, 8 + header[1] as u64 * 4)?))
+    };
+    let owner = sid(member(4, 8)?)?;
+    let group = sid(member(8, 16)?)?;
+    let acl = if control & 4 != 0 { member(16, 32)? } else { 0 };
+    let dacl = if acl == 0 {
+        None
+    } else {
+        let header = acl_read(unicorn, acl, 8)?;
+        let size = u16::from_le_bytes([header[2], header[3]]) as usize;
+        if !(2..=4).contains(&header[0]) || size < 8 || size % 4 != 0 {
+            return Err("invalid object DACL".into());
+        }
+        let bytes = acl_read(unicorn, acl, size as u64)?;
+        let count = u16::from_le_bytes([header[4], header[5]]);
+        let mut offset = 8;
+        for _ in 0..count {
+            if offset + 4 > size {
+                return Err("object DACL entry exceeds buffer".into());
+            }
+            let length = u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]) as usize;
+            if length < 4 || length % 4 != 0 || offset + length > size {
+                return Err("invalid object DACL entry size".into());
+            }
+            offset += length;
+        }
+        Some(bytes)
+    };
+    Ok(Some(GuestObjectSecurity {
+        inherit_handle,
+        control,
+        owner,
+        group,
+        dacl,
+    }))
+}
+
+impl GuestObjectSecurity {
+    fn registry_security(&self) -> Result<Option<crate::guest_registry::RegistrySecurity>, String> {
+        use crate::guest_registry::{RegistryAce, RegistrySecurity};
+        if self.owner.is_some() || self.group.is_some() {
+            return Err("registry security owner/group token mapping is not implemented".into());
+        }
+        if self.control & 4 == 0 {
+            return Ok(None);
+        }
+        let dacl = self
+            .dacl
+            .as_ref()
+            .map(|bytes| -> Result<Vec<RegistryAce>, String> {
+                let count = u16::from_le_bytes([bytes[4], bytes[5]]);
+                let mut offset = 8;
+                let mut entries = Vec::new();
+                for _ in 0..count {
+                    let length =
+                        u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]) as usize;
+                    let ace = &bytes[offset..offset + length];
+                    if length != 20 || ace[0] > 1 || ace[1] & !0x1f != 0 {
+                        return Err(
+                            "registry security ACE type/size/flags is not implemented".into()
+                        );
+                    }
+                    if ace[8..] != [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0] {
+                        return Err(
+                            "registry security trustee token mapping is not implemented".into()
+                        );
+                    }
+                    entries.push(RegistryAce {
+                        deny: ace[0] == 1,
+                        flags: ace[1],
+                        mask: u32::from_le_bytes(ace[4..8].try_into().unwrap()),
+                    });
+                    offset += length;
+                }
+                Ok(entries)
+            })
+            .transpose()?;
+        Ok(Some(RegistrySecurity {
+            dacl,
+            protected: self.control & 0x1000 != 0,
+        }))
+    }
+}

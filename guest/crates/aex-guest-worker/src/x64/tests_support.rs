@@ -22966,3 +22966,149 @@ fn registry_create_api_reopens_key_and_returns_disposition() {
         6
     );
 }
+
+#[test]
+fn object_security_copies_absolute_and_relative_descriptors() {
+    let mut engine = test_engine(&[0xc3]);
+    let attrs = DATA_BASE + 0x100;
+    let sd = DATA_BASE + 0x200;
+    let sid = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+    let acl = [2, 0, 8, 0, 0, 0, 0, 0];
+    let mut attributes = [0u8; 24];
+    attributes[..4].copy_from_slice(&24u32.to_le_bytes());
+    attributes[8..16].copy_from_slice(&sd.to_le_bytes());
+    attributes[16] = 1;
+    engine.write(attrs, &attributes).unwrap();
+    for relative in [false, true] {
+        let mut descriptor = [0u8; 80];
+        descriptor[0] = 1;
+        let control = 4u16 | if relative { 0x8000 } else { 0 };
+        descriptor[2..4].copy_from_slice(&control.to_le_bytes());
+        if relative {
+            descriptor[4..8].copy_from_slice(&40u32.to_le_bytes());
+            descriptor[8..12].copy_from_slice(&40u32.to_le_bytes());
+            descriptor[16..20].copy_from_slice(&56u32.to_le_bytes());
+        } else {
+            descriptor[8..16].copy_from_slice(&(sd + 40).to_le_bytes());
+            descriptor[16..24].copy_from_slice(&(sd + 40).to_le_bytes());
+            descriptor[32..40].copy_from_slice(&(sd + 56).to_le_bytes());
+        }
+        descriptor[40..52].copy_from_slice(&sid);
+        descriptor[56..64].copy_from_slice(&acl);
+        engine.write(sd, &descriptor).unwrap();
+        let security = read_guest_object_security(&engine.unicorn, attrs)
+            .unwrap()
+            .unwrap();
+        engine.write(sd, &[0; 80]).unwrap();
+        assert!(security.inherit_handle);
+        assert_eq!(security.control, control);
+        assert_eq!(security.owner.as_deref(), Some(sid.as_slice()));
+        assert_eq!(security.group.as_deref(), Some(sid.as_slice()));
+        assert_eq!(security.dacl.as_deref(), Some(acl.as_slice()));
+    }
+    assert!(
+        read_guest_object_security(&engine.unicorn, 0)
+            .unwrap()
+            .is_none()
+    );
+    attributes[8..16].fill(0);
+    engine.write(attrs, &attributes).unwrap();
+    let security = read_guest_object_security(&engine.unicorn, attrs)
+        .unwrap()
+        .unwrap();
+    assert!(security.inherit_handle);
+    assert_eq!(security.control, 0);
+    assert!(security.dacl.is_none());
+}
+
+#[test]
+fn object_security_rejects_unreadable_and_malformed_data() {
+    let mut engine = test_engine(&[0xc3]);
+    let attrs = DATA_BASE + 0x100;
+    let sd = DATA_BASE + 0x200;
+    let mut attributes = [0u8; 24];
+    attributes[..4].copy_from_slice(&24u32.to_le_bytes());
+    attributes[8..16].copy_from_slice(&sd.to_le_bytes());
+    engine.write(attrs, &attributes).unwrap();
+    for (control, revision, count, length) in [
+        (4u16, 0u8, 0u16, 0u16),
+        (0x14, 1, 0, 0),
+        (4, 1, 1, 0),
+        (4, 1, 1, 12),
+    ] {
+        let mut descriptor = [0u8; 64];
+        descriptor[0] = revision;
+        descriptor[2..4].copy_from_slice(&control.to_le_bytes());
+        descriptor[32..40].copy_from_slice(&(sd + 40).to_le_bytes());
+        descriptor[40] = 2;
+        descriptor[42..44].copy_from_slice(&16u16.to_le_bytes());
+        descriptor[44..46].copy_from_slice(&count.to_le_bytes());
+        descriptor[50..52].copy_from_slice(&length.to_le_bytes());
+        engine.write(sd, &descriptor).unwrap();
+        assert!(read_guest_object_security(&engine.unicorn, attrs).is_err());
+    }
+    attributes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+    engine.write(attrs, &attributes).unwrap();
+    assert!(read_guest_object_security(&engine.unicorn, attrs).is_err());
+    attributes[0] = 20;
+    engine.write(attrs, &attributes).unwrap();
+    assert!(read_guest_object_security(&engine.unicorn, attrs).is_err());
+}
+
+#[test]
+fn registry_create_security_is_copied_and_enforced_on_reopen() {
+    let mut engine = test_engine(&[0xc3]);
+    let create = STUB_BASE + 0x100;
+    let open = STUB_BASE + 0x110;
+    install_win64_import(
+        &mut engine.unicorn,
+        create,
+        "advapi32.dll",
+        "RegCreateKeyExA",
+    )
+    .unwrap();
+    install_win64_import(&mut engine.unicorn, open, "advapi32.dll", "RegOpenKeyExA").unwrap();
+    let name = DATA_BASE + 0x100;
+    let attrs = DATA_BASE + 0x200;
+    let sd = DATA_BASE + 0x300;
+    let out = DATA_BASE + 0x400;
+    let root = 0xffff_ffff_8000_0001;
+    engine.write(name, b"Restricted\0").unwrap();
+    let mut attributes = [0u8; 24];
+    attributes[..4].copy_from_slice(&24u32.to_le_bytes());
+    attributes[8..16].copy_from_slice(&sd.to_le_bytes());
+    engine.write(attrs, &attributes).unwrap();
+    let mut descriptor = [0u8; 68];
+    descriptor[0] = 1;
+    descriptor[2..4].copy_from_slice(&0x1004u16.to_le_bytes());
+    descriptor[32..40].copy_from_slice(&(sd + 40).to_le_bytes());
+    descriptor[40] = 2;
+    descriptor[42..44].copy_from_slice(&28u16.to_le_bytes());
+    descriptor[44] = 1;
+    descriptor[50] = 20;
+    descriptor[52..56].copy_from_slice(&0x80000000u32.to_le_bytes());
+    descriptor[56..68].copy_from_slice(&[1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+    engine.write(sd, &descriptor).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_args(create, &[root, name, 0, 0, 0, 0x20019, attrs, out, 0])
+            .unwrap(),
+        0
+    );
+    engine.write(sd, &[0; 68]).unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 77;
+    assert_eq!(
+        engine
+            .call_win64_args(open, &[root, name, 0, 2, out])
+            .unwrap(),
+        5
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(out, 8).unwrap(), [0; 8]);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 77);
+    assert_eq!(
+        engine
+            .call_win64_args(open, &[root, name, 0, 0x20019, out])
+            .unwrap(),
+        0
+    );
+}

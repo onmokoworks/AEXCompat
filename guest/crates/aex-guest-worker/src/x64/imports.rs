@@ -10476,7 +10476,7 @@ fn emulate_reg_create_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         if reserved != 0 || output == 0 || access & 0x300 == 0x300 {
             return Ok(87);
         }
-        if options != 0 || class != 0 || security != 0 {
+        if options != 0 || class != 0 {
             return Err(format!(
                 "RegCreateKeyExA unsupported options={options:#x} class={class:#x} security={security:#x}"
             ));
@@ -10501,11 +10501,23 @@ fn emulate_reg_create_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         if !name.is_ascii() {
             return Err("RegCreateKeyExA non-ASCII key names unsupported".into());
         }
-        let (handle, created) = match unicorn
-            .get_data_mut()
-            .registry
-            .open(key, &name, access, true)
-        {
+        let attributes = read_guest_object_security(unicorn, security)?;
+        let policy = attributes
+            .as_ref()
+            .map(GuestObjectSecurity::registry_security)
+            .transpose()?
+            .flatten();
+        let inherit_handle = attributes
+            .as_ref()
+            .is_some_and(|attrs| attrs.inherit_handle);
+        let (handle, created) = match unicorn.get_data_mut().registry.open_with_security(
+            key,
+            &name,
+            access,
+            true,
+            policy,
+            inherit_handle,
+        ) {
             Ok(value) => value,
             Err(error) => return Ok(error as u64),
         };
