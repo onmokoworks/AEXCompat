@@ -17234,6 +17234,16 @@ fn guest_file_search_returns_real_metadata_and_owns_cursor_and_handles() {
         u64::MAX
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 3);
+    engine
+        .write(query, b"C:\\\\ASSETS\\\\nvrtc64_*.dll\0")
+        .unwrap();
+    let duplicate_separator = engine
+        .call_win64(first, [query, output, 0, 0, 0, 0])
+        .unwrap();
+    assert_ne!(duplicate_separator, u64::MAX);
+    engine
+        .call_win64(close, [duplicate_separator, 0, 0, 0, 0, 0])
+        .unwrap();
     let records =
         guest_find_records(&engine.unicorn.get_data().guest_files, "c:/assets/*.*").unwrap();
     assert_eq!(records.len(), 3);
@@ -18652,6 +18662,47 @@ fn system_metrics_reports_local_guest_session_and_rejects_unknown_metrics() {
         dispatch_win64_import("foreign.dll", "GetSystemMetrics"),
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
+}
+
+#[test]
+fn beep_validates_windows_range_without_delaying_guest_execution() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", "Beep").unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 71;
+    assert_eq!(engine.call_win64(entry, [440, 1000, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    assert_eq!(engine.call_win64(entry, [36, 1000, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "Beep"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[test]
+fn windows_hook_apis_own_bounded_guest_registrations_without_host_events() {
+    let mut engine = test_engine(&[0xc3]);
+    let set = STUB_BASE + 0x100;
+    let next = set + 16;
+    let unhook = next + 16;
+    for (entry, symbol) in [
+        (set, "SetWindowsHookExA"),
+        (next, "CallNextHookEx"),
+        (unhook, "UnhookWindowsHookEx"),
+    ] {
+        install_win64_import(&mut engine.unicorn, entry, "user32.dll", symbol).unwrap();
+    }
+    let handle = engine
+        .call_win64(set, [5, TEST_CODE, 0, 1, 0, 0])
+        .unwrap();
+    assert_ne!(handle, 0);
+    assert_eq!(engine.call_win64(next, [handle, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.call_win64(unhook, [handle, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.call_win64(unhook, [handle, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 1404);
+    assert_eq!(engine.call_win64(set, [5, 0, 0, 1, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
 }
 
 #[test]
@@ -20274,6 +20325,11 @@ fn wstat64i32_reports_guest_directory_and_mounted_file_metadata() {
         assert_eq!(&result[24..32], &expected_time.to_le_bytes());
         assert_eq!(&result[48..], &[0xa5; 8]);
         assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        engine.write(path, &wide("ProgramData\\test\\")).unwrap();
+        assert_eq!(
+            engine.call_win64(STAT, [path, output, 0, 0, 0, 0]).unwrap(),
+            0
+        );
         engine.write(path, &wide("c:/missing")).unwrap();
         assert_eq!(
             engine.call_win64(STAT, [path, output, 0, 0, 0, 0]).unwrap(),

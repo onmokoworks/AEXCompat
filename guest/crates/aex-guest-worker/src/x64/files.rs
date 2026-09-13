@@ -562,8 +562,14 @@ fn guest_star_match(pattern: &[u8], name: &[u8]) -> bool {
     p == pattern.len()
 }
 
+fn canonical_guest_search_name(query: &str) -> Result<String, String> {
+    let mut path = canonical_guest_fullpath(query.as_bytes())?;
+    path.pop();
+    guest_file_name(std::str::from_utf8(&path).unwrap())
+}
+
 fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>, String> {
-    let query = guest_file_name(query)?;
+    let query = canonical_guest_search_name(query)?;
     let (directory, pattern) = query
         .rsplit_once('/')
         .ok_or("relative file search is unsupported")?;
@@ -658,7 +664,7 @@ fn emulate_guest_file_search(unicorn: &mut Unicorn<'_, GuestState>, operation: L
             if files.searches.len() >= 64 || files.next_search >= 4096 {
                 return Err("file search handle capacity exceeded".into());
             }
-            let normalized = guest_file_name(query)?;
+            let normalized = canonical_guest_search_name(query)?;
             let directory = normalized
                 .rsplit_once('/')
                 .ok_or("relative file search is unsupported")?
@@ -881,8 +887,19 @@ fn guest_stat64i32(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) -> Result<
         }
         text.into_owned()
     };
+    let normalized = if text.is_ascii() {
+        let mut path = canonical_guest_fullpath(text.as_bytes())?;
+        path.pop(); // remove the NUL used by the `_fullpath` ABI
+        String::from_utf8(path).unwrap()
+    } else {
+        return Err("_wstat64i32 non-ASCII path normalization is not implemented".into());
+    };
     let mut record = [0u8; 48];
-    let result = guest_stat_record(&unicorn.get_data().guest_files, &text, &mut record)?;
+    let result = guest_stat_record(
+        &unicorn.get_data().guest_files,
+        &normalized,
+        &mut record,
+    )?;
     unicorn
         .mem_write(output, &record)
         .map_err(|e| e.to_string())?;

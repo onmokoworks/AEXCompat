@@ -1070,6 +1070,59 @@ fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
+fn emulate_windows_hook_api(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        match operation {
+            LegacyWin64Import::SetWindowsHookExA => {
+                let kind = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+                let callback = read_win64_import_argument(unicorn, 1)?;
+                let module = read_win64_import_argument(unicorn, 2)?;
+                let thread = read_win64_import_argument(unicorn, 3)? as u32;
+                if !(-1..=14).contains(&kind)
+                    || callback == 0
+                    || !guest_range_has_permission(unicorn, callback, 1, Prot::EXEC)?
+                {
+                    unicorn.get_data_mut().windows_last_error = 87;
+                    return Ok(0);
+                }
+                if unicorn.get_data().windows_hooks.len() >= MAX_WINDOWS_HOOKS {
+                    unicorn.get_data_mut().windows_last_error = 8;
+                    return Ok(0);
+                }
+                let index = unicorn.get_data().next_windows_hook;
+                let handle = WINDOWS_HOOK_HANDLE_BASE
+                    .checked_add(index.checked_mul(16).ok_or("Windows hook token overflow")?)
+                    .ok_or("Windows hook token overflow")?;
+                unicorn.get_data_mut().next_windows_hook = index + 1;
+                unicorn
+                    .get_data_mut()
+                    .windows_hooks
+                    .insert(handle, (kind, callback, module, thread));
+                Ok(handle)
+            }
+            LegacyWin64Import::UnhookWindowsHookEx => {
+                let handle = read_win64_import_argument(unicorn, 0)?;
+                if unicorn.get_data_mut().windows_hooks.remove(&handle).is_some() {
+                    Ok(1)
+                } else {
+                    unicorn.get_data_mut().windows_last_error = 1404;
+                    Ok(0)
+                }
+            }
+            LegacyWin64Import::CallNextHookEx => {
+                // This isolated guest has no hook chain outside registrations
+                // owned above, and host UI events are never injected.
+                Ok(0)
+            }
+            _ => unreachable!("validated Windows hook operation"),
+        }
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let pointer = unicorn

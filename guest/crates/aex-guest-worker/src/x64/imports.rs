@@ -188,11 +188,15 @@ enum LegacyWin64Import {
     VcompNoOp,
     GetSystemTimeAsFileTime,
     GetSystemInfo,
+    Beep,
     VerifyVersionInfoA,
     VerSetConditionMask,
     GetVersion,
     GetVersionExA,
     GetSystemMetrics,
+    SetWindowsHookExA,
+    UnhookWindowsHookEx,
+    CallNextHookEx,
     GetUserNameA,
     GetUserNameW,
     GetHostname,
@@ -501,6 +505,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "Beep") => LegacyWin64Import::Beep,
+        (_, "Beep") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "VerifyVersionInfoA") => {
             LegacyWin64Import::VerifyVersionInfoA
         }
@@ -515,6 +521,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetVersionExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("user32.dll", "GetSystemMetrics") => LegacyWin64Import::GetSystemMetrics,
         (_, "GetSystemMetrics") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("user32.dll", "SetWindowsHookExA") => LegacyWin64Import::SetWindowsHookExA,
+        ("user32.dll", "UnhookWindowsHookEx") => LegacyWin64Import::UnhookWindowsHookEx,
+        ("user32.dll", "CallNextHookEx") => LegacyWin64Import::CallNextHookEx,
+        (_, "SetWindowsHookExA" | "UnhookWindowsHookEx" | "CallNextHookEx") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("advapi32.dll", "GetUserNameA") => LegacyWin64Import::GetUserNameA,
         (_, "GetUserNameA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "GetUserNameW") => LegacyWin64Import::GetUserNameW,
@@ -2348,6 +2360,36 @@ fn install_win64_import(
                         "install GetSystemMetrics",
                         unicorn
                             .add_code_hook(stub, stub, |uc, _, _| emulate_get_system_metrics(uc)),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::SetWindowsHookExA
+                | LegacyWin64Import::UnhookWindowsHookEx
+                | LegacyWin64Import::CallNextHookEx) => {
+                    uc("write Windows hook return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install Windows hook API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_hook_api(unicorn, operation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Beep => {
+                    uc("write Beep return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install Beep",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let frequency = read_win64_import_argument(unicorn, 0)?;
+                                let duration = read_win64_import_argument(unicorn, 1)?;
+                                if !(37..=32_767).contains(&frequency) || duration > u32::MAX as u64
+                                {
+                                    unicorn.get_data_mut().windows_last_error = 87;
+                                    return Ok(0);
+                                }
+                                Ok(1)
+                            })();
+                            finish_guest_stdio(unicorn, result);
+                        }),
                     )?;
                 }
                 LegacyWin64Import::VerifyVersionInfoA => {
