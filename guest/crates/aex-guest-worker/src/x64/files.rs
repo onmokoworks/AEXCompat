@@ -1240,3 +1240,96 @@ impl GuestFiles {
         Ok(0)
     }
 }
+
+fn guest_file_attributes_ex(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    wide: bool,
+) -> Result<u64, String> {
+    let path = read_win64_import_argument(unicorn, 0)?;
+    let level = read_win64_import_argument(unicorn, 1)? as u32;
+    let output = read_win64_import_argument(unicorn, 2)?;
+    if level != 0 || path == 0 {
+        unicorn.get_data_mut().windows_last_error = 87;
+        return Ok(0);
+    }
+    if output == 0 || !guest_range_has_permission(unicorn, output, 36, Prot::WRITE)? {
+        unicorn.get_data_mut().windows_last_error = 998;
+        return Ok(0);
+    }
+    let bytes = if wide {
+        let mut units = Vec::new();
+        for i in 0..=1024u64 {
+            let address = path
+                .checked_add(i * 2)
+                .ok_or("file attributes path overflow")?;
+            let raw = acl_read(unicorn, address, 2)?;
+            let unit = u16::from_le_bytes([raw[0], raw[1]]);
+            if unit == 0 {
+                break;
+            }
+            if i == 1024 {
+                return Err("file attributes path exceeds bound".into());
+            }
+            units.push(unit);
+        }
+        String::from_utf16(&units)
+            .map_err(|_| "file attributes invalid UTF16")?
+            .into_bytes()
+    } else {
+        read_crt_stdio_c_string(unicorn, path, 1025, "file attributes path")?
+    };
+    if bytes.is_empty() {
+        unicorn.get_data_mut().windows_last_error = 3;
+        return Ok(0);
+    }
+    let absolute = canonical_guest_fullpath(&bytes)?;
+    let text = std::str::from_utf8(&absolute[..absolute.len() - 1])
+        .map_err(|_| "file attributes encoding")?;
+    let name = guest_file_name(text.trim_end_matches(['/', '\\']))?;
+    let files = &unicorn.get_data().guest_files;
+    let mut record = [0u8; 36];
+    let times;
+    if let Some(source) = files.sources.get(&name) {
+        let metadata = match std::fs::metadata(source) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                unicorn.get_data_mut().windows_last_error = match error.kind() {
+                    std::io::ErrorKind::NotFound => 2,
+                    std::io::ErrorKind::PermissionDenied => 5,
+                    _ => return Err(format!("file attributes metadata: {error}")),
+                };
+                return Ok(0);
+            }
+        };
+        if !metadata.is_file() {
+            return Err("file attributes mounted source is not a file".into());
+        }
+        record[..4].copy_from_slice(&1u32.to_le_bytes());
+        record[28..32].copy_from_slice(&((metadata.len() >> 32) as u32).to_le_bytes());
+        record[32..36].copy_from_slice(&(metadata.len() as u32).to_le_bytes());
+        times = [metadata.created(), metadata.accessed(), metadata.modified()]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("file attributes time: {e}"))?;
+    } else if files.directory_exists(&name) {
+        record[..4].copy_from_slice(&0x10u32.to_le_bytes());
+        let stored = files
+            .directory_times
+            .get(&name)
+            .ok_or("file attributes missing directory times")?;
+        times = vec![stored[2], stored[0], stored[1]];
+    } else {
+        let parent_exists = name
+            .rsplit_once('/')
+            .is_some_and(|(parent, _)| files.directory_exists(parent));
+        unicorn.get_data_mut().windows_last_error = if parent_exists { 2 } else { 3 };
+        return Ok(0);
+    }
+    for (i, time) in times.into_iter().enumerate() {
+        record[4 + i * 8..12 + i * 8].copy_from_slice(&windows_filetime(time)?.to_le_bytes());
+    }
+    unicorn
+        .mem_write(output, &record)
+        .map_err(|e| e.to_string())?;
+    Ok(1)
+}

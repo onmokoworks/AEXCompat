@@ -89,6 +89,8 @@ enum LegacyWin64Import {
     CoInitializeSecurity,
     CoInitializeEx,
     CoUninitialize,
+    GetFileAttributesExA,
+    GetFileAttributesExW,
     Rename,
     Stat64i32,
     Wstat64i32,
@@ -997,6 +999,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::Fullpath
         }
         (_, "_fullpath") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetFileAttributesExA") => LegacyWin64Import::GetFileAttributesExA,
+        ("kernel32.dll", "GetFileAttributesExW") => LegacyWin64Import::GetFileAttributesExW,
+        (_, "GetFileAttributesExA" | "GetFileAttributesExW") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "rename") => {
             LegacyWin64Import::Rename
         }
@@ -1529,6 +1536,23 @@ fn install_win64_import(
                         "install _fullpath",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_fullpath(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetFileAttributesExA
+                | LegacyWin64Import::GetFileAttributesExW => {
+                    uc(
+                        "write file attributes return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install file attributes",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = guest_file_attributes_ex(
+                                unicorn,
+                                implementation == LegacyWin64Import::GetFileAttributesExW,
+                            );
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;

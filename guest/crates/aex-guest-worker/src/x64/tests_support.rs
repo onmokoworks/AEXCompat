@@ -23328,3 +23328,91 @@ fn rename_moves_guest_directory_tree_and_reports_errors() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn file_attributes_ex_reports_size_times_and_errors() {
+    for symbol in ["GetFileAttributesExA", "GetFileAttributesExW"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", symbol).unwrap();
+        let path = DATA_BASE + 0x100;
+        let out = DATA_BASE + 0x500;
+        let encode = |s: &str| -> Vec<u8> {
+            if symbol.ends_with('W') {
+                s.encode_utf16()
+                    .chain([0])
+                    .flat_map(u16::to_le_bytes)
+                    .collect()
+            } else {
+                s.bytes().chain([0]).collect()
+            }
+        };
+        let files = &mut engine.unicorn.get_data_mut().guest_files;
+        files.directories.insert("c:/data".into());
+        files.record_directory_creation("c:/data");
+        let times = files.directory_times["c:/data"];
+        engine.write(path, &encode("C:/data")).unwrap();
+        engine.write(out, &[0xa5; 40]).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 77;
+        assert_eq!(
+            engine.call_win64(entry, [path, 0, out, 0, 0, 0]).unwrap(),
+            1
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 77);
+        let record = engine.unicorn.mem_read_as_vec(out, 40).unwrap();
+        assert_eq!(&record[..4], &0x10u32.to_le_bytes());
+        assert_eq!(
+            &record[4..12],
+            &windows_filetime(times[2]).unwrap().to_le_bytes()
+        );
+        assert_eq!(
+            &record[12..20],
+            &windows_filetime(times[0]).unwrap().to_le_bytes()
+        );
+        assert_eq!(
+            &record[20..28],
+            &windows_filetime(times[1]).unwrap().to_le_bytes()
+        );
+        assert_eq!(&record[28..36], &[0; 8]);
+        assert_eq!(&record[36..40], &[0xa5; 4]);
+        for (name, expected) in [("C:/data/absent", 2), ("C:/absent/file", 3)] {
+            engine.write(path, &encode(name)).unwrap();
+            assert_eq!(
+                engine.call_win64(entry, [path, 0, out, 0, 0, 0]).unwrap(),
+                0
+            );
+            assert_eq!(engine.unicorn.get_data().windows_last_error, expected);
+            assert_eq!(engine.unicorn.mem_read_as_vec(out, 40).unwrap(), record);
+        }
+        assert_eq!(
+            engine.call_win64(entry, [path, 1, out, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+        let source =
+            std::env::temp_dir().join(format!("aex-attributes-{}-{symbol}", std::process::id()));
+        let file = std::fs::File::create(&source).unwrap();
+        file.set_len(0x100000007).unwrap();
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .sources
+            .insert("c:/data/asset".into(), source.clone());
+        engine.write(path, &encode("C:/data/asset")).unwrap();
+        assert_eq!(
+            engine.call_win64(entry, [path, 0, out, 0, 0, 0]).unwrap(),
+            1
+        );
+        let result = engine.unicorn.mem_read_as_vec(out, 36).unwrap();
+        assert_eq!(&result[..4], &1u32.to_le_bytes());
+        assert_eq!(&result[28..32], &1u32.to_le_bytes());
+        assert_eq!(&result[32..36], &7u32.to_le_bytes());
+        drop(file);
+        std::fs::remove_file(source).unwrap();
+        assert_eq!(
+            dispatch_win64_import("foreign.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+}
