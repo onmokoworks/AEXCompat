@@ -63,6 +63,7 @@ enum LegacyWin64Import {
     MemoryCopy,
     MemChr,
     StrStr,
+    CrtCtime64,
     CrtLocaltime64,
     CrtFtime64,
     CrtTime64,
@@ -951,6 +952,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtTime64
         }
         (_, "_time64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_ctime64") => {
+            LegacyWin64Import::CrtCtime64
+        }
+        (_, "_ctime64") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_localtime64") => {
             LegacyWin64Import::CrtLocaltime64
         }
@@ -1825,14 +1830,19 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_ftime64(uc)),
                     )?;
                 }
-                LegacyWin64Import::CrtLocaltime64 => {
+                LegacyWin64Import::CrtLocaltime64 | LegacyWin64Import::CrtCtime64 => {
                     uc(
                         "write _localtime64 return",
                         unicorn.mem_write(stub, &[0xc3]),
                     )?;
                     uc(
                         "install _localtime64",
-                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_localtime64(uc)),
+                        unicorn.add_code_hook(stub, stub, move |uc, _, _| {
+                            emulate_crt_localtime64(
+                                uc,
+                                implementation == LegacyWin64Import::CrtCtime64,
+                            )
+                        }),
                     )?;
                 }
                 LegacyWin64Import::CrtTime64 => {
@@ -9541,7 +9551,7 @@ fn emulate_get_process_affinity_mask(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>) {
+fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>, ctime: bool) {
     let result = (|| -> Result<u64, String> {
         let input = read_win64_import_argument(unicorn, 0)?;
         if input == 0 || !guest_range_has_permission(unicorn, input, 8, Prot::READ)? {
@@ -9580,6 +9590,17 @@ fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>) {
                 .insert(thread, address);
             address
         };
+        if ctime {
+            let text = format_crt_ctime(fields)?;
+            let address = address + 64; // Separate narrow static buffer in the thread's CRT page.
+            if !guest_range_has_permission(unicorn, address, text.len() as u64, Prot::WRITE)? {
+                return Err("CRT ctime result storage is not writable".into());
+            }
+            unicorn
+                .mem_write(address, text.as_bytes())
+                .map_err(|e| e.to_string())?;
+            return Ok(address);
+        }
         if !guest_range_has_permission(unicorn, address, 36, Prot::WRITE)? {
             return Err("CRT tm result storage is not writable".into());
         }
@@ -10805,5 +10826,29 @@ fn describe_unavailable_shell_execute(
         String::from_utf8_lossy(&operation),
         String::from_utf8_lossy(&target),
         parameters.len()
+    ))
+}
+
+fn format_crt_ctime(fields: [i32; 9]) -> Result<String, String> {
+    let [second, minute, hour, day, month, year, weekday, _, _] = fields;
+    let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    if !(0..7).contains(&weekday)
+        || !(0..12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+        || !(0..=8099).contains(&year)
+    {
+        return Err("ctime calendar fields out of range".into());
+    }
+    Ok(format!(
+        "{} {} {day:2} {hour:02}:{minute:02}:{second:02} {:04}\n\0",
+        weekdays[weekday as usize],
+        months[month as usize],
+        year + 1900
     ))
 }

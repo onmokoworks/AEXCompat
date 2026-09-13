@@ -23553,3 +23553,36 @@ fn fopen_resolves_root_relative_and_dot_paths_in_guest_namespace() {
     );
     std::fs::remove_file(source).unwrap();
 }
+
+#[test]
+fn ctime64_formats_static_thread_local_text_and_rejects_invalid_time() {
+    assert_eq!(
+        format_crt_ctime([5, 4, 3, 2, 0, 124, 2, 1, 0]).unwrap(),
+        "Tue Jan  2 03:04:05 2024\n\0"
+    );
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", "_ctime64").unwrap();
+    let input = DATA_BASE + 0x100;
+    engine.write(input, &1704164645i64.to_le_bytes()).unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 77;
+    let first = engine.call_win64(entry, [input, 0, 0, 0, 0, 0]).unwrap();
+    assert_ne!(first, 0);
+    let text = engine.unicorn.mem_read_as_vec(first, 26).unwrap();
+    assert_eq!(&text[24..], b"\n\0");
+    assert_eq!(&text[20..24], b"2024");
+    assert_eq!(engine.unicorn.get_data().crt_errno, 77);
+    engine.write(input, &1704251045i64.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine.call_win64(entry, [input, 0, 0, 0, 0, 0]).unwrap(),
+        first
+    );
+    assert_ne!(engine.unicorn.mem_read_as_vec(first, 26).unwrap(), text);
+    engine.write(input, &(-1i64).to_le_bytes()).unwrap();
+    assert_eq!(engine.call_win64(entry, [input, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+    assert_eq!(
+        dispatch_win64_import("foreign.dll", "_ctime64"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
