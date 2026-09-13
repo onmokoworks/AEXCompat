@@ -714,6 +714,27 @@ static int compare_subregion_addresses(const void *left, const void *right)
     return (a->addr > b->addr) - (a->addr < b->addr);
 }
 
+/* Allocation order commonly gives already sorted or reversed siblings. */
+static void sort_subregions_by_address(MemoryRegion **children, size_t count)
+{
+    bool ascending = true, descending = true;
+    for (size_t i = 1; i < count; ++i) {
+        ascending &= children[i - 1]->addr <= children[i]->addr;
+        descending &= children[i - 1]->addr >= children[i]->addr;
+        if (!ascending && !descending) {
+            qsort(children, count, sizeof(*children), compare_subregion_addresses);
+            return;
+        }
+    }
+    if (!ascending) {
+        for (size_t i = 0; i < count / 2; ++i) {
+            MemoryRegion *temporary = children[i];
+            children[i] = children[count - 1 - i];
+            children[count - 1 - i] = temporary;
+        }
+    }
+}
+
 static MemoryRegion **disjoint_subregions_by_address(MemoryRegion *mr,
                                                     size_t *count)
 {
@@ -734,7 +755,7 @@ static MemoryRegion **disjoint_subregions_by_address(MemoryRegion *mr,
     QTAILQ_FOREACH(child, &mr->subregions, subregions_link) {
         children[index++] = child;
     }
-    qsort(children, *count, sizeof(*children), compare_subregion_addresses);
+    sort_subregions_by_address(children, *count);
     for (index = 1; index < *count; ++index) {
         Int128 previous_end = int128_add(int128_make64(children[index - 1]->addr),
                                         children[index - 1]->size);

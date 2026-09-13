@@ -124,4 +124,61 @@ mod tests {
             );
         }
     }
+    #[test]
+    #[ignore = "manual memory mapping scalability measurement"]
+    fn benchmark_fragmented_mapping_updates() {
+        use unicorn_engine::Prot;
+        for count in [128u64, 1024, 4096] {
+            let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+            let started = std::time::Instant::now();
+            for index in 0..count {
+                uc.mem_map(0x100000 + index * 8192, 4096, Prot::READ | Prot::WRITE)
+                    .unwrap();
+            }
+            let map_time = started.elapsed();
+            let started = std::time::Instant::now();
+            for index in 0..count {
+                uc.mem_unmap(0x100000 + index * 8192, 4096).unwrap();
+            }
+            assert!(uc.mem_regions().unwrap().is_empty());
+            eprintln!(
+                "fragmented_mapping count={count} map={map_time:?} unmap={:?}",
+                started.elapsed()
+            );
+        }
+    }
+    #[test]
+    fn many_shuffled_regions_preserve_address_order_and_contents() {
+        use unicorn_engine::Prot;
+        let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        let address = |index: u64| 0x100000 + ((index % 8) << 40) + (index / 8) * 8192;
+        for step in 0..320u64 {
+            let index = (step * 137) % 320;
+            uc.mem_map(address(index), 4096, Prot::READ | Prot::WRITE)
+                .unwrap();
+            uc.mem_write(address(index), &index.to_le_bytes()).unwrap();
+        }
+        for index in 0..320u64 {
+            assert_eq!(
+                uc.mem_read_as_vec(address(index), 8).unwrap(),
+                index.to_le_bytes()
+            );
+        }
+        assert_eq!(
+            uc.mem_map(address(100), 4096, Prot::READ),
+            Err(uc_error::MAP)
+        );
+        for index in (0..320u64).step_by(3) {
+            uc.mem_unmap(address(index), 4096).unwrap();
+            assert!(uc.mem_read_as_vec(address(index), 1).is_err());
+        }
+        for index in 0..320u64 {
+            if index % 3 != 0 {
+                assert_eq!(
+                    uc.mem_read_as_vec(address(index), 8).unwrap(),
+                    index.to_le_bytes()
+                );
+            }
+        }
+    }
 }
