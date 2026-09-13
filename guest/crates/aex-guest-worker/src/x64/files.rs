@@ -29,6 +29,7 @@ struct GuestFileStream {
     buffer_state: Option<u64>,
 }
 
+#[track_caller]
 fn guest_file_name(name: &str) -> Result<String, String> {
     if name.is_empty() || name.len() > 1024 || !name.is_ascii() || name.contains('\0') {
         return Err("unsupported guest asset path encoding or length".into());
@@ -38,7 +39,10 @@ fn guest_file_name(name: &str) -> Result<String, String> {
         .split('/')
         .any(|part| part.is_empty() || part == "." || part == "..")
     {
-        return Err("ambiguous guest asset path".into());
+        return Err(format!(
+            "ambiguous guest asset path {name:?} (caller line {})",
+            std::panic::Location::caller().line()
+        ));
     }
     Ok(normalized)
 }
