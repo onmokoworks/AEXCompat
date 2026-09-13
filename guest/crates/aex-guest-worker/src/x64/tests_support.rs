@@ -16794,6 +16794,7 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
         engine.unicorn.get_data_mut().guest_files.streams.insert(
             token,
             GuestFileStream {
+                name: None,
                 bytes: vec![0, 127, 128, 255].into_boxed_slice(),
                 position: 0,
                 readable: true,
@@ -17759,6 +17760,7 @@ fn exposed_file_cells_preserve_unbuffered_reads_and_reject_unknown_buffering() {
     engine.unicorn.get_data_mut().guest_files.streams.insert(
         token,
         GuestFileStream {
+            name: None,
             bytes: Box::from(&b"abc"[..]),
             position: 0,
             readable: true,
@@ -21446,4 +21448,184 @@ fn stdio_zero_padded_hex_uses_existing_guest_buffer_contract() {
         engine.unicorn.mem_read_as_vec(output, 12).unwrap(),
         b"0a-000000FF\0"
     );
+}
+
+#[test]
+fn windows_asset_handles_own_binary_bytes_and_enforce_sharing_with_crt() {
+    let mut engine = test_engine(&[0xc3]);
+    let source = std::env::temp_dir().join(format!("aex-win-asset-{}.bin", std::process::id()));
+    std::fs::write(&source, b"A\r\n\x1aB").unwrap();
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .sources
+        .insert("c:/asset.bin".into(), source.clone());
+    let handle = engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .open_windows_asset("c:/asset.bin", true, true, 0)
+        .unwrap()
+        .unwrap();
+    let files = &engine.unicorn.get_data().guest_files;
+    assert_eq!(&*files.windows_files[&handle].bytes, b"A\r\n\x1aB");
+    assert_eq!(files.windows_files[&handle].position, 0);
+    assert!(files.windows_files[&handle].readable);
+    assert_eq!(files.live_bytes, 5);
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .open_windows_asset("c:/asset.bin", true, true, 1)
+            .unwrap(),
+        Err(32)
+    );
+    assert_eq!(
+        open_guest_stream(&mut engine.unicorn, b"c:/asset.bin", b"rb").unwrap(),
+        (0, 13)
+    );
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .close_windows_asset(handle)
+        .unwrap();
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .close_windows_asset(handle),
+        Err(6)
+    );
+    assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
+    let (stream, error) = open_guest_stream(&mut engine.unicorn, b"c:/asset.bin", b"rb").unwrap();
+    assert_eq!(error, 0);
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .open_windows_asset("c:/asset.bin", true, true, 0)
+            .unwrap(),
+        Err(32)
+    );
+    let second = engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .open_windows_asset("c:/asset.bin", true, true, 1)
+        .unwrap()
+        .unwrap();
+    assert_ne!(second, handle);
+    assert_ne!(second, stream);
+    assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 10);
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .close_windows_asset(second)
+        .unwrap();
+    const CLOSE: u64 = STUB_BASE + 0x410;
+    install_win64_import(&mut engine.unicorn, CLOSE, "ucrtbase.dll", "fclose").unwrap();
+    assert_eq!(
+        engine.call_win64(CLOSE, [stream, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
+    std::fs::remove_file(source).unwrap();
+}
+
+#[test]
+fn windows_asset_limits_fail_without_issuing_handles() {
+    let source = std::env::temp_dir().join(format!("aex-win-limit-{}.bin", std::process::id()));
+    std::fs::write(&source, b"xy").unwrap();
+    let mut files = GuestFiles::default();
+    files.sources.insert("c:/asset.bin".into(), source.clone());
+    assert_eq!(
+        files
+            .open_windows_asset("c:/missing.bin", true, true, 1)
+            .unwrap(),
+        Err(2)
+    );
+    assert_eq!(
+        files
+            .open_windows_asset("c:/asset.bin", true, true, 8)
+            .unwrap(),
+        Err(87)
+    );
+    files.live_bytes = MAX_GUEST_STREAM_BYTES - 1;
+    assert!(
+        files
+            .open_windows_asset("c:/asset.bin", true, true, 1)
+            .is_err()
+    );
+    assert!(files.windows_files.is_empty());
+    assert_eq!(files.next_windows_file, 0);
+    files.live_bytes = 0;
+    files.next_windows_file = 65536;
+    assert_eq!(
+        files
+            .open_windows_asset("c:/asset.bin", true, true, 1)
+            .unwrap(),
+        Err(4)
+    );
+    assert!(files.windows_files.is_empty());
+    std::fs::remove_file(source).unwrap();
+}
+
+#[test]
+fn standard_file_creation_shares_windows_handle_capacity() {
+    let source =
+        std::env::temp_dir().join(format!("aex-win-standard-limit-{}.bin", std::process::id()));
+    std::fs::write(&source, b"").unwrap();
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .sources
+        .insert("c:/empty.bin".into(), source.clone());
+    let mut handles = Vec::new();
+    for _ in 0..64 {
+        handles.push(
+            engine
+                .unicorn
+                .get_data_mut()
+                .guest_files
+                .open_windows_asset("c:/empty.bin", true, true, 1)
+                .unwrap()
+                .unwrap(),
+        );
+    }
+    const CALL: u64 = STUB_BASE + 0x410;
+    install_win64_import(&mut engine.unicorn, CALL, "ucrtbase.dll", "__acrt_iob_func").unwrap();
+    assert!(engine.call_win64(CALL, [0; 6]).is_err());
+    assert!(engine.unicorn.get_data().guest_files.streams.is_empty());
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .close_windows_asset(handles[0])
+        .unwrap();
+    engine.unicorn.get_data_mut().callback_error = None;
+    let token = engine.call_win64(CALL, [0; 6]).unwrap();
+    assert_eq!(engine.call_win64(CALL, [0; 6]).unwrap(), token);
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .open_windows_asset("c:/empty.bin", true, true, 1)
+            .unwrap(),
+        Err(4)
+    );
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.windows_files.len()
+            + engine.unicorn.get_data().guest_files.streams.len(),
+        64
+    );
+    std::fs::remove_file(source).unwrap();
 }

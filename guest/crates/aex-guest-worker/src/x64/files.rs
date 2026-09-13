@@ -18,8 +18,11 @@ struct GuestFiles {
     reports: Vec<TraceModule>,
     searches: BTreeMap<u64, GuestFileSearch>,
     next_search: u64,
+    windows_files: BTreeMap<u64, WindowsAssetFile>,
+    next_windows_file: u64,
 }
 struct GuestFileStream {
+    name: Option<String>,
     bytes: Box<[u8]>,
     position: usize,
     readable: bool,
@@ -161,7 +164,16 @@ fn open_guest_stream(
         Err(e) => return Err(format!("guest asset metadata: {e}")),
     }
     let files = &unicorn.get_data().guest_files;
-    if files.streams.len() >= 64 || files.next_stream >= MAX_GUEST_STREAM_OPENS {
+    if files
+        .windows_files
+        .values()
+        .any(|file| file.name == name && file.share & 1 == 0)
+    {
+        return Ok((0, 13));
+    }
+    if files.streams.len() + files.windows_files.len() >= 64
+        || files.next_stream >= MAX_GUEST_STREAM_OPENS
+    {
         return Ok((0, 24));
     }
     let bound = MAX_GUEST_FILE_BYTES.min(MAX_GUEST_STREAM_BYTES - files.live_bytes);
@@ -211,6 +223,7 @@ fn open_guest_stream(
     files.streams.insert(
         token,
         GuestFileStream {
+            name: Some(name.clone()),
             bytes: bytes.into_boxed_slice(),
             position: 0,
             readable: true,
@@ -239,7 +252,9 @@ fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
         if let Some(token) = files.standard_streams[index] {
             return Ok(token);
         }
-        if files.streams.len() >= 64 || files.next_stream >= MAX_GUEST_STREAM_OPENS {
+        if files.streams.len() + files.windows_files.len() >= 64
+            || files.next_stream >= MAX_GUEST_STREAM_OPENS
+        {
             return Err("standard FILE token capacity exceeded".into());
         }
         let token = GUEST_STREAM_BASE + files.next_stream * PAGE_SIZE;
@@ -252,6 +267,7 @@ fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
         files.streams.insert(
             token,
             GuestFileStream {
+                name: None,
                 bytes: Box::default(),
                 position: 0,
                 readable: index == 0,
