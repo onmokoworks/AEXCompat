@@ -120,6 +120,7 @@ enum LegacyWin64Import {
     Wfopen,
     Strerror,
     FopenS,
+    MbsuprS,
     DupenvS,
     StrcatS,
     StrcpyS,
@@ -620,6 +621,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentThreadId") => {
             LegacyWin64Import::GetCurrentThreadId
         }
+        ("api-ms-win-crt-multibyte-l1-1-0.dll" | "ucrtbase.dll", "_mbsupr_s") => {
+            LegacyWin64Import::MbsuprS
+        }
+        (_, "_mbsupr_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-environment-l1-1-0.dll" | "ucrtbase.dll", "_dupenv_s") => {
             LegacyWin64Import::DupenvS
         }
@@ -3148,6 +3153,13 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_fopen_s(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::MbsuprS => {
+                    uc("write _mbsupr_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _mbsupr_s",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_mbsupr_s(uc)),
                     )?;
                 }
                 LegacyWin64Import::DupenvS => {
@@ -10010,6 +10022,70 @@ fn emulate_dupenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = free_crt_region(unicorn, pointer);
             return Err(error);
         }
+        Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_mbsupr_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let capacity = read_win64_import_argument(unicorn, 1)?;
+        if pointer == 0 || capacity == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(22);
+        }
+        if capacity > MAX_CRT_STRING_BYTES {
+            return Err("_mbsupr_s buffer exceeds bound".into());
+        }
+        if !guest_range_has_permission(unicorn, pointer, capacity, Prot::READ | Prot::WRITE)? {
+            return Err("_mbsupr_s buffer is not readable and writable".into());
+        }
+        let bytes = read_strncpy_s_source(unicorn, pointer, capacity)?;
+        let Some(end) = bytes.iter().position(|b| *b == 0) else {
+            unicorn
+                .mem_write(pointer, &[0])
+                .map_err(|e| e.to_string())?;
+            set_guest_crt_errno(unicorn, 34)?;
+            return Ok(34);
+        };
+        let mut output = Vec::with_capacity(end + 1);
+        let mut i = 0;
+        while i < end {
+            let lead = bytes[i];
+            if matches!(lead, 0x81..=0x9f | 0xe0..=0xfc) {
+                if i + 1 >= end || !matches!(bytes[i + 1], 0x40..=0x7e | 0x80..=0xfc) {
+                    unicorn
+                        .mem_write(pointer, &[0])
+                        .map_err(|e| e.to_string())?;
+                    set_guest_crt_errno(unicorn, 42)?;
+                    return Ok(42);
+                }
+                let pair = &bytes[i..i + 2];
+                let (decoded, malformed) = encoding_rs::SHIFT_JIS.decode_without_bom_handling(pair);
+                if malformed {
+                    return Err("_mbsupr_s unmapped Shift-JIS character".into());
+                }
+                let upper = decoded.to_uppercase();
+                if upper == decoded {
+                    output.extend_from_slice(pair);
+                } else {
+                    let (encoded, substituted) = encode_shift_jis_with_default(&upper, b'?');
+                    if substituted || encoded.len() != 2 {
+                        return Err("_mbsupr_s unsupported case mapping".into());
+                    }
+                    output.extend_from_slice(&encoded);
+                }
+                i += 2;
+            } else {
+                output.push(lead.to_ascii_uppercase());
+                i += 1;
+            }
+        }
+        output.push(0);
+        unicorn
+            .mem_write(pointer, &output)
+            .map_err(|e| e.to_string())?;
         Ok(0)
     })();
     finish_guest_stdio(unicorn, result);

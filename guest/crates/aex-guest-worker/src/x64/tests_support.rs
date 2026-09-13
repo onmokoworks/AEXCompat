@@ -22661,3 +22661,32 @@ fn dupenv_s_returns_owned_copies_and_absent_values() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn mbsupr_s_preserves_dbcs_trails_and_uppercases_fullwidth_letters() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", "_mbsupr_s").unwrap();
+    let out = DATA_BASE + 0x100;
+    // 0x8361 is a katakana character: its trail byte is ASCII 'a'.
+    engine
+        .write(out, &[b'a', 0x83, 0x61, 0x82, 0x81, 0, 0xa5])
+        .unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 71;
+    assert_eq!(engine.call_win64(entry, [out, 6, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(out, 7).unwrap(),
+        [b'A', 0x83, 0x61, 0x82, 0x60, 0, 0xa5]
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+    engine.write(out, b"abc").unwrap();
+    assert_eq!(engine.call_win64(entry, [out, 3, 0, 0, 0, 0]).unwrap(), 34);
+    assert_eq!(engine.unicorn.mem_read_as_vec(out, 3).unwrap(), b"\0bc");
+    engine.write(out, &[0x81, 0]).unwrap();
+    assert_eq!(engine.call_win64(entry, [out, 2, 0, 0, 0, 0]).unwrap(), 42);
+    assert_eq!(engine.unicorn.mem_read_as_vec(out, 2).unwrap(), [0, 0]);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "_mbsupr_s"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
