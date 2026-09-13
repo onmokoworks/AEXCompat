@@ -208,7 +208,10 @@ const MAX_ITERATE_PIXELS: i64 = 16_777_216;
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
 const MAX_INSTRUCTIONS: usize = 0;
-const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
+// A plug-in call that cannot finish inside an interactive frame budget must
+// fail with a bounded crash snapshot instead of stalling the host or a corpus
+// sweep for minutes. This covers loader callbacks and effect selectors alike.
+const TIMEOUT_MICROSECONDS: u64 = 20_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
 const MAX_TRACE_BRANCH_EDGES: usize = 100_000;
