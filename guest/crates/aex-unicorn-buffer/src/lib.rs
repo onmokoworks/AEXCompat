@@ -148,6 +148,30 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "manual allocation after free measurement"]
+    fn benchmark_allocation_after_free() {
+        use unicorn_engine::Prot;
+        for count in [128u64, 1024, 4096] {
+            let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+            for index in 0..count {
+                uc.mem_map(0x100000 + index * 8192, 4096, Prot::ALL)
+                    .unwrap();
+            }
+            let started = std::time::Instant::now();
+            for index in 0..128u64 {
+                let address = 0x100000 + (index * 137 % count) * 8192;
+                uc.mem_unmap(address, 4096).unwrap();
+                uc.mem_map(address, 4096, Prot::ALL).unwrap();
+                uc.mem_write(address, &index.to_le_bytes()).unwrap();
+                assert_eq!(uc.mem_read_as_vec(address, 8).unwrap(), index.to_le_bytes());
+            }
+            eprintln!(
+                "allocation_after_free count={count} cycles=128 elapsed={:?}",
+                started.elapsed()
+            );
+        }
+    }
+    #[test]
     fn many_shuffled_regions_preserve_address_order_and_contents() {
         use unicorn_engine::Prot;
         let mut uc = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
