@@ -281,6 +281,36 @@ fn emulate_crt_stream_position(unicorn: &mut Unicorn<'_, GuestState>, operation:
         if operation == LegacyWin64Import::Ftelli64 {
             return Ok(file.position as u64);
         }
+        if operation == LegacyWin64Import::Fgetpos {
+            let output = read_win64_import_argument(unicorn, 1)?;
+            if output == 0 || !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(u32::MAX as u64);
+            }
+            unicorn
+                .mem_write(output, &(file.position as i64).to_le_bytes())
+                .map_err(|error| format!("fgetpos output write failed: {error}"))?;
+            return Ok(0);
+        }
+        if operation == LegacyWin64Import::Fsetpos {
+            let input = read_win64_import_argument(unicorn, 1)?;
+            if input == 0 || !guest_range_has_permission(unicorn, input, 8, Prot::READ)? {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(u32::MAX as u64);
+            }
+            let bytes = unicorn
+                .mem_read_as_vec(input, 8)
+                .map_err(|error| format!("fsetpos input read failed: {error}"))?;
+            let position = i64::from_le_bytes(bytes.try_into().unwrap());
+            if position < 0 {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(u32::MAX as u64);
+            }
+            let file = unicorn.get_data_mut().guest_files.streams.get_mut(&stream).unwrap();
+            file.position = position as usize;
+            file.eof = false;
+            return Ok(0);
+        }
         if operation == LegacyWin64Import::Rewind {
             unicorn
                 .get_data_mut()
@@ -541,9 +571,6 @@ fn require_unbuffered_guest_stream(
         .get(&token)
         .ok_or("stdio received stale or foreign FILE")?;
     if let Some(state) = stream.buffer_state {
-        if !guest_range_has_permission(unicorn, state, 20, Prot::READ)? {
-            return Err("FILE buffer state is not readable".into());
-        }
         let mut values = [0u8; 20];
         unicorn
             .mem_read(state, &mut values)
@@ -618,6 +645,16 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
                     .eof,
             ));
         }
+        if matches!(
+            import,
+            LegacyWin64Import::Ferror
+                | LegacyWin64Import::LockFile
+                | LegacyWin64Import::UnlockFile
+        ) {
+            let token = read_win64_import_argument(unicorn, 0)?;
+            require_unbuffered_guest_stream(unicorn, token)?;
+            return Ok(0);
+        }
         if import == LegacyWin64Import::Fgetc {
             let token = read_win64_import_argument(unicorn, 0)?;
             require_unbuffered_guest_stream(unicorn, token)?;
@@ -641,6 +678,27 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
                     u64::from(u32::MAX)
                 } // EOF is an int, not a signed byte.
             });
+        }
+        if import == LegacyWin64Import::Ungetc {
+            let character = read_win64_import_argument(unicorn, 0)? as u32;
+            let token = read_win64_import_argument(unicorn, 1)?;
+            require_unbuffered_guest_stream(unicorn, token)?;
+            let stream = unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&token)
+                .ok_or("ungetc received stale or foreign FILE")?;
+            if character == u32::MAX || stream.position == 0 {
+                return Ok(u64::from(u32::MAX));
+            }
+            let byte = character as u8;
+            if stream.bytes[stream.position - 1] != byte {
+                return Ok(u64::from(u32::MAX));
+            }
+            stream.position -= 1;
+            stream.eof = false;
+            return Ok(u64::from(byte));
         }
         if import == LegacyWin64Import::Fgets {
             let output = read_win64_import_argument(unicorn, 0)?;

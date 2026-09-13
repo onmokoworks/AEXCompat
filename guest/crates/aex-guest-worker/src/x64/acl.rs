@@ -138,6 +138,15 @@ fn emulate_windows_acl(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyW
             if pointer == 0 {
                 return Ok(0);
             }
+            if unicorn
+                .get_data()
+                .crt_heap
+                .allocations()
+                .any(|(allocation, _)| allocation == pointer)
+            {
+                free_crt_region(unicorn, pointer)?;
+                return Ok(0);
+            }
             let Some(size) = unicorn
                 .get_data()
                 .windows_acl_allocations

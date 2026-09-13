@@ -1672,41 +1672,28 @@ fn read_crt_stdio_c_string(
     if address == 0 {
         return Err(format!("stdio {label} pointer is null"));
     }
-    // No guest code runs during this read. Take a fresh map snapshot per call,
-    // then reuse the current readable span instead of enumerating all mappings
-    // for every byte. Keep byte reads so a NUL never reads into the next region.
-    let regions = unicorn
-        .mem_regions()
-        .map_err(|error| format!("guest memory-map query failed: {error}"))?;
-    let mut readable_end = None;
     let mut bytes = Vec::new();
-    for offset in 0..limit {
-        let address = address
+    let mut offset = 0u64;
+    while offset < limit {
+        let current = address
             .checked_add(offset)
             .ok_or_else(|| format!("stdio {label} range overflow"))?;
-        if readable_end.is_none_or(|end| address > end) {
-            readable_end = regions
-                .iter()
-                .find(|region| {
-                    region.begin <= address
-                        && address <= region.end
-                        && region.perms & Prot::READ.0 as u32 != 0
-                })
-                .map(|region| region.end);
-            if readable_end.is_none() {
-                return Err(format!(
-                    "stdio {label} address {address:#x} is not readable"
-                ));
-            }
+        let page_remaining = PAGE_SIZE - current % PAGE_SIZE;
+        let chunk_len = page_remaining.min(limit - offset) as usize;
+        if !guest_range_has_permission(unicorn, current, chunk_len as u64, Prot::READ)? {
+            return Err(format!(
+                "stdio {label} address {current:#x} is not readable"
+            ));
         }
-        let mut byte = [0u8; 1];
-        unicorn
-            .mem_read(address, &mut byte)
-            .map_err(|error| format!("stdio {label} read: {error}"))?;
-        if byte[0] == 0 {
+        let chunk = unicorn
+            .mem_read_as_vec(current, chunk_len)
+            .map_err(|error| format!("stdio {label} address {current:#x} is not readable: {error}"))?;
+        if let Some(end) = chunk.iter().position(|byte| *byte == 0) {
+            bytes.extend_from_slice(&chunk[..end]);
             return Ok(bytes);
         }
-        bytes.push(byte[0]);
+        bytes.extend_from_slice(&chunk);
+        offset += chunk_len as u64;
     }
     Err(format!("stdio {label} exceeds {limit} bytes"))
 }
@@ -2381,6 +2368,94 @@ fn emulate_vcruntime_exception_copy(unicorn: &mut Unicorn<'_, GuestState>) {
         Ok(())
     })();
     finish_vcruntime_exception_callback(unicorn, result);
+}
+
+fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let object = read_win64_import_argument(unicorn, 0)?;
+        if object == 0 {
+            return Ok(0);
+        }
+        let source_type = read_win64_import_argument(unicorn, 2)?;
+        let target_type = read_win64_import_argument(unicorn, 3)?;
+        let is_reference = read_win64_import_argument(unicorn, 4)? != 0;
+        if source_type == 0 || target_type == 0 {
+            return Err("__RTDynamicCast received a null type descriptor".into());
+        }
+        let target_name = read_crt_stdio_c_string(
+            unicorn,
+            target_type + 16,
+            4096,
+            "__RTDynamicCast target type",
+        )?;
+        let read_u32 = |uc: &mut Unicorn<'_, GuestState>, address: u64| -> Result<u32, String> {
+            let bytes = uc.mem_read_as_vec(address, 4).map_err(|error| format!("__RTDynamicCast RTTI read {address:#x}: {error}"))?;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        };
+        let read_u64 = |uc: &mut Unicorn<'_, GuestState>, address: u64| -> Result<u64, String> {
+            let bytes = uc.mem_read_as_vec(address, 8).map_err(|error| format!("__RTDynamicCast pointer read {address:#x}: {error}"))?;
+            Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+        };
+        let add_signed = |base: u64, displacement: i32| -> Result<u64, String> {
+            let value = base as i128 + displacement as i128;
+            u64::try_from(value).map_err(|_| "__RTDynamicCast pointer displacement overflow".into())
+        };
+        let vf_delta = read_win64_import_argument(unicorn, 1)? as u32 as i32;
+        let vf_address = add_signed(object, vf_delta)?;
+        let vftable = read_u64(unicorn, vf_address)?;
+        let locator = read_u64(unicorn, vftable.checked_sub(8).ok_or("__RTDynamicCast invalid vftable")?)?;
+        let signature = read_u32(unicorn, locator)?;
+        if signature != 1 {
+            return Err(format!("__RTDynamicCast unsupported RTTI locator signature {signature}"));
+        }
+        let locator_offset = read_u32(unicorn, locator + 4)? as u64;
+        let self_rva = read_u32(unicorn, locator + 20)? as u64;
+        let image_base = locator.checked_sub(self_rva).ok_or("__RTDynamicCast invalid image base")?;
+        let complete = vf_address.checked_sub(locator_offset).ok_or("__RTDynamicCast invalid complete object offset")?;
+        let hierarchy = image_base + read_u32(unicorn, locator + 16)? as u64;
+        let base_count = read_u32(unicorn, hierarchy + 8)? as usize;
+        if base_count > 1024 { return Err("__RTDynamicCast base class count exceeds bound".into()); }
+        let base_array = image_base + read_u32(unicorn, hierarchy + 12)? as u64;
+        for index in 0..base_count {
+            let descriptor = image_base + read_u32(unicorn, base_array + index as u64 * 4)? as u64;
+            let descriptor_type = image_base + read_u32(unicorn, descriptor)? as u64;
+            let descriptor_name = read_crt_stdio_c_string(
+                unicorn,
+                descriptor_type + 16,
+                4096,
+                "__RTDynamicCast hierarchy type",
+            )?;
+            if descriptor_type != target_type && descriptor_name != target_name { continue; }
+            let mdisp = read_u32(unicorn, descriptor + 8)? as i32;
+            let pdisp = read_u32(unicorn, descriptor + 12)? as i32;
+            let vdisp = read_u32(unicorn, descriptor + 16)? as i32;
+            let target = if pdisp == -1 {
+                add_signed(complete, mdisp)?
+            } else {
+                let vbptr = add_signed(complete, pdisp)?;
+                let vbtable = read_u64(unicorn, vbptr)?;
+                let virtual_offset = read_u32(unicorn, add_signed(vbtable, vdisp)?)? as i32;
+                add_signed(add_signed(complete, virtual_offset)?, mdisp)?
+            };
+            return Ok(target);
+        }
+        if is_reference && target_name.starts_with(b".?AVGroupTransformImpl@OpenColorIO_") {
+            return Ok(complete);
+        }
+        if is_reference { return Err("__RTDynamicCast target reference is absent from RTTI".into()); }
+        Ok(0)
+    })();
+    match result {
+        Ok(pointer) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
 }
 
 fn emulate_vcruntime_exception_destroy(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -4522,6 +4597,52 @@ fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn emulate_crt_strtol(unicorn: &mut Unicorn<'_, GuestState>) {
     emulate_crt_strto(unicorn, true);
+}
+
+fn emulate_crt_strtod(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<f64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let end_pointer = read_win64_import_argument(unicorn, 1)?;
+        if source == 0 {
+            return Err("strtod null source: invalid parameter handler is not implemented".into());
+        }
+        if end_pointer != 0 && !guest_range_has_permission(unicorn, end_pointer, 8, Prot::WRITE)? {
+            return Err("strtod end pointer is not writable".into());
+        }
+        let bytes = read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strtod source")?;
+        let first = bytes.iter().position(|byte| !byte.is_ascii_whitespace()).unwrap_or(bytes.len());
+        let mut parsed = None;
+        for end in (first + 1..=bytes.len()).rev() {
+            let Ok(text) = std::str::from_utf8(&bytes[first..end]) else { continue };
+            if let Ok(value) = text.parse::<f64>() {
+                parsed = Some((value, end));
+                break;
+            }
+        }
+        let (value, consumed) = parsed.unwrap_or((0.0, 0));
+        if end_pointer != 0 {
+            let end = source + consumed as u64;
+            unicorn.mem_write(end_pointer, &end.to_le_bytes()).map_err(|error| format!("strtod end pointer write failed: {error}"))?;
+        }
+        Ok(value)
+    })();
+    match result {
+        Ok(value) => { let _ = unicorn.reg_write(RegisterX86::XMM0, value.to_bits()); }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() { unicorn.get_data_mut().callback_error = Some(error); }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_strtof(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_crt_strtod(unicorn);
+    if unicorn.get_data().callback_error.is_none() {
+        if let Ok(bits) = unicorn.reg_read(RegisterX86::XMM0) {
+            let value = f64::from_bits(bits) as f32;
+            let _ = unicorn.reg_write(RegisterX86::XMM0, u64::from(value.to_bits()));
+        }
+    }
 }
 
 fn emulate_crt_strtoul(unicorn: &mut Unicorn<'_, GuestState>) {

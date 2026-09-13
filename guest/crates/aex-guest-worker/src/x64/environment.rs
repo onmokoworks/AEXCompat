@@ -107,12 +107,93 @@ fn emulate_crt_putenv(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_crt_putenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), u32> {
+        let name_pointer = unicorn.reg_read(RegisterX86::RCX).map_err(|_| 22u32)?;
+        let value_pointer = unicorn.reg_read(RegisterX86::RDX).map_err(|_| 22u32)?;
+        if name_pointer == 0 || value_pointer == 0 {
+            return Err(22);
+        }
+        let name = read_crt_stdio_c_string(
+            unicorn,
+            name_pointer,
+            (MAX_WINDOWS_ENVIRONMENT_NAME_BYTES + 1) as u64,
+            "_putenv_s name",
+        )
+        .map_err(|_| 22u32)?;
+        let value = read_crt_stdio_c_string(
+            unicorn,
+            value_pointer,
+            (MAX_GUEST_ENVIRONMENT_ASSIGNMENT + 1) as u64,
+            "_putenv_s value",
+        )
+        .map_err(|_| 22u32)?;
+        if name.is_empty() || !name.is_ascii() || !value.is_ascii() || name.contains(&b'=') {
+            return Err(22);
+        }
+        let name = name.to_ascii_uppercase();
+        if !unicorn.get_data().environment_overrides.contains_key(&name)
+            && unicorn.get_data().environment_overrides.len() >= MAX_GUEST_ENVIRONMENT_OVERRIDES
+        {
+            return Err(12);
+        }
+        unicorn.get_data_mut().environment_overrides.insert(
+            name,
+            if value.is_empty() { None } else { Some(value) },
+        );
+        Ok(())
+    })();
+    let returned = match result {
+        Ok(()) => 0,
+        Err(errno) => {
+            if let Err(error) = set_guest_crt_errno(unicorn, errno) {
+                finish_guest_stdio(unicorn, Err(error));
+                return;
+            }
+            errno
+        }
+    };
+    let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(returned));
+}
+
 // One narrow page followed by independent wide results, each large enough for
 // the maximum supported environment assignment. Results are borrowed for the
 // engine lifetime; querying another variable never invalidates a prior pointer.
 const MAX_GUEST_WGETENV_BUFFERS: usize = MAX_GUEST_ENVIRONMENT_OVERRIDES + 1;
 const GUEST_ENVIRONMENT_BORROWED_BYTES: u64 =
-    PAGE_SIZE * (1 + 2 * MAX_GUEST_WGETENV_BUFFERS as u64);
+    PAGE_SIZE * (2 + 2 * MAX_GUEST_WGETENV_BUFFERS as u64);
+
+fn emulate_crt_wenviron(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        if let Some(cell) = unicorn.get_data().wenviron_cell {
+            return Ok(cell);
+        }
+        let (_, base) = environment_strings_range(unicorn.get_data_mut())?;
+        let cell = base + PAGE_SIZE * (1 + 2 * MAX_GUEST_WGETENV_BUFFERS as u64);
+        unicorn
+            .mem_map(cell, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .map_err(|error| format!("CRT __p__wenviron storage map failed: {error}"))?;
+        unicorn
+            .mem_write(cell, &(cell + 8).to_le_bytes())
+            .map_err(|error| format!("CRT __p__wenviron cell write failed: {error}"))?;
+        unicorn
+            .mem_write(cell + 8, &0u64.to_le_bytes())
+            .map_err(|error| format!("CRT __p__wenviron terminator write failed: {error}"))?;
+        unicorn.get_data_mut().wenviron_cell = Some(cell);
+        Ok(cell)
+    })();
+    match result {
+        Ok(pointer) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
 
 fn emulate_crt_wgetenv(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
