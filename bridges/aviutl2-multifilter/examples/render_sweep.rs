@@ -37,6 +37,9 @@
 //!                        after discovery (default 1). Members of the same
 //!                        closure remain serial; final report order is unchanged
 //!   --filter <substr>    only plug-ins whose file name contains it (no case)
+//!   --exclude-path <substr>
+//!                        skip plug-ins whose full path contains it (repeatable,
+//!                        no case); the report records every exclusion
 //!   --verify-pixel-determinism
 //!                        repeat rendered plug-ins in a fresh session and compare pixels
 //!   --depth 8|16|32      session bit depth (a plug-in can fail at one and not
@@ -299,6 +302,7 @@ struct Options {
     skip: usize,
     render_jobs: usize,
     filter: Option<String>,
+    exclude_paths: Vec<String>,
     pixel_format: RenderPixelFormat,
     width: u32,
     height: u32,
@@ -324,6 +328,7 @@ fn parse_options() -> Options {
         skip: 0,
         render_jobs: 1,
         filter: None,
+        exclude_paths: Vec::new(),
         pixel_format: RenderPixelFormat::Argb8,
         width: 256,
         height: 144,
@@ -355,6 +360,7 @@ fn parse_options() -> Options {
                 assert!(options.render_jobs >= 1, "--render-jobs takes at least 1");
             }
             "--filter" => options.filter = Some(value().to_lowercase()),
+            "--exclude-path" => options.exclude_paths.push(value().to_lowercase()),
             "--depth" => {
                 options.pixel_format = match value().as_str() {
                     "8" => RenderPixelFormat::Argb8,
@@ -434,6 +440,17 @@ fn load_primary_image(path: &Path, width: u32, height: u32) -> std::io::Result<V
         ));
     }
     Ok(image.into_raw())
+}
+
+fn matches_target_filters(path: &Path, include: Option<&str>, excludes: &[String]) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_lowercase();
+    let full_path = path.to_string_lossy().to_lowercase();
+    include.is_none_or(|filter| file_name.contains(filter))
+        && excludes.iter().all(|exclude| !full_path.contains(exclude))
 }
 
 /// Runs independent work under a fixed concurrency bound while returning
@@ -544,12 +561,8 @@ fn main() {
     let mut matched: Vec<PathBuf> = scan
         .plugins
         .iter()
-        .filter(|path| match &options.filter {
-            Some(filter) => path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.to_lowercase().contains(filter)),
-            None => true,
+        .filter(|path| {
+            matches_target_filters(path, options.filter.as_deref(), &options.exclude_paths)
         })
         .cloned()
         .collect();
@@ -1781,6 +1794,7 @@ fn report(
             // invisible to anything comparing two reports.
             "selection": {
                 "filter": options.filter,
+                "excluded_path_substrings": options.exclude_paths,
                 "limit": options.limit,
                 "skip": options.skip,
             },
@@ -1881,6 +1895,7 @@ mod tests {
             skip: 0,
             render_jobs: 1,
             filter: None,
+            exclude_paths: Vec::new(),
             pixel_format: RenderPixelFormat::Argb8,
             width: 1,
             height: 1,
@@ -1934,6 +1949,31 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn target_filters_apply_filename_inclusion_and_repeatable_path_exclusions() {
+        let excluded = vec!["\\maxon\\".to_owned(), "\\sapphire\\".to_owned()];
+        assert!(matches_target_filters(
+            Path::new(r"C:\Plug-ins\Other\Glow.aex"),
+            Some("glow"),
+            &excluded,
+        ));
+        assert!(!matches_target_filters(
+            Path::new(r"C:\Plug-ins\MAXON\Glow.aex"),
+            Some("glow"),
+            &excluded,
+        ));
+        assert!(!matches_target_filters(
+            Path::new(r"C:\Plug-ins\Sapphire\Blur.aex"),
+            None,
+            &excluded,
+        ));
+        assert!(!matches_target_filters(
+            Path::new(r"C:\Plug-ins\Other\Blur.aex"),
+            Some("glow"),
+            &excluded,
+        ));
     }
 
     #[test]
@@ -2678,7 +2718,8 @@ mod tests {
             incomplete_reason: None,
         };
         let report_path = root.join("discovery.json");
-        let options = discovery_options(report_path.clone());
+        let mut options = discovery_options(report_path.clone());
+        options.exclude_paths = vec!["maxon".to_owned(), "sapphire".to_owned()];
         let cli = write_build_layout(&root);
         let build_start = capture_report_build_fingerprint(&root, Ok(cli.clone()));
         let build = finalize_report_build_fingerprint(&build_start, &root, Ok(cli));
@@ -2722,6 +2763,10 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
         assert_eq!(final_report["mode"], "discovery_only");
         assert!(final_report["render"].is_null());
+        assert_eq!(
+            final_report["scan"]["selection"]["excluded_path_substrings"],
+            json!(["maxon", "sapphire"])
+        );
         assert_eq!(final_report["buckets"]["exit_11_load_library"], 1);
         assert_eq!(final_report["plugins"][0]["discovery"]["ok"], false);
         assert_eq!(final_report["build"]["complete"], true);
