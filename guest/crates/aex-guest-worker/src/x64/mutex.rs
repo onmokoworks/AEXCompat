@@ -27,6 +27,7 @@ struct WindowsEvent {
     manual_reset: bool,
     signaled: bool,
     references: u32,
+    waiters: VecDeque<u32>,
 }
 impl WindowsKernelObjects {
     fn create(&mut self, name: Option<String>, owner: Option<u32>) -> Result<(u64, u32), String> {
@@ -121,7 +122,16 @@ impl WindowsKernelObjects {
             event.references += 1;
         } else {
             if let Some(name) = &name { self.names.insert(name.clone(), object); }
-            self.events.insert(object, WindowsEvent { name, manual_reset, signaled, references: 1 });
+            self.events.insert(
+                object,
+                WindowsEvent {
+                    name,
+                    manual_reset,
+                    signaled,
+                    references: 1,
+                    waiters: VecDeque::new(),
+                },
+            );
         }
         self.handles.insert(handle, object);
         (handle, if existing.is_some() { 183 } else { 0 })
@@ -323,10 +333,35 @@ fn emulate_windows_kernel_object(
         let handle = read_win64_import_argument(unicorn, 0)?;
         match operation {
             LegacyWin64Import::SetEvent | LegacyWin64Import::ResetEvent => {
-                let objects = &mut unicorn.get_data_mut().windows_objects;
-                let Some(object) = objects.handles.get(&handle).copied() else { unicorn.get_data_mut().windows_last_error = 6; return Ok(0); };
-                let Some(event) = objects.events.get_mut(&object) else { unicorn.get_data_mut().windows_last_error = 6; return Ok(0); };
-                event.signaled = operation == LegacyWin64Import::SetEvent;
+                let wake = {
+                    let objects = &mut unicorn.get_data_mut().windows_objects;
+                    let Some(object) = objects.handles.get(&handle).copied() else {
+                        unicorn.get_data_mut().windows_last_error = 6;
+                        return Ok(0);
+                    };
+                    let Some(event) = objects.events.get_mut(&object) else {
+                        unicorn.get_data_mut().windows_last_error = 6;
+                        return Ok(0);
+                    };
+                    if operation == LegacyWin64Import::ResetEvent {
+                        event.signaled = false;
+                        Vec::new()
+                    } else if event.manual_reset {
+                        event.signaled = true;
+                        event.waiters.drain(..).collect()
+                    } else if let Some(waiter) = event.waiters.pop_front() {
+                        event.signaled = false;
+                        vec![waiter]
+                    } else {
+                        event.signaled = true;
+                        Vec::new()
+                    }
+                };
+                for thread_id in wake {
+                    if !unicorn.get_data().scheduler_woken_threads.contains(&thread_id) {
+                        unicorn.get_data_mut().scheduler_woken_threads.push_back(thread_id);
+                    }
+                }
                 Ok(1)
             }
             LegacyWin64Import::ReleaseSemaphore => {
@@ -393,6 +428,49 @@ fn emulate_windows_kernel_object(
                     && read_win64_import_argument(unicorn, 2)? as u32 != 0
                 {
                     return Err("alertable mutex waits are unsupported".into());
+                }
+                let waiting_event = {
+                    let objects = &unicorn.get_data().windows_objects;
+                    objects
+                        .handles
+                        .get(&handle)
+                        .and_then(|object| objects.events.get(object))
+                        .is_some_and(|event| !event.signaled)
+                };
+                if waiting_event && timeout == u32::MAX {
+                    if unicorn.get_data().pending_windows_thread.is_none() {
+                        return Err("infinite event wait on the main guest thread is unsupported".into());
+                    }
+                    let object = unicorn.get_data().windows_objects.handles[&handle];
+                    let event = unicorn
+                        .get_data_mut()
+                        .windows_objects
+                        .events
+                        .get_mut(&object)
+                        .unwrap();
+                    if event.waiters.len() >= 1024 {
+                        return Err("event waiter count exceeds 1024".into());
+                    }
+                    if event.waiters.contains(&thread) {
+                        return Err(format!("thread {thread} is already waiting on event"));
+                    }
+                    event.waiters.push_back(thread);
+                    let rsp = unicorn
+                        .reg_read(RegisterX86::RSP)
+                        .map_err(|error| format!("event wait stack read failed: {error}"))?;
+                    let return_address = read_vcomp_u64(unicorn, rsp)?;
+                    unicorn
+                        .reg_write(RegisterX86::RSP, rsp + 8)
+                        .map_err(|error| format!("event wait stack advance failed: {error}"))?;
+                    unicorn
+                        .reg_write(RegisterX86::RIP, return_address)
+                        .map_err(|error| format!("event wait return advance failed: {error}"))?;
+                    unicorn.get_data_mut().scheduler_yield_reason = Some(SchedulerYieldReason::Event);
+                    unicorn.get_data_mut().scheduler_resume_rip = return_address;
+                    unicorn
+                        .emu_stop()
+                        .map_err(|error| format!("event wait scheduler stop failed: {error}"))?;
+                    return Ok(0);
                 }
                 unicorn
                     .get_data_mut()

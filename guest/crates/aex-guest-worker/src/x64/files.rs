@@ -12,6 +12,9 @@ struct GuestFiles {
     directory_dacls: BTreeMap<String, Vec<u8>>,
     directory_times: BTreeMap<String, [std::time::SystemTime; 3]>,
     streams: BTreeMap<u64, GuestFileStream>,
+    descriptors: BTreeMap<i32, GuestFileStream>,
+    descriptor_modes: BTreeMap<i32, i32>,
+    next_descriptor: i32,
     next_stream: u64,
     standard_streams: [Option<u64>; 3],
     live_bytes: usize,
@@ -292,6 +295,118 @@ fn emulate_crt_stream_position(unicorn: &mut Unicorn<'_, GuestState>, operation:
         file.position = next as usize;
         file.eof = false;
         Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_descriptor(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<u64, String> {
+        if let LegacyWin64Import::CrtOpen(wide) = operation {
+            let path = read_win64_import_argument(unicorn, 0)?;
+            let flags = read_win64_import_argument(unicorn, 1)? as u32;
+            if path == 0 || flags & 0x703 != 0 {
+                set_guest_crt_errno(unicorn, if path == 0 { 22 } else { 13 })?;
+                return Ok(u32::MAX as u64);
+            }
+            let name = if wide {
+                read_guest_wide_file_string(unicorn, path, 4096, "_wopen path")?.into_bytes()
+            } else {
+                read_crt_stdio_c_string(unicorn, path, 4096, "_open path")?
+            };
+            let binary = flags & 0x8000 != 0;
+            // Preserve raw bytes because _setmode may switch a descriptor to
+            // binary before its first read. Text translation belongs in _read.
+            let (token, errno) = open_guest_stream(unicorn, &name, b"rb")?;
+            if token == 0 {
+                set_guest_crt_errno(unicorn, errno)?;
+                return Ok(u32::MAX as u64);
+            }
+            let fd = unicorn.get_data().guest_files.next_descriptor.max(3);
+            if fd >= 4096 || unicorn.get_data().guest_files.descriptors.len() >= 64 {
+                unicorn
+                    .mem_unmap(token, PAGE_SIZE)
+                    .map_err(|error| format!("descriptor FILE token cleanup failed: {error}"))?;
+                let files = &mut unicorn.get_data_mut().guest_files;
+                let stream = files.streams.remove(&token).unwrap();
+                files.live_bytes -= stream.bytes.len();
+                set_guest_crt_errno(unicorn, 24)?;
+                return Ok(u32::MAX as u64);
+            }
+            let stream = unicorn.get_data_mut().guest_files.streams.remove(&token).unwrap();
+            unicorn
+                .mem_unmap(token, PAGE_SIZE)
+                .map_err(|error| format!("descriptor FILE token unmap failed: {error}"))?;
+            let files = &mut unicorn.get_data_mut().guest_files;
+            files.next_descriptor = fd + 1;
+            files.descriptors.insert(fd, stream);
+            files.descriptor_modes.insert(fd, if binary { 0x8000 } else { 0x4000 });
+            return Ok(fd as u64);
+        }
+        let fd = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+        match operation {
+            LegacyWin64Import::CrtRead => {
+                let output = read_win64_import_argument(unicorn, 1)?;
+                let count = read_win64_import_argument(unicorn, 2)? as u32 as usize;
+                let stream = match unicorn.get_data().guest_files.descriptors.get(&fd) {
+                    Some(stream) => stream,
+                    None => { set_guest_crt_errno(unicorn, 9)?; return Ok(u32::MAX as u64); }
+                };
+                let actual = count.min(stream.bytes.len().saturating_sub(stream.position));
+                if actual != 0 {
+                    if output == 0 || !guest_range_has_permission(unicorn, output, actual as u64, Prot::WRITE)? {
+                        return Err("_read output is not writable".into());
+                    }
+                    let bytes = stream.bytes[stream.position..stream.position + actual].to_vec();
+                    unicorn.mem_write(output, &bytes).map_err(|error| format!("_read output failed: {error}"))?;
+                }
+                let stream = unicorn.get_data_mut().guest_files.descriptors.get_mut(&fd).unwrap();
+                stream.position += actual;
+                stream.eof = actual < count;
+                Ok(actual as u64)
+            }
+            LegacyWin64Import::CrtClose => {
+                let Some(stream) = unicorn.get_data_mut().guest_files.descriptors.remove(&fd) else {
+                    set_guest_crt_errno(unicorn, 9)?;
+                    return Ok(u32::MAX as u64);
+                };
+                let files = &mut unicorn.get_data_mut().guest_files;
+                files.descriptor_modes.remove(&fd);
+                files.live_bytes -= stream.bytes.len();
+                Ok(0)
+            }
+            LegacyWin64Import::CrtLseek64 => {
+                let offset = read_win64_import_argument(unicorn, 1)? as i64;
+                let origin = read_win64_import_argument(unicorn, 2)? as u32;
+                let Some(stream) = unicorn.get_data_mut().guest_files.descriptors.get_mut(&fd) else {
+                    set_guest_crt_errno(unicorn, 9)?;
+                    return Ok(u64::MAX);
+                };
+                let base = match origin { 0 => 0i128, 1 => stream.position as i128, 2 => stream.bytes.len() as i128, _ => {
+                    set_guest_crt_errno(unicorn, 22)?; return Ok(u64::MAX);
+                }};
+                let next = base + offset as i128;
+                if !(0..=i64::MAX as i128).contains(&next) {
+                    set_guest_crt_errno(unicorn, 22)?;
+                    return Ok(u64::MAX);
+                }
+                stream.position = next as usize;
+                stream.eof = false;
+                Ok(next as u64)
+            }
+            LegacyWin64Import::CrtSetMode => {
+                let mode = read_win64_import_argument(unicorn, 1)? as u32 as i32;
+                if !matches!(mode, 0x4000 | 0x8000) {
+                    set_guest_crt_errno(unicorn, 22)?;
+                    return Ok(u32::MAX as u64);
+                }
+                if fd < 0 || (fd > 2 && !unicorn.get_data().guest_files.descriptors.contains_key(&fd)) {
+                    set_guest_crt_errno(unicorn, 9)?;
+                    return Ok(u32::MAX as u64);
+                }
+                Ok(unicorn.get_data_mut().guest_files.descriptor_modes.insert(fd, mode).unwrap_or(0x4000) as u32 as u64)
+            }
+            _ => Err("invalid CRT descriptor operation".into()),
+        }
     })();
     finish_guest_stdio(unicorn, result);
 }

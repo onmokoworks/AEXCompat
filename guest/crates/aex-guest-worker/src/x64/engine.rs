@@ -1830,6 +1830,40 @@ impl GuestEngine<'static> {
                         "address wake selected non-parked guest thread {thread_id}"
                     )));
                 }
+                if let Some(lock_address) = self
+                    .unicorn
+                    .get_data_mut()
+                    .scheduler_condition_locks
+                    .remove(&thread_id)
+                {
+                    let lock = self
+                        .unicorn
+                        .get_data_mut()
+                        .windows_srw_locks
+                        .get_mut(&lock_address)
+                        .ok_or_else(|| {
+                            GuestError::Callback(format!(
+                                "condition-variable SRW lock {lock_address:#x} disappeared"
+                            ))
+                        })?;
+                    if lock.owner.is_some() {
+                        return Err(GuestError::Callback(format!(
+                            "condition-variable wake cannot reacquire owned SRW lock {lock_address:#x}"
+                        )));
+                    }
+                    lock.owner = Some(thread_id);
+                    uc(
+                        "restore condition-variable SRW ownership",
+                        self.unicorn.mem_write(lock_address, &1u64.to_le_bytes()),
+                    )?;
+                    self.unicorn
+                        .get_data_mut()
+                        .windows_condition_waiters
+                        .retain(|_, waiters| {
+                            waiters.retain(|waiter| *waiter != thread_id);
+                            !waiters.is_empty()
+                        });
+                }
                 if !self.scheduler_ready.contains(&thread_id) {
                     self.scheduler_ready.push_back(thread_id);
                 }
@@ -2255,6 +2289,14 @@ impl GuestEngine<'static> {
                     return Err(GuestError::Callback(
                         "SRW lock deadlock: no runnable guest thread can release the exclusive owner"
                             .into(),
+                    ));
+                } else if yield_reason == SchedulerYieldReason::Event {
+                    return Err(GuestError::Callback(
+                        "event deadlock: no runnable guest thread can signal the event".into(),
+                    ));
+                } else if yield_reason == SchedulerYieldReason::ConditionVariable {
+                    return Err(GuestError::Callback(
+                        "condition-variable deadlock: no runnable guest thread can wake it".into(),
                     ));
                 } else {
                     // Windows permits SwitchToThread to find no runnable peer.

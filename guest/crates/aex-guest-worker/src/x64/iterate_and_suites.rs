@@ -1137,8 +1137,18 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
             .and_then(|bytes| bytes.try_into().ok())
             .map(u64::from_le_bytes)
             .unwrap_or_default();
+        let heap_live = unicorn.get_data().crt_heap.live_bytes();
+        let heap_allocations = unicorn.get_data().crt_heap.allocations().count();
+        let heap_largest = unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .map(|(_, allocation)| allocation.requested_size)
+            .max()
+            .unwrap_or(0);
+        let heap_failure = format!("{:?}", unicorn.get_data().last_crt_heap_failure);
         unicorn.get_data_mut().callback_error = Some(format!(
-            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}, caller={caller:#x}{message_suffix})"
+            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}, caller={caller:#x}, crt_heap_live={heap_live}, crt_heap_allocations={heap_allocations}, crt_heap_largest={heap_largest}, crt_heap_failure={heap_failure}{message_suffix})"
         ));
     }
     let _ = unicorn.emu_stop();

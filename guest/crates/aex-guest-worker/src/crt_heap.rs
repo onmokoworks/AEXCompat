@@ -4,11 +4,11 @@ use std::fmt;
 
 pub(crate) const CRT_HEAP_ALIGNMENT: u64 = 16;
 pub(crate) const CRT_HEAP_PAGE_SIZE: u64 = 4096;
-pub(crate) const MAX_CRT_ALLOCATION_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const MAX_CRT_HEAP_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const MAX_CRT_ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_CRT_HEAP_BYTES: u64 = 512 * 1024 * 1024;
 // Sapphire setup holds more than 4096 small C++ objects concurrently. Keep
 // a finite metadata/page-overhead bound while retaining the byte-size limits.
-pub(crate) const MAX_CRT_ALLOCATIONS: usize = 32_768;
+pub(crate) const MAX_CRT_ALLOCATIONS: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CrtAllocation {
@@ -115,7 +115,12 @@ impl CrtHeap {
         if self.live_bytes > MAX_CRT_HEAP_BYTES - requested_size {
             return Err(CrtHeapError::AggregateBudgetExceeded);
         }
-        let backing_size = align_up(requested_size, CRT_HEAP_PAGE_SIZE)?;
+        let backing_alignment = if kind == CrtAllocationKind::EnvironmentStrings {
+            CRT_HEAP_PAGE_SIZE
+        } else {
+            CRT_HEAP_ALIGNMENT
+        };
+        let backing_size = align_up(requested_size, backing_alignment)?;
         Ok(CrtAllocation {
             requested_size,
             backing_size,
@@ -129,7 +134,12 @@ impl CrtHeap {
         range_end: u64,
         allocation: CrtAllocation,
     ) -> Result<u64, CrtHeapError> {
-        self.first_fit_aligned(range_start, range_end, allocation, CRT_HEAP_PAGE_SIZE)
+        let alignment = if allocation.kind == CrtAllocationKind::EnvironmentStrings {
+            CRT_HEAP_PAGE_SIZE
+        } else {
+            CRT_HEAP_ALIGNMENT
+        };
+        self.first_fit_aligned(range_start, range_end, allocation, alignment)
     }
 
     pub(crate) fn first_fit_aligned(
@@ -142,7 +152,7 @@ impl CrtHeap {
         if alignment == 0 || !alignment.is_power_of_two() {
             return Err(CrtHeapError::InvalidAlignment);
         }
-        let mapping_alignment = alignment.max(CRT_HEAP_PAGE_SIZE);
+        let mapping_alignment = alignment.max(CRT_HEAP_ALIGNMENT);
         let hinted = self
             .allocation_hints
             .borrow()
@@ -235,7 +245,7 @@ impl CrtHeap {
         if retained_bytes > MAX_CRT_HEAP_BYTES - requested_size {
             return Err(CrtHeapError::AggregateBudgetExceeded);
         }
-        let backing_size = align_up(requested_size, CRT_HEAP_PAGE_SIZE)?;
+        let backing_size = align_up(requested_size, CRT_HEAP_ALIGNMENT)?;
         Ok(CrtAllocation {
             requested_size,
             backing_size,
@@ -409,11 +419,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zero_size_is_unique_minimum_allocation_and_page_backed() {
+    fn zero_size_is_unique_minimum_allocation_and_aligned() {
         let heap = CrtHeap::default();
         let allocation = heap.prepare_allocation(0).unwrap();
         assert_eq!(allocation.requested_size, 1);
-        assert_eq!(allocation.backing_size, CRT_HEAP_PAGE_SIZE);
+        assert_eq!(allocation.backing_size, CRT_HEAP_ALIGNMENT);
     }
 
     #[test]
@@ -431,7 +441,7 @@ mod tests {
             heap.prepare_allocation(MAX_CRT_ALLOCATION_BYTES + 1),
             Err(CrtHeapError::AllocationTooLarge)
         );
-        for index in 0..2 {
+        for index in 0..(MAX_CRT_HEAP_BYTES / MAX_CRT_ALLOCATION_BYTES) {
             let allocation = heap.prepare_allocation(MAX_CRT_ALLOCATION_BYTES).unwrap();
             heap.insert(0x1000 + index * 0x1000, allocation).unwrap();
         }
@@ -465,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn first_fit_reuses_freed_page_and_preserves_alignment() {
+    fn first_fit_reuses_freed_slot_and_preserves_alignment() {
         let mut heap = CrtHeap::default();
         let allocation = heap.prepare_allocation(17).unwrap();
         let first = heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap();
@@ -473,7 +483,7 @@ mod tests {
         heap.insert(first, allocation).unwrap();
         let second = heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap();
         heap.insert(second, allocation).unwrap();
-        assert_eq!(second, first + CRT_HEAP_PAGE_SIZE);
+        assert_eq!(second, first + allocation.backing_size);
         heap.remove(first).unwrap();
         assert_eq!(
             heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap(),

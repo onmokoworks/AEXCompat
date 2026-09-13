@@ -662,24 +662,23 @@ fn install_double_import(
     .map(|_| ())
 }
 
-fn emulate_fdclass(unicorn: &mut Unicorn<'_, GuestState>) {
+fn emulate_fdclass(unicorn: &mut Unicorn<'_, GuestState>, float: bool) {
     let result = (|| -> Result<u64, String> {
         let xmm = unicorn.reg_read_long(RegisterX86::XMM0).map_err(|e| e.to_string())?;
-        let bits = u64::from_le_bytes(xmm[..8].try_into().unwrap());
-        let sign = bits >> 63 != 0;
-        let exponent = (bits >> 52) & 0x7ff;
-        let fraction = bits & ((1u64 << 52) - 1);
-        Ok(match (exponent, fraction, sign) {
-            (0x7ff, 0, true) => 0x0004,
-            (0x7ff, 0, false) => 0x0200,
-            (0x7ff, fraction, _) if fraction & (1u64 << 51) == 0 => 0x0001,
-            (0x7ff, _, _) => 0x0002,
-            (0, 0, true) => 0x0020,
-            (0, 0, false) => 0x0040,
-            (0, _, true) => 0x0010,
-            (0, _, false) => 0x0080,
-            (_, _, true) => 0x0008,
-            (_, _, false) => 0x0100,
+        let (sign, exponent, fraction, max_exponent, quiet_bit) = if float {
+            let bits = u32::from_le_bytes(xmm[..4].try_into().unwrap()) as u64;
+            (bits >> 31 != 0, (bits >> 23) & 0xff, bits & ((1 << 23) - 1), 0xff, 1 << 22)
+        } else {
+            let bits = u64::from_le_bytes(xmm[..8].try_into().unwrap());
+            (bits >> 63 != 0, (bits >> 52) & 0x7ff, bits & ((1u64 << 52) - 1), 0x7ff, 1u64 << 51)
+        };
+        let _ = (sign, quiet_bit);
+        Ok(match (exponent, fraction) {
+            (exponent, fraction) if exponent == max_exponent && fraction != 0 => 2,
+            (exponent, 0) if exponent == max_exponent => 1,
+            (0, 0) => 0,
+            (0, _) => u64::from((-2i16) as u16),
+            _ => u64::from((-1i16) as u16),
         })
     })();
     finish_guest_stdio(unicorn, result);
@@ -887,17 +886,23 @@ fn allocate_crt_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     size: u64,
 ) -> Result<u64, CrtHeapError> {
-    ensure_crt_heap_mapping(unicorn)?;
-    let allocation = unicorn.get_data().crt_heap.prepare_allocation(size)?;
-    let pointer = unicorn
-        .get_data()
-        .crt_heap
-        .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
-    unicorn
-        .get_data_mut()
-        .crt_heap
-        .insert(pointer, allocation)?;
-    Ok(pointer)
+    let result: Result<u64, CrtHeapError> = (|| {
+        ensure_crt_heap_mapping(unicorn)?;
+        let allocation = unicorn.get_data().crt_heap.prepare_allocation(size)?;
+        let pointer = unicorn
+            .get_data()
+            .crt_heap
+            .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
+        unicorn
+            .get_data_mut()
+            .crt_heap
+            .insert(pointer, allocation)?;
+        Ok(pointer)
+    })();
+    if let Err(error) = result {
+        unicorn.get_data_mut().last_crt_heap_failure = Some((size, error.to_string()));
+    }
+    result
 }
 
 fn ensure_crt_heap_mapping(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), CrtHeapError> {
@@ -1893,13 +1898,70 @@ fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>, bounded: bool) {
                 return Ok(0);
             }
         }
-        Err(format!(
-            "_stricmp strings exceed {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
-        ))
+        if bounded {
+            Ok(0)
+        } else {
+            Err(format!(
+                "_stricmp strings exceed {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+            ))
+        }
     })();
     match result {
         Ok(ordering) => {
             let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(ordering as u32));
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_crt_wcstombs(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let source = read_win64_import_argument(unicorn, 1)?;
+        let count = read_win64_import_argument(unicorn, 2)?;
+        if source == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(u64::MAX);
+        }
+        let text = read_guest_wide_file_string(unicorn, source, 4096, "wcstombs source")?;
+        if !text.is_ascii() {
+            set_guest_crt_errno(unicorn, 42)?;
+            return Ok(u64::MAX);
+        }
+        let bytes = text.as_bytes();
+        if destination == 0 {
+            return Ok(bytes.len() as u64);
+        }
+        let writable = usize::try_from(count)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len().saturating_add(1));
+        if writable == 0 {
+            return Ok(0);
+        }
+        if !guest_range_has_permission(unicorn, destination, writable as u64, Prot::WRITE)? {
+            return Err("wcstombs destination is not writable".into());
+        }
+        let copied = writable.min(bytes.len());
+        if copied != 0 {
+            unicorn
+                .mem_write(destination, &bytes[..copied])
+                .map_err(|error| format!("wcstombs destination write failed: {error}"))?;
+        }
+        if writable > bytes.len() {
+            unicorn
+                .mem_write(destination + bytes.len() as u64, &[0])
+                .map_err(|error| format!("wcstombs terminator write failed: {error}"))?;
+        }
+        Ok(copied as u64)
+    })();
+    match result {
+        Ok(value) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, value);
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {

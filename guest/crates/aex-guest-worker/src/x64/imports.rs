@@ -51,6 +51,7 @@ enum LegacyWin64Import {
     Free,
     CrtStrdup,
     CrtStricmp,
+    CrtWcstombs,
     CrtIsSpace,
     CrtIsAlnum,
     CrtAsciiClass(CrtAsciiClass),
@@ -146,6 +147,11 @@ enum LegacyWin64Import {
     Fseeki64,
     Ftelli64,
     Rewind,
+    CrtOpen(bool),
+    CrtRead,
+    CrtClose,
+    CrtLseek64,
+    CrtSetMode,
     Fopen,
     Wfopen,
     Strerror,
@@ -189,6 +195,7 @@ enum LegacyWin64Import {
     FloorF,
     FmodF,
     FdClass,
+    DClass,
     LRound,
     LRoundF,
     Log,
@@ -319,6 +326,10 @@ enum LegacyWin64Import {
     AcquireSrwLockExclusive,
     TryAcquireSrwLockExclusive,
     ReleaseSrwLockExclusive,
+    InitializeConditionVariable,
+    SleepConditionVariableSrw,
+    WakeConditionVariable,
+    WakeAllConditionVariable,
     ExpandEnvironmentStringsA,
     GetModuleHandleA,
     GetModuleHandleW,
@@ -917,6 +928,21 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "ReleaseSRWLockExclusive") => {
             LegacyWin64Import::ReleaseSrwLockExclusive
         }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "InitializeConditionVariable") => {
+            LegacyWin64Import::InitializeConditionVariable
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "SleepConditionVariableSRW") => {
+            LegacyWin64Import::SleepConditionVariableSrw
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "WakeConditionVariable") => {
+            LegacyWin64Import::WakeConditionVariable
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "WakeAllConditionVariable") => {
+            LegacyWin64Import::WakeAllConditionVariable
+        }
+        (_, "InitializeConditionVariable" | "SleepConditionVariableSRW" | "WakeConditionVariable" | "WakeAllConditionVariable") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("kernel32.dll" | "kernelbase.dll", "ExpandEnvironmentStringsA") => {
             LegacyWin64Import::ExpandEnvironmentStringsA
         }
@@ -1002,6 +1028,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::FdClass
         }
         (_, "_fdclass") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "_dclass") => {
+            LegacyWin64Import::DClass
+        }
+        (_, "_dclass") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lround") => LegacyWin64Import::LRound,
         (_, "lround") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lroundf") => {
@@ -1081,6 +1111,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         (_, "strchr") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "atoi") => LegacyWin64Import::Atoi,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "wcstombs") => {
+            LegacyWin64Import::CrtWcstombs
+        }
+        (_, "wcstombs") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "atoi") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetNamedSecurityInfoA") => LegacyWin64Import::SetNamedSecurityInfoA,
         (_, "SetNamedSecurityInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
@@ -1290,6 +1324,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_ftelli64") => LegacyWin64Import::Ftelli64,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "rewind") => LegacyWin64Import::Rewind,
         (_, "_fseeki64" | "_ftelli64" | "rewind") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_open") => LegacyWin64Import::CrtOpen(false),
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_wopen") => LegacyWin64Import::CrtOpen(true),
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_read") => LegacyWin64Import::CrtRead,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_close") => LegacyWin64Import::CrtClose,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_lseeki64") => LegacyWin64Import::CrtLseek64,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_setmode") => LegacyWin64Import::CrtSetMode,
+        (_, "_open" | "_wopen" | "_read" | "_close" | "_lseeki64" | "_setmode") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         (_, "fflush") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fwrite") => LegacyWin64Import::Fwrite,
         (_, "fwrite") => return Win64ImportDispatch::UnsupportedLegacyImport,
@@ -1983,6 +2026,15 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_atoi(uc)),
                     )?;
                 }
+                LegacyWin64Import::CrtWcstombs => {
+                    uc("write wcstombs return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install wcstombs import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_wcstombs(unicorn);
+                        }),
+                    )?;
+                }
                 LegacyWin64Import::StrRChr => {
                     uc("write strrchr return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
@@ -2360,7 +2412,16 @@ fn install_win64_import(
                     uc(
                         "install _fdclass",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                            emulate_fdclass(unicorn);
+                            emulate_fdclass(unicorn, true);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::DClass => {
+                    uc("write _dclass return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _dclass",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_fdclass(unicorn, false);
                         }),
                     )?;
                 }
@@ -3395,6 +3456,18 @@ fn install_win64_import(
                         }),
                     )?;
                 }
+                operation @ (LegacyWin64Import::InitializeConditionVariable
+                | LegacyWin64Import::SleepConditionVariableSrw
+                | LegacyWin64Import::WakeConditionVariable
+                | LegacyWin64Import::WakeAllConditionVariable) => {
+                    uc("write condition variable return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install condition variable import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_condition_variable_srw(unicorn, operation);
+                        }),
+                    )?;
+                }
                 LegacyWin64Import::ExpandEnvironmentStringsA => {
                     uc(
                         "write ExpandEnvironmentStringsA return",
@@ -3701,6 +3774,19 @@ fn install_win64_import(
                         "install CRT stream position",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_crt_stream_position(unicorn, operation);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::CrtOpen(_)
+                | LegacyWin64Import::CrtRead
+                | LegacyWin64Import::CrtClose
+                | LegacyWin64Import::CrtLseek64
+                | LegacyWin64Import::CrtSetMode) => {
+                    uc("write CRT descriptor return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install CRT descriptor import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_descriptor(unicorn, operation);
                         }),
                     )?;
                 }
@@ -6875,6 +6961,98 @@ fn ensure_windows_condition_variable(
     Ok(())
 }
 
+fn emulate_windows_condition_variable_srw(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        let condition = read_win64_import_argument(unicorn, 0)?;
+        ensure_windows_condition_variable(unicorn, condition)?;
+        match operation {
+            LegacyWin64Import::InitializeConditionVariable => Ok(0),
+            LegacyWin64Import::WakeConditionVariable
+            | LegacyWin64Import::WakeAllConditionVariable => {
+                let wake_all = operation == LegacyWin64Import::WakeAllConditionVariable;
+                let waiters = unicorn
+                    .get_data_mut()
+                    .windows_condition_waiters
+                    .entry(condition)
+                    .or_default();
+                let selected = if wake_all {
+                    waiters.drain(..).collect::<Vec<_>>()
+                } else {
+                    waiters.pop_front().into_iter().collect()
+                };
+                for thread_id in selected {
+                    if !unicorn.get_data().scheduler_woken_threads.contains(&thread_id) {
+                        unicorn.get_data_mut().scheduler_woken_threads.push_back(thread_id);
+                    }
+                }
+                Ok(0)
+            }
+            LegacyWin64Import::SleepConditionVariableSrw => {
+                let lock_address = read_win64_import_argument(unicorn, 1)?;
+                let timeout = read_win64_import_argument(unicorn, 2)? as u32;
+                let flags = read_win64_import_argument(unicorn, 3)? as u32;
+                if flags != 0 {
+                    return Err("shared SleepConditionVariableSRW is unsupported".into());
+                }
+                let thread_id = unicorn.get_data().current_windows_thread_id;
+                let lock = unicorn
+                    .get_data_mut()
+                    .windows_srw_locks
+                    .get_mut(&lock_address)
+                    .ok_or_else(|| format!("condition variable uses unknown SRW lock {lock_address:#x}"))?;
+                if lock.owner != Some(thread_id) {
+                    return Err(format!("thread {thread_id} does not own condition-variable SRW lock"));
+                }
+                let next = lock.waiters.pop_front();
+                lock.owner = next;
+                unicorn
+                    .mem_write(lock_address, &(u64::from(next.is_some())).to_le_bytes())
+                    .map_err(|error| format!("condition variable SRW release failed: {error}"))?;
+                if let Some(waiter) = next.filter(|waiter| *waiter != 1) {
+                    unicorn.get_data_mut().scheduler_woken_threads.push_back(waiter);
+                }
+                if timeout == 0 {
+                    unicorn.get_data_mut().windows_last_error = 1460;
+                    return Ok(0);
+                }
+                if unicorn.get_data().pending_windows_thread.is_none() {
+                    return Err("main-thread SleepConditionVariableSRW is unsupported".into());
+                }
+                let waiters = unicorn
+                    .get_data_mut()
+                    .windows_condition_waiters
+                    .entry(condition)
+                    .or_default();
+                if waiters.len() >= 1024 || waiters.contains(&thread_id) {
+                    return Err("condition-variable waiter capacity or duplication".into());
+                }
+                waiters.push_back(thread_id);
+                unicorn
+                    .get_data_mut()
+                    .scheduler_condition_locks
+                    .insert(thread_id, lock_address);
+                let rsp = unicorn.reg_read(RegisterX86::RSP).map_err(|e| e.to_string())?;
+                let return_address = read_vcomp_u64(unicorn, rsp)?;
+                unicorn.reg_write(RegisterX86::RSP, rsp + 8).map_err(|e| e.to_string())?;
+                unicorn.reg_write(RegisterX86::RIP, return_address).map_err(|e| e.to_string())?;
+                unicorn.reg_write(RegisterX86::RAX, 1).map_err(|e| e.to_string())?;
+                unicorn.get_data_mut().scheduler_yield_reason =
+                    Some(SchedulerYieldReason::ConditionVariable);
+                unicorn.get_data_mut().scheduler_resume_rip = return_address;
+                unicorn.get_data_mut().scheduler_wait_deadline =
+                    (timeout != u32::MAX).then(|| unicorn.get_data().scheduler_virtual_tick + u64::from(timeout));
+                unicorn.emu_stop().map_err(|e| e.to_string())?;
+                Ok(1)
+            }
+            _ => Err("invalid condition-variable operation".into()),
+        }
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
     // Use the current wall clock. A fixed historical date would invalidate
     // observations of expiration, licensing, and other time-dependent logic.
@@ -9008,9 +9186,79 @@ fn emulate_windows_thread_lifecycle(
             {
                 Some(thread) if thread.completed => WAIT_OBJECT_0,
                 Some(_) if timeout == 0 => WAIT_TIMEOUT,
+                Some(_)
+                    if (unicorn.get_data().scheduler_ready_hint
+                        || !unicorn.get_data().scheduler_woken_threads.is_empty())
+                        && unicorn.get_data().pending_windows_thread.is_none() =>
+                {
+                    let parked = (|| -> Result<(), String> {
+                        let rsp = unicorn
+                            .reg_read(RegisterX86::RSP)
+                            .map_err(|error| format!("thread wait stack read failed: {error}"))?;
+                        let return_address = read_vcomp_u64(unicorn, rsp)?;
+                        unicorn
+                            .reg_write(RegisterX86::RSP, rsp + 8)
+                            .map_err(|error| format!("thread wait stack advance failed: {error}"))?;
+                        unicorn
+                            .reg_write(RegisterX86::RIP, return_address)
+                            .map_err(|error| format!("thread wait return advance failed: {error}"))?;
+                        unicorn.get_data_mut().scheduler_yield_reason =
+                            Some(SchedulerYieldReason::Voluntary);
+                        unicorn.get_data_mut().scheduler_resume_rip = return_address;
+                        unicorn
+                            .emu_stop()
+                            .map_err(|error| format!("thread wait scheduler stop failed: {error}"))
+                    })();
+                    if let Err(error) = parked {
+                        unicorn.get_data_mut().callback_error = Some(error);
+                        let _ = unicorn.emu_stop();
+                        WAIT_FAILED
+                    } else {
+                        WAIT_OBJECT_0
+                    }
+                }
                 Some(_) => {
+                    let event_waits = unicorn
+                        .get_data()
+                        .windows_objects
+                        .events
+                        .values()
+                        .filter(|event| !event.waiters.is_empty())
+                        .map(|event| {
+                            format!(
+                                "name={:?},manual_reset={},signaled={},waiters={:?}",
+                                event.name, event.manual_reset, event.signaled, event.waiters
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let address_waits = format!(
+                        "{:?}",
+                        unicorn.get_data().windows_address_waiters
+                    );
+                    let srw_waits = unicorn
+                        .get_data()
+                        .windows_srw_locks
+                        .iter()
+                        .filter(|(_, lock)| !lock.waiters.is_empty())
+                        .map(|(address, lock)| format!("{address:#x}:{:?}", lock.waiters))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let thread_states = unicorn
+                        .get_data()
+                        .windows_threads
+                        .iter()
+                        .map(|(thread_handle, thread)| {
+                            format!(
+                                "{thread_handle:#x}:id={},suspended={},completed={},open={}",
+                                thread.id, thread.suspended, thread.completed, thread.handle_open
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
                     unicorn.get_data_mut().callback_error = Some(format!(
-                        "blocking wait on incomplete guest thread {handle:#x} is unsupported"
+                        "thread {} blocking wait on incomplete guest thread {handle:#x} has no runnable peer; threads: [{thread_states}]; event waits: [{event_waits}]; address waits: {address_waits}; SRW waits: [{srw_waits}]",
+                        unicorn.get_data().current_windows_thread_id
                     ));
                     let _ = unicorn.emu_stop();
                     WAIT_FAILED

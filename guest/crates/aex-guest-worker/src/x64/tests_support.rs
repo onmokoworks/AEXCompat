@@ -12299,20 +12299,28 @@ fn tls_allocation_reuses_indices_enforces_capacity_and_is_session_local() {
 fn fdclass_returns_ucrt_fpclass_masks() {
     let mut engine = test_engine(&[0xc3]);
     let entry = STUB_BASE + 0x190;
+    let dentry = entry + 16;
     install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", "_fdclass").unwrap();
+    install_win64_import(&mut engine.unicorn, dentry, "ucrtbase.dll", "_dclass").unwrap();
     for (value, expected) in [
-        (0.0, 0x40),
-        (-0.0, 0x20),
-        (1.0, 0x100),
-        (-1.0, 0x8),
-        (f64::INFINITY, 0x200),
-        (f64::NEG_INFINITY, 0x4),
-        (f64::NAN, 0x2),
+        (0.0, 0),
+        (-0.0, 0),
+        (1.0, u64::from((-1i16) as u16)),
+        (-1.0, u64::from((-1i16) as u16)),
+        (f64::INFINITY, 1),
+        (f64::NEG_INFINITY, 1),
+        (f64::NAN, 2),
     ] {
-        let mut xmm = [0u8; 16];
-        xmm[..8].copy_from_slice(&value.to_bits().to_le_bytes());
-        engine.unicorn.reg_write_long(RegisterX86::XMM0, &xmm).unwrap();
-        assert_eq!(engine.call_win64(entry, [0; 6]).unwrap(), expected);
+        for (target, float) in [(entry, true), (dentry, false)] {
+            let mut xmm = [0u8; 16];
+            if float {
+                xmm[..4].copy_from_slice(&(value as f32).to_bits().to_le_bytes());
+            } else {
+                xmm[..8].copy_from_slice(&value.to_bits().to_le_bytes());
+            }
+            engine.unicorn.reg_write_long(RegisterX86::XMM0, &xmm).unwrap();
+            assert_eq!(engine.call_win64(target, [0; 6]).unwrap(), expected);
+        }
     }
 }
 

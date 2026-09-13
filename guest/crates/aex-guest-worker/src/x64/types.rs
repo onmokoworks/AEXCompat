@@ -241,6 +241,8 @@ struct GuestState {
     windows_critical_sections: HashMap<u64, u32>,
     windows_srw_locks: BTreeMap<u64, WindowsSrwLock>,
     windows_condition_variables: HashSet<u64>,
+    windows_condition_waiters: BTreeMap<u64, VecDeque<u32>>,
+    scheduler_condition_locks: BTreeMap<u32, u64>,
     windows_address_waiters: BTreeMap<u64, BTreeSet<u32>>,
     windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
     windows_tls_slots: BTreeMap<u32, u64>,
@@ -266,6 +268,7 @@ struct GuestState {
     pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
     crt_errno: u32,
+    last_crt_heap_failure: Option<(u64, String)>,
     crt_errno_buffers: BTreeMap<u32, u64>,
     crt_random_states: BTreeMap<u32, u32>,
     registry: crate::guest_registry::GuestRegistry,
@@ -532,6 +535,8 @@ enum SchedulerYieldReason {
     Voluntary,
     AddressWait,
     SrwLock,
+    Event,
+    ConditionVariable,
 }
 
 #[derive(Clone, Copy, Debug)]
