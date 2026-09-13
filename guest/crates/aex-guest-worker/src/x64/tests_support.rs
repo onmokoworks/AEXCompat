@@ -21629,3 +21629,323 @@ fn standard_file_creation_shares_windows_handle_capacity() {
     );
     std::fs::remove_file(source).unwrap();
 }
+
+#[test]
+fn windows_file_apis_open_read_seek_and_close_mounted_assets() {
+    for (library, wide) in [
+        ("kernel32.dll", false),
+        ("kernelbase.dll", true),
+        ("api-ms-win-core-file-l1-1-0.dll", false),
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        let source =
+            std::env::temp_dir().join(format!("aex-file-api-{}-{library}.bin", std::process::id()));
+        std::fs::write(&source, b"A\r\n\x1aBC").unwrap();
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .sources
+            .insert("c:/asset.bin".into(), source.clone());
+        let open = STUB_BASE + 0x400;
+        let read = open + 16;
+        let size = open + 32;
+        let seek = open + 48;
+        let close = open + 64;
+        let kind = open + 80;
+        for (address, symbol) in [
+            (open, if wide { "CreateFileW" } else { "CreateFileA" }),
+            (read, "ReadFile"),
+            (size, "GetFileSizeEx"),
+            (seek, "SetFilePointerEx"),
+        ] {
+            install_win64_import(&mut engine.unicorn, address, library, symbol).unwrap();
+        }
+        install_win64_import(&mut engine.unicorn, close, "kernel32.dll", "CloseHandle").unwrap();
+        install_win64_import(&mut engine.unicorn, kind, "kernel32.dll", "GetFileType").unwrap();
+        let name = DATA_BASE + 0x100;
+        let output = DATA_BASE + 0x300;
+        let count = DATA_BASE + 0x500;
+        let path: Vec<u8> = if wide {
+            "C:\\asset.bin\0"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        } else {
+            b"C:\\asset.bin\0".to_vec()
+        };
+        engine.write(name, &path).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        let handle = engine
+            .call_win64_with_timeout(
+                open,
+                &[name, 0x80000000, 1, 0, 3, 0x80, 0],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap();
+        assert_ne!(handle, u64::MAX);
+        assert_ne!(handle, 0);
+        assert_eq!(engine.call_win64(kind, [handle, 0, 0, 0, 0, 0]).unwrap(), 1);
+        assert_eq!(
+            engine
+                .call_win64(size, [handle, count, 0, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(count, 8).unwrap(),
+            6u64.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(read, [handle, output, 4, count, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+            b"A\r\n\x1a"
+        );
+        assert_eq!(
+            engine
+                .call_win64(seek, [handle, (-1i64) as u64, count, 2, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(count, 8).unwrap(),
+            5u64.to_le_bytes()
+        );
+        assert_eq!(
+            engine
+                .call_win64(read, [handle, output, 9, count, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(count, 4).unwrap(),
+            1u32.to_le_bytes()
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 1).unwrap(), b"C");
+        assert_eq!(
+            engine
+                .call_win64(read, [handle, output, 9, count, 0, 0])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(count, 4).unwrap(),
+            0u32.to_le_bytes()
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+        assert_eq!(
+            engine.call_win64(close, [handle, 0, 0, 0, 0, 0]).unwrap(),
+            1
+        );
+        assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
+        assert_eq!(
+            engine.call_win64(close, [handle, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 6);
+        assert_eq!(
+            engine
+                .call_win64(read, [handle, output, 1, count, 0, 0])
+                .unwrap(),
+            0
+        );
+        std::fs::remove_file(source).unwrap();
+    }
+}
+
+#[test]
+fn windows_read_preflight_keeps_cursor_and_outputs_unchanged() {
+    for overlap in [false, true] {
+        let mut engine = test_engine(&[0xc3]);
+        let source = std::env::temp_dir().join(format!(
+            "aex-file-preflight-{}-{overlap}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&source, b"abcdef").unwrap();
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .sources
+            .insert("c:/asset.bin".into(), source.clone());
+        let handle = engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .open_windows_asset("c:/asset.bin", true, true, 1)
+            .unwrap()
+            .unwrap();
+        let output = allocate_crt_region(&mut engine.unicorn, PAGE_SIZE).unwrap();
+        let count = if overlap { output } else { DATA_BASE + 0x100 };
+        engine.write(output, b"unchanged").unwrap();
+        engine.write(count, &77u32.to_le_bytes()).unwrap();
+        let before = engine.unicorn.mem_read_as_vec(output, 9).unwrap();
+        if !overlap {
+            engine
+                .unicorn
+                .mem_protect(output, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        const READ: u64 = STUB_BASE + 0x410;
+        install_win64_import(&mut engine.unicorn, READ, "kernel32.dll", "ReadFile").unwrap();
+        assert!(
+            engine
+                .call_win64(READ, [handle, output, 6, count, 0, 0])
+                .is_err()
+        );
+        assert_eq!(
+            engine.unicorn.get_data().guest_files.windows_files[&handle].position,
+            0
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 9).unwrap(), before);
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(count, 4).unwrap(),
+            77u32.to_le_bytes()
+        );
+        std::fs::remove_file(source).unwrap();
+    }
+}
+
+#[test]
+fn windows_file_open_always_inheritance_and_metadata_access() {
+    let mut engine = test_engine(&[0xc3]);
+    let source = std::env::temp_dir().join(format!("aex-file-access-{}.bin", std::process::id()));
+    std::fs::write(&source, b"abc").unwrap();
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .sources
+        .insert("c:/asset.bin".into(), source.clone());
+    let open = STUB_BASE + 0x400;
+    let read = open + 16;
+    let seek = open + 32;
+    for (address, symbol) in [
+        (open, "CreateFileA"),
+        (read, "ReadFile"),
+        (seek, "SetFilePointerEx"),
+    ] {
+        install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
+    }
+    let name = DATA_BASE + 0x100;
+    let security = DATA_BASE + 0x200;
+    let output = DATA_BASE + 0x300;
+    engine.write(name, b"C:/asset.bin\0").unwrap();
+    let mut attributes = [0u8; 24];
+    attributes[..4].copy_from_slice(&24u32.to_le_bytes());
+    attributes[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+    attributes[16..20].copy_from_slice(&1u32.to_le_bytes());
+    engine.write(security, &attributes).unwrap();
+    let handle = engine
+        .call_win64_with_timeout(
+            open,
+            &[name, 0, 1, security, 4, 0x80, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
+    assert_ne!(handle, u64::MAX);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
+    assert!(engine.unicorn.get_data().guest_files.windows_files[&handle].inheritable);
+    engine.write(output, &77u64.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(read, [handle, output + 16, 1, output, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 5);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        0u32.to_le_bytes()
+    );
+    engine.write(output, &77u64.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(seek, [handle, 1, output, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        77u64.to_le_bytes()
+    );
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.windows_files[&handle].position,
+        0
+    );
+    attributes[..4].copy_from_slice(&20u32.to_le_bytes());
+    engine.write(security, &attributes).unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                open,
+                &[name, 0, 1, security, 3, 0x80, 0],
+                TIMEOUT_MICROSECONDS
+            )
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+    assert_eq!(engine.unicorn.get_data().guest_files.windows_files.len(), 1);
+    std::fs::remove_file(source).unwrap();
+}
+
+#[test]
+fn windows_create_file_resolves_guest_relative_and_dot_paths() {
+    for wide in [false, true] {
+        let mut engine = test_engine(&[0xc3]);
+        let source =
+            std::env::temp_dir().join(format!("aex-file-path-{}-{wide}.bin", std::process::id()));
+        std::fs::write(&source, b"abc").unwrap();
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .sources
+            .insert("c:/asset.bin".into(), source.clone());
+        let open = STUB_BASE + 0x400;
+        install_win64_import(
+            &mut engine.unicorn,
+            open,
+            "kernel32.dll",
+            if wide { "CreateFileW" } else { "CreateFileA" },
+        )
+        .unwrap();
+        for path in [
+            "asset.bin",
+            "\\asset.bin",
+            "C:\\.\\asset.bin",
+            "C:asset.bin",
+        ] {
+            let path = format!("{path}\0");
+            let bytes = if wide {
+                path.encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>()
+            } else {
+                path.into_bytes()
+            };
+            engine.write(DATA_BASE + 0x100, &bytes).unwrap();
+            let handle = engine
+                .call_win64_with_timeout(
+                    open,
+                    &[DATA_BASE + 0x100, 0x80000000, 1, 0, 3, 0x80, 0],
+                    TIMEOUT_MICROSECONDS,
+                )
+                .unwrap();
+            assert_ne!(handle, u64::MAX);
+            assert_eq!(
+                &*engine.unicorn.get_data().guest_files.windows_files[&handle].bytes,
+                b"abc"
+            );
+        }
+        std::fs::remove_file(source).unwrap();
+    }
+}
