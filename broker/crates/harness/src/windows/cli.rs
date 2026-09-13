@@ -1262,12 +1262,12 @@ fn main() -> eframe::Result {
         if let Some(object) = assignment_document.as_object_mut() {
             object.remove("timed_layers");
         }
-        let parameters = typed_render_request_parameters(
-            &parameters, &assignment_document, Some(request_path),
-        ).unwrap_or_else(|error| {
-            emit_host_request_validation_failure(&error, &parameter_metadata);
-            std::process::exit(1);
-        });
+        let parameters =
+            typed_render_request_parameters(&parameters, &assignment_document, Some(request_path))
+                .unwrap_or_else(|error| {
+                    emit_host_request_validation_failure(&error, &parameter_metadata);
+                    std::process::exit(1);
+                });
         let report =
             aexcompat_broker::image_render::render_experimental_image_with_timed_layers_and_context(
                 &repository,

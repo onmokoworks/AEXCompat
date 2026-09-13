@@ -114,13 +114,11 @@ fn is_ignored(path: &Path, ignore: &[String]) -> bool {
         .any(|entry| strip_aex_ext(entry).eq_ignore_ascii_case(stem))
 }
 
-/// Cap on concurrent discovery workers. Each spawns an L2 worker subprocess that
-/// loads the AEX + the compat runtime (memory-heavy). Kept low: too much
-/// concurrency causes resource contention that pushes a plain ~2 s discovery past
-/// the worker's 5 s deadline, so a discoverable effect times out and is wrongly
-/// cached as a non-effect. Discovery runs on a background thread, so a low cap is
-/// cheap. (Measured: 8-way ≈ 68% false timeouts, serial ≈ 3%.)
-const MAX_DISCOVERY_PARALLELISM: usize = 3;
+/// Cap on concurrent discovery workers. Each process loads an AEX plus its
+/// runtime, so this remains below the machine's logical-core count. Six lanes
+/// keep the current 300-second hung-inspect containment far away from healthy
+/// work while amortizing worker and vendor-runtime startup across clusters.
+const MAX_DISCOVERY_PARALLELISM: usize = 6;
 /// Recursion depth cap for the folder scan. A backstop against a pathological
 /// tree eating the stack, not the cycle guard — `visited` holds canonical paths
 /// and already breaks link loops.
@@ -133,9 +131,9 @@ const MAX_DISCOVERY_PARALLELISM: usize = 3;
 /// suppressed the prune (issue #660). Sized well clear of any real install.
 const MAX_SCAN_DEPTH: usize = 32;
 
-/// The background discovery saves the cache after each chunk of this many AEX, so
-/// progress survives a restart/shutdown mid-scan (rather than only at the end of a
-/// multi-minute scan).
+/// Maximum completed discovery results between cache checkpoints. This also
+/// caps a cluster shard: a worker that hangs in one member cannot strand more
+/// completed-but-unreported members than one checkpoint interval.
 const DISCOVERY_SAVE_CHUNK: usize = 24;
 
 /// Set on plugin unload so the background discovery thread stops promptly.
@@ -1034,7 +1032,54 @@ fn spawn_background_discovery(
     }
 }
 
-/// The background pass itself: prune, then discover in chunks, then report.
+struct DiscoveryPassProgress<'a> {
+    cache: &'a mut HashMap<String, CacheEntry>,
+    effects: usize,
+    aegps: usize,
+    rejected: usize,
+    since_save: usize,
+    persisted: bool,
+}
+
+impl DiscoveryPassProgress<'_> {
+    fn completed_with(
+        &mut self,
+        results: &[(PathBuf, CacheEntry)],
+        mut persist: impl FnMut(&HashMap<String, CacheEntry>) -> bool,
+    ) {
+        for (plugin, entry) in results {
+            match discovery_result_kind(entry) {
+                DiscoveryResultKind::Effect => self.effects += 1,
+                DiscoveryResultKind::Aegp => self.aegps += 1,
+                DiscoveryResultKind::Rejected => self.rejected += 1,
+            }
+            let key = plugin.to_string_lossy().into_owned();
+            // `None` means there was nothing trustworthy to write; the existing
+            // entry keeps registering and is retried next launch.
+            if let Some(merged) = keep_best(self.cache.get(&key), entry.clone(), file_meta(plugin))
+            {
+                self.cache.insert(key, merged);
+            }
+            self.since_save += 1;
+            if self.since_save == DISCOVERY_SAVE_CHUNK {
+                // Assigned, not accumulated: every save writes the whole map,
+                // so a later successful write makes up for an earlier failure.
+                self.persisted = persist(self.cache);
+                self.since_save = 0;
+            }
+        }
+    }
+
+    fn flush_with(&mut self, mut persist: impl FnMut(&HashMap<String, CacheEntry>) -> bool) {
+        if self.since_save > 0 {
+            self.persisted = persist(self.cache);
+            self.since_save = 0;
+        }
+    }
+}
+
+/// The background pass itself: prune, discover as one schedulable corpus while
+/// checkpointing completed shards, then report.
 #[allow(clippy::too_many_arguments)]
 fn run_discovery_pass(
     repository: &Path,
@@ -1051,58 +1096,54 @@ fn run_discovery_pass(
     // still leaves a pruned cache.
     prune_cache(cache, seen, roots, scan_complete);
 
-    // Discover in chunks and save the cache after each, so a restart or shutdown
-    // mid-scan keeps the progress so far (effects appear across successive
-    // launches) instead of discarding a multi-minute scan. On the background
+    // Discover the whole pending set in one scheduler pass, so same-runtime
+    // clusters can cross checkpoint boundaries and amortize worker startup.
+    // The progress callback still saves after at most DISCOVERY_SAVE_CHUNK
+    // completed entries, so a restart or shutdown keeps the progress so far
+    // (effects appear across successive launches). On the background
     // pass the results show on the next launch (AviUtl2 freezes a filter's
     // config at load); the synchronous first-launch pass (issue #838) runs
     // before registration, so its results register immediately.
     // Each entry carries the build that produced it, so an interrupted pass
     // leaves the not-yet-redone entries on the old build and they are queued
     // again next launch (issue #307).
-    let (mut effects, mut aegps, mut rejected) = (0usize, 0usize, 0usize);
-    let mut interrupted = false;
-    let mut persisted = true;
-    for chunk in pending.chunks(DISCOVERY_SAVE_CHUNK) {
-        if DISCOVERY_SHUTDOWN.load(Ordering::Relaxed) {
-            interrupted = true;
-            break;
-        }
-        let results = discover_all(repository, chunk, dependency, build);
-        let discovered = results.len();
-        for (plugin, entry) in results {
-            match discovery_result_kind(&entry) {
-                DiscoveryResultKind::Effect => effects += 1,
-                DiscoveryResultKind::Aegp => aegps += 1,
-                DiscoveryResultKind::Rejected => rejected += 1,
-            }
-            let key = plugin.to_string_lossy().into_owned();
-            // `None` means there was nothing trustworthy to write; the existing
-            // entry keeps registering and is retried next launch.
-            if let Some(merged) = keep_best(cache.get(&key), entry, file_meta(&plugin)) {
-                cache.insert(key, merged);
-            }
-        }
-        // discover_all returns fewer than the chunk only if it was cut short by
-        // the shutdown flag; save what we have and stop.
-        // Assigned, not accumulated: every save writes the whole map, so a chunk
-        // that lost the cache lock is fully made up for by the next successful
-        // write. Sticking on the earlier failure would warn that a pass "will not
-        // survive the restart" when all of it did.
-        persisted = save_cache(cache);
-        if discovered < chunk.len() {
-            interrupted = true;
-            break;
-        }
-    }
+    let progress = Mutex::new(DiscoveryPassProgress {
+        cache,
+        effects: 0,
+        aegps: 0,
+        rejected: 0,
+        since_save: 0,
+        persisted: true,
+    });
+    let discovered =
+        discover_all_with_progress(repository, pending, dependency, build, &|completed| {
+            progress
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .completed_with(completed, save_cache);
+        })
+        .len();
+    let mut progress = progress
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner());
+    progress.flush_with(save_cache);
+    let interrupted = discovered < pending.len();
     // Resident probes are never part of the synchronous first-launch path.
     // Unresolved effects are queued above and completed only by this background
     // pass, becoming registerable on the next launch.
-    if kind == DiscoveryPassKind::Background && complete_companion_demand_probes(repository, cache)
+    if kind == DiscoveryPassKind::Background
+        && complete_companion_demand_probes(repository, progress.cache)
     {
-        persisted = save_cache(cache);
+        progress.persisted = save_cache(progress.cache);
     }
-    report_discovery(effects, aegps, rejected, interrupted, persisted, kind);
+    report_discovery(
+        progress.effects,
+        progress.aegps,
+        progress.rejected,
+        interrupted,
+        progress.persisted,
+        kind,
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

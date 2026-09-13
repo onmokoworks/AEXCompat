@@ -114,23 +114,14 @@ fn write_rgba8_preview_png_to(
     if rgba.len() != expected {
         return Err(invalid("session output dimensions are invalid"));
     }
-    let encoder = PngEncoder::new_with_quality(
-        &mut *writer,
-        PngCompression::Fast,
-        PngFilter::Up,
-    );
+    let encoder = PngEncoder::new_with_quality(&mut *writer, PngCompression::Fast, PngFilter::Up);
     encoder
         .write_image(rgba, width, height, ExtendedColorType::Rgba8)
         .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
     writer.flush()
 }
 
-fn write_rgba8_preview_png(
-    path: &Path,
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-) -> io::Result<()> {
+fn write_rgba8_preview_png(path: &Path, rgba: &[u8], width: u32, height: u32) -> io::Result<()> {
     let file = OpenOptions::new().write(true).create_new(true).open(path)?;
     write_rgba8_preview_png_to(&mut BufWriter::new(file), rgba, width, height)
 }

@@ -1122,9 +1122,17 @@ mod tests {
             let parameters = std::cell::RefCell::new(vec![path]);
             let defaults = parameters.borrow().clone();
             eframe::egui::__run_test_ui(|ui| {
-                let output = show_effect_controls(ui, &mut parameters.borrow_mut(), &defaults, false,
-                    EffectControlCapabilities { choose_layer: false, trigger_button: false },
-                    EffectControlsText::default());
+                let output = show_effect_controls(
+                    ui,
+                    &mut parameters.borrow_mut(),
+                    &defaults,
+                    false,
+                    EffectControlCapabilities {
+                        choose_layer: false,
+                        trigger_button: false,
+                    },
+                    EffectControlsText::default(),
+                );
                 assert_eq!(parameters.borrow()[0].value, value);
                 assert!(output.intents.is_empty());
             });

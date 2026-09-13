@@ -3967,17 +3967,16 @@ mod tests {
     }
 
     #[test]
-    fn plan_tasks_splits_oversized_groups_into_authenticated_singletons() {
+    fn plan_tasks_splits_oversized_groups_into_bounded_clusters() {
         let members: Vec<PlannedMember> = (0..=MAX_CLUSTER_PLUGINS)
             .map(|_| planned(Some("huge"), 2))
             .collect();
         let tasks = plan_tasks(&members);
+        assert_eq!(tasks.len(), 2);
         assert!(
-            tasks
-                .iter()
-                .all(|task| matches!(task, DiscoveryTask::Cluster(indices) if indices.len() == 1))
+            matches!(&tasks[0], DiscoveryTask::Cluster(indices) if indices.len() == MAX_CLUSTER_PLUGINS)
         );
-        assert_eq!(tasks.len(), MAX_CLUSTER_PLUGINS + 1);
+        assert!(matches!(&tasks[1], DiscoveryTask::Cluster(indices) if indices.len() == 1));
     }
 
     #[test]
@@ -4004,6 +4003,54 @@ mod tests {
             _ => panic!("an unresolved closure stays on the one-shot path"),
         }
         assert_eq!(cluster_of(4), vec![4]);
+    }
+
+    #[test]
+    fn discovery_progress_checkpoints_at_the_exact_record_interval() {
+        let mut cache = HashMap::new();
+        let first = (0..23)
+            .map(|index| {
+                (
+                    PathBuf::from(format!("first-{index}.aex")),
+                    discovered(1, 1, build(1)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let second = (0..24)
+            .map(|index| {
+                (
+                    PathBuf::from(format!("second-{index}.aex")),
+                    discovered(1, 1, build(1)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let saves = std::cell::Cell::new(0usize);
+        let mut progress = DiscoveryPassProgress {
+            cache: &mut cache,
+            effects: 0,
+            aegps: 0,
+            rejected: 0,
+            since_save: 0,
+            persisted: true,
+        };
+        progress.completed_with(&first, |_: &HashMap<String, CacheEntry>| {
+            saves.set(saves.get() + 1);
+            true
+        });
+        assert_eq!(saves.get(), 0);
+        progress.completed_with(&second, |_: &HashMap<String, CacheEntry>| {
+            saves.set(saves.get() + 1);
+            true
+        });
+        assert_eq!(saves.get(), 1);
+        assert_eq!(progress.since_save, 23);
+        progress.flush_with(|_: &HashMap<String, CacheEntry>| {
+            saves.set(saves.get() + 1);
+            true
+        });
+        assert_eq!(saves.get(), 2);
+        assert_eq!(progress.since_save, 0);
+        assert_eq!(progress.effects, 47);
     }
 
     #[test]
@@ -4494,6 +4541,42 @@ mod tests {
             let three = shard_in_place_clusters(vec![cluster(&[0, 1, 2])], 8);
             assert_eq!(three.len(), 1);
             assert!(matches!(&three[0], DiscoveryTask::Cluster(chunk) if chunk.len() == 3));
+
+            let large: Vec<usize> = (0..100).collect();
+            let checkpointed = shard_in_place_clusters(vec![cluster(&large)], 3);
+            assert!(checkpointed.iter().all(|task| {
+                matches!(task, DiscoveryTask::Cluster(chunk) if chunk.len() <= DISCOVERY_SAVE_CHUNK)
+            }));
+            let flattened = checkpointed
+                .iter()
+                .flat_map(|task| match task {
+                    DiscoveryTask::Cluster(chunk) => chunk.clone(),
+                    DiscoveryTask::Single(index) => vec![*index],
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(flattened, large);
+        }
+
+        #[test]
+        fn oversized_discovery_identity_stays_clustered_with_bounded_manifests() {
+            let count = MAX_CLUSTER_PLUGINS * 2 + 3;
+            let members = (0..count)
+                .map(|_| PlannedMember {
+                    identity: Some("shared-runtime".to_owned()),
+                })
+                .collect::<Vec<_>>();
+            let tasks = plan_tasks(&members);
+
+            assert_eq!(tasks.len(), 3);
+            let sizes = tasks
+                .iter()
+                .map(|task| match task {
+                    DiscoveryTask::Cluster(indices) => indices.len(),
+                    DiscoveryTask::Single(_) => panic!("validated member fell back to one-shot"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(sizes, vec![MAX_CLUSTER_PLUGINS, MAX_CLUSTER_PLUGINS, 3]);
+            assert_eq!(sizes.iter().sum::<usize>(), count);
         }
 
         #[test]

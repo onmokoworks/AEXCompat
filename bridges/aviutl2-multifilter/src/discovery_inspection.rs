@@ -938,10 +938,11 @@ struct PlannedMember {
     identity: Option<String>,
 }
 
-/// Groups prepared plug-ins by validated identity. Groups within the manifest
-/// bound share one session; every other validated member uses a one-member
-/// session so its cleanup-crash checkpoint has the same authenticated launch
-/// boundary. Only unresolved identities remain on the one-shot path.
+/// Groups prepared plug-ins by validated identity. A group larger than one
+/// manifest is split into bounded clusters instead of degenerating every
+/// member to a one-member session. Every validated member therefore keeps a
+/// discovery-session cleanup checkpoint; only unresolved identities use the
+/// one-shot path.
 fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
     let mut groups: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut first_seen: Vec<&str> = Vec::new();
@@ -961,17 +962,17 @@ fn plan_tasks(members: &[PlannedMember]) -> Vec<DiscoveryTask> {
     let mut tasks = Vec::new();
     for identity in first_seen {
         let members = &groups[identity];
-        if members.len() >= 2 && members.len() <= MAX_CLUSTER_PLUGINS {
-            clustered.extend(members.iter().copied());
-            tasks.push(DiscoveryTask::Cluster(members.clone()));
+        if members.len() >= 2 {
+            for chunk in members.chunks(MAX_CLUSTER_PLUGINS) {
+                clustered.extend(chunk.iter().copied());
+                tasks.push(DiscoveryTask::Cluster(chunk.to_vec()));
+            }
         }
     }
     for (index, member) in members.iter().enumerate() {
         if clustered.contains(&index) {
             continue;
         }
-        // A validated singleton (including a member of an oversized group)
-        // still needs a session checkpoint before cleanup can be contained.
         if member.identity.is_some() {
             tasks.push(DiscoveryTask::Cluster(vec![index]));
         } else {
@@ -994,8 +995,8 @@ fn shard_in_place_clusters(tasks: Vec<DiscoveryTask>, parallelism: usize) -> Vec
     for task in tasks {
         match task {
             DiscoveryTask::Cluster(members) if members.len() > 2 => {
-                let chunk_count = parallelism.min(members.len() / 2).max(1);
-                let chunk_size = members.len().div_ceil(chunk_count);
+                let lane_count = parallelism.min(members.len() / 2).max(1);
+                let chunk_size = members.len().div_ceil(lane_count).min(DISCOVERY_SAVE_CHUNK);
                 for chunk in members.chunks(chunk_size) {
                     sharded.push(DiscoveryTask::Cluster(chunk.to_vec()));
                 }
@@ -1645,6 +1646,7 @@ fn diagnostic_discovery(path: PathBuf, entry: CacheEntry) -> DiagnosticDiscovery
 /// A panic in any task (arbitrary third-party AEX) is caught and turned into
 /// negative entries, so one bad plug-in cannot abort the process by
 /// unwinding out of the scoped thread.
+#[cfg(test)]
 fn discover_all(
     repository: &Path,
     paths: &[PathBuf],
