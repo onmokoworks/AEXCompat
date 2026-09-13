@@ -16033,7 +16033,11 @@ fn guest_asset_streams_read_real_bytes_and_close_without_reusing_tokens() {
         assert_eq!(engine.call_win64(open, [0, mode, 0, 0, 0, 0]).unwrap(), 0);
         assert_eq!(engine.unicorn.get_data().crt_errno, 22);
         engine.write(name, b"c:/Assets/../data.bin\0").unwrap();
-        assert!(engine.call_win64(open, [name, mode, 0, 0, 0, 0]).is_err());
+        assert_eq!(
+            engine.call_win64(open, [name, mode, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 2);
         assert_eq!(engine.call_win64(read, [0, 0, 99, 0, 0, 0]).unwrap(), 0);
         assert!(
             engine
@@ -23514,4 +23518,38 @@ fn fflush_accepts_standard_and_all_streams_and_rejects_foreign_token() {
         dispatch_win64_import("foreign.dll", "fflush"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
+}
+
+#[test]
+fn fopen_resolves_root_relative_and_dot_paths_in_guest_namespace() {
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        open_guest_stream(&mut engine.unicorn, b"/missing/probe.test", b"rb").unwrap(),
+        (0, 2)
+    );
+    let source = std::env::temp_dir().join(format!("aex-root-relative-{}.bin", std::process::id()));
+    std::fs::write(&source, b"guest asset").unwrap();
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .sources
+        .insert("c:/data/asset.bin".into(), source.clone());
+    for path in [
+        b"/data/asset.bin".as_slice(),
+        b"data/./asset.bin",
+        b"C:/data/sub/../asset.bin",
+    ] {
+        let (stream, error) = open_guest_stream(&mut engine.unicorn, path, b"rb").unwrap();
+        assert_eq!(error, 0);
+        assert_eq!(
+            &*engine.unicorn.get_data().guest_files.streams[&stream].bytes,
+            b"guest asset"
+        );
+    }
+    assert_eq!(
+        open_guest_stream(&mut engine.unicorn, b"/data/asset.bin/", b"rb").unwrap(),
+        (0, 13)
+    );
+    std::fs::remove_file(source).unwrap();
 }

@@ -142,16 +142,18 @@ fn open_guest_stream(
     if filename.is_empty() || !valid_fopen_mode(mode) {
         return Ok((0, 22));
     }
-    let filename =
-        std::str::from_utf8(filename).map_err(|_| "unsupported fopen filename encoding")?;
-    let name = guest_file_name(filename)?;
+    let trailing_separator = filename.ends_with(b"/") || filename.ends_with(b"\\");
+    let absolute = canonical_guest_fullpath(filename)?;
+    let filename = std::str::from_utf8(&absolute[..absolute.len() - 1])
+        .map_err(|_| "unsupported fopen filename encoding")?;
+    let name = guest_file_name(filename.trim_end_matches(['/', '\\']))?;
     let mode = trim_leading_crt_mode_spaces(mode);
     // The mounted namespace is read-only, including existing files opened r+.
     if mode[0] != b'r' || mode.contains(&b'+') || mode.contains(&b'D') {
         return Ok((0, 13));
     }
 
-    if unicorn.get_data().guest_files.directory_exists(&name) {
+    if trailing_separator || unicorn.get_data().guest_files.directory_exists(&name) {
         return Ok((0, 13));
     }
     let Some(source) = unicorn.get_data().guest_files.sources.get(&name).cloned() else {
