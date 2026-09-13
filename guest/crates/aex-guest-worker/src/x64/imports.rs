@@ -268,6 +268,7 @@ enum LegacyWin64Import {
     AcquireSrwLockExclusive,
     TryAcquireSrwLockExclusive,
     ReleaseSrwLockExclusive,
+    ExpandEnvironmentStringsA,
     GetModuleHandleA,
     GetModuleHandleW,
     GetModuleHandleExA,
@@ -831,6 +832,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "ReleaseSRWLockExclusive") => {
             LegacyWin64Import::ReleaseSrwLockExclusive
         }
+        ("kernel32.dll" | "kernelbase.dll", "ExpandEnvironmentStringsA") => {
+            LegacyWin64Import::ExpandEnvironmentStringsA
+        }
+        (_, "ExpandEnvironmentStringsA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleHandleA") => {
             LegacyWin64Import::GetModuleHandleA
         }
@@ -2948,6 +2953,18 @@ fn install_win64_import(
                         "install SRW import",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_windows_srw_lock(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ExpandEnvironmentStringsA => {
+                    uc(
+                        "write ExpandEnvironmentStringsA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install ExpandEnvironmentStringsA",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_expand_environment_strings_a(uc)
                         }),
                     )?;
                 }
@@ -10310,6 +10327,67 @@ fn emulate_get_module_handle_a(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
         }
         Ok(module.unwrap_or(0))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_expand_environment_strings_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let destination = read_win64_import_argument(unicorn, 1)?;
+        let capacity = read_win64_import_argument(unicorn, 2)? as u32 as u64;
+        if source == 0 {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        let input = read_bounded_crt_c_string(
+            unicorn,
+            source,
+            MAX_CRT_STRING_BYTES,
+            "ExpandEnvironmentStringsA",
+        )?;
+        let input = &input[..input.len() - 1];
+        let mut output = Vec::new();
+        let mut cursor = 0;
+        while cursor < input.len() {
+            if input[cursor] == b'%' {
+                if let Some(relative) = input[cursor + 1..].iter().position(|b| *b == b'%') {
+                    let end = cursor + 1 + relative;
+                    if let Some(value) =
+                        guest_environment_value(unicorn.get_data(), &input[cursor + 1..end])
+                    {
+                        output.extend_from_slice(&value);
+                    } else {
+                        output.extend_from_slice(&input[cursor..=end]);
+                    }
+                    cursor = end + 1;
+                } else {
+                    output.extend_from_slice(&input[cursor..]);
+                    cursor = input.len();
+                }
+            } else {
+                output.push(input[cursor]);
+                cursor += 1;
+            }
+            if output.len() as u64 >= MAX_CRT_STRING_BYTES {
+                return Err("environment expansion exceeds bound".into());
+            }
+        }
+        output.push(0);
+        let required = output.len() as u64;
+        if capacity < required {
+            return Ok(required);
+        }
+        if destination == 0
+            || !guest_range_has_permission(unicorn, destination, required, Prot::WRITE)?
+        {
+            unicorn.get_data_mut().windows_last_error = 998;
+            return Ok(0);
+        }
+        unicorn
+            .mem_write(destination, &output)
+            .map_err(|e| e.to_string())?;
+        Ok(required)
     })();
     finish_guest_stdio(unicorn, result);
 }

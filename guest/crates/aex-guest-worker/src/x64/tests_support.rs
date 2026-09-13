@@ -22835,3 +22835,43 @@ fn get_module_handle_a_finds_known_modules_without_adding_references() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn expand_environment_strings_a_sizes_and_preserves_unknown_variables() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "kernel32.dll",
+        "ExpandEnvironmentStringsA",
+    )
+    .unwrap();
+    let src = DATA_BASE + 0x100;
+    let dst = DATA_BASE + 0x300;
+    engine
+        .unicorn
+        .get_data_mut()
+        .environment_overrides
+        .insert(b"X".to_vec(), Some(b"%Y%".to_vec()));
+    engine.write(src, b"a%x%/%UNKNOWN%/tail%\0").unwrap();
+    let expected = b"a%Y%/%UNKNOWN%/tail%\0";
+    assert_eq!(
+        engine.call_win64(entry, [src, 0, 0, 0, 0, 0]).unwrap(),
+        expected.len() as u64
+    );
+    engine.write(dst, &[0xa5; 64]).unwrap();
+    assert_eq!(
+        engine.call_win64(entry, [src, dst, 1, 0, 0, 0]).unwrap(),
+        expected.len() as u64
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(dst, 64).unwrap(), [0xa5; 64]);
+    assert_eq!(
+        engine.call_win64(entry, [src, dst, 64, 0, 0, 0]).unwrap(),
+        expected.len() as u64
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(dst, expected.len()).unwrap(),
+        expected
+    );
+}
