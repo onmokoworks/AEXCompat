@@ -1138,3 +1138,105 @@ fn guest_volume_information(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64
     unicorn.get_data_mut().windows_last_error = if exists { 50 } else { 15 }; // NOT_SUPPORTED / INVALID_DRIVE
     Ok(0)
 }
+
+fn guest_rename(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let old = read_win64_import_argument(unicorn, 0)?;
+    let new = read_win64_import_argument(unicorn, 1)?;
+    if old == 0 || new == 0 {
+        return Err("rename null argument requires invalid parameter handler".into());
+    }
+    let mut names = Vec::new();
+    for address in [old, new] {
+        let bytes = read_crt_stdio_c_string(unicorn, address, 1025, "rename path")?;
+        if bytes.is_empty() {
+            set_guest_crt_errno(unicorn, 2)?;
+            return Ok(u32::MAX as u64);
+        }
+        let absolute = canonical_guest_fullpath(&bytes)?;
+        let text = std::str::from_utf8(&absolute[..absolute.len() - 1])
+            .map_err(|_| "rename path encoding")?;
+        names.push(guest_file_name(text.trim_end_matches(['/', '\\']))?);
+    }
+    let status = unicorn
+        .get_data_mut()
+        .guest_files
+        .rename_directory(&names[0], &names[1])?;
+    if status == 0 {
+        Ok(0)
+    } else {
+        set_guest_crt_errno(unicorn, status)?;
+        Ok(u32::MAX as u64)
+    }
+}
+
+impl GuestFiles {
+    fn rename_directory(&mut self, old: &str, new: &str) -> Result<u32, String> {
+        if !self.sources.contains_key(old) && !self.directory_exists(old) {
+            return Ok(2);
+        }
+        let prefix = format!("{old}/");
+        // The manifest mounts a read-only asset tree. Renaming it must not
+        // mutate either the host files or the mount's namespace.
+        if self
+            .sources
+            .keys()
+            .any(|path| path == old || path.starts_with(&prefix))
+        {
+            return Ok(13);
+        }
+        if self.sources.contains_key(new) || self.directory_exists(new) {
+            return Ok(13);
+        }
+        let (Some((parent, _)), Some((destination_parent, _))) =
+            (old.rsplit_once('/'), new.rsplit_once('/'))
+        else {
+            return Ok(13);
+        };
+        if parent != destination_parent || !self.directory_exists(destination_parent) {
+            return Ok(13);
+        }
+        if new[2..].contains(['*', '?', ':', '<', '>', '|', '"']) {
+            return Ok(13);
+        }
+        if self.directory_dacls.contains_key(old) || self.directory_dacls.contains_key(parent) {
+            return Err("rename directory ACL access evaluation is not implemented".into());
+        }
+        let affected = self
+            .directories
+            .iter()
+            .filter(|path| path.as_str() == old || path.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in affected {
+            let renamed = format!("{new}{}", &path[old.len()..]);
+            self.directories.remove(&path);
+            self.directories.insert(renamed);
+        }
+        let affected = self
+            .directory_times
+            .keys()
+            .filter(|path| path.as_str() == old || path.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in affected {
+            let times = self.directory_times.remove(&path).unwrap();
+            self.directory_times
+                .insert(format!("{new}{}", &path[old.len()..]), times);
+        }
+        let affected = self
+            .directory_dacls
+            .keys()
+            .filter(|path| path.as_str() == old || path.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in affected {
+            let acl = self.directory_dacls.remove(&path).unwrap();
+            self.directory_dacls
+                .insert(format!("{new}{}", &path[old.len()..]), acl);
+        }
+        if let Some(times) = self.directory_times.get_mut(parent) {
+            times[1] = std::time::SystemTime::now();
+        }
+        Ok(0)
+    }
+}

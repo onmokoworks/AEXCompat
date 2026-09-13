@@ -89,6 +89,7 @@ enum LegacyWin64Import {
     CoInitializeSecurity,
     CoInitializeEx,
     CoUninitialize,
+    Rename,
     Stat64i32,
     Wstat64i32,
     Fullpath,
@@ -996,6 +997,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::Fullpath
         }
         (_, "_fullpath") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "rename") => {
+            LegacyWin64Import::Rename
+        }
+        (_, "rename") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_stat64i32") => {
             LegacyWin64Import::Stat64i32
         }
@@ -1524,6 +1529,16 @@ fn install_win64_import(
                         "install _fullpath",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_fullpath(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Rename => {
+                    uc("write rename return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install rename",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_rename(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;

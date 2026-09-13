@@ -23264,3 +23264,67 @@ fn registry_values_round_trip_sizes_types_default_and_access() {
         );
     }
 }
+
+#[test]
+fn rename_moves_guest_directory_tree_and_reports_errors() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-filesystem-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, dll, "rename").unwrap();
+        let old = DATA_BASE + 0x100;
+        let new = DATA_BASE + 0x300;
+        let files = &mut engine.unicorn.get_data_mut().guest_files;
+        files.directories.insert("c:/work/old/child".into());
+        files.record_directory_creation("c:/work/old/child");
+        let original_time = files.directory_times["c:/work/old/child"];
+        engine.write(old, b"C:/work/old\0").unwrap();
+        engine.write(new, b"C:/work/new\0").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 77;
+        assert_eq!(engine.call_win64(entry, [old, new, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 77);
+        let files = &engine.unicorn.get_data().guest_files;
+        assert!(!files.directory_exists("c:/work/old"));
+        assert!(files.directory_exists("c:/work/new/child"));
+        assert_eq!(files.directory_times["c:/work/new/child"], original_time);
+        assert_eq!(
+            engine.call_win64(entry, [old, new, 0, 0, 0, 0]).unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 2);
+        engine.write(old, b"C:/work/new\0").unwrap();
+        engine.write(new, b"C:/work/new/child\0").unwrap();
+        assert_eq!(
+            engine.call_win64(entry, [old, new, 0, 0, 0, 0]).unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 13);
+        engine.write(new, b"C:/elsewhere/new\0").unwrap();
+        assert_eq!(
+            engine.call_win64(entry, [old, new, 0, 0, 0, 0]).unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 13);
+        engine.unicorn.get_data_mut().guest_files.sources.insert(
+            "c:/readonly.bin".into(),
+            std::path::PathBuf::from("not-accessed"),
+        );
+        engine.write(old, b"C:/readonly.bin\0").unwrap();
+        assert_eq!(
+            engine.call_win64(entry, [old, new, 0, 0, 0, 0]).unwrap(),
+            u32::MAX as u64
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 13);
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .guest_files
+                .sources
+                .contains_key("c:/readonly.bin")
+        );
+    }
+    assert_eq!(
+        dispatch_win64_import("foreign.dll", "rename"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
