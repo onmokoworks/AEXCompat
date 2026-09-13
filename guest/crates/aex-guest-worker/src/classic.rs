@@ -2425,8 +2425,22 @@ impl ClassicHost {
     }
 
     fn invoke(&mut self, selector: u64) -> Result<u64, GuestError> {
-        self.engine
-            .call_selector_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
+        let report_timings = std::env::var_os("AEXCOMPAT_LOAD_TIMINGS").is_some();
+        if report_timings {
+            eprintln!("aex_guest_load_timing: event=begin stage=selector selector={selector}");
+        }
+        let started = std::time::Instant::now();
+        let result = self
+            .engine
+            .call_selector_win64(self.entry, [selector, self.input, self.output, 0, 0, 0]);
+        if report_timings {
+            eprintln!(
+                "aex_guest_load_timing: event=end stage=selector selector={selector} elapsed_ms={} result={}",
+                started.elapsed().as_millis(),
+                if result.is_ok() { "ok" } else { "error" }
+            );
+        }
+        result
     }
 
     fn write_frame_context(

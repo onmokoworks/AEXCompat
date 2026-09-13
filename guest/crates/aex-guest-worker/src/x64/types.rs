@@ -166,6 +166,7 @@ struct GuestState {
     crt_wlocale_buffer: Option<u64>,
     crt_pctype_buffer: Option<u64>,
     crt_locale_names_buffer: Option<u64>,
+    crt_lconv_buffer: Option<u64>,
     crt_tm_buffers: BTreeMap<u32, u64>,
     crt_strerror_buffers: BTreeMap<u32, u64>,
     windows_hostent_buffers: BTreeMap<u32, u64>,
@@ -539,8 +540,12 @@ impl Drop for GuestEngine<'_> {
                 .get_data()
                 .crt_heap
                 .allocations()
+                .filter(|(pointer, _)| !(CRT_HEAP_BASE..CRT_HEAP_END).contains(pointer))
                 .map(|(pointer, allocation)| (pointer, allocation.backing_size)),
         );
+        if self.unicorn.get_data().crt_heap_mapped {
+            mappings.push((CRT_HEAP_BASE, MAX_CRT_HEAP_BYTES));
+        }
         mappings.extend(self.unicorn.get_data().gpu_suite.mapped_regions());
         {
             let state = self.unicorn.get_data_mut();

@@ -235,3 +235,33 @@ fn emulate_crt_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
     })();
     finish_guest_stdio(unicorn, result);
 }
+
+// Windows x64 `struct lconv` has ten pointer fields followed by eight signed
+// char fields. The deterministic C locale uses "." for decimal_point, empty
+// strings for every other string field, and CHAR_MAX for monetary metadata.
+fn emulate_crt_localeconv(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        if let Some(address) = unicorn.get_data().crt_lconv_buffer {
+            return Ok(address);
+        }
+        // Keep this page immediately before the disjoint errno thread arena.
+        // The lower stream namespace after `+3 pages` belongs to popup text.
+        let address = CRT_ERRNO_BASE - PAGE_SIZE;
+        let decimal = address + 88;
+        let empty = decimal + 2;
+        let mut bytes = [0u8; 96];
+        bytes[0..8].copy_from_slice(&decimal.to_le_bytes());
+        for offset in (8..80).step_by(8) {
+            bytes[offset..offset + 8].copy_from_slice(&empty.to_le_bytes());
+        }
+        bytes[80..88].fill(i8::MAX as u8);
+        bytes[88..92].copy_from_slice(b".\0\0\0");
+        unicorn
+            .mem_map(address, PAGE_SIZE, Prot::READ)
+            .map_err(|e| e.to_string())?;
+        unicorn.mem_write(address, &bytes).map_err(|e| e.to_string())?;
+        unicorn.get_data_mut().crt_lconv_buffer = Some(address);
+        Ok(address)
+    })();
+    finish_guest_stdio(unicorn, result);
+}

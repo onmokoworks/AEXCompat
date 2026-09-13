@@ -46,6 +46,7 @@ impl CrtAsciiClass {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegacyWin64Import {
     Malloc,
+    Realloc,
     Calloc,
     Free,
     CrtStrdup,
@@ -116,6 +117,7 @@ enum LegacyWin64Import {
     EncodePointer,
     DecodePointer,
     CrtLocaleNames,
+    CrtLocaleConv,
     CrtPctype,
     CrtMbCurMax,
     CrtLocaleCodePage,
@@ -1128,6 +1130,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtLocaleNames
         }
         (_, "___lc_locale_name_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "localeconv") => {
+            LegacyWin64Import::CrtLocaleConv
+        }
+        (_, "localeconv") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "__pctype_func") => {
             LegacyWin64Import::CrtPctype
         }
@@ -1301,8 +1307,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, symbol) if symbol.contains("__ExceptionPtr") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        ("vcruntime140.dll", "__uncaught_exceptions") => LegacyWin64Import::UncaughtExceptions,
-        (_, "__uncaught_exceptions") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("vcruntime140.dll", "__uncaught_exception" | "__uncaught_exceptions") => {
+            LegacyWin64Import::UncaughtExceptions
+        }
+        (_, "__uncaught_exception" | "__uncaught_exceptions") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("vcruntime140.dll", "__std_exception_copy") => LegacyWin64Import::VcruntimeExceptionCopy,
         ("vcruntime140.dll", "__std_exception_destroy") => {
             LegacyWin64Import::VcruntimeExceptionDestroy
@@ -1312,6 +1322,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         (_, symbol) => match symbol {
             "malloc" => LegacyWin64Import::Malloc,
+            "realloc" => LegacyWin64Import::Realloc,
             "calloc" => LegacyWin64Import::Calloc,
             "free" => LegacyWin64Import::Free,
             "_callnewh" => LegacyWin64Import::CallNewHandler,
@@ -1366,6 +1377,15 @@ fn install_win64_import(
                         "install malloc import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_crt_malloc(unicorn, false);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Realloc => {
+                    uc("write realloc return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install realloc import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_realloc(unicorn);
                         }),
                     )?;
                 }
@@ -3279,6 +3299,15 @@ fn install_win64_import(
                         "install CRT locale names",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_crt_locale_names(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtLocaleConv => {
+                    uc("write localeconv return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install localeconv",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_localeconv(unicorn);
                         }),
                     )?;
                 }

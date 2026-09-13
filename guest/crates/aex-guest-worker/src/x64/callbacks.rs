@@ -1070,6 +1070,79 @@ fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
+fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = unicorn
+            .reg_read(RegisterX86::RCX)
+            .map_err(|error| format!("read CRT realloc pointer: {error}"))?;
+        let size = unicorn
+            .reg_read(RegisterX86::RDX)
+            .map_err(|error| format!("read CRT realloc size: {error}"))?;
+        if pointer == 0 {
+            return Ok(allocate_crt_region(unicorn, size).unwrap_or(0));
+        }
+        if size == 0 {
+            free_crt_region(unicorn, pointer)?;
+            return Ok(0);
+        }
+        let old = unicorn
+            .get_data()
+            .crt_heap
+            .regular_allocation(pointer)
+            .map_err(|error| error.to_string())?;
+        let replacement = match unicorn
+            .get_data()
+            .crt_heap
+            .prepare_regular_reallocation(pointer, size)
+        {
+            Ok(replacement) => replacement,
+            Err(CrtHeapError::ForeignOrFreedPointer | CrtHeapError::AllocatorMismatch) => {
+                return Err("CRT realloc rejected foreign allocation".into());
+            }
+            Err(_) => return Ok(0),
+        };
+        if replacement.backing_size <= old.backing_size {
+            unicorn
+                .get_data_mut()
+                .crt_heap
+                .commit_regular_reallocation(pointer, pointer, replacement)
+                .map_err(|error| error.to_string())?;
+            return Ok(pointer);
+        }
+        let new_pointer = match unicorn.get_data().crt_heap.first_fit(
+            CRT_HEAP_BASE,
+            CRT_HEAP_END,
+            replacement,
+        ) {
+            Ok(pointer) => pointer,
+            Err(_) => return Ok(0),
+        };
+        let bytes = unicorn
+            .mem_read_as_vec(pointer, old.requested_size.min(size) as usize)
+            .map_err(|error| format!("CRT realloc read old block: {error}"))?;
+        unicorn
+            .mem_write(new_pointer, &bytes)
+            .map_err(|error| format!("CRT realloc write new block: {error}"))?;
+        unicorn
+            .get_data_mut()
+            .crt_heap
+            .commit_regular_reallocation(pointer, new_pointer, replacement)
+            .map_err(|error| error.to_string())?;
+        Ok(new_pointer)
+    })();
+    match result {
+        Ok(pointer) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, pointer);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
 fn emulate_memset(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| {
         let destination = unicorn

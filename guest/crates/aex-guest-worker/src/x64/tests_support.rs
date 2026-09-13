@@ -529,6 +529,36 @@ fn crt_heap_imports_allocate_zero_reuse_and_reject_invalid_free() {
 }
 
 #[test]
+fn crt_realloc_preserves_bytes_shrinks_in_place_and_frees_zero_size() {
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 8).unwrap();
+    emulate_crt_realloc(&mut engine.unicorn);
+    let original = engine.unicorn.reg_read(RegisterX86::RAX).unwrap();
+    engine.unicorn.mem_write(original, b"realloc!").unwrap();
+
+    engine.unicorn.reg_write(RegisterX86::RCX, original).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 8192).unwrap();
+    emulate_crt_realloc(&mut engine.unicorn);
+    let grown = engine.unicorn.reg_read(RegisterX86::RAX).unwrap();
+    assert_ne!(grown, 0);
+    let mut bytes = [0; 8];
+    engine.unicorn.mem_read(grown, &mut bytes).unwrap();
+    assert_eq!(&bytes, b"realloc!");
+
+    engine.unicorn.reg_write(RegisterX86::RCX, grown).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 4).unwrap();
+    emulate_crt_realloc(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), grown);
+
+    engine.unicorn.reg_write(RegisterX86::RCX, grown).unwrap();
+    engine.unicorn.reg_write(RegisterX86::RDX, 0).unwrap();
+    emulate_crt_realloc(&mut engine.unicorn);
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
+    assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
 fn crt_heap_uses_one_guest_mapping_for_many_allocations() {
     let mut engine = test_engine(&[0xc3]);
     let regions_before = engine.unicorn.mem_regions().unwrap().len();
@@ -18112,6 +18142,33 @@ fn crt_locale_names_are_six_null_c_categories_distinct_from_printable_names() {
 }
 
 #[test]
+fn localeconv_returns_stable_readonly_windows_c_locale_layout() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let query = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, query, dll, "localeconv").unwrap();
+        engine.unicorn.get_data_mut().crt_errno = 71;
+        let address = engine.call_win64(query, [u64::MAX; 6]).unwrap();
+        let mut bytes = [0; 92];
+        engine.unicorn.mem_read(address, &mut bytes).unwrap();
+        let pointer = |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        assert_eq!(pointer(0), address + 88);
+        for offset in (8..80).step_by(8) {
+            assert_eq!(pointer(offset), address + 90);
+        }
+        assert_eq!(&bytes[80..88], &[127; 8]);
+        assert_eq!(&bytes[88..92], b".\0\0\0");
+        assert_eq!(engine.call_win64(query, [0; 6]).unwrap(), address);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+        assert!(guest_range_has_permission(&engine.unicorn, address, 92, Prot::READ).unwrap());
+        assert!(!guest_range_has_permission(&engine.unicorn, address, 92, Prot::WRITE).unwrap());
+        install_win64_import(&mut engine.unicorn, query + 16, "foreign.dll", "localeconv")
+            .unwrap();
+        assert!(engine.call_win64(query + 16, [0; 6]).is_err());
+    }
+}
+
+#[test]
 fn crt_mb_cur_max_tracks_supported_c_locale_and_preserves_errno() {
     for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
         let mut engine = test_engine(&[0xc3]);
@@ -18159,6 +18216,14 @@ fn uncaught_exception_count_is_zero_at_normal_boundaries_without_suppressing_thr
         engine.unicorn.get_data_mut().current_windows_thread_id = thread;
         assert_eq!(engine.call_win64(query, [u64::MAX; 6]).unwrap(), 0);
     }
+    install_win64_import(
+        &mut engine.unicorn,
+        query + 16,
+        "vcruntime140.dll",
+        "__uncaught_exception",
+    )
+    .unwrap();
+    assert_eq!(engine.call_win64(query + 16, [u64::MAX; 6]).unwrap(), 0);
     assert!(matches!(engine.call_win64(CODE, [0; 6]),
         Err(GuestError::Callback(message)) if message.contains("_CxxThrowException")));
     assert_eq!(engine.unicorn.get_data().crt_errno, 71);

@@ -243,6 +243,66 @@ impl CrtHeap {
         })
     }
 
+    pub(crate) fn regular_allocation(&self, pointer: u64) -> Result<CrtAllocation, CrtHeapError> {
+        let allocation = *self
+            .allocations
+            .get(&pointer)
+            .ok_or(CrtHeapError::ForeignOrFreedPointer)?;
+        if allocation.kind != CrtAllocationKind::Regular {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        Ok(allocation)
+    }
+
+    pub(crate) fn prepare_regular_reallocation(
+        &self,
+        pointer: u64,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.regular_allocation(pointer)?;
+        let requested_size = requested_size.max(1);
+        if requested_size > MAX_CRT_ALLOCATION_BYTES {
+            return Err(CrtHeapError::AllocationTooLarge);
+        }
+        let retained_bytes = self.live_bytes - old.requested_size;
+        if retained_bytes > MAX_CRT_HEAP_BYTES - requested_size {
+            return Err(CrtHeapError::AggregateBudgetExceeded);
+        }
+        Ok(CrtAllocation {
+            requested_size,
+            backing_size: align_up(requested_size, CRT_HEAP_PAGE_SIZE)?,
+            kind: CrtAllocationKind::Regular,
+        })
+    }
+
+    pub(crate) fn commit_regular_reallocation(
+        &mut self,
+        old_pointer: u64,
+        new_pointer: u64,
+        mut allocation: CrtAllocation,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.regular_allocation(old_pointer)?;
+        if allocation.kind != CrtAllocationKind::Regular {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        if new_pointer == 0 || new_pointer % CRT_HEAP_ALIGNMENT != 0 {
+            return Err(CrtHeapError::InvalidPointer);
+        }
+        if new_pointer != old_pointer && self.allocations.contains_key(&new_pointer) {
+            return Err(CrtHeapError::DuplicatePointer);
+        }
+        if new_pointer == old_pointer {
+            allocation.backing_size = old.backing_size;
+        }
+        self.allocations.remove(&old_pointer);
+        self.allocations.insert(new_pointer, allocation);
+        self.live_bytes = self.live_bytes - old.requested_size + allocation.requested_size;
+        if new_pointer != old_pointer {
+            self.rewind_allocation_hints(old_pointer);
+        }
+        Ok(old)
+    }
+
     pub(crate) fn prepare_process_heap_in_place_reallocation(
         &self,
         pointer: u64,

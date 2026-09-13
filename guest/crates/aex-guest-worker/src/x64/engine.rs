@@ -114,22 +114,56 @@ impl GuestEngine<'static> {
         tls_callbacks: &[u64],
         dll_entry: Option<u64>,
     ) -> Result<(), GuestError> {
+        let report_timings = std::env::var_os("AEXCOMPAT_LOAD_TIMINGS").is_some();
+        let attach_started = Instant::now();
         // The Windows loader invokes TLS callbacks in image order before
         // DllMain for DLL_PROCESS_ATTACH.  Several MSVC runtimes use this
         // phase to make later C++ static initialization safe.
         for (index, address) in tls_callbacks.iter().copied().enumerate() {
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=begin stage=tls_callback image_base={image_base:#x} index={} address={address:#x}",
+                    index + 1
+                );
+            }
+            let callback_started = Instant::now();
             self.call_win64(address, [image_base, 1, 0, 0, 0, 0])
                 .map_err(|error| GuestError::TlsProcessAttach {
                     index: index + 1,
                     address,
                     detail: error.to_string(),
                 })?;
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=end stage=tls_callback image_base={image_base:#x} index={} elapsed_ms={}",
+                    index + 1,
+                    callback_started.elapsed().as_millis()
+                );
+            }
         }
         if let Some(entry) = dll_entry {
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=begin stage=dll_main image_base={image_base:#x} address={entry:#x}"
+                );
+            }
+            let dll_started = Instant::now();
             let attached = self.call_win64(entry, [image_base, 1, 0, 0, 0, 0])?;
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=end stage=dll_main image_base={image_base:#x} elapsed_ms={}",
+                    dll_started.elapsed().as_millis()
+                );
+            }
             if attached == 0 {
                 return Err(GuestError::DllProcessAttach);
             }
+        }
+        if report_timings {
+            eprintln!(
+                "aex_guest_load_timing: event=end stage=process_attach image_base={image_base:#x} elapsed_ms={}",
+                attach_started.elapsed().as_millis()
+            );
         }
         Ok(())
     }
