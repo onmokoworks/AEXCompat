@@ -18,6 +18,67 @@ pub enum Property {
 
 pub type Configuration = BTreeMap<String, BTreeMap<String, Property>>;
 
+/// Service identifiers associated with the native interface. State names take
+/// precedence over setup names for running VPNs. IPv4 and IPv6 state names may
+/// differ; each interface must retain the matching service in that case.
+pub fn interface_services(
+    configuration: &Configuration,
+    interface_name: &str,
+) -> Result<Vec<String>, String> {
+    if interface_name.is_empty()
+        || interface_name.len() >= libc::IFNAMSIZ
+        || interface_name.contains(['/', '\0'])
+    {
+        return Err("invalid native interface name".into());
+    }
+    let mut services = std::collections::BTreeSet::new();
+    for key in configuration.keys() {
+        let rest = key
+            .strip_prefix("Setup:/Network/Service/")
+            .or_else(|| key.strip_prefix("State:/Network/Service/"));
+        if let Some(rest) = rest {
+            if let Some((id, entity)) = rest.split_once('/') {
+                if !id.is_empty() && !entity.contains('/') {
+                    services.insert(id.to_string());
+                }
+            }
+        }
+    }
+    if services.len() > 4096 {
+        return Err("network service count exceeds bound".into());
+    }
+    let get_name = |key: &str, field: &str| -> Result<Option<&str>, String> {
+        match configuration.get(key).and_then(|record| record.get(field)) {
+            None => Ok(None),
+            Some(Property::Text(value)) => Ok(Some(value)),
+            Some(_) => Err("network service interface name has invalid type".into()),
+        }
+    };
+    let mut result = Vec::new();
+    for id in services {
+        let ipv4 = get_name(
+            &format!("State:/Network/Service/{id}/IPv4"),
+            "InterfaceName",
+        )?;
+        let ipv6 = get_name(
+            &format!("State:/Network/Service/{id}/IPv6"),
+            "InterfaceName",
+        )?;
+        let matches = if ipv4.is_some() || ipv6.is_some() {
+            ipv4 == Some(interface_name) || ipv6 == Some(interface_name)
+        } else {
+            get_name(
+                &format!("Setup:/Network/Service/{id}/Interface"),
+                "DeviceName",
+            )? == Some(interface_name)
+        };
+        if matches {
+            result.push(id);
+        }
+    }
+    Ok(result)
+}
+
 #[link(name = "SystemConfiguration", kind = "framework")]
 unsafe extern "C" {
     fn SCDynamicStoreCopyMultiple(
@@ -148,6 +209,44 @@ pub fn snapshot() -> Result<Configuration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_correlation_uses_runtime_names_and_keeps_multiple_services() {
+        let mut config = Configuration::new();
+        for (path, field, value) in [
+            (
+                "Setup:/Network/Service/ether/Interface",
+                "DeviceName",
+                "en0",
+            ),
+            ("Setup:/Network/Service/vpn/Interface", "DeviceName", "en0"),
+            ("State:/Network/Service/vpn/IPv4", "InterfaceName", "utun0"),
+            ("State:/Network/Service/vpn/IPv6", "InterfaceName", "utun1"),
+            (
+                "State:/Network/Service/second/IPv4",
+                "InterfaceName",
+                "utun0",
+            ),
+        ] {
+            config.insert(
+                path.into(),
+                BTreeMap::from([(field.into(), Property::Text(value.into()))]),
+            );
+        }
+        assert_eq!(interface_services(&config, "en0").unwrap(), ["ether"]);
+        assert_eq!(
+            interface_services(&config, "utun0").unwrap(),
+            ["second", "vpn"]
+        );
+        assert_eq!(interface_services(&config, "utun1").unwrap(), ["vpn"]);
+        assert!(interface_services(&config, "lo0").unwrap().is_empty());
+        assert!(interface_services(&config, "../en0").is_err());
+        config
+            .get_mut("State:/Network/Service/vpn/IPv4")
+            .unwrap()
+            .insert("InterfaceName".into(), Property::Boolean(true));
+        assert!(interface_services(&config, "utun0").is_err());
+    }
 
     #[test]
     fn decoding_preserves_missing_fields_and_rejects_wrong_native_types() {
