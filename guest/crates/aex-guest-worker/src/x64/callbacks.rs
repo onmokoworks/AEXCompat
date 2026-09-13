@@ -4314,3 +4314,53 @@ fn emulate_crt_strerror(unicorn: &mut Unicorn<'_, GuestState>) {
     })();
     finish_guest_stdio(unicorn, result);
 }
+
+fn emulate_stdio_common_vsprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let options = read_win64_import_argument(unicorn, 0)?;
+        let destination = read_win64_import_argument(unicorn, 1)?;
+        let capacity = read_win64_import_argument(unicorn, 2)?;
+        let format = read_win64_import_argument(unicorn, 3)?;
+        let locale = read_win64_import_argument(unicorn, 4)?;
+        let args = read_win64_import_argument(unicorn, 5)?;
+        if options != 0x24 || locale != 0 {
+            return Err(format!(
+                "vsprintf_s unsupported options {options:#x} or locale {locale:#x}"
+            ));
+        }
+        if destination == 0 || capacity == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(u32::MAX as u64);
+        }
+        if capacity > MAX_CRT_STDIO_BUFFER_BYTES {
+            return Err("vsprintf_s capacity exceeds bounded output".into());
+        }
+        if !guest_range_has_permission(unicorn, destination, capacity, Prot::WRITE)? {
+            return Err("vsprintf_s destination is not fully writable".into());
+        }
+        if format == 0 {
+            unicorn
+                .mem_write(destination, &[0])
+                .map_err(|e| e.to_string())?;
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(u32::MAX as u64);
+        }
+        let format =
+            read_crt_stdio_c_string(unicorn, format, MAX_CRT_STDIO_FORMAT_BYTES, "format")?;
+        let mut output = format_guest_stdio(unicorn, &format, args)?;
+        if output.len() as u64 >= capacity {
+            unicorn
+                .mem_write(destination, &[0])
+                .map_err(|e| e.to_string())?;
+            set_guest_crt_errno(unicorn, 34)?;
+            return Ok(u32::MAX as u64);
+        }
+        let length = output.len() as u64;
+        output.push(0);
+        unicorn
+            .mem_write(destination, &output)
+            .map_err(|e| e.to_string())?;
+        Ok(length)
+    })();
+    finish_guest_stdio(unicorn, result);
+}

@@ -100,6 +100,7 @@ enum LegacyWin64Import {
     MemCmp,
     StdioVsnprintfS,
     StdioVsscanf,
+    StdioVsprintfS,
     StdioVsprintf,
     EncodePointer,
     DecodePointer,
@@ -1003,6 +1004,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "__stdio_common_vsnprintf_s") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsprintf_s") => {
+            LegacyWin64Import::StdioVsprintfS
+        }
+        (_, "__stdio_common_vsprintf_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsprintf") => {
             LegacyWin64Import::StdioVsprintf
         }
@@ -1725,6 +1730,15 @@ fn install_win64_import(
                         "install vsscanf",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_stdio_common_vsscanf(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StdioVsprintfS => {
+                    uc("write vsprintf_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install vsprintf_s",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_stdio_common_vsprintf_s(uc)
                         }),
                     )?;
                 }

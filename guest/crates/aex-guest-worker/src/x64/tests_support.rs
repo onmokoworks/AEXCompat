@@ -22520,3 +22520,53 @@ fn get_version_matches_extended_version_and_preserves_errors() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn vsprintf_s_uses_six_argument_abi_and_rejects_small_buffer() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "ucrtbase.dll",
+        "__stdio_common_vsprintf_s",
+    )
+    .unwrap();
+    let dst = DATA_BASE + 0x100;
+    let format = DATA_BASE + 0x200;
+    let args = DATA_BASE + 0x300;
+    engine.write(format, b"id=%d\0").unwrap();
+    engine.write(args, &42u64.to_le_bytes()).unwrap();
+    engine.write(dst, &[0xa5; 8]).unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 71;
+    assert_eq!(
+        engine
+            .call_win64(entry, [0x24, dst, 6, format, 0, args])
+            .unwrap(),
+        5
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(dst, 7).unwrap(),
+        b"id=42\0\xa5"
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+    assert_eq!(
+        engine
+            .call_win64(entry, [0x24, dst, 5, format, 0, args])
+            .unwrap(),
+        u32::MAX as u64
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(dst, 6).unwrap(), b"\0d=42\0");
+    assert_eq!(engine.unicorn.get_data().crt_errno, 34);
+    assert_eq!(
+        engine
+            .call_win64(entry, [0x24, dst, 6, 0, 0, args])
+            .unwrap(),
+        u32::MAX as u64
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "__stdio_common_vsprintf_s"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
