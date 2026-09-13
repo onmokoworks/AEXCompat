@@ -386,13 +386,12 @@ impl CrtHeap {
         }
     }
 
-    pub(crate) fn allocations(&self) -> impl Iterator<Item = (u64, CrtAllocation)> + '_ {
+    pub(crate) fn allocations(&self) -> impl DoubleEndedIterator<Item = (u64, CrtAllocation)> + '_ {
         self.allocations
             .iter()
             .map(|(&pointer, &allocation)| (pointer, allocation))
     }
 
-    #[cfg(test)]
     pub(crate) fn live_bytes(&self) -> u64 {
         self.live_bytes
     }

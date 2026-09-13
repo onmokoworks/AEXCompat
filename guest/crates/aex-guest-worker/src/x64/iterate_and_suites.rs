@@ -1130,8 +1130,15 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
         let message_suffix = cv_message
             .map(|message| format!(", cv_message={message}"))
             .unwrap_or_default();
+        let caller = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 8).ok())
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or_default();
         unicorn.get_data_mut().callback_error = Some(format!(
-            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}{message_suffix})"
+            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}, caller={caller:#x}{message_suffix})"
         ));
     }
     let _ = unicorn.emu_stop();

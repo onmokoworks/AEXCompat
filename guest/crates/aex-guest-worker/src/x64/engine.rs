@@ -2381,6 +2381,16 @@ impl GuestEngine<'static> {
         } else {
             String::new()
         };
+        let rsp = *registers.get("rsp").unwrap_or(&0);
+        let stack_words = (0..96u64)
+            .map_while(|index| {
+                let bytes = self
+                    .unicorn
+                    .mem_read_as_vec(rsp.checked_add(index * 8)?, 8)
+                    .ok()?;
+                Some(u64::from_le_bytes(bytes.try_into().ok()?))
+            })
+            .collect();
         let runtime_target = self
             .unicorn
             .get_data()
@@ -2388,6 +2398,18 @@ impl GuestEngine<'static> {
             .as_ref()
             .filter(|target| target.source_address == rip || target.effective_target == Some(rip))
             .cloned();
+        let crt_heap_allocation_count = self.unicorn.get_data().crt_heap.allocations().count();
+        let crt_heap_tail_allocations = self
+            .unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .rev()
+            .take(16)
+            .map(|(pointer, allocation)| {
+                (pointer, allocation.requested_size, allocation.backing_size)
+            })
+            .collect();
         let snapshot = TraceCrashSnapshot {
             reason: reason.clone(),
             registers,
@@ -2398,10 +2420,14 @@ impl GuestEngine<'static> {
                 .contains(&rip)
                 .then(|| rip - self.image_base),
             instruction_bytes,
+            stack_words,
             runtime_target,
             handle_allocations: self.unicorn.get_data().handle_allocations.clone(),
             handle_allocation_failures: self.unicorn.get_data().handle_allocation_failures.clone(),
             live_handle_count: self.unicorn.get_data().handles.len(),
+            crt_heap_live_bytes: self.unicorn.get_data().crt_heap.live_bytes(),
+            crt_heap_allocation_count,
+            crt_heap_tail_allocations,
             next_pf_handle_data: self.unicorn.get_data().next_pf_handle_data,
             pf_handle_data_end: PF_HANDLE_DATA_END,
         };

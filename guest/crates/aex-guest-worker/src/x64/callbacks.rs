@@ -1123,6 +1123,99 @@ fn emulate_windows_hook_api(
     finish_guest_stdio(unicorn, result);
 }
 
+fn emulate_windows_timer_api(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        let window = read_win64_import_argument(unicorn, 0)?;
+        let requested_id = read_win64_import_argument(unicorn, 1)?;
+        if operation == LegacyWin64Import::KillTimer {
+            return if unicorn
+                .get_data_mut()
+                .windows_timers
+                .remove(&(window, requested_id))
+                .is_some()
+            {
+                Ok(1)
+            } else {
+                Ok(0)
+            };
+        }
+        let interval = read_win64_import_argument(unicorn, 2)?;
+        let callback = read_win64_import_argument(unicorn, 3)?;
+        if interval > u32::MAX as u64
+            || (callback != 0
+                && !guest_range_has_permission(unicorn, callback, 1, Prot::EXEC)?)
+        {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        if unicorn.get_data().windows_timers.len() >= 256 {
+            unicorn.get_data_mut().windows_last_error = 8;
+            return Ok(0);
+        }
+        let id = if requested_id != 0 {
+            requested_id
+        } else {
+            let next = unicorn
+                .get_data()
+                .next_windows_timer
+                .checked_add(1)
+                .ok_or("Windows timer id overflow")?;
+            unicorn.get_data_mut().next_windows_timer = next;
+            next
+        };
+        unicorn
+            .get_data_mut()
+            .windows_timers
+            .insert((window, id), ((interval as u32).max(10), callback));
+        Ok(id)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_message_box(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
+    let result = (|| -> Result<u64, String> {
+        let text_pointer = read_win64_import_argument(unicorn, 1)?;
+        let caption_pointer = read_win64_import_argument(unicorn, 2)?;
+        let style = read_win64_import_argument(unicorn, 3)? as u32;
+        let read = |unicorn: &Unicorn<'_, GuestState>, pointer, label| {
+            if pointer == 0 {
+                return Ok(String::new());
+            }
+            if wide {
+                read_guest_wide_file_string(unicorn, pointer, 4096, label)
+            } else {
+                let bytes = read_crt_stdio_c_string(unicorn, pointer, 4096, label)?;
+                let (text, _, malformed) = encoding_rs::SHIFT_JIS.decode(&bytes);
+                if malformed {
+                    return Err(format!("{label} contains invalid CP932"));
+                }
+                Ok(text.into_owned())
+            }
+        };
+        let text = read(unicorn, text_pointer, "MessageBox text")?;
+        let caption = read(unicorn, caption_pointer, "MessageBox caption")?;
+        if unicorn.get_data().windows_message_boxes.len() >= 32 {
+            return Err("MessageBox diagnostic capacity exceeded".into());
+        }
+        unicorn
+            .get_data_mut()
+            .windows_message_boxes
+            .push((caption, text, style));
+        // Choose the dismissive/default-safe result for each button group.
+        Ok(match style & 0xf {
+            0 => 1, // IDOK
+            1 | 3 | 5 | 6 => 2, // IDCANCEL
+            2 => 3, // IDABORT
+            4 => 7, // IDNO
+            _ => 1,
+        })
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let pointer = unicorn
@@ -1822,11 +1915,15 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
             )
         };
 
-        let expected_options = if secure { 0x24 } else { 0x25 };
-        if options != expected_options {
+        // UCRT call sites select either legacy termination (0x1) or standard
+        // snprintf behavior (0x2), alongside legacy narrow-format wide
+        // specifiers (0x4) and standard rounding (0x20). The formatter below
+        // implements the common subset identically for these three observed
+        // combinations.
+        if !matches!(options, 0x24 | 0x25 | 0x26) {
             return Err(format!("stdio unsupported formatting options {options:#x}"));
         }
-        if locale != 0 {
+        if !supported_crt_locale(unicorn, locale) {
             return Err("stdio locale-aware formatting is unsupported".to_string());
         }
         if secure && (destination == 0 || buffer_count == 0) {
@@ -3735,7 +3832,7 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
         let format = read_win64_import_argument(unicorn, 3)?;
         let locale = read_win64_import_argument(unicorn, 4)?;
         let args = read_win64_import_argument(unicorn, 5)?;
-        if options & !2 != 0 || locale != 0 {
+        if options & !2 != 0 || !supported_crt_locale(unicorn, locale) {
             return Err(format!(
                 "unsupported scanf options={options:#x} locale={locale:#x}"
             ));
@@ -4459,7 +4556,7 @@ fn emulate_stdio_common_vsprintf_s(unicorn: &mut Unicorn<'_, GuestState>) {
         let format = read_win64_import_argument(unicorn, 3)?;
         let locale = read_win64_import_argument(unicorn, 4)?;
         let args = read_win64_import_argument(unicorn, 5)?;
-        if options != 0x24 || locale != 0 {
+        if options != 0x24 || !supported_crt_locale(unicorn, locale) {
             return Err(format!(
                 "vsprintf_s unsupported options {options:#x} or locale {locale:#x}"
             ));

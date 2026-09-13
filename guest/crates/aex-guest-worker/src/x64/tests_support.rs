@@ -1915,7 +1915,7 @@ fn stdio_vsprintf_formats_observed_olm_parameter_name_with_size_max() {
         engine
             .call_win64_with_timeout(
                 VSPRINTF,
-                &[0x25, output, 12, format, 0, va_list],
+                &[0x26, output, 12, format, 0, va_list],
                 TIMEOUT_MICROSECONDS,
             )
             .unwrap(),
@@ -7871,7 +7871,7 @@ fn environment_strings_w_is_kernel32_scoped_sorted_writable_and_double_nul_termi
     engine.unicorn.get_data_mut().windows_last_error = 0xdead_beef;
     let pointer = engine.call_win64(GET_STRINGS, [0, 0, 0, 0, 0, 0]).unwrap();
     assert_ne!(pointer, 0);
-    let expected = "OPENCV_FOR_THREADS_NUM=1\0\0"
+    let expected = "OPENCV_FOR_THREADS_NUM=1\0OPENIMAGEIO_THREADS=1\0\0"
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
@@ -9933,6 +9933,18 @@ fn get_console_mode_rejects_foreign_handles_without_touching_guest_memory() {
         sentinel
     );
     assert!(engine.unicorn.get_data().callback_error.is_none());
+}
+
+#[test]
+fn file_api_encoding_mode_is_ansi_and_kernel32_scoped() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", "AreFileApisANSI").unwrap();
+    assert_eq!(engine.call_win64(entry, [u64::MAX; 6]).unwrap(), 1);
+    assert_eq!(
+        dispatch_win64_import("foreign.dll", "AreFileApisANSI"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
 }
 
 #[test]
@@ -12287,6 +12299,18 @@ fn win64_crt_math_imports_classify_without_bypassing_library_routing() {
     );
     assert_eq!(
         dispatch_win64_import("fixture.dll", "lroundf"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        dispatch_win64_import(crt_math, "log"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Log)
+    );
+    assert_eq!(
+        dispatch_win64_import("ucrtbase.dll", "log"),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::Log)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "log"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
     assert_eq!(
@@ -15804,7 +15828,11 @@ fn putenv_updates_all_guest_readers_and_preserves_snapshots() {
             .unwrap(),
         0
     );
-    assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), [0; 4]);
+    let remaining = "OPENIMAGEIO_THREADS=1\0\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), remaining);
     engine.write(text, b"INVALID\0").unwrap();
     assert_eq!(
         engine
@@ -15813,7 +15841,11 @@ fn putenv_updates_all_guest_readers_and_preserves_snapshots() {
         u32::MAX as u64
     );
     assert_eq!(engine.unicorn.get_data().crt_errno, 22);
-    assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), [0; 4]);
+    let remaining = "OPENIMAGEIO_THREADS=1\0\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), remaining);
 }
 
 #[test]
@@ -15909,6 +15941,62 @@ fn guest_clocks_convert_epochs_and_counter_tracks_elapsed_time() {
             u64::from(id)
         );
     }
+}
+
+#[test]
+fn crt_time_names_return_owned_c_locale_tables() {
+    let mut engine = test_engine(&[0xc3]);
+    let days = STUB_BASE + 0x100;
+    let months = days + 16;
+    let tnames = months + 16;
+    let wide_days = tnames + 16;
+    let free = wide_days + 16;
+    let dll = "api-ms-win-crt-time-l1-1-0.dll";
+    install_win64_import(&mut engine.unicorn, days, dll, "_Getdays").unwrap();
+    install_win64_import(&mut engine.unicorn, months, dll, "_Getmonths").unwrap();
+    install_win64_import(&mut engine.unicorn, tnames, dll, "_Gettnames").unwrap();
+    install_win64_import(&mut engine.unicorn, wide_days, dll, "_W_Getdays").unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        free,
+        "api-ms-win-crt-heap-l1-1-0.dll",
+        "free",
+    )
+    .unwrap();
+    for (entry, expected) in [
+        (days, b":Sun:Sunday:Mon:Monday".as_slice()),
+        (months, b":Jan:January:Feb:February".as_slice()),
+    ] {
+        let pointer = engine.call_win64(entry, [0; 6]).unwrap();
+        let bytes = engine
+            .unicorn
+            .mem_read_as_vec(pointer, expected.len())
+            .unwrap();
+        assert_eq!(bytes, expected);
+        engine.call_win64(free, [pointer, 0, 0, 0, 0, 0]).unwrap();
+    }
+    let pointer = engine.call_win64(tnames, [0; 6]).unwrap();
+    let first = u64::from_le_bytes(
+        engine
+            .unicorn
+            .mem_read_as_vec(pointer, 8)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(first, 4).unwrap(), b"Sun\0");
+    engine.call_win64(free, [pointer, 0, 0, 0, 0, 0]).unwrap();
+    let pointer = engine.call_win64(wide_days, [0; 6]).unwrap();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(pointer, 10).unwrap(),
+        b":\0S\0u\0n\0:\0"
+    );
+    engine.call_win64(free, [pointer, 0, 0, 0, 0, 0]).unwrap();
+    assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+    assert_eq!(
+        dispatch_win64_import("foreign.dll", "_Getdays"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
 }
 
 #[test]
@@ -18044,11 +18132,14 @@ fn crt_locale_codepage_tracks_supported_c_locale_and_preserves_errno() {
     for dll in ["ucrtbase.dll", "api-ms-win-crt-locale-l1-1-0.dll"] {
         let mut engine = test_engine(&[0xc3]);
         let query = STUB_BASE + 0x100;
+        let collate = query + 16;
         let set = query + 32;
         install_win64_import(&mut engine.unicorn, query, dll, "___lc_codepage_func").unwrap();
+        install_win64_import(&mut engine.unicorn, collate, dll, "___lc_collate_cp_func").unwrap();
         install_win64_import(&mut engine.unicorn, set, dll, "setlocale").unwrap();
         engine.unicorn.get_data_mut().crt_errno = 71;
         assert_eq!(engine.call_win64(query, [u64::MAX; 6]).unwrap(), 0);
+        assert_eq!(engine.call_win64(collate, [0; 6]).unwrap(), 0);
         let locale = engine.call_win64(set, [0; 6]).unwrap();
         engine.call_win64(set, [0, locale, 0, 0, 0, 0]).unwrap();
         assert_eq!(engine.call_win64(query, [0; 6]).unwrap(), 0);
@@ -18176,6 +18267,36 @@ fn localeconv_returns_stable_readonly_windows_c_locale_layout() {
             .unwrap();
         assert!(engine.call_win64(query + 16, [0; 6]).is_err());
     }
+}
+
+#[test]
+fn crt_locale_objects_are_bounded_c_locale_handles_with_owned_lifetime() {
+    let mut engine = test_engine(&[0xc3]);
+    let create = STUB_BASE + 0x100;
+    let free = create + 16;
+    install_win64_import(
+        &mut engine.unicorn,
+        create,
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "_create_locale",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        free,
+        "api-ms-win-crt-locale-l1-1-0.dll",
+        "_free_locale",
+    )
+    .unwrap();
+    let name = DATA_BASE + 0x100;
+    engine.write(name, b"C\0").unwrap();
+    let locale = engine.call_win64(create, [0, name, 0, 0, 0, 0]).unwrap();
+    assert!(supported_crt_locale(&engine.unicorn, locale));
+    assert_eq!(engine.call_win64(free, [locale, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert!(!supported_crt_locale(&engine.unicorn, locale));
+    engine.write(name, b"ja-JP\0").unwrap();
+    assert_eq!(engine.call_win64(create, [0, name, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 22);
 }
 
 #[test]
@@ -18703,6 +18824,61 @@ fn windows_hook_apis_own_bounded_guest_registrations_without_host_events() {
     assert_eq!(engine.unicorn.get_data().windows_last_error, 1404);
     assert_eq!(engine.call_win64(set, [5, 0, 0, 1, 0, 0]).unwrap(), 0);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+}
+
+#[test]
+fn windows_timer_apis_register_replace_and_cancel_without_wall_clock_waits() {
+    let mut engine = test_engine(&[0xc3]);
+    let set = STUB_BASE + 0x100;
+    let kill = set + 16;
+    install_win64_import(&mut engine.unicorn, set, "user32.dll", "SetTimer").unwrap();
+    install_win64_import(&mut engine.unicorn, kill, "user32.dll", "KillTimer").unwrap();
+    let generated = engine
+        .call_win64(set, [0, 0, 1, TEST_CODE, 0, 0])
+        .unwrap();
+    assert_ne!(generated, 0);
+    assert_eq!(
+        engine.unicorn.get_data().windows_timers[&(0, generated)],
+        (10, TEST_CODE)
+    );
+    assert_eq!(engine.call_win64(set, [7, 42, 50, 0, 0, 0]).unwrap(), 42);
+    assert_eq!(engine.call_win64(set, [7, 42, 75, 0, 0, 0]).unwrap(), 42);
+    assert_eq!(engine.unicorn.get_data().windows_timers[&(7, 42)], (75, 0));
+    assert_eq!(engine.call_win64(kill, [7, 42, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.call_win64(kill, [7, 42, 0, 0, 0, 0]).unwrap(), 0);
+}
+
+#[test]
+fn message_box_records_text_and_returns_dismissive_button_without_host_ui() {
+    for (symbol, wide) in [("MessageBoxA", false), ("MessageBoxW", true)] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, "user32.dll", symbol).unwrap();
+        let text = DATA_BASE + 0x100;
+        let caption = DATA_BASE + 0x200;
+        let encode = |value: &str| {
+            if wide {
+                value
+                    .encode_utf16()
+                    .chain([0])
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>()
+            } else {
+                value.bytes().chain([0]).collect()
+            }
+        };
+        engine.write(text, &encode("license unavailable")).unwrap();
+        engine.write(caption, &encode("Sapphire")).unwrap();
+        assert_eq!(engine.call_win64(entry, [0, text, caption, 4, 0, 0]).unwrap(), 7);
+        assert_eq!(
+            engine.unicorn.get_data().windows_message_boxes[0],
+            ("Sapphire".into(), "license unavailable".into(), 4)
+        );
+        assert!(matches!(
+            dispatch_win64_import("foreign.dll", symbol),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        ));
+    }
 }
 
 #[test]

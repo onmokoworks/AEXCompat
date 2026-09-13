@@ -83,6 +83,7 @@ enum LegacyWin64Import {
     IsValidAcl,
     InitializeAcl,
     CreateDirectoryA,
+    AreFileApisAnsi,
     GetVolumeInformationA,
     Errno,
     GetHostByName,
@@ -118,12 +119,18 @@ enum LegacyWin64Import {
     DecodePointer,
     CrtLocaleNames,
     CrtLocaleConv,
+    CrtCreateLocale,
+    CrtFreeLocale,
     CrtPctype,
     CrtMbCurMax,
     CrtLocaleCodePage,
+    CrtLocaleCollateCodePage,
     CrtSetLocale(bool),
     CrtLocaleLock,
     CrtLocaleUnlock,
+    CrtTimeNames(bool),
+    CrtWideTimeNames(bool),
+    CrtTimeLocaleNames,
     StreamBufferPointers,
     AcRtIobFunc,
     Fgetc,
@@ -172,6 +179,7 @@ enum LegacyWin64Import {
     FmodF,
     LRound,
     LRoundF,
+    Log,
     Round,
     RoundF,
     PowF,
@@ -197,6 +205,9 @@ enum LegacyWin64Import {
     SetWindowsHookExA,
     UnhookWindowsHookEx,
     CallNextHookEx,
+    SetTimer,
+    KillTimer,
+    MessageBox(bool),
     GetUserNameA,
     GetUserNameW,
     GetHostname,
@@ -527,6 +538,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "SetWindowsHookExA" | "UnhookWindowsHookEx" | "CallNextHookEx") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("user32.dll", "SetTimer") => LegacyWin64Import::SetTimer,
+        ("user32.dll", "KillTimer") => LegacyWin64Import::KillTimer,
+        (_, "SetTimer" | "KillTimer") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("user32.dll", "MessageBoxA") => LegacyWin64Import::MessageBox(false),
+        ("user32.dll", "MessageBoxW") => LegacyWin64Import::MessageBox(true),
+        (_, "MessageBoxA" | "MessageBoxW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "GetUserNameA") => LegacyWin64Import::GetUserNameA,
         (_, "GetUserNameA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "GetUserNameW") => LegacyWin64Import::GetUserNameW,
@@ -951,6 +968,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::LRoundF
         }
         (_, "lroundf") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "log") => LegacyWin64Import::Log,
+        (_, "log") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "round") => LegacyWin64Import::Round,
         (_, "round") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "roundf") => LegacyWin64Import::RoundF,
@@ -1138,6 +1157,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "EncodePointer" | "DecodePointer") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("kernel32.dll", "AreFileApisANSI") => LegacyWin64Import::AreFileApisAnsi,
+        (_, "AreFileApisANSI") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___lc_locale_name_func") => {
             LegacyWin64Import::CrtLocaleNames
         }
@@ -1146,6 +1167,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtLocaleConv
         }
         (_, "localeconv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_create_locale") => {
+            LegacyWin64Import::CrtCreateLocale
+        }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_free_locale") => {
+            LegacyWin64Import::CrtFreeLocale
+        }
+        (_, "_create_locale" | "_free_locale") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "__pctype_func") => {
             LegacyWin64Import::CrtPctype
         }
@@ -1158,6 +1188,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtLocaleCodePage
         }
         (_, "___lc_codepage_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___lc_collate_cp_func") => {
+            LegacyWin64Import::CrtLocaleCollateCodePage
+        }
+        (_, "___lc_collate_cp_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_wsetlocale") => {
             LegacyWin64Import::CrtSetLocale(true)
         }
@@ -1172,6 +1206,27 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtLocaleUnlock
         }
         (_, "_lock_locales" | "_unlock_locales") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_Getdays") => {
+            LegacyWin64Import::CrtTimeNames(false)
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_Getmonths") => {
+            LegacyWin64Import::CrtTimeNames(true)
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_Gettnames") => {
+            LegacyWin64Import::CrtTimeLocaleNames
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_W_Getdays") => {
+            LegacyWin64Import::CrtWideTimeNames(false)
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_W_Getmonths") => {
+            LegacyWin64Import::CrtWideTimeNames(true)
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_W_Gettnames") => {
+            LegacyWin64Import::CrtTimeLocaleNames
+        }
+        (_, "_Getdays" | "_Getmonths" | "_Gettnames" | "_W_Getdays" | "_W_Getmonths" | "_W_Gettnames") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fflush") => LegacyWin64Import::Fflush,
@@ -1557,6 +1612,12 @@ fn install_win64_import(
                 LegacyWin64Import::CallNewHandler => {
                     // No new-handler is installed by this bounded host. Returning
                     // zero tells the MSVC allocation path not to retry.
+                }
+                LegacyWin64Import::AreFileApisAnsi => {
+                    uc(
+                        "install ANSI file API mode query",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(1)),
+                    )?;
                 }
                 LegacyWin64Import::Strncpy => {
                     uc(
@@ -2195,6 +2256,9 @@ fn install_win64_import(
                 LegacyWin64Import::LRoundF => {
                     install_lroundf_import(unicorn, stub)?;
                 }
+                LegacyWin64Import::Log => {
+                    install_double_import(unicorn, stub, "log", f64::ln)?;
+                }
                 LegacyWin64Import::Round => {
                     install_double_import(unicorn, stub, "round", f64::round)?;
                 }
@@ -2370,6 +2434,24 @@ fn install_win64_import(
                         "install Windows hook API",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_windows_hook_api(unicorn, operation);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::SetTimer | LegacyWin64Import::KillTimer) => {
+                    uc("write Windows timer return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install Windows timer API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_timer_api(unicorn, operation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MessageBox(wide) => {
+                    uc("write MessageBox return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install MessageBox",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_message_box(unicorn, wide);
                         }),
                     )?;
                 }
@@ -3353,6 +3435,16 @@ fn install_win64_import(
                         }),
                     )?;
                 }
+                operation @ (LegacyWin64Import::CrtCreateLocale
+                | LegacyWin64Import::CrtFreeLocale) => {
+                    uc("write CRT locale object return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install CRT locale object API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_locale_object(unicorn, operation);
+                        }),
+                    )?;
+                }
                 LegacyWin64Import::CrtPctype => {
                     uc(
                         "write __pctype_func return",
@@ -3373,12 +3465,10 @@ fn install_win64_import(
                         unicorn.mem_write(stub, &deterministic_u64_stub(1)),
                     )?;
                 }
-                LegacyWin64Import::CrtLocaleCodePage => {
-                    // The CRT remains in C: its locale codepage is 0. This is
-                    // distinct from the Windows ANSI codepage and _getmbcp.
-                    // Non-C setlocale requests are rejected explicitly.
+                LegacyWin64Import::CrtLocaleCodePage
+                | LegacyWin64Import::CrtLocaleCollateCodePage => {
                     uc(
-                        "install C locale codepage query",
+                        "install CRT locale codepage query",
                         unicorn.mem_write(stub, &deterministic_u64_stub(0)),
                     )?;
                 }
@@ -3402,6 +3492,33 @@ fn install_win64_import(
                         "install CRT locale lock",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_crt_locale_lock(unicorn, release);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtTimeNames(months) => {
+                    uc("write CRT time names return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install CRT time names",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_time_names(unicorn, months);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtWideTimeNames(months) => {
+                    uc("write wide CRT time names return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install wide CRT time names",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_wide_time_names(unicorn, months);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtTimeLocaleNames => {
+                    uc("write CRT time locale return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install CRT time locale",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_time_locale_names(unicorn);
                         }),
                     )?;
                 }
@@ -3951,7 +4068,10 @@ fn deterministic_guest_environment_value(name: &[u8]) -> Option<&'static [u8]> {
 fn deterministic_guest_environment_entries() -> &'static [(&'static [u8], &'static [u8])] {
     // Keep this sorted case-insensitively, matching the ordering of a Windows
     // environment block and the allowlist used by GetEnvironmentVariableA/W.
-    &[(b"OPENCV_FOR_THREADS_NUM", b"1")]
+    &[
+        (b"OPENCV_FOR_THREADS_NUM", b"1"),
+        (b"OPENIMAGEIO_THREADS", b"1"),
+    ]
 }
 
 fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), String> {
@@ -6260,11 +6380,16 @@ fn emulate_get_proc_address(unicorn: &mut Unicorn<'_, GuestState>) {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     }
-    // Win32 encodes an ordinal in the low 16 bits of the name pointer. This
-    // synthetic module exposes names only, so ordinals fail without probing
-    // guest memory at small integer addresses.
     if pointer <= u64::from(u16::MAX) {
-        fail(unicorn, ERROR_PROC_NOT_FOUND);
+        let address = real_module
+            .and_then(|library| library.ordinal_exports.get(&(pointer as u32)))
+            .filter(|address| real_module.is_some_and(|library| (library.base..library.end).contains(address)))
+            .copied();
+        if let Some(address) = address {
+            let _ = unicorn.reg_write(RegisterX86::RAX, address);
+        } else {
+            fail(unicorn, ERROR_PROC_NOT_FOUND);
+        }
         return;
     }
 

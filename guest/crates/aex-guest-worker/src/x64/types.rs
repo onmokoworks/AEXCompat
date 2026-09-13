@@ -167,6 +167,8 @@ struct GuestState {
     crt_pctype_buffer: Option<u64>,
     crt_locale_names_buffer: Option<u64>,
     crt_lconv_buffer: Option<u64>,
+    crt_locales: BTreeSet<u64>,
+    next_crt_locale: u64,
     crt_tm_buffers: BTreeMap<u32, u64>,
     crt_strerror_buffers: BTreeMap<u32, u64>,
     windows_hostent_buffers: BTreeMap<u32, u64>,
@@ -239,6 +241,9 @@ struct GuestState {
     windows_threads: BTreeMap<u64, WindowsThread>,
     windows_hooks: BTreeMap<u64, (i32, u64, u64, u32)>,
     next_windows_hook: u64,
+    windows_timers: BTreeMap<(u64, u64), (u32, u64)>,
+    next_windows_timer: u64,
+    windows_message_boxes: Vec<(String, String, u32)>,
     windows_objects: WindowsKernelObjects,
     windows_sids: BTreeSet<u64>,
     windows_sid_issued: u64,
@@ -821,11 +826,17 @@ pub struct TraceCrashSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_rva: Option<u64>,
     pub instruction_bytes: String,
+    /// Readable 64-bit words starting at RSP, for recovering untracked native calls.
+    pub stack_words: Vec<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_target: Option<TraceRuntimeTarget>,
     pub handle_allocations: Vec<u64>,
     pub handle_allocation_failures: Vec<String>,
     pub live_handle_count: usize,
+    pub crt_heap_live_bytes: u64,
+    pub crt_heap_allocation_count: usize,
+    /// Highest-address live allocations as (pointer, requested bytes, backing bytes).
+    pub crt_heap_tail_allocations: Vec<(u64, u64, u64)>,
     pub next_pf_handle_data: u64,
     pub pf_handle_data_end: u64,
 }

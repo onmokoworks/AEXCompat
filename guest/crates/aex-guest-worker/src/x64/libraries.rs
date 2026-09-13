@@ -9,6 +9,7 @@ struct GuestLibrary {
     base: u64,
     end: u64,
     exports: BTreeMap<String, u64>,
+    ordinal_exports: BTreeMap<u32, u64>,
     report: crate::pe::PeReport,
     initialized: bool,
 }
@@ -181,6 +182,15 @@ impl GuestEngine<'static> {
                         .map(|address| (name.clone(), address))
                 })
                 .collect();
+            let ordinal_exports = library
+                .ordinal_exports()
+                .keys()
+                .filter_map(|ordinal| {
+                    library
+                        .ordinal_address(*ordinal)
+                        .map(|address| (*ordinal, address))
+                })
+                .collect();
             engine.trace_modules.push(TraceModule {
                 name: name.rsplit(['/', '\\']).next().unwrap().to_string(),
                 kind: "mapped_dependency_pe",
@@ -193,6 +203,7 @@ impl GuestEngine<'static> {
                     base,
                     end,
                     exports,
+                    ordinal_exports,
                     report: library.report(),
                     initialized: false,
                 },
@@ -206,9 +217,10 @@ impl GuestEngine<'static> {
                 for symbol in &import.symbols {
                     let address =
                         if let Some(index) = basenames.get(&import.name.to_ascii_lowercase()) {
-                            libraries[*index]
-                                .1
-                                .symbol_address(&symbol.name)
+                            symbol
+                                .ordinal
+                                .and_then(|ordinal| libraries[*index].1.ordinal_address(ordinal.into()))
+                                .or_else(|| libraries[*index].1.symbol_address(&symbol.name))
                                 .ok_or_else(|| {
                                     GuestError::Callback(format!(
                                         "DLL export unavailable: {}!{}",

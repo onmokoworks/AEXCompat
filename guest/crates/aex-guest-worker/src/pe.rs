@@ -79,6 +79,7 @@ pub enum PeError {
 #[derive(Clone, Debug, Serialize)]
 pub struct ImportSymbol {
     pub name: String,
+    pub ordinal: Option<u16>,
     pub iat_rva: usize,
 }
 
@@ -116,6 +117,7 @@ pub struct PeImage {
     entry_rva: usize,
     direct_entry: Option<String>,
     exports: BTreeMap<String, usize>,
+    ordinal_exports: BTreeMap<u32, usize>,
     dll_entry_rva: usize,
     section_count: usize,
     imports: Vec<ImportLibrary>,
@@ -230,6 +232,20 @@ impl PeImage {
                 return Err(PeError::DuplicateExport(name.to_string()));
             }
         }
+        let mut ordinal_exports = BTreeMap::new();
+        if let Some(export_data) = &pe.export_data {
+            let base = export_data.export_directory_table.ordinal_base;
+            for (index, entry) in export_data.export_address_table.iter().enumerate() {
+                if let goblin::pe::export::ExportAddressTableEntry::ExportRVA(rva) = entry
+                    && *rva != 0
+                {
+                    let ordinal = base
+                        .checked_add(index as u32)
+                        .ok_or(PeError::ExportCount(pe.exports.len()))?;
+                    ordinal_exports.insert(ordinal, *rva as usize);
+                }
+            }
+        }
         let executable_export = |name: &str, rva: usize| {
             rva_is_executable(&section_protections, rva).then_some((name.to_string(), rva))
         };
@@ -307,6 +323,11 @@ impl PeImage {
                 .or_default()
                 .push(ImportSymbol {
                     name: import.name.to_string(),
+                    // Goblin exposes the hint from an IMAGE_IMPORT_BY_NAME in
+                    // `ordinal` too. Only a zero name-table RVA denotes a real
+                    // ordinal import; treating a nonzero hint as an ordinal can
+                    // silently bind a different C++ overload.
+                    ordinal: (import.rva == 0).then_some(import.ordinal),
                     iat_rva: import.offset,
                 });
         }
@@ -341,6 +362,7 @@ impl PeImage {
             entry_rva,
             direct_entry,
             exports,
+            ordinal_exports,
             dll_entry_rva,
             section_count: pe.sections.len(),
             imports,
@@ -441,6 +463,25 @@ impl PeImage {
             })
             .then(|| self.image_base.checked_add(rva as u64))
             .flatten()
+    }
+
+    pub fn ordinal_address(&self, ordinal: u32) -> Option<u64> {
+        let rva = *self.ordinal_exports.get(&ordinal)?;
+        if rva >= self.bytes.len() {
+            return None;
+        }
+        self.section_protections
+            .iter()
+            .any(|section| {
+                rva >= section.virtual_address
+                    && rva < section.virtual_address.saturating_add(section.virtual_size)
+            })
+            .then(|| self.image_base.checked_add(rva as u64))
+            .flatten()
+    }
+
+    pub fn ordinal_exports(&self) -> &BTreeMap<u32, usize> {
+        &self.ordinal_exports
     }
 
     pub fn exports(&self) -> &BTreeMap<String, usize> {
@@ -920,6 +961,7 @@ mod export_capacity_tests {
                 image.export_address(&format!("entry{index:05}")),
                 Some(0x180001000)
             );
+            assert_eq!(image.ordinal_address((index + 1) as u32), Some(0x180001000));
         }
         assert!(
             matches!(PeImage::parse_library(&many_exports(MAX_EXPORTS+1)),Err(PeError::ExportCount(count)) if count==MAX_EXPORTS+1)

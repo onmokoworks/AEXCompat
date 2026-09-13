@@ -239,8 +239,7 @@ fn emulate_crt_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
 // Windows x64 `struct lconv` has ten pointer fields followed by eight signed
 // char fields. The deterministic C locale uses "." for decimal_point, empty
 // strings for every other string field, and CHAR_MAX for monetary metadata.
-fn emulate_crt_localeconv(unicorn: &mut Unicorn<'_, GuestState>) {
-    let result = (|| -> Result<u64, String> {
+fn crt_lconv_address(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
         if let Some(address) = unicorn.get_data().crt_lconv_buffer {
             return Ok(address);
         }
@@ -262,6 +261,138 @@ fn emulate_crt_localeconv(unicorn: &mut Unicorn<'_, GuestState>) {
         unicorn.mem_write(address, &bytes).map_err(|e| e.to_string())?;
         unicorn.get_data_mut().crt_lconv_buffer = Some(address);
         Ok(address)
+}
+
+fn emulate_crt_localeconv(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = crt_lconv_address(unicorn);
+    finish_guest_stdio(unicorn, result);
+}
+
+// UCRT allocates these colon-delimited C-locale tables for the caller, which
+// releases them through the ordinary CRT heap.
+fn emulate_crt_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
+    const DAYS: &[u8] = b":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday\0";
+    const MONTHS: &[u8] = b":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:November:Dec:December\0";
+    let result = (|| -> Result<u64, String> {
+        let bytes = if months { MONTHS } else { DAYS };
+        let pointer = allocate_crt_region(unicorn, bytes.len() as u64)
+            .map_err(|error| error.to_string())?;
+        unicorn.mem_write(pointer, bytes).map_err(|error| {
+            let _ = free_crt_region(unicorn, pointer);
+            error.to_string()
+        })?;
+        Ok(pointer)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_wide_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
+    const DAYS: &str = ":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday";
+    const MONTHS: &str = ":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:November:Dec:December";
+    let result = (|| -> Result<u64, String> {
+        let value = if months { MONTHS } else { DAYS };
+        let mut bytes = Vec::with_capacity((value.len() + 1) * 2);
+        for unit in value.encode_utf16().chain([0]) {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let pointer = allocate_crt_region(unicorn, bytes.len() as u64)
+            .map_err(|error| error.to_string())?;
+        unicorn.mem_write(pointer, &bytes).map_err(|error| {
+            let _ = free_crt_region(unicorn, pointer);
+            error.to_string()
+        })?;
+        Ok(pointer)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_time_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
+    const NAMES: [&str; 43] = [
+        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sunday", "Monday", "Tuesday",
+        "Wednesday", "Thursday", "Friday", "Saturday", "Jan", "Feb", "Mar", "Apr", "May",
+        "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "January", "February", "March",
+        "April", "May", "June", "July", "August", "September", "October", "November",
+        "December", "AM", "PM", "MM/dd/yy", "dddd, MMMM dd, yyyy", "HH:mm:ss",
+    ];
+    const POINTER_COUNT: usize = 43;
+    const HEADER_BYTES: usize = POINTER_COUNT * 8 + 8 + POINTER_COUNT * 8 + 8;
+    let result = (|| -> Result<u64, String> {
+        let narrow_bytes: usize = NAMES.iter().map(|name| name.len() + 1).sum();
+        let wide_start = (HEADER_BYTES + narrow_bytes + 1) & !1;
+        let wide_bytes: usize = NAMES.iter().map(|name| (name.len() + 1) * 2).sum();
+        let total = wide_start
+            .checked_add(wide_bytes)
+            .ok_or("_Gettnames size overflow")?;
+        let pointer = allocate_crt_region(unicorn, total as u64)
+            .map_err(|error| error.to_string())?;
+        let mut bytes = vec![0u8; total];
+        let mut narrow = HEADER_BYTES;
+        let mut wide = wide_start;
+        for (index, name) in NAMES.iter().enumerate() {
+            bytes[index * 8..index * 8 + 8]
+                .copy_from_slice(&(pointer + narrow as u64).to_le_bytes());
+            bytes[352 + index * 8..360 + index * 8]
+                .copy_from_slice(&(pointer + wide as u64).to_le_bytes());
+            bytes[narrow..narrow + name.len()].copy_from_slice(name.as_bytes());
+            narrow += name.len() + 1;
+            for byte in name.bytes() {
+                bytes[wide..wide + 2].copy_from_slice(&u16::from(byte).to_le_bytes());
+                wide += 2;
+            }
+            wide += 2;
+        }
+        // Fields between the pointer arrays are `unk` and `refcount`.
+        bytes[348..352].copy_from_slice(&1i32.to_le_bytes());
+        unicorn.mem_write(pointer, &bytes).map_err(|error| {
+            let _ = free_crt_region(unicorn, pointer);
+            error.to_string()
+        })?;
+        Ok(pointer)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+// UCRT exposes both values as pointers to process-global integers. In the C
+// locale their code pages are zero; returning the integer itself breaks callers
+// that immediately dereference the ABI result.
+fn supported_crt_locale(unicorn: &Unicorn<'_, GuestState>, locale: u64) -> bool {
+    locale == 0 || unicorn.get_data().crt_locales.contains(&locale)
+}
+
+fn emulate_crt_locale_object(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        if operation == LegacyWin64Import::CrtFreeLocale {
+            let locale = read_win64_import_argument(unicorn, 0)?;
+            if locale == 0 || unicorn.get_data_mut().crt_locales.remove(&locale) {
+                return Ok(0);
+            }
+            return Err("_free_locale rejected unknown locale object".into());
+        }
+        let category = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+        let name = read_win64_import_argument(unicorn, 1)?;
+        if !(0..=5).contains(&category) || name == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(0);
+        }
+        let name = read_crt_stdio_c_string(unicorn, name, 128, "_create_locale name")?;
+        if name != b"C" {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(0);
+        }
+        if unicorn.get_data().crt_locales.len() >= 64 {
+            set_guest_crt_errno(unicorn, 12)?;
+            return Ok(0);
+        }
+        let index = unicorn.get_data().next_crt_locale;
+        let handle = CRT_LOCALE_HANDLE_BASE
+            .checked_add(index.checked_mul(16).ok_or("CRT locale token overflow")?)
+            .ok_or("CRT locale token overflow")?;
+        unicorn.get_data_mut().next_crt_locale = index + 1;
+        unicorn.get_data_mut().crt_locales.insert(handle);
+        Ok(handle)
     })();
     finish_guest_stdio(unicorn, result);
 }
