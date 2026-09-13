@@ -119,6 +119,7 @@ enum LegacyWin64Import {
     Wfopen,
     Strerror,
     FopenS,
+    StrcpyS,
     StrncpyS,
     MsvcpLockitCtor,
     MsvcpLockitDtor,
@@ -1075,6 +1076,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::FopenS
         }
         (_, "fopen_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcpy_s") => {
+            LegacyWin64Import::StrcpyS
+        }
+        (_, "strcpy_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strncpy_s") => {
             LegacyWin64Import::StrncpyS
         }
@@ -3101,6 +3106,15 @@ fn install_win64_import(
                         "install fopen_s import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_fopen_s(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StrcpyS => {
+                    uc("write strcpy_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strcpy_s import",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_secure_string_copy(uc, false);
                         }),
                     )?;
                 }
@@ -6700,6 +6714,10 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
 }
 
 fn emulate_strncpy_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_secure_string_copy(unicorn, true);
+}
+
+fn emulate_secure_string_copy(unicorn: &mut Unicorn<'_, GuestState>, counted: bool) {
     const EINVAL: u32 = 22;
     const ERANGE: u32 = 34;
     const STRUNCATE: u32 = 80;
@@ -6710,7 +6728,13 @@ fn emulate_strncpy_s(unicorn: &mut Unicorn<'_, GuestState>) {
         let destination = read_win64_import_argument(unicorn, 0)?;
         let destination_size = read_win64_import_argument(unicorn, 1)?;
         let source = read_win64_import_argument(unicorn, 2)?;
-        let count = read_win64_import_argument(unicorn, 3)?;
+        // strcpy_s must find a terminator within the destination capacity;
+        // it has no fourth argument and never permits truncation.
+        let count = if counted {
+            read_win64_import_argument(unicorn, 3)?
+        } else {
+            destination_size
+        };
 
         if destination == 0 || destination_size == 0 {
             return Ok((EINVAL, true));
