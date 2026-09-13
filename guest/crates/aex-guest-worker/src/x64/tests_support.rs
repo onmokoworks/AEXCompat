@@ -2838,7 +2838,7 @@ fn stdio_vsnprintf_s_is_library_qualified_bounded_and_fail_closed() {
     let output = DATA_BASE + 0x300;
     engine
         .unicorn
-        .mem_write(format, b"unsupported=%x\0")
+        .mem_write(format, b"unsupported=%f\0")
         .unwrap();
     engine.unicorn.mem_write(output, b"unchanged\0").unwrap();
 
@@ -2850,7 +2850,7 @@ fn stdio_vsnprintf_s_is_library_qualified_bounded_and_fail_closed() {
         )
         .unwrap_err();
     assert!(
-        error.to_string().contains("unsupported conversion '%x'"),
+        error.to_string().contains("unsupported conversion '%f'"),
         "{error}"
     );
     assert_eq!(
@@ -21351,4 +21351,99 @@ fn adapter_translation_does_not_copy_physical_settings_to_vpn() {
     let translated = windows_adapters_from_native(vec![interface], &config).unwrap();
     assert_eq!(translated[0].kind, 71);
     assert_eq!(translated[0].flags & 4, 4);
+}
+
+#[test]
+fn stdio_integer_flags_precision_and_windows_lengths() {
+    let mut engine = test_engine(&[0xc3]);
+    let va = DATA_BASE + 0x100;
+    let string = DATA_BASE + 0x500;
+    engine.write(string, b"abcdef\0").unwrap();
+    for (format, args, expected) in [
+        (
+            "%02x:%02X|%+06d|%#08x|%#o|%08.4d",
+            vec![10, 254, (-42i32) as u32 as u64, 42, 9, 12],
+            "0a:FE|-00042|0x00002a|011|    0012",
+        ),
+        (
+            "%ld/%lld/%I64u/%hhd/%hu",
+            vec![0x100000001, i64::MIN as u64, u64::MAX, 255, 0x10001],
+            "1/-9223372036854775808/18446744073709551615/-1/1",
+        ),
+        (
+            "%#.0o/%.0u/%-5.3s/%*.*d",
+            vec![0, 0, string, (-7i32) as u32 as u64, 4, 12],
+            "0//abc  /0012   ",
+        ),
+        (
+            "%.*s|% 04d|%#X",
+            vec![u32::MAX as u64, string, 7, 0],
+            "abcdef| 007|0",
+        ),
+    ] {
+        let bytes: Vec<_> = args.into_iter().flat_map(u64::to_le_bytes).collect();
+        engine.write(va, &bytes).unwrap();
+        assert_eq!(
+            format_guest_stdio(&engine.unicorn, format.as_bytes(), va).unwrap(),
+            expected.as_bytes(),
+            "{format}"
+        );
+    }
+}
+
+#[test]
+fn stdio_precision_stops_at_boundary_and_bounds_dynamic_dimensions() {
+    let mut engine = test_engine(&[0xc3]);
+    let va = DATA_BASE + 0x100;
+    let text = DATA_BASE + PAGE_SIZE - 3;
+    engine.write(text, b"abc").unwrap();
+    engine.write(va, &text.to_le_bytes()).unwrap();
+    assert_eq!(
+        format_guest_stdio(&engine.unicorn, b"%.3s", va).unwrap(),
+        b"abc"
+    );
+    assert!(format_guest_stdio(&engine.unicorn, b"%.4s", va).is_err());
+    engine
+        .write(va, &(i32::MIN as u32 as u64).to_le_bytes())
+        .unwrap();
+    assert!(format_guest_stdio(&engine.unicorn, b"%*d", va).is_err());
+    assert!(format_guest_stdio(&engine.unicorn, b"%999999999999999999999d", va).is_err());
+    assert!(format_guest_stdio(&engine.unicorn, b"%n", va).is_err());
+    assert!(format_guest_stdio(&engine.unicorn, b"%d", u64::MAX - 3).is_err());
+}
+
+#[test]
+fn stdio_zero_padded_hex_uses_existing_guest_buffer_contract() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CALL,
+        "ucrtbase.dll",
+        "__stdio_common_vsprintf",
+    )
+    .unwrap();
+    let format = DATA_BASE + 0x100;
+    let va = DATA_BASE + 0x200;
+    let output = DATA_BASE + 0x500;
+    engine.write(format, b"%02x-%08lX\0").unwrap();
+    engine
+        .write(
+            va,
+            &[0xau64, 0x1000000ff]
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CALL, [0x25, output, 32, format, 0, va])
+            .unwrap(),
+        11
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 12).unwrap(),
+        b"0a-000000FF\0"
+    );
 }

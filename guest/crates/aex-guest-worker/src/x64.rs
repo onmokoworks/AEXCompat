@@ -464,3 +464,5 @@ include!("x64/sid.rs");
 
 include!("x64/acl.rs");
 include!("x64/network.rs");
+
+include!("x64/printf.rs");

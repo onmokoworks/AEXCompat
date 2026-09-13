@@ -1720,67 +1720,7 @@ fn emulate_stdio_common_printf(unicorn: &mut Unicorn<'_, GuestState>, secure: bo
             MAX_CRT_STDIO_FORMAT_BYTES,
             "format",
         )?;
-        let mut output = Vec::new();
-        let mut format_index = 0usize;
-        let mut argument_index = 0usize;
-        while format_index < format.len() {
-            if format[format_index] != b'%' {
-                output.push(format[format_index]);
-                format_index += 1;
-            } else {
-                format_index += 1;
-                let conversion = *format
-                    .get(format_index)
-                    .ok_or_else(|| "stdio format ends with '%'".to_string())?;
-                format_index += 1;
-                if conversion == b'%' {
-                    output.push(b'%');
-                    continue;
-                }
-                if argument_index >= MAX_CRT_STDIO_ARGUMENTS {
-                    return Err(format!(
-                        "stdio conversion count exceeds {MAX_CRT_STDIO_ARGUMENTS}"
-                    ));
-                }
-                let slot_address = va_list
-                    .checked_add((argument_index as u64) * 8)
-                    .ok_or_else(|| "stdio va_list address overflow".to_string())?;
-                if !guest_range_has_permission(unicorn, slot_address, 8, Prot::READ)? {
-                    return Err(format!(
-                        "stdio va_list slot {slot_address:#x} is not readable"
-                    ));
-                }
-                let slot = unicorn
-                    .mem_read_as_vec(slot_address, 8)
-                    .map_err(|error| format!("stdio va_list read: {error}"))?;
-                let value = u64::from_le_bytes(
-                    slot.try_into()
-                        .map_err(|_| "stdio va_list slot has wrong size".to_string())?,
-                );
-                argument_index += 1;
-                match conversion {
-                    b's' => output.extend(read_crt_stdio_c_string(
-                        unicorn,
-                        value,
-                        MAX_CRT_STDIO_BUFFER_BYTES,
-                        "string argument",
-                    )?),
-                    b'd' => output.extend((value as u32 as i32).to_string().as_bytes()),
-                    b'c' => output.push(value as u8),
-                    other => {
-                        return Err(format!(
-                            "stdio unsupported conversion '%{}'",
-                            char::from(other)
-                        ));
-                    }
-                }
-            }
-            if output.len() as u64 > MAX_CRT_STDIO_BUFFER_BYTES {
-                return Err(format!(
-                    "stdio formatted output exceeds {MAX_CRT_STDIO_BUFFER_BYTES} bytes"
-                ));
-            }
-        }
+        let mut output = format_guest_stdio(unicorn, &format, va_list)?;
 
         let return_value;
         if !secure && requested_buffer_count != u64::MAX {
