@@ -387,6 +387,9 @@ fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
+        if import == LegacyWin64Import::Fwrite {
+            return guest_fwrite(unicorn);
+        }
         if import == LegacyWin64Import::Fgetc {
             let token = read_win64_import_argument(unicorn, 0)?;
             require_unbuffered_guest_stream(unicorn, token)?;
@@ -1332,4 +1335,58 @@ fn guest_file_attributes_ex(
         .mem_write(output, &record)
         .map_err(|e| e.to_string())?;
     Ok(1)
+}
+
+fn guest_fwrite(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    use std::io::Write;
+    let input = read_win64_import_argument(unicorn, 0)?;
+    let size = read_win64_import_argument(unicorn, 1)?;
+    let count = read_win64_import_argument(unicorn, 2)?;
+    let token = read_win64_import_argument(unicorn, 3)?;
+    if size == 0 || count == 0 {
+        return Ok(0);
+    }
+    let length = size.checked_mul(count).ok_or("fwrite size overflow")?;
+    if length > MAX_GUEST_FILE_BYTES as u64 {
+        return Err("fwrite request exceeds byte bound".into());
+    }
+    require_unbuffered_guest_stream(unicorn, token)?;
+    let files = &unicorn.get_data().guest_files;
+    let stream = files
+        .streams
+        .get(&token)
+        .ok_or("fwrite received stale or foreign FILE")?;
+    if stream.readable {
+        return Err("fwrite received a read-only FILE".into());
+    }
+    if !files.standard_streams[1..].contains(&Some(token)) {
+        return Err("fwrite output file backend is not implemented".into());
+    }
+    let bytes = acl_read(unicorn, input, length)?;
+    let mut translated = Vec::with_capacity(bytes.len());
+    for byte in bytes {
+        if byte == b'\n' {
+            translated.push(b'\r');
+        }
+        translated.push(byte);
+    }
+    if stream.bytes.len().saturating_add(translated.len()) > MAX_GUEST_FILE_BYTES
+        || files.live_bytes.saturating_add(translated.len()) > MAX_GUEST_STREAM_BYTES
+    {
+        return Err("fwrite stream capacity exceeded".into());
+    }
+    // The worker stdout carries its JSON protocol. Both guest console streams
+    // are captured on the worker diagnostic pipe instead, never in that JSON.
+    std::io::stderr()
+        .lock()
+        .write_all(&translated)
+        .map_err(|e| format!("guest console write failed: {e}"))?;
+    let files = &mut unicorn.get_data_mut().guest_files;
+    files.live_bytes += translated.len();
+    let stream = files.streams.get_mut(&token).unwrap();
+    let mut contents = std::mem::take(&mut stream.bytes).into_vec();
+    contents.extend_from_slice(&translated);
+    stream.bytes = contents.into_boxed_slice();
+    stream.position = stream.bytes.len();
+    Ok(count)
 }

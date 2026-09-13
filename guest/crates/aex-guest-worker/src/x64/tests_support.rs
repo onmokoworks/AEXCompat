@@ -23461,3 +23461,35 @@ fn shell_execute_missing_executable_returns_failure_not_success() {
     assert_eq!(engine.unicorn.get_data().windows_last_error, 2);
     assert_eq!(engine.unicorn.get_data().crt_errno, 77);
 }
+
+#[test]
+fn fwrite_captures_standard_stream_and_counts_elements() {
+    let mut engine = test_engine(&[0xc3]);
+    let iob = STUB_BASE + 0x100;
+    let write = STUB_BASE + 0x110;
+    install_win64_import(&mut engine.unicorn, iob, "ucrtbase.dll", "__acrt_iob_func").unwrap();
+    install_win64_import(&mut engine.unicorn, write, "ucrtbase.dll", "fwrite").unwrap();
+    let token = engine.call_win64(iob, [2, 0, 0, 0, 0, 0]).unwrap();
+    let input = DATA_BASE + 0x100;
+    engine.write(input, b"ab\ncd!").unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 77;
+    assert_eq!(
+        engine
+            .call_win64(write, [input, 2, 3, token, 0, 0])
+            .unwrap(),
+        3
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 77);
+    assert_eq!(
+        &*engine.unicorn.get_data().guest_files.streams[&token].bytes,
+        b"ab\r\ncd!"
+    );
+    assert_eq!(
+        engine.call_win64(write, [0, 0, u64::MAX, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(
+        dispatch_win64_import("foreign.dll", "fwrite"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

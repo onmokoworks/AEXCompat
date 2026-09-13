@@ -123,6 +123,7 @@ enum LegacyWin64Import {
     StreamBufferPointers,
     AcRtIobFunc,
     Fgetc,
+    Fwrite,
     Fread,
     Fclose,
     Fopen,
@@ -1139,6 +1140,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_lock_locales" | "_unlock_locales") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fwrite") => LegacyWin64Import::Fwrite,
+        (_, "fwrite") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fread") => LegacyWin64Import::Fread,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fclose") => LegacyWin64Import::Fclose,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "getc" | "fgetc") => {
@@ -3335,7 +3338,10 @@ fn install_win64_import(
                         }),
                     )?;
                 }
-                LegacyWin64Import::Fgetc | LegacyWin64Import::Fread | LegacyWin64Import::Fclose => {
+                LegacyWin64Import::Fgetc
+                | LegacyWin64Import::Fread
+                | LegacyWin64Import::Fwrite
+                | LegacyWin64Import::Fclose => {
                     uc("write stdio return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
                         "install stdio",
