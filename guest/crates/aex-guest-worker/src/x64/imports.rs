@@ -168,6 +168,7 @@ enum LegacyWin64Import {
     GetSystemInfo,
     GetVersionExA,
     GetSystemMetrics,
+    GetUserNameA,
     GetUserNameW,
     GetHostname,
     GetStartupInfoW,
@@ -476,6 +477,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetVersionExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("user32.dll", "GetSystemMetrics") => LegacyWin64Import::GetSystemMetrics,
         (_, "GetSystemMetrics") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "GetUserNameA") => LegacyWin64Import::GetUserNameA,
+        (_, "GetUserNameA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "GetUserNameW") => LegacyWin64Import::GetUserNameW,
         (_, "GetUserNameW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetStartupInfoW") => {
@@ -2058,6 +2061,17 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_gethostname(uc)),
                     )?;
                 }
+                LegacyWin64Import::GetUserNameA => {
+                    uc(
+                        "write GetUserNameA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetUserNameA",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_get_user_name(uc, false)),
+                    )?;
+                }
                 LegacyWin64Import::GetUserNameW => {
                     uc(
                         "write GetUserNameW return",
@@ -2065,7 +2079,8 @@ fn install_win64_import(
                     )?;
                     uc(
                         "install GetUserNameW",
-                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_get_user_name_w(uc)),
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_get_user_name(uc, true)),
                     )?;
                 }
                 LegacyWin64Import::GetSystemMetrics => {
@@ -9248,7 +9263,7 @@ fn emulate_get_system_metrics(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_get_user_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
+fn emulate_get_user_name(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
     let result = (|| -> Result<u64, String> {
         let output = read_win64_import_argument(unicorn, 0)?;
         let size_pointer = read_win64_import_argument(unicorn, 1)?;
@@ -9267,10 +9282,29 @@ fn emulate_get_user_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
         // independently of mutable environment variables. Never invent an identity.
         let mut name = aex_host_identity::current_username()?;
         if name.is_empty() || name.len() > 256 || name.contains(&0) {
-            return Err("host user name is not representable by GetUserNameW".into());
+            return Err("host user name is not representable by GetUserName".into());
         }
         name.push(0);
-        let required = name.len() as u32;
+        let (bytes, required) = if wide {
+            let required = name.len() as u32;
+            (
+                name.into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<u8>>(),
+                required,
+            )
+        } else {
+            let unicode = String::from_utf16(&name)
+                .map_err(|_| "host user name contains invalid UTF-16".to_string())?;
+            let (bytes, substituted) = encode_shift_jis_with_default(&unicode, b'?');
+            if substituted {
+                return Err(
+                    "host user name is not representable in the guest ANSI codepage".into(),
+                );
+            }
+            let required = bytes.len() as u32;
+            (bytes, required)
+        };
         if capacity < required {
             unicorn
                 .mem_write(size_pointer, &required.to_le_bytes())
@@ -9278,7 +9312,6 @@ fn emulate_get_user_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn.get_data_mut().windows_last_error = 122;
             return Ok(0);
         }
-        let bytes: Vec<u8> = name.into_iter().flat_map(u16::to_le_bytes).collect();
         if output == 0
             || !guest_range_has_permission(unicorn, output, bytes.len() as u64, Prot::WRITE)?
         {
