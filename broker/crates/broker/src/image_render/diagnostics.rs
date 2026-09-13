@@ -8,13 +8,16 @@ use crate::runtime_module_policy::{
 use crate::secure_image_dispatch::{
     ApprovedImageArtifact, SecureImageDispatch, WorkerKind, dispatch_secure_image,
 };
-use image::ImageFormat;
+use image::{
+    ExtendedColorType, ImageEncoder, ImageFormat,
+    codecs::png::{CompressionType as PngCompression, FilterType as PngFilter, PngEncoder},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

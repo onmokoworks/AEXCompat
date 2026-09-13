@@ -955,11 +955,12 @@ fn render_classic_via_length_one_session(
         })
     } else {
         native_rgba_to_preview(&pixels, request.pixel_format).and_then(|preview| {
-            let image = image::RgbaImage::from_raw(rendered_width, rendered_height, preview)
-                .ok_or_else(|| invalid("worker output dimensions are invalid"))?;
-            image
-                .save_with_format(request.output_path, ImageFormat::Png)
-                .map_err(|error| invalid(format!("output PNG save failed: {error}")))
+            write_rgba8_preview_png(
+                request.output_path,
+                &preview,
+                rendered_width,
+                rendered_height,
+            )
         })
     };
     if let Err(error) = png_written {
@@ -1296,11 +1297,7 @@ impl InteractiveRenderSession {
                 }
                 let preview = native_rgba_to_preview(&pixels, self.pixel_format)?;
                 // The frame's actual (possibly shrunk) dimensions (#261).
-                let image = image::RgbaImage::from_raw(frame_width, frame_height, preview)
-                    .ok_or_else(|| invalid("session output dimensions are invalid"))?;
-                image
-                    .save_with_format(output_path, ImageFormat::Png)
-                    .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+                write_rgba8_preview_png(output_path, &preview, frame_width, frame_height)?;
                 let mut report = json!({
                     "schema_version": 1,
                     "stage": "interactive_image_render",

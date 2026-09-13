@@ -198,14 +198,16 @@ mod windows_e2e {
         .expect("open resident session");
         let open_ms = open_started.elapsed().as_secs_f64() * 1000.0;
         let mut resident = Vec::new();
+        let mut worker = Vec::new();
         for index in 0..runs {
             let update = [echo_parameter((index % 200) as f64)];
             let output = scratch.join(format!("resident-{index}.png"));
             let started = std::time::Instant::now();
-            session
+            let report = session
                 .render(&rgba, index as i32, Some(&update), &output)
                 .expect("resident render");
             resident.push(started.elapsed().as_secs_f64() * 1000.0);
+            worker.push(report["resident_session"]["render_ms"].as_u64().unwrap() as f64);
         }
         let close = session.close();
         assert_eq!(close["session_clean"], true, "close: {close}");
@@ -222,6 +224,12 @@ mod windows_e2e {
             median(resident.clone()),
             resident.iter().cloned().fold(f64::INFINITY, f64::min),
             resident.iter().cloned().fold(0.0, f64::max),
+        );
+        println!(
+            "resident_worker_ms median={:.1} min={:.1} max={:.1}",
+            median(worker.clone()),
+            worker.iter().cloned().fold(f64::INFINITY, f64::min),
+            worker.iter().cloned().fold(0.0, f64::max),
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }

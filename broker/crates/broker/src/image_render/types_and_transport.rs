@@ -100,6 +100,41 @@ pub(crate) fn native_rgba_to_preview(
     }
 }
 
+fn write_rgba8_preview_png_to(
+    writer: &mut impl Write,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> io::Result<()> {
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .ok_or_else(|| invalid("session output dimensions are invalid"))?;
+    if rgba.len() != expected {
+        return Err(invalid("session output dimensions are invalid"));
+    }
+    let encoder = PngEncoder::new_with_quality(
+        &mut *writer,
+        PngCompression::Fast,
+        PngFilter::Up,
+    );
+    encoder
+        .write_image(rgba, width, height, ExtendedColorType::Rgba8)
+        .map_err(|error| invalid(format!("output PNG save failed: {error}")))?;
+    writer.flush()
+}
+
+fn write_rgba8_preview_png(
+    path: &Path,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> io::Result<()> {
+    let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    write_rgba8_preview_png_to(&mut BufWriter::new(file), rgba, width, height)
+}
+
 /// Opt-in world snapshot dumps and output checksum detail (issue #19). Both
 /// default off and only take effect for broker-dispatched image renders.
 const WORLD_DUMP_DIR_ENV: &str = "AEXCOMPAT_DUMP_WORLDS_DIR";

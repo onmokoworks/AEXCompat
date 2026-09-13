@@ -2,6 +2,49 @@
 mod tests {
     use super::*;
 
+    struct FlushFails(Vec<u8>);
+
+    impl Write for FlushFails {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::Other, "flush failed"))
+        }
+    }
+
+    #[test]
+    fn fast_preview_png_round_trips_pixels_and_refuses_overwrite() {
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-fast-preview-{}-{:032x}.png",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let rgba = vec![
+            0, 1, 2, 3, 10, 20, 30, 40, 50, 60, 70, 80, 250, 240, 230, 220,
+        ];
+        write_rgba8_preview_png(&path, &rgba, 2, 2).unwrap();
+        let encoded = fs::read(&path).unwrap();
+        let decoded = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 2));
+        assert_eq!(decoded.into_raw(), rgba);
+
+        let error = write_rgba8_preview_png(&path, &[0; 16], 2, 2).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).unwrap(), encoded);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn fast_preview_png_propagates_terminal_flush_failure() {
+        let mut writer = FlushFails(Vec::new());
+        let error = write_rgba8_preview_png_to(&mut writer, &[0, 1, 2, 3], 1, 1).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "flush failed");
+    }
+
     /// Minimal facts for the public-report flattening; only the audio field
     /// varies across the audio projection tests below.
     fn audio_report_facts(audio_input_sha256: Option<&str>) -> InteractiveImageReportFacts {
