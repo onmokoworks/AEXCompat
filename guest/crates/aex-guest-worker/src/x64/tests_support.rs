@@ -21979,7 +21979,7 @@ fn critical_section_exhaustion_records_bounded_guest_evidence_without_mutation()
     assert!(error.contains("Windows critical-section count exceeds"));
     assert!(error.contains(&format!("requested={object:#x}")));
     assert!(error.contains(&format!("caller=Some({RETURN_ADDRESS:x})")));
-    assert!(error.contains("live=["));
+    assert!(error.contains("live_sample=["));
     assert_eq!(
         engine.unicorn.get_data().windows_critical_sections.len(),
         MAX_WINDOWS_CRITICAL_SECTIONS
@@ -21991,4 +21991,49 @@ fn critical_section_exhaustion_records_bounded_guest_evidence_without_mutation()
             .unwrap(),
         [0xa5; WINDOWS_CRITICAL_SECTION_BYTES]
     );
+}
+
+#[test]
+fn windows_critical_sections_support_multi_runtime_capacity_and_reclaim_slots() {
+    let mut engine = test_engine(&[0xc3]);
+    let init = STUB_BASE + 0x400;
+    let delete = init + 16;
+    install_win64_import(
+        &mut engine.unicorn,
+        init,
+        "kernel32.dll",
+        "InitializeCriticalSection",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        delete,
+        "kernel32.dll",
+        "DeleteCriticalSection",
+    )
+    .unwrap();
+    let storage = allocate_crt_region(&mut engine.unicorn, 4 * PAGE_SIZE).unwrap();
+    for index in 0..300u64 {
+        engine
+            .call_win64(init, [storage + index * 40, 0, 0, 0, 0, 0])
+            .unwrap();
+    }
+    assert_eq!(
+        engine.unicorn.get_data().windows_critical_sections.len(),
+        300
+    );
+    for index in 0..300u64 {
+        engine
+            .call_win64(delete, [storage + index * 40, 0, 0, 0, 0, 0])
+            .unwrap();
+    }
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_critical_sections
+            .is_empty()
+    );
+    engine.call_win64(init, [storage, 0, 0, 0, 0, 0]).unwrap();
+    assert_eq!(engine.unicorn.get_data().windows_critical_sections.len(), 1);
 }

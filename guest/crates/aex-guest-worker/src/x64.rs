@@ -239,7 +239,9 @@ const MAX_CRT_STDIO_ARGUMENTS: usize = 32;
 const MAX_CRT_INITIALIZERS: usize = 4096;
 const MAX_CRT_ONEXIT_TABLES: usize = 64;
 const WINDOWS_CRITICAL_SECTION_BYTES: usize = 40;
-const MAX_WINDOWS_CRITICAL_SECTIONS: usize = 256;
+// Shared across the primary image and every loaded runtime DLL. Real DLL
+// sets keep hundreds of startup locks alive; retain a finite resource bound.
+const MAX_WINDOWS_CRITICAL_SECTIONS: usize = 4096;
 const MAX_WINDOWS_CRITICAL_SECTION_RECURSION: u32 = 1024;
 const MAX_WINDOWS_SRW_LOCKS: usize = 256;
 const MAX_WINDOWS_SRW_WAITERS: usize = MAX_WINDOWS_THREADS;

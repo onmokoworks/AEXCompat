@@ -5073,8 +5073,9 @@ fn emulate_windows_critical_section(
                         .map(|(address, depth)| (*address, *depth))
                         .collect::<Vec<_>>();
                     held.sort_unstable();
+                    held.truncate(256);
                     return Err(format!(
-                        "Windows critical-section count exceeds {MAX_WINDOWS_CRITICAL_SECTIONS}; requested={address:#x}; caller={caller:x?}; live={held:x?}"
+                        "Windows critical-section count exceeds {MAX_WINDOWS_CRITICAL_SECTIONS}; requested={address:#x}; caller={caller:x?}; live_sample={held:x?}"
                     ));
                 }
                 unicorn
