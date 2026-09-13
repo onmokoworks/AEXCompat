@@ -171,6 +171,7 @@ enum LegacyWin64Import {
     VcompNoOp,
     GetSystemTimeAsFileTime,
     GetSystemInfo,
+    VerSetConditionMask,
     GetVersion,
     GetVersionExA,
     GetSystemMetrics,
@@ -479,6 +480,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "VerSetConditionMask") => {
+            LegacyWin64Import::VerSetConditionMask
+        }
+        (_, "VerSetConditionMask") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "GetVersion") => LegacyWin64Import::GetVersion,
         (_, "GetVersion") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "GetVersionExA") => LegacyWin64Import::GetVersionExA,
@@ -2133,6 +2138,28 @@ fn install_win64_import(
                         "install GetSystemMetrics",
                         unicorn
                             .add_code_hook(stub, stub, |uc, _, _| emulate_get_system_metrics(uc)),
+                    )?;
+                }
+                LegacyWin64Import::VerSetConditionMask => {
+                    uc(
+                        "write VerSetConditionMask return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install VerSetConditionMask",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let mask = read_win64_import_argument(uc, 0)?;
+                                let types = read_win64_import_argument(uc, 1)? as u32 & 0xff;
+                                let condition = read_win64_import_argument(uc, 2)? & 7;
+                                Ok(if types == 0 {
+                                    mask
+                                } else {
+                                    mask | (condition << ((31 - types.leading_zeros()) * 3))
+                                })
+                            })();
+                            finish_guest_stdio(uc, result);
+                        }),
                     )?;
                 }
                 LegacyWin64Import::GetVersion => {

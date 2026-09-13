@@ -22690,3 +22690,37 @@ fn mbsupr_s_preserves_dbcs_trails_and_uppercases_fullwidth_letters() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn version_condition_mask_packs_all_fields_and_preserves_existing_bits() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "kernel32.dll",
+        "VerSetConditionMask",
+    )
+    .unwrap();
+    let mut mask = 1u64 << 63;
+    for field in 0..8 {
+        let expected = mask | (3 << (field * 3));
+        mask = engine
+            .call_win64(entry, [mask, 1 << field, 3, 0, 0, 0])
+            .unwrap();
+        assert_eq!(mask, expected);
+    }
+    assert_eq!(
+        engine.call_win64(entry, [mask, 0, 7, 0, 0, 0]).unwrap(),
+        mask
+    );
+    assert_eq!(
+        engine.call_win64(entry, [0, 0xff, 0xff, 0, 0, 0]).unwrap(),
+        7 << 21
+    );
+    assert_eq!(engine.call_win64(entry, [1, 1, 2, 0, 0, 0]).unwrap(), 3);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "VerSetConditionMask"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
