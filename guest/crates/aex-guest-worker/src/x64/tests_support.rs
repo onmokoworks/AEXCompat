@@ -23586,3 +23586,41 @@ fn ctime64_formats_static_thread_local_text_and_rejects_invalid_time() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn asctime_formats_tm_and_shares_ctime_text_storage() {
+    let mut engine = test_engine(&[0xc3]);
+    let asc = STUB_BASE + 0x100;
+    let ctime = STUB_BASE + 0x110;
+    install_win64_import(&mut engine.unicorn, asc, "ucrtbase.dll", "asctime").unwrap();
+    install_win64_import(&mut engine.unicorn, ctime, "ucrtbase.dll", "_ctime64").unwrap();
+    let input = DATA_BASE + 0x100;
+    let fields = [5i32, 4, 3, 2, 0, 124, 2, 1, 0];
+    engine
+        .write(
+            input,
+            &fields
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let first = engine.call_win64(asc, [input, 0, 0, 0, 0, 0]).unwrap();
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(first, 26).unwrap(),
+        b"Tue Jan  2 03:04:05 2024\n\0"
+    );
+    engine.write(input, &0i64.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine.call_win64(ctime, [input, 0, 0, 0, 0, 0]).unwrap(),
+        first
+    );
+    assert_ne!(
+        engine.unicorn.mem_read_as_vec(first, 26).unwrap(),
+        b"Tue Jan  2 03:04:05 2024\n\0"
+    );
+    assert_eq!(
+        dispatch_win64_import("foreign.dll", "asctime"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

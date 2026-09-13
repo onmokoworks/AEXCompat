@@ -63,6 +63,7 @@ enum LegacyWin64Import {
     MemoryCopy,
     MemChr,
     StrStr,
+    CrtAsctime,
     CrtCtime64,
     CrtLocaltime64,
     CrtFtime64,
@@ -952,6 +953,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtTime64
         }
         (_, "_time64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "asctime") => {
+            LegacyWin64Import::CrtAsctime
+        }
+        (_, "asctime") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_ctime64") => {
             LegacyWin64Import::CrtCtime64
         }
@@ -1830,7 +1835,9 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_ftime64(uc)),
                     )?;
                 }
-                LegacyWin64Import::CrtLocaltime64 | LegacyWin64Import::CrtCtime64 => {
+                LegacyWin64Import::CrtLocaltime64
+                | LegacyWin64Import::CrtCtime64
+                | LegacyWin64Import::CrtAsctime => {
                     uc(
                         "write _localtime64 return",
                         unicorn.mem_write(stub, &[0xc3]),
@@ -1840,7 +1847,8 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, move |uc, _, _| {
                             emulate_crt_localtime64(
                                 uc,
-                                implementation == LegacyWin64Import::CrtCtime64,
+                                implementation != LegacyWin64Import::CrtLocaltime64,
+                                implementation == LegacyWin64Import::CrtAsctime,
                             )
                         }),
                     )?;
@@ -9551,26 +9559,35 @@ fn emulate_get_process_affinity_mask(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>, ctime: bool) {
+fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>, ctime: bool, asctime: bool) {
     let result = (|| -> Result<u64, String> {
         let input = read_win64_import_argument(unicorn, 0)?;
-        if input == 0 || !guest_range_has_permission(unicorn, input, 8, Prot::READ)? {
-            return Err("_localtime64 source is not readable".into());
-        }
-        let mut bytes = [0; 8];
-        unicorn
-            .mem_read(input, &mut bytes)
-            .map_err(|e| e.to_string())?;
-        let seconds = i64::from_le_bytes(bytes);
-        // Windows _localtime64 documented UTC range through 3000-12-31.
-        if !(0..=32_535_215_999).contains(&seconds) {
-            set_guest_crt_errno(unicorn, 22)?;
-            return Ok(0);
-        }
-        if guest_environment_value(unicorn.get_data(), b"TZ").is_some() {
-            return Err("guest CRT TZ override conversion is not implemented".into());
-        }
-        let fields = aex_host_time::localtime_fields(seconds)?;
+        let fields = if asctime {
+            let bytes = acl_read(unicorn, input, 36)?;
+            let mut fields = [0i32; 9];
+            for (field, bytes) in fields.iter_mut().zip(bytes.chunks_exact(4)) {
+                *field = i32::from_le_bytes(bytes.try_into().unwrap());
+            }
+            fields
+        } else {
+            if input == 0 || !guest_range_has_permission(unicorn, input, 8, Prot::READ)? {
+                return Err("_localtime64 source is not readable".into());
+            }
+            let mut bytes = [0; 8];
+            unicorn
+                .mem_read(input, &mut bytes)
+                .map_err(|e| e.to_string())?;
+            let seconds = i64::from_le_bytes(bytes);
+            // Windows _localtime64 documented UTC range through 3000-12-31.
+            if !(0..=32_535_215_999).contains(&seconds) {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(0);
+            }
+            if guest_environment_value(unicorn.get_data(), b"TZ").is_some() {
+                return Err("guest CRT TZ override conversion is not implemented".into());
+            }
+            aex_host_time::localtime_fields(seconds)?
+        };
         let thread = unicorn.get_data().current_windows_thread_id;
         let address = if let Some(address) = unicorn.get_data().crt_tm_buffers.get(&thread) {
             *address
