@@ -22446,3 +22446,40 @@ fn strcpy_s_requires_terminator_and_ignores_fourth_register() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn strcat_s_appends_and_clears_invalid_destinations() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", "strcat_s").unwrap();
+    let dst = DATA_BASE + 0x100;
+    let src = DATA_BASE + 0x200;
+    engine.write(src, b"cd\0").unwrap();
+    engine.write(dst, b"ab\0xxx").unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 71;
+    assert_eq!(engine.call_win64(entry, [dst, 5, src, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.mem_read_as_vec(dst, 6).unwrap(), b"abcd\0x");
+    assert_eq!(engine.unicorn.get_data().crt_errno, 71);
+    for (initial, capacity, source, error) in [
+        (b"ab\0xxx", 4, src, 34),
+        (b"abcdef", 6, src, 22),
+        (b"ab\0xxx", 6, 0, 22),
+        (b"ab\0xxx", 6, dst, 22),
+    ] {
+        engine.write(dst, initial).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(entry, [dst, capacity, source, 0, 0, 0])
+                .unwrap(),
+            error
+        );
+        let mut expected = *initial;
+        expected[0] = 0;
+        assert_eq!(engine.unicorn.mem_read_as_vec(dst, 6).unwrap(), expected);
+        assert_eq!(engine.unicorn.get_data().crt_errno as u64, error);
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "strcat_s"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

@@ -119,6 +119,7 @@ enum LegacyWin64Import {
     Wfopen,
     Strerror,
     FopenS,
+    StrcatS,
     StrcpyS,
     StrncpyS,
     MsvcpLockitCtor,
@@ -1076,6 +1077,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::FopenS
         }
         (_, "fopen_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcat_s") => {
+            LegacyWin64Import::StrcatS
+        }
+        (_, "strcat_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcpy_s") => {
             LegacyWin64Import::StrcpyS
         }
@@ -3107,6 +3112,13 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_fopen_s(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::StrcatS => {
+                    uc("write strcat_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strcat_s",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_strcat_s(uc)),
                     )?;
                 }
                 LegacyWin64Import::StrcpyS => {
@@ -6711,6 +6723,57 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn emulate_strcat_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let capacity = read_win64_import_argument(unicorn, 1)?;
+        let source = read_win64_import_argument(unicorn, 2)?;
+        if destination == 0 || capacity == 0 || capacity > (u64::MAX >> 1) {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(22);
+        }
+        if capacity > MAX_CRT_STRING_BYTES {
+            return Err("strcat_s destination exceeds bounded string size".into());
+        }
+        if !guest_range_has_permission(unicorn, destination, capacity, Prot::WRITE)? {
+            return Err("strcat_s destination is not fully writable".into());
+        }
+        let existing = read_strncpy_s_source(unicorn, destination, capacity)?;
+        let prefix = existing.iter().position(|byte| *byte == 0);
+        let error = if source == 0 || prefix.is_none() {
+            22
+        } else {
+            let prefix = prefix.unwrap();
+            let remaining = capacity - prefix as u64;
+            let bytes = read_strncpy_s_source(unicorn, source, remaining)?;
+            let end = bytes.iter().position(|byte| *byte == 0);
+            let source_span = end.map_or(remaining, |n| n as u64 + 1);
+            let source_end = source
+                .checked_add(source_span)
+                .ok_or_else(|| "strcat_s source overflow".to_string())?;
+            let destination_end = destination
+                .checked_add(capacity)
+                .ok_or_else(|| "strcat_s destination overflow".to_string())?;
+            if destination < source_end && source < destination_end {
+                22
+            } else if let Some(end) = end {
+                unicorn
+                    .mem_write(destination + prefix as u64, &bytes[..=end])
+                    .map_err(|e| format!("strcat_s write: {e}"))?;
+                return Ok(0);
+            } else {
+                34
+            }
+        };
+        unicorn
+            .mem_write(destination, &[0])
+            .map_err(|e| e.to_string())?;
+        set_guest_crt_errno(unicorn, error)?;
+        Ok(error as u64)
+    })();
+    finish_guest_stdio(unicorn, result);
 }
 
 fn emulate_strncpy_s(unicorn: &mut Unicorn<'_, GuestState>) {
