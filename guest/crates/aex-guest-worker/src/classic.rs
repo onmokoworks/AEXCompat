@@ -1727,6 +1727,9 @@ impl ClassicHost {
         trace_enabled: bool,
         backend: RenderBackendRequest,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        // A standalone image render is one frame at t=0, not an empty timeline.
+        // Resident/fixture callers provide their own explicit frame context.
+        self.write_frame_context(width, height, 0, 1, 1, 1)?;
         self.render_pixels_with_request_mode(
             width,
             height,

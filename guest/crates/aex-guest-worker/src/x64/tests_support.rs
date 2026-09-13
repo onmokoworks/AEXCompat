@@ -23493,3 +23493,25 @@ fn fwrite_captures_standard_stream_and_counts_elements() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn fflush_accepts_standard_and_all_streams_and_rejects_foreign_token() {
+    let mut engine = test_engine(&[0xc3]);
+    let flush = STUB_BASE + 0x100;
+    let iob = STUB_BASE + 0x110;
+    install_win64_import(&mut engine.unicorn, flush, "ucrtbase.dll", "fflush").unwrap();
+    install_win64_import(&mut engine.unicorn, iob, "ucrtbase.dll", "__acrt_iob_func").unwrap();
+    let stream = engine.call_win64(iob, [2, 0, 0, 0, 0, 0]).unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 77;
+    assert_eq!(
+        engine.call_win64(flush, [stream, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
+    assert_eq!(engine.call_win64(flush, [0; 6]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 77);
+    assert!(engine.call_win64(flush, [0x1234, 0, 0, 0, 0, 0]).is_err());
+    assert_eq!(
+        dispatch_win64_import("foreign.dll", "fflush"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

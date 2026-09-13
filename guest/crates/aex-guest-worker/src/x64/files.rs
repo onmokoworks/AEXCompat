@@ -387,6 +387,32 @@ fn emulate_fopen(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
+        if import == LegacyWin64Import::Fflush {
+            use std::io::Write;
+            let token = read_win64_import_argument(unicorn, 0)?;
+            let tokens = if token == 0 {
+                unicorn
+                    .get_data()
+                    .guest_files
+                    .streams
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>()
+            } else {
+                vec![token]
+            };
+            for token in tokens {
+                if !unicorn.get_data().guest_files.streams.contains_key(&token) {
+                    return Err("fflush received stale or foreign FILE".into());
+                }
+                require_unbuffered_guest_stream(unicorn, token)?;
+            }
+            std::io::stderr()
+                .lock()
+                .flush()
+                .map_err(|e| format!("guest console flush failed: {e}"))?;
+            return Ok(0);
+        }
         if import == LegacyWin64Import::Fwrite {
             return guest_fwrite(unicorn);
         }
