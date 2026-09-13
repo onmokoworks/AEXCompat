@@ -80,6 +80,7 @@ enum LegacyWin64Import {
     StrRChr,
     Atoi,
     Strtol,
+    Strtoul,
     SetNamedSecurityInfoA,
     SetEntriesInAclA,
     IsValidAcl,
@@ -1119,6 +1120,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::Strtol
         }
         (_, "strtol") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "strtoul") => {
+            LegacyWin64Import::Strtoul
+        }
+        (_, "strtoul") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "wcstombs") => {
             LegacyWin64Import::CrtWcstombs
         }
@@ -2050,6 +2055,13 @@ fn install_win64_import(
                     uc(
                         "install strtol",
                         unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strtol(uc)),
+                    )?;
+                }
+                LegacyWin64Import::Strtoul => {
+                    uc("write strtoul return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strtoul",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strtoul(uc)),
                     )?;
                 }
                 LegacyWin64Import::CrtWcstombs => {

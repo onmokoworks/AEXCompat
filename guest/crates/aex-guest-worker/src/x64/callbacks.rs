@@ -4521,6 +4521,14 @@ fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
 }
 
 fn emulate_crt_strtol(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_crt_strto(unicorn, true);
+}
+
+fn emulate_crt_strtoul(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_crt_strto(unicorn, false);
+}
+
+fn emulate_crt_strto(unicorn: &mut Unicorn<'_, GuestState>, signed: bool) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
         let end_pointer = read_win64_import_argument(unicorn, 1)?;
@@ -4604,7 +4612,13 @@ fn emulate_crt_strtol(unicorn: &mut Unicorn<'_, GuestState>) {
             position += 2;
         }
         let digits_begin = position;
-        let limit = if negative { 2_147_483_648u64 } else { 2_147_483_647u64 };
+        let limit = if signed && negative {
+            2_147_483_648u64
+        } else if signed {
+            2_147_483_647u64
+        } else {
+            u64::from(u32::MAX)
+        };
         let mut magnitude = 0u64;
         let mut overflow = false;
         loop {
@@ -4632,12 +4646,22 @@ fn emulate_crt_strtol(unicorn: &mut Unicorn<'_, GuestState>) {
         if !consumed {
             return Ok(0);
         }
-        let value = if negative {
-            -(magnitude as i64)
+        if overflow && !signed {
+            return Ok(u64::from(u32::MAX));
+        }
+        let value = if signed {
+            let value = if negative {
+                -(magnitude as i64)
+            } else {
+                magnitude as i64
+            } as i32;
+            value as u32
+        } else if negative {
+            (magnitude as u32).wrapping_neg()
         } else {
-            magnitude as i64
-        } as i32;
-        Ok(u64::from(value as u32))
+            magnitude as u32
+        };
+        Ok(u64::from(value))
     })();
     finish_guest_stdio(unicorn, result);
 }

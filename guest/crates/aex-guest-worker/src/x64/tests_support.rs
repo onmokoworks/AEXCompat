@@ -19520,6 +19520,49 @@ fn strtol_handles_windows_long_bases_end_pointer_and_overflow() {
 }
 
 #[test]
+fn strtoul_uses_windows_32_bit_unsigned_long_semantics() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-convert-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        let end_pointer = DATA_BASE + 0x800;
+        install_win64_import(&mut engine.unicorn, entry, dll, "strtoul").unwrap();
+        for (text, base, expected, consumed, errno) in [
+            ("4294967295!", 10, u32::MAX, 10, 71),
+            ("-1!", 10, u32::MAX, 2, 71),
+            ("0xffffffff", 0, u32::MAX, 10, 71),
+            ("4294967296", 10, u32::MAX, 10, 34),
+            ("-4294967296", 10, u32::MAX, 11, 34),
+        ] {
+            engine.write(DATA_BASE, format!("{text}\0").as_bytes()).unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 71;
+            assert_eq!(
+                engine
+                    .call_win64(entry, [DATA_BASE, end_pointer, base, 0, 0, 0])
+                    .unwrap() as u32,
+                expected,
+                "{text} base {base}"
+            );
+            assert_eq!(
+                u64::from_le_bytes(
+                    engine
+                        .unicorn
+                        .mem_read_as_vec(end_pointer, 8)
+                        .unwrap()
+                        .try_into()
+                        .unwrap()
+                ),
+                DATA_BASE + consumed
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, errno);
+        }
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "strtoul"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
 fn scanf_hexadecimal_accepts_sign_prefix_width_and_full_unsigned_word() {
     for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
         let mut engine = test_engine(&[0xc3]);
