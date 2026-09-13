@@ -23416,3 +23416,28 @@ fn file_attributes_ex_reports_size_times_and_errors() {
         );
     }
 }
+
+#[test]
+fn shell_execute_diagnostic_preserves_failure_and_omits_parameters() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "shell32.dll", "ShellExecuteA").unwrap();
+    let operation = DATA_BASE + 0x100;
+    let target = DATA_BASE + 0x200;
+    let args = DATA_BASE + 0x300;
+    engine.write(operation, b"open\0").unwrap();
+    engine.write(target, b"helper.exe\0").unwrap();
+    engine.write(args, b"private-argument\0").unwrap();
+    let error = engine
+        .call_win64(entry, [0, operation, target, args, 0, 1])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Windows shell provider"));
+    assert!(error.contains("helper.exe"));
+    assert!(error.contains("parameters_bytes=16"));
+    assert!(!error.contains("private-argument"));
+    assert_eq!(
+        dispatch_win64_import("foreign.dll", "ShellExecuteA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

@@ -89,6 +89,7 @@ enum LegacyWin64Import {
     CoInitializeSecurity,
     CoInitializeEx,
     CoUninitialize,
+    ShellExecuteA,
     GetFileAttributesExA,
     GetFileAttributesExW,
     Rename,
@@ -999,6 +1000,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::Fullpath
         }
         (_, "_fullpath") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("shell32.dll", "ShellExecuteA") => LegacyWin64Import::ShellExecuteA,
+        (_, "ShellExecuteA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetFileAttributesExA") => LegacyWin64Import::GetFileAttributesExA,
         ("kernel32.dll", "GetFileAttributesExW") => LegacyWin64Import::GetFileAttributesExW,
         (_, "GetFileAttributesExA" | "GetFileAttributesExW") => {
@@ -1536,6 +1539,15 @@ fn install_win64_import(
                         "install _fullpath",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_fullpath(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ShellExecuteA => {
+                    uc(
+                        "install shell execution diagnostic",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = describe_unavailable_shell_execute(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;
@@ -10724,4 +10736,36 @@ fn emulate_registry_value_a(
         Ok(if data != 0 && !copy_data { 234 } else { 0 })
     })();
     finish_registry_import(unicorn, result);
+}
+
+// The guest has no Windows shell/process-launch provider. Keep this a
+// diagnostic gap rather than reporting a process that was never launched.
+fn describe_unavailable_shell_execute(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<u64, String> {
+    let operation = read_win64_import_argument(unicorn, 1)?;
+    let target = read_win64_import_argument(unicorn, 2)?;
+    let parameters = read_win64_import_argument(unicorn, 3)?;
+    let read = |address, label| -> Result<Vec<u8>, String> {
+        if address == 0 {
+            Ok(Vec::new())
+        } else {
+            read_crt_stdio_c_string(unicorn, address, 4096, label)
+        }
+    };
+    let operation = read(operation, "ShellExecuteA operation")?;
+    let target = read(target, "ShellExecuteA target")?;
+    let parameters = read(parameters, "ShellExecuteA parameters")?;
+    let stack = unicorn
+        .reg_read(RegisterX86::RSP)
+        .map_err(|e| e.to_string())?;
+    let raw = acl_read(unicorn, stack, 8)?;
+    let caller = u64::from_le_bytes(raw.try_into().unwrap());
+    // Parameter contents may contain credentials. Only their length is recorded.
+    Err(format!(
+        "ShellExecuteA requires a Windows shell provider: operation={:?} target={:?} parameters_bytes={} return_address={caller:#x}",
+        String::from_utf8_lossy(&operation),
+        String::from_utf8_lossy(&target),
+        parameters.len()
+    ))
 }
