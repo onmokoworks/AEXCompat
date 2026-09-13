@@ -1461,6 +1461,34 @@ fn emulate_wfsopen(unicorn: &mut Unicorn<'_, GuestState>) {
     finish_guest_stdio(unicorn, result);
 }
 
+fn emulate_fsopen(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let name = read_win64_import_argument(unicorn, 0)?;
+        let mode = read_win64_import_argument(unicorn, 1)?;
+        let share = read_win64_import_argument(unicorn, 2)? as u32;
+        if name == 0 || mode == 0 {
+            return Err("_fsopen requires an invalid parameter handler for null arguments".into());
+        }
+        let share_read_access = match share {
+            0x10 | 0x30 => false,
+            0x20 | 0x40 | 0x80 => true,
+            _ => {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(0);
+            }
+        };
+        let name = read_crt_stdio_c_string(unicorn, name, MAX_CRT_STRING_BYTES, "_fsopen filename")?;
+        let mode = read_crt_stdio_c_string(unicorn, mode, 64, "_fsopen mode")?;
+        let (stream, errno) =
+            open_guest_stream_with_share(unicorn, &name, &mode, share_read_access)?;
+        if errno != 0 {
+            set_guest_crt_errno(unicorn, errno)?;
+        }
+        Ok(stream)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn guest_volume_information(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     let root = read_win64_import_argument(unicorn, 0)?;
     let path = if root == 0 {

@@ -21171,6 +21171,60 @@ fn wfsopen_enforces_read_sharing_and_releases_it_on_close() {
 }
 
 #[test]
+fn fsopen_uses_the_same_bounded_read_sharing_contract() {
+    const OPEN: u64 = STUB_BASE + 0x410;
+    const CLOSE: u64 = STUB_BASE + 0x420;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, OPEN, "ucrtbase.dll", "_fsopen").unwrap();
+    install_win64_import(&mut engine.unicorn, CLOSE, "ucrtbase.dll", "fclose").unwrap();
+    let source = std::env::temp_dir().join(format!("aex-fsopen-{}", std::process::id()));
+    std::fs::write(&source, b"asset").unwrap();
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .sources
+        .insert("c:/shared.bin".into(), source.clone());
+    let name = DATA_BASE + 0x100;
+    let mode = DATA_BASE + 0x300;
+    engine.write(name, b"C:\\Shared.bin\0").unwrap();
+    engine.write(mode, b"rb\0").unwrap();
+    let exclusive = engine
+        .call_win64(OPEN, [name, mode, 0x30, 0, 0, 0])
+        .unwrap();
+    assert_ne!(exclusive, 0);
+    assert_eq!(
+        engine
+            .call_win64(OPEN, [name, mode, 0x40, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().crt_errno, 13);
+    assert_eq!(
+        engine
+            .call_win64(CLOSE, [exclusive, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let shared = engine
+        .call_win64(OPEN, [name, mode, 0x40, 0, 0, 0])
+        .unwrap();
+    assert_ne!(shared, 0);
+    assert_eq!(
+        engine
+            .call_win64(CLOSE, [shared, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
+    std::fs::remove_file(source).unwrap();
+    assert_eq!(
+        dispatch_win64_import("other.dll", "_fsopen"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
 fn strerror_maps_windows_errors_and_keeps_thread_borrowed_storage() {
     const CALL: u64 = STUB_BASE + 0x410;
     for dll in ["ucrtbase.dll", "api-ms-win-crt-runtime-l1-1-0.dll"] {

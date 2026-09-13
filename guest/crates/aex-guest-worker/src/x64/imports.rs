@@ -155,6 +155,7 @@ enum LegacyWin64Import {
     CrtLseek64,
     CrtSetMode,
     Fopen,
+    Fsopen,
     Wfopen,
     Wfsopen,
     Strerror,
@@ -1369,6 +1370,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_wfsopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen") => LegacyWin64Import::Fopen,
         (_, "fopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_fsopen") => {
+            LegacyWin64Import::Fsopen
+        }
+        (_, "_fsopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen_s") => {
             LegacyWin64Import::FopenS
         }
@@ -3843,6 +3848,15 @@ fn install_win64_import(
                         "install fopen",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_fopen(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Fsopen => {
+                    uc("write _fsopen return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _fsopen",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_fsopen(unicorn)
                         }),
                     )?;
                 }
