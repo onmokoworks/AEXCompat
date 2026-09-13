@@ -529,6 +529,27 @@ fn crt_heap_imports_allocate_zero_reuse_and_reject_invalid_free() {
 }
 
 #[test]
+fn crt_heap_uses_one_guest_mapping_for_many_allocations() {
+    let mut engine = test_engine(&[0xc3]);
+    let regions_before = engine.unicorn.mem_regions().unwrap().len();
+    let pointers: Vec<_> = (0..256)
+        .map(|_| allocate_crt_region(&mut engine.unicorn, 24).unwrap())
+        .collect();
+    assert_eq!(
+        engine.unicorn.mem_regions().unwrap().len(),
+        regions_before + 1
+    );
+    for pointer in pointers {
+        free_crt_region(&mut engine.unicorn, pointer).unwrap();
+    }
+    assert_eq!(
+        engine.unicorn.mem_regions().unwrap().len(),
+        regions_before + 1
+    );
+    assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
+}
+
+#[test]
 fn crt_strdup_copies_independently_uses_crt_ownership_and_fails_closed() {
     const STRDUP: u64 = STUB_BASE + 0x530;
     let mut engine = test_engine(&[0xc3]);
@@ -830,7 +851,9 @@ fn crt_aligned_allocation_honors_alignment_reuses_and_owns_free() {
     assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 17);
     assert_eq!(engine.call_win64(FREE, [first, 0, 0, 0, 0, 0]).unwrap(), 0);
     assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
-    assert!(engine.unicorn.mem_read_as_vec(first, 1).is_err());
+    // Windows heaps may retain freed pages. Ownership metadata, rather than a
+    // per-free virtual-memory unmap, rejects a second free.
+    assert!(engine.unicorn.mem_read_as_vec(first, 1).is_ok());
 
     let reused = engine.call_win64(ALLOC, [0, 0x20_000, 0, 0, 0, 0]).unwrap();
     assert_eq!(reused, first);
@@ -3605,8 +3628,8 @@ fn vcruntime_exception_copy_deep_copies_and_frees_owned_crt_string() {
         .unwrap();
     engine.call_win64(DESTROY, [source, 0, 0, 0, 0, 0]).unwrap();
     assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
-    assert!(engine.unicorn.mem_read_as_vec(owned, 1).is_err());
-    assert!(engine.unicorn.mem_read_as_vec(copied.what, 1).is_err());
+    assert!(engine.unicorn.mem_read_as_vec(owned, 1).is_ok());
+    assert!(engine.unicorn.mem_read_as_vec(copied.what, 1).is_ok());
 }
 
 #[test]
@@ -9202,7 +9225,7 @@ fn private_heap_lifecycle_tracks_allocations_and_releases_them_on_destroy() {
             .windows_private_heaps
             .contains_key(&heap)
     );
-    assert!(engine.unicorn.mem_read_as_vec(moved, 1).is_err());
+    assert!(engine.unicorn.mem_read_as_vec(moved, 1).is_ok());
     assert_eq!(engine.unicorn.get_data().crt_heap.live_bytes(), 0);
 }
 

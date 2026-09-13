@@ -779,7 +779,15 @@ fn emulate_crt_malloc(unicorn: &mut Unicorn<'_, GuestState>, calloc: bool) {
             .reg_read(RegisterX86::RCX)
             .map_err(|_| CrtHeapError::SizeOverflow)
     };
-    let pointer = requested_size.and_then(|size| allocate_crt_region(unicorn, size));
+    let pointer = requested_size.and_then(|size| {
+        let pointer = allocate_crt_region(unicorn, size)?;
+        if calloc {
+            unicorn
+                .mem_write(pointer, &vec![0; size.max(1) as usize])
+                .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
+        }
+        Ok(pointer)
+    });
     // malloc/calloc report normal bounded allocation failure as NULL. This is
     // distinct from free ownership violations, which stop at the callback boundary.
     let _ = unicorn.reg_write(RegisterX86::RAX, pointer.unwrap_or(0));
@@ -856,19 +864,27 @@ fn allocate_crt_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     size: u64,
 ) -> Result<u64, CrtHeapError> {
+    ensure_crt_heap_mapping(unicorn)?;
     let allocation = unicorn.get_data().crt_heap.prepare_allocation(size)?;
     let pointer = unicorn
         .get_data()
         .crt_heap
         .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
     unicorn
-        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
-        .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
-    if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
-        let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
-        return Err(error);
-    }
+        .get_data_mut()
+        .crt_heap
+        .insert(pointer, allocation)?;
     Ok(pointer)
+}
+
+fn ensure_crt_heap_mapping(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), CrtHeapError> {
+    if !unicorn.get_data().crt_heap_mapped {
+        unicorn
+            .mem_map(CRT_HEAP_BASE, MAX_CRT_HEAP_BYTES, Prot::READ | Prot::WRITE)
+            .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
+        unicorn.get_data_mut().crt_heap_mapped = true;
+    }
+    Ok(())
 }
 
 fn allocate_aligned_crt_region(
@@ -876,6 +892,7 @@ fn allocate_aligned_crt_region(
     size: u64,
     alignment: u64,
 ) -> Result<u64, CrtHeapError> {
+    ensure_crt_heap_mapping(unicorn)?;
     if alignment == 0 || !alignment.is_power_of_two() {
         return Err(CrtHeapError::InvalidAlignment);
     }
@@ -890,38 +907,31 @@ fn allocate_aligned_crt_region(
         alignment,
     )?;
     unicorn
-        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
-        .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
-    if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
-        let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
-        return Err(error);
-    }
+        .get_data_mut()
+        .crt_heap
+        .insert(pointer, allocation)?;
     Ok(pointer)
 }
 
 fn free_crt_region(unicorn: &mut Unicorn<'_, GuestState>, pointer: u64) -> Result<(), String> {
-    let allocation = unicorn
+    unicorn
         .get_data_mut()
         .crt_heap
         .remove(pointer)
         .map_err(|error| error.to_string())?;
-    unicorn
-        .mem_unmap(pointer, allocation.backing_size)
-        .map_err(|error| format!("unmap CRT allocation {pointer:#x}: {error}"))
+    Ok(())
 }
 
 fn free_aligned_crt_region(
     unicorn: &mut Unicorn<'_, GuestState>,
     pointer: u64,
 ) -> Result<(), String> {
-    let allocation = unicorn
+    unicorn
         .get_data_mut()
         .crt_heap
         .remove_aligned(pointer)
         .map_err(|error| error.to_string())?;
-    unicorn
-        .mem_unmap(pointer, allocation.backing_size)
-        .map_err(|error| format!("unmap aligned CRT allocation {pointer:#x}: {error}"))
+    Ok(())
 }
 
 fn emulate_crt_aligned_malloc(unicorn: &mut Unicorn<'_, GuestState>) {

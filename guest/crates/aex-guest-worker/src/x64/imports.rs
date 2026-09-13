@@ -7791,21 +7791,14 @@ fn emulate_private_heap_lifecycle(
                 );
             };
             for pointer in allocations {
-                let allocation = match unicorn.get_data_mut().crt_heap.remove_process_heap(pointer)
-                {
-                    Ok(allocation) => allocation,
+                match unicorn.get_data_mut().crt_heap.remove_process_heap(pointer) {
+                    Ok(_) => {}
                     Err(error) => {
                         return fail_process_heap(
                             unicorn,
                             format!("HeapDestroy allocation {pointer:#x} removal failed: {error}"),
                         );
                     }
-                };
-                if let Err(error) = unicorn.mem_unmap(pointer, allocation.backing_size) {
-                    return fail_process_heap(
-                        unicorn,
-                        format!("HeapDestroy allocation {pointer:#x} unmap failed: {error}"),
-                    );
                 }
             }
             let _ = unicorn.reg_write(RegisterX86::RAX, 1);
@@ -7850,6 +7843,7 @@ fn allocate_process_heap_region(
     handle: u64,
     size: u64,
 ) -> Result<u64, CrtHeapError> {
+    ensure_crt_heap_mapping(unicorn)?;
     let allocation = unicorn
         .get_data()
         .crt_heap
@@ -7859,12 +7853,9 @@ fn allocate_process_heap_region(
         .crt_heap
         .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
     unicorn
-        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
-        .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
-    if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
-        let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
-        return Err(error);
-    }
+        .get_data_mut()
+        .crt_heap
+        .insert(pointer, allocation)?;
     if handle != PROCESS_HEAP_HANDLE {
         let Some(allocations) = unicorn
             .get_data_mut()
@@ -7872,7 +7863,6 @@ fn allocate_process_heap_region(
             .get_mut(&handle)
         else {
             let _ = unicorn.get_data_mut().crt_heap.remove_process_heap(pointer);
-            let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
             return Err(CrtHeapError::AllocatorMismatch);
         };
         allocations.insert(pointer);
@@ -7885,14 +7875,11 @@ fn free_process_heap_region(
     handle: u64,
     pointer: u64,
 ) -> Result<(), String> {
-    let allocation = unicorn
+    unicorn
         .get_data_mut()
         .crt_heap
         .remove_process_heap(pointer)
         .map_err(|error| error.to_string())?;
-    unicorn
-        .mem_unmap(pointer, allocation.backing_size)
-        .map_err(|error| format!("unmap process heap allocation {pointer:#x}: {error}"))?;
     if handle != PROCESS_HEAP_HANDLE {
         if let Some(allocations) = unicorn
             .get_data_mut()
@@ -8042,17 +8029,6 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
                 return;
             }
         };
-    if unicorn
-        .mem_map(
-            new_pointer,
-            replacement.backing_size,
-            Prot::READ | Prot::WRITE,
-        )
-        .is_err()
-    {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
-        return;
-    }
     let copy_length = old.requested_size.min(replacement.requested_size) as usize;
     let move_result = (|| -> Result<(), String> {
         if copy_length > 0 {
@@ -8072,25 +8048,17 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
         Ok(())
     })();
     if let Err(error) = move_result {
-        let _ = unicorn.mem_unmap(new_pointer, replacement.backing_size);
         return fail_process_heap(unicorn, error);
     }
-    let removed = match unicorn
+    match unicorn
         .get_data_mut()
         .crt_heap
         .commit_process_heap_reallocation(pointer, new_pointer, replacement)
     {
-        Ok(allocation) => allocation,
+        Ok(_) => {}
         Err(error) => {
-            let _ = unicorn.mem_unmap(new_pointer, replacement.backing_size);
             return fail_process_heap(unicorn, format!("HeapReAlloc commit failed: {error}"));
         }
-    };
-    if let Err(error) = unicorn.mem_unmap(pointer, removed.backing_size) {
-        return fail_process_heap(
-            unicorn,
-            format!("HeapReAlloc unmap old block failed: {error}"),
-        );
     }
     if handle != PROCESS_HEAP_HANDLE {
         let Some(allocations) = unicorn

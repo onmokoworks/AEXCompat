@@ -280,6 +280,7 @@ struct GuestState {
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
     crt_heap: CrtHeap,
+    crt_heap_mapped: bool,
     extended_strings: HashMap<i32, u64>,
     extended_empty_string: u64,
     extended_string_table_valid: bool,
