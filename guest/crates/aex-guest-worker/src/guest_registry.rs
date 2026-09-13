@@ -98,6 +98,8 @@ pub(crate) struct GuestRegistry {
     inheritable: BTreeMap<u64, bool>,
     handles: BTreeMap<u64, (u64, u32, Vec<u8>, u32)>,
     issued: u64,
+    values: BTreeMap<(u64, u32, Vec<u8>, Vec<u8>), (u32, Vec<u8>)>,
+    value_bytes: usize,
 }
 impl GuestRegistry {
     pub(crate) fn resolve(&self, key: u64, view: u32) -> Result<(u64, u32, Vec<u8>), u32> {
@@ -208,6 +210,58 @@ impl GuestRegistry {
             .insert(handle, (root, view, path, map_access(access)));
         self.inheritable.insert(handle, inherit_handle);
         Ok((handle, !existed))
+    }
+
+    fn value_identity(
+        &self,
+        key: u64,
+        name: &[u8],
+        access: u32,
+    ) -> Result<(u64, u32, Vec<u8>, Vec<u8>), u32> {
+        let (root, view, path) = self.resolve(key, 0)?;
+        if self
+            .handles
+            .get(&key)
+            .is_some_and(|h| h.3 & access != access)
+        {
+            return Err(5);
+        }
+        if name.len() > 16383 || !name.is_ascii() {
+            return Err(87);
+        }
+        Ok((
+            root,
+            view,
+            path,
+            name.iter().map(u8::to_ascii_lowercase).collect(),
+        ))
+    }
+    pub(crate) fn set_value(
+        &mut self,
+        key: u64,
+        name: &[u8],
+        kind: u32,
+        data: Vec<u8>,
+    ) -> Result<(), u32> {
+        let identity = self.value_identity(key, name, 2)?;
+        let previous = self
+            .values
+            .get(&identity)
+            .map_or(0, |(_, bytes)| bytes.len());
+        let total = self.value_bytes - previous + data.len();
+        if data.len() > 2 * 1024 * 1024
+            || total > 16 * 1024 * 1024
+            || (!self.values.contains_key(&identity) && self.values.len() >= 4096)
+        {
+            return Err(8);
+        }
+        self.values.insert(identity, (kind, data));
+        self.value_bytes = total;
+        Ok(())
+    }
+    pub(crate) fn query_value(&self, key: u64, name: &[u8]) -> Result<&(u32, Vec<u8>), u32> {
+        let identity = self.value_identity(key, name, 1)?;
+        self.values.get(&identity).ok_or(2)
     }
     pub(crate) fn close(&mut self, key: u64) -> Result<(), u32> {
         self.handles.remove(&key).ok_or(6u32)?;

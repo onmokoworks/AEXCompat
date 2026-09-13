@@ -96,6 +96,8 @@ enum LegacyWin64Import {
     AllocateAndInitializeSid,
     CreateWellKnownSid,
     FreeSid,
+    RegSetValueExA,
+    RegQueryValueExA,
     RegCreateKeyExA,
     RegOpenKeyExA,
     RegCloseKey,
@@ -1030,6 +1032,11 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "AllocateAndInitializeSid" | "FreeSid") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("advapi32.dll", "RegSetValueExA") => LegacyWin64Import::RegSetValueExA,
+        ("advapi32.dll", "RegQueryValueExA") => LegacyWin64Import::RegQueryValueExA,
+        (_, "RegSetValueExA" | "RegQueryValueExA") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("advapi32.dll", "RegCreateKeyExA") => LegacyWin64Import::RegCreateKeyExA,
         (_, "RegCreateKeyExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "RegOpenKeyExA") => LegacyWin64Import::RegOpenKeyExA,
@@ -1651,6 +1658,18 @@ fn install_win64_import(
                         "install SID import",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_windows_sid(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::RegSetValueExA | LegacyWin64Import::RegQueryValueExA => {
+                    uc(
+                        "write registry value return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install registry value import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_registry_value_a(unicorn, implementation);
                         }),
                     )?;
                 }
@@ -10533,6 +10552,129 @@ fn emulate_reg_create_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
                 .map_err(|e| e.to_string())?;
         }
         Ok(0)
+    })();
+    finish_registry_import(unicorn, result);
+}
+
+fn emulate_registry_value_a(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    implementation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        let key = read_win64_import_argument(unicorn, 0)?;
+        let name = read_win64_import_argument(unicorn, 1)?;
+        let reserved = read_win64_import_argument(unicorn, 2)?;
+        let fourth = read_win64_import_argument(unicorn, 3)?;
+        let data = read_win64_import_argument(unicorn, 4)?;
+        let sixth = read_win64_import_argument(unicorn, 5)?;
+        if reserved != 0 {
+            return Ok(87);
+        }
+        let name = if name == 0 {
+            Vec::new()
+        } else {
+            read_crt_stdio_c_string(unicorn, name, 16384, "registry value name")?
+        };
+        if !name.is_ascii() {
+            return Err("non-ASCII registry value names unsupported".into());
+        }
+        if matches!(implementation, LegacyWin64Import::RegSetValueExA) {
+            let size = sixth as u32 as u64;
+            if data == 0 && size != 0 {
+                return Ok(87);
+            }
+            if size > 1024 * 1024 {
+                return Ok(8);
+            }
+            let kind = fourth as u32;
+            if kind > 11 {
+                return Err(format!("registry value type {kind} unsupported"));
+            }
+            let mut bytes = if size == 0 {
+                Vec::new()
+            } else {
+                acl_read(unicorn, data, size)?
+            };
+            if matches!(kind, 1 | 2 | 7) {
+                let (text, _, invalid) = encoding_rs::SHIFT_JIS.decode(&bytes);
+                if invalid {
+                    return Err("invalid CP932 registry string".into());
+                }
+                bytes = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            }
+            return Ok(
+                match unicorn
+                    .get_data_mut()
+                    .registry
+                    .set_value(key, &name, kind, bytes)
+                {
+                    Ok(()) => 0,
+                    Err(error) => error as u64,
+                },
+            );
+        }
+        if data != 0 && sixth == 0 {
+            return Ok(87);
+        }
+        let (kind, mut bytes) = match unicorn.get_data().registry.query_value(key, &name) {
+            Ok(value) => value.clone(),
+            Err(error) => return Ok(error as u64),
+        };
+        if matches!(kind, 1 | 2 | 7) {
+            let units = bytes
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect::<Vec<_>>();
+            let text = String::from_utf16(&units).map_err(|_| "invalid UTF16 registry string")?;
+            let (encoded, _, invalid) = encoding_rs::SHIFT_JIS.encode(&text);
+            if invalid {
+                return Err("registry string cannot be encoded in CP932".into());
+            }
+            bytes = encoded.into_owned();
+        }
+        let capacity = if data != 0 {
+            let raw = acl_read(unicorn, sixth, 4)?;
+            u32::from_le_bytes(raw.try_into().unwrap()) as usize
+        } else {
+            0
+        };
+        let copy_data = data != 0 && capacity >= bytes.len();
+        let outputs = [
+            (fourth, 4u64),
+            (sixth, 4u64),
+            (if copy_data { data } else { 0 }, bytes.len() as u64),
+        ];
+        for (index, &(address, size)) in outputs.iter().enumerate() {
+            if address == 0 || size == 0 {
+                continue;
+            }
+            if !guest_range_has_permission(unicorn, address, size, Prot::WRITE)? {
+                return Err("registry query output is not writable".into());
+            }
+            for &(other, length) in &outputs[..index] {
+                if other != 0
+                    && length != 0
+                    && address < other.saturating_add(length)
+                    && other < address.saturating_add(size)
+                {
+                    return Err("registry query outputs overlap".into());
+                }
+            }
+        }
+        if fourth != 0 {
+            unicorn
+                .mem_write(fourth, &kind.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        if sixth != 0 {
+            unicorn
+                .mem_write(sixth, &(bytes.len() as u32).to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        if copy_data && !bytes.is_empty() {
+            unicorn.mem_write(data, &bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(if data != 0 && !copy_data { 234 } else { 0 })
     })();
     finish_registry_import(unicorn, result);
 }

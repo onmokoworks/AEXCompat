@@ -23112,3 +23112,147 @@ fn registry_create_security_is_copied_and_enforced_on_reopen() {
         0
     );
 }
+
+#[test]
+fn registry_values_round_trip_sizes_types_default_and_access() {
+    let mut engine = test_engine(&[0xc3]);
+    let set = STUB_BASE + 0x100;
+    let query = STUB_BASE + 0x110;
+    install_win64_import(&mut engine.unicorn, set, "advapi32.dll", "RegSetValueExA").unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        query,
+        "advapi32.dll",
+        "RegQueryValueExA",
+    )
+    .unwrap();
+    let root = 0xffff_ffff_8000_0001;
+    let (handle, _) = engine
+        .unicorn
+        .get_data_mut()
+        .registry
+        .open(root, b"Values", 3, true)
+        .unwrap();
+    let name = DATA_BASE + 0x100;
+    let data = DATA_BASE + 0x200;
+    let size = DATA_BASE + 0x300;
+    let kind_out = size + 8;
+    engine.write(name, b"Value\0").unwrap();
+    for (kind, bytes) in [
+        (3, vec![0x00, 0xff, 0x7f]),
+        (1, vec![0x82, 0xa0, 0]),
+        (7, vec![b'a', 0, b'b', 0, 0]),
+        (4, vec![4, 3, 2, 1]),
+    ] {
+        engine.write(data, &bytes).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(set, [handle, name, 0, kind, data, bytes.len() as u64])
+                .unwrap(),
+            0
+        );
+        engine.write(data, &[0xcc; 32]).unwrap();
+        engine.write(name, b"vALUE\0").unwrap();
+        assert_eq!(
+            engine
+                .call_win64(query, [handle, name, 0, kind_out, 0, size])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(size, 4).unwrap(),
+            (bytes.len() as u32).to_le_bytes()
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(kind_out, 4).unwrap(),
+            (kind as u32).to_le_bytes()
+        );
+        engine.write(size, &1u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(query, [handle, name, 0, kind_out, data, size])
+                .unwrap(),
+            234
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(data, 32).unwrap(),
+            [0xcc; 32]
+        );
+        assert_eq!(
+            engine
+                .call_win64(query, [handle, name, 0, kind_out, data, size])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(data, bytes.len()).unwrap(),
+            bytes
+        );
+    }
+    assert_eq!(engine.call_win64(set, [handle, 0, 0, 3, 0, 0]).unwrap(), 0);
+    engine.write(size, &99u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(query, [handle, 0, 0, 0, 0, size])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(size, 4).unwrap(), [0; 4]);
+    let (readonly, _) = engine
+        .unicorn
+        .get_data_mut()
+        .registry
+        .open(root, b"Values", 1, false)
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(set, [readonly, name, 0, 3, 0, 0])
+            .unwrap(),
+        5
+    );
+    let (writeonly, _) = engine
+        .unicorn
+        .get_data_mut()
+        .registry
+        .open(root, b"Values", 2, false)
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(query, [writeonly, name, 0, 0, 0, 0])
+            .unwrap(),
+        5
+    );
+    engine
+        .unicorn
+        .get_data_mut()
+        .registry
+        .close(handle)
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(query, [readonly, name, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine
+            .call_win64(query, [handle, name, 0, 0, 0, 0])
+            .unwrap(),
+        6
+    );
+    engine.write(name, b"Missing\0").unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 77;
+    assert_eq!(
+        engine
+            .call_win64(query, [readonly, name, 0, 0, 0, 0])
+            .unwrap(),
+        2
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 77);
+    for name in ["RegSetValueExA", "RegQueryValueExA"] {
+        assert_eq!(
+            dispatch_win64_import("other.dll", name),
+            Win64ImportDispatch::UnsupportedLegacyImport
+        );
+    }
+}
