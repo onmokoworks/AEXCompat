@@ -22875,3 +22875,39 @@ fn expand_environment_strings_a_sizes_and_preserves_unknown_variables() {
         expected
     );
 }
+
+#[test]
+fn is_valid_acl_checks_header_and_entry_bounds_without_mutation() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "advapi32.dll", "IsValidAcl").unwrap();
+    let out = DATA_BASE + 0x100;
+    for (revision, size, count, ace_size, expected) in [
+        (2u8, 16u16, 0u16, 0u16, 1),
+        (2, 16, 1, 8, 1),
+        (2, 16, 2, 8, 0),
+        (2, 16, 1, 12, 0),
+        (1, 16, 0, 0, 0),
+        (2, 7, 0, 0, 0),
+        (2, 16, 1, 0, 0),
+    ] {
+        let mut bytes = [0u8; 16];
+        bytes[0] = revision;
+        bytes[2..4].copy_from_slice(&size.to_le_bytes());
+        bytes[4..6].copy_from_slice(&count.to_le_bytes());
+        bytes[10..12].copy_from_slice(&ace_size.to_le_bytes());
+        engine.write(out, &bytes).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        assert_eq!(
+            engine.call_win64(entry, [out, 0, 0, 0, 0, 0]).unwrap(),
+            expected
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(out, 16).unwrap(), bytes);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    }
+    assert_eq!(engine.call_win64(entry, [0; 6]).unwrap(), 0);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "IsValidAcl"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

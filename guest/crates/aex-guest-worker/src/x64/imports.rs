@@ -77,6 +77,7 @@ enum LegacyWin64Import {
     Atoi,
     SetNamedSecurityInfoA,
     SetEntriesInAclA,
+    IsValidAcl,
     InitializeAcl,
     CreateDirectoryA,
     GetVolumeInformationA,
@@ -1012,6 +1013,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CreateDirectoryA
         }
         (_, "CreateDirectoryA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "IsValidAcl") => LegacyWin64Import::IsValidAcl,
+        (_, "IsValidAcl") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "InitializeAcl") => LegacyWin64Import::InitializeAcl,
         (_, "InitializeAcl") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "SetEntriesInAclA") => LegacyWin64Import::SetEntriesInAclA,
@@ -1583,6 +1586,44 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = create_guest_directory(unicorn);
                             finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::IsValidAcl => {
+                    uc("write IsValidAcl return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install IsValidAcl",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            let valid = (|| -> Result<bool, String> {
+                                let acl = read_win64_import_argument(uc, 0)?;
+                                let header = acl_read(uc, acl, 8)?;
+                                let size = u16::from_le_bytes([header[2], header[3]]) as usize;
+                                if acl % 4 != 0
+                                    || !(2..=4).contains(&header[0])
+                                    || size < 8
+                                    || size % 4 != 0
+                                {
+                                    return Ok(false);
+                                }
+                                let bytes = acl_read(uc, acl, size as u64)?;
+                                let count = u16::from_le_bytes([header[4], header[5]]);
+                                let mut offset = 8;
+                                for _ in 0..count {
+                                    if offset + 4 > size {
+                                        return Ok(false);
+                                    }
+                                    let length =
+                                        u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]])
+                                            as usize;
+                                    if length < 4 || length % 4 != 0 || offset + length > size {
+                                        return Ok(false);
+                                    }
+                                    offset += length;
+                                }
+                                Ok(true)
+                            })()
+                            .unwrap_or(false);
+                            let _ = uc.reg_write(RegisterX86::RAX, u64::from(valid));
                         }),
                     )?;
                 }
