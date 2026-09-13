@@ -22800,3 +22800,38 @@ fn crt_rand_repeats_seeded_sequence_and_isolates_threads() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn get_module_handle_a_finds_known_modules_without_adding_references() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "kernel32.dll",
+        "GetModuleHandleA",
+    )
+    .unwrap();
+    let name = DATA_BASE + 0x100;
+    let before = engine.unicorn.get_data().windows_module_refcounts.clone();
+    for (text, expected) in [
+        (b"KERNEL32.DLL\0".as_slice(), WINDOWS_KERNEL32_MODULE_TOKEN),
+        (b"ntdll.dll\0".as_slice(), WINDOWS_NTDLL_MODULE_TOKEN),
+        (b"missing.dll\0".as_slice(), 0),
+    ] {
+        engine.write(name, text).unwrap();
+        assert_eq!(
+            engine.call_win64(entry, [name, 0, 0, 0, 0, 0]).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_MOD_NOT_FOUND
+    );
+    assert_eq!(engine.unicorn.get_data().windows_module_refcounts, before);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "GetModuleHandleA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

@@ -268,6 +268,7 @@ enum LegacyWin64Import {
     AcquireSrwLockExclusive,
     TryAcquireSrwLockExclusive,
     ReleaseSrwLockExclusive,
+    GetModuleHandleA,
     GetModuleHandleW,
     GetModuleHandleExA,
     GetModuleHandleExW,
@@ -830,6 +831,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "ReleaseSRWLockExclusive") => {
             LegacyWin64Import::ReleaseSrwLockExclusive
         }
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleHandleA") => {
+            LegacyWin64Import::GetModuleHandleA
+        }
+        (_, "GetModuleHandleA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleHandleW") => {
             LegacyWin64Import::GetModuleHandleW
         }
@@ -2944,6 +2949,17 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_windows_srw_lock(unicorn, implementation);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::GetModuleHandleA => {
+                    uc(
+                        "write GetModuleHandleA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetModuleHandleA",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_get_module_handle_a(uc)),
                     )?;
                 }
                 LegacyWin64Import::GetModuleHandleW => {
@@ -10262,6 +10278,38 @@ fn emulate_verify_version_info_a(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn.get_data_mut().windows_last_error = 1150;
         }
         Ok(u64::from(matches))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_module_handle_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let module = if pointer == 0 {
+            unicorn.get_data().image_region.map(|(start, _)| start)
+        } else {
+            let bytes = read_strncpy_s_source(unicorn, pointer, 128)?;
+            let Some(end) = bytes.iter().position(|b| *b == 0) else {
+                return Err("GetModuleHandleA name exceeds bound".into());
+            };
+            let (name, malformed) =
+                encoding_rs::SHIFT_JIS.decode_without_bom_handling(&bytes[..end]);
+            if malformed {
+                return Err("GetModuleHandleA name has invalid ANSI encoding".into());
+            }
+            let basename = name.rsplit(['\\', '/']).next().unwrap_or("");
+            if basename.eq_ignore_ascii_case("kernel32.dll") {
+                Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+            } else if basename.eq_ignore_ascii_case("ntdll.dll") {
+                Some(WINDOWS_NTDLL_MODULE_TOKEN)
+            } else {
+                guest_library_by_name(unicorn.get_data(), &name).map(|library| library.base)
+            }
+        };
+        if module.is_none() {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+        }
+        Ok(module.unwrap_or(0))
     })();
     finish_guest_stdio(unicorn, result);
 }
