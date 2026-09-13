@@ -165,11 +165,10 @@ void HELPER(exit_atomic)(CPUArchState *env)
     cpu_loop_exit_atomic(env_cpu(env), GETPC());
 }
 
-void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {
-    uc_engine *uc = p;
-
-    if (cpu_loop_exit_requested(uc->cpu) && !in_delay_slot) {
-        // There are stil something we have to before exiting to be compatible with previous behaviors
+static void __attribute__((noinline, cold))
+check_exit_request_slow(uc_engine *uc, uintptr_t return_address) {
+        // There are still some things we have to do before exiting to be
+        // compatible with previous behaviors.
 
         // from cpu_tb_exec
         if (uc->nested_level == 1) {
@@ -182,7 +181,14 @@ void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {
             uc->skip_sync_pc_on_exit = false;
             cpu_loop_exit(uc->cpu);
         } else {
-            cpu_loop_exit_restore(uc->cpu, GETPC());
+            cpu_loop_exit_restore(uc->cpu, return_address);
         }
+}
+
+void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {
+    uc_engine *uc = p;
+
+    if (unlikely(cpu_loop_exit_requested(uc->cpu)) && !in_delay_slot) {
+        check_exit_request_slow(uc, GETPC());
     }
 }

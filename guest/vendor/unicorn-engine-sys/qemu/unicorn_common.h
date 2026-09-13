@@ -174,6 +174,13 @@ static uc_err uc_set_tlb(struct uc_struct *uc, int mode) {
 
 MemoryRegion *find_memory_mapping(struct uc_struct *uc, hwaddr address)
 {
+    hwaddr page = address & ~(hwaddr)uc->target_page_align;
+    UcMemoryMappingCacheEntry *cached =
+        &uc->memory_mapping_cache[(page / uc->target_page_size) %
+                                  UC_MEMORY_MAPPING_CACHE_SIZE];
+    if (cached->region && cached->page == page) {
+        return cached->region;
+    }
     hwaddr xlat = 0;
     hwaddr len = 1;
     MemoryRegion *mr = address_space_translate(&uc->address_space_memory, address, &xlat, &len, false, MEMTXATTRS_UNSPECIFIED);
@@ -181,6 +188,8 @@ MemoryRegion *find_memory_mapping(struct uc_struct *uc, hwaddr address)
     if (mr == &uc->io_mem_unassigned) {
         return NULL;
     }
+    cached->page = page;
+    cached->region = mr;
     return mr;
 }
 

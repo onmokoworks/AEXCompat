@@ -265,6 +265,12 @@ static inline bool _hook_exists_bounded(struct list_item *cur, uint64_t addr)
 
 // relloc increment, KEEP THIS A POWER OF 2!
 #define MEM_BLOCK_INCR 32
+#define UC_MEMORY_MAPPING_CACHE_SIZE 4096
+
+typedef struct UcMemoryMappingCacheEntry {
+    hwaddr page;
+    MemoryRegion *region;
+} UcMemoryMappingCacheEntry;
 
 typedef struct TargetPageBits TargetPageBits;
 typedef struct TCGContext TCGContext;
@@ -406,6 +412,8 @@ struct uc_struct {
     MemoryRegion **mapped_blocks;
     uint32_t mapped_block_count;
     uint32_t mapped_block_cache_index;
+    UcMemoryMappingCacheEntry
+        memory_mapping_cache[UC_MEMORY_MAPPING_CACHE_SIZE];
     void *qemu_thread_data; // to support cross compile to Windows
                             // (qemu-thread-win32.c)
     uint32_t target_page_size;

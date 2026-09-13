@@ -1477,6 +1477,8 @@ static void memory_region_add_subregion_common(MemoryRegion *mr,
                                                hwaddr offset,
                                                MemoryRegion *subregion)
 {
+    memset(mr->uc->memory_mapping_cache, 0,
+           sizeof(mr->uc->memory_mapping_cache));
     assert(!subregion->container);
     subregion->container = mr;
     subregion->addr = offset;
@@ -1504,6 +1506,8 @@ void memory_region_add_subregion_overlap(MemoryRegion *mr,
 void memory_region_del_subregion(MemoryRegion *mr,
                                  MemoryRegion *subregion)
 {
+    memset(mr->uc->memory_mapping_cache, 0,
+           sizeof(mr->uc->memory_mapping_cache));
     memory_region_transaction_begin();
     assert(subregion->container == mr);
     subregion->container = NULL;
