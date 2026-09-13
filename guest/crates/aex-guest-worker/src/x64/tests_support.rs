@@ -22772,3 +22772,31 @@ fn verify_version_info_compares_hierarchy_and_reports_mismatch() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn crt_rand_repeats_seeded_sequence_and_isolates_threads() {
+    let mut engine = test_engine(&[0xc3]);
+    let rand = STUB_BASE + 0x100;
+    let srand = STUB_BASE + 0x110;
+    install_win64_import(&mut engine.unicorn, rand, "ucrtbase.dll", "rand").unwrap();
+    install_win64_import(&mut engine.unicorn, srand, "ucrtbase.dll", "srand").unwrap();
+    let original_thread = engine.unicorn.get_data().current_windows_thread_id;
+    for _ in 0..2 {
+        engine.call_win64(srand, [1, 0, 0, 0, 0, 0]).unwrap();
+        for expected in [41, 18467, 6334, 26500, 19169] {
+            assert_eq!(engine.call_win64(rand, [0; 6]).unwrap(), expected);
+        }
+    }
+    engine.unicorn.get_data_mut().current_windows_thread_id = original_thread + 100;
+    assert_eq!(engine.call_win64(rand, [0; 6]).unwrap(), 41);
+    engine.unicorn.get_data_mut().current_windows_thread_id = original_thread;
+    assert_eq!(engine.call_win64(rand, [0; 6]).unwrap(), 15724);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "srand"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    assert_eq!(
+        dispatch_win64_import("other.dll", "rand"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}

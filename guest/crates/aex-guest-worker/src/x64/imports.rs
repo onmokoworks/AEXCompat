@@ -120,6 +120,8 @@ enum LegacyWin64Import {
     Wfopen,
     Strerror,
     FopenS,
+    CrtSrand,
+    CrtRand,
     MbsuprS,
     DupenvS,
     StrcatS,
@@ -631,6 +633,13 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentThreadId") => {
             LegacyWin64Import::GetCurrentThreadId
         }
+        ("api-ms-win-crt-utility-l1-1-0.dll" | "ucrtbase.dll", "srand") => {
+            LegacyWin64Import::CrtSrand
+        }
+        ("api-ms-win-crt-utility-l1-1-0.dll" | "ucrtbase.dll", "rand") => {
+            LegacyWin64Import::CrtRand
+        }
+        (_, "srand" | "rand") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-multibyte-l1-1-0.dll" | "ucrtbase.dll", "_mbsupr_s") => {
             LegacyWin64Import::MbsuprS
         }
@@ -3196,6 +3205,36 @@ fn install_win64_import(
                         "install fopen_s import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_fopen_s(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtSrand | LegacyWin64Import::CrtRand => {
+                    uc("write CRT random return", unicorn.mem_write(stub, &[0xc3]))?;
+                    let seed = matches!(implementation, LegacyWin64Import::CrtSrand);
+                    uc(
+                        "install CRT random",
+                        unicorn.add_code_hook(stub, stub, move |uc, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let input = if seed {
+                                    Some(read_win64_import_argument(uc, 0)? as u32)
+                                } else {
+                                    None
+                                };
+                                let thread = uc.get_data().current_windows_thread_id;
+                                let state = uc
+                                    .get_data_mut()
+                                    .crt_random_states
+                                    .entry(thread)
+                                    .or_insert(1);
+                                if let Some(input) = input {
+                                    *state = input;
+                                    Ok(0)
+                                } else {
+                                    *state = state.wrapping_mul(214013).wrapping_add(2531011);
+                                    Ok(u64::from((*state >> 16) & 0x7fff))
+                                }
+                            })();
+                            finish_guest_stdio(uc, result);
                         }),
                     )?;
                 }
@@ -9994,6 +10033,7 @@ fn release_guest_errno(unicorn: &mut Unicorn<'_, GuestState>, thread: u32) -> Re
             .map_err(|e| format!("_errno release: {e}"))?;
         unicorn.get_data_mut().crt_errno_buffers.remove(&thread);
     }
+    unicorn.get_data_mut().crt_random_states.remove(&thread);
     Ok(())
 }
 
