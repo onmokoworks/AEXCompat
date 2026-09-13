@@ -171,6 +171,7 @@ enum LegacyWin64Import {
     VcompNoOp,
     GetSystemTimeAsFileTime,
     GetSystemInfo,
+    VerifyVersionInfoA,
     VerSetConditionMask,
     GetVersion,
     GetVersionExA,
@@ -480,6 +481,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "VerifyVersionInfoA") => {
+            LegacyWin64Import::VerifyVersionInfoA
+        }
+        (_, "VerifyVersionInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "VerSetConditionMask") => {
             LegacyWin64Import::VerSetConditionMask
         }
@@ -2138,6 +2143,18 @@ fn install_win64_import(
                         "install GetSystemMetrics",
                         unicorn
                             .add_code_hook(stub, stub, |uc, _, _| emulate_get_system_metrics(uc)),
+                    )?;
+                }
+                LegacyWin64Import::VerifyVersionInfoA => {
+                    uc(
+                        "write VerifyVersionInfoA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install VerifyVersionInfoA",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_verify_version_info_a(uc)
+                        }),
                     )?;
                 }
                 LegacyWin64Import::VerSetConditionMask => {
@@ -10114,6 +10131,97 @@ fn emulate_mbsupr_s(unicorn: &mut Unicorn<'_, GuestState>) {
             .mem_write(pointer, &output)
             .map_err(|e| e.to_string())?;
         Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_verify_version_info_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let types = read_win64_import_argument(unicorn, 1)? as u32;
+        let mask = read_win64_import_argument(unicorn, 2)?;
+        if pointer == 0 || !guest_range_has_permission(unicorn, pointer, 156, Prot::READ)? {
+            unicorn.get_data_mut().windows_last_error = 998;
+            return Ok(0);
+        }
+        let bytes = unicorn
+            .mem_read_as_vec(pointer, 156)
+            .map_err(|e| e.to_string())?;
+        let dword = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let word =
+            |offset| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap()) as u32;
+        if dword(0) != 156 || types == 0 || types & !0xff != 0 {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        let requested = [
+            dword(8),
+            dword(4),
+            dword(12),
+            dword(16),
+            word(150),
+            word(148),
+            word(152),
+            bytes[154] as u32,
+        ];
+        let current = [2, 6, 9200, 2, 0, 0, 0, 1];
+        let condition = |field: usize| ((mask >> (field * 3)) & 7) as u32;
+        for field in 0..8 {
+            if types & (1 << field) != 0
+                && !(if field == 6 { 6..=7 } else { 1..=5 }).contains(&condition(field))
+            {
+                unicorn.get_data_mut().windows_last_error = 87;
+                return Ok(0);
+            }
+        }
+        let compare = |a, b, op| match op {
+            1 => a == b,
+            2 => a > b,
+            3 => a >= b,
+            4 => a < b,
+            5 => a <= b,
+            _ => false,
+        };
+        let mut matches = true;
+        for field in [2, 3, 7] {
+            if types & (1 << field) != 0 {
+                matches &= compare(current[field], requested[field], condition(field));
+            }
+        }
+        if types & 0x40 != 0 {
+            matches &= if condition(6) == 6 {
+                requested[6] == 0
+            } else {
+                false
+            };
+        }
+        let mut op = 1;
+        for field in [1, 0, 5, 4] {
+            if types & (1 << field) == 0 {
+                continue;
+            }
+            if op == 1 {
+                op = condition(field);
+            }
+            if current[field] != requested[field] {
+                matches &= compare(current[field], requested[field], op);
+                break;
+            }
+            // Equal components defer strict inequalities to the next component.
+            let lower_selected = match field {
+                1 => types & 0x31,
+                0 => types & 0x30,
+                5 => types & 0x10,
+                _ => 0,
+            };
+            if lower_selected == 0 {
+                matches &= compare(current[field], requested[field], op);
+            }
+        }
+        if !matches {
+            unicorn.get_data_mut().windows_last_error = 1150;
+        }
+        Ok(u64::from(matches))
     })();
     finish_guest_stdio(unicorn, result);
 }

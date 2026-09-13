@@ -22724,3 +22724,51 @@ fn version_condition_mask_packs_all_fields_and_preserves_existing_bits() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn verify_version_info_compares_hierarchy_and_reports_mismatch() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "kernel32.dll",
+        "VerifyVersionInfoA",
+    )
+    .unwrap();
+    let out = DATA_BASE + 0x100;
+    for (major, minor, sp, op, expected) in [
+        (5u32, 9u32, 9u16, 3u64, 1),
+        (6, 1, 9, 3, 1),
+        (6, 2, 0, 3, 1),
+        (6, 3, 0, 3, 0),
+        (10, 0, 0, 3, 0),
+        (6, 2, 0, 2, 0),
+        (6, 2, 0, 1, 1),
+    ] {
+        let mut bytes = [0u8; 156];
+        bytes[0..4].copy_from_slice(&156u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&major.to_le_bytes());
+        bytes[8..12].copy_from_slice(&minor.to_le_bytes());
+        bytes[148..150].copy_from_slice(&sp.to_le_bytes());
+        engine.write(out, &bytes).unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        let mask = op | (op << 3) | (op << 12) | (op << 15);
+        assert_eq!(
+            engine
+                .call_win64(entry, [out, 0x33, mask, 0, 0, 0])
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            engine.unicorn.get_data().windows_last_error,
+            if expected == 0 { 1150 } else { 71 }
+        );
+    }
+    assert_eq!(engine.call_win64(entry, [out, 2, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "VerifyVersionInfoA"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
