@@ -1711,6 +1711,30 @@ fn install_avx_state_sync_points(
     Ok(())
 }
 
+// A conservative filter: false means no VEX encoding can start here. Decode
+// remains authoritative for every candidate, including invalid prefix mixes.
+fn may_start_vex_instruction(bytes: &[u8]) -> bool {
+    for &byte in bytes {
+        match byte {
+            0x26
+            | 0x2e
+            | 0x36
+            | 0x3e
+            | 0x64
+            | 0x65
+            | 0x66
+            | 0x67
+            | 0xf0
+            | 0xf2
+            | 0xf3
+            | 0x40..=0x4f => continue,
+            0xc4 | 0xc5 => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
 // Large dependency DLLs can contain more VEX candidates than the bounded
 // eager map permits. Inspect only the current instruction, using fixed scratch
 // space and one hook per executable section. This also avoids replacing the
@@ -1737,6 +1761,9 @@ fn install_runtime_avx_state_sync(
                 unicorn.get_data_mut().callback_error =
                     Some("cannot read AVX synchronization instruction".into());
                 let _ = unicorn.emu_stop();
+                return;
+            }
+            if !may_start_vex_instruction(bytes) {
                 return;
             }
             // Decode from the executed PC, including valid legacy prefixes

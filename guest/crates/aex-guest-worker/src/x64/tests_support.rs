@@ -22164,3 +22164,56 @@ fn wsprintf_a_long_string_and_winuser_precision_differ_from_crt() {
         expected
     );
 }
+
+#[test]
+fn vex_prefilter_preserves_decoder_candidates_with_legacy_prefixes() {
+    let mut factory = InstructionInfoFactory::new();
+    for prefix in [
+        None,
+        Some(0x67),
+        Some(0x64),
+        Some(0x66),
+        Some(0xf3),
+        Some(0x48),
+    ] {
+        for first in 0..=255u8 {
+            for second in 0..=255u8 {
+                let mut bytes = vec![];
+                bytes.extend(prefix);
+                bytes.extend([first, second, 0x77, 0xc0, 0, 0, 0, 0]);
+                let mut decoder = Decoder::with_ip(64, &bytes, TEST_CODE, DecoderOptions::NONE);
+                let decoded = decoder.decode();
+                if native_avx_state_sync(&decoded, &mut factory).is_some() {
+                    assert!(may_start_vex_instruction(&bytes), "{bytes:x?}");
+                }
+            }
+        }
+    }
+    assert!(!may_start_vex_instruction(&[0x48, 0x89, 0xc0]));
+    assert!(!may_start_vex_instruction(&[0x90]));
+    assert!(may_start_vex_instruction(&[0x64, 0x67, 0xc5, 0xf8, 0x77]));
+}
+
+#[test]
+#[ignore = "manual performance comparison; no wall-clock correctness assertion"]
+fn benchmark_non_vex_runtime_sync_decode() {
+    let bytes = [0x48, 0x89, 0xc0];
+    for filtered in [false, true] {
+        let started = std::time::Instant::now();
+        let mut matches = 0;
+        for _ in 0..200_000 {
+            let bytes = std::hint::black_box(&bytes);
+            if filtered && !may_start_vex_instruction(bytes) {
+                continue;
+            }
+            let mut decoder = Decoder::with_ip(64, bytes, TEST_CODE, DecoderOptions::NONE);
+            let instruction = decoder.decode();
+            let mut factory = InstructionInfoFactory::new();
+            matches += usize::from(
+                std::hint::black_box(native_avx_state_sync(&instruction, &mut factory)).is_some(),
+            );
+        }
+        assert_eq!(matches, 0);
+        eprintln!("non_vex_sync filtered={filtered}: {:?}", started.elapsed());
+    }
+}
