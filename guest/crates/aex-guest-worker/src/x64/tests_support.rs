@@ -23427,6 +23427,10 @@ fn shell_execute_diagnostic_preserves_failure_and_omits_parameters() {
     let args = DATA_BASE + 0x300;
     engine.write(operation, b"open\0").unwrap();
     engine.write(target, b"helper.exe\0").unwrap();
+    engine.unicorn.get_data_mut().guest_files.sources.insert(
+        "c:/helper.exe".into(),
+        std::path::PathBuf::from("not-opened"),
+    );
     engine.write(args, b"private-argument\0").unwrap();
     let error = engine
         .call_win64(entry, [0, operation, target, args, 0, 1])
@@ -23440,4 +23444,20 @@ fn shell_execute_diagnostic_preserves_failure_and_omits_parameters() {
         dispatch_win64_import("foreign.dll", "ShellExecuteA"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
+}
+
+#[test]
+fn shell_execute_missing_executable_returns_failure_not_success() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "shell32.dll", "ShellExecuteA").unwrap();
+    let target = DATA_BASE + 0x100;
+    engine.write(target, b"absent-helper.exe\0").unwrap();
+    engine.unicorn.get_data_mut().crt_errno = 77;
+    assert_eq!(
+        engine.call_win64(entry, [0, 0, target, 0, 0, 1]).unwrap(),
+        2
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 2);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 77);
 }

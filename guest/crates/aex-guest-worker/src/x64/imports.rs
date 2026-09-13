@@ -1545,6 +1545,10 @@ fn install_win64_import(
                 }
                 LegacyWin64Import::ShellExecuteA => {
                     uc(
+                        "write ShellExecuteA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
                         "install shell execution diagnostic",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = describe_unavailable_shell_execute(unicorn);
@@ -10756,6 +10760,30 @@ fn describe_unavailable_shell_execute(
     let operation = read(operation, "ShellExecuteA operation")?;
     let target = read(target, "ShellExecuteA target")?;
     let parameters = read(parameters, "ShellExecuteA parameters")?;
+    // Only resolve the ordinary executable-open case. Existing executable
+    // targets, document associations, URLs and other verbs still need a shell.
+    if (operation.is_empty() || operation.eq_ignore_ascii_case(b"open"))
+        && target.is_ascii()
+        && target.to_ascii_lowercase().ends_with(b".exe")
+        && !target.contains(&b':')
+        && !target.contains(&b'/')
+        && !target.contains(&b'\\')
+        && !target.contains(&b'"')
+        && !target.contains(&b'*')
+        && !target.contains(&b'?')
+    {
+        let found = unicorn.get_data().guest_files.sources.keys().any(|name| {
+            name.rsplit('/')
+                .next()
+                .is_some_and(|leaf| leaf.as_bytes().eq_ignore_ascii_case(&target))
+        });
+        // Searching all mounted names is conservative: even a candidate outside
+        // PATH remains a diagnostic gap until shell search/launch is available.
+        if !found {
+            unicorn.get_data_mut().windows_last_error = 2;
+            return Ok(2); // SE_ERR_FNF, not an HINSTANCE success (>32).
+        }
+    }
     let stack = unicorn
         .reg_read(RegisterX86::RSP)
         .map_err(|e| e.to_string())?;
