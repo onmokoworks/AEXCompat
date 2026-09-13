@@ -1544,6 +1544,10 @@ pub struct DiagnosticDiscovery {
     pub parameters: Vec<InteractiveParameter>,
     /// The in-place DLL search roots, in resolution order.
     pub search_roots: Vec<PathBuf>,
+    /// SHA-256 of the resolved dependency-closure identity used by shipping
+    /// cluster pooling. The raw identity contains local absolute paths, so the
+    /// diagnostic boundary exposes equality evidence without those paths.
+    pub closure_identity_sha256: Option<String>,
     pub failure_classification: Option<String>,
     pub failure_diagnostics: Option<serde_json::Value>,
     /// `reason/resolution` of a cluster-session fallback, when this entry came
@@ -1626,6 +1630,10 @@ fn diagnostic_discovery(path: PathBuf, entry: CacheEntry) -> DiagnosticDiscovery
         category: entry.category,
         parameters: entry.params,
         search_roots: entry.closure.roots.iter().map(PathBuf::from).collect(),
+        closure_identity_sha256: entry
+            .closure_identity
+            .as_deref()
+            .map(|identity| hex_lower(&Sha256::digest(identity.as_bytes()))),
         failure_classification: entry.failure_classification,
         failure_diagnostics: entry.failure_diagnostics,
         cluster_fallback: entry

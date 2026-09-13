@@ -33,6 +33,9 @@
 //!                        Each run reports exactly what it swept and overwrites
 //!                        whatever is at its own --json, so give each slice its
 //!                        own path; merging them is not something this does
+//!   --render-jobs <n>    render independent dependency closures concurrently
+//!                        after discovery (default 1). Members of the same
+//!                        closure remain serial; final report order is unchanged
 //!   --filter <substr>    only plug-ins whose file name contains it (no case)
 //!   --verify-pixel-determinism
 //!                        repeat rendered plug-ins in a fresh session and compare pixels
@@ -77,7 +80,7 @@
 //! trace on stderr, which is worth having on a re-run of one bucket, not on a
 //! whole sweep.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -294,6 +297,7 @@ struct Options {
     json: Option<PathBuf>,
     limit: Option<usize>,
     skip: usize,
+    render_jobs: usize,
     filter: Option<String>,
     pixel_format: RenderPixelFormat,
     width: u32,
@@ -318,6 +322,7 @@ fn parse_options() -> Options {
         json: None,
         limit: None,
         skip: 0,
+        render_jobs: 1,
         filter: None,
         pixel_format: RenderPixelFormat::Argb8,
         width: 256,
@@ -345,6 +350,10 @@ fn parse_options() -> Options {
             "--json" => options.json = Some(PathBuf::from(value())),
             "--limit" => options.limit = Some(value().parse().expect("--limit takes a count")),
             "--skip" => options.skip = value().parse().expect("--skip takes a count"),
+            "--render-jobs" => {
+                options.render_jobs = value().parse().expect("--render-jobs takes a count");
+                assert!(options.render_jobs >= 1, "--render-jobs takes at least 1");
+            }
             "--filter" => options.filter = Some(value().to_lowercase()),
             "--depth" => {
                 options.pixel_format = match value().as_str() {
@@ -425,6 +434,96 @@ fn load_primary_image(path: &Path, width: u32, height: u32) -> std::io::Result<V
         ));
     }
     Ok(image.into_raw())
+}
+
+/// Runs independent work under a fixed concurrency bound while returning
+/// results in input order. Completion order is intentionally not observable in
+/// the final report: two sweeps of the same corpus must remain directly
+/// comparable even when different plug-ins finish first.
+fn bounded_parallel_map_ordered<T, R, F>(items: &[T], jobs: usize, operation: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(usize, &T) -> R + Sync,
+{
+    assert!(jobs >= 1, "parallel work requires at least one job");
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new((0..items.len()).map(|_| None).collect::<Vec<Option<R>>>());
+    let worker_count = jobs.min(items.len());
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let operation = &operation;
+            let next = &next;
+            let results = &results;
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(item) = items.get(index) else {
+                        break;
+                    };
+                    let result = operation(index, item);
+                    results.lock().unwrap_or_else(|poison| poison.into_inner())[index] =
+                        Some(result);
+                }
+            });
+        }
+    });
+    results
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            result.unwrap_or_else(|| panic!("parallel job {index} did not produce a result"))
+        })
+        .collect()
+}
+
+/// Partitions the corpus into serial lanes. Equal dependency-closure identities
+/// must never overlap: real plug-ins may coordinate through vendor-global
+/// helpers even though each AEXCompat worker is process-isolated. Lanes whose
+/// identities differ may run concurrently.
+fn serial_lanes_by_key<T, K, F>(items: &[T], jobs: usize, key_of: F) -> Vec<Vec<usize>>
+where
+    K: Eq + std::hash::Hash,
+    F: Fn(&T) -> K,
+{
+    if jobs == 1 {
+        return vec![(0..items.len()).collect()];
+    }
+    let mut lane_by_key = HashMap::new();
+    let mut lanes: Vec<Vec<usize>> = Vec::new();
+    for (index, item) in items.iter().enumerate() {
+        let key = key_of(item);
+        let lane = *lane_by_key.entry(key).or_insert_with(|| {
+            lanes.push(Vec::new());
+            lanes.len() - 1
+        });
+        lanes[lane].push(index);
+    }
+    lanes
+}
+
+fn restore_indexed_order<T>(length: usize, groups: Vec<Vec<(usize, T)>>) -> Vec<T> {
+    let mut ordered = (0..length).map(|_| None).collect::<Vec<Option<T>>>();
+    for (index, value) in groups.into_iter().flatten() {
+        assert!(
+            index < length,
+            "parallel result index is outside the corpus"
+        );
+        assert!(
+            ordered[index].replace(value).is_none(),
+            "duplicate parallel result index"
+        );
+    }
+    ordered
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| value.unwrap_or_else(|| panic!("parallel result {index} is missing")))
+        .collect()
 }
 
 fn main() {
@@ -542,70 +641,97 @@ fn main() {
     // its indices against, and getting any of that wrong turns a narrower
     // answer into what reads as a whole-corpus one. Slices go to separate
     // `--json` paths and are compared by whoever asked for them.
-    let mut sidecar = options.json.as_ref().map(|path| {
+    let sidecar = options.json.as_ref().map(|path| {
         let path = partial_path(path);
         let _ = std::fs::remove_file(&path);
-        (path, Vec::<u8>::new())
+        (path, Mutex::new(()))
     });
 
-    let mut plugins: Vec<Value> = Vec::with_capacity(records.len());
-    let mut buckets: BTreeMap<String, usize> = BTreeMap::new();
-    for (index, record) in records.iter().enumerate() {
-        let name = plugin_name(&record.path, &scan.dirs);
-        let plugin_started = Instant::now();
-        // Third-party AEX in-process code paths (the PE read, the parameter
-        // translation) can panic; one plug-in must not end the sweep.
-        let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sweep_one(
-                &repository,
-                record,
-                &records,
-                &options,
-                &input,
-                &layer_pixels,
-            )
-        }))
-        .unwrap_or_else(|_| Outcome {
-            bucket: "sweep_panicked".to_owned(),
-            detail: Map::new(),
-        });
-        verify_pixel_determinism(&mut outcome, options.verify_pixel_determinism, || {
-            let mut repeat_options = options.clone();
-            // The primary frame dump is the artifact requested by the
-            // caller. A verification pass must not overwrite it.
-            repeat_options.dump_frames = None;
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sweep_one(
-                    &repository,
-                    record,
-                    &records,
-                    &repeat_options,
-                    &input,
-                    &layer_pixels,
-                )
-            }))
-            .unwrap_or_else(|_| Outcome::bare("sweep_panicked"))
-        });
-        let elapsed_ms = plugin_started.elapsed().as_millis();
-        // Numbered from the corpus, not from this slice: the number an operator
-        // reads off the log is the one they would pass back as `--skip`.
-        eprintln!(
-            "[{}/{}] {}	{}	{elapsed_ms}ms",
-            options.skip + index + 1,
-            options.skip + records.len(),
-            name.relative,
-            outcome.bucket,
-        );
-        *buckets.entry(outcome.bucket.clone()).or_default() += 1;
-        let record = plugin_record(record, &name, &build, outcome, elapsed_ms);
-        if let Some((path, line)) = &mut sidecar {
-            line.clear();
-            if serde_json::to_writer(&mut *line, &record).is_ok() {
-                line.push(b'\n');
-                append_line(path, line);
+    let lanes = serial_lanes_by_key(&records, options.render_jobs, |record| {
+        record.closure_identity_sha256.clone()
+    });
+    eprintln!(
+        "rendering {} plug-in(s) in {} dependency lane(s) with {} job(s)...",
+        records.len(),
+        lanes.len(),
+        options.render_jobs.min(lanes.len()),
+    );
+    let finish_plugin =
+        |index: usize, record: &DiagnosticDiscovery, outcome: Outcome, elapsed_ms: u128| {
+            let name = plugin_name(&record.path, &scan.dirs);
+            // Numbered from the corpus, not from this slice: the number an
+            // operator reads off the log is the one they pass back as --skip.
+            eprintln!(
+                "[{}/{}] {}\t{}\t{elapsed_ms}ms",
+                options.skip + index + 1,
+                options.skip + records.len(),
+                name.relative,
+                outcome.bucket,
+            );
+            let record = plugin_record(record, &name, &build, outcome, elapsed_ms);
+            if let Some((path, write_lock)) = &sidecar {
+                let mut line = Vec::new();
+                if serde_json::to_writer(&mut line, &record).is_ok() {
+                    line.push(b'\n');
+                    let _guard = write_lock
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    append_line(path, &line);
+                }
             }
+            record
+        };
+    let grouped = bounded_parallel_map_ordered(&lanes, options.render_jobs, |_, lane| {
+        lane.iter()
+            .map(|&index| {
+                let record = &records[index];
+                let plugin_started = Instant::now();
+                // Third-party AEX in-process code paths (the PE read, the parameter
+                // translation) can panic; one plug-in must not end the sweep.
+                let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    sweep_one(
+                        &repository,
+                        record,
+                        &records,
+                        &options,
+                        options.skip + index,
+                        &input,
+                        &layer_pixels,
+                    )
+                }))
+                .unwrap_or_else(|_| Outcome {
+                    bucket: "sweep_panicked".to_owned(),
+                    detail: Map::new(),
+                });
+                verify_pixel_determinism(&mut outcome, options.verify_pixel_determinism, || {
+                    let mut repeat_options = options.clone();
+                    // The primary frame dump is the artifact requested by the
+                    // caller. A verification pass must not overwrite it.
+                    repeat_options.dump_frames = None;
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        sweep_one(
+                            &repository,
+                            record,
+                            &records,
+                            &repeat_options,
+                            options.skip + index,
+                            &input,
+                            &layer_pixels,
+                        )
+                    }))
+                    .unwrap_or_else(|_| Outcome::bare("sweep_panicked"))
+                });
+                let elapsed_ms = plugin_started.elapsed().as_millis();
+                (index, finish_plugin(index, record, outcome, elapsed_ms))
+            })
+            .collect::<Vec<_>>()
+    });
+    let plugins = restore_indexed_order(records.len(), grouped);
+    let mut buckets: BTreeMap<String, usize> = BTreeMap::new();
+    for plugin in &plugins {
+        if let Some(bucket) = plugin.get("bucket").and_then(Value::as_str) {
+            *buckets.entry(bucket.to_owned()).or_default() += 1;
         }
-        plugins.push(record);
     }
 
     let build = finalize_report_build_fingerprint(&build, &repository, cli_path);
@@ -617,6 +743,7 @@ fn main() {
         started.elapsed(),
         buckets,
         plugins,
+        Some(lanes.len()),
     );
     finish_report(&options, &report);
 }
@@ -673,6 +800,7 @@ fn discovery_only_report(
         elapsed,
         buckets,
         plugins,
+        None,
     )
 }
 
@@ -901,12 +1029,12 @@ fn companion_providers_for(
     result.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
     Ok(result)
 }
-
 fn sweep_one(
     repository: &Path,
     record: &DiagnosticDiscovery,
     records: &[DiagnosticDiscovery],
     options: &Options,
+    corpus_index: usize,
     input: &[u8],
     layer_pixels: &[u8],
 ) -> Outcome {
@@ -944,6 +1072,7 @@ fn sweep_one(
         Err(classification) => return Outcome::bare(classification),
     };
 
+    let session_open_started = Instant::now();
     let session = RenderSession::open(SessionOpenRequest {
         repository,
         plugin_path: &record.path,
@@ -976,6 +1105,7 @@ fn sweep_one(
         payload_override: None,
         launch_environment: Default::default(),
     });
+    let session_open_ms = session_open_started.elapsed().as_millis();
     let mut session = match session {
         Ok(session) => session,
         Err(error) => {
@@ -983,6 +1113,10 @@ fn sweep_one(
             outcome
                 .detail
                 .insert("session_open_error".to_owned(), json!(error.to_string()));
+            outcome.detail.insert(
+                "phase_elapsed_ms".to_owned(),
+                json!({ "session_open": session_open_ms }),
+            );
             return outcome;
         }
     };
@@ -991,6 +1125,7 @@ fn sweep_one(
     // frames continuously into a live session, so an effect whose first frame
     // fails and whose second renders looks like a working effect there and like
     // a failing one to a sweep that only ever asks for frame 0.
+    let frame_started = Instant::now();
     let mut frames: Vec<Outcome> = Vec::with_capacity(options.frames as usize);
     for frame_index in 0..options.frames {
         let plugin_stem = record
@@ -1002,6 +1137,7 @@ fn sweep_one(
             dir,
             plugin_stem,
             plugin_sha256_prefix: record.sha256.get(..8).unwrap_or(&record.sha256),
+            corpus_index,
             frame_index,
             format: match options.pixel_format {
                 RenderPixelFormat::Argb8 => "argb8",
@@ -1049,12 +1185,23 @@ fn sweep_one(
                 .collect(),
         )
     });
+    let frame_ms = frame_started.elapsed().as_millis();
     let mut outcome = frames.swap_remove(verdict);
     if let Some(per_frame) = per_frame {
         outcome.detail.insert("frames".to_owned(), per_frame);
     }
 
+    let close_started = Instant::now();
     let close = session.close();
+    let close_ms = close_started.elapsed().as_millis();
+    let phase_elapsed = json!({
+        "session_open": session_open_ms,
+        "frames": frame_ms,
+        "session_close": close_ms,
+    });
+    outcome
+        .detail
+        .insert("phase_elapsed_ms".to_owned(), phase_elapsed.clone());
     let close_clean = close.get("session_clean") == Some(&Value::Bool(true))
         && close.get("invalidated") == Some(&Value::Bool(false));
     let smart_output_untouched = smart
@@ -1100,7 +1247,7 @@ fn sweep_one(
             json!("smart_attempt_validation"),
         );
     }
-    if let Some(fallback) = orchestrate_sweep_classic_fallback(
+    if let Some(mut fallback) = orchestrate_sweep_classic_fallback(
         options,
         fallback_reason,
         fallback_authorized,
@@ -1111,11 +1258,15 @@ fn sweep_one(
                 record,
                 records,
                 classic_options,
+                corpus_index,
                 input,
                 layer_pixels,
             )
         },
     ) {
+        fallback
+            .detail
+            .insert("smart_attempt_phase_elapsed_ms".to_owned(), phase_elapsed);
         return fallback;
     }
     if outcome.bucket == "rendered" && !close_clean {
@@ -1394,13 +1545,15 @@ fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
 }
 
 /// Where a rendered frame's raw pixels go under `--dump-frames`: the directory,
-/// the plug-in's file stem plus a prefix of its SHA-256 (two `Foo.aex` in
-/// different scan folders must not overwrite each other), the frame index and
-/// the pixel-format tag for the file name.
+/// the plug-in's file stem, a prefix of its SHA-256, its stable corpus index,
+/// the frame index and the pixel-format tag for the file name. The corpus index
+/// keeps byte-identical copies from different dependency roots from racing on
+/// the same dump path when their lanes run concurrently.
 struct FrameDump<'a> {
     dir: &'a Path,
     plugin_stem: &'a str,
     plugin_sha256_prefix: &'a str,
+    corpus_index: usize,
     frame_index: u32,
     format: &'static str,
 }
@@ -1438,9 +1591,10 @@ fn frame_outcome_dumping(
                 if let Some(dump) = dump.filter(|_| !pixels.is_empty() && width != 0 && height != 0)
                 {
                     let path = dump.dir.join(format!(
-                        "{}.{}.f{}.{}x{}.{}",
+                        "{}.{}.r{}.f{}.{}x{}.{}",
                         dump.plugin_stem,
                         dump.plugin_sha256_prefix,
+                        dump.corpus_index,
                         dump.frame_index,
                         width,
                         height,
@@ -1557,6 +1711,7 @@ fn plugin_record(
             "failure_classification": record.failure_classification,
             "failure_diagnostics": record.failure_diagnostics,
             "cluster_fallback": record.cluster_fallback,
+            "closure_identity_sha256": record.closure_identity_sha256.as_deref(),
         },
         "bucket": outcome.bucket,
         "detail": outcome.detail,
@@ -1572,6 +1727,7 @@ fn report(
     elapsed: Duration,
     buckets: BTreeMap<String, usize>,
     mut plugins: Vec<Value>,
+    dependency_lane_count: Option<usize>,
 ) -> Value {
     // Render partial rows are written as each plug-in completes and retain the
     // explicit pre-run candidate. Only the atomic final report can carry the
@@ -1579,6 +1735,16 @@ fn report(
     for plugin in &mut plugins {
         plugin["build"] = json!(build);
     }
+    let distinct_dependency_closure_count = plugins
+        .iter()
+        .map(|plugin| {
+            plugin
+                .pointer("/discovery/closure_identity_sha256")
+                .and_then(Value::as_str)
+                .unwrap_or("unresolved")
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let render = (!options.discovery_only).then(|| {
         json!({
             "width": options.width,
@@ -1591,6 +1757,10 @@ fn report(
             "plugin_defaults": options.plugin_defaults,
             "effective_input_policy": effective_input_policy(options),
             "verify_pixel_determinism": options.verify_pixel_determinism,
+            "render_jobs": options.render_jobs,
+            "effective_render_jobs": options.render_jobs.min(dependency_lane_count.unwrap_or(0)),
+            "dependency_lane_count": dependency_lane_count,
+            "distinct_dependency_closure_count": distinct_dependency_closure_count,
             "frame_deadline_ms": FRAME_DEADLINE.as_millis(),
             "time_step": TIME_STEP,
             "total_time": TOTAL_TIME,
@@ -1709,6 +1879,7 @@ mod tests {
             json: Some(json),
             limit: None,
             skip: 0,
+            render_jobs: 1,
             filter: None,
             pixel_format: RenderPixelFormat::Argb8,
             width: 1,
@@ -1725,6 +1896,66 @@ mod tests {
             dump_frames: None,
             dirs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn bounded_parallel_map_respects_the_job_cap_and_preserves_input_order() {
+        use std::sync::Barrier;
+
+        let items = [0usize, 1, 2, 3];
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let pair = Barrier::new(2);
+        let output = bounded_parallel_map_ordered(&items, 2, |index, value| {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            // Both worker threads must be inside the operation together for
+            // each pair. This proves actual overlap without a wall-clock
+            // performance assertion that would be flaky on a loaded runner.
+            pair.wait();
+            if index % 2 == 0 {
+                std::thread::yield_now();
+            }
+            active.fetch_sub(1, Ordering::SeqCst);
+            value * 10
+        });
+
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+        assert_eq!(output, vec![0, 10, 20, 30]);
+    }
+
+    #[test]
+    fn bounded_parallel_map_does_not_create_empty_work_or_accept_zero_jobs() {
+        let empty: Vec<u8> = bounded_parallel_map_ordered::<u8, u8, _>(&[], 3, |_, value| *value);
+        assert!(empty.is_empty());
+        assert!(
+            std::panic::catch_unwind(|| {
+                bounded_parallel_map_ordered(&[1u8], 0, |_, value| *value)
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dependency_identity_lanes_serialize_equals_and_restore_corpus_order() {
+        let keys = [Some("shared"), Some("other"), Some("shared"), None, None];
+        assert_eq!(
+            serial_lanes_by_key(&keys, 1, |key| *key),
+            vec![vec![0, 1, 2, 3, 4]],
+            "the default one-job path preserves historical execution order"
+        );
+        let lanes = serial_lanes_by_key(&keys, 2, |key| *key);
+        assert_eq!(lanes, vec![vec![0, 2], vec![1], vec![3, 4]]);
+
+        let completion_order = vec![
+            vec![(1, "one")],
+            vec![(3, "three"), (4, "four")],
+            vec![(0, "zero"), (2, "two")],
+        ];
+        assert_eq!(
+            restore_indexed_order(5, completion_order),
+            vec!["zero", "one", "two", "three", "four"]
+        );
     }
 
     #[test]
@@ -1771,6 +2002,7 @@ mod tests {
             demanded_suites: Vec::new(),
             companion_demand_probe_complete: false,
             search_roots: Vec::new(),
+            closure_identity_sha256: None,
             failure_classification: Some("nonzero_exit".to_owned()),
             failure_diagnostics: Some(json!({
                 "classification": "nonzero_exit",
@@ -1942,6 +2174,51 @@ mod tests {
         }));
         assert_eq!(empty.bucket, "rendered_empty");
         assert_eq!(empty.detail["pixel_bytes"], 0);
+    }
+
+    #[test]
+    fn frame_dumps_do_not_collide_for_identical_binaries_in_different_records() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "aexcompat-render-sweep-dumps-{}-{nonce:032x}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let dump = |corpus_index, pixels: Vec<u8>| {
+            frame_outcome_dumping(
+                Ok(FrameOutcome {
+                    frame_index: 0,
+                    status: FrameStatus::Rendered {
+                        pixels,
+                        width: 1,
+                        height: 1,
+                        origin_x: 0,
+                        origin_y: 0,
+                    },
+                }),
+                Some(FrameDump {
+                    dir: &dir,
+                    plugin_stem: "SameName",
+                    plugin_sha256_prefix: "01234567",
+                    corpus_index,
+                    frame_index: 0,
+                    format: "argb8",
+                }),
+            )
+        };
+        let first = dump(7, vec![1, 2, 3, 4]);
+        let second = dump(19, vec![5, 6, 7, 8]);
+        let first_name = first.detail["dumped_frame"].as_str().unwrap();
+        let second_name = second.detail["dumped_frame"].as_str().unwrap();
+
+        assert_ne!(first_name, second_name);
+        assert_eq!(std::fs::read(dir.join(first_name)).unwrap(), [1, 2, 3, 4]);
+        assert_eq!(std::fs::read(dir.join(second_name)).unwrap(), [5, 6, 7, 8]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn rendered_pixels(bytes: &[u8]) -> Outcome {
