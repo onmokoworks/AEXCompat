@@ -9,6 +9,7 @@ struct WindowsAssetFile {
     inheritable: bool,
     share_read_access: bool,
     share: u32,
+    null_device: bool,
 }
 
 impl GuestFiles {
@@ -83,6 +84,7 @@ impl GuestFiles {
                 inheritable: false,
                 share_read_access,
                 share,
+                null_device: false,
             },
         );
         self.reports.push(TraceModule {
@@ -91,6 +93,33 @@ impl GuestFiles {
             sha256: Some(sha),
             symbols: vec![],
         });
+        Ok(Ok(handle))
+    }
+
+    fn open_windows_null(
+        &mut self,
+        readable: bool,
+        share_read_access: bool,
+        share: u32,
+    ) -> Result<Result<u64, u32>, String> {
+        if self.windows_files.len() + self.streams.len() >= 64 || self.next_windows_file >= 65536 {
+            return Ok(Err(4));
+        }
+        let handle = WINDOWS_ASSET_HANDLE_BASE + self.next_windows_file * 8;
+        self.next_windows_file += 1;
+        self.windows_files.insert(
+            handle,
+            WindowsAssetFile {
+                name: "nul".into(),
+                bytes: Box::default(),
+                position: 0,
+                readable,
+                inheritable: false,
+                share_read_access,
+                share,
+                null_device: true,
+            },
+        );
         Ok(Ok(handle))
     }
 
@@ -182,13 +211,18 @@ fn guest_create_file(
     if access & !0xa01200a9 != 0 {
         return Err("CreateFile access mask is not implemented".into());
     }
-    let canonical = canonical_guest_fullpath(path.as_bytes())
-        .map_err(|error| format!("CreateFile path resolution: {error}"))?;
-    let name = std::str::from_utf8(&canonical[..canonical.len() - 1])
-        .unwrap()
-        .replace('\\', "/")
-        .to_ascii_lowercase();
-    let exists = unicorn.get_data().guest_files.sources.contains_key(&name);
+    let null_device = path.eq_ignore_ascii_case("nul") || path.eq_ignore_ascii_case("nul:");
+    let name = if null_device {
+        "nul".to_string()
+    } else {
+        let canonical = canonical_guest_fullpath(path.as_bytes())
+            .map_err(|error| format!("CreateFile path resolution for {path:?}: {error}"))?;
+        std::str::from_utf8(&canonical[..canonical.len() - 1])
+            .unwrap()
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    };
+    let exists = null_device || unicorn.get_data().guest_files.sources.contains_key(&name);
     if disposition == 1 && (exists || unicorn.get_data().guest_files.directory_exists(&name)) {
         return Ok((u64::MAX, 80));
     }
@@ -210,8 +244,12 @@ fn guest_create_file(
     }
     // Only caching hints and file attributes are accepted for a regular,
     // synchronous, read-only asset. No raw-device, asynchronous or reparse I/O.
-    if flags & !(0x98000000 | 0xffff) != 0 {
-        return Err("CreateFile flags are not implemented for mounted assets".into());
+    // BACKUP_SEMANTICS and OPEN_REPARSE_POINT do not change an immutable,
+    // regular mounted file because the virtual tree contains no reparse nodes.
+    if flags & !(0x98000000 | 0x02200000 | 0xffff) != 0 {
+        return Err(format!(
+            "CreateFile flags {flags:#x} are not implemented for mounted assets"
+        ));
     }
     let mut inheritable = false;
     if security != 0 {
@@ -229,12 +267,20 @@ fn guest_create_file(
     }
     let readable = access & 0x80000001 != 0;
     let share_read_access = access & 0xa0000021 != 0;
-    match unicorn.get_data_mut().guest_files.open_windows_asset(
-        &name,
-        readable,
-        share_read_access,
-        share,
-    )? {
+    let opened = if null_device {
+        unicorn
+            .get_data_mut()
+            .guest_files
+            .open_windows_null(readable, share_read_access, share)?
+    } else {
+        unicorn.get_data_mut().guest_files.open_windows_asset(
+            &name,
+            readable,
+            share_read_access,
+            share,
+        )?
+    };
+    match opened {
         Ok(handle) => {
             unicorn
                 .get_data_mut()
@@ -319,7 +365,21 @@ fn guest_windows_file_io(
     let Some(file) = unicorn.get_data().guest_files.windows_files.get(&handle) else {
         return Ok((0, 6));
     };
-    if operation == LegacyWin64Import::GetFileSizeEx {
+    if operation == LegacyWin64Import::GetFileInformationByHandle {
+        if output == 0 || !guest_range_has_permission(unicorn, output, 52, Prot::WRITE)? {
+            return Err("GetFileInformationByHandle output is not writable".into());
+        }
+        let size = file.bytes.len() as u64;
+        let mut bytes = [0u8; 52];
+        bytes[0..4].copy_from_slice(&0x80u32.to_le_bytes());
+        bytes[32..36].copy_from_slice(&((size >> 32) as u32).to_le_bytes());
+        bytes[36..40].copy_from_slice(&(size as u32).to_le_bytes());
+        bytes[40..44].copy_from_slice(&1u32.to_le_bytes());
+        bytes[48..52].copy_from_slice(&(handle as u32).to_le_bytes());
+        unicorn
+            .mem_write(output, &bytes)
+            .map_err(|e| format!("GetFileInformationByHandle output: {e}"))?;
+    } else if operation == LegacyWin64Import::GetFileSizeEx {
         let size = file.bytes.len() as u64;
         if output == 0 || !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
             return Err("GetFileSizeEx output is not writable".into());

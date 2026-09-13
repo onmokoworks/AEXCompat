@@ -84,6 +84,10 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     AreFileApisAnsi,
+    GlobalMemoryStatusEx,
+    InitOnceBeginInitialize,
+    InitOnceComplete,
+    InitOnceInitialize,
     GetVolumeInformationA,
     Errno,
     GetHostByName,
@@ -137,7 +141,11 @@ enum LegacyWin64Import {
     Fflush,
     Fwrite,
     Fread,
+    Feof,
     Fclose,
+    Fseeki64,
+    Ftelli64,
+    Rewind,
     Fopen,
     Wfopen,
     Strerror,
@@ -149,6 +157,7 @@ enum LegacyWin64Import {
     StrcatS,
     StrcpyS,
     StrncpyS,
+    CrtStrnicmpLocale,
     MsvcpLockitCtor,
     MsvcpLockitDtor,
     MsvcpMutexInit,
@@ -156,6 +165,8 @@ enum LegacyWin64Import {
     MsvcpMutexUnlock,
     MsvcpMutexDestroy,
     MsvcpHardwareConcurrency,
+    MsvcpCodecvtIn,
+    MsvcpCodecvtOut,
     ShGetFolderPathA,
     ShGetSpecialFolderPathA,
     MsvcpExceptionPtrCreate,
@@ -177,6 +188,7 @@ enum LegacyWin64Import {
     Floor,
     FloorF,
     FmodF,
+    FdClass,
     LRound,
     LRoundF,
     Log,
@@ -221,12 +233,14 @@ enum LegacyWin64Import {
     WsPrintfA,
     ReadFile,
     GetFileSizeEx,
+    GetFileInformationByHandle,
     SetFilePointerEx,
     FindFirstFileA,
     FindNextFileA,
     FindClose,
     FindFirstFileExW,
     CreateThread,
+    CrtBeginThreadEx,
     NtWriteFile,
     WakeByAddressAll,
     WakeByAddressSingle,
@@ -235,6 +249,12 @@ enum LegacyWin64Import {
     ReleaseSemaphore,
     CreateMutexA,
     ReleaseMutex,
+    CreateEventA,
+    CreateEventW,
+    OpenEventA,
+    OpenEventW,
+    SetEvent,
+    ResetEvent,
     WaitForSingleObject,
     WaitForSingleObjectEx,
     CloseHandle,
@@ -503,6 +523,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_Thrd_id") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("msvcp140.dll", "??0_Lockit@std@@QEAA@H@Z") => LegacyWin64Import::MsvcpLockitCtor,
         ("msvcp140.dll", "??1_Lockit@std@@QEAA@XZ") => LegacyWin64Import::MsvcpLockitDtor,
+        ("msvcp140.dll", "?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z") => LegacyWin64Import::MsvcpCodecvtIn,
+        ("msvcp140.dll", "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z") => LegacyWin64Import::MsvcpCodecvtOut,
         ("advapi32.dll", "SetSecurityDescriptorDacl") => {
             LegacyWin64Import::SetSecurityDescriptorDacl
         }
@@ -576,14 +598,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "wsprintfA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (
             "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-file-l1-1-0.dll",
-            symbol @ ("CreateFileA" | "ReadFile" | "GetFileSizeEx" | "SetFilePointerEx"),
+            symbol @ ("CreateFileA" | "ReadFile" | "GetFileSizeEx" | "GetFileInformationByHandle" | "SetFilePointerEx"),
         ) => match symbol {
             "CreateFileA" => LegacyWin64Import::CreateFileA,
             "ReadFile" => LegacyWin64Import::ReadFile,
             "GetFileSizeEx" => LegacyWin64Import::GetFileSizeEx,
+            "GetFileInformationByHandle" => LegacyWin64Import::GetFileInformationByHandle,
             _ => LegacyWin64Import::SetFilePointerEx,
         },
-        (_, "CreateFileA" | "ReadFile" | "GetFileSizeEx" | "SetFilePointerEx") => {
+        (_, "CreateFileA" | "ReadFile" | "GetFileSizeEx" | "GetFileInformationByHandle" | "SetFilePointerEx") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
 
@@ -596,6 +619,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "FindFirstFileExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "CreateThread") => LegacyWin64Import::CreateThread,
         (_, "CreateThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "_beginthreadex") => {
+            LegacyWin64Import::CrtBeginThreadEx
+        }
+        (_, "_beginthreadex") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (
             "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-processthreads-l1-1-0.dll",
             "ExitThread",
@@ -623,6 +650,15 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll", "CreateMutexA") => LegacyWin64Import::CreateMutexA,
         ("kernel32.dll", "ReleaseMutex") => LegacyWin64Import::ReleaseMutex,
         (_, "CreateMutexA" | "ReleaseMutex") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("kernel32.dll", "CreateEventA") => LegacyWin64Import::CreateEventA,
+        ("kernel32.dll", "CreateEventW") => LegacyWin64Import::CreateEventW,
+        ("kernel32.dll", "OpenEventA") => LegacyWin64Import::OpenEventA,
+        ("kernel32.dll", "OpenEventW") => LegacyWin64Import::OpenEventW,
+        ("kernel32.dll", "SetEvent") => LegacyWin64Import::SetEvent,
+        ("kernel32.dll", "ResetEvent") => LegacyWin64Import::ResetEvent,
+        (_, "CreateEventA" | "CreateEventW" | "OpenEventA" | "OpenEventW" | "SetEvent" | "ResetEvent") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("kernel32.dll", "WaitForSingleObject") => LegacyWin64Import::WaitForSingleObject,
@@ -962,6 +998,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "floor") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "fmodf") => LegacyWin64Import::FmodF,
         (_, "fmodf") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "_fdclass") => {
+            LegacyWin64Import::FdClass
+        }
+        (_, "_fdclass") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lround") => LegacyWin64Import::LRound,
         (_, "lround") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lroundf") => {
@@ -1159,6 +1199,22 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "AreFileApisANSI") => LegacyWin64Import::AreFileApisAnsi,
         (_, "AreFileApisANSI") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GlobalMemoryStatusEx") => {
+            LegacyWin64Import::GlobalMemoryStatusEx
+        }
+        (_, "GlobalMemoryStatusEx") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "InitOnceBeginInitialize") => {
+            LegacyWin64Import::InitOnceBeginInitialize
+        }
+        ("kernel32.dll" | "kernelbase.dll", "InitOnceComplete") => {
+            LegacyWin64Import::InitOnceComplete
+        }
+        ("kernel32.dll" | "kernelbase.dll", "InitOnceInitialize") => {
+            LegacyWin64Import::InitOnceInitialize
+        }
+        (_, "InitOnceBeginInitialize" | "InitOnceComplete" | "InitOnceInitialize") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___lc_locale_name_func") => {
             LegacyWin64Import::CrtLocaleNames
         }
@@ -1230,15 +1286,20 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fflush") => LegacyWin64Import::Fflush,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_fseeki64") => LegacyWin64Import::Fseeki64,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_ftelli64") => LegacyWin64Import::Ftelli64,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "rewind") => LegacyWin64Import::Rewind,
+        (_, "_fseeki64" | "_ftelli64" | "rewind") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "fflush") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fwrite") => LegacyWin64Import::Fwrite,
         (_, "fwrite") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fread") => LegacyWin64Import::Fread,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "feof") => LegacyWin64Import::Feof,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fclose") => LegacyWin64Import::Fclose,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "getc" | "fgetc") => {
             LegacyWin64Import::Fgetc
         }
-        (_, "getc" | "fgetc" | "fread" | "fclose") => {
+        (_, "getc" | "fgetc" | "fread" | "feof" | "fclose") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "strerror") => {
@@ -1275,6 +1336,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtStricmp
         }
         (_, "_stricmp") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "_strnicmp_l") => {
+            LegacyWin64Import::CrtStrnicmpLocale
+        }
+        (_, "_strnicmp_l") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "tolower") => {
             LegacyWin64Import::CrtToLower
         }
@@ -1488,7 +1553,16 @@ fn install_win64_import(
                     uc(
                         "install _stricmp import",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                            emulate_crt_stricmp(unicorn);
+                            emulate_crt_stricmp(unicorn, false);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtStrnicmpLocale => {
+                    uc("write _strnicmp_l return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _strnicmp_l import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_stricmp(unicorn, true);
                         }),
                     )?;
                 }
@@ -1617,6 +1691,26 @@ fn install_win64_import(
                     uc(
                         "install ANSI file API mode query",
                         unicorn.mem_write(stub, &deterministic_u64_stub(1)),
+                    )?;
+                }
+                LegacyWin64Import::GlobalMemoryStatusEx => {
+                    uc("write GlobalMemoryStatusEx return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install GlobalMemoryStatusEx",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_global_memory_status_ex(unicorn);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::InitOnceBeginInitialize
+                | LegacyWin64Import::InitOnceComplete
+                | LegacyWin64Import::InitOnceInitialize) => {
+                    uc("write InitOnce return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install InitOnce API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_init_once(unicorn, operation);
+                        }),
                     )?;
                 }
                 LegacyWin64Import::Strncpy => {
@@ -2064,6 +2158,17 @@ fn install_win64_import(
                         }),
                     )?;
                 }
+                operation @ (LegacyWin64Import::MsvcpCodecvtIn
+                | LegacyWin64Import::MsvcpCodecvtOut) => {
+                    let wide_to_narrow = operation == LegacyWin64Import::MsvcpCodecvtOut;
+                    uc("write MSVCP codecvt return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install MSVCP codecvt",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_msvcp_codecvt(unicorn, wide_to_narrow);
+                        }),
+                    )?;
+                }
                 LegacyWin64Import::MsvcpMutexInit => {
                     uc("write mutex init return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
@@ -2249,6 +2354,15 @@ fn install_win64_import(
                 }
                 LegacyWin64Import::FmodF => {
                     install_fmodf_import(unicorn, stub)?;
+                }
+                LegacyWin64Import::FdClass => {
+                    uc("write _fdclass return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _fdclass",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_fdclass(unicorn);
+                        }),
+                    )?;
                 }
                 LegacyWin64Import::LRound => {
                     install_lround_import(unicorn, stub)?;
@@ -2610,6 +2724,7 @@ fn install_win64_import(
                 LegacyWin64Import::CreateFileA
                 | LegacyWin64Import::ReadFile
                 | LegacyWin64Import::GetFileSizeEx
+                | LegacyWin64Import::GetFileInformationByHandle
                 | LegacyWin64Import::SetFilePointerEx => {
                     uc("write file API return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
@@ -2706,7 +2821,7 @@ fn install_win64_import(
                         }),
                     )?;
                 }
-                LegacyWin64Import::CreateThread => {
+                LegacyWin64Import::CreateThread | LegacyWin64Import::CrtBeginThreadEx => {
                     uc(
                         "write CreateThread callback tail jump",
                         unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
@@ -2768,7 +2883,13 @@ fn install_win64_import(
                 LegacyWin64Import::CreateMutexA
                 | LegacyWin64Import::ReleaseMutex
                 | LegacyWin64Import::CreateSemaphoreA
-                | LegacyWin64Import::ReleaseSemaphore => {
+                | LegacyWin64Import::ReleaseSemaphore
+                | LegacyWin64Import::CreateEventA
+                | LegacyWin64Import::CreateEventW
+                | LegacyWin64Import::OpenEventA
+                | LegacyWin64Import::OpenEventW
+                | LegacyWin64Import::SetEvent
+                | LegacyWin64Import::ResetEvent => {
                     uc("write mutex return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
                         "install mutex",
@@ -3562,6 +3683,7 @@ fn install_win64_import(
                 }
                 LegacyWin64Import::Fgetc
                 | LegacyWin64Import::Fread
+                | LegacyWin64Import::Feof
                 | LegacyWin64Import::Fflush
                 | LegacyWin64Import::Fwrite
                 | LegacyWin64Import::Fclose => {
@@ -3570,6 +3692,15 @@ fn install_win64_import(
                         "install stdio",
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_guest_stdio(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::Fseeki64 | LegacyWin64Import::Ftelli64 | LegacyWin64Import::Rewind) => {
+                    uc("write CRT stream position return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install CRT stream position",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_stream_position(unicorn, operation);
                         }),
                     )?;
                 }
@@ -7133,15 +7264,11 @@ fn emulate_get_console_mode(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
     const FILE_TYPE_UNKNOWN: u64 = 0;
+    const FILE_TYPE_CHAR: u64 = 2;
     const FILE_TYPE_PIPE: u64 = 3;
     let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
-    let returned = if unicorn
-        .get_data()
-        .guest_files
-        .windows_files
-        .contains_key(&handle)
-    {
-        1 // FILE_TYPE_DISK
+    let returned = if let Some(file) = unicorn.get_data().guest_files.windows_files.get(&handle) {
+        if file.null_device { FILE_TYPE_CHAR } else { 1 }
     } else if matches!(
         handle,
         WINDOWS_STANDARD_INPUT_TOKEN | WINDOWS_STANDARD_OUTPUT_TOKEN | WINDOWS_STANDARD_ERROR_TOKEN

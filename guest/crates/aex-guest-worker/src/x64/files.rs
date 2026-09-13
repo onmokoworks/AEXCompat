@@ -26,6 +26,7 @@ struct GuestFileStream {
     bytes: Box<[u8]>,
     position: usize,
     readable: bool,
+    eof: bool,
     buffer_state: Option<u64>,
 }
 
@@ -233,6 +234,7 @@ fn open_guest_stream(
             bytes: bytes.into_boxed_slice(),
             position: 0,
             readable: true,
+            eof: false,
             buffer_state: None,
         },
     );
@@ -248,6 +250,52 @@ fn open_guest_stream(
 // Standard FILE objects have stable identities, including after fclose. The
 // worker has no guest stdin input; stdout/stderr are output-only. Output calls
 // remain explicit unsupported imports until their capture semantics are provided.
+fn emulate_crt_stream_position(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    let result = (|| -> Result<u64, String> {
+        let stream = read_win64_import_argument(unicorn, 0)?;
+        let Some(file) = unicorn.get_data().guest_files.streams.get(&stream) else {
+            set_guest_crt_errno(unicorn, 9)?;
+            return Ok(u64::MAX);
+        };
+        if operation == LegacyWin64Import::Ftelli64 {
+            return Ok(file.position as u64);
+        }
+        if operation == LegacyWin64Import::Rewind {
+            unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&stream)
+                .unwrap()
+                .position = 0;
+            unicorn.get_data_mut().guest_files.streams.get_mut(&stream).unwrap().eof = false;
+            set_guest_crt_errno(unicorn, 0)?;
+            return Ok(0);
+        }
+        let offset = read_win64_import_argument(unicorn, 1)? as i64;
+        let origin = read_win64_import_argument(unicorn, 2)? as u32;
+        let base = match origin {
+            0 => 0i128,
+            1 => file.position as i128,
+            2 => file.bytes.len() as i128,
+            _ => {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(u32::MAX as u64);
+            }
+        };
+        let next = base + offset as i128;
+        if !(0..=i64::MAX as i128).contains(&next) {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(u32::MAX as u64);
+        }
+        let file = unicorn.get_data_mut().guest_files.streams.get_mut(&stream).unwrap();
+        file.position = next as usize;
+        file.eof = false;
+        Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let index = read_win64_import_argument(unicorn, 0)? as u32 as usize;
@@ -277,6 +325,7 @@ fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
                 bytes: Box::default(),
                 position: 0,
                 readable: index == 0,
+                eof: false,
                 buffer_state: None,
             },
         );
@@ -422,6 +471,19 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
         if import == LegacyWin64Import::Fwrite {
             return guest_fwrite(unicorn);
         }
+        if import == LegacyWin64Import::Feof {
+            let token = read_win64_import_argument(unicorn, 0)?;
+            require_unbuffered_guest_stream(unicorn, token)?;
+            return Ok(u64::from(
+                unicorn
+                    .get_data()
+                    .guest_files
+                    .streams
+                    .get(&token)
+                    .ok_or("feof received stale or foreign FILE")?
+                    .eof,
+            ));
+        }
         if import == LegacyWin64Import::Fgetc {
             let token = read_win64_import_argument(unicorn, 0)?;
             require_unbuffered_guest_stream(unicorn, token)?;
@@ -440,7 +502,10 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
                     stream.position += 1;
                     value
                 }
-                None => u64::from(u32::MAX), // EOF is an int, not a signed byte.
+                None => {
+                    stream.eof = true;
+                    u64::from(u32::MAX)
+                } // EOF is an int, not a signed byte.
             });
         }
         if import == LegacyWin64Import::Fclose {
@@ -489,8 +554,10 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
         if !stream.readable {
             return Err("fread received an output-only FILE".into());
         }
-        let actual = (wanted as usize).min(stream.bytes.len() - stream.position);
+        let actual = (wanted as usize).min(stream.bytes.len().saturating_sub(stream.position));
+        let hit_eof = actual < wanted as usize;
         if actual == 0 {
+            unicorn.get_data_mut().guest_files.streams.get_mut(&token).unwrap().eof = hit_eof;
             return Ok(0);
         }
         if output == 0 || !guest_range_has_permission(unicorn, output, actual as u64, Prot::WRITE)?
@@ -508,6 +575,7 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
             .get_mut(&token)
             .unwrap()
             .position += actual;
+        unicorn.get_data_mut().guest_files.streams.get_mut(&token).unwrap().eof = hit_eof;
         Ok(actual as u64 / size)
     })();
     finish_guest_stdio(unicorn, result);

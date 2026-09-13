@@ -662,6 +662,29 @@ fn install_double_import(
     .map(|_| ())
 }
 
+fn emulate_fdclass(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let xmm = unicorn.reg_read_long(RegisterX86::XMM0).map_err(|e| e.to_string())?;
+        let bits = u64::from_le_bytes(xmm[..8].try_into().unwrap());
+        let sign = bits >> 63 != 0;
+        let exponent = (bits >> 52) & 0x7ff;
+        let fraction = bits & ((1u64 << 52) - 1);
+        Ok(match (exponent, fraction, sign) {
+            (0x7ff, 0, true) => 0x0004,
+            (0x7ff, 0, false) => 0x0200,
+            (0x7ff, fraction, _) if fraction & (1u64 << 51) == 0 => 0x0001,
+            (0x7ff, _, _) => 0x0002,
+            (0, 0, true) => 0x0020,
+            (0, 0, false) => 0x0040,
+            (0, _, true) => 0x0010,
+            (0, _, false) => 0x0080,
+            (_, _, true) => 0x0008,
+            (_, _, false) => 0x0100,
+        })
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn windows_lround(value: f64) -> i32 {
     let rounded = value.round();
     if !rounded.is_finite() || rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
@@ -1818,14 +1841,22 @@ fn emulate_crt_strncmp(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
-fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>) {
+fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>, bounded: bool) {
     let result = (|| -> Result<i32, String> {
+        let limit = if bounded {
+            let count = read_win64_import_argument(unicorn, 2)?;
+            let _locale = read_win64_import_argument(unicorn, 3)?;
+            count.min(MAX_CRT_STRING_BYTES)
+        } else {
+            MAX_CRT_STRING_BYTES
+        };
+        if limit == 0 { return Ok(0); }
         let left = read_win64_import_argument(unicorn, 0)?;
         let right = read_win64_import_argument(unicorn, 1)?;
         if left == 0 || right == 0 {
             return Err("_stricmp received a null string pointer".into());
         }
-        for offset in 0..MAX_CRT_STRING_BYTES {
+        for offset in 0..limit {
             let read = |unicorn: &Unicorn<'_, GuestState>, base: u64, side: &str| {
                 let address = base
                     .checked_add(offset)

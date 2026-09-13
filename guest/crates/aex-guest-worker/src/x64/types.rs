@@ -160,6 +160,13 @@ fn record_named_unsupported_suite_call(
     }
 }
 
+#[derive(Clone, Copy)]
+struct WindowsInitOnceState {
+    owner: Option<u32>,
+    context: u64,
+    complete: bool,
+}
+
 #[derive(Default)]
 struct GuestState {
     pointer_encoding_key: Option<u64>,
@@ -242,6 +249,7 @@ struct GuestState {
     windows_hooks: BTreeMap<u64, (i32, u64, u64, u32)>,
     next_windows_hook: u64,
     windows_timers: BTreeMap<(u64, u64), (u32, u64)>,
+    windows_init_once: BTreeMap<u64, WindowsInitOnceState>,
     next_windows_timer: u64,
     windows_message_boxes: Vec<(String, String, u32)>,
     windows_objects: WindowsKernelObjects,

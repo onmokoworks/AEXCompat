@@ -28,6 +28,15 @@ fn normalized_library_name(name: &str) -> Result<String, GuestError> {
     Ok(name)
 }
 
+fn prefer_emulated_dependency_import(library: &str, symbol: &str) -> bool {
+    library.eq_ignore_ascii_case("msvcp140.dll")
+        && matches!(
+            symbol,
+            "?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z"
+                | "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z"
+        )
+}
+
 fn guest_module_from_address(state: &GuestState, address: u64) -> Option<u64> {
     state
         .image_region
@@ -216,7 +225,9 @@ impl GuestEngine<'static> {
             for import in target.imports() {
                 for symbol in &import.symbols {
                     let address =
-                        if let Some(index) = basenames.get(&import.name.to_ascii_lowercase()) {
+                        if let Some(index) = basenames.get(&import.name.to_ascii_lowercase())
+                            && !prefer_emulated_dependency_import(&import.name, &symbol.name)
+                        {
                             symbol
                                 .ordinal
                                 .and_then(|ordinal| libraries[*index].1.ordinal_address(ordinal.into()))

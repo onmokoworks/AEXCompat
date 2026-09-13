@@ -9948,6 +9948,43 @@ fn file_api_encoding_mode_is_ansi_and_kernel32_scoped() {
 }
 
 #[test]
+fn global_memory_status_ex_validates_layout_and_reports_bounded_capacity() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x110;
+    install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", "GlobalMemoryStatusEx").unwrap();
+    engine.unicorn.mem_write(DATA_BASE, &64u32.to_le_bytes()).unwrap();
+    assert_eq!(engine.call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap(), 1);
+    let bytes = engine.unicorn.mem_read_as_vec(DATA_BASE, 64).unwrap();
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 50);
+    assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 8 * 1024 * 1024 * 1024);
+    engine.unicorn.mem_write(DATA_BASE, &63u32.to_le_bytes()).unwrap();
+    assert_eq!(engine.call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
+}
+
+#[test]
+fn init_once_begin_complete_and_initialize_preserve_context() {
+    let mut engine = test_engine(&[0xc3]);
+    let begin = STUB_BASE + 0x140;
+    let complete = begin + 16;
+    let initialize = complete + 16;
+    for (entry, name) in [(begin, "InitOnceBeginInitialize"), (complete, "InitOnceComplete"), (initialize, "InitOnceInitialize")] {
+        install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", name).unwrap();
+    }
+    let object = DATA_BASE + 0x100;
+    let pending = DATA_BASE + 0x200;
+    let context_out = DATA_BASE + 0x208;
+    assert_eq!(engine.call_win64(begin, [object, 0, pending, context_out, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.unicorn.mem_read_as_vec(pending, 4).unwrap(), 1u32.to_le_bytes());
+    assert_eq!(engine.call_win64(complete, [object, 0, 0x12340, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.call_win64(begin, [object, 0, pending, context_out, 0, 0]).unwrap(), 1);
+    assert_eq!(engine.unicorn.mem_read_as_vec(pending, 4).unwrap(), 0u32.to_le_bytes());
+    assert_eq!(engine.unicorn.mem_read_as_vec(context_out, 8).unwrap(), 0x12340u64.to_le_bytes());
+    assert_eq!(engine.call_win64(initialize, [object, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.mem_read_as_vec(object, 8).unwrap(), [0; 8]);
+}
+
+#[test]
 fn get_file_type_classifies_synthetic_standard_handles_as_pipes() {
     const GET_FILE_TYPE: u64 = STUB_BASE + 0x1c0;
     let mut engine = test_engine(&[0xc3]);
@@ -12256,6 +12293,27 @@ fn tls_allocation_reuses_indices_enforces_capacity_and_is_session_local() {
     emulate_tls(&mut second.unicorn, LegacyWin64Import::TlsAlloc);
     assert_eq!(second.unicorn.reg_read(RegisterX86::RAX).unwrap(), 0);
     assert_eq!(second.unicorn.get_data().windows_tls_slots.len(), 1);
+}
+
+#[test]
+fn fdclass_returns_ucrt_fpclass_masks() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x190;
+    install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", "_fdclass").unwrap();
+    for (value, expected) in [
+        (0.0, 0x40),
+        (-0.0, 0x20),
+        (1.0, 0x100),
+        (-1.0, 0x8),
+        (f64::INFINITY, 0x200),
+        (f64::NEG_INFINITY, 0x4),
+        (f64::NAN, 0x2),
+    ] {
+        let mut xmm = [0u8; 16];
+        xmm[..8].copy_from_slice(&value.to_bits().to_le_bytes());
+        engine.unicorn.reg_write_long(RegisterX86::XMM0, &xmm).unwrap();
+        assert_eq!(engine.call_win64(entry, [0; 6]).unwrap(), expected);
+    }
 }
 
 #[test]
@@ -15644,6 +15702,30 @@ fn descriptor_dacl_setter_preserves_references_and_unrelated_fields() {
 }
 
 #[test]
+fn msvcp_codecvt_converts_ascii_paths_and_updates_next_pointers() {
+    const OUT_NAME: &str = "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z";
+    const IN_NAME: &str = "?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z";
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    let input = DATA_BASE + 0x100;
+    let output = DATA_BASE + 0x200;
+    let from_next = DATA_BASE + 0x300;
+    let to_next = DATA_BASE + 0x308;
+    install_win64_import(&mut engine.unicorn, entry, "msvcp140.dll", OUT_NAME).unwrap();
+    engine.unicorn.mem_write(input, b"A\0E\0X\0").unwrap();
+    assert_eq!(engine.call_win64_with_timeout(entry, &[0, 0, input, input + 6, from_next, output, output + 3, to_next], TIMEOUT_MICROSECONDS).unwrap(), 0);
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 3).unwrap(), b"AEX");
+    assert_eq!(u64::from_le_bytes(engine.unicorn.mem_read_as_vec(from_next, 8).unwrap().try_into().unwrap()), input + 6);
+    let narrow = DATA_BASE + 0x400;
+    let wide = DATA_BASE + 0x500;
+    install_win64_import(&mut engine.unicorn, entry + 16, "msvcp140.dll", IN_NAME).unwrap();
+    engine.unicorn.mem_write(narrow, b"Mac").unwrap();
+    assert_eq!(engine.call_win64_with_timeout(entry + 16, &[0, 0, narrow, narrow + 3, from_next, wide, wide + 6, to_next], TIMEOUT_MICROSECONDS).unwrap(), 0);
+    assert_eq!(engine.unicorn.mem_read_as_vec(wide, 6).unwrap(), b"M\0a\0c\0");
+    assert!(prefer_emulated_dependency_import("MSVCP140.DLL", OUT_NAME));
+}
+
+#[test]
 fn msvcp_lockit_tracks_recursive_ownership_and_balances_destructors() {
     let mut engine = test_engine(&[0xc3]);
     let ctor = STUB_BASE + 0x100;
@@ -15944,6 +16026,24 @@ fn guest_clocks_convert_epochs_and_counter_tracks_elapsed_time() {
 }
 
 #[test]
+fn crt_64_bit_stream_seek_and_tell_track_mounted_file_position() {
+    let mut engine = test_engine(&[0xc3]);
+    let seek = STUB_BASE + 0x80;
+    let tell = seek + 16;
+    let stream = GUEST_STREAM_BASE;
+    engine.unicorn.get_data_mut().guest_files.streams.insert(
+        stream,
+        GuestFileStream { name: Some("c:/fixture".into()), bytes: Box::from(*b"abcdef"), position: 1, readable: true, eof: false, buffer_state: None },
+    );
+    install_win64_import(&mut engine.unicorn, seek, "ucrtbase.dll", "_fseeki64").unwrap();
+    install_win64_import(&mut engine.unicorn, tell, "ucrtbase.dll", "_ftelli64").unwrap();
+    assert_eq!(engine.call_win64(seek, [stream, (-2i64) as u64, 2, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.call_win64(tell, [stream, 0, 0, 0, 0, 0]).unwrap(), 4);
+    assert_eq!(engine.call_win64(seek, [stream, 3, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.call_win64(tell, [stream, 0, 0, 0, 0, 0]).unwrap(), 3);
+}
+
+#[test]
 fn crt_time_names_return_owned_c_locale_tables() {
     let mut engine = test_engine(&[0xc3]);
     let days = STUB_BASE + 0x100;
@@ -16136,6 +16236,28 @@ fn guest_asset_streams_read_real_bytes_and_close_without_reusing_tokens() {
                 engine.unicorn.get_data().guest_files.streams[&token].position,
                 0
             );
+            engine
+                .unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&token)
+                .unwrap()
+                .position = expected.len() + 32;
+            assert_eq!(
+                engine
+                    .call_win64(read, [output, 1, 1, token, 0, 0])
+                    .unwrap(),
+                0
+            );
+            engine
+                .unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&token)
+                .unwrap()
+                .position = 0;
             engine.write(output, &[0xa5; 16]).unwrap();
             assert_eq!(
                 engine
@@ -17002,6 +17124,7 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
                 bytes: vec![0, 127, 128, 255].into_boxed_slice(),
                 position: 0,
                 readable: true,
+                eof: false,
                 buffer_state: None,
             },
         );
@@ -17978,6 +18101,7 @@ fn exposed_file_cells_preserve_unbuffered_reads_and_reject_unknown_buffering() {
             bytes: Box::from(&b"abc"[..]),
             position: 0,
             readable: true,
+            eof: false,
             buffer_state: None,
         },
     );
@@ -22136,6 +22260,22 @@ fn standard_file_creation_shares_windows_handle_capacity() {
 }
 
 #[test]
+fn create_file_opens_nul_as_a_session_owned_character_device() {
+    let mut engine = test_engine(&[0xc3]);
+    let open = STUB_BASE + 0x3d0;
+    let kind = open + 16;
+    let close = kind + 16;
+    install_win64_import(&mut engine.unicorn, open, "kernel32.dll", "CreateFileA").unwrap();
+    install_win64_import(&mut engine.unicorn, kind, "kernel32.dll", "GetFileType").unwrap();
+    install_win64_import(&mut engine.unicorn, close, "kernel32.dll", "CloseHandle").unwrap();
+    engine.unicorn.mem_write(DATA_BASE, b"NUL\0").unwrap();
+    let handle = engine.call_win64_with_timeout(open, &[DATA_BASE, 0x80000000, 7, 0, 3, 0, 0], TIMEOUT_MICROSECONDS).unwrap();
+    assert_ne!(handle, u64::MAX);
+    assert_eq!(engine.call_win64(kind, [handle, 0, 0, 0, 0, 0]).unwrap(), 2);
+    assert_eq!(engine.call_win64(close, [handle, 0, 0, 0, 0, 0]).unwrap(), 1);
+}
+
+#[test]
 fn windows_file_apis_open_read_seek_and_close_mounted_assets() {
     for (library, wide) in [
         ("kernel32.dll", false),
@@ -22158,11 +22298,13 @@ fn windows_file_apis_open_read_seek_and_close_mounted_assets() {
         let seek = open + 48;
         let close = open + 64;
         let kind = open + 80;
+        let info = open + 96;
         for (address, symbol) in [
             (open, if wide { "CreateFileW" } else { "CreateFileA" }),
             (read, "ReadFile"),
             (size, "GetFileSizeEx"),
             (seek, "SetFilePointerEx"),
+            (info, "GetFileInformationByHandle"),
         ] {
             install_win64_import(&mut engine.unicorn, address, library, symbol).unwrap();
         }
@@ -22185,7 +22327,7 @@ fn windows_file_apis_open_read_seek_and_close_mounted_assets() {
         let handle = engine
             .call_win64_with_timeout(
                 open,
-                &[name, 0x80000000, 1, 0, 3, 0x80, 0],
+                &[name, 0x80000000, 1, 0, 3, 0x02200080, 0],
                 TIMEOUT_MICROSECONDS,
             )
             .unwrap();
@@ -22202,6 +22344,10 @@ fn windows_file_apis_open_read_seek_and_close_mounted_assets() {
             engine.unicorn.mem_read_as_vec(count, 8).unwrap(),
             6u64.to_le_bytes()
         );
+        assert_eq!(engine.call_win64(info, [handle, output, 0, 0, 0, 0]).unwrap(), 1);
+        let metadata = engine.unicorn.mem_read_as_vec(output, 52).unwrap();
+        assert_eq!(u32::from_le_bytes(metadata[0..4].try_into().unwrap()), 0x80);
+        assert_eq!(u32::from_le_bytes(metadata[36..40].try_into().unwrap()), 6);
         assert_eq!(
             engine
                 .call_win64(read, [handle, output, 4, count, 0, 0])

@@ -86,6 +86,185 @@ fn emulate_msvcp_lockit(unicorn: &mut Unicorn<'_, GuestState>, destroy: bool) {
     }
 }
 
+fn emulate_msvcp_codecvt(unicorn: &mut Unicorn<'_, GuestState>, wide_to_narrow: bool) {
+    let result = (|| -> Result<u64, String> {
+        let from = read_win64_import_argument(unicorn, 2)?;
+        let from_end = read_win64_import_argument(unicorn, 3)?;
+        let from_next = read_win64_import_argument(unicorn, 4)?;
+        let to = read_win64_import_argument(unicorn, 5)?;
+        let to_end = read_win64_import_argument(unicorn, 6)?;
+        let to_next = read_win64_import_argument(unicorn, 7)?;
+        let input_width = if wide_to_narrow { 2 } else { 1 };
+        let output_width = if wide_to_narrow { 1 } else { 2 };
+        if from_end < from || to_end < to || (from_end - from) % input_width != 0 {
+            return Err("MSVCP codecvt received reversed or misaligned ranges".into());
+        }
+        let input_count = (from_end - from) / input_width;
+        let output_count = (to_end - to) / output_width;
+        if input_count > MAX_CRT_STRING_BYTES || output_count > MAX_CRT_STRING_BYTES {
+            return Err("MSVCP codecvt range exceeds supported bound".into());
+        }
+        if !guest_range_has_permission(unicorn, from, input_count * input_width, Prot::READ)?
+            || !guest_range_has_permission(unicorn, to, output_count * output_width, Prot::WRITE)?
+            || !guest_range_has_permission(unicorn, from_next, 8, Prot::WRITE)?
+            || !guest_range_has_permission(unicorn, to_next, 8, Prot::WRITE)?
+        {
+            return Err("MSVCP codecvt range or result pointer is inaccessible".into());
+        }
+        let converted = input_count.min(output_count);
+        let mut output = Vec::with_capacity((converted * output_width) as usize);
+        for index in 0..converted {
+            let source = from + index * input_width;
+            let value = if wide_to_narrow {
+                let bytes = unicorn.mem_read_as_vec(source, 2).map_err(|e| e.to_string())?;
+                u16::from_le_bytes([bytes[0], bytes[1]])
+            } else {
+                unicorn.mem_read_as_vec(source, 1).map_err(|e| e.to_string())?[0] as u16
+            };
+            if wide_to_narrow && value > 0x7f {
+                return Ok(2); // codecvt_base::error in the C locale
+            }
+            if wide_to_narrow {
+                output.push(value as u8);
+            } else {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        unicorn.mem_write(to, &output).map_err(|e| e.to_string())?;
+        unicorn
+            .mem_write(from_next, &(from + converted * input_width).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        unicorn
+            .mem_write(to_next, &(to + converted * output_width).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok(u64::from(converted < input_count)) // ok=0, partial=1
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_global_memory_status_ex(unicorn: &mut Unicorn<'_, GuestState>) {
+    const STRUCT_BYTES: u64 = 64;
+    const GIB: u64 = 1024 * 1024 * 1024;
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        if output == 0 || !guest_range_has_permission(unicorn, output, STRUCT_BYTES, Prot::WRITE)? {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        let mut length = [0; 4];
+        unicorn.mem_read(output, &mut length).map_err(|e| e.to_string())?;
+        if u32::from_le_bytes(length) != STRUCT_BYTES as u32 {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        let mut bytes = [0u8; STRUCT_BYTES as usize];
+        bytes[0..4].copy_from_slice(&(STRUCT_BYTES as u32).to_le_bytes());
+        bytes[4..8].copy_from_slice(&50u32.to_le_bytes());
+        for (offset, value) in [
+            (8, 8 * GIB),
+            (16, 4 * GIB),
+            (24, 16 * GIB),
+            (32, 8 * GIB),
+            (40, 128 * 1024 * GIB),
+            (48, 127 * 1024 * GIB),
+            (56, 0),
+        ] {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        unicorn.mem_write(output, &bytes).map_err(|e| e.to_string())?;
+        Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_init_once(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+    const CHECK_ONLY: u32 = 1;
+    const ASYNC: u32 = 2;
+    const INIT_FAILED: u32 = 4;
+    let result = (|| -> Result<u64, String> {
+        let object = read_win64_import_argument(unicorn, 0)?;
+        if object == 0 || !guest_range_has_permission(unicorn, object, 8, Prot::WRITE)? {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        if operation == LegacyWin64Import::InitOnceInitialize {
+            unicorn.mem_write(object, &[0; 8]).map_err(|e| e.to_string())?;
+            unicorn.get_data_mut().windows_init_once.remove(&object);
+            return Ok(0);
+        }
+        let flags = read_win64_import_argument(unicorn, 1)? as u32;
+        if operation == LegacyWin64Import::InitOnceComplete {
+            if flags & !(ASYNC | INIT_FAILED) != 0 || flags & ASYNC != 0 && flags & INIT_FAILED != 0 {
+                unicorn.get_data_mut().windows_last_error = 87;
+                return Ok(0);
+            }
+            let context = read_win64_import_argument(unicorn, 2)?;
+            let Some(state) = unicorn.get_data().windows_init_once.get(&object).copied() else {
+                unicorn.get_data_mut().windows_last_error = 87;
+                return Ok(0);
+            };
+            if state.complete || state.owner != Some(unicorn.get_data().current_windows_thread_id) {
+                unicorn.get_data_mut().windows_last_error = 87;
+                return Ok(0);
+            }
+            if flags & INIT_FAILED != 0 {
+                unicorn.get_data_mut().windows_init_once.remove(&object);
+                unicorn.mem_write(object, &[0; 8]).map_err(|e| e.to_string())?;
+            } else {
+                if context & 3 != 0 {
+                    unicorn.get_data_mut().windows_last_error = 87;
+                    return Ok(0);
+                }
+                unicorn.get_data_mut().windows_init_once.insert(
+                    object,
+                    WindowsInitOnceState { owner: None, context, complete: true },
+                );
+                unicorn.mem_write(object, &(context | 1).to_le_bytes()).map_err(|e| e.to_string())?;
+            }
+            return Ok(1);
+        }
+        if flags & !(CHECK_ONLY | ASYNC) != 0 || flags & CHECK_ONLY != 0 && flags & ASYNC != 0 {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        let pending_out = read_win64_import_argument(unicorn, 2)?;
+        let context_out = read_win64_import_argument(unicorn, 3)?;
+        if pending_out == 0
+            || !guest_range_has_permission(unicorn, pending_out, 4, Prot::WRITE)?
+            || context_out != 0
+                && !guest_range_has_permission(unicorn, context_out, 8, Prot::WRITE)?
+        {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        let state = unicorn.get_data().windows_init_once.get(&object).copied();
+        let (pending, context) = match state {
+            Some(state) if state.complete => (0u32, state.context),
+            Some(state) if state.owner == Some(unicorn.get_data().current_windows_thread_id) => {
+                return Err("recursive InitOnce initialization is not supported".into());
+            }
+            Some(_) => return Err("contended InitOnce requires guest scheduling".into()),
+            None => {
+                if flags & CHECK_ONLY == 0 {
+                    let owner = unicorn.get_data().current_windows_thread_id;
+                    unicorn.get_data_mut().windows_init_once.insert(
+                        object,
+                        WindowsInitOnceState { owner: Some(owner), context: 0, complete: false },
+                    );
+                    unicorn.mem_write(object, &2u64.to_le_bytes()).map_err(|e| e.to_string())?;
+                }
+                (1, 0)
+            }
+        };
+        unicorn.mem_write(pending_out, &pending.to_le_bytes()).map_err(|e| e.to_string())?;
+        if context_out != 0 {
+            unicorn.mem_write(context_out, &context.to_le_bytes()).map_err(|e| e.to_string())?;
+        }
+        Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 // The CRT locale lock is recursive and shared with _Lockit(_LOCK_LOCALE=0).
 // See Microsoft STL xlock.cpp and yvals.h. Contention stays explicit until
 // blocking guest-thread scheduling is available for this internal CRT API.
