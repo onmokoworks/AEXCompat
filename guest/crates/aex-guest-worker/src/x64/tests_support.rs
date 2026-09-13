@@ -10890,6 +10890,29 @@ fn get_acp_is_deterministic_cp932_and_matches_cp_acp_conversion() {
 }
 
 #[test]
+fn get_system_default_lcid_matches_the_deterministic_japanese_locale() {
+    const GET_LCID: u64 = STUB_BASE + 0x1dc;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            GET_LCID,
+            "KERNEL32.DLL",
+            "GetSystemDefaultLCID",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::GetSystemDefaultLCID)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "GetSystemDefaultLCID"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(engine.call_win64(GET_LCID, [u64::MAX; 6]).unwrap(), 0x0411);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+}
+
+#[test]
 fn get_cp_info_reports_cp932_and_rejects_invalid_outputs_atomically() {
     const GET_CP_INFO: u64 = STUB_BASE + 0x1e8;
     const EXPECTED: [u8; 20] = [

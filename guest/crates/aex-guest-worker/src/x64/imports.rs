@@ -230,6 +230,7 @@ enum LegacyWin64Import {
     GetCommandLineA,
     GetCommandLineW,
     GetACP,
+    GetSystemDefaultLCID,
     GetCPInfo,
     IsDebuggerPresent,
     OutputDebugStringA,
@@ -635,6 +636,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::GetACP
         }
         (_, "GetACP") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "GetSystemDefaultLCID") => {
+            LegacyWin64Import::GetSystemDefaultLCID
+        }
+        (_, "GetSystemDefaultLCID") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "GetCPInfo") => {
             LegacyWin64Import::GetCPInfo
         }
@@ -2720,6 +2725,14 @@ fn install_win64_import(
                     uc(
                         "install deterministic GetACP import",
                         unicorn.mem_write(stub, &deterministic_i32_stub(932)),
+                    )?;
+                }
+                LegacyWin64Import::GetSystemDefaultLCID => {
+                    // Match the deterministic Japanese CP932 locale exposed by
+                    // GetACP and admitted by the Unicode locale helpers.
+                    uc(
+                        "install deterministic GetSystemDefaultLCID import",
+                        unicorn.mem_write(stub, &deterministic_i32_stub(0x0411)),
                     )?;
                 }
                 LegacyWin64Import::GetCPInfo => {
