@@ -5060,8 +5060,21 @@ fn emulate_windows_critical_section(
                 if unicorn.get_data().windows_critical_sections.len()
                     >= MAX_WINDOWS_CRITICAL_SECTIONS
                 {
+                    // Capture bounded guest-only evidence before stopping. Reading
+                    // the return slot is best effort and cannot replace the error.
+                    let caller = unicorn
+                        .reg_read(RegisterX86::RSP)
+                        .ok()
+                        .and_then(|rsp| read_vcomp_u64(unicorn, rsp).ok());
+                    let mut held = unicorn
+                        .get_data()
+                        .windows_critical_sections
+                        .iter()
+                        .map(|(address, depth)| (*address, *depth))
+                        .collect::<Vec<_>>();
+                    held.sort_unstable();
                     return Err(format!(
-                        "Windows critical-section count exceeds {MAX_WINDOWS_CRITICAL_SECTIONS}"
+                        "Windows critical-section count exceeds {MAX_WINDOWS_CRITICAL_SECTIONS}; requested={address:#x}; caller={caller:x?}; live={held:x?}"
                     ));
                 }
                 unicorn

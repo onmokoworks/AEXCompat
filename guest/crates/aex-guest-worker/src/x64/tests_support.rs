@@ -21949,3 +21949,46 @@ fn windows_create_file_resolves_guest_relative_and_dot_paths() {
         std::fs::remove_file(source).unwrap();
     }
 }
+
+#[test]
+fn critical_section_exhaustion_records_bounded_guest_evidence_without_mutation() {
+    let mut engine = test_engine(&[0xc3]);
+    let init = STUB_BASE + 0x400;
+    install_win64_import(
+        &mut engine.unicorn,
+        init,
+        "kernel32.dll",
+        "InitializeCriticalSection",
+    )
+    .unwrap();
+    for index in 0..MAX_WINDOWS_CRITICAL_SECTIONS {
+        engine
+            .unicorn
+            .get_data_mut()
+            .windows_critical_sections
+            .insert(DATA_BASE + index as u64 * 40, 0);
+    }
+    let object = allocate_crt_region(&mut engine.unicorn, PAGE_SIZE).unwrap();
+    engine
+        .write(object, &[0xa5; WINDOWS_CRITICAL_SECTION_BYTES])
+        .unwrap();
+    let error = engine
+        .call_win64(init, [object, 0, 0, 0, 0, 0])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Windows critical-section count exceeds"));
+    assert!(error.contains(&format!("requested={object:#x}")));
+    assert!(error.contains(&format!("caller=Some({RETURN_ADDRESS:x})")));
+    assert!(error.contains("live=["));
+    assert_eq!(
+        engine.unicorn.get_data().windows_critical_sections.len(),
+        MAX_WINDOWS_CRITICAL_SECTIONS
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(object, WINDOWS_CRITICAL_SECTION_BYTES)
+            .unwrap(),
+        [0xa5; WINDOWS_CRITICAL_SECTION_BYTES]
+    );
+}
