@@ -1,4 +1,4 @@
-// Bounded integer/narrow-string formatting using Win64 va_list slots. Windows
+// Bounded CRT formatting using Win64 va_list slots. Windows
 // long remains 32 bits even though the native macOS ABI uses 64-bit long.
 fn format_guest_stdio(
     unicorn: &Unicorn<'_, GuestState>,
@@ -23,7 +23,9 @@ fn format_guest_stdio(
         argument += 1;
         Ok(u64::from_le_bytes(bytes))
     };
-    format_guest_values(unicorn, format, &mut next, false)
+    // All supported UCRT entry points require option bit 0x20, which requests
+    // the legacy three-digit exponent spelling used by the calling binaries.
+    format_guest_values(unicorn, format, &mut next, false, true)
 }
 
 fn format_guest_values(
@@ -31,6 +33,7 @@ fn format_guest_values(
     format: &[u8],
     next: &mut impl FnMut() -> Result<u64, String>,
     winuser: bool,
+    legacy_three_digit_exponents: bool,
 ) -> Result<Vec<u8>, String> {
     let limit = if winuser {
         1023
@@ -156,7 +159,7 @@ fn format_guest_values(
                 }
                 let mut prefix = Vec::new();
                 let mut content;
-                let numeric = matches!(conversion, b'd' | b'i' | b'u' | b'o' | b'x' | b'X');
+                let mut numeric = matches!(conversion, b'd' | b'i' | b'u' | b'o' | b'x' | b'X');
                 if numeric {
                     let value = next()?;
                     let bits = match length {
@@ -216,6 +219,28 @@ fn format_guest_values(
                             prefix.extend(if conversion == b'x' { b"0x" } else { b"0X" });
                         }
                     }
+                } else if matches!(conversion, b'f' | b'F' | b'e' | b'E' | b'g' | b'G')
+                    && matches!(length, "" | "l")
+                {
+                    let value = f64::from_bits(next()?);
+                    if value.is_sign_negative() {
+                        prefix.push(b'-');
+                    } else if plus {
+                        prefix.push(b'+');
+                    } else if blank {
+                        prefix.push(b' ');
+                    }
+                    content = format_crt_float(
+                        value.abs(),
+                        conversion,
+                        precision,
+                        alternate,
+                        legacy_three_digit_exponents,
+                    )?
+                    .into_bytes();
+                    numeric = value.is_finite();
+                    // Unlike integers, floating precision does not disable zero padding.
+                    precision = None;
                 } else if matches!(conversion, b's' | b'c') && matches!(length, "" | "h") {
                     let value = next()?;
                     if conversion == b'c' {
@@ -321,7 +346,7 @@ fn guest_wsprintf_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String
         argument += 1;
         Ok(value)
     };
-    let mut output = format_guest_values(unicorn, &format, &mut next, true)?;
+    let mut output = format_guest_values(unicorn, &format, &mut next, true, false)?;
     let count = output.len() as u64;
     output.push(0);
     if destination == 0
@@ -333,4 +358,74 @@ fn guest_wsprintf_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String
         .mem_write(destination, &output)
         .map_err(|error| format!("wsprintfA output: {error}"))?;
     Ok(count)
+}
+
+fn format_crt_float(
+    value: f64,
+    conversion: u8,
+    precision: Option<usize>,
+    alternate: bool,
+    legacy_three_digit_exponents: bool,
+) -> Result<String, String> {
+    let uppercase = conversion.is_ascii_uppercase();
+    let conversion = conversion.to_ascii_lowercase();
+    if value.is_nan() {
+        return Ok(if uppercase { "NAN" } else { "nan" }.into());
+    }
+    if value.is_infinite() {
+        return Ok(if uppercase { "INF" } else { "inf" }.into());
+    }
+    let precision = precision.unwrap_or(6);
+    if precision > MAX_CRT_STDIO_BUFFER_BYTES as usize {
+        return Err("float precision exceeds bound".into());
+    }
+    let scientific = |digits| -> Result<(String, i32), String> {
+        let text = format!("{value:.digits$e}");
+        let (mantissa, exponent) = text.split_once('e').ok_or("float exponent missing")?;
+        Ok((
+            mantissa.to_owned(),
+            exponent
+                .parse::<i32>()
+                .map_err(|_| "float exponent invalid")?,
+        ))
+    };
+    let (mut mantissa, exponent) = match conversion {
+        b'f' => (format!("{value:.precision$}"), None),
+        b'e' => {
+            let (m, e) = scientific(precision)?;
+            (m, Some(e))
+        }
+        b'g' => {
+            let digits = precision.max(1);
+            let (m, e) = scientific(digits - 1)?;
+            if e < -4 || e >= digits as i32 {
+                (m, Some(e))
+            } else {
+                (
+                    format!(
+                        "{value:.places$}",
+                        places = (digits as i32 - e - 1) as usize
+                    ),
+                    None,
+                )
+            }
+        }
+        _ => return Err("unsupported floating conversion".into()),
+    };
+    if conversion == b'g' && !alternate && mantissa.contains('.') {
+        mantissa = mantissa
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_owned();
+    }
+    if alternate && !mantissa.contains('.') {
+        mantissa.push('.');
+    }
+    if let Some(exponent) = exponent {
+        mantissa.push(if uppercase { 'E' } else { 'e' });
+        mantissa.push(if exponent < 0 { '-' } else { '+' });
+        let exponent_digits = if legacy_three_digit_exponents { 3 } else { 2 };
+        mantissa.push_str(&format!("{:0exponent_digits$}", exponent.unsigned_abs()));
+    }
+    Ok(mantissa)
 }

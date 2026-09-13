@@ -2838,7 +2838,7 @@ fn stdio_vsnprintf_s_is_library_qualified_bounded_and_fail_closed() {
     let output = DATA_BASE + 0x300;
     engine
         .unicorn
-        .mem_write(format, b"unsupported=%f\0")
+        .mem_write(format, b"unsupported=%a\0")
         .unwrap();
     engine.unicorn.mem_write(output, b"unchanged\0").unwrap();
 
@@ -2850,7 +2850,7 @@ fn stdio_vsnprintf_s_is_library_qualified_bounded_and_fail_closed() {
         )
         .unwrap_err();
     assert!(
-        error.to_string().contains("unsupported conversion '%f'"),
+        error.to_string().contains("unsupported conversion '%a'"),
         "{error}"
     );
     assert_eq!(
@@ -16508,6 +16508,43 @@ fn stdio_char_conversion_preserves_embedded_nul_and_consumes_promoted_int_slots(
 }
 
 #[test]
+fn stdio_common_formats_win64_double_slots_with_legacy_exponents() {
+    for (secure, symbol) in [
+        (false, "__stdio_common_vsprintf"),
+        (true, "__stdio_common_vsnprintf_s"),
+    ] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", symbol).unwrap();
+        let format = DATA_BASE + 0x100;
+        let arguments = DATA_BASE + 0x200;
+        let output = DATA_BASE + 0x300;
+        engine.write(format, b"%.2e/%.3g\0").unwrap();
+        engine
+            .write(arguments, &12.5f64.to_bits().to_le_bytes())
+            .unwrap();
+        engine
+            .write(arguments + 8, &0.00001f64.to_bits().to_le_bytes())
+            .unwrap();
+        let args = if secure {
+            vec![0x24, output, 64, u64::MAX, format, 0, arguments]
+        } else {
+            vec![0x25, output, 64, format, 0, arguments]
+        };
+        assert_eq!(
+            engine
+                .call_win64_with_timeout(entry, &args, TIMEOUT_MICROSECONDS)
+                .unwrap(),
+            16
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 17).unwrap(),
+            b"1.25e+001/1e-005\0"
+        );
+    }
+}
+
+#[test]
 fn allocated_sids_encode_authority_and_stack_arguments_and_free_only_owned_storage() {
     let mut engine = test_engine(&[0xc3]);
     let allocate = STUB_BASE + 0x100;
@@ -23623,4 +23660,32 @@ fn asctime_formats_tm_and_shares_ctime_text_storage() {
         dispatch_win64_import("foreign.dll", "asctime"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
+}
+
+#[test]
+fn printf_float_general_fixed_exponential_and_padding() {
+    let engine = test_engine(&[0xc3]);
+    for (format, value, expected) in [
+        ("%g", 12.5, "12.5"),
+        ("%.0g", 12.5, "1e+001"),
+        ("%.3g", 999.9, "1e+003"),
+        ("%.3g", 0.0001, "0.0001"),
+        ("%.3g", 0.00001, "1e-005"),
+        ("%#.4g", 12.0, "12.00"),
+        ("%.2f", 1.125, "1.12"),
+        ("%.2e", 12.5, "1.25e+001"),
+        ("%+010.2f", 12.5, "+000012.50"),
+        ("%-8.1f", -0.0, "-0.0    "),
+        ("%#.0f", 12.0, "12."),
+        ("%G", 10000000.0, "1E+007"),
+        ("%08g", f64::INFINITY, "     inf"),
+    ] {
+        let mut next = || Ok(f64::to_bits(value));
+        assert_eq!(
+            format_guest_values(&engine.unicorn, format.as_bytes(), &mut next, false, true)
+                .unwrap(),
+            expected.as_bytes(),
+            "{format}"
+        );
+    }
 }
