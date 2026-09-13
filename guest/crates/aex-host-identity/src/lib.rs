@@ -130,4 +130,6 @@ fn hostname_matches_operating_system_command() {
 }
 
 pub mod adapters;
+#[cfg(target_os = "macos")]
+pub mod network_configuration;
 pub mod resolver;
