@@ -96,6 +96,7 @@ enum LegacyWin64Import {
     AllocateAndInitializeSid,
     CreateWellKnownSid,
     FreeSid,
+    RegCreateKeyExA,
     RegOpenKeyExA,
     RegCloseKey,
     MemCmp,
@@ -1029,6 +1030,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "AllocateAndInitializeSid" | "FreeSid") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("advapi32.dll", "RegCreateKeyExA") => LegacyWin64Import::RegCreateKeyExA,
+        (_, "RegCreateKeyExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "RegOpenKeyExA") => LegacyWin64Import::RegOpenKeyExA,
         ("advapi32.dll", "RegCloseKey") => LegacyWin64Import::RegCloseKey,
         (_, "RegOpenKeyExA" | "RegCloseKey") => {
@@ -1649,6 +1652,17 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
                             emulate_windows_sid(unicorn, implementation);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::RegCreateKeyExA => {
+                    uc(
+                        "write RegCreateKeyExA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install RegCreateKeyExA",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_reg_create_key_ex_a(uc)),
                     )?;
                 }
                 LegacyWin64Import::RegOpenKeyExA => {
@@ -9110,8 +9124,8 @@ fn read_win64_import_argument(
 }
 
 // The guest begins with an empty application registry. No host registry,
-// installation records or activation data are synthesized. Mutating APIs and
-// special performance pseudo-keys remain explicit unsupported imports/paths.
+// installation records or activation data are synthesized. Application-created
+// keys live only in this guest session; performance pseudo-keys are unsupported.
 fn guest_registry_predefined_key(key: u64) -> bool {
     matches!(
         key,
@@ -9126,10 +9140,13 @@ fn emulate_reg_open_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         let options = read_win64_import_argument(unicorn, 2)? as u32;
         let access = read_win64_import_argument(unicorn, 3)? as u32;
         let output = read_win64_import_argument(unicorn, 4)?;
-        if !guest_registry_predefined_key(key) {
-            return Err(format!(
-                "RegOpenKeyExA unsupported or foreign registry handle {key:#x}"
-            ));
+        if unicorn
+            .get_data()
+            .registry
+            .resolve(key, access & 0x300)
+            .is_err()
+        {
+            return Ok(6);
         }
         if options != 0 {
             return Err(format!("RegOpenKeyExA unsupported options {options:#x}"));
@@ -9148,7 +9165,18 @@ fn emulate_reg_open_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         } else {
             read_crt_stdio_c_string(unicorn, subkey, 32768, "RegOpenKeyExA subkey")?
         };
-        let (status, handle) = if name.is_empty() { (0, key) } else { (2, 0) };
+        let (status, handle) = if name.is_empty() && guest_registry_predefined_key(key) {
+            (0, key)
+        } else {
+            match unicorn
+                .get_data_mut()
+                .registry
+                .open(key, &name, access, false)
+            {
+                Ok((handle, _)) => (0, handle),
+                Err(status) => (status as u64, 0),
+            }
+        };
         unicorn
             .mem_write(output, &u64::to_le_bytes(handle))
             .map_err(|error| format!("RegOpenKeyExA output: {error}"))?;
@@ -9162,9 +9190,10 @@ fn emulate_reg_close_key(unicorn: &mut Unicorn<'_, GuestState>) {
         if guest_registry_predefined_key(key) {
             Ok(0)
         } else {
-            // RegCloseKey reports an LSTATUS error for a handle it cannot
-            // close. No registry object is created or successfully closed.
-            Ok(u64::from(ERROR_INVALID_HANDLE))
+            Ok(match unicorn.get_data_mut().registry.close(key) {
+                Ok(()) => 0,
+                Err(error) => error as u64,
+            })
         }
     });
     finish_registry_import(unicorn, result);
@@ -10431,4 +10460,67 @@ fn emulate_expand_environment_strings_a(unicorn: &mut Unicorn<'_, GuestState>) {
         Ok(required)
     })();
     finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_reg_create_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let key = read_win64_import_argument(unicorn, 0)?;
+        let name = read_win64_import_argument(unicorn, 1)?;
+        let reserved = read_win64_import_argument(unicorn, 2)? as u32;
+        let class = read_win64_import_argument(unicorn, 3)?;
+        let options = read_win64_import_argument(unicorn, 4)? as u32;
+        let access = read_win64_import_argument(unicorn, 5)? as u32;
+        let security = read_win64_import_argument(unicorn, 6)?;
+        let output = read_win64_import_argument(unicorn, 7)?;
+        let disposition = read_win64_import_argument(unicorn, 8)?;
+        if reserved != 0 || output == 0 || access & 0x300 == 0x300 {
+            return Ok(87);
+        }
+        if options != 0 || class != 0 || security != 0 {
+            return Err(format!(
+                "RegCreateKeyExA unsupported options={options:#x} class={class:#x} security={security:#x}"
+            ));
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)?
+            || (disposition != 0
+                && !guest_range_has_permission(unicorn, disposition, 4, Prot::WRITE)?)
+        {
+            return Err("RegCreateKeyExA outputs not writable".into());
+        }
+        if disposition != 0
+            && disposition < output.saturating_add(8)
+            && output < disposition.saturating_add(4)
+        {
+            return Err("RegCreateKeyExA outputs overlap".into());
+        }
+        let name = if name == 0 {
+            Vec::new()
+        } else {
+            read_crt_stdio_c_string(unicorn, name, 32768, "RegCreateKeyExA name")?
+        };
+        if !name.is_ascii() {
+            return Err("RegCreateKeyExA non-ASCII key names unsupported".into());
+        }
+        let (handle, created) = match unicorn
+            .get_data_mut()
+            .registry
+            .open(key, &name, access, true)
+        {
+            Ok(value) => value,
+            Err(error) => return Ok(error as u64),
+        };
+        unicorn
+            .mem_write(output, &handle.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        if disposition != 0 {
+            unicorn
+                .mem_write(
+                    disposition,
+                    &(if created { 1u32 } else { 2u32 }).to_le_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(0)
+    })();
+    finish_registry_import(unicorn, result);
 }

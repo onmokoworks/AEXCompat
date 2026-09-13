@@ -15179,7 +15179,6 @@ fn registry_open_rejects_unsupported_handles_options_and_bad_pointers() {
     const OPEN: u64 = STUB_BASE + 0x1f0;
     const ROOT: u64 = 0xffff_ffff_8000_0002;
     for args in [
-        [123, 0, 0, 0x20019, DATA_BASE, 0],
         [ROOT, 0, 8, 0x20019, DATA_BASE, 0],
         [ROOT, 0xdead_beef, 0, 0x20019, DATA_BASE, 0],
         [ROOT, 0, 0, 0x20019, 0xdead_beef, 0],
@@ -22909,5 +22908,61 @@ fn is_valid_acl_checks_header_and_entry_bounds_without_mutation() {
     assert_eq!(
         dispatch_win64_import("other.dll", "IsValidAcl"),
         Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
+fn registry_create_api_reopens_key_and_returns_disposition() {
+    let mut engine = test_engine(&[0xc3]);
+    let create = STUB_BASE + 0x100;
+    let open = STUB_BASE + 0x110;
+    let close = STUB_BASE + 0x120;
+    for (entry, name) in [
+        (create, "RegCreateKeyExA"),
+        (open, "RegOpenKeyExA"),
+        (close, "RegCloseKey"),
+    ] {
+        install_win64_import(&mut engine.unicorn, entry, "advapi32.dll", name).unwrap();
+    }
+    let root = 0xffff_ffff_8000_0001;
+    let name = DATA_BASE + 0x100;
+    let out = DATA_BASE + 0x200;
+    let disposition = out + 8;
+    engine.write(name, b"Software\\Example\0").unwrap();
+    for expected in [1u32, 2] {
+        assert_eq!(
+            engine
+                .call_win64_args(create, &[root, name, 0, 0, 0, 0x2001f, 0, out, disposition])
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(disposition, 4).unwrap(),
+            expected.to_le_bytes()
+        );
+        let handle = u64::from_le_bytes(
+            engine
+                .unicorn
+                .mem_read_as_vec(out, 8)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            engine.call_win64(close, [handle, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
+    }
+    assert_eq!(
+        engine
+            .call_win64(open, [root, name, 0, 0x20019, out, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine
+            .call_win64(open, [123, name, 0, 0x20019, out, 0])
+            .unwrap(),
+        6
     );
 }
