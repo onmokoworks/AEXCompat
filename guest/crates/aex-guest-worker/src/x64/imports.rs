@@ -168,6 +168,7 @@ enum LegacyWin64Import {
     VcompNoOp,
     GetSystemTimeAsFileTime,
     GetSystemInfo,
+    GetVersion,
     GetVersionExA,
     GetSystemMetrics,
     GetUserNameA,
@@ -475,6 +476,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GetVersion") => LegacyWin64Import::GetVersion,
+        (_, "GetVersion") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "GetVersionExA") => LegacyWin64Import::GetVersionExA,
         (_, "GetVersionExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("user32.dll", "GetSystemMetrics") => LegacyWin64Import::GetSystemMetrics,
@@ -2102,6 +2105,16 @@ fn install_win64_import(
                         "install GetSystemMetrics",
                         unicorn
                             .add_code_hook(stub, stub, |uc, _, _| emulate_get_system_metrics(uc)),
+                    )?;
+                }
+                LegacyWin64Import::GetVersion => {
+                    uc("write GetVersion return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install GetVersion",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            // Match GetVersionExA's manifest-free NT 6.2 / build 9200 view.
+                            let _ = uc.reg_write(RegisterX86::RAX, (9200u64 << 16) | (2 << 8) | 6);
+                        }),
                     )?;
                 }
                 LegacyWin64Import::GetVersionExA => {

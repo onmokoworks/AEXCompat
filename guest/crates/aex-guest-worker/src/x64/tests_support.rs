@@ -22483,3 +22483,40 @@ fn strcat_s_appends_and_clears_invalid_destinations() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn get_version_matches_extended_version_and_preserves_errors() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    let extended = STUB_BASE + 0x110;
+    install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", "GetVersion").unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        extended,
+        "kernel32.dll",
+        "GetVersionExA",
+    )
+    .unwrap();
+    let out = DATA_BASE + 0x100;
+    engine.write(out, &148u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine.call_win64(extended, [out, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    let bytes = engine.unicorn.mem_read_as_vec(out, 20).unwrap();
+    let major = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let minor = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let build = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+    engine.unicorn.get_data_mut().windows_last_error = 71;
+    engine.unicorn.get_data_mut().crt_errno = 72;
+    assert_eq!(
+        engine.call_win64(entry, [0; 6]).unwrap(),
+        ((build << 16) | (minor << 8) | major) as u64
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "GetVersion"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
