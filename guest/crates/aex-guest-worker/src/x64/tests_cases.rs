@@ -2664,6 +2664,34 @@ fn dense_avx_sync_map_preserves_vex128_upper_zeroing() {
 }
 
 #[test]
+fn runtime_avx_sync_map_preserves_vex128_upper_zeroing() {
+    const CODE: u64 = 0x1000_0000;
+    let mut engine = test_engine(&[
+        0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+        0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
+        0xc3,
+    ]);
+    install_runtime_avx_state_sync(
+        &mut engine.unicorn,
+        CODE,
+        CODE + PAGE_SIZE,
+        vec![(CODE, AvxStateSync::RegisterUpper(0))],
+    )
+    .unwrap();
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::YMM0, &[0x5a; 32])
+        .unwrap();
+
+    engine.call_win64(CODE, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap();
+
+    let mut output = [0xff; 32];
+    engine.unicorn.mem_read(DATA_BASE, &mut output).unwrap();
+    assert_eq!(output, [0; 32]);
+    assert_eq!(engine.unicorn.get_data().avx_state_sync_points.len(), 1);
+}
+
+#[test]
 fn memory_witness_reports_unmapped_and_oversized_reads() {
     const CODE: u64 = 0x1000_0000;
     let engine = test_engine(&[0xc3]);

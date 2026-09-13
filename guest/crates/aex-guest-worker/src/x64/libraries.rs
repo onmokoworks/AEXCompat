@@ -154,7 +154,17 @@ impl GuestEngine<'static> {
                     .filter(|stop| *stop <= end)
                     .ok_or(GuestError::ImageAlignment)?;
                 if start < stop {
-                    install_runtime_avx_state_sync(&mut engine.unicorn, start, stop)?;
+                    let section_start = section.virtual_address;
+                    let section_end = section_start
+                        .checked_add(section.virtual_size)
+                        .filter(|end| *end <= library.mapped_bytes().len())
+                        .ok_or(GuestError::ImageAlignment)?;
+                    let points = discover_avx_state_sync_points_with_limit(
+                        &library.mapped_bytes()[section_start..section_end],
+                        start,
+                        MAX_RUNTIME_AVX_STATE_SYNC_POINTS,
+                    )?;
+                    install_runtime_avx_state_sync(&mut engine.unicorn, start, stop, points)?;
                     engine
                         .unicorn
                         .get_data_mut()
@@ -726,16 +736,12 @@ mod library_tests {
     }
 
     #[test]
-    fn runtime_sync_preserves_lower_lanes_and_clears_upper_lanes_in_real_dll() {
+    fn precomputed_runtime_sync_preserves_lower_lanes_and_clears_upper_lanes_in_real_dll() {
         let primary = fixture(0x180000000, "EffectMain", None, false);
-        let dep = fixture(0x1800000000, "answer", None, false);
+        let mut bytes = fixture_bytes(0x1800000000, "answer", None, false);
+        bytes[0x200..0x205].copy_from_slice(&[0x67, 0xc5, 0xf8, 0x77, 0xc3]);
+        let dep = PeImage::parse_library(&bytes).unwrap();
         let mut engine = GuestEngine::load_with_libraries(&primary, &[("dep.dll", dep)]).unwrap();
-        // Replace the fixture export before execution; the runtime hook must
-        // inspect the executed bytes rather than a stale discovery snapshot.
-        engine
-            .unicorn
-            .mem_write(0x1800001000, &[0x67, 0xc5, 0xf8, 0x77, 0xc3])
-            .unwrap();
         for index in 0..16 {
             engine
                 .unicorn

@@ -1583,6 +1583,14 @@ fn discover_avx_state_sync_points(
     bytes: &[u8],
     address: u64,
 ) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
+    discover_avx_state_sync_points_with_limit(bytes, address, MAX_AVX_STATE_SYNC_POINTS)
+}
+
+fn discover_avx_state_sync_points_with_limit(
+    bytes: &[u8],
+    address: u64,
+    limit: usize,
+) -> Result<Vec<(u64, AvxStateSync)>, GuestError> {
     // A PE executable section can contain inline data or multiple entry points,
     // so a single linear decode is not sufficient. In 64-bit mode every C4/C5
     // byte is a potential VEX prefix. Decode each candidate independently;
@@ -1593,28 +1601,40 @@ fn discover_avx_state_sync_points(
         if !matches!(prefix, 0xc4 | 0xc5) {
             continue;
         }
-        let Some(instruction_address) = address.checked_add(offset as u64) else {
-            continue;
-        };
-        let mut decoder = Decoder::with_ip(
-            64,
-            &bytes[offset..],
-            instruction_address,
-            DecoderOptions::NONE,
-        );
-        let instruction = decoder.decode();
-        if instruction.is_invalid() || instruction.encoding() != EncodingKind::VEX {
-            continue;
-        }
-        let sync = native_avx_state_sync(&instruction, &mut info_factory);
-        if let Some(sync) = sync {
-            if points.len() >= MAX_AVX_STATE_SYNC_POINTS {
-                return Err(GuestError::AvxStateCapacity {
-                    observed: points.len() + 1,
-                    limit: MAX_AVX_STATE_SYNC_POINTS,
-                });
+        let mut start = offset;
+        loop {
+            let Some(instruction_address) = address.checked_add(start as u64) else {
+                break;
+            };
+            let mut decoder = Decoder::with_ip(
+                64,
+                &bytes[start..],
+                instruction_address,
+                DecoderOptions::NONE,
+            );
+            let instruction = decoder.decode();
+            if !instruction.is_invalid()
+                && instruction.encoding() == EncodingKind::VEX
+                && let Some(sync) = native_avx_state_sync(&instruction, &mut info_factory)
+            {
+                if points.len() >= limit {
+                    return Err(GuestError::AvxStateCapacity {
+                        observed: points.len() + 1,
+                        limit,
+                    });
+                }
+                points.push((instruction.ip(), sync));
             }
-            points.push((instruction.ip(), sync));
+            if start == 0
+                || offset - start >= 14
+                || !matches!(
+                    bytes[start - 1],
+                    0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0xf0 | 0xf2 | 0xf3
+                )
+            {
+                break;
+            }
+            start -= 1;
         }
     }
     Ok(points)
@@ -1713,6 +1733,7 @@ fn install_avx_state_sync_points(
 
 // A conservative filter: false means no VEX encoding can start here. Decode
 // remains authoritative for every candidate, including invalid prefix mixes.
+#[cfg(test)]
 fn may_start_vex_instruction(bytes: &[u8]) -> bool {
     for &byte in bytes {
         match byte {
@@ -1735,43 +1756,44 @@ fn may_start_vex_instruction(bytes: &[u8]) -> bool {
     false
 }
 
-// Large dependency DLLs can contain more VEX candidates than the bounded
-// eager map permits. Inspect only the current instruction, using fixed scratch
-// space and one hook per executable section. This also avoids replacing the
-// primary image's dense synchronization map when another module is loaded.
+// Dependency DLLs can contain hundreds of thousands of native VEX writes.
+// Decode them once while loading, then use a constant-time address lookup in
+// the one range hook. Reading and decoding every executed instruction made
+// large plug-in runtimes spend most of their time crossing the hook boundary.
 fn install_runtime_avx_state_sync(
     unicorn: &mut Unicorn<'static, GuestState>,
     start: u64,
     end: u64,
+    points: Vec<(u64, AvxStateSync)>,
 ) -> Result<(), GuestError> {
     if start >= end {
         return Err(GuestError::ImageAlignment);
     }
+    let state = unicorn.get_data_mut();
+    let observed = state
+        .avx_state_sync_points
+        .len()
+        .checked_add(points.len())
+        .ok_or(GuestError::AvxStateCapacity {
+            observed: usize::MAX,
+            limit: MAX_RUNTIME_AVX_STATE_SYNC_POINTS,
+        })?;
+    if observed > MAX_RUNTIME_AVX_STATE_SYNC_POINTS {
+        return Err(GuestError::AvxStateCapacity {
+            observed,
+            limit: MAX_RUNTIME_AVX_STATE_SYNC_POINTS,
+        });
+    }
+    state.avx_state_sync_points.extend(points);
     uc(
         "install runtime native AVX state sync",
-        unicorn.add_code_hook(start, end - 1, |unicorn, address, size| {
-            // Unicorn may report a sentinel size for an invalid instruction. Its
-            // bounded invalid-instruction handler owns that case.
-            if size == 0 || size > 15 {
-                return;
-            }
-            let mut bytes = [0u8; 15];
-            let bytes = &mut bytes[..size as usize];
-            if unicorn.mem_read(address, bytes).is_err() {
-                unicorn.get_data_mut().callback_error =
-                    Some("cannot read AVX synchronization instruction".into());
-                let _ = unicorn.emu_stop();
-                return;
-            }
-            if !may_start_vex_instruction(bytes) {
-                return;
-            }
-            // Decode from the executed PC, including valid legacy prefixes
-            // before VEX (address-size and segment overrides).
-            let mut decoder = Decoder::with_ip(64, bytes, address, DecoderOptions::NONE);
-            let instruction = decoder.decode();
-            let mut factory = InstructionInfoFactory::new();
-            if let Some(sync) = native_avx_state_sync(&instruction, &mut factory) {
+        unicorn.add_code_hook(start, end - 1, |unicorn, address, _| {
+            if let Some(sync) = unicorn
+                .get_data()
+                .avx_state_sync_points
+                .get(&address)
+                .copied()
+            {
                 synchronize_native_avx_state(unicorn, sync);
             }
         }),

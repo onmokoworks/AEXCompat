@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -60,6 +61,7 @@ impl fmt::Display for CrtHeapError {
 #[derive(Default)]
 pub(crate) struct CrtHeap {
     allocations: BTreeMap<u64, CrtAllocation>,
+    allocation_hints: RefCell<BTreeMap<(u64, u64), u64>>,
     live_bytes: u64,
 }
 
@@ -141,12 +143,30 @@ impl CrtHeap {
             return Err(CrtHeapError::InvalidAlignment);
         }
         let mapping_alignment = alignment.max(CRT_HEAP_PAGE_SIZE);
-        let mut candidate = align_up(range_start, mapping_alignment)?;
-        for (&pointer, existing) in self.allocations.range(range_start..range_end) {
+        let hinted = self
+            .allocation_hints
+            .borrow()
+            .get(&(range_start, range_end))
+            .copied()
+            .filter(|hint| (range_start..range_end).contains(hint))
+            .unwrap_or(range_start);
+        let mut candidate = align_up(hinted, mapping_alignment)?;
+        if let Some((&pointer, existing)) = self.allocations.range(..=candidate).next_back() {
+            let existing_end = pointer
+                .checked_add(existing.backing_size)
+                .ok_or(CrtHeapError::AddressSpaceExhausted)?;
+            if existing_end > candidate {
+                candidate = align_up(existing_end, mapping_alignment)?;
+            }
+        }
+        for (&pointer, existing) in self.allocations.range(candidate..range_end) {
             let candidate_end = candidate
                 .checked_add(allocation.backing_size)
                 .ok_or(CrtHeapError::AddressSpaceExhausted)?;
             if candidate_end <= pointer {
+                self.allocation_hints
+                    .borrow_mut()
+                    .insert((range_start, range_end), candidate_end);
                 return Ok(candidate);
             }
             candidate = align_up(
@@ -156,11 +176,15 @@ impl CrtHeap {
                 mapping_alignment,
             )?;
         }
-        candidate
+        let selected = candidate
             .checked_add(allocation.backing_size)
             .filter(|end| *end <= range_end)
             .map(|_| candidate)
-            .ok_or(CrtHeapError::AddressSpaceExhausted)
+            .ok_or(CrtHeapError::AddressSpaceExhausted)?;
+        self.allocation_hints
+            .borrow_mut()
+            .insert((range_start, range_end), selected + allocation.backing_size);
+        Ok(selected)
     }
 
     pub(crate) fn insert(
@@ -252,6 +276,9 @@ impl CrtHeap {
         self.allocations.remove(&old_pointer);
         self.allocations.insert(new_pointer, allocation);
         self.live_bytes = self.live_bytes - old.requested_size + allocation.requested_size;
+        if new_pointer != old_pointer {
+            self.rewind_allocation_hints(old_pointer);
+        }
         Ok(old)
     }
 
@@ -287,7 +314,16 @@ impl CrtHeap {
         }
         self.allocations.remove(&pointer);
         self.live_bytes -= allocation.requested_size;
+        self.rewind_allocation_hints(pointer);
         Ok(allocation)
+    }
+
+    fn rewind_allocation_hints(&self, pointer: u64) {
+        for (&(start, end), hint) in self.allocation_hints.borrow_mut().iter_mut() {
+            if (start..end).contains(&pointer) && pointer < *hint {
+                *hint = pointer;
+            }
+        }
     }
 
     pub(crate) fn allocations(&self) -> impl Iterator<Item = (u64, CrtAllocation)> + '_ {

@@ -229,6 +229,7 @@ const MAX_AVX_FALLBACK_INSTRUCTIONS: u64 = 1_000_000;
 // when a smaller executable section contains dense or false-positive decodes.
 const MAX_SPARSE_AVX_STATE_SYNC_HOOKS: usize = 4_096;
 const MAX_AVX_STATE_SYNC_POINTS: usize = 512 * 1_024;
+const MAX_RUNTIME_AVX_STATE_SYNC_POINTS: usize = 2 * 1_024 * 1_024;
 const MAX_VCOMP_REQUESTED_THREADS: i32 = 1_024;
 const MAX_CRT_MEMORY_COPY_BYTES: u64 = 128 * 1024 * 1024;
 const CRT_MEMORY_COPY_CHUNK: usize = 64 * 1024;
