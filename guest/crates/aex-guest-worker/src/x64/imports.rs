@@ -619,6 +619,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentThreadId") => {
             LegacyWin64Import::GetCurrentThreadId
         }
+        ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "_getpid") => {
+            LegacyWin64Import::GetCurrentProcessId
+        }
+        (_, "_getpid") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentProcessId") => {
             LegacyWin64Import::GetCurrentProcessId
         }

@@ -22570,3 +22570,30 @@ fn vsprintf_s_uses_six_argument_abi_and_rejects_small_buffer() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn crt_getpid_matches_guest_process_identity_and_preserves_errors() {
+    let mut engine = test_engine(&[0xc3]);
+    let win = STUB_BASE + 0x100;
+    let crt = STUB_BASE + 0x110;
+    install_win64_import(
+        &mut engine.unicorn,
+        win,
+        "kernel32.dll",
+        "GetCurrentProcessId",
+    )
+    .unwrap();
+    let expected = engine.call_win64(win, [0; 6]).unwrap();
+    for dll in ["api-ms-win-crt-runtime-l1-1-0.dll", "ucrtbase.dll"] {
+        install_win64_import(&mut engine.unicorn, crt, dll, "_getpid").unwrap();
+        engine.unicorn.get_data_mut().windows_last_error = 71;
+        engine.unicorn.get_data_mut().crt_errno = 72;
+        assert_eq!(engine.call_win64(crt, [0; 6]).unwrap(), expected);
+        assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "_getpid"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
