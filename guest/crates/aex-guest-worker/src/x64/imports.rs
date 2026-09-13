@@ -120,6 +120,7 @@ enum LegacyWin64Import {
     Wfopen,
     Strerror,
     FopenS,
+    DupenvS,
     StrcatS,
     StrcpyS,
     StrncpyS,
@@ -619,6 +620,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentThreadId") => {
             LegacyWin64Import::GetCurrentThreadId
         }
+        ("api-ms-win-crt-environment-l1-1-0.dll" | "ucrtbase.dll", "_dupenv_s") => {
+            LegacyWin64Import::DupenvS
+        }
+        (_, "_dupenv_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "_getpid") => {
             LegacyWin64Import::GetCurrentProcessId
         }
@@ -3143,6 +3148,13 @@ fn install_win64_import(
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             emulate_fopen_s(unicorn);
                         }),
+                    )?;
+                }
+                LegacyWin64Import::DupenvS => {
+                    uc("write _dupenv_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _dupenv_s",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_dupenv_s(uc)),
                     )?;
                 }
                 LegacyWin64Import::StrcatS => {
@@ -9927,4 +9939,78 @@ fn release_guest_errno(unicorn: &mut Unicorn<'_, GuestState>, thread: u32) -> Re
         unicorn.get_data_mut().crt_errno_buffers.remove(&thread);
     }
     Ok(())
+}
+
+fn emulate_dupenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        let size_output = read_win64_import_argument(unicorn, 1)?;
+        let name_pointer = read_win64_import_argument(unicorn, 2)?;
+        if output == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(22);
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)?
+            || (size_output != 0
+                && !guest_range_has_permission(unicorn, size_output, 8, Prot::WRITE)?)
+        {
+            return Err("_dupenv_s output is not writable".into());
+        }
+        if size_output != 0 && output.abs_diff(size_output) < 8 {
+            return Err("_dupenv_s output pointers overlap".into());
+        }
+        let name = if name_pointer == 0 {
+            None
+        } else {
+            Some(read_windows_environment_name(
+                unicorn,
+                name_pointer,
+                "_dupenv_s",
+            )?)
+        };
+        unicorn
+            .mem_write(output, &0u64.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        if size_output != 0 {
+            unicorn
+                .mem_write(size_output, &0u64.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        let Some(name) = name else {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(22);
+        };
+        let Some(mut value) = guest_environment_value(unicorn.get_data(), &name) else {
+            return Ok(0);
+        };
+        value.push(0);
+        let size = value.len() as u64;
+        let pointer = match allocate_crt_region(unicorn, size) {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                set_guest_crt_errno(unicorn, 12)?;
+                return Ok(12);
+            }
+        };
+        let written = (|| -> Result<(), String> {
+            unicorn
+                .mem_write(pointer, &value)
+                .map_err(|e| e.to_string())?;
+            unicorn
+                .mem_write(output, &pointer.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+            if size_output != 0 {
+                unicorn
+                    .mem_write(size_output, &size.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = written {
+            let _ = free_crt_region(unicorn, pointer);
+            return Err(error);
+        }
+        Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
 }

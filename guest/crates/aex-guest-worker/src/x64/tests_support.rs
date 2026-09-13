@@ -22597,3 +22597,67 @@ fn crt_getpid_matches_guest_process_identity_and_preserves_errors() {
         Win64ImportDispatch::UnsupportedLegacyImport
     );
 }
+
+#[test]
+fn dupenv_s_returns_owned_copies_and_absent_values() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(&mut engine.unicorn, entry, "ucrtbase.dll", "_dupenv_s").unwrap();
+    let out = DATA_BASE + 0x100;
+    let size = out + 8;
+    let name = DATA_BASE + 0x200;
+    engine.write(name, b"example\0").unwrap();
+    engine
+        .unicorn
+        .get_data_mut()
+        .environment_overrides
+        .insert(b"EXAMPLE".to_vec(), Some(b"value".to_vec()));
+    let mut pointers = Vec::new();
+    for _ in 0..2 {
+        assert_eq!(
+            engine
+                .call_win64(entry, [out, size, name, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        let pointer = u64::from_le_bytes(
+            engine
+                .unicorn
+                .mem_read_as_vec(out, 8)
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(pointer, 6).unwrap(),
+            b"value\0"
+        );
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(size, 8).unwrap(),
+            6u64.to_le_bytes()
+        );
+        pointers.push(pointer);
+    }
+    assert_ne!(pointers[0], pointers[1]);
+    for pointer in pointers {
+        free_crt_region(&mut engine.unicorn, pointer).unwrap();
+    }
+    engine
+        .unicorn
+        .get_data_mut()
+        .environment_overrides
+        .insert(b"EXAMPLE".to_vec(), None);
+    assert_eq!(
+        engine
+            .call_win64(entry, [out, size, name, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(out, 16).unwrap(), [0; 16]);
+    assert_eq!(engine.call_win64(entry, [out, 0, 0, 0, 0, 0]).unwrap(), 22);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+    assert_eq!(
+        dispatch_win64_import("other.dll", "_dupenv_s"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
