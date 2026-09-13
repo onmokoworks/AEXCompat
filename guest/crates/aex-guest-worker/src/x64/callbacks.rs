@@ -4269,7 +4269,7 @@ fn emulate_crt_strncat(unicorn: &mut Unicorn<'_, GuestState>) {
         let mut suffix = Vec::new();
         let mut read_count = 0u64;
         for offset in 0..count {
-            if offset >= MAX_CRT_STRING_BYTES {
+            if offset as u64 >= MAX_CRT_STRING_BYTES {
                 return Err("strncat source exceeds CRT string limit".into());
             }
             let address = source
@@ -4516,6 +4516,128 @@ fn emulate_crt_atoi(unicorn: &mut Unicorn<'_, GuestState>) {
         Err(format!(
             "atoi source exceeds {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
         ))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_strtol(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let end_pointer = read_win64_import_argument(unicorn, 1)?;
+        let requested_base = read_win64_import_argument(unicorn, 2)? as u32;
+        if source == 0 {
+            return Err("strtol null source: invalid parameter handler is not implemented".into());
+        }
+        if end_pointer != 0
+            && !guest_range_has_permission(unicorn, end_pointer, 8, Prot::WRITE)?
+        {
+            return Err("strtol end pointer is not writable".into());
+        }
+        if requested_base != 0 && !(2..=36).contains(&requested_base) {
+            set_guest_crt_errno(unicorn, 22)?;
+            if end_pointer != 0 {
+                unicorn
+                    .mem_write(end_pointer, &source.to_le_bytes())
+                    .map_err(|error| format!("strtol end pointer write failed: {error}"))?;
+            }
+            return Ok(0);
+        }
+        let read_byte = |unicorn: &mut Unicorn<'_, GuestState>, offset: usize| {
+            if offset as u64 >= MAX_CRT_STRING_BYTES {
+                return Err(format!(
+                    "strtol source exceeds {MAX_CRT_STRING_BYTES} bytes without a decisive byte"
+                ));
+            }
+            let address = source
+                .checked_add(offset as u64)
+                .ok_or("strtol source range overflow")?;
+            if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
+                return Err(format!("strtol source address {address:#x} is not readable"));
+            }
+            let mut byte = [0];
+            unicorn
+                .mem_read(address, &mut byte)
+                .map_err(|error| format!("strtol source read failed: {error}"))?;
+            Ok(byte[0])
+        };
+        let digit = |byte: u8| -> Option<u32> {
+            match byte {
+                b'0'..=b'9' => Some(u32::from(byte - b'0')),
+                b'a'..=b'z' => Some(u32::from(byte - b'a') + 10),
+                b'A'..=b'Z' => Some(u32::from(byte - b'A') + 10),
+                _ => None,
+            }
+        };
+        let mut position = 0usize;
+        while matches!(read_byte(unicorn, position)?, 9..=13 | 32) {
+            position += 1;
+        }
+        let negative = match read_byte(unicorn, position)? {
+            b'+' => {
+                position += 1;
+                false
+            }
+            b'-' => {
+                position += 1;
+                true
+            }
+            _ => false,
+        };
+        let mut base = requested_base;
+        if base == 0 {
+            base = 10;
+            if read_byte(unicorn, position)? == b'0' {
+                base = 8;
+                let next = read_byte(unicorn, position + 1)?;
+                if matches!(next, b'x' | b'X')
+                    && digit(read_byte(unicorn, position + 2)?).is_some_and(|value| value < 16)
+                {
+                    base = 16;
+                    position += 2;
+                }
+            }
+        } else if base == 16
+            && read_byte(unicorn, position)? == b'0'
+            && matches!(read_byte(unicorn, position + 1)?, b'x' | b'X')
+            && digit(read_byte(unicorn, position + 2)?).is_some_and(|value| value < 16)
+        {
+            position += 2;
+        }
+        let digits_begin = position;
+        let limit = if negative { 2_147_483_648u64 } else { 2_147_483_647u64 };
+        let mut magnitude = 0u64;
+        let mut overflow = false;
+        loop {
+            let byte = read_byte(unicorn, position)?;
+            let Some(value) = digit(byte).filter(|value| *value < base) else {
+                break;
+            };
+            overflow |= magnitude > (limit - u64::from(value)) / u64::from(base);
+            magnitude = magnitude
+                .saturating_mul(u64::from(base))
+                .saturating_add(u64::from(value))
+                .min(limit);
+            position += 1;
+        }
+        let consumed = position != digits_begin;
+        let end = if consumed { source + position as u64 } else { source };
+        if end_pointer != 0 {
+            unicorn
+                .mem_write(end_pointer, &end.to_le_bytes())
+                .map_err(|error| format!("strtol end pointer write failed: {error}"))?;
+        }
+        if overflow {
+            set_guest_crt_errno(unicorn, 34)?;
+        }
+        if !consumed {
+            return Ok(0);
+        }
+        let value = if negative {
+            -(magnitude as i64)
+        } else {
+            magnitude as i64
+        } as i32;
+        Ok(u64::from(value as u32))
     })();
     finish_guest_stdio(unicorn, result);
 }

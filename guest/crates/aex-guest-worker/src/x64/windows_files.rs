@@ -39,6 +39,12 @@ impl GuestFiles {
                 .streams
                 .values()
                 .any(|file| file.name.as_deref() == Some(name) && file.readable))
+            || (share_read_access
+                && self.streams.values().any(|file| {
+                    file.name.as_deref() == Some(name)
+                        && file.readable
+                        && !file.share_read_access
+                }))
         {
             return Ok(Err(32));
         }

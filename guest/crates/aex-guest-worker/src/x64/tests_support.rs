@@ -16041,7 +16041,7 @@ fn crt_64_bit_stream_seek_and_tell_track_mounted_file_position() {
     let stream = GUEST_STREAM_BASE;
     engine.unicorn.get_data_mut().guest_files.streams.insert(
         stream,
-        GuestFileStream { name: Some("c:/fixture".into()), bytes: Box::from(*b"abcdef"), position: 1, readable: true, eof: false, buffer_state: None },
+        GuestFileStream { name: Some("c:/fixture".into()), bytes: Box::from(*b"abcdef"), position: 1, readable: true, share_read_access: true, eof: false, buffer_state: None },
     );
     install_win64_import(&mut engine.unicorn, seek, "ucrtbase.dll", "_fseeki64").unwrap();
     install_win64_import(&mut engine.unicorn, tell, "ucrtbase.dll", "_ftelli64").unwrap();
@@ -17132,6 +17132,7 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
                 bytes: vec![0, 127, 128, 255].into_boxed_slice(),
                 position: 0,
                 readable: true,
+                share_read_access: true,
                 eof: false,
                 buffer_state: None,
             },
@@ -18109,6 +18110,7 @@ fn exposed_file_cells_preserve_unbuffered_reads_and_reject_unknown_buffering() {
             bytes: Box::from(&b"abc"[..]),
             position: 0,
             readable: true,
+            share_read_access: true,
             eof: false,
             buffer_state: None,
         },
@@ -19388,6 +19390,62 @@ fn atoi_stops_at_first_non_digit_without_reading_next_page() {
         .mem_protect(PAGE, PAGE_SIZE, Prot::WRITE)
         .unwrap();
     assert!(engine.call_win64(entry, [source, 0, 0, 0, 0, 0]).is_err());
+}
+
+#[test]
+fn strtol_handles_windows_long_bases_end_pointer_and_overflow() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-convert-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        let end_pointer = DATA_BASE + 0x800;
+        install_win64_import(&mut engine.unicorn, entry, dll, "strtol").unwrap();
+        for (text, base, expected, consumed, errno) in [
+            ("  -42tail", 10, -42, 5, 71),
+            ("0x20!", 0, 32, 4, 71),
+            ("0778", 0, 63, 3, 71),
+            ("zZ", 36, 1295, 2, 71),
+            ("word", 10, 0, 0, 71),
+            ("2147483648", 10, i32::MAX, 10, 34),
+            ("-2147483649", 10, i32::MIN, 11, 34),
+        ] {
+            engine.write(DATA_BASE, format!("{text}\0").as_bytes()).unwrap();
+            engine.unicorn.get_data_mut().crt_errno = 71;
+            assert_eq!(
+                engine
+                    .call_win64(entry, [DATA_BASE, end_pointer, base, 0, 0, 0])
+                    .unwrap() as u32 as i32,
+                expected,
+                "{text} base {base}"
+            );
+            assert_eq!(
+                u64::from_le_bytes(
+                    engine
+                        .unicorn
+                        .mem_read_as_vec(end_pointer, 8)
+                        .unwrap()
+                        .try_into()
+                        .unwrap()
+                ),
+                DATA_BASE + consumed
+            );
+            assert_eq!(engine.unicorn.get_data().crt_errno, errno);
+        }
+        engine.unicorn.get_data_mut().crt_errno = 0;
+        assert_eq!(
+            engine
+                .call_win64(entry, [DATA_BASE, end_pointer, 1, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+        assert!(engine
+            .call_win64(entry, [0, end_pointer, 10, 0, 0, 0])
+            .is_err());
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "strtol"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
 }
 
 #[test]
@@ -20983,6 +21041,62 @@ fn wfopen_rejects_unreadable_and_malformed_wide_strings_before_opening() {
         assert!(engine.call_win64(OPEN, [name, mode, 0, 0, 0, 0]).is_err());
         assert!(engine.unicorn.get_data().guest_files.streams.is_empty());
     }
+}
+
+#[test]
+fn wfsopen_enforces_read_sharing_and_releases_it_on_close() {
+    const OPEN: u64 = STUB_BASE + 0x410;
+    const CLOSE: u64 = STUB_BASE + 0x420;
+    let wide = |s: &str| {
+        s.encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+    };
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(&mut engine.unicorn, OPEN, dll, "_wfsopen").unwrap();
+        install_win64_import(&mut engine.unicorn, CLOSE, dll, "fclose").unwrap();
+        let source = std::env::temp_dir().join(format!(
+            "aex-wfsopen-{}-{}",
+            std::process::id(),
+            dll.len()
+        ));
+        std::fs::write(&source, b"asset").unwrap();
+        engine
+            .unicorn
+            .get_data_mut()
+            .guest_files
+            .sources
+            .insert("c:/shared.bin".into(), source.clone());
+        let name = DATA_BASE + 0x100;
+        let mode = DATA_BASE + 0x300;
+        engine.write(name, &wide("C:\\Shared.bin")).unwrap();
+        engine.write(mode, &wide("rb")).unwrap();
+
+        let exclusive_read = engine
+            .call_win64(OPEN, [name, mode, 0x10, 0, 0, 0])
+            .unwrap();
+        assert_ne!(exclusive_read, 0);
+        assert_eq!(engine.call_win64(OPEN, [name, mode, 0x40, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 13);
+        assert_eq!(engine.call_win64(CLOSE, [exclusive_read, 0, 0, 0, 0, 0]).unwrap(), 0);
+
+        let shared = engine
+            .call_win64(OPEN, [name, mode, 0x40, 0, 0, 0])
+            .unwrap();
+        assert_ne!(shared, 0);
+        assert_eq!(engine.call_win64(CLOSE, [shared, 0, 0, 0, 0, 0]).unwrap(), 0);
+        engine.unicorn.get_data_mut().crt_errno = 0;
+        assert_eq!(engine.call_win64(OPEN, [name, mode, 7, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+        assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
+        std::fs::remove_file(source).unwrap();
+    }
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "_wfsopen"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
 }
 
 #[test]

@@ -29,6 +29,7 @@ struct GuestFileStream {
     bytes: Box<[u8]>,
     position: usize,
     readable: bool,
+    share_read_access: bool,
     eof: bool,
     buffer_state: Option<u64>,
 }
@@ -137,10 +138,11 @@ impl GuestFiles {
     }
 }
 
-fn open_guest_stream(
+fn open_guest_stream_with_share(
     unicorn: &mut Unicorn<'_, GuestState>,
     filename: &[u8],
     mode: &[u8],
+    share_read_access: bool,
 ) -> Result<(u64, u32), String> {
     use std::io::Read;
     if filename.is_empty() || !valid_fopen_mode(mode) {
@@ -177,7 +179,14 @@ fn open_guest_stream(
     if files
         .windows_files
         .values()
-        .any(|file| file.name == name && file.share & 1 == 0)
+        .any(|file| {
+            file.name == name
+                && (file.share & 1 == 0 || (!share_read_access && file.readable))
+        })
+        || files.streams.values().any(|file| {
+            file.name.as_deref() == Some(&name)
+                && (!file.share_read_access || !share_read_access)
+        })
     {
         return Ok((0, 13));
     }
@@ -237,6 +246,7 @@ fn open_guest_stream(
             bytes: bytes.into_boxed_slice(),
             position: 0,
             readable: true,
+            share_read_access,
             eof: false,
             buffer_state: None,
         },
@@ -248,6 +258,14 @@ fn open_guest_stream(
         symbols: vec![],
     });
     Ok((token, 0))
+}
+
+fn open_guest_stream(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    filename: &[u8],
+    mode: &[u8],
+) -> Result<(u64, u32), String> {
+    open_guest_stream_with_share(unicorn, filename, mode, true)
 }
 
 // Standard FILE objects have stable identities, including after fclose. The
@@ -440,6 +458,7 @@ fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
                 bytes: Box::default(),
                 position: 0,
                 readable: index == 0,
+                share_read_access: true,
                 eof: false,
                 buffer_state: None,
             },
@@ -1345,6 +1364,41 @@ fn emulate_wfopen(unicorn: &mut Unicorn<'_, GuestState>) {
             return Err("_wfopen unsupported mode encoding".into());
         }
         let (stream, errno) = open_guest_stream(unicorn, name.as_bytes(), mode.as_bytes())?;
+        if errno != 0 {
+            set_guest_crt_errno(unicorn, errno)?;
+        }
+        Ok(stream)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_wfsopen(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let name = read_win64_import_argument(unicorn, 0)?;
+        let mode = read_win64_import_argument(unicorn, 1)?;
+        let share = read_win64_import_argument(unicorn, 2)? as u32;
+        if name == 0 || mode == 0 {
+            return Err("_wfsopen requires an invalid parameter handler for null arguments".into());
+        }
+        let share_read_access = match share {
+            0x10 | 0x30 => false,
+            0x20 | 0x40 | 0x80 => true,
+            _ => {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(0);
+            }
+        };
+        let name = read_guest_wide_file_string(unicorn, name, 1024, "_wfsopen filename")?;
+        let mode = read_guest_wide_file_string(unicorn, mode, 64, "_wfsopen mode")?;
+        if !mode.is_ascii() {
+            return Err("_wfsopen unsupported mode encoding".into());
+        }
+        let (stream, errno) = open_guest_stream_with_share(
+            unicorn,
+            name.as_bytes(),
+            mode.as_bytes(),
+            share_read_access,
+        )?;
         if errno != 0 {
             set_guest_crt_errno(unicorn, errno)?;
         }

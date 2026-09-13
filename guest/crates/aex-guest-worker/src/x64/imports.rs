@@ -79,6 +79,7 @@ enum LegacyWin64Import {
     StrChr,
     StrRChr,
     Atoi,
+    Strtol,
     SetNamedSecurityInfoA,
     SetEntriesInAclA,
     IsValidAcl,
@@ -154,6 +155,7 @@ enum LegacyWin64Import {
     CrtSetMode,
     Fopen,
     Wfopen,
+    Wfsopen,
     Strerror,
     FopenS,
     CrtSrand,
@@ -1111,6 +1113,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         (_, "strchr") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "atoi") => LegacyWin64Import::Atoi,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "strtol") => {
+            LegacyWin64Import::Strtol
+        }
+        (_, "strtol") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "wcstombs") => {
             LegacyWin64Import::CrtWcstombs
         }
@@ -1353,6 +1359,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::Wfopen
         }
         (_, "_wfopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_wfsopen") => {
+            LegacyWin64Import::Wfsopen
+        }
+        (_, "_wfsopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen") => LegacyWin64Import::Fopen,
         (_, "fopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen_s") => {
@@ -2024,6 +2034,13 @@ fn install_win64_import(
                     uc(
                         "install atoi",
                         unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_atoi(uc)),
+                    )?;
+                }
+                LegacyWin64Import::Strtol => {
+                    uc("write strtol return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strtol",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strtol(uc)),
                     )?;
                 }
                 LegacyWin64Import::CrtWcstombs => {
@@ -3804,6 +3821,15 @@ fn install_win64_import(
                     uc(
                         "install _wfopen",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| emulate_wfopen(unicorn)),
+                    )?;
+                }
+                LegacyWin64Import::Wfsopen => {
+                    uc("write _wfsopen return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _wfsopen",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_wfsopen(unicorn)
+                        }),
                     )?;
                 }
                 LegacyWin64Import::Fopen => {
