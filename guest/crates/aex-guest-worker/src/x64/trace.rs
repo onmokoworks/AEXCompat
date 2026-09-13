@@ -1757,18 +1757,12 @@ fn may_start_vex_instruction(bytes: &[u8]) -> bool {
 }
 
 // Dependency DLLs can contain hundreds of thousands of native VEX writes.
-// Decode them once while loading, then use a constant-time address lookup in
-// the one range hook. Reading and decoding every executed instruction made
-// large plug-in runtimes spend most of their time crossing the hook boundary.
+// Decode them once while loading and queue their exact addresses for Unicorn's
+// translator, avoiding a runtime callback on every instruction in the image.
 fn install_runtime_avx_state_sync(
     unicorn: &mut Unicorn<'static, GuestState>,
-    start: u64,
-    end: u64,
     points: Vec<(u64, AvxStateSync)>,
 ) -> Result<(), GuestError> {
-    if start >= end {
-        return Err(GuestError::ImageAlignment);
-    }
     let state = unicorn.get_data_mut();
     let observed = state
         .avx_state_sync_points
@@ -1785,20 +1779,32 @@ fn install_runtime_avx_state_sync(
         });
     }
     state.avx_state_sync_points.extend(points);
-    uc(
-        "install runtime native AVX state sync",
-        unicorn.add_code_hook(start, end - 1, |unicorn, address, _| {
-            if let Some(sync) = unicorn
-                .get_data()
-                .avx_state_sync_points
-                .get(&address)
-                .copied()
-            {
-                synchronize_native_avx_state(unicorn, sync);
-            }
-        }),
-    )?;
     Ok(())
+}
+
+fn install_translated_avx_state_sync(
+    unicorn: &mut Unicorn<'static, GuestState>,
+) -> Result<(), GuestError> {
+    let mut points: Vec<_> = unicorn
+        .get_data()
+        .avx_state_sync_points
+        .iter()
+        .map(|(&address, &sync)| (address, sync))
+        .collect();
+    points.sort_unstable_by_key(|(address, _)| *address);
+    let addresses: Vec<_> = points.iter().map(|(address, _)| *address).collect();
+    let actions: Vec<_> = points
+        .iter()
+        .map(|(_, sync)| match sync {
+            AvxStateSync::RegisterUpper(index) => (*index + 1) as u8,
+            AvxStateSync::AllUpper => 17,
+            AvxStateSync::AllRegisters => 18,
+        })
+        .collect();
+    uc(
+        "install translated native AVX state sync",
+        aex_unicorn_buffer::set_x86_avx_sync_points(unicorn, &addresses, &actions),
+    )
 }
 
 fn iced_memory_address(
@@ -2057,6 +2063,12 @@ fn emulate_vextractf128(
 }
 
 fn emulate_avx_invalid_instruction(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
+    let translated_mask = aex_unicorn_buffer::x86_avx_defined_mask(unicorn);
+    for index in 0..16 {
+        if translated_mask & (1 << index) != 0 {
+            unicorn.get_data_mut().avx_defined_ymm[index] = true;
+        }
+    }
     let Ok(rip) = unicorn.reg_read(RegisterX86::RIP) else {
         return false;
     };

@@ -1088,6 +1088,18 @@ UNICORN_EXPORT
 uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
                    void *user_data, uint64_t begin, uint64_t end, ...);
 
+/* AEXCompat x86 extension: install sorted instruction addresses whose VEX.128
+ * upper-lane semantics are emitted directly by the translator. `actions`
+ * contains 1..16 for one destination register, 17 for VZEROUPPER, and 18 for
+ * VZEROALL. The input arrays are copied by Unicorn. */
+UNICORN_EXPORT
+uc_err uc_x86_set_avx_sync_points(uc_engine *uc, const uint64_t *addresses,
+                                  const uint8_t *actions, size_t count);
+UNICORN_EXPORT
+uc_err uc_x86_reset_avx_defined_mask(uc_engine *uc);
+UNICORN_EXPORT
+uint32_t uc_x86_get_avx_defined_mask(uc_engine *uc);
+
 /*
  Unregister (remove) a hook callback.
  This API removes the hook callback registered by uc_hook_add().

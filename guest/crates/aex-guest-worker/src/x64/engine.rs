@@ -1717,6 +1717,10 @@ impl GuestEngine<'static> {
         self.unicorn.get_data_mut().scheduler_ready_hint = !self.scheduler_ready.is_empty();
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
+        uc(
+            "reset translated AVX defined mask",
+            aex_unicorn_buffer::reset_x86_avx_defined_mask(&self.unicorn),
+        )?;
         self.unicorn.get_data_mut().latest_runtime_target = None;
         self.unicorn.get_data_mut().unsupported_import = None;
         let stack_top = STACK_BASE + STACK_SIZE;

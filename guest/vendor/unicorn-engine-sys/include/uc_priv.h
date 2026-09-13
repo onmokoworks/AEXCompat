@@ -369,6 +369,9 @@ struct uc_struct {
         uint64_t generation;
         struct list_item *single;
     } code_hook_cache[1024];
+    uint64_t *x86_avx_sync_addresses;
+    uint8_t *x86_avx_sync_actions;
+    size_t x86_avx_sync_count;
 
 
     // hook to count number of instructions for uc_emu_start()
@@ -441,6 +444,8 @@ struct uc_struct {
     bool current_executable;
     bool skip_sync_pc_on_exit;
 };
+
+uint8_t uc_x86_avx_sync_for_pc(struct uc_struct *uc, uint64_t address);
 
 // Metadata stub for the variable-size cpu context used with uc_context_*()
 struct uc_context {

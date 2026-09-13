@@ -2673,11 +2673,10 @@ fn runtime_avx_sync_map_preserves_vex128_upper_zeroing() {
     ]);
     install_runtime_avx_state_sync(
         &mut engine.unicorn,
-        CODE,
-        CODE + PAGE_SIZE,
         vec![(CODE, AvxStateSync::RegisterUpper(0))],
     )
     .unwrap();
+    install_translated_avx_state_sync(&mut engine.unicorn).unwrap();
     engine
         .unicorn
         .reg_write_long(RegisterX86::YMM0, &[0x5a; 32])

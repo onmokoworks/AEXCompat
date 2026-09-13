@@ -164,7 +164,7 @@ impl GuestEngine<'static> {
                         start,
                         MAX_RUNTIME_AVX_STATE_SYNC_POINTS,
                     )?;
-                    install_runtime_avx_state_sync(&mut engine.unicorn, start, stop, points)?;
+                    install_runtime_avx_state_sync(&mut engine.unicorn, points)?;
                     engine
                         .unicorn
                         .get_data_mut()
@@ -198,6 +198,7 @@ impl GuestEngine<'static> {
                 },
             );
         }
+        install_translated_avx_state_sync(&mut engine.unicorn)?;
         // Re-link primary imports as well: a named dependency must resolve to
         // its real code/data export, never an unrelated emulation stub.
         for target in std::iter::once(image).chain(libraries.iter().map(|(_, image)| image)) {
@@ -757,7 +758,7 @@ mod library_tests {
             assert_eq!(&value[..16], [index as u8 + 1; 16]);
             assert_eq!(&value[16..], [0; 16]);
         }
-        assert_eq!(engine.unicorn.get_data().avx_defined_ymm, [true; 16]);
+        assert_eq!(aex_unicorn_buffer::x86_avx_defined_mask(&engine.unicorn), 0xffff);
     }
 
     #[test]

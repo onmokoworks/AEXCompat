@@ -564,6 +564,8 @@ uc_err uc_close(uc_engine *uc)
     }
 
     free(uc->mapped_blocks);
+    free(uc->x86_avx_sync_addresses);
+    free(uc->x86_avx_sync_actions);
 
     g_tree_destroy(uc->ctl_exits);
 
@@ -572,6 +574,63 @@ uc_err uc_close(uc_engine *uc)
     free(uc);
 
     return UC_ERR_OK;
+}
+
+UNICORN_EXPORT
+uc_err uc_x86_set_avx_sync_points(uc_engine *uc, const uint64_t *addresses,
+                                  const uint8_t *actions, size_t count)
+{
+    UC_INIT(uc);
+    if ((count != 0 && (!addresses || !actions)) ||
+        count > SIZE_MAX / sizeof(*addresses)) {
+        return UC_ERR_ARG;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (actions[i] < 1 || actions[i] > 18 ||
+            (i != 0 && addresses[i - 1] >= addresses[i])) {
+            return UC_ERR_ARG;
+        }
+    }
+    uint64_t *new_addresses = NULL;
+    uint8_t *new_actions = NULL;
+    if (count != 0) {
+        new_addresses = malloc(count * sizeof(*new_addresses));
+        new_actions = malloc(count * sizeof(*new_actions));
+        if (!new_addresses || !new_actions) {
+            free(new_addresses);
+            free(new_actions);
+            return UC_ERR_NOMEM;
+        }
+        memcpy(new_addresses, addresses, count * sizeof(*new_addresses));
+        memcpy(new_actions, actions, count * sizeof(*new_actions));
+    }
+    uc->tb_flush(uc);
+    free(uc->x86_avx_sync_addresses);
+    free(uc->x86_avx_sync_actions);
+    uc->x86_avx_sync_addresses = new_addresses;
+    uc->x86_avx_sync_actions = new_actions;
+    uc->x86_avx_sync_count = count;
+    return UC_ERR_OK;
+}
+
+uint8_t uc_x86_avx_sync_for_pc(struct uc_struct *uc, uint64_t address)
+{
+    size_t low = 0;
+    size_t high = uc->x86_avx_sync_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        uint64_t candidate = uc->x86_avx_sync_addresses[middle];
+        if (candidate < address) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if (low < uc->x86_avx_sync_count &&
+        uc->x86_avx_sync_addresses[low] == address) {
+        return uc->x86_avx_sync_actions[low];
+    }
+    return 0;
 }
 
 UNICORN_EXPORT

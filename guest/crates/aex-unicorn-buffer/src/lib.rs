@@ -2,6 +2,40 @@
 
 use unicorn_engine::{RegisterX86, Unicorn, uc_error, uc_reg_read};
 
+/// Installs exact x86 instruction addresses where the vendored translator must
+/// apply VEX.128 upper-lane semantics before executing the instruction.
+pub fn set_x86_avx_sync_points<D>(
+    unicorn: &Unicorn<'_, D>,
+    addresses: &[u64],
+    actions: &[u8],
+) -> Result<(), uc_error> {
+    if addresses.len() != actions.len()
+        || actions.iter().any(|action| !(1..=18).contains(action))
+        || addresses.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(uc_error::ARG);
+    }
+    unsafe {
+        unicorn_engine::unicorn_const::uc_x86_set_avx_sync_points(
+            unicorn.get_handle(),
+            addresses.as_ptr(),
+            actions.as_ptr(),
+            addresses.len(),
+        )
+    }
+    .into()
+}
+
+pub fn reset_x86_avx_defined_mask<D>(unicorn: &Unicorn<'_, D>) -> Result<(), uc_error> {
+    unsafe { unicorn_engine::unicorn_const::uc_x86_reset_avx_defined_mask(unicorn.get_handle()) }
+        .into()
+}
+
+#[must_use]
+pub fn x86_avx_defined_mask<D>(unicorn: &Unicorn<'_, D>) -> u32 {
+    unsafe { unicorn_engine::unicorn_const::uc_x86_get_avx_defined_mask(unicorn.get_handle()) }
+}
+
 /// Caller-owned storage with the alignment required by Unicorn's x86 backend.
 #[repr(C, align(32))]
 pub struct YmmValue {
