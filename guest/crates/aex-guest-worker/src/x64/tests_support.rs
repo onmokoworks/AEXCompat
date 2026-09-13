@@ -22217,3 +22217,82 @@ fn benchmark_non_vex_runtime_sync_decode() {
         eprintln!("non_vex_sync filtered={filtered}: {:?}", started.elapsed());
     }
 }
+
+#[test]
+#[ignore = "manual hook dispatch performance comparison"]
+fn benchmark_dense_runtime_hook_with_unrelated_import_hooks() {
+    for unrelated in [0, 1024] {
+        let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, 0usize).unwrap();
+        uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
+        uc.mem_write(TEST_CODE, &[0x48, 0xff, 0xc9, 0x75, 0xfb, 0x90])
+            .unwrap();
+        uc.add_code_hook(TEST_CODE, TEST_CODE + 5, |uc, _, _| *uc.get_data_mut() += 1)
+            .unwrap();
+        for index in 0..unrelated {
+            let address = TEST_CODE + PAGE_SIZE + index * 16;
+            uc.add_code_hook(address, address, |_, _, _| panic!("unrelated hook invoked"))
+                .unwrap();
+        }
+        uc.reg_write(RegisterX86::RCX, 100_000).unwrap();
+        let started = std::time::Instant::now();
+        uc.emu_start(TEST_CODE, TEST_CODE + 6, 10_000_000, 0)
+            .unwrap();
+        assert_eq!(*uc.get_data(), 200_001);
+        assert_eq!(uc.reg_read(RegisterX86::RCX).unwrap(), 0);
+        eprintln!(
+            "hook_dispatch unrelated={unrelated}: {:?}",
+            started.elapsed()
+        );
+    }
+}
+
+#[test]
+fn code_hook_cache_observes_callback_addition_deletion_and_stop() {
+    let mut uc =
+        Unicorn::new_with_data(Arch::X86, Mode::MODE_64, (Vec::<u8>::new(), false)).unwrap();
+    uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
+    uc.mem_write(TEST_CODE, &[0x90, 0x90]).unwrap();
+    let original = uc
+        .add_code_hook(TEST_CODE, TEST_CODE + 1, |uc, _, _| {
+            uc.get_data_mut().0.push(1);
+            if uc.get_data().1 {
+                uc.get_data_mut().1 = false;
+                uc.add_code_hook(TEST_CODE, TEST_CODE + 1, |uc, _, _| {
+                    uc.get_data_mut().0.push(2)
+                })
+                .unwrap();
+            }
+        })
+        .unwrap();
+    for index in 0..32 {
+        let address = TEST_CODE + 0x100 + index;
+        uc.add_code_hook(address, address, |_, _, _| panic!("unrelated hook"))
+            .unwrap();
+    }
+    uc.emu_start(TEST_CODE, TEST_CODE + 2, 1_000_000, 0)
+        .unwrap();
+    assert_eq!(uc.get_data().0, [1, 1]);
+    uc.get_data_mut().0.clear();
+    uc.get_data_mut().1 = true;
+    uc.emu_start(TEST_CODE, TEST_CODE + 2, 1_000_000, 0)
+        .unwrap();
+    assert_eq!(uc.get_data().0, [1, 2, 1, 2]);
+    uc.remove_hook(original).unwrap();
+    uc.get_data_mut().0.clear();
+    uc.emu_start(TEST_CODE, TEST_CODE + 2, 1_000_000, 0)
+        .unwrap();
+    assert_eq!(uc.get_data().0, [2, 2]);
+    uc.get_data_mut().0.clear();
+    uc.emu_start(TEST_CODE, TEST_CODE + 2, 1_000_000, 1)
+        .unwrap();
+    assert_eq!(uc.get_data().0, [2]);
+    uc.add_code_hook(TEST_CODE, TEST_CODE + 1, |uc, _, _| {
+        uc.get_data_mut().0.push(3);
+        uc.emu_stop().unwrap();
+    })
+    .unwrap();
+    uc.get_data_mut().0.clear();
+    uc.emu_start(TEST_CODE, TEST_CODE + 2, 1_000_000, 0)
+        .unwrap();
+    assert_eq!(uc.get_data().0, [2, 3]);
+}

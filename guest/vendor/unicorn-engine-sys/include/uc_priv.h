@@ -362,6 +362,14 @@ struct uc_struct {
     struct list hook[UC_HOOK_MAX];
     struct list hooks_to_del;
     int hooks_count[UC_HOOK_MAX];
+    /* Bounded, engine-local cache for PCs with exactly one code hook. */
+    uint64_t code_hook_generation;
+    struct {
+        uint64_t address;
+        uint64_t generation;
+        struct list_item *single;
+    } code_hook_cache[1024];
+
 
     // hook to count number of instructions for uc_emu_start()
     uc_hook count_hook;

@@ -1904,6 +1904,14 @@ uc_err uc_mem_unmap(struct uc_struct *uc, uint64_t address, uint64_t size)
     return UC_ERR_OK;
 }
 
+static void invalidate_code_hook_cache(uc_engine *uc)
+{
+    if (++uc->code_hook_generation == 0) {
+        memset(uc->code_hook_cache, 0, sizeof(uc->code_hook_cache));
+        uc->code_hook_generation = 1;
+    }
+}
+
 UNICORN_EXPORT
 uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
                    void *user_data, uint64_t begin, uint64_t end, ...)
@@ -1912,6 +1920,7 @@ uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
     int i = 0;
 
     UC_INIT(uc);
+    invalidate_code_hook_cache(uc);
 
     struct hook *hook = calloc(1, sizeof(struct hook));
     if (hook == NULL) {
@@ -2039,6 +2048,7 @@ uc_err uc_hook_del(uc_engine *uc, uc_hook hh)
     struct hook *hook = (struct hook *)hh;
 
     UC_INIT(uc);
+    invalidate_code_hook_cache(uc);
 
     // we can't dereference hook->type if hook is invalid
     // so for now we need to iterate over all possible types to remove the hook
@@ -2127,7 +2137,32 @@ void helper_uc_tracecode(int32_t size, uc_hook_idx index, void *handle,
         revert_uc_emu_stop(uc);
     }
 
-    for (cur = uc->hook[index].head;
+    struct list_item *single = NULL;
+    uint64_t generation = uc->code_hook_generation;
+    if (index == UC_HOOK_CODE_IDX && size != 0 && !not_allow_stop &&
+        !uc->count_hook) {
+        unsigned slot = ((uint64_t)address ^ ((uint64_t)address >> 10)) & 1023;
+        if (uc->code_hook_cache[slot].generation == generation &&
+            uc->code_hook_cache[slot].address == (uint64_t)address) {
+            single = uc->code_hook_cache[slot].single;
+        } else {
+            for (cur = uc->hook[index].head; cur; cur = cur->next) {
+                hook = cur->data;
+                if (!hook->to_delete && HOOK_BOUND_CHECK(hook, (uint64_t)address)) {
+                    if (single) {
+                        single = NULL;
+                        break;
+                    }
+                    single = cur;
+                }
+            }
+            uc->code_hook_cache[slot].address = (uint64_t)address;
+            uc->code_hook_cache[slot].generation = generation;
+            uc->code_hook_cache[slot].single = single;
+        }
+    }
+
+    for (cur = single ? single : uc->hook[index].head;
          cur != NULL && (hook = (struct hook *)cur->data); cur = cur->next) {
         if (hook->to_delete) {
             continue;
@@ -2159,6 +2194,11 @@ void helper_uc_tracecode(int32_t size, uc_hook_idx index, void *handle,
         if (not_allow_stop && uc->stop_request) {
             revert_uc_emu_stop(uc);
         } else if (!not_allow_stop && uc->stop_request) {
+            break;
+        }
+        /* Hook callbacks may append/delete hooks. Preserve list traversal if
+         * mutation occurred, including a newly appended matching hook. */
+        if (single && generation == uc->code_hook_generation) {
             break;
         }
     }
