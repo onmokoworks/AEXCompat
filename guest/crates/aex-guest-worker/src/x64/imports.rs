@@ -82,6 +82,7 @@ enum LegacyWin64Import {
     GetVolumeInformationA,
     Errno,
     GetHostByName,
+    GetAdaptersAddresses,
     ExitThread,
     CoCreateInstance,
     CoInitializeSecurity,
@@ -712,6 +713,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::GetHostByName
         }
         (_, "gethostbyname" | "ORDINAL 52") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("iphlpapi.dll", "GetAdaptersAddresses") => LegacyWin64Import::GetAdaptersAddresses,
+        (_, "GetAdaptersAddresses") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ws2_32.dll" | "wsock32.dll", "WSAGetLastError" | "ORDINAL 111") => {
             LegacyWin64Import::GetLastError
         }
@@ -2186,6 +2189,19 @@ fn install_win64_import(
                         "install gethostbyname",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_gethostbyname(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetAdaptersAddresses => {
+                    uc(
+                        "write GetAdaptersAddresses return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetAdaptersAddresses",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_get_adapters_addresses(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;

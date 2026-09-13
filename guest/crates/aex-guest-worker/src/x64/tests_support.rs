@@ -21136,3 +21136,219 @@ fn errno_pointer_survives_thread_yield_and_child_storage_is_released() {
     assert!(!guest_range_has_permission(&engine.unicorn, child, 4, Prot::READ).unwrap());
     assert_eq!(engine.unicorn.get_data().crt_errno_buffers.len(), 1);
 }
+
+#[test]
+fn adapter_metadata_serialization_has_bounded_windows_pointers() {
+    let first = WindowsAdapter {
+        name: "en0".into(),
+        description: "Wi-Fi 日本語".into(),
+        dns_suffix: "example.test".into(),
+        index: 7,
+        physical_address: vec![2, 3, 4, 5, 6, 7],
+        flags: 0x184,
+        mtu: 1500,
+        kind: 71,
+        status: 1,
+        ipv4: true,
+        ipv6: true,
+    };
+    let second = WindowsAdapter {
+        name: "lo0".into(),
+        physical_address: vec![],
+        index: 1,
+        ..first.clone()
+    };
+    let bytes = serialize_windows_adapters(&[first.clone(), second], DATA_BASE, false).unwrap();
+    let u32_at = |at| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+    let u64_at = |at| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    assert_eq!(u32_at(0), 184);
+    assert_eq!(u32_at(4), 7);
+    assert_eq!(u64_at(8), DATA_BASE + 184);
+    assert_eq!(u64_at(184 + 8), 0);
+    assert_eq!(&bytes[80..86], &[2, 3, 4, 5, 6, 7]);
+    assert_eq!(u32_at(88), 6);
+    assert_eq!(u32_at(96), 1500);
+    assert_eq!(u32_at(100), 71);
+    for header in [0, 184] {
+        for offset in [16, 56, 64, 72] {
+            let pointer = u64_at(header + offset);
+            assert!(pointer >= DATA_BASE + 368 && pointer < DATA_BASE + bytes.len() as u64);
+        }
+        for offset in [24, 32, 40, 48, 176] {
+            assert_eq!(u64_at(header + offset), 0);
+        }
+    }
+    let description = (u64_at(64) - DATA_BASE) as usize;
+    let expected: Vec<_> = "Wi-Fi 日本語"
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    assert_eq!(&bytes[description..description + expected.len()], expected);
+    let skipped = serialize_windows_adapters(&[first.clone()], DATA_BASE, true).unwrap();
+    assert_eq!(&skipped[72..80], &[0; 8]);
+    assert!(serialize_windows_adapters(&[first.clone()], u64::MAX - 100, false).is_err());
+    let invalid = WindowsAdapter {
+        physical_address: vec![0; 9],
+        ..first
+    };
+    assert!(serialize_windows_adapters(&[invalid], 0, false).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn adapter_import_size_query_short_buffer_and_metadata_output() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CALL,
+        "iphlpapi.dll",
+        "GetAdaptersAddresses",
+    )
+    .unwrap();
+    let size_pointer = DATA_BASE + 0x100;
+    engine.write(size_pointer, &[0; 4]).unwrap();
+    engine.unicorn.get_data_mut().windows_last_error = 71;
+    engine.unicorn.get_data_mut().crt_errno = 72;
+    assert_eq!(
+        engine
+            .call_win64(CALL, [0, 15, 0, 0, size_pointer, 0])
+            .unwrap(),
+        111
+    );
+    let needed = u32::from_le_bytes(
+        engine
+            .unicorn
+            .mem_read_as_vec(size_pointer, 4)
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    assert!(needed >= 184 && needed <= 4 * 1024 * 1024);
+    let output = allocate_crt_region(&mut engine.unicorn, needed as u64 + 4096).unwrap();
+    engine.write(output, &[0x55; 8]).unwrap();
+    engine.write(size_pointer, &1u32.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CALL, [0, 15, 0, output, size_pointer, 0])
+            .unwrap(),
+        111
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0x55; 8]
+    );
+    engine
+        .write(size_pointer, &(needed + 4096).to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CALL, [0, 15, 0, output, size_pointer, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+        184u32.to_le_bytes()
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
+    assert_eq!(engine.unicorn.get_data().crt_errno, 72);
+    assert_eq!(
+        engine
+            .call_win64(CALL, [99, 15, 0, output, size_pointer, 0])
+            .unwrap(),
+        87
+    );
+    assert!(
+        engine
+            .call_win64(CALL, [0, 0x10, 0, output, size_pointer, 0])
+            .is_err()
+    );
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "GetAdaptersAddresses"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn adapter_import_preflights_caller_storage() {
+    const CALL: u64 = STUB_BASE + 0x410;
+    for overlap in [false, true] {
+        let mut engine = test_engine(&[0xc3]);
+        install_win64_import(
+            &mut engine.unicorn,
+            CALL,
+            "iphlpapi.dll",
+            "GetAdaptersAddresses",
+        )
+        .unwrap();
+        let output = allocate_crt_region(&mut engine.unicorn, 65536).unwrap();
+        let size = if overlap { output } else { DATA_BASE + 0x100 };
+        engine.write(output, &[0x55; 8]).unwrap();
+        engine.write(size, &65536u32.to_le_bytes()).unwrap();
+        let before = engine.unicorn.mem_read_as_vec(output, 8).unwrap();
+        if !overlap {
+            engine
+                .unicorn
+                .mem_protect(output, PAGE_SIZE, Prot::READ)
+                .unwrap();
+        }
+        assert!(
+            engine
+                .call_win64(CALL, [0, 15, 0, output, size, 0])
+                .is_err()
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 8).unwrap(), before);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn adapter_translation_does_not_copy_physical_settings_to_vpn() {
+    use aex_host_identity::{
+        adapters::Interface,
+        network_configuration::{Configuration, Property},
+    };
+    let interface = Interface {
+        name: b"utun0".to_vec(),
+        index: 9,
+        native_flags: 1,
+        native_type: 1,
+        mtu: 1280,
+        physical_address: vec![],
+        addresses: vec![],
+    };
+    let mut config = Configuration::new();
+    for (path, fields) in [
+        (
+            "Setup:/Network/Service/vpn/Interface",
+            vec![("DeviceName", "en0"), ("Hardware", "AirPort")],
+        ),
+        (
+            "Setup:/Network/Service/vpn/IPv4",
+            vec![("ConfigMethod", "DHCP")],
+        ),
+        (
+            "State:/Network/Service/vpn/IPv4",
+            vec![("InterfaceName", "utun0")],
+        ),
+    ] {
+        config.insert(
+            path.into(),
+            fields
+                .into_iter()
+                .map(|(key, value)| (key.into(), Property::Text(value.into())))
+                .collect(),
+        );
+    }
+    assert!(windows_adapters_from_native(vec![interface.clone()], &config).is_err());
+    config
+        .get_mut("Setup:/Network/Service/vpn/Interface")
+        .unwrap()
+        .insert("DeviceName".into(), Property::Text("utun0".into()));
+    let translated = windows_adapters_from_native(vec![interface], &config).unwrap();
+    assert_eq!(translated[0].kind, 71);
+    assert_eq!(translated[0].flags & 4, 4);
+}
