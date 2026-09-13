@@ -1040,6 +1040,55 @@ bool flatview_copy(struct uc_struct *uc, FlatView *dst, FlatView *src, bool upda
     return true;
 }
 
+static void rebuild_flatview_dispatch(FlatView *fv, struct uc_struct *uc)
+{
+    address_space_dispatch_clear(fv->dispatch);
+    fv->dispatch = address_space_dispatch_new(uc, fv);
+    for (size_t j = 0; j < fv->nr; j++) {
+        MemoryRegionSection mrs = section_from_flat_range(&fv->ranges[j], fv);
+        flatview_add_to_dispatch(uc, fv, &mrs);
+    }
+    address_space_dispatch_compact(fv->dispatch);
+}
+
+/* Adding a disjoint leaf under the unchanged address-space root does not
+ * require re-rendering its siblings. Keep snapshot and nested topologies on
+ * the general path. The dispatcher is rebuilt to preserve compact-tree rules. */
+static bool flatview_insert_disjoint_leaf(FlatView *fv, MemoryRegion *mr,
+                                         AddrRange range)
+{
+    MemoryRegion *root = mr->uc->system_memory;
+    if (mr->uc->snapshot_level || fv->root != root || mr->container != root ||
+        !root->enabled || root->terminates || root->addr != 0 || !mr->enabled ||
+        !mr->terminates || !mr->ram || !QTAILQ_EMPTY(&mr->subregions) ||
+        !int128_nz(range.size) ||
+        int128_gt(addrrange_end(range), root->size)) {
+        return false;
+    }
+    unsigned low = 0, high = fv->nr;
+    while (low < high) {
+        unsigned middle = low + (high - low) / 2;
+        if (int128_lt(fv->ranges[middle].addr.start, range.start)) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if ((low && addrrange_intersects(fv->ranges[low - 1].addr, range)) ||
+        (low < fv->nr && addrrange_intersects(fv->ranges[low].addr, range))) {
+        return false;
+    }
+    FlatRange added = {
+        .mr = mr,
+        .offset_in_region = 0,
+        .addr = range,
+        .readonly = mr->readonly || root->readonly,
+    };
+    flatview_insert(fv, low, &added);
+    rebuild_flatview_dispatch(fv, mr->uc);
+    return true;
+}
+
 static bool flatview_update(FlatView *fv, MemoryRegion *mr)
 {
     struct uc_struct *uc = mr->uc;
@@ -1054,6 +1103,10 @@ static bool flatview_update(FlatView *fv, MemoryRegion *mr)
 
     if (!mr->container || !QTAILQ_EMPTY(&mr->subregions))
         return false;
+
+    if (flatview_insert_disjoint_leaf(fv, mr, r)) {
+        return true;
+    }
 
     for (size_t i = 0; i < fv->nr; i++) {
         if (!addrrange_intersects(fv->ranges[i].addr, r)) {
