@@ -140,6 +140,7 @@ enum LegacyWin64Import {
     StreamBufferPointers,
     AcRtIobFunc,
     Fgetc,
+    Fgets,
     Fflush,
     Fwrite,
     Fread,
@@ -1348,7 +1349,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "getc" | "fgetc") => {
             LegacyWin64Import::Fgetc
         }
-        (_, "getc" | "fgetc" | "fread" | "feof" | "fclose") => {
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fgets") => {
+            LegacyWin64Import::Fgets
+        }
+        (_, "getc" | "fgetc" | "fgets" | "fread" | "feof" | "fclose") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "strerror") => {
@@ -3772,6 +3776,7 @@ fn install_win64_import(
                     )?;
                 }
                 LegacyWin64Import::Fgetc
+                | LegacyWin64Import::Fgets
                 | LegacyWin64Import::Fread
                 | LegacyWin64Import::Feof
                 | LegacyWin64Import::Fflush

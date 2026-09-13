@@ -17182,6 +17182,77 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
 }
 
 #[test]
+fn fgets_reads_bounded_lines_terminates_and_reports_eof() {
+    for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
+        let mut engine = test_engine(&[0xc3]);
+        let entry = STUB_BASE + 0x100;
+        let token = GUEST_STREAM_BASE;
+        engine.unicorn.get_data_mut().guest_files.streams.insert(
+            token,
+            GuestFileStream {
+                name: None,
+                bytes: Box::from(&b"ab\nlong"[..]),
+                position: 0,
+                readable: true,
+                share_read_access: true,
+                eof: false,
+                buffer_state: None,
+            },
+        );
+        install_win64_import(&mut engine.unicorn, entry, dll, "fgets").unwrap();
+        let output = DATA_BASE + 0x100;
+        engine.write(output, &[0xa5; 12]).unwrap();
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, 8, token, 0, 0, 0])
+                .unwrap(),
+            output
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), b"ab\n\0");
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, 3, token, 0, 0, 0])
+                .unwrap(),
+            output
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 3).unwrap(), b"lo\0");
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, 8, token, 0, 0, 0])
+                .unwrap(),
+            output
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 3).unwrap(), b"ng\0");
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, 8, token, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert!(engine.unicorn.get_data().guest_files.streams[&token].eof);
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, 1, token, 0, 0, 0])
+                .unwrap(),
+            output
+        );
+        assert_eq!(engine.unicorn.mem_read_as_vec(output, 1).unwrap(), b"\0");
+        engine.unicorn.get_data_mut().crt_errno = 0;
+        assert_eq!(
+            engine
+                .call_win64(entry, [output, 0, token, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+        assert_eq!(engine.unicorn.get_data().crt_errno, 22);
+    }
+    assert_eq!(
+        dispatch_win64_import("other.dll", "fgets"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+}
+
+#[test]
 fn isspace_classifies_all_c_locale_bytes_and_int_eof() {
     for dll in ["ucrtbase.dll", "api-ms-win-crt-string-l1-1-0.dll"] {
         let mut engine = test_engine(&[0xc3]);

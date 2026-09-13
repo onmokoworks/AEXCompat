@@ -642,6 +642,60 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
                 } // EOF is an int, not a signed byte.
             });
         }
+        if import == LegacyWin64Import::Fgets {
+            let output = read_win64_import_argument(unicorn, 0)?;
+            let count = read_win64_import_argument(unicorn, 1)? as u32 as i32;
+            let token = read_win64_import_argument(unicorn, 2)?;
+            if output == 0 || count <= 0 {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(0);
+            }
+            require_unbuffered_guest_stream(unicorn, token)?;
+            let stream = unicorn
+                .get_data()
+                .guest_files
+                .streams
+                .get(&token)
+                .ok_or("fgets received stale or foreign FILE")?;
+            if !stream.readable {
+                set_guest_crt_errno(unicorn, 9)?;
+                return Ok(0);
+            }
+            if stream.position >= stream.bytes.len() && count > 1 {
+                unicorn
+                    .get_data_mut()
+                    .guest_files
+                    .streams
+                    .get_mut(&token)
+                    .unwrap()
+                    .eof = true;
+                return Ok(0);
+            }
+            let maximum = (count as usize).saturating_sub(1);
+            let available = &stream.bytes[stream.position..];
+            let actual = available
+                .iter()
+                .take(maximum)
+                .position(|byte| *byte == b'\n')
+                .map_or(maximum.min(available.len()), |position| position + 1);
+            if !guest_range_has_permission(unicorn, output, actual as u64 + 1, Prot::WRITE)? {
+                return Err("fgets output is not writable".into());
+            }
+            let mut bytes = stream.bytes[stream.position..stream.position + actual].to_vec();
+            bytes.push(0);
+            unicorn
+                .mem_write(output, &bytes)
+                .map_err(|error| format!("fgets output write failed: {error}"))?;
+            let stream = unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&token)
+                .unwrap();
+            stream.position += actual;
+            stream.eof = false;
+            return Ok(output);
+        }
         if import == LegacyWin64Import::Fclose {
             let token = read_win64_import_argument(unicorn, 0)?;
             if !unicorn.get_data().guest_files.streams.contains_key(&token) {
