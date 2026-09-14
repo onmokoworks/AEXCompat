@@ -2,6 +2,201 @@
 // thread-stack arenas, even when those regions have not been mapped yet.
 const DEPENDENCY_IMAGE_BASE: u64 = 0x0000_0018_0000_0000;
 const DEPENDENCY_IMAGE_END: u64 = ENVIRONMENT_STRINGS_BASE;
+const SAPPHIRE_LARGE_STRING_ASSIGN_RVA: u64 = 0x0c_7840;
+const SAPPHIRE_LUT_COPY_SITE_RVA: u64 = 0x0874_81c;
+const SAPPHIRE_LUT_COPY_CONTINUE_RVA: u64 = 0x0874_8e1;
+const SAPPHIRE_LUT_COPY_SITE_BYTES: &[u8] = &[
+    0x49, 0x29, 0xd0, 0x48, 0x8d, 0x8d, 0xe0, 0x09, 0x00, 0x00, 0x48, 0x89, 0xce, 0xe8,
+];
+const SAPPHIRE_LARGE_STRING_ASSIGN_PROLOGUE: &[u8] = &[
+    0x56, 0x57, 0x53, 0x48, 0x83, 0xec, 0x40, 0x4c, 0x89, 0xc7, 0x48, 0x89, 0xce, 0x48, 0x8b,
+    0x41, 0x18,
+];
+const SAPPHIRE_LARGE_STRING_MIN_BYTES: u64 = 1024 * 1024;
+
+fn install_sapphire_large_string_assign(
+    unicorn: &mut Unicorn<'static, GuestState>,
+) -> Result<(), GuestError> {
+    let Some(library) = guest_library_by_name(unicorn.get_data(), "sapphire_ae.dll") else {
+        return Ok(());
+    };
+    let address = library
+        .base
+        .checked_add(SAPPHIRE_LARGE_STRING_ASSIGN_RVA)
+        .ok_or(GuestError::ImageAlignment)?;
+    let mut actual = vec![0; SAPPHIRE_LARGE_STRING_ASSIGN_PROLOGUE.len()];
+    uc(
+        "read Sapphire large string assign prologue",
+        unicorn.mem_read(address, &mut actual),
+    )?;
+    if actual != SAPPHIRE_LARGE_STRING_ASSIGN_PROLOGUE {
+        return Ok(());
+    }
+    let copy_site = library.base + SAPPHIRE_LUT_COPY_SITE_RVA;
+    let mut copy_site_actual = vec![0; SAPPHIRE_LUT_COPY_SITE_BYTES.len()];
+    uc(
+        "read Sapphire LUT copy site",
+        unicorn.mem_read(copy_site, &mut copy_site_actual),
+    )?;
+    if copy_site_actual == SAPPHIRE_LUT_COPY_SITE_BYTES {
+        let continuation = library.base + SAPPHIRE_LUT_COPY_CONTINUE_RVA;
+        uc(
+            "install Sapphire LUT copy fast path",
+            unicorn.add_code_hook(copy_site, copy_site, move |unicorn, _, _| {
+                if let Err(error) = emulate_sapphire_lut_copy(unicorn, continuation) {
+                    if unicorn.get_data().callback_error.is_none() {
+                        unicorn.get_data_mut().callback_error = Some(error);
+                    }
+                    let _ = unicorn.emu_stop();
+                }
+            }),
+        )?;
+    }
+    uc(
+        "install Sapphire large string assign",
+        unicorn.add_code_hook(address, address, |unicorn, _, _| {
+            if let Err(error) = emulate_sapphire_large_string_assign(unicorn) {
+                if unicorn.get_data().callback_error.is_none() {
+                    unicorn.get_data_mut().callback_error = Some(error);
+                }
+                let _ = unicorn.emu_stop();
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
+fn emulate_sapphire_lut_copy(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    continuation: u64,
+) -> Result<(), String> {
+    let source = unicorn
+        .reg_read(RegisterX86::RDX)
+        .map_err(|error| format!("read Sapphire LUT source: {error}"))?;
+    let end = unicorn
+        .reg_read(RegisterX86::R8)
+        .map_err(|error| format!("read Sapphire LUT end: {error}"))?;
+    let Some(length) = end.checked_sub(source) else {
+        return Ok(());
+    };
+    if source == 0
+        || length < SAPPHIRE_LARGE_STRING_MIN_BYTES
+        || length > MAX_CRT_ALLOCATION_BYTES
+    {
+        return Ok(());
+    }
+    let output = allocate_crt_region(unicorn, length + 1).map_err(|error| error.to_string())?;
+    let mut offset = 0u64;
+    let mut chunk = vec![0u8; 1024 * 1024];
+    while offset < length {
+        let count = usize::try_from((length - offset).min(chunk.len() as u64)).unwrap();
+        unicorn
+            .mem_read(source + offset, &mut chunk[..count])
+            .map_err(|error| format!("read Sapphire LUT bytes: {error}"))?;
+        unicorn
+            .mem_write(output + offset, &chunk[..count])
+            .map_err(|error| format!("write Sapphire LUT bytes: {error}"))?;
+        offset += count as u64;
+    }
+    unicorn
+        .mem_write(output + length, &[0])
+        .map_err(|error| format!("terminate Sapphire LUT: {error}"))?;
+    let rbp = unicorn
+        .reg_read(RegisterX86::RBP)
+        .map_err(|error| format!("read Sapphire LUT frame: {error}"))?;
+    let mut owner_bytes = [0u8; 8];
+    unicorn
+        .mem_read(rbp + 0x8c0, &mut owner_bytes)
+        .map_err(|error| format!("read Sapphire LUT owner: {error}"))?;
+    let owner = u64::from_le_bytes(owner_bytes);
+    unicorn
+        .mem_write(owner + 0x108, &output.to_le_bytes())
+        .map_err(|error| format!("write Sapphire LUT pointer: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RIP, continuation)
+        .map_err(|error| format!("continue Sapphire LUT setup: {error}"))?;
+    Ok(())
+}
+
+fn emulate_sapphire_large_string_assign(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), String> {
+    let object = unicorn
+        .reg_read(RegisterX86::RCX)
+        .map_err(|error| format!("read Sapphire string object: {error}"))?;
+    let source = unicorn
+        .reg_read(RegisterX86::RDX)
+        .map_err(|error| format!("read Sapphire string source: {error}"))?;
+    let length = unicorn
+        .reg_read(RegisterX86::R8)
+        .map_err(|error| format!("read Sapphire string length: {error}"))?;
+    let mut metadata = [0u8; 16];
+    if object == 0
+        || source == 0
+        || length < SAPPHIRE_LARGE_STRING_MIN_BYTES
+        || length > MAX_CRT_ALLOCATION_BYTES
+        || unicorn.mem_read(object + 16, &mut metadata).is_err()
+        || u64::from_le_bytes(metadata[..8].try_into().unwrap()) != 0
+        || u64::from_le_bytes(metadata[8..].try_into().unwrap()) != 15
+    {
+        return Ok(());
+    }
+
+    let capacity = length | 15;
+    let allocation_size = capacity
+        .checked_add(40)
+        .ok_or_else(|| "Sapphire string allocation overflow".to_string())?;
+    let base = allocate_crt_region(unicorn, allocation_size).map_err(|error| error.to_string())?;
+    let data = base
+        .checked_add(39)
+        .map(|address| address & !31)
+        .ok_or_else(|| "Sapphire aligned string pointer overflow".to_string())?;
+    unicorn
+        .mem_write(data - 8, &base.to_le_bytes())
+        .map_err(|error| format!("write Sapphire string allocation base: {error}"))?;
+    let mut offset = 0u64;
+    let mut chunk = vec![0u8; 1024 * 1024];
+    while offset < length {
+        let count = usize::try_from((length - offset).min(chunk.len() as u64)).unwrap();
+        unicorn
+            .mem_read(source + offset, &mut chunk[..count])
+            .map_err(|error| format!("read Sapphire string bytes: {error}"))?;
+        unicorn
+            .mem_write(data + offset, &chunk[..count])
+            .map_err(|error| format!("write Sapphire string bytes: {error}"))?;
+        offset += count as u64;
+    }
+    unicorn
+        .mem_write(data + length, &[0])
+        .map_err(|error| format!("terminate Sapphire string: {error}"))?;
+    unicorn
+        .mem_write(object, &data.to_le_bytes())
+        .map_err(|error| format!("write Sapphire string pointer: {error}"))?;
+    unicorn
+        .mem_write(object + 16, &length.to_le_bytes())
+        .map_err(|error| format!("write Sapphire string length: {error}"))?;
+    unicorn
+        .mem_write(object + 24, &capacity.to_le_bytes())
+        .map_err(|error| format!("write Sapphire string capacity: {error}"))?;
+    let rsp = unicorn
+        .reg_read(RegisterX86::RSP)
+        .map_err(|error| format!("read Sapphire string stack: {error}"))?;
+    let mut return_bytes = [0u8; 8];
+    unicorn
+        .mem_read(rsp, &mut return_bytes)
+        .map_err(|error| format!("read Sapphire string return address: {error}"))?;
+    let return_address = u64::from_le_bytes(return_bytes);
+    unicorn
+        .reg_write(RegisterX86::RAX, object)
+        .map_err(|error| format!("write Sapphire string result: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RSP, rsp + 8)
+        .map_err(|error| format!("restore Sapphire string stack: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RIP, return_address)
+        .map_err(|error| format!("return from Sapphire string assign: {error}"))?;
+    Ok(())
+}
 
 /// A real mapped DLL, pinned for the lifetime of the explicit library set.
 #[derive(Clone)]
@@ -303,6 +498,7 @@ impl GuestEngine<'static> {
             }
             engine.write(0x58, &array.to_le_bytes())?;
         }
+        install_sapphire_large_string_assign(&mut engine.unicorn)?;
         for (_, library) in libraries {
             seal_unicorn_image(
                 &mut engine.unicorn,

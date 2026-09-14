@@ -12,7 +12,7 @@ use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{Context, RegisterX86, UcHookId, Unicorn};
 
-use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_HEAP_BYTES};
+use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_ALLOCATION_BYTES, MAX_CRT_HEAP_BYTES};
 use crate::pe::{PeImage, StaticTlsImage};
 use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
