@@ -2387,7 +2387,10 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         let source_type = read_win64_import_argument(unicorn, 2)?;
         let target_type = read_win64_import_argument(unicorn, 3)?;
-        let is_reference = read_win64_import_argument(unicorn, 4)? != 0;
+        // The fifth parameter is a Win32 BOOL. Callers are allowed to write
+        // only its low 32 bits into the 8-byte stack slot, leaving the upper
+        // half as unrelated shadow-stack data.
+        let is_reference = read_win64_import_argument(unicorn, 4)? as u32 != 0;
         if source_type == 0 || target_type == 0 {
             return Err("__RTDynamicCast received a null type descriptor".into());
         }
@@ -2456,9 +2459,28 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
             return Ok(complete);
         }
         if is_reference {
+            let rsp = unicorn.reg_read(RegisterX86::RSP).unwrap_or_default();
+            let caller = read_u64(unicorn, rsp).unwrap_or_default();
+            let stack_code = unicorn
+                .mem_read_as_vec(rsp, 768)
+                .ok()
+                .map(|bytes| {
+                    bytes
+                        .chunks_exact(8)
+                        .enumerate()
+                        .filter_map(|(slot, bytes)| {
+                            let address = u64::from_le_bytes(bytes.try_into().ok()?);
+                            let module = guest_module_from_address(unicorn.get_data(), address)?;
+                            Some(format!("+{:#x}:{:#x}+{:#x}", slot * 8, module, address - module))
+                        })
+                        .take(16)
+                        .collect::<Vec<_>>()
+                        .join("|")
+                })
+                .unwrap_or_default();
             return Err(format!(
-                "__RTDynamicCast target reference is absent from RTTI: {}",
-                format!("{}; hierarchy={}", String::from_utf8_lossy(&target_name), hierarchy_names.join("|"))
+                "__RTDynamicCast target reference is absent from RTTI: {}; hierarchy={}; caller={caller:#x}; stack_code={stack_code}",
+                String::from_utf8_lossy(&target_name), hierarchy_names.join("|")
             ));
         }
         Ok(0)
@@ -4018,7 +4040,7 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
         let format = read_win64_import_argument(unicorn, 3)?;
         let locale = read_win64_import_argument(unicorn, 4)?;
         let args = read_win64_import_argument(unicorn, 5)?;
-        if options & !2 != 0 || !supported_crt_locale(unicorn, locale) {
+        if options & !3 != 0 || !supported_crt_locale(unicorn, locale) {
             return Err(format!(
                 "unsupported scanf options={options:#x} locale={locale:#x}"
             ));
@@ -4051,7 +4073,7 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
             input
         };
         let white = |b: u8| matches!(b, 9..=13 | 32);
-        let (mut fi, mut pos, mut assigned) = (0usize, 0usize, 0u64);
+        let (mut fi, mut pos, mut assigned, mut arg_index) = (0usize, 0usize, 0u64, 0u64);
         while fi < format.len() {
             if white(format[fi]) {
                 fi += 1;
@@ -4094,6 +4116,9 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                 width = usize::MAX;
             }
             if width != 0 && matches!(format.get(fi), Some(b's' | b'[')) {
+                if options & 1 != 0 && !suppress {
+                    return Err("secure scanf string sizes are not implemented".into());
+                }
                 let conversion = format[fi];
                 fi += 1;
                 let set = if conversion == b'[' {
@@ -4125,7 +4150,7 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                 }
                 if !suppress {
                     let slot = args
-                        .checked_add(assigned * 8)
+                        .checked_add(arg_index * 8)
                         .ok_or("scanf va_list overflow")?;
                     if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
                         return Err("scanf va_list unreadable".into());
@@ -4149,6 +4174,120 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                     unicorn
                         .mem_write(output, &bytes)
                         .map_err(|e| e.to_string())?;
+                    arg_index += 1;
+                    assigned += 1;
+                }
+                continue;
+            }
+            if width != 0 && format.get(fi) == Some(&b'c') {
+                fi += 1;
+                let character_width = if width == usize::MAX { 1 } else { width };
+                let count = character_width.min(input.len().saturating_sub(pos));
+                if count == 0 {
+                    return Ok(if assigned != 0 { assigned } else { u32::MAX as u64 });
+                }
+                if !suppress {
+                    let slot = args
+                        .checked_add(arg_index * 8)
+                        .ok_or("scanf va_list overflow")?;
+                    if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
+                        return Err("scanf va_list unreadable".into());
+                    }
+                    let output = u64::from_le_bytes(
+                        unicorn.mem_read_as_vec(slot, 8).map_err(|e| e.to_string())?[..]
+                            .try_into().unwrap(),
+                    );
+                    arg_index += 1;
+                    if options & 1 != 0 {
+                        let size_slot = args
+                            .checked_add(arg_index * 8)
+                            .ok_or("scanf va_list overflow")?;
+                        let size = u64::from_le_bytes(
+                            unicorn.mem_read_as_vec(size_slot, 8).map_err(|e| e.to_string())?[..]
+                                .try_into().unwrap(),
+                        );
+                        arg_index += 1;
+                        if size < count as u64 {
+                            return Err("secure scanf character output is too small".into());
+                        }
+                    }
+                    if output == 0
+                        || !guest_range_has_permission(unicorn, output, count as u64, Prot::WRITE)?
+                    {
+                        return Err("scanf character output unwritable".into());
+                    }
+                    unicorn
+                        .mem_write(output, &input[pos..pos + count])
+                        .map_err(|e| e.to_string())?;
+                    assigned += 1;
+                }
+                pos += count;
+                continue;
+            }
+            if width != 0 && matches!(format.get(fi), Some(b'f' | b'e' | b'E' | b'g' | b'G')) {
+                fi += 1;
+                while pos < input.len() && white(input[pos]) {
+                    pos += 1;
+                }
+                if pos == input.len() {
+                    return Ok(if assigned != 0 { assigned } else { u32::MAX as u64 });
+                }
+                let end = pos.saturating_add(width).min(input.len());
+                let start = pos;
+                if pos < end && matches!(input[pos], b'+' | b'-') {
+                    pos += 1;
+                }
+                let integer_start = pos;
+                while pos < end && input[pos].is_ascii_digit() {
+                    pos += 1;
+                }
+                let mut digits = pos - integer_start;
+                if pos < end && input[pos] == b'.' {
+                    pos += 1;
+                    let fractional_start = pos;
+                    while pos < end && input[pos].is_ascii_digit() {
+                        pos += 1;
+                    }
+                    digits += pos - fractional_start;
+                }
+                if digits == 0 {
+                    return Ok(assigned);
+                }
+                if pos < end && matches!(input[pos], b'e' | b'E') {
+                    let exponent = pos;
+                    pos += 1;
+                    if pos < end && matches!(input[pos], b'+' | b'-') {
+                        pos += 1;
+                    }
+                    let exponent_digits = pos;
+                    while pos < end && input[pos].is_ascii_digit() {
+                        pos += 1;
+                    }
+                    if pos == exponent_digits {
+                        pos = exponent;
+                    }
+                }
+                if !suppress {
+                    let text = std::str::from_utf8(&input[start..pos])
+                        .map_err(|_| "scanf float is not ASCII")?;
+                    let value = text.parse::<f32>().map_err(|_| "scanf float parse failed")?;
+                    let slot = args
+                        .checked_add(arg_index * 8)
+                        .ok_or("scanf va_list overflow")?;
+                    if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
+                        return Err("scanf va_list unreadable".into());
+                    }
+                    let output = u64::from_le_bytes(
+                        unicorn.mem_read_as_vec(slot, 8).map_err(|e| e.to_string())?[..]
+                            .try_into().unwrap(),
+                    );
+                    if output == 0 || !guest_range_has_permission(unicorn, output, 4, Prot::WRITE)? {
+                        return Err("scanf float output unwritable".into());
+                    }
+                    unicorn
+                        .mem_write(output, &value.to_le_bytes())
+                        .map_err(|e| e.to_string())?;
+                    arg_index += 1;
                     assigned += 1;
                 }
                 continue;
@@ -4230,7 +4369,7 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                     i32::try_from(value).map_err(|_| "scanf decimal outside int32 range")? as u32
                 };
                 let slot = args
-                    .checked_add(assigned * 8)
+                    .checked_add(arg_index * 8)
                     .ok_or("scanf va_list overflow")?;
                 if args == 0 || !guest_range_has_permission(unicorn, slot, 8, Prot::READ)? {
                     return Err("scanf va_list unreadable".into());
@@ -4245,6 +4384,7 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                 unicorn
                     .mem_write(output, &value.to_le_bytes())
                     .map_err(|e| e.to_string())?;
+                arg_index += 1;
                 assigned += 1;
             }
         }

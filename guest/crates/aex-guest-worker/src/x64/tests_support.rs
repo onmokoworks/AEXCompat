@@ -19337,6 +19337,76 @@ fn scanf_strings_and_scansets_honor_width_sets_and_suppression() {
 }
 
 #[test]
+fn scanf_float_conversions_store_win32_floats_and_ignore_stack_slot_high_bits() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "ucrtbase.dll",
+        "__stdio_common_vsscanf",
+    )
+    .unwrap();
+    let (input, format, args, output) = (
+        DATA_BASE + 0x100,
+        DATA_BASE + 0x200,
+        DATA_BASE + 0x300,
+        DATA_BASE + 0x400,
+    );
+    engine.write(input, b"1.25 -2 .5e2\0").unwrap();
+    engine.write(format, b"%f %f %f\0").unwrap();
+    for index in 0..3u64 {
+        engine
+            .write(args + index * 8, &(output + index * 4).to_le_bytes())
+            .unwrap();
+    }
+    assert_eq!(
+        engine
+            .call_win64(entry, [2, input, u64::MAX, format, 0, args])
+            .unwrap(),
+        3
+    );
+    for (index, expected) in [1.25f32, -2.0, 50.0].into_iter().enumerate() {
+        let bytes = engine
+            .unicorn
+            .mem_read_as_vec(output + index as u64 * 4, 4)
+            .unwrap();
+        assert_eq!(f32::from_le_bytes(bytes.try_into().unwrap()), expected);
+    }
+}
+
+#[test]
+fn secure_scanf_character_consumes_its_size_argument() {
+    let mut engine = test_engine(&[0xc3]);
+    let entry = STUB_BASE + 0x100;
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "ucrtbase.dll",
+        "__stdio_common_vsscanf",
+    )
+    .unwrap();
+    let (input, format, args, output) = (
+        DATA_BASE + 0x100,
+        DATA_BASE + 0x200,
+        DATA_BASE + 0x300,
+        DATA_BASE + 0x400,
+    );
+    engine.write(input, b"7 X\0").unwrap();
+    engine.write(format, b"%d %c\0").unwrap();
+    engine.write(args, &output.to_le_bytes()).unwrap();
+    engine.write(args + 8, &(output + 4).to_le_bytes()).unwrap();
+    engine.write(args + 16, &1u64.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(entry, [3, input, u64::MAX, format, 0, args])
+            .unwrap(),
+        2
+    );
+    assert_eq!(engine.unicorn.mem_read_as_vec(output, 5).unwrap(), [7, 0, 0, 0, b'X']);
+}
+
+#[test]
 fn scanf_scanset_rejects_malformed_format_and_preflights_output() {
     let mut engine = test_engine(&[0xc3]);
     let entry = STUB_BASE + 0x100;
