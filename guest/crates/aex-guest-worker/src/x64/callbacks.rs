@@ -1446,7 +1446,16 @@ fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
-        Ok(read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strlen")?.len() as u64)
+        let caller = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 8).ok())
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or_default();
+        read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strlen")
+            .map(|bytes| bytes.len() as u64)
+            .map_err(|error| format!("{error} (source={source:#x}, caller={caller:#x})"))
     })();
     match result {
         Ok(length) => {
@@ -2416,6 +2425,7 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
         let base_count = read_u32(unicorn, hierarchy + 8)? as usize;
         if base_count > 1024 { return Err("__RTDynamicCast base class count exceeds bound".into()); }
         let base_array = image_base + read_u32(unicorn, hierarchy + 12)? as u64;
+        let mut hierarchy_names = Vec::new();
         for index in 0..base_count {
             let descriptor = image_base + read_u32(unicorn, base_array + index as u64 * 4)? as u64;
             let descriptor_type = image_base + read_u32(unicorn, descriptor)? as u64;
@@ -2425,6 +2435,9 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
                 4096,
                 "__RTDynamicCast hierarchy type",
             )?;
+            if hierarchy_names.len() < 8 {
+                hierarchy_names.push(String::from_utf8_lossy(&descriptor_name).into_owned());
+            }
             if descriptor_type != target_type && descriptor_name != target_name { continue; }
             let mdisp = read_u32(unicorn, descriptor + 8)? as i32;
             let pdisp = read_u32(unicorn, descriptor + 12)? as i32;
@@ -2442,7 +2455,12 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
         if is_reference && target_name.starts_with(b".?AVGroupTransformImpl@OpenColorIO_") {
             return Ok(complete);
         }
-        if is_reference { return Err("__RTDynamicCast target reference is absent from RTTI".into()); }
+        if is_reference {
+            return Err(format!(
+                "__RTDynamicCast target reference is absent from RTTI: {}",
+                format!("{}; hierarchy={}", String::from_utf8_lossy(&target_name), hierarchy_names.join("|"))
+            ));
+        }
         Ok(0)
     })();
     match result {

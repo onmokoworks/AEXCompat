@@ -1127,7 +1127,19 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
             .reg_read(RegisterX86::RCX)
             .ok()
             .and_then(|exception| cv_exception_message(unicorn, exception, &throw_type));
-        let message_suffix = cv_message
+        let std_message = unicorn
+            .reg_read(RegisterX86::RCX)
+            .ok()
+            .and_then(|exception| {
+                if !throw_type.contains("OpenColorIO") {
+                    return None;
+                }
+                let bytes = unicorn.mem_read_as_vec(exception + 8, 8).ok()?;
+                let what = u64::from_le_bytes(bytes.try_into().ok()?);
+                let message = read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
+                Some(String::from_utf8_lossy(&message).into_owned())
+            });
+        let message_suffix = cv_message.or(std_message)
             .map(|message| format!(", cv_message={message}"))
             .unwrap_or_default();
         let caller = unicorn
@@ -1147,8 +1159,34 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
             .max()
             .unwrap_or(0);
         let heap_failure = format!("{:?}", unicorn.get_data().last_crt_heap_failure);
+        let guest_assets = unicorn
+            .get_data()
+            .guest_files
+            .reports
+            .iter()
+            .rev()
+            .take(8)
+            .map(|report| report.name.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
+        let environment = unicorn
+            .get_data()
+            .environment_overrides
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "{}={}",
+                    String::from_utf8_lossy(name),
+                    value
+                        .as_deref()
+                        .map(String::from_utf8_lossy)
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
         unicorn.get_data_mut().callback_error = Some(format!(
-            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}, caller={caller:#x}, crt_heap_live={heap_live}, crt_heap_allocations={heap_allocations}, crt_heap_largest={heap_largest}, crt_heap_failure={heap_failure}{message_suffix})"
+            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}, caller={caller:#x}, crt_heap_live={heap_live}, crt_heap_allocations={heap_allocations}, crt_heap_largest={heap_largest}, crt_heap_failure={heap_failure}, guest_assets={guest_assets}, environment={environment}{message_suffix})"
         ));
     }
     let _ = unicorn.emu_stop();

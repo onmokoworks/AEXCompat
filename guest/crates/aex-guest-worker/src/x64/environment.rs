@@ -160,26 +160,52 @@ fn emulate_crt_putenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
 // the maximum supported environment assignment. Results are borrowed for the
 // engine lifetime; querying another variable never invalidates a prior pointer.
 const MAX_GUEST_WGETENV_BUFFERS: usize = MAX_GUEST_ENVIRONMENT_OVERRIDES + 1;
+const GUEST_WENVIRON_BYTES: u64 = 4 * 1024 * 1024;
 const GUEST_ENVIRONMENT_BORROWED_BYTES: u64 =
-    PAGE_SIZE * (2 + 2 * MAX_GUEST_WGETENV_BUFFERS as u64);
+    PAGE_SIZE * (1 + 2 * MAX_GUEST_WGETENV_BUFFERS as u64) + GUEST_WENVIRON_BYTES;
 
 fn emulate_crt_wenviron(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
-        if let Some(cell) = unicorn.get_data().wenviron_cell {
-            return Ok(cell);
-        }
         let (_, base) = environment_strings_range(unicorn.get_data_mut())?;
         let cell = base + PAGE_SIZE * (1 + 2 * MAX_GUEST_WGETENV_BUFFERS as u64);
-        unicorn
-            .mem_map(cell, PAGE_SIZE, Prot::READ | Prot::WRITE)
-            .map_err(|error| format!("CRT __p__wenviron storage map failed: {error}"))?;
-        unicorn
-            .mem_write(cell, &(cell + 8).to_le_bytes())
-            .map_err(|error| format!("CRT __p__wenviron cell write failed: {error}"))?;
-        unicorn
-            .mem_write(cell + 8, &0u64.to_le_bytes())
-            .map_err(|error| format!("CRT __p__wenviron terminator write failed: {error}"))?;
-        unicorn.get_data_mut().wenviron_cell = Some(cell);
+        if unicorn.get_data().wenviron_cell.is_none() {
+            unicorn
+                .mem_map(cell, GUEST_WENVIRON_BYTES, Prot::READ | Prot::WRITE)
+                .map_err(|error| format!("CRT __p__wenviron storage map failed: {error}"))?;
+            unicorn.get_data_mut().wenviron_cell = Some(cell);
+        }
+        let mut entries: BTreeMap<Vec<u8>, Vec<u8>> = deterministic_guest_environment_entries()
+            .iter()
+            .map(|(name, value)| (name.to_ascii_uppercase(), value.to_vec()))
+            .collect();
+        for (name, value) in &unicorn.get_data().environment_overrides {
+            if let Some(value) = value {
+                entries.insert(name.clone(), value.clone());
+            } else {
+                entries.remove(name);
+            }
+        }
+        let array = cell + 8;
+        let strings = array + (entries.len() as u64 + 1) * 8;
+        let mut pointers = Vec::with_capacity((entries.len() + 1) * 8);
+        let mut text = Vec::new();
+        for (name, value) in entries {
+            pointers.extend_from_slice(&(strings + text.len() as u64).to_le_bytes());
+            for byte in name.into_iter().chain([b'=']).chain(value).chain([0]) {
+                text.extend_from_slice(&u16::from(byte).to_le_bytes());
+            }
+        }
+        pointers.extend_from_slice(&0u64.to_le_bytes());
+        let used = 8usize
+            .checked_add(pointers.len())
+            .and_then(|size| size.checked_add(text.len()))
+            .ok_or("CRT __p__wenviron storage size overflow")?;
+        if used as u64 > GUEST_WENVIRON_BYTES {
+            return Err("CRT __p__wenviron storage exceeds bound".into());
+        }
+        unicorn.mem_write(cell, &array.to_le_bytes()).map_err(|error| format!("CRT __p__wenviron cell write failed: {error}"))?;
+        unicorn.mem_write(array, &pointers).map_err(|error| format!("CRT __p__wenviron pointer array write failed: {error}"))?;
+        unicorn.mem_write(strings, &text).map_err(|error| format!("CRT __p__wenviron strings write failed: {error}"))?;
         Ok(cell)
     })();
     match result {
