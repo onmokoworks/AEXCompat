@@ -264,6 +264,11 @@ impl CrtHeap {
         Ok(allocation)
     }
 
+    pub(crate) fn allocation_containing(&self, pointer: u64) -> Option<(u64, CrtAllocation)> {
+        let (&base, &allocation) = self.allocations.range(..=pointer).next_back()?;
+        (pointer < base.saturating_add(allocation.requested_size)).then_some((base, allocation))
+    }
+
     pub(crate) fn prepare_regular_reallocation(
         &self,
         pointer: u64,
@@ -538,6 +543,21 @@ mod tests {
             heap.remove(0x1000),
             Err(CrtHeapError::ForeignOrFreedPointer)
         );
+    }
+
+    #[test]
+    fn containing_lookup_finds_interior_bytes_without_crossing_requested_end() {
+        let mut heap = CrtHeap::default();
+        let first = heap.prepare_allocation(17).unwrap();
+        let second = heap.prepare_allocation(9).unwrap();
+        heap.insert(0x1000, first).unwrap();
+        heap.insert(0x2000, second).unwrap();
+        assert_eq!(heap.allocation_containing(0x1000), Some((0x1000, first)));
+        assert_eq!(heap.allocation_containing(0x1010), Some((0x1000, first)));
+        assert_eq!(heap.allocation_containing(0x1011), None);
+        assert_eq!(heap.allocation_containing(0x1fff), None);
+        assert_eq!(heap.allocation_containing(0x2008), Some((0x2000, second)));
+        assert_eq!(heap.allocation_containing(0x2009), None);
     }
 
     #[test]

@@ -1422,12 +1422,8 @@ fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
         let live_remaining = unicorn
             .get_data()
             .crt_heap
-            .allocations()
-            .find_map(|(base, allocation)| {
-                (base..base.saturating_add(allocation.requested_size))
-                    .contains(&source)
-                    .then_some(allocation.requested_size - (source - base))
-            });
+            .allocation_containing(source)
+            .map(|(base, allocation)| allocation.requested_size - (source - base));
         let mut value = if let Some(remaining) = live_remaining {
             let mut bytes = unicorn
                 .mem_read_as_vec(source, remaining as usize)
@@ -1476,10 +1472,7 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
         let live_allocation = unicorn
             .get_data()
             .crt_heap
-            .allocations()
-            .find(|(base, allocation)| {
-                (*base..base.saturating_add(allocation.requested_size)).contains(&source)
-            });
+            .allocation_containing(source);
         let error = if let Some((base, allocation)) = live_allocation {
             let remaining = allocation.requested_size - (source - base);
             let mut scanned = 0u64;
@@ -1512,10 +1505,7 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
         let allocation = unicorn
             .get_data()
             .crt_heap
-            .allocations()
-            .find(|(base, allocation)| {
-                (*base..base.saturating_add(allocation.requested_size)).contains(&source)
-            })
+            .allocation_containing(source)
             .map(|(base, allocation)| format!("{base:#x}+{:#x}", allocation.requested_size))
             .unwrap_or_default();
         let stack_code = unicorn
@@ -1801,12 +1791,8 @@ fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
             unicorn
                 .get_data()
                 .crt_heap
-                .allocations()
-                .find_map(|(base, allocation)| {
-                    (base..base.saturating_add(allocation.requested_size))
-                        .contains(&pointer)
-                        .then(|| allocation.requested_size - (pointer - base))
-                })
+                .allocation_containing(pointer)
+                .map(|(base, allocation)| allocation.requested_size - (pointer - base))
         };
         let left_remaining = allocation_remaining(left);
         let right_remaining = allocation_remaining(right);
