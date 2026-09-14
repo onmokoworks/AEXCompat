@@ -13,6 +13,9 @@ const SAPPHIRE_LARGE_STRING_ASSIGN_PROLOGUE: &[u8] = &[
     0x41, 0x18,
 ];
 const SAPPHIRE_LARGE_STRING_MIN_BYTES: u64 = 1024 * 1024;
+const SAPPHIRE_FILEBUF_FGETC_CALL_RVA: u64 = 0x05cc_caf;
+const SAPPHIRE_FILEBUF_FGETC_RETURN_RVA: u64 = 0x05cc_cb5;
+const SAPPHIRE_FILEBUF_FGETC_CALL_BYTES: &[u8] = &[0xff, 0x15, 0x8b, 0x29, 0xc9, 0x02];
 
 fn install_sapphire_large_string_assign(
     unicorn: &mut Unicorn<'static, GuestState>,
@@ -20,8 +23,8 @@ fn install_sapphire_large_string_assign(
     let Some(library) = guest_library_by_name(unicorn.get_data(), "sapphire_ae.dll") else {
         return Ok(());
     };
-    let address = library
-        .base
+    let library_base = library.base;
+    let address = library_base
         .checked_add(SAPPHIRE_LARGE_STRING_ASSIGN_RVA)
         .ok_or(GuestError::ImageAlignment)?;
     let mut actual = vec![0; SAPPHIRE_LARGE_STRING_ASSIGN_PROLOGUE.len()];
@@ -32,14 +35,26 @@ fn install_sapphire_large_string_assign(
     if actual != SAPPHIRE_LARGE_STRING_ASSIGN_PROLOGUE {
         return Ok(());
     }
-    let copy_site = library.base + SAPPHIRE_LUT_COPY_SITE_RVA;
+    let mut fgetc_call = vec![0; SAPPHIRE_FILEBUF_FGETC_CALL_BYTES.len()];
+    uc(
+        "read Sapphire filebuf fgetc call",
+        unicorn.mem_read(
+            library_base + SAPPHIRE_FILEBUF_FGETC_CALL_RVA,
+            &mut fgetc_call,
+        ),
+    )?;
+    if fgetc_call == SAPPHIRE_FILEBUF_FGETC_CALL_BYTES {
+        unicorn.get_data_mut().sapphire_filebuf_fgetc_return =
+            Some(library_base + SAPPHIRE_FILEBUF_FGETC_RETURN_RVA);
+    }
+    let copy_site = library_base + SAPPHIRE_LUT_COPY_SITE_RVA;
     let mut copy_site_actual = vec![0; SAPPHIRE_LUT_COPY_SITE_BYTES.len()];
     uc(
         "read Sapphire LUT copy site",
         unicorn.mem_read(copy_site, &mut copy_site_actual),
     )?;
     if copy_site_actual == SAPPHIRE_LUT_COPY_SITE_BYTES {
-        let continuation = library.base + SAPPHIRE_LUT_COPY_CONTINUE_RVA;
+        let continuation = library_base + SAPPHIRE_LUT_COPY_CONTINUE_RVA;
         uc(
             "install Sapphire LUT copy fast path",
             unicorn.add_code_hook(copy_site, copy_site, move |unicorn, _, _| {

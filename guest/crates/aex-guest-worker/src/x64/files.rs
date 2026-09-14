@@ -32,6 +32,7 @@ struct GuestFileStream {
     share_read_access: bool,
     eof: bool,
     buffer_state: Option<u64>,
+    fast_buffer: Option<u64>,
 }
 
 #[track_caller]
@@ -249,6 +250,7 @@ fn open_guest_stream_with_share(
             share_read_access,
             eof: false,
             buffer_state: None,
+            fast_buffer: None,
         },
     );
     files.reports.push(TraceModule {
@@ -491,6 +493,7 @@ fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
                 share_read_access: true,
                 eof: false,
                 buffer_state: None,
+                fast_buffer: None,
             },
         );
         Ok(token)
@@ -575,8 +578,34 @@ fn require_unbuffered_guest_stream(
         unicorn
             .mem_read(state, &mut values)
             .map_err(|error| format!("FILE buffer state read: {error}"))?;
-        if values != [0; 20] {
-            return Err("guest-modified FILE buffering state is not implemented".into());
+        let modeled_fast_buffer = stream.fast_buffer.is_some_and(|buffer| {
+            let cursor = u64::from_le_bytes(values[8..16].try_into().unwrap());
+            let remaining = u32::from_le_bytes(values[16..20].try_into().unwrap()) as u64;
+            unicorn
+                .get_data()
+                .crt_heap
+                .regular_allocation(buffer)
+                .is_ok_and(|allocation| {
+                    let end = buffer.saturating_add(allocation.requested_size);
+                    values[..16] == [0; 16]
+                        || (values[..8] == [0; 8]
+                            && (buffer..=end).contains(&cursor)
+                            && cursor.checked_add(remaining) == Some(end))
+                })
+        });
+        if values != [0; 20] && !modeled_fast_buffer {
+            let fast_allocation = stream.fast_buffer.map(|buffer| {
+                unicorn
+                    .get_data()
+                    .crt_heap
+                    .regular_allocation(buffer)
+                    .map(|allocation| allocation.requested_size)
+            });
+            return Err(format!(
+                "guest-modified FILE buffering state is not implemented: state={} fast_buffer={:?} fast_allocation={fast_allocation:?}",
+                values.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                stream.fast_buffer
+            ));
         }
     }
     Ok(())
@@ -658,6 +687,67 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
         if import == LegacyWin64Import::Fgetc {
             let token = read_win64_import_argument(unicorn, 0)?;
             require_unbuffered_guest_stream(unicorn, token)?;
+            let expected_return = unicorn.get_data().sapphire_filebuf_fgetc_return;
+            if let Some(expected_return) = expected_return {
+                let rsp = unicorn
+                    .reg_read(RegisterX86::RSP)
+                    .map_err(|error| format!("read Sapphire filebuf return stack: {error}"))?;
+                let mut return_bytes = [0u8; 8];
+                unicorn
+                    .mem_read(rsp, &mut return_bytes)
+                    .map_err(|error| format!("read Sapphire filebuf return address: {error}"))?;
+                let stream = unicorn
+                    .get_data()
+                    .guest_files
+                    .streams
+                    .get(&token)
+                    .ok_or("getc received stale or foreign FILE")?;
+                if u64::from_le_bytes(return_bytes) == expected_return
+                    && stream.fast_buffer.is_none()
+                    && stream.bytes.len().saturating_sub(stream.position) > PAGE_SIZE as usize
+                {
+                    let first = stream.bytes[stream.position];
+                    let remaining = stream.bytes[stream.position + 1..].to_vec();
+                    let filebuf = unicorn
+                        .reg_read(RegisterX86::RSI)
+                        .map_err(|error| format!("read Sapphire filebuf object: {error}"))?;
+                    let mut pointer_cells = [0u8; 16];
+                    unicorn
+                        .mem_read(filebuf + 0x38, &mut pointer_cells[..8])
+                        .map_err(|error| format!("read Sapphire filebuf pointer cell: {error}"))?;
+                    unicorn
+                        .mem_read(filebuf + 0x50, &mut pointer_cells[8..])
+                        .map_err(|error| format!("read Sapphire filebuf count cell: {error}"))?;
+                    let pointer_cell = u64::from_le_bytes(pointer_cells[..8].try_into().unwrap());
+                    let count_cell = u64::from_le_bytes(pointer_cells[8..].try_into().unwrap());
+                    if pointer_cell != 0
+                        && count_cell != 0
+                        && guest_range_has_permission(unicorn, pointer_cell, 8, Prot::WRITE)?
+                        && guest_range_has_permission(unicorn, count_cell, 4, Prot::WRITE)?
+                    {
+                        let buffer = allocate_crt_region(unicorn, remaining.len() as u64)
+                            .map_err(|error| error.to_string())?;
+                        unicorn
+                            .mem_write(buffer, &remaining)
+                            .map_err(|error| format!("write Sapphire filebuf bytes: {error}"))?;
+                        unicorn
+                            .mem_write(pointer_cell, &buffer.to_le_bytes())
+                            .map_err(|error| format!("write Sapphire filebuf pointer: {error}"))?;
+                        unicorn
+                            .mem_write(count_cell, &(remaining.len() as i32).to_le_bytes())
+                            .map_err(|error| format!("write Sapphire filebuf count: {error}"))?;
+                        let stream = unicorn
+                            .get_data_mut()
+                            .guest_files
+                            .streams
+                            .get_mut(&token)
+                            .unwrap();
+                        stream.position = stream.bytes.len();
+                        stream.fast_buffer = Some(buffer);
+                        return Ok(u64::from(first));
+                    }
+                }
+            }
             let stream = unicorn
                 .get_data_mut()
                 .guest_files
@@ -773,6 +863,9 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
                 unicorn
                     .mem_unmap(state, PAGE_SIZE)
                     .map_err(|error| format!("fclose buffer state unmap: {error}"))?;
+            }
+            if let Some(buffer) = unicorn.get_data().guest_files.streams[&token].fast_buffer {
+                free_crt_region(unicorn, buffer)?;
             }
             let files = &mut unicorn.get_data_mut().guest_files;
             let stream = files.streams.remove(&token).unwrap();

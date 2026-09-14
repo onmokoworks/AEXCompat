@@ -16090,7 +16090,7 @@ fn crt_64_bit_stream_seek_and_tell_track_mounted_file_position() {
     let stream = GUEST_STREAM_BASE;
     engine.unicorn.get_data_mut().guest_files.streams.insert(
         stream,
-        GuestFileStream { name: Some("c:/fixture".into()), bytes: Box::from(*b"abcdef"), position: 1, readable: true, share_read_access: true, eof: false, buffer_state: None },
+        GuestFileStream { name: Some("c:/fixture".into()), bytes: Box::from(*b"abcdef"), position: 1, readable: true, share_read_access: true, eof: false, buffer_state: None, fast_buffer: None },
     );
     install_win64_import(&mut engine.unicorn, seek, "ucrtbase.dll", "_fseeki64").unwrap();
     install_win64_import(&mut engine.unicorn, tell, "ucrtbase.dll", "_ftelli64").unwrap();
@@ -17184,6 +17184,7 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
                 share_read_access: true,
                 eof: false,
                 buffer_state: None,
+                fast_buffer: None,
             },
         );
         engine.unicorn.get_data_mut().crt_errno = 77;
@@ -17231,6 +17232,79 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
 }
 
 #[test]
+fn sapphire_filebuf_fgetc_bulk_loads_large_stream_and_frees_buffer_on_close() {
+    let mut engine = test_engine(&[0xc3]);
+    let fgetc = STUB_BASE + 0x100;
+    let close = fgetc + 16;
+    let token = GUEST_STREAM_BASE + 40 * PAGE_SIZE;
+    let filebuf = DATA_BASE + 0x100;
+    let pointer_cell = DATA_BASE + 0x200;
+    let count_cell = DATA_BASE + 0x208;
+    let bytes: Box<[u8]> = (0..PAGE_SIZE as usize + 17)
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let byte_count = bytes.len();
+    engine
+        .unicorn
+        .mem_map(token, PAGE_SIZE, Prot::READ)
+        .unwrap();
+    engine.unicorn.get_data_mut().guest_files.live_bytes = byte_count;
+    engine.unicorn.get_data_mut().guest_files.streams.insert(
+        token,
+        GuestFileStream {
+            name: Some("c:/sapphire-large.cube".into()),
+            bytes,
+            position: 0,
+            readable: true,
+            share_read_access: true,
+            eof: false,
+            buffer_state: None,
+            fast_buffer: None,
+        },
+    );
+    engine.unicorn.get_data_mut().sapphire_filebuf_fgetc_return = Some(RETURN_ADDRESS);
+    engine.write(filebuf + 0x38, &pointer_cell.to_le_bytes()).unwrap();
+    engine.write(filebuf + 0x50, &count_cell.to_le_bytes()).unwrap();
+    install_win64_import(&mut engine.unicorn, fgetc, "ucrtbase.dll", "fgetc").unwrap();
+    install_win64_import(&mut engine.unicorn, close, "ucrtbase.dll", "fclose").unwrap();
+    engine.unicorn.reg_write(RegisterX86::RSI, filebuf).unwrap();
+
+    assert_eq!(engine.call_win64(fgetc, [token, 0, 0, 0, 0, 0]).unwrap(), 0);
+    let mut pointer = [0; 8];
+    let mut count = [0; 4];
+    engine.read(pointer_cell, &mut pointer).unwrap();
+    engine.read(count_cell, &mut count).unwrap();
+    let buffer = u64::from_le_bytes(pointer);
+    assert_eq!(u32::from_le_bytes(count) as usize, byte_count - 1);
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(buffer, byte_count - 1)
+            .unwrap(),
+        (1..byte_count)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.streams[&token].position,
+        byte_count
+    );
+    assert_eq!(
+        engine.unicorn.get_data().guest_files.streams[&token].fast_buffer,
+        Some(buffer)
+    );
+
+    assert_eq!(engine.call_win64(close, [token, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert!(engine
+        .unicorn
+        .get_data()
+        .crt_heap
+        .regular_allocation(buffer)
+        .is_err());
+    assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
+}
+
+#[test]
 fn fgets_reads_bounded_lines_terminates_and_reports_eof() {
     for dll in ["ucrtbase.dll", "api-ms-win-crt-stdio-l1-1-0.dll"] {
         let mut engine = test_engine(&[0xc3]);
@@ -17246,6 +17320,7 @@ fn fgets_reads_bounded_lines_terminates_and_reports_eof() {
                 share_read_access: true,
                 eof: false,
                 buffer_state: None,
+                fast_buffer: None,
             },
         );
         install_win64_import(&mut engine.unicorn, entry, dll, "fgets").unwrap();
@@ -18233,6 +18308,7 @@ fn exposed_file_cells_preserve_unbuffered_reads_and_reject_unknown_buffering() {
             share_read_access: true,
             eof: false,
             buffer_state: None,
+            fast_buffer: None,
         },
     );
     let query = STUB_BASE + 0x100;

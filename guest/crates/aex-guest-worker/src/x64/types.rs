@@ -180,6 +180,7 @@ struct GuestState {
     crt_strerror_buffers: BTreeMap<u32, u64>,
     windows_hostent_buffers: BTreeMap<u32, u64>,
     loaded_libraries: BTreeMap<String, GuestLibrary>,
+    sapphire_filebuf_fgetc_return: Option<u64>,
     params: Vec<GuestParam>,
     popup_choice_pages: u64,
     custom_ui_registration: Option<CustomUiRegistration>,
