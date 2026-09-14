@@ -1797,55 +1797,68 @@ fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
         if left == 0 || right == 0 {
             return Err("strcmp received a null string pointer".into());
         }
-        // This synchronous comparison cannot run guest code between reads.
-        // Refresh the map for each call and track each input's readable span.
-        let regions = unicorn
-            .mem_regions()
-            .map_err(|error| format!("guest memory-map query failed: {error}"))?;
-        let mut left_end = None;
-        let mut right_end = None;
-        for offset in 0..MAX_CRT_STRING_BYTES {
-            let read = |unicorn: &Unicorn<'_, GuestState>,
-                        base: u64,
-                        side: &str,
-                        readable_end: &mut Option<u64>| {
-                let address = base
-                    .checked_add(offset)
-                    .ok_or_else(|| format!("strcmp {side} string range overflow"))?;
-                if readable_end.is_none_or(|end| address > end) {
-                    *readable_end = regions
-                        .iter()
-                        .find(|region| {
-                            region.begin <= address
-                                && address <= region.end
-                                && region.perms & Prot::READ.0 as u32 != 0
-                        })
-                        .map(|region| region.end);
-                    if readable_end.is_none() {
-                        return Err(format!(
-                            "strcmp {side} string address {address:#x} is not readable"
-                        ));
-                    }
+        let allocation_remaining = |pointer: u64| {
+            unicorn
+                .get_data()
+                .crt_heap
+                .allocations()
+                .find_map(|(base, allocation)| {
+                    (base..base.saturating_add(allocation.requested_size))
+                        .contains(&pointer)
+                        .then(|| allocation.requested_size - (pointer - base))
+                })
+        };
+        let left_remaining = allocation_remaining(left);
+        let right_remaining = allocation_remaining(right);
+        let both_owned = left_remaining.is_some() && right_remaining.is_some();
+        let limit = left_remaining
+            .unwrap_or(MAX_CRT_STRING_BYTES)
+            .min(right_remaining.unwrap_or(MAX_CRT_STRING_BYTES));
+        let mut offset = 0u64;
+        while offset < limit {
+            let mut count = (limit - offset).min(256 * 1024);
+            if !both_owned {
+                count = count
+                    .min(PAGE_SIZE - (left + offset) % PAGE_SIZE)
+                    .min(PAGE_SIZE - (right + offset) % PAGE_SIZE);
+            }
+            let count = count as usize;
+            if !guest_range_has_permission(unicorn, left + offset, count as u64, Prot::READ)? {
+                return Err(format!(
+                    "strcmp left string address {:#x} is not readable",
+                    left + offset
+                ));
+            }
+            if !guest_range_has_permission(unicorn, right + offset, count as u64, Prot::READ)? {
+                return Err(format!(
+                    "strcmp right string address {:#x} is not readable",
+                    right + offset
+                ));
+            }
+            let left_bytes = unicorn
+                .mem_read_as_vec(left + offset, count)
+                .map_err(|error| {
+                    format!("strcmp left string address {:#x} is not readable: {error}", left + offset)
+                })?;
+            let right_bytes = unicorn
+                .mem_read_as_vec(right + offset, count)
+                .map_err(|error| {
+                    format!("strcmp right string address {:#x} is not readable: {error}", right + offset)
+                })?;
+            for (&left_byte, &right_byte) in left_bytes.iter().zip(&right_bytes) {
+                let ordering = left_byte.cmp(&right_byte);
+                if !ordering.is_eq() {
+                    return Ok(match ordering {
+                        std::cmp::Ordering::Less => -1,
+                        std::cmp::Ordering::Equal => 0,
+                        std::cmp::Ordering::Greater => 1,
+                    });
                 }
-                let mut byte = [0u8; 1];
-                unicorn
-                    .mem_read(address, &mut byte)
-                    .map_err(|error| format!("strcmp {side} string read failed: {error}"))?;
-                Ok(byte[0])
-            };
-            let left_byte = read(unicorn, left, "left", &mut left_end)?;
-            let right_byte = read(unicorn, right, "right", &mut right_end)?;
-            let ordering = left_byte.cmp(&right_byte);
-            if !ordering.is_eq() {
-                return Ok(match ordering {
-                    std::cmp::Ordering::Less => -1,
-                    std::cmp::Ordering::Equal => 0,
-                    std::cmp::Ordering::Greater => 1,
-                });
+                if left_byte == 0 {
+                    return Ok(0);
+                }
             }
-            if left_byte == 0 {
-                return Ok(0);
-            }
+            offset += count as u64;
         }
         Err(format!(
             "strcmp strings exceed {MAX_CRT_STRING_BYTES} bytes without a decisive byte"

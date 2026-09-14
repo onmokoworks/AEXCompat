@@ -15278,9 +15278,11 @@ fn win64_strlen_rejects_null_unreadable_and_unterminated_input() {
 fn win64_strlen_scans_a_live_crt_allocation_beyond_the_generic_string_limit() {
     const STRLEN: u64 = STUB_BASE + 0x1e0;
     const STRCPY: u64 = STUB_BASE + 0x1f0;
+    const STRCMP: u64 = STUB_BASE + 0x200;
     let mut engine = test_engine(&[0xc3]);
     install_win64_import(&mut engine.unicorn, STRLEN, "ucrtbase.dll", "strlen").unwrap();
     install_win64_import(&mut engine.unicorn, STRCPY, "ucrtbase.dll", "strcpy").unwrap();
+    install_win64_import(&mut engine.unicorn, STRCMP, "ucrtbase.dll", "strcmp").unwrap();
     let length = MAX_CRT_STRING_BYTES + 17;
     let pointer = allocate_crt_region(&mut engine.unicorn, length + 1).unwrap();
     engine
@@ -15308,6 +15310,17 @@ fn win64_strlen_scans_a_live_crt_allocation_beyond_the_generic_string_limit() {
             .unwrap(),
         [b'x', 0]
     );
+    assert_eq!(
+        engine
+            .call_win64(STRCMP, [copy, pointer, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine.unicorn.mem_write(copy + length - 1, b"y").unwrap();
+    assert!((engine
+        .call_win64(STRCMP, [copy, pointer, 0, 0, 0, 0])
+        .unwrap() as u32 as i32)
+        > 0);
 }
 
 #[test]
