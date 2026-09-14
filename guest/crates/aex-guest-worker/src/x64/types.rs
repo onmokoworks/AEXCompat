@@ -214,6 +214,7 @@ struct GuestState {
     next_pf_handle_data: u64,
     image_region: Option<(u64, u64)>,
     image_executable_ranges: Vec<(u64, u64)>,
+    sealed_image_reads: bool,
     latest_runtime_target: Option<TraceRuntimeTarget>,
     handles: HashMap<u64, GuestHandle>,
     worlds: HashMap<u64, GuestWorld>,

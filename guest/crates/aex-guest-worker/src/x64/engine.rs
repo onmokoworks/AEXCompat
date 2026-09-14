@@ -173,10 +173,15 @@ impl GuestEngine<'static> {
     }
 
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
-        match std::env::var_os("AEXCOMPAT_GUEST_LIBRARIES") {
+        let mut engine = match std::env::var_os("AEXCOMPAT_GUEST_LIBRARIES") {
             Some(path) => Self::load_with_library_manifest(image, std::path::Path::new(&path)),
             None => Self::load_primary(image, true),
-        }
+        }?;
+        // All primary and dependency PE pages have now passed
+        // `seal_unicorn_image`, which always grants read access and never
+        // exposes an image unmap/protection capability to the guest.
+        engine.unicorn.get_data_mut().sealed_image_reads = true;
+        Ok(engine)
     }
 
     fn load_primary(image: &PeImage, attach: bool) -> Result<Self, GuestError> {

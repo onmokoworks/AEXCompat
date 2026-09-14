@@ -8091,6 +8091,19 @@ fn guest_range_has_permission(
     let Some(end) = address.checked_add(length - 1) else {
         return Ok(false);
     };
+    if permission == Prot::READ && unicorn.get_data().sealed_image_reads {
+        let state = unicorn.get_data();
+        let in_primary = state
+            .image_region
+            .is_some_and(|(begin, image_end)| address >= begin && end < image_end);
+        let in_dependency = state
+            .loaded_libraries
+            .values()
+            .any(|library| address >= library.base && end < library.end);
+        if in_primary || in_dependency {
+            return Ok(true);
+        }
+    }
     let regions = unicorn
         .mem_regions()
         .map_err(|error| format!("guest memory-map query failed: {error}"))?;
