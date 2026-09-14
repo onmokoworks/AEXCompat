@@ -265,7 +265,8 @@ SmartRenderSessionOutcome run_smart_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
-    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers);
+    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers,
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr);
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -582,7 +583,8 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
           invocation.external_width, invocation.external_height,
           invocation.external_time_step, invocation.external_total_time,
           invocation.external_time_scale, invocation.external_pixel_bytes,
-          invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
+          invocation.external_layers.empty() ? nullptr : &invocation.external_layers,
+          request.cluster_swap);
       smart = outcome.last;
       // The report's guard verdict is the session-level one: a per-frame
       // guard violation invalidated the session (exit 24), and an empty
@@ -590,6 +592,7 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
       smart.guards_intact = outcome.session.guards_intact;
       result.session_protocol_violation = outcome.session.protocol_violation;
       result.session_invariant_failure = outcome.session.invariant_failure;
+      result.session_swap_failure = outcome.session.swap_failure;
       result.session_frames_attempted = outcome.session.frames_attempted;
       result.session_sequence_setup_error = outcome.session.setup_error;
       result.session_sequence_setdown_error = outcome.session.setdown_error;

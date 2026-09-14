@@ -175,7 +175,7 @@ struct FinalDispatchRequest {
   bool image_render_supported{};
   bool depth_supported{};
   bool smart_render_supported{};
-  // Cluster-session swap hook (classic render session only, issue #405);
+  // Cluster-session swap hook (classic and SmartFX resident sessions, issue #405);
   // null on every non-cluster path, where a swap_plugin message stays a
   // protocol violation.
   const worker_render_session::SwapPluginHook* cluster_swap{};
@@ -239,6 +239,7 @@ struct SmartFinalDispatchResult {
   // session fields so worker_main keeps the same 23/24 exit contract.
   bool session_protocol_violation{};
   bool session_invariant_failure{};
+  bool session_swap_failure{};
   int32_t session_frames_attempted{};
   int32_t session_sequence_setup_error{-1};
   int32_t session_sequence_setdown_error{-1};

@@ -98,8 +98,9 @@ use aexcompat_aviutl2_multifilter::{
 use aexcompat_broker::companion_manifest::{ApprovedCompanion, CompanionSuiteIdentity};
 use aexcompat_broker::image_render::{RenderGpuBackend, RenderPixelFormat};
 use aexcompat_broker::render_session::{
-    FrameOutcome, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
-    validate_abandoned_smart_heap_corruption_close, validate_abandoned_smart_untouched_close,
+    ClusterRenderPlugins, FrameOutcome, FrameStatus, RenderSession, SessionLayer,
+    SessionOpenRequest, SwapOutcome, validate_abandoned_smart_heap_corruption_close,
+    validate_abandoned_smart_untouched_close,
 };
 use aexcompat_broker::secure_image_dispatch::{ApprovedImageArtifact, WorkerKind};
 use serde::Serialize;
@@ -111,6 +112,12 @@ use sha2::{Digest, Sha256};
 /// a slow one (#354) — but a frame the caller is waiting on is exactly where a
 /// deadline belongs.
 const FRAME_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A cluster is one close-validated checkpoint: none of its frame results are
+/// final until the shared session closes cleanly. Bounding it limits both the
+/// amount of completed frame work awaiting that verdict and the retry cost if
+/// a later member invalidates the session.
+const MAX_SWEEP_CLUSTER_MEMBERS: usize = 16;
 
 const PRIMARY_RGBA: [u8; 4] = [32, 64, 128, 255];
 
@@ -695,27 +702,44 @@ fn main() {
             record
         };
     let grouped = bounded_parallel_map_ordered(&lanes, options.render_jobs, |_, lane| {
-        lane.iter()
-            .map(|&index| {
+        let mut finished = Vec::with_capacity(lane.len());
+        let mut position = 0;
+        while position < lane.len() {
+            let end = cluster_candidate_run_end(lane, position, &records);
+            let run = &lane[position..end];
+            let clustered = (run.len() >= 2)
+                .then(|| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        sweep_cluster_candidates(&repository, run, &records, &options, &input)
+                    }))
+                    .ok()
+                    .flatten()
+                })
+                .flatten();
+            for &index in run {
                 let record = &records[index];
                 let plugin_started = Instant::now();
                 // Third-party AEX in-process code paths (the PE read, the parameter
                 // translation) can panic; one plug-in must not end the sweep.
-                let mut outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    sweep_one(
-                        &repository,
-                        record,
-                        &records,
-                        &options,
-                        options.skip + index,
-                        &input,
-                        &layer_pixels,
-                    )
-                }))
-                .unwrap_or_else(|_| Outcome {
-                    bucket: "sweep_panicked".to_owned(),
-                    detail: Map::new(),
-                });
+                let clustered_result = clustered
+                    .as_ref()
+                    .and_then(|outcomes| outcomes.get(&index))
+                    .cloned();
+                let clustered_elapsed_ms = clustered_result.as_ref().map(|(_, elapsed)| *elapsed);
+                let mut outcome =
+                    clustered_result
+                        .map(|(outcome, _)| outcome)
+                        .unwrap_or_else(|| {
+                            sweep_one_caught(
+                                &repository,
+                                record,
+                                &records,
+                                &options,
+                                options.skip + index,
+                                &input,
+                                &layer_pixels,
+                            )
+                        });
                 verify_pixel_determinism(&mut outcome, options.verify_pixel_determinism, || {
                     let mut repeat_options = options.clone();
                     // The primary frame dump is the artifact requested by the
@@ -734,10 +758,13 @@ fn main() {
                     }))
                     .unwrap_or_else(|_| Outcome::bare("sweep_panicked"))
                 });
-                let elapsed_ms = plugin_started.elapsed().as_millis();
-                (index, finish_plugin(index, record, outcome, elapsed_ms))
-            })
-            .collect::<Vec<_>>()
+                let elapsed_ms =
+                    clustered_elapsed_ms.unwrap_or_else(|| plugin_started.elapsed().as_millis());
+                finished.push((index, finish_plugin(index, record, outcome, elapsed_ms)));
+            }
+            position = end;
+        }
+        finished
     });
     let plugins = restore_indexed_order(records.len(), grouped);
     let mut buckets: BTreeMap<String, usize> = BTreeMap::new();
@@ -759,6 +786,246 @@ fn main() {
         Some(lanes.len()),
     );
     finish_report(&options, &report);
+}
+
+fn sweep_one_caught(
+    repository: &Path,
+    record: &DiagnosticDiscovery,
+    records: &[DiagnosticDiscovery],
+    options: &Options,
+    corpus_index: usize,
+    input: &[u8],
+    layer_pixels: &[u8],
+) -> Outcome {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sweep_one(
+            repository,
+            record,
+            records,
+            options,
+            corpus_index,
+            input,
+            layer_pixels,
+        )
+    }))
+    .unwrap_or_else(|_| Outcome {
+        bucket: "sweep_panicked".to_owned(),
+        detail: Map::new(),
+    })
+}
+
+/// Uses the same in-place cluster session as the shipping bridge for the safe
+/// subset it pools there: SmartFX effects with no secondary layer. Healthy
+/// members amortize worker/bootstrap teardown across the closure. Any ambiguous
+/// session-wide failure rejects the whole fast path; the caller then re-runs
+/// every member through the existing one-plugin path so failure attribution is
+/// never weakened for speed.
+fn sweep_cluster_candidates(
+    repository: &Path,
+    candidates: &[usize],
+    records: &[DiagnosticDiscovery],
+    options: &Options,
+    input: &[u8],
+) -> Option<HashMap<usize, (Outcome, u128)>> {
+    if !cluster_fast_path_enabled(options) {
+        return None;
+    }
+    if candidates.len() < 2 || candidates.len() > MAX_SWEEP_CLUSTER_MEMBERS {
+        return None;
+    }
+
+    let first = &records[candidates[0]];
+    if !cluster_fast_path_eligible(first)
+        || candidates.iter().skip(1).any(|&index| {
+            let record = &records[index];
+            !cluster_fast_path_eligible(record)
+                || record.closure_identity_sha256 != first.closure_identity_sha256
+                || record.search_roots != first.search_roots
+        })
+    {
+        return None;
+    }
+
+    let mut plugins = Vec::with_capacity(candidates.len());
+    let mut companions = Vec::new();
+    for &index in candidates {
+        let record = &records[index];
+        plugins.push(ApprovedImageArtifact {
+            path: record.path.clone(),
+            expected_sha256: decode_sha256(&record.sha256)?,
+            expected_size: record.byte_size,
+        });
+        companions.extend(companion_providers_for(record, records).ok()?);
+    }
+    companions.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
+    companions.dedup_by(|left, right| left.artifact.path == right.artifact.path);
+
+    let open_started = Instant::now();
+    let mut session = match RenderSession::open_cluster(
+        SessionOpenRequest {
+            repository,
+            plugin_path: &first.path,
+            plugin_sha256: &first.sha256,
+            parameters: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            layers: &[],
+            dependencies: Vec::new(),
+            companions,
+            dependency_search_dirs: first.search_roots.clone(),
+            width: options.width,
+            height: options.height,
+            pixel_format: options.pixel_format,
+            time_step: TIME_STEP,
+            total_time: TOTAL_TIME,
+            time_scale: TIME_SCALE,
+            frame_deadline: FRAME_DEADLINE,
+            smart: true,
+            gpu_backend: RenderGpuBackend::Auto,
+            gpu_runtime_policy: None,
+            payload_override: None,
+            launch_environment: Default::default(),
+        },
+        ClusterRenderPlugins {
+            swap_payloads: vec![None; plugins.len()],
+            plugins,
+            module_bound: aexcompat_broker::cluster_manifest::MAX_CLUSTER_MODULE_BOUND,
+        },
+    ) {
+        Ok(session) => session,
+        Err(_) => return None,
+    };
+    let open_ms = open_started.elapsed().as_millis();
+
+    let mut outcomes = HashMap::new();
+    for (plugin_index, &record_index) in candidates.iter().enumerate() {
+        let swap_started = Instant::now();
+        if plugin_index > 0 {
+            match session.swap_plugin(plugin_index as u32) {
+                Ok(SwapOutcome::Swapped) => {}
+                Ok(SwapOutcome::PluginError { .. }) => return None,
+                Err(_) => {
+                    let _ = session.close();
+                    return None;
+                }
+            }
+        }
+        let swap_ms = swap_started.elapsed().as_millis();
+        let frame_started = Instant::now();
+        let mut outcome = frame_outcome_dumping(
+            session.render_frame_with_parameters(
+                plugin_index as u32,
+                options.current_time,
+                input,
+                None,
+            ),
+            None,
+        );
+        let frame_ms = frame_started.elapsed().as_millis();
+        // These cases require the per-plugin close evidence used by the existing
+        // fallback/classification logic. Abandon the optimization and let the
+        // caller reproduce every candidate independently.
+        if outcome.bucket == "render_frame_failed"
+            || outcome
+                .detail
+                .get("host_failure_reason")
+                .and_then(Value::as_str)
+                == Some("smart_output_untouched")
+        {
+            return None;
+        }
+        outcome.detail.insert(
+            "phase_elapsed_ms".to_owned(),
+            json!({
+                "session_open": if plugin_index == 0 { open_ms } else { 0 },
+                "plugin_swap": swap_ms,
+                "frames": frame_ms,
+                "session_close": 0,
+            }),
+        );
+        outcome.detail.insert(
+            "cluster_session".to_owned(),
+            json!({ "plugin_index": plugin_index, "plugin_count": candidates.len() }),
+        );
+        let elapsed = (if plugin_index == 0 { open_ms } else { 0 }) + swap_ms + frame_ms;
+        outcomes.insert(record_index, (outcome, elapsed));
+    }
+
+    let close_started = Instant::now();
+    let close = session.close();
+    let close_ms = close_started.elapsed().as_millis();
+    if close.get("session_clean") != Some(&Value::Bool(true))
+        || close.get("invalidated") != Some(&Value::Bool(false))
+    {
+        return None;
+    }
+    for (position, record_index) in candidates.iter().enumerate() {
+        let (outcome, elapsed) = outcomes.get_mut(record_index)?;
+        if position + 1 == candidates.len() {
+            *elapsed += close_ms;
+            if let Some(phases) = outcome
+                .detail
+                .get_mut("phase_elapsed_ms")
+                .and_then(Value::as_object_mut)
+            {
+                phases.insert("session_close".to_owned(), json!(close_ms));
+            }
+        }
+        attach_shared_cluster_close(outcome, &close);
+    }
+    Some(outcomes)
+}
+
+fn cluster_fast_path_enabled(options: &Options) -> bool {
+    options.frames == 1
+        && options.dump_frames.is_none()
+        && !options.close_report
+        && !options.verify_pixel_determinism
+        && !options.force_classic
+}
+
+fn cluster_fast_path_eligible(record: &DiagnosticDiscovery) -> bool {
+    record.ok
+        && record.plugin_kind == aexcompat_aviutl2_multifilter::DiscoveredPluginKind::Effect
+        && record.closure_identity_sha256.is_some()
+        && layer_slots_of(&record.parameters).is_empty()
+        && smart_render_route_supported(record.smart, record.out_flags2)
+}
+
+/// Finds the next order-preserving cluster transaction. With one render job a
+/// lane is the whole corpus, so the boundary must be derived from the records,
+/// not from scheduler membership. With multiple jobs this remains an explicit
+/// defence against a scheduler change silently broadening dependency scope.
+fn cluster_candidate_run_end(
+    lane: &[usize],
+    start: usize,
+    records: &[DiagnosticDiscovery],
+) -> usize {
+    let first_index = lane[start];
+    let first = &records[first_index];
+    if !cluster_fast_path_eligible(first) {
+        return start + 1;
+    }
+    lane.iter()
+        .enumerate()
+        .skip(start + 1)
+        .take(MAX_SWEEP_CLUSTER_MEMBERS - 1)
+        .take_while(|(_, index)| {
+            let record = &records[**index];
+            cluster_fast_path_eligible(record)
+                && record.closure_identity_sha256 == first.closure_identity_sha256
+                && record.search_roots == first.search_roots
+        })
+        .last()
+        .map_or(start + 1, |(position, _)| position + 1)
 }
 
 fn record_discovery_progress(
@@ -855,6 +1122,7 @@ fn discovery_outcome(record: &DiagnosticDiscovery) -> Outcome {
 /// evidence behind that bucket. The evidence's shape is per bucket - an open
 /// error, the rendered extent, the frame's error and the plug-in's own message
 /// - so it is a map rather than a type per bucket.
+#[derive(Clone)]
 struct Outcome {
     bucket: String,
     detail: Map<String, Value>,
@@ -1551,6 +1819,35 @@ fn attach_close(outcome: &mut Outcome, close: Value, whole_report: bool) {
     }
 }
 
+/// Records only session-wide facts from a clean shared close. The worker's
+/// detailed close diagnostics describe whichever plug-in was active last, so
+/// copying them onto every cluster member would falsely attribute one effect's
+/// route and callback evidence to all of its neighbours.
+fn attach_shared_cluster_close(outcome: &mut Outcome, close: &Value) {
+    let mut worker = Map::new();
+    for (key, value) in [
+        ("classification", close.pointer("/worker/classification")),
+        ("exit_code", close.pointer("/worker/exit_code")),
+    ] {
+        worker.insert(key.to_owned(), value.cloned().unwrap_or(Value::Null));
+    }
+    outcome.detail.insert("worker".to_owned(), worker.into());
+    outcome
+        .detail
+        .insert("session_clean".to_owned(), close["session_clean"].clone());
+    outcome.detail.insert(
+        "invalidated_reason".to_owned(),
+        close["invalidated_reason"].clone(),
+    );
+    if let Some(cluster) = outcome
+        .detail
+        .get_mut("cluster_session")
+        .and_then(Value::as_object_mut)
+    {
+        cluster.insert("close_shared".to_owned(), Value::Bool(true));
+    }
+}
+
 /// The unit tests' shape of `frame_outcome_dumping`: no dump.
 #[cfg(test)]
 fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
@@ -2185,6 +2482,94 @@ mod tests {
 
         options.no_layer = true;
         assert!(probe_layers(&record, &options, &[0; 4]).is_empty());
+    }
+
+    #[test]
+    fn cluster_fast_path_matches_the_shipping_smart_layerless_boundary() {
+        let mut record = failed_discovery(PathBuf::from("smart.aex"));
+        record.ok = true;
+        record.smart = true;
+        record.closure_identity_sha256 = Some("closure".to_owned());
+        record.failure_classification = None;
+        record.failure_diagnostics = None;
+        assert!(cluster_fast_path_eligible(&record));
+
+        record.parameters.push(parameter(3, "layer"));
+        assert!(!cluster_fast_path_eligible(&record));
+        record.parameters.clear();
+        record.plugin_kind = DiscoveredPluginKind::Aegp;
+        assert!(!cluster_fast_path_eligible(&record));
+
+        let mut options = discovery_options(PathBuf::from("unused.json"));
+        options.discovery_only = false;
+        assert!(cluster_fast_path_enabled(&options));
+        options.frames = 2;
+        assert!(!cluster_fast_path_enabled(&options));
+    }
+
+    #[test]
+    fn cluster_runs_preserve_order_and_stop_at_closure_or_runtime_root_boundaries() {
+        let eligible = |name: &str, closure: &str, root: &str| {
+            let mut record = failed_discovery(PathBuf::from(name));
+            record.ok = true;
+            record.smart = true;
+            record.closure_identity_sha256 = Some(closure.to_owned());
+            record.search_roots = vec![PathBuf::from(root)];
+            record.failure_classification = None;
+            record.failure_diagnostics = None;
+            record
+        };
+        let records = vec![
+            eligible("a.aex", "same", "root-a"),
+            eligible("b.aex", "same", "root-a"),
+            eligible("c.aex", "other", "root-a"),
+            eligible("d.aex", "other", "root-b"),
+            eligible("e.aex", "same", "root-a"),
+        ];
+        // This is the default jobs=1 scheduler shape: one lane containing the
+        // whole corpus. Only the first adjacent pair is one safe transaction;
+        // a later matching identity cannot jump over intervening boundaries.
+        let lane = vec![0, 1, 2, 3, 4];
+        assert_eq!(cluster_candidate_run_end(&lane, 0, &records), 2);
+        assert_eq!(cluster_candidate_run_end(&lane, 2, &records), 3);
+        assert_eq!(cluster_candidate_run_end(&lane, 3, &records), 4);
+        assert_eq!(cluster_candidate_run_end(&lane, 4, &records), 5);
+    }
+
+    #[test]
+    fn shared_cluster_close_does_not_misattribute_the_last_plugins_diagnostics() {
+        let mut outcome = Outcome::bare("rendered");
+        outcome.detail.insert(
+            "cluster_session".to_owned(),
+            json!({ "plugin_index": 0, "plugin_count": 2 }),
+        );
+        attach_shared_cluster_close(
+            &mut outcome,
+            &json!({
+                "session_clean": true,
+                "invalidated": false,
+                "invalidated_reason": Value::Null,
+                "worker": {
+                    "classification": "ok",
+                    "exit_code": 0,
+                    "diagnostics": {
+                        "failure_stage": "belongs_to_the_last_plugin",
+                        "stage_events": [{
+                            "stage": "pr_gpu_route",
+                            "state": "end",
+                            "errors": { "reason": "belongs_to_the_last_plugin" }
+                        }]
+                    }
+                }
+            }),
+        );
+
+        assert_eq!(outcome.detail["session_clean"], true);
+        assert_eq!(outcome.detail["worker"]["classification"], "ok");
+        assert_eq!(outcome.detail["worker"]["exit_code"], 0);
+        assert_eq!(outcome.detail["cluster_session"]["close_shared"], true);
+        assert!(outcome.detail["worker"].get("failure_stage").is_none());
+        assert!(outcome.detail["worker"].get("pr_gpu_route").is_none());
     }
 
     #[test]

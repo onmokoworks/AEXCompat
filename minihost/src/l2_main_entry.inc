@@ -2833,7 +2833,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   cluster::Manifest cluster_manifest;
   ClusterSwapContext cluster_swap_context;
   aexcompat::worker_render_session::SwapPluginHook cluster_swap_hook;
-  if (is_render_worker() && invocation.render_session_mode &&
+  if (is_rendering_worker() && invocation.render_session_mode &&
       !invocation.cluster_manifest_path.empty()) {
     if (!cluster::load_manifest(invocation.cluster_manifest_path, cluster_manifest))
       return session.finish(3);
@@ -3115,7 +3115,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   } else if (is_smart_worker()) {
     const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
-         image_render_supported, depth_supported, smart_render_supported});
+         image_render_supported, depth_supported, smart_render_supported,
+         cluster_session_active ? &cluster_swap_hook : nullptr, audio_effect_only});
     if (dispatch.case_id_rejected) {
       dispose_arbitrary_defaults(entry, input, output);
       if (global_error == 0)
@@ -3127,6 +3128,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     lifetime_fault_observed = dispatch.lifetime_fault_observed;
     session_protocol_violation = dispatch.session_protocol_violation;
     session_invariant_failure = dispatch.session_invariant_failure;
+    session_swap_failure = dispatch.session_swap_failure;
     smart_session_frames_attempted = dispatch.session_frames_attempted;
     smart_session_sequence_setup_error = dispatch.session_sequence_setup_error;
     smart_session_sequence_setdown_error = dispatch.session_sequence_setdown_error;

@@ -9,8 +9,13 @@
 #[cfg(windows)]
 mod windows_e2e {
     use aexcompat_broker::image_render::{
-        InteractiveParameter, InteractiveRenderSession, InteractiveSessionOpen, RenderPixelFormat,
+        InteractiveParameter, InteractiveRenderSession, InteractiveSessionOpen, RenderGpuBackend,
+        RenderPixelFormat,
     };
+    use aexcompat_broker::render_session::{
+        ClusterRenderPlugins, FrameStatus, RenderSession, SessionOpenRequest, SwapOutcome,
+    };
+    use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
 
@@ -56,6 +61,166 @@ mod windows_e2e {
         ));
         std::fs::create_dir_all(&scratch).unwrap();
         scratch
+    }
+
+    fn approved_artifact(path: &Path) -> ApprovedImageArtifact {
+        let bytes = std::fs::read(path).unwrap();
+        ApprovedImageArtifact {
+            path: path.to_path_buf(),
+            expected_sha256: Sha256::digest(&bytes).into(),
+            expected_size: bytes.len() as u64,
+        }
+    }
+
+    fn first_built_artifact(root: &Path, candidates: &[&str]) -> PathBuf {
+        candidates
+            .iter()
+            .map(|candidate| root.join(candidate))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| root.join(candidates[0]))
+    }
+
+    fn de_verbatim(path: &Path) -> PathBuf {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+    }
+
+    #[test]
+    fn smart_cluster_swaps_real_effects_and_restores_the_first_effect() {
+        let root = de_verbatim(&repository_root());
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let geometry = first_built_artifact(
+            &root,
+            &[
+                "target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex",
+                "target/pf-smart-geometry-probe-build/pf_smart_geometry_probe.aex",
+            ],
+        );
+        let passthrough = first_built_artifact(
+            &root,
+            &[
+                "target/pf-smart-param-time-probe-build/Release/pf_smart_param_time_probe.aex",
+                "target/pf-smart-param-time-probe-build/pf_smart_param_time_probe.aex",
+            ],
+        );
+        let setup_error = first_built_artifact(
+            &root,
+            &[
+                "target/pf-smart-param-time-probe-build/Release/pf_smart_global_setup_error_probe.aex",
+                "target/pf-smart-param-time-probe-build/pf_smart_global_setup_error_probe.aex",
+            ],
+        );
+        if !worker.is_file()
+            || !geometry.is_file()
+            || !passthrough.is_file()
+            || !setup_error.is_file()
+        {
+            eprintln!(
+                "skipping real SmartFX cluster test: build aex_worker.exe, the geometry probe, and the smart-param-time probe first"
+            );
+            return;
+        }
+
+        let plugins = vec![
+            approved_artifact(&geometry),
+            approved_artifact(&passthrough),
+            approved_artifact(&setup_error),
+        ];
+        let geometry_sha = format!("{:x}", Sha256::digest(std::fs::read(&geometry).unwrap()));
+        let mut session = RenderSession::open_cluster(
+            SessionOpenRequest {
+                repository: &root,
+                plugin_path: &geometry,
+                plugin_sha256: &geometry_sha,
+                parameters: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                companions: Vec::new(),
+                dependency_search_dirs: vec![
+                    geometry.parent().unwrap().to_path_buf(),
+                    passthrough.parent().unwrap().to_path_buf(),
+                    setup_error.parent().unwrap().to_path_buf(),
+                ],
+                width: 64,
+                height: 48,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: std::time::Duration::from_secs(30),
+                smart: true,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                payload_override: None,
+                launch_environment: Default::default(),
+            },
+            ClusterRenderPlugins {
+                swap_payloads: vec![None; plugins.len()],
+                plugins,
+                module_bound: 64,
+            },
+        )
+        .expect("open real SmartFX cluster");
+
+        let input: Vec<u8> = (0..64 * 48 * 4).map(|index| (index % 251) as u8).collect();
+        let render = |session: &mut RenderSession, frame_index| {
+            let frame = session
+                .render_frame(frame_index, 0, &input)
+                .expect("cluster frame transport");
+            match frame.status {
+                FrameStatus::Rendered { pixels, .. } => pixels,
+                status => panic!("cluster frame did not render: {status:?}"),
+            }
+        };
+
+        let first = render(&mut session, 0);
+        let to_second = session.swap_plugin(1);
+        assert!(
+            matches!(to_second, Ok(SwapOutcome::Swapped)),
+            "swap to effect B failed: {to_second:?}"
+        );
+        let second = render(&mut session, 1);
+        assert_ne!(
+            first, second,
+            "two different effects produced the same frame"
+        );
+        let to_first = session.swap_plugin(0);
+        assert!(
+            matches!(to_first, Ok(SwapOutcome::Swapped)),
+            "swap back to effect A failed: {to_first:?}"
+        );
+        let restored = render(&mut session, 2);
+        assert_eq!(first, restored, "A -> B -> A did not restore effect A");
+
+        let failed_setup = session
+            .swap_plugin(2)
+            .expect("a plug-in-local setup failure still completes the exchange");
+        let SwapOutcome::PluginError { global_setup_error } = failed_setup else {
+            panic!("GLOBAL_SETUP failure was not propagated: {failed_setup:?}");
+        };
+        assert_eq!(global_setup_error, 512);
+
+        let close = session.close();
+        assert_eq!(close["invalidated"], false, "close: {close}");
+        assert_eq!(close["frames_ok"], 3, "close: {close}");
+        assert_eq!(close["session_clean"], false, "close: {close}");
+        assert_eq!(
+            close["worker"]["diagnostics"]["first_failure_stage"], "global_setup",
+            "the plug-in-local swap failure must remain visible at close: {close}"
+        );
     }
 
     #[test]

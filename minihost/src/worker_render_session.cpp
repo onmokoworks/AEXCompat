@@ -1343,7 +1343,8 @@ SmartRenderSessionOutcome run_smart_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
-    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers) {
+    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers,
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook) {
   SmartRenderSessionOutcome outcome;
   run_session_frame_loop(
       outcome.session, entry, input, output, max_width, max_height,
@@ -1509,8 +1510,7 @@ SmartRenderSessionOutcome run_smart_render_session(
                 .return_message.empty();
         return frame;
       },
-      // Smart sessions are out of cluster-swap scope (design §1): no hook.
-      nullptr);
+      swap_hook);
   return outcome;
 }
 

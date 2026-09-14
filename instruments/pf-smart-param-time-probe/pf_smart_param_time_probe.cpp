@@ -45,11 +45,15 @@ PF_Err CheckOutOwnTime(PF_InData* in_data) {
 }
 
 PF_Err GlobalSetup(PF_OutData* out_data) {
+#if defined(AEXCOMPAT_FAIL_GLOBAL_SETUP)
+  return PF_Err_INTERNAL_STRUCT_DAMAGED;
+#else
   out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
   out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
   out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
       PF_OutFlag2_SUPPORTS_QUERY_DYNAMIC_FLAGS;
   return PF_Err_NONE;
+#endif
 }
 
 PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data) {
