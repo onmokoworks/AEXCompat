@@ -1419,8 +1419,28 @@ fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
         if destination == 0 {
             return Err("strcpy destination is null".into());
         }
-        let mut value =
-            read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strcpy source")?;
+        let live_remaining = unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .find_map(|(base, allocation)| {
+                (base..base.saturating_add(allocation.requested_size))
+                    .contains(&source)
+                    .then_some(allocation.requested_size - (source - base))
+            });
+        let mut value = if let Some(remaining) = live_remaining {
+            let mut bytes = unicorn
+                .mem_read_as_vec(source, remaining as usize)
+                .map_err(|error| format!("strcpy allocation read: {error}"))?;
+            let end = bytes
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or("strcpy live allocation has no terminator")?;
+            bytes.truncate(end);
+            bytes
+        } else {
+            read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strcpy source")?
+        };
         value.push(0);
         if !guest_range_has_permission(unicorn, destination, value.len() as u64, Prot::WRITE)? {
             return Err("strcpy destination is not writable".into());
@@ -1453,9 +1473,72 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
             .and_then(|bytes| bytes.try_into().ok())
             .map(u64::from_le_bytes)
             .unwrap_or_default();
-        read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strlen")
-            .map(|bytes| bytes.len() as u64)
-            .map_err(|error| format!("{error} (source={source:#x}, caller={caller:#x})"))
+        let live_allocation = unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .find(|(base, allocation)| {
+                (*base..base.saturating_add(allocation.requested_size)).contains(&source)
+            });
+        let error = if let Some((base, allocation)) = live_allocation {
+            let remaining = allocation.requested_size - (source - base);
+            let mut scanned = 0u64;
+            while scanned < remaining {
+                let count = (remaining - scanned).min(256 * 1024) as usize;
+                let bytes = unicorn
+                    .mem_read_as_vec(source + scanned, count)
+                    .map_err(|error| format!("strlen allocation read: {error}"))?;
+                if let Some(index) = bytes.iter().position(|byte| *byte == 0) {
+                    return Ok(scanned + index as u64);
+                }
+                scanned += count as u64;
+            }
+            "strlen live allocation has no terminator".to_string()
+        } else {
+            match read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strlen") {
+                Ok(bytes) => return Ok(bytes.len() as u64),
+                Err(error) => error,
+            }
+        };
+        let preview = unicorn
+            .mem_read_as_vec(source, 64)
+            .map(|bytes| {
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            })
+            .unwrap_or_default();
+        let allocation = unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .find(|(base, allocation)| {
+                (*base..base.saturating_add(allocation.requested_size)).contains(&source)
+            })
+            .map(|(base, allocation)| format!("{base:#x}+{:#x}", allocation.requested_size))
+            .unwrap_or_default();
+        let stack_code = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 512).ok())
+            .map(|bytes| {
+                bytes
+                    .chunks_exact(8)
+                    .enumerate()
+                    .filter_map(|(slot, bytes)| {
+                        let address = u64::from_le_bytes(bytes.try_into().ok()?);
+                        let module = guest_module_from_address(unicorn.get_data(), address)?;
+                        Some(format!("+{:#x}:{:#x}+{:#x}", slot * 8, module, address - module))
+                    })
+                    .take(16)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_default();
+        Err(format!(
+            "{error} (source={source:#x}, caller={caller:#x}, allocation={allocation}, preview={preview}, stack_code={stack_code})"
+        ))
     })();
     match result {
         Ok(length) => {

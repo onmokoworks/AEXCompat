@@ -15275,6 +15275,42 @@ fn win64_strlen_rejects_null_unreadable_and_unterminated_input() {
 }
 
 #[test]
+fn win64_strlen_scans_a_live_crt_allocation_beyond_the_generic_string_limit() {
+    const STRLEN: u64 = STUB_BASE + 0x1e0;
+    const STRCPY: u64 = STUB_BASE + 0x1f0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, STRLEN, "ucrtbase.dll", "strlen").unwrap();
+    install_win64_import(&mut engine.unicorn, STRCPY, "ucrtbase.dll", "strcpy").unwrap();
+    let length = MAX_CRT_STRING_BYTES + 17;
+    let pointer = allocate_crt_region(&mut engine.unicorn, length + 1).unwrap();
+    engine
+        .unicorn
+        .mem_write(pointer, &vec![b'x'; length as usize])
+        .unwrap();
+    engine.unicorn.mem_write(pointer + length, &[0]).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STRLEN, [pointer, 0, 0, 0, 0, 0])
+            .unwrap(),
+        length
+    );
+    let copy = allocate_crt_region(&mut engine.unicorn, length + 1).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(STRCPY, [copy, pointer, 0, 0, 0, 0])
+            .unwrap(),
+        copy
+    );
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(copy + length - 1, 2)
+            .unwrap(),
+        [b'x', 0]
+    );
+}
+
+#[test]
 fn registry_open_empty_roots_and_missing_application_keys() {
     const OPEN: u64 = STUB_BASE + 0x1f0;
     const CLOSE: u64 = STUB_BASE + 0x200;
