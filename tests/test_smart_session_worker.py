@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from test_render_session_worker import (
+    probe_variant,
     EXIT_INVARIANT_FAILURE,
     HEIGHT,
     OUTPUT_GENERATION_OFFSET,
@@ -49,10 +50,15 @@ def _require_artifacts():
         pytest.skip("pf_smart_geometry_probe.aex is not built")
 
 
-def _spawn(transport, command="--smart-session-v1", kind="smart"):
-    aex_sha = hashlib.sha256(PROBE.read_bytes()).hexdigest()
+def _spawn(transport, command="--smart-session-v1", kind="smart", variant=None):
+    # `variant` names a depth-advertisement variant of the same probe; the
+    # probe selects it from a marker in its own file name, so the variant
+    # travels with the plug-in the run loaded instead of sitting in an ambient
+    # environment variable every other test would inherit.
+    probe = PROBE if variant is None else probe_variant(variant, PROBE)
+    aex_sha = hashlib.sha256(probe.read_bytes()).hexdigest()
     process = subprocess.Popen(
-        [str(WORKER), "--kind", kind, command, str(PROBE), aex_sha, "v2|",
+        [str(WORKER), "--kind", kind, command, str(probe), aex_sha, "v2|",
          str(WIDTH), str(HEIGHT), "1", str(TOTAL_TIME), str(TIME_SCALE)],
         cwd=ROOT, env=transport.environment(), close_fds=False,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -155,6 +161,90 @@ def test_smart_session_deep32_cpu_command_renders_a_float_frame():
         assert report["pixel_format"] == "argb32f"
         assert report["case_id"] == "request_cpu"
         assert report["session_frames_attempted"] == 1
+        # The advertised path: the plug-in itself saw float32 worlds. Asserted
+        # so this test cannot quietly become the narrowed one - the slot is
+        # argb32f either way.
+        assert report["advertised_depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 16
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_smart_session_narrows_a_plug_in_that_does_not_advertise_the_depth():
+    """After Effects does not refuse an effect that lacks DEEP_COLOR_AWARE in a
+    deep project: it hands the effect worlds at the deepest depth it does
+    advertise and converts the result back, so the effect renders at 8-bit
+    precision inside a 32-bpc session rather than not at all. The session slot,
+    the frame message and the final report all describe the frame at the
+    session's depth - the narrowing is between the host and the plug-in, and a
+    caller reading the slot must not have to know it happened.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=32, output_pixel_bytes=16)
+    process = _spawn(transport, command="--smart-session32-cpu-v1",
+                     variant="shallow")
+    try:
+        transport.write_input(57, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        output = done["output"]
+        # The slot is float32 even though the plug-in rendered 8-bit.
+        assert output["pixel_format"] == "argb32f"
+        assert output["rowbytes"] == WIDTH * 16
+        slot = transport.output_bytes(WIDTH * HEIGHT * 16)
+        assert output["packed_bytes"] == len(slot)
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+        report = json.loads(stdout.strip())
+        assert report["status"] == "render_completed"
+        # The final report describes the same frame as the message above.
+        assert report["pixel_format"] == "argb32f"
+        assert report["rowbytes"] == WIDTH * 16
+        assert report["bytes_written_per_row"] == WIDTH * 16
+        assert report["undefined_tail_bytes_per_row"] == 0
+        # ... and records that the plug-in itself never saw that depth.
+        assert report["advertised_depth_supported"] is False
+        assert report["depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 4
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_smart_session_depth_follows_global_setup_not_a_later_rewrite():
+    """`out_data` is one buffer that every selector writes into and nothing
+    restores between frames, so a plug-in that assigns rather than ORs its
+    out-flags in PARAMS_SETUP erases what GLOBAL_SETUP advertised. The depth a
+    session hands the plug-in its worlds in is decided by the advertisement,
+    not by whatever is in that buffer when a frame starts: a host that reads it
+    live would dispatch this probe at 8 bits while its report still says it
+    advertised float32.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=32, output_pixel_bytes=16)
+    process = _spawn(transport, command="--smart-session32-cpu-v1",
+                     variant="rewrite")
+    try:
+        transport.write_input(57, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        assert done["output"]["pixel_format"] == "argb32f"
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+        report = json.loads(stdout.strip())
+        assert report["status"] == "render_completed"
+        assert report["advertised_depth_supported"] is True
+        # 16, not 4: the rewrite in PARAMS_SETUP did not move the dispatch.
+        assert report["dispatch_pixel_bytes"] == 16
     finally:
         if process.poll() is None:
             process.kill()

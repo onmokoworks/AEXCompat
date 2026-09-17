@@ -2,9 +2,69 @@
 #include "entry.h"
 #include "AE_Effect.h"
 
+// Prophylactic, not load-bearing: nothing here trips the function-like max/min
+// macros today (this file uses neither) and nothing here uses anything
+// WIN32_LEAN_AND_MEAN excludes. They keep the next use from failing to compile
+// with an error that points at a standard header rather than at this include.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+
+#include <array>
 #include <cstdint>
+#include <cstring>
 
 namespace {
+
+// Depth-advertisement variants, selected by a marker in this module's own file
+// name so the same fixture, the same entry point and the same render answer
+// every case - only the advertisement differs, which is the variable under
+// test. Every other probe in the tree advertises DEEP and FLOAT
+// unconditionally, so without these a session's dispatch depth always equals
+// its own and the host's narrowing path never runs under test.
+//
+//   ...-shallow.aex   advertise neither depth at GLOBAL_SETUP.
+//   ...-rewrite.aex   advertise both at GLOBAL_SETUP and then ASSIGN them away
+//                     in PARAMS_SETUP, the way a plug-in that assigns rather
+//                     than ORs does. A host that decides its dispatch depth
+//                     from the live out_data instead of from the GLOBAL_SETUP
+//                     snapshot follows the rewrite and renders shallower.
+//
+// The file name and not an environment variable: a test copies the probe to a
+// marked name and points the worker at the copy, so the variant travels with
+// the plug-in the run actually loaded. An environment variable is ambient -
+// every other test that spawns this probe inherits it, and after this change a
+// session report describes the slot rather than the plug-in's world, so those
+// tests stay green while silently measuring a narrowed run.
+const char* ModuleFileName() {
+  // One function-local static with an initializer, so the compiler emits the
+  // thread-safe guard: a `static bool resolved` tested and set by hand is a
+  // data race even when the racing writes are identical.
+  //
+  // Not MAX_PATH: GetModuleFileNameA truncates silently, and the marker is the
+  // last thing before the extension - a deep enough checkout would make it
+  // invisible and the variant would quietly become the plain probe.
+  static const std::array<char, 4096> path = [] {
+    std::array<char, 4096> resolved{};
+    HMODULE self = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(&ModuleFileName), &self)) {
+      GetModuleFileNameA(self, resolved.data(),
+                         static_cast<DWORD>(resolved.size()));
+    }
+    return resolved;
+  }();
+  return path.data();
+}
+
+bool ModuleNameHas(const char* marker) {
+  return std::strstr(ModuleFileName(), marker) != nullptr;
+}
+
+bool AdvertisesDeepColor() { return !ModuleNameHas("-shallow"); }
+
+bool RewritesFlagsInParamsSetup() { return ModuleNameHas("-rewrite"); }
 
 bool RectEmpty(const PF_LRect& rect) {
   return rect.left >= rect.right || rect.top >= rect.bottom;
@@ -157,12 +217,17 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
   switch (cmd) {
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
-      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_DEEP_COLOR_AWARE;
+      out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT |
+          (AdvertisesDeepColor() ? PF_OutFlag_DEEP_COLOR_AWARE : 0);
       out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
-                             PF_OutFlag2_FLOAT_COLOR_AWARE;
+          (AdvertisesDeepColor() ? PF_OutFlag2_FLOAT_COLOR_AWARE : 0);
       return PF_Err_NONE;
     case PF_Cmd_PARAMS_SETUP:
       out_data->num_params = 1;
+      if (RewritesFlagsInParamsSetup()) {
+        out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
+        out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER;
+      }
       return PF_Err_NONE;
     case PF_Cmd_SMART_PRE_RENDER:
       return SmartPreRender(in_data, static_cast<PF_PreRenderExtra*>(extra));

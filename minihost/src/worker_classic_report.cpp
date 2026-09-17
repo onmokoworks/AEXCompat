@@ -109,12 +109,21 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
       in.resetup_handle_replaced, in.flattened_handle_host_disposed, in.copied_flattened_sequence,
       in.get_flattened_sequence_data_error, in.original_sequence_preserved};
   const auto& smart_runtime_state = aexcompat::worker_runtime::smart::state();
-  const int32_t bytes_per_pixel = smart_runtime_state.pixel_format == "argb32f" ? 16 :
+  const int32_t world_pixel_bytes = smart_runtime_state.pixel_format == "argb32f" ? 16 :
       (smart_runtime_state.pixel_format == "argb16" ? 8 : 4);
+  const int32_t bytes_per_pixel =
+      in.session_pixel_bytes != 0 ? in.session_pixel_bytes : world_pixel_bytes;
+  // A run that never built a world leaves the format empty, and it stays
+  // empty: naming a depth for a frame that does not exist would be a
+  // fabricated fact in a diagnostic.
+  const std::string frame_pixel_format = smart_runtime_state.pixel_format.empty()
+      ? smart_runtime_state.pixel_format
+      : (bytes_per_pixel == 16 ? "argb32f"
+                               : (bytes_per_pixel == 8 ? "argb16" : "argb8"));
   classic_report.frame = {
       in.setdown_error,
       escape(in.frame_return_message),
-      in.case_id, smart_runtime_state.pixel_format, in.render_width, in.render_height,
+      in.case_id, frame_pixel_format, in.render_width, in.render_height,
       in.render_rowbytes,
       in.render_width * bytes_per_pixel,
       std::max(0, in.render_rowbytes - in.render_width * bytes_per_pixel),
@@ -162,7 +171,8 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
       classic_report, classic_custom_ui, report::capture_classic_subsystems(),
       report::capture_gpu_diagnostics(), report::capture_seh_diagnostics(), classic_requested,
       aexcompat::worker_runtime::classic::last_selector_dispatched(),
-      in.depth_supported, in.render_error});
+      in.depth_supported, in.advertised_depth_supported,
+      in.dispatch_pixel_bytes, in.render_error});
   report::emit(report_snapshot, std::cout);
 }
 

@@ -23,6 +23,44 @@ T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
 
 }  // namespace
 
+int32_t dispatch_pixel_bytes(int32_t session_pixel_bytes, uint32_t out_flags,
+                             uint32_t out_flags2) {
+  // PF_OutFlag_DEEP_COLOR_AWARE and PF_OutFlag2_FLOAT_COLOR_AWARE.
+  const bool deep = (out_flags & (1u << 25)) != 0;
+  const bool floating = (out_flags2 & (1u << 12)) != 0;
+  if (session_pixel_bytes == 16) return floating ? 16 : (deep ? 8 : 4);
+  if (session_pixel_bytes == 8) return deep ? 8 : 4;
+  return session_pixel_bytes;
+}
+
+bool verify_dispatch_pixel_depth_rule() {
+  constexpr uint32_t kDeep = 1u << 25;   // PF_OutFlag_DEEP_COLOR_AWARE
+  constexpr uint32_t kFloat = 1u << 12;  // PF_OutFlag2_FLOAT_COLOR_AWARE
+  struct Case { int32_t session; uint32_t flags; uint32_t flags2; int32_t expected; };
+  // Every (deep, float) x (8, 16, 32 bpc) combination, spelled out rather than
+  // recomputed from the rule: a table that restates the implementation would
+  // pass against any edit to it.
+  constexpr Case cases[] = {
+      {4, 0, 0, 4}, {4, kDeep, 0, 4}, {4, 0, kFloat, 4}, {4, kDeep, kFloat, 4},
+      {8, 0, 0, 4}, {8, kDeep, 0, 8}, {8, 0, kFloat, 4}, {8, kDeep, kFloat, 8},
+      {16, 0, 0, 4}, {16, kDeep, 0, 8}, {16, 0, kFloat, 16},
+      {16, kDeep, kFloat, 16},
+  };
+  for (const auto& entry : cases)
+    if (dispatch_pixel_bytes(entry.session, entry.flags, entry.flags2) !=
+        entry.expected) return false;
+  // Unrelated flags must not move the answer: everything but the two bits.
+  const uint32_t noise = ~(kDeep);
+  const uint32_t noise2 = ~(kFloat);
+  if (dispatch_pixel_bytes(8, noise, noise2) != 4) return false;
+  if (dispatch_pixel_bytes(16, noise, noise2) != 4) return false;
+  // A session depth the transport does not carry is the caller's contract
+  // violation and passes through unchanged rather than being substituted.
+  for (const int32_t outside : {0, 1, 2, 3, 5, 12, 32, -4})
+    if (dispatch_pixel_bytes(outside, 0, 0) != outside) return false;
+  return true;
+}
+
 void install_callback_tables(State& state, const AbiHooks& abi) {
   for (std::size_t i = 0; i < abi.input_callbacks.size(); ++i)
     write(state.input, contract::INPUT_CALLBACK_OFFSETS[i], abi.input_callbacks[i]);
@@ -129,11 +167,12 @@ Result run(State& state, EffectEntry entry, const AbiHooks& abi,
   result.input_write_advertised = (result.advertised_out_flags & (1u << 11)) != 0;
   result.expand_buffer_advertised = (result.advertised_out_flags & (1u << 9)) != 0;
   result.shrink_buffer_advertised = (result.advertised_out_flags & (1u << 12)) != 0;
-  result.depth_supported = request.external_pixel_bytes == 4 ||
-      (request.external_pixel_bytes == 8 &&
-       (result.advertised_out_flags & (1u << 25)) != 0) ||
-      (request.external_pixel_bytes == 16 &&
-       (result.advertised_out_flags2 & (1u << 12)) != 0);
+  result.depth_supported =
+      dispatch_pixel_bytes(request.external_pixel_bytes, result.advertised_out_flags,
+                           result.advertised_out_flags2) ==
+      request.external_pixel_bytes;
+  result.depth_dispatchable = request.external_pixel_bytes == 4 ||
+      request.external_pixel_bytes == 8 || request.external_pixel_bytes == 16;
   result.smart_render_supported = (result.advertised_out_flags2 & (1u << 10)) != 0;
   result.update_params_ui_advertised = (result.advertised_out_flags & (1u << 26)) != 0;
   result.query_dynamic_flags_advertised = (result.advertised_out_flags2 & 1u) != 0;

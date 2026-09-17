@@ -118,6 +118,9 @@ void emit_classic_complete(ReportSnapshot& output, const ClassicEmission& value)
   output.stream() << ",\"render_selector_dispatched\":"
       << (value.selector_dispatched ? "true" : "false")
       << ",\"depth_supported\":" << (value.depth_supported ? "true" : "false")
+      << ",\"advertised_depth_supported\":"
+      << (value.advertised_depth_supported ? "true" : "false")
+      << ",\"dispatch_pixel_bytes\":" << value.dispatch_pixel_bytes
       << ",\"render_error\":" << value.render_error;
   append_classic_sequence(output, value.report.sequence);
   append_classic_frame(output, value.report.frame);
@@ -298,6 +301,9 @@ void begin_smart(ReportSnapshot& report, const SmartReport::Head& v) {
       << ",\"guid_mix_in_size_limit\":" << v.host_context[7]
       << ",\"guid_mix_in_last_result\":" << v.host_context[8]
       << ",\"depth_supported\":" << (v.depth_supported ? "true" : "false")
+      << ",\"advertised_depth_supported\":"
+      << (v.advertised_depth_supported ? "true" : "false")
+      << ",\"dispatch_pixel_bytes\":" << v.dispatch_pixel_bytes
       << ",\"pre_render_error\":" << v.selector_errors[0]
       << ",\"smart_render_error\":" << v.selector_errors[1]
       << ",\"smart_render_selector_error\":" << v.selector_errors[2]

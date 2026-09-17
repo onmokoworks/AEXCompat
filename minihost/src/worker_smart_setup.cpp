@@ -110,7 +110,17 @@ Plan prepare(const Context& context, const Request& request) {
       plan.height > 4096) return plan;
   plan.pixel_bytes = plan.float32 ? 16 : (plan.deep16 ? 8 : 4);
   plan.rowbytes = case_id == "padded_stride" ? 64 : plan.width * plan.pixel_bytes;
-  if (!render::is_fixed_image_case(case_id) && case_id != "request" && !plan.deep16 &&
+  // `request_cpu` is a session case like `request`, and is admitted the same
+  // way. It used to be admitted only incidentally, through `deep16`/`float32`
+  // being true whenever the session was deep; narrowing an unadvertised depth
+  // makes those false for a deep session (the plug-in gets 8-bit worlds) and
+  // would turn the whole plan invalid. Named rather than widened to "any
+  // external image", which would have admitted an unrecognised case_id too
+  // wherever the classic route's `prepare_image_request` still answers -2 for
+  // one. (The terms below can still admit an unrecognised case_id on their
+  // own, at a depth the plug-in advertises; sessions never carry one.)
+  if (!render::is_fixed_image_case(case_id) && case_id != "request" &&
+      !plan.force_cpu_image && !plan.deep16 &&
       !plan.float32 && !plan.missing_input && !plan.crash_null_output &&
       !plan.temporal_context && !plan.partial_output_request &&
       !plan.connected_map) return plan;

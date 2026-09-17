@@ -64,6 +64,8 @@ struct SimpleHooks {
   bool (*aegp_persistent_data_suite4)(){};
   bool (*headless_system_sound_suppression)(){};
   bool (*argb32f_depth_conversion)(){};
+  bool (*pixel_depth_conform)(){};
+  bool (*dispatch_pixel_depth_rule)(){};
 };
 
 struct Hooks {

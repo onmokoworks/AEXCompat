@@ -1892,6 +1892,8 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
   result.global_setup_error = bootstrap.global_error;
   result.params_setup_error = bootstrap.params_error;
   result.audio_effect_only = bootstrap.audio_effect_only;
+  result.advertised_out_flags = bootstrap.advertised_out_flags;
+  result.advertised_out_flags2 = bootstrap.advertised_out_flags2;
   context.current_global_error = bootstrap.global_error;
   // Step 6: the manifest payload (plugins[1..]) replaces the launch
   // assignments, riding the same argv encoding (design §2.2/§4.1).
@@ -2801,6 +2803,19 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   const bool expand_buffer_advertised = bootstrap.expand_buffer_advertised;
   const bool shrink_buffer_advertised = bootstrap.shrink_buffer_advertised;
   const bool depth_supported = bootstrap.depth_supported;
+  // A resident session narrows the plug-in's worlds to the depth it
+  // advertises and widens the frame back into the slot, so the session exits
+  // are gated on the session being able to run at all rather than on the
+  // plug-in advertising the caller's depth. The one-shot routes below keep the
+  // advertised gate; after #365 deleted the argv transport that carried a deep
+  // one-shot they only ever run at 8 bits, where both gates are true, so
+  // neither can currently refuse a run. The two stay separate because they
+  // answer different questions, not because either fires today.
+  const bool session_depth_ok = bootstrap.depth_dispatchable;
+  // What the last reported session frame was actually dispatched at. The
+  // session fills it; a route that never opened one leaves the caller's own
+  // depth, which is what it would have dispatched at.
+  int32_t session_dispatch_pixel_bytes = invocation.external_pixel_bytes;
   const bool smart_render_supported = bootstrap.smart_render_supported;
   const bool parameter_count_contract_valid = bootstrap.parameter_count_contract_valid;
   g_update_params_ui_advertised = bootstrap.update_params_ui_advertised;
@@ -3095,7 +3110,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   if (is_render_worker()) {
     const auto dispatch = aexcompat::worker_runtime::invocation::run_classic_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
-         image_render_supported, depth_supported, smart_render_supported,
+         image_render_supported, depth_supported, session_depth_ok,
+         advertised_out_flags, advertised_out_flags2, smart_render_supported,
          cluster_session_active ? &cluster_swap_hook : nullptr, audio_effect_only});
     if (dispatch.case_id_rejected) {
       dispose_arbitrary_defaults(entry, input, output);
@@ -3132,10 +3148,12 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     get_flattened_sequence_data_error = dispatch.get_flattened_sequence_data_error;
     original_sequence_preserved = dispatch.original_sequence_preserved;
     render_error = dispatch.render_error;
+    session_dispatch_pixel_bytes = dispatch.dispatch_pixel_bytes;
   } else if (is_smart_worker()) {
     const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
-         image_render_supported, depth_supported, smart_render_supported});
+         image_render_supported, depth_supported, session_depth_ok,
+         advertised_out_flags, advertised_out_flags2, smart_render_supported});
     if (dispatch.case_id_rejected) {
       dispose_arbitrary_defaults(entry, input, output);
       if (global_error == 0)
@@ -3151,6 +3169,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     smart_session_sequence_setup_error = dispatch.session_sequence_setup_error;
     smart_session_sequence_setdown_error = dispatch.session_sequence_setdown_error;
     smart_session_render_error = dispatch.session_render_error;
+    session_dispatch_pixel_bytes = dispatch.dispatch_pixel_bytes;
   }
   if (is_render_worker()) drain_async_layer_requests();
   // After cluster swaps, `entry` is the CURRENT plug-in's entry (or null when
@@ -3215,7 +3234,21 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   classic_inputs.parameter_count_contract_valid = parameter_count_contract_valid;
   classic_inputs.guards_intact = guards_intact;
   classic_inputs.arbitrary_defaults_disposed = arbitrary_defaults_disposed;
-  classic_inputs.depth_supported = depth_supported;
+  // `depth_supported` is read downstream as "the depth negotiation refused
+  // this run": `render_contract.rs` turns a false into classification
+  // `unsupported_pixel_depth` and drops the selector error with it, and
+  // `run-conformance-bundle.py` calls the run "unsupported" (there a
+  // meaningful selector error still wins). A session that narrowed the
+  // plug-in's worlds and rendered did not refuse anything, so it reports what
+  // it did: served the depth. What the plug-in advertised and what it was
+  // actually dispatched at are recorded beside it, which is where a reader
+  // looks for the narrowing.
+  classic_inputs.depth_supported =
+      invocation.render_session_mode ? session_depth_ok : depth_supported;
+  classic_inputs.advertised_depth_supported = depth_supported;
+  classic_inputs.dispatch_pixel_bytes = session_dispatch_pixel_bytes;
+  classic_inputs.session_pixel_bytes =
+      invocation.render_session_mode ? invocation.external_pixel_bytes : 0;
   classic_inputs.advertised_out_flags = advertised_out_flags;
   classic_inputs.advertised_out_flags2 = advertised_out_flags2;
   classic_inputs.image_render_supported = image_render_supported;
@@ -3296,7 +3329,21 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   smart_inputs.advertised_out_flags2 = advertised_out_flags2;
   smart_inputs.parameter_count_contract_valid = parameter_count_contract_valid;
   smart_inputs.arbitrary_defaults_disposed = arbitrary_defaults_disposed;
-  smart_inputs.depth_supported = depth_supported;
+  // `depth_supported` is read downstream as "the depth negotiation refused
+  // this run": `render_contract.rs` turns a false into classification
+  // `unsupported_pixel_depth` and drops the selector error with it, and
+  // `run-conformance-bundle.py` calls the run "unsupported" (there a
+  // meaningful selector error still wins). A session that narrowed the
+  // plug-in's worlds and rendered did not refuse anything, so it reports what
+  // it did: served the depth. What the plug-in advertised and what it was
+  // actually dispatched at are recorded beside it, which is where a reader
+  // looks for the narrowing.
+  smart_inputs.depth_supported =
+      invocation.render_session_mode ? session_depth_ok : depth_supported;
+  smart_inputs.advertised_depth_supported = depth_supported;
+  smart_inputs.dispatch_pixel_bytes = session_dispatch_pixel_bytes;
+  smart_inputs.session_pixel_bytes =
+      invocation.render_session_mode ? invocation.external_pixel_bytes : 0;
   smart_inputs.image_render_supported = image_render_supported;
   smart_inputs.smart_render_supported = smart_render_supported;
   smart_inputs.nop_render_advertised = nop_render_advertised;
@@ -3345,7 +3392,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         : session_protocol_violation ? 23
         : session_invariant_failure ? 24
         : global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
-              ((image_render_supported && depth_supported) || audio_effect_only) &&
+              ((image_render_supported &&
+                (invocation.render_session_mode ? session_depth_ok
+                                                : depth_supported)) ||
+               audio_effect_only) &&
               render_error == 0 && guards_intact &&
               handle_lifetimes_balanced() && world_lifetimes_balanced() &&
               async_receipt_lifetimes_balanced() &&
@@ -3378,7 +3428,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       const int session_exit = session_protocol_violation ? 23
           : session_invariant_failure ? 24
           : global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
-        image_render_supported && depth_supported && smart_render_supported &&
+        image_render_supported && session_depth_ok && smart_render_supported &&
         smart_session_render_error == 0 && smart.guards_intact &&
         handle_lifetimes_balanced() && world_lifetimes_balanced() &&
         gpu_memory_lifetimes_balanced() &&
