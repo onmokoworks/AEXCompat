@@ -174,7 +174,7 @@ pub(crate) fn dispatch_secure_image_session_on_current_desktop(
 
 #[cfg(windows)]
 fn dispatch_secure_image_session_with_policy(
-    input: SecureImageDispatch<'_>,
+    mut input: SecureImageDispatch<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
     memory_budget: crate::windows_process::SessionMemoryBudget,
@@ -184,6 +184,8 @@ fn dispatch_secure_image_session_with_policy(
         .repository
         .join(input.worker_kind.repository_relative_program());
     validate_in_place_input(&input.dependencies, &input.plugin)?;
+    input.launch_environment =
+        runtime_library_environment(input.launch_environment, &input.dependency_search_dirs)?;
     let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
     let staged_worker_assets =
         executable_relative_kernel_assets(&input.plugin.path, &input.dependency_search_dirs)?;
@@ -274,7 +276,7 @@ pub fn dispatch_secure_in_place_cluster_session(
 
 #[cfg(windows)]
 pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
-    input: SecureInPlaceClusterDispatch<'_>,
+    mut input: SecureInPlaceClusterDispatch<'_>,
     session: &crate::windows_process::SessionChildHandles,
     desktop_policy: crate::windows_process::WorkerDesktopPolicy,
 ) -> io::Result<SecureInPlaceClusterSessionLaunch> {
@@ -287,6 +289,8 @@ pub(crate) fn dispatch_secure_in_place_cluster_session_with_policy(
             return Err(invalid("in-place plugin path must be absolute"));
         }
     }
+    input.launch_environment =
+        runtime_library_environment(input.launch_environment, &input.dependency_search_dirs)?;
     // The same canonicalize + de-verbatim + bounds pipeline as the one-shot
     // in-place dispatch; the validated strings ride the manifest instead of
     // an argv value, so the ';' join constraint never applies here.
@@ -490,7 +494,7 @@ fn executable_relative_kernel_assets(
 }
 
 fn dispatch_secure_image_impl(
-    input: SecureImageDispatch<'_>,
+    mut input: SecureImageDispatch<'_>,
     process_memory_limit: Option<usize>,
 ) -> io::Result<SecureLaunchResult> {
     crate::trace_policy::validate_broker_trace_directory(input.repository)?;
@@ -498,6 +502,8 @@ fn dispatch_secure_image_impl(
         .repository
         .join(input.worker_kind.repository_relative_program());
     validate_in_place_input(&input.dependencies, &input.plugin)?;
+    input.launch_environment =
+        runtime_library_environment(input.launch_environment, &input.dependency_search_dirs)?;
     let joined = joined_dependency_search_dirs(&input.dependency_search_dirs)?;
     let staged_worker_assets =
         executable_relative_kernel_assets(&input.plugin.path, &input.dependency_search_dirs)?;
@@ -525,6 +531,79 @@ fn dispatch_secure_image_impl(
     )?;
     result.worker_freshness_warning = admitted.freshness_warning;
     Ok(result)
+}
+
+/// Some libraries choose their dynamic runtime before calling the Windows
+/// loader and therefore do not consult the worker's admitted USER_DIRS set.
+/// The Rust `ort` loader used by ONNX-based effects is one such client: it
+/// honors `ORT_DYLIB_PATH`. When the already-resolved dependency roots contain
+/// exactly one ONNX Runtime DLL, carry that exact path to this worker only.
+///
+/// An inherited value or an explicit per-launch override/removal wins. More
+/// than one distinct candidate is deliberately ambiguous: choosing a runtime
+/// from another effect's closure would be worse than preserving the plug-in's
+/// normal failure.
+fn runtime_library_environment(
+    environment: LaunchEnvironment,
+    dependency_search_dirs: &[PathBuf],
+) -> io::Result<LaunchEnvironment> {
+    const ORT_DYLIB_PATH: &str = "ORT_DYLIB_PATH";
+    runtime_library_environment_with_inherited(
+        environment,
+        dependency_search_dirs,
+        std::env::var_os(ORT_DYLIB_PATH).is_some(),
+    )
+}
+
+fn runtime_library_environment_with_inherited(
+    environment: LaunchEnvironment,
+    dependency_search_dirs: &[PathBuf],
+    inherited_ort_dylib_path: bool,
+) -> io::Result<LaunchEnvironment> {
+    const ORT_DYLIB_PATH: &str = "ORT_DYLIB_PATH";
+    if environment.has_child_var_decision(ORT_DYLIB_PATH) || inherited_ort_dylib_path {
+        return Ok(environment);
+    }
+    let Some(runtime) = unique_runtime_library(dependency_search_dirs, "onnxruntime.dll")? else {
+        return Ok(environment);
+    };
+    Ok(environment.with_child_var(ORT_DYLIB_PATH, runtime.into_os_string()))
+}
+
+/// Resolve one direct child of the dependency roots without recursively
+/// rescanning the registered tree. The roots are the dependency-set result
+/// already computed by discovery, so this is bounded by the 16-root admission
+/// limit and does O(roots) metadata checks.
+fn unique_runtime_library(
+    dependency_search_dirs: &[PathBuf],
+    basename: &str,
+) -> io::Result<Option<PathBuf>> {
+    let mut found: Option<PathBuf> = None;
+    for root in dependency_search_dirs {
+        let candidate = root.join(basename);
+        if !candidate.is_file() {
+            continue;
+        }
+        let canonical_root = std::fs::canonicalize(root)?;
+        let canonical_candidate = std::fs::canonicalize(candidate)?;
+        if !canonical_candidate.starts_with(&canonical_root) {
+            return Err(invalid(
+                "runtime library escaped dependency search directory",
+            ));
+        }
+        let candidate = strip_extended_prefix(&canonical_candidate);
+        if let Some(existing) = &found {
+            if !existing
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&candidate.to_string_lossy())
+            {
+                return Ok(None);
+            }
+        } else {
+            found = Some(candidate);
+        }
+    }
+    Ok(found)
 }
 
 /// The locally built worker as admitted for one launch: its identity, and the
@@ -925,6 +1004,108 @@ mod tests {
         assert!(
             !joined.starts_with(r"\\?\"),
             "worker paths are de-verbatim: {joined}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dynamic_runtime_lookup_requires_one_direct_dependency_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-runtime-library-{:032x}",
+            rand::random::<u128>()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        let nested = first.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let first_runtime = first.join("onnxruntime.dll");
+        fs::write(&first_runtime, b"first runtime").unwrap();
+        fs::write(nested.join("onnxruntime.dll"), b"nested runtime").unwrap();
+
+        let resolved = unique_runtime_library(&[first.clone()], "onnxruntime.dll")
+            .unwrap()
+            .expect("the direct dependency candidate is selected");
+        assert_eq!(
+            resolved,
+            strip_extended_prefix(&fs::canonicalize(&first_runtime).unwrap())
+        );
+        assert_eq!(
+            unique_runtime_library(&[first.clone(), first.clone()], "onnxruntime.dll").unwrap(),
+            Some(resolved),
+            "repeated roots still identify the same runtime"
+        );
+
+        fs::write(second.join("onnxruntime.dll"), b"second runtime").unwrap();
+        assert_eq!(
+            unique_runtime_library(&[first.clone(), second], "onnxruntime.dll").unwrap(),
+            None,
+            "two effect-local runtimes are ambiguous"
+        );
+        fs::remove_file(&first_runtime).unwrap();
+        assert_eq!(
+            unique_runtime_library(&[first], "onnxruntime.dll").unwrap(),
+            None,
+            "a same-named DLL below the root is not found recursively"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dynamic_runtime_environment_respects_all_child_precedence_decisions() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-runtime-environment-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let runtime = root.join("onnxruntime.dll");
+        fs::write(&runtime, b"runtime").unwrap();
+        let expected = strip_extended_prefix(&fs::canonicalize(&runtime).unwrap());
+
+        let automatic = runtime_library_environment_with_inherited(
+            LaunchEnvironment::default(),
+            std::slice::from_ref(&root),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            automatic.child_override_value("ort_dylib_path"),
+            Some(expected.as_os_str())
+        );
+
+        let explicit = runtime_library_environment_with_inherited(
+            LaunchEnvironment::default()
+                .with_child_var("ort_dylib_path", std::ffi::OsString::from("caller.dll")),
+            std::slice::from_ref(&root),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.child_override_value("ORT_DYLIB_PATH"),
+            Some(std::ffi::OsStr::new("caller.dll")),
+            "an explicit mixed-case override wins"
+        );
+
+        let removed = runtime_library_environment_with_inherited(
+            LaunchEnvironment::default().without_child_var("Ort_Dylib_Path"),
+            std::slice::from_ref(&root),
+            false,
+        )
+        .unwrap();
+        assert!(removed.removes_child_var("ORT_DYLIB_PATH"));
+        assert_eq!(removed.child_override_value("ORT_DYLIB_PATH"), None);
+
+        let inherited = runtime_library_environment_with_inherited(
+            LaunchEnvironment::default(),
+            std::slice::from_ref(&root),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            inherited.child_override_value("ORT_DYLIB_PATH"),
+            None,
+            "an inherited value wins without mutating process-global state"
         );
         fs::remove_dir_all(root).unwrap();
     }

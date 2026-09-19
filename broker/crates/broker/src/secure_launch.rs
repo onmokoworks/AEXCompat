@@ -21,6 +21,19 @@ pub struct LaunchEnvironment {
 }
 
 impl LaunchEnvironment {
+    /// Whether the caller already made an explicit decision for one child
+    /// variable. Windows environment keys are case-insensitive, so compare
+    /// the ASCII transport names the same way the process environment does.
+    pub(crate) fn has_child_var_decision(&self, key: &str) -> bool {
+        self.child_overrides
+            .iter()
+            .any(|(candidate, _)| candidate.to_string_lossy().eq_ignore_ascii_case(key))
+            || self
+                .child_removals
+                .iter()
+                .any(|candidate| candidate.to_string_lossy().eq_ignore_ascii_case(key))
+    }
+
     /// Removes a variable only in this child. Removal wins over a supplied
     /// override, but cannot remove broker-owned transport handles.
     pub fn without_child_var(mut self, key: impl Into<OsString>) -> Self {
@@ -64,6 +77,23 @@ impl LaunchEnvironment {
 
     pub(crate) fn minidump_directory(&self) -> Option<&Path> {
         self.minidump_directory.as_deref()
+    }
+}
+
+#[cfg(test)]
+impl LaunchEnvironment {
+    pub(crate) fn child_override_value(&self, key: &str) -> Option<&std::ffi::OsStr> {
+        self.child_overrides
+            .iter()
+            .rev()
+            .find(|(candidate, _)| candidate.to_string_lossy().eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_os_str())
+    }
+
+    pub(crate) fn removes_child_var(&self, key: &str) -> bool {
+        self.child_removals
+            .iter()
+            .any(|candidate| candidate.to_string_lossy().eq_ignore_ascii_case(key))
     }
 }
 

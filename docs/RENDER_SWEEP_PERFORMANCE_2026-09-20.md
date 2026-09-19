@@ -358,10 +358,55 @@ user profile also found no copy. Strings embedded in the installed AEX include
 Model Folder`, consistent with a separately supplied model pack. A cached
 public project listing identified three export commands for these same manifest
 filenames, but its source URL returned 404 during the final evidence check and
-is not treated as durable proof. The missing weights are therefore retained as
-`external_blocked:missing_model_assets`, and the effect is not counted as a
-render success. This does not yet prove that missing weights alone caused the
-untouched Classic output: the same report records one
-`effect_sequence_data` callback denial (`no_active_state`, result 516), which
-remains an independent host-compatibility lead. No After Effects process was
-used.
+is not treated as durable proof.
+
+A compatible 99,060,839-byte ONNX graph was then obtained for a bounded local
+probe (SHA-256
+`afb6a5c28f3b6bf1618c6e43f02073ef9dfdc70e937502d51603e57b0a1df10c`).
+Its inspected contract is IR 9 / opset 14, input `pixel_values` float32
+`[batch,3,height,width]`, output `predicted_depth` float32 with dynamic spatial
+dimensions, and no external tensor data. Parameter discovery found the model
+pack and all three resolution choices. Nevertheless, both Smart and Classic
+continued to return `-6`, and the worker never observed ONNX Runtime loaded.
+The earlier `effect_sequence_data` result 516 was isolated to `PARAMS_SETUP`;
+temporarily returning success with a null value removed that diagnostic without
+changing the render failure, so it is not the render blocker.
+
+The discriminating experiment set `ORT_DYLIB_PATH` to the already-admitted
+`onnxruntime.dll` beside the AEX. The same Smart render immediately changed
+from `frame_error:-6` to a valid rendered frame. The cause was therefore the
+dynamic `ort` loader's path selection, not the graph, model discovery, or the
+host's DLL search-directory admission. Shipping dispatch now checks only the
+already-resolved dependency roots (maximum 16, no recursive tree scan). If
+exactly one `onnxruntime.dll` is present and the caller/inherited environment
+has not made an explicit choice, its canonical path is passed to that worker
+as `ORT_DYLIB_PATH`. Distinct candidates remain ambiguous and are not guessed.
+The single-plugin, clustered, one-shot, and resident-session dispatches share
+this behavior.
+
+The post-fix installed-AEX report is
+`%TEMP%/aexcompat-depthonnx-installed-auto-ort-final-2026-09-20.json`. It was
+run with no `ORT_DYLIB_PATH`; only the temporary model-pack root was supplied
+because the installed package lacks weights:
+
+| result | value |
+|---|---:|
+| installed image effects | 1 |
+| valid rendered images | 1 |
+| plug-in row elapsed | 1,177 ms |
+| decoded bytes | 147,456 (256x144 RGBA8) |
+| nonzero / invalid alpha pixels | 36,864 / 0 |
+| output SHA-256 | `253db088889f5edc2e915f7b73734f5aac6921dc1a9011946f55bb8ff341d821` |
+| worker / session | `ok` / clean |
+
+The raw frame is not the solid input or a warning/canary image: it is an opaque
+grayscale depth-shaped image with a dark horizontal center and smooth brighter
+upper/lower regions. The accepted report fingerprints are CLI
+`cc96567e93c05c633d5a94c67d1ee5444b0032656e31d5ba3687691e85f8ac3b`
+and worker
+`94071433e24859e52a340bd94a758deaec9c7a442d59d05c9d6ed6c717d6f88d`.
+The automatic runtime-DLL compatibility failure is resolved. The installed
+package's absent model weights remain
+`external_blocked:missing_model_assets`; the local probe model is evidence,
+not a claim that AEXCompat ships that third-party asset. No After Effects
+process was used.
