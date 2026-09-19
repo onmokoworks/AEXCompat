@@ -5800,6 +5800,7 @@ fn ntdll_module_token_isolated_across_filename_and_proc_consumers() {
 #[test]
 fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
     const GET_MODULE_EX: u64 = STUB_BASE + 0x410;
+    const FREE_LIBRARY: u64 = STUB_BASE + 0x430;
     const PIN: u64 = 0x1;
     const UNCHANGED_REFCOUNT: u64 = 0x2;
     const FROM_ADDRESS: u64 = 0x4;
@@ -5817,6 +5818,13 @@ fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
         GET_MODULE_EX,
         "kernel32.dll",
         "GetModuleHandleExA",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        FREE_LIBRARY,
+        "kernel32.dll",
+        "FreeLibrary",
     )
     .unwrap();
 
@@ -5837,8 +5845,29 @@ fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
         WINDOWS_KERNEL32_MODULE_TOKEN
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert!(engine
+        .unicorn
+        .get_data()
+        .windows_pinned_modules
+        .contains(&WINDOWS_KERNEL32_MODULE_TOKEN));
+    for _ in 0..2 {
+        assert_eq!(
+            engine
+                .call_win64(
+                    FREE_LIBRARY,
+                    [WINDOWS_KERNEL32_MODULE_TOKEN, 0, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            1
+        );
+    }
+    assert!(!engine
+        .unicorn
+        .get_data()
+        .windows_module_refcounts
+        .contains_key(&WINDOWS_KERNEL32_MODULE_TOKEN));
 
-    for flags in [0, PIN, UNCHANGED_REFCOUNT] {
+    for flags in [0, UNCHANGED_REFCOUNT] {
         engine.write(output, &[0; 8]).unwrap();
         engine.unicorn.get_data_mut().windows_last_error = 0x5678;
         assert_eq!(
@@ -5871,6 +5900,26 @@ fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
     );
     engine.read(output, &mut module_bytes).unwrap();
     assert_eq!(u64::from_le_bytes(module_bytes), TEST_CODE);
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_module_refcounts
+            .get(&TEST_CODE),
+        Some(&1)
+    );
+    assert_eq!(
+        engine
+            .call_win64(FREE_LIBRARY, [TEST_CODE, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine
+            .call_win64(FREE_LIBRARY, [TEST_CODE, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
 
     engine.write(name, b"missing.dll\0").unwrap();
     assert_eq!(
@@ -5936,6 +5985,7 @@ fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
 #[test]
 fn get_module_handle_ex_w_resolves_guest_modules_with_win32_flags() {
     const GET_MODULE_EX: u64 = STUB_BASE + 0x418;
+    const FREE_LIBRARY: u64 = STUB_BASE + 0x438;
     const PIN: u64 = 0x1;
     const UNCHANGED_REFCOUNT: u64 = 0x2;
     const FROM_ADDRESS: u64 = 0x4;
@@ -5953,6 +6003,13 @@ fn get_module_handle_ex_w_resolves_guest_modules_with_win32_flags() {
         GET_MODULE_EX,
         "kernel32.dll",
         "GetModuleHandleExW",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        FREE_LIBRARY,
+        "kernel32.dll",
+        "FreeLibrary",
     )
     .unwrap();
 
@@ -5983,8 +6040,29 @@ fn get_module_handle_ex_w_resolves_guest_modules_with_win32_flags() {
         WINDOWS_KERNEL32_MODULE_TOKEN
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert!(engine
+        .unicorn
+        .get_data()
+        .windows_pinned_modules
+        .contains(&WINDOWS_KERNEL32_MODULE_TOKEN));
+    for _ in 0..2 {
+        assert_eq!(
+            engine
+                .call_win64(
+                    FREE_LIBRARY,
+                    [WINDOWS_KERNEL32_MODULE_TOKEN, 0, 0, 0, 0, 0],
+                )
+                .unwrap(),
+            1
+        );
+    }
+    assert!(!engine
+        .unicorn
+        .get_data()
+        .windows_module_refcounts
+        .contains_key(&WINDOWS_KERNEL32_MODULE_TOKEN));
 
-    for flags in [0, PIN, UNCHANGED_REFCOUNT] {
+    for flags in [0, UNCHANGED_REFCOUNT] {
         engine.write(output, &[0; 8]).unwrap();
         engine.unicorn.get_data_mut().windows_last_error = 0x5678;
         assert_eq!(
@@ -6012,6 +6090,26 @@ fn get_module_handle_ex_w_resolves_guest_modules_with_win32_flags() {
         engine.read(output, &mut module_bytes).unwrap();
         assert_eq!(u64::from_le_bytes(module_bytes), TEST_CODE);
     }
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_module_refcounts
+            .get(&TEST_CODE),
+        Some(&1)
+    );
+    assert_eq!(
+        engine
+            .call_win64(FREE_LIBRARY, [TEST_CODE, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine
+            .call_win64(FREE_LIBRARY, [TEST_CODE, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -8769,6 +8867,66 @@ fn load_library_a_rejects_unmapped_or_unterminated_paths_without_host_loading() 
             .callback_error
             .as_deref()
             .is_some_and(|error| error.contains("LoadLibraryA path read failed"))
+    );
+}
+
+#[test]
+fn free_library_consumes_one_logical_reference_and_rejects_double_free() {
+    const FREE_LIBRARY: u64 = STUB_BASE + 0x1b8;
+    const LOAD_LIBRARY: u64 = STUB_BASE + 0x1c8;
+    let mut engine = test_engine(&[0xc3]);
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            FREE_LIBRARY,
+            "KERNEL32.DLL",
+            "FreeLibrary",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::FreeLibrary)
+    );
+    assert_eq!(
+        dispatch_win64_import("fixture.dll", "FreeLibrary"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    );
+    install_win64_import(
+        &mut engine.unicorn,
+        LOAD_LIBRARY,
+        "kernel32.dll",
+        "LoadLibraryA",
+    )
+    .unwrap();
+    let name = DATA_BASE + 0xd00;
+    engine.write(name, b"kernel32.dll\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(LOAD_LIBRARY, [name, 0, 0, 0, 0, 0])
+            .unwrap(),
+        WINDOWS_KERNEL32_MODULE_TOKEN
+    );
+    engine.unicorn.get_data_mut().windows_last_error = 0x1234;
+    assert_eq!(
+        engine
+            .call_win64(FREE_LIBRARY, [WINDOWS_KERNEL32_MODULE_TOKEN, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+    assert_eq!(
+        engine
+            .call_win64(FREE_LIBRARY, [WINDOWS_KERNEL32_MODULE_TOKEN, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_INVALID_HANDLE
+    );
+    assert_eq!(
+        engine
+            .call_win64(FREE_LIBRARY, [0xdead_beef, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
     );
 }
 

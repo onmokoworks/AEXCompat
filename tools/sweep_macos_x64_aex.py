@@ -21,7 +21,8 @@ from typing import BinaryIO
 from PIL import Image
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+EXECUTION_MODEL = "per-aex-resident-probe-render-v1"
 MAX_MESSAGE_BYTES = 64 * 1024
 MAX_ERROR_BYTES = 4096
 MAX_DURABLE_ERROR_BYTES = 1024
@@ -250,23 +251,43 @@ def require_exact_keys(value: dict[str, object], expected: set[str], label: str)
 def validate_setup(value: object) -> None:
     if not isinstance(value, dict):
         raise SweepError("session setup is not an object")
-    require_exact_keys(
-        value,
-        {
-            "schema_version",
-            "execution_backend",
-            "global_setup_error",
-            "params_setup_error",
-            "advertised_num_params",
-            "out_flags",
-            "out_flags2",
-            "parameters",
-            "suite_requests",
-            "unsupported_suite_calls",
-            "dropped_unsupported_suite_calls",
-        },
-        "session setup",
-    )
+    expected_setup_keys = {
+        "schema_version",
+        "execution_backend",
+        "global_setup_error",
+        "params_setup_error",
+        "advertised_num_params",
+        "out_flags",
+        "out_flags2",
+        "parameters",
+        "suite_requests",
+        "unsupported_suite_calls",
+        "dropped_unsupported_suite_calls",
+    }
+    custom_ui = value.get("custom_ui")
+    if "custom_ui" in value:
+        expected_setup_keys.add("custom_ui")
+        if not isinstance(custom_ui, dict):
+            raise SweepError(f"invalid session custom_ui: {value}")
+        require_exact_keys(
+            custom_ui,
+            {
+                "events",
+                "comp_width",
+                "comp_height",
+                "comp_alignment",
+                "layer_width",
+                "layer_height",
+                "layer_alignment",
+                "preview_width",
+                "preview_height",
+                "preview_alignment",
+            },
+            "session custom_ui",
+        )
+        if not all(type(item) is int for item in custom_ui.values()):
+            raise SweepError(f"invalid session custom_ui: {value}")
+    require_exact_keys(value, expected_setup_keys, "session setup")
     if (
         value.get("schema_version") != 1
         or not isinstance(value.get("execution_backend"), str)
@@ -436,22 +457,21 @@ def validate_close(value: dict[str, object], pid: int, expected_frames: int) -> 
     close = value.get("close")
     if not isinstance(close, dict):
         raise SweepError("session_closed has no close object")
-    require_exact_keys(
-        close,
-        {
-            "schema_version",
-            "execution_backend",
-            "frames_rendered",
-            "frame_setdown_error",
-            "sequence_setdown_error",
-            "global_setdown_error",
-            "suite_requests",
-            "unsupported_suite_calls",
-            "dropped_unsupported_suite_calls",
-            "session_clean",
-        },
-        "session close report",
-    )
+    expected_close_keys = {
+        "schema_version",
+        "execution_backend",
+        "frames_rendered",
+        "frame_setdown_error",
+        "sequence_setdown_error",
+        "global_setdown_error",
+        "suite_requests",
+        "unsupported_suite_calls",
+        "dropped_unsupported_suite_calls",
+        "session_clean",
+    }
+    if "global_setdown_diagnostic" in close:
+        expected_close_keys.add("global_setdown_diagnostic")
+    require_exact_keys(close, expected_close_keys, "session close report")
     if (
         value.get("v") != 1
         or value.get("type") != "session_closed"
@@ -461,6 +481,7 @@ def validate_close(value: dict[str, object], pid: int, expected_frames: int) -> 
         or close.get("frame_setdown_error") != 0
         or close.get("sequence_setdown_error") != 0
         or close.get("global_setdown_error") != 0
+        or close.get("global_setdown_diagnostic") is not None
         or close.get("session_clean") is not True
     ):
         raise SweepError(f"resident cleanup was not clean: {value}")
@@ -479,7 +500,15 @@ def validate_frame(
         raise SweepError(f"frame_done has no output: {value}")
     require_exact_keys(
         output,
-        {"width", "height", "rowbytes", "pixel_format", "checksum", "guards_intact"},
+        {
+            "width",
+            "height",
+            "rowbytes",
+            "pixel_format",
+            "render_path",
+            "checksum",
+            "guards_intact",
+        },
         "frame output",
     )
     if (
@@ -493,6 +522,7 @@ def validate_frame(
         or output.get("height") != height
         or output.get("rowbytes") != width * 4
         or output.get("pixel_format") != "argb8"
+        or output.get("render_path") not in {"smartfx", "classic"}
         or output.get("checksum") != expected_checksum
         or output.get("guards_intact") is not True
     ):
@@ -600,7 +630,11 @@ def terminate_worker(process: subprocess.Popen[bytes]) -> str:
     )
 
 
-def close_worker(process: subprocess.Popen[bytes], expected_frames: int) -> dict[str, object]:
+def close_worker(
+    process: subprocess.Popen[bytes],
+    expected_frames: int,
+    redactions: dict[str, str] | None = None,
+) -> dict[str, object]:
     if process.stdin is None or process.stdout is None:
         raise SweepError("worker control pipes are unavailable")
     write_message(process.stdin, {"v": 1, "type": "close"})
@@ -614,8 +648,10 @@ def close_worker(process: subprocess.Popen[bytes], expected_frames: int) -> dict
         detail = f"; {cleanup}" if cleanup else ""
         raise SweepError(f"worker exceeded close deadline{detail}") from error
     stderr = read_stderr_bounded(process)
-    if returncode != 0 or stderr:
+    if returncode != 0:
         raise SweepError(f"worker close exit={returncode} stderr={stderr}")
+    if stderr:
+        response["worker_stderr"] = sanitize_error_text(stderr, redactions)
     return response
 
 
@@ -659,6 +695,7 @@ def run_backend(
     width: int,
     height: int,
     directory: Path,
+    redactions: dict[str, str] | None = None,
 ) -> dict[str, object]:
     input_slot = directory / "input.argb8"
     output_slot = directory / "output.argb8"
@@ -684,7 +721,6 @@ def run_backend(
         write_message(probe.stdin, {"v": 1, "type": "probe"})
         validate_probe(read_message(probe.stdout, RENDER_TIMEOUT_SECONDS), probe.pid)
         admission_success = True
-        close_worker(probe, 0)
     except AdmissionFailure as error:
         error.termination_evidence = terminate_worker(probe)
         raise
@@ -695,18 +731,10 @@ def run_backend(
         stage = "admission_cleanup" if admission_success else "admission_probe"
         raise BackendFailure(error, stage, admission_success, False) from error
 
-    try:
-        process, ready = launch_ready(
-            worker,
-            plugin,
-            input_slot,
-            output_slot,
-            width,
-            height,
-            extra_environment,
-        )
-    except Exception as error:
-        raise BackendFailure(error, "render_setup", True, False) from error
+    # Admission and rendering share one process, but every AEX still receives
+    # its own isolated worker/process group. This avoids paying DLL/selector
+    # setup twice while retaining crash containment between corpus entries.
+    process, ready = probe, probe_ready
     render_success = False
     try:
         require_backend(ready, expected_backend, "render")
@@ -729,21 +757,23 @@ def run_backend(
         checksum = hashlib.sha256(output).hexdigest()
         validate_frame(frame, width, height, checksum)
         render_success = True
-        close = close_worker(process, 1)
+        close = close_worker(process, 1, redactions)
     except Exception as error:
         stderr = terminate_worker(process)
         if stderr:
             error = SweepError(f"{error}; worker stderr: {stderr}")
         stage = "render_cleanup" if render_success else "render"
         raise BackendFailure(error, stage, True, render_success) from error
+    worker_stderr = close.get("worker_stderr", "")
     return {
         "status": "rendered",
-        "fresh_after_probe": probe_ready["worker_pid"] != ready["worker_pid"],
+        "fresh_after_probe": False,
         "execution_backend": ready["setup"].get("execution_backend"),
         "output_sha256": checksum,
         "suite_requests": close["close"].get("suite_requests", []),
         "unsupported_suite_calls": close["close"].get("unsupported_suite_calls", []),
         "session_clean": True,
+        "worker_stderr": worker_stderr,
         "milestones": {
             "admission_success": True,
             "render_success": True,
@@ -989,6 +1019,7 @@ def compare_baseline(
         "backends",
         "jobs",
         "native_run_dllmain",
+        "execution_model",
     }
     conditions = {key: source.get(key) for key in condition_keys if key in source}
     baseline_conditions = {
@@ -998,6 +1029,12 @@ def compare_baseline(
     }
     if conditions != baseline_conditions:
         raise SweepError("baseline report execution conditions differ")
+    for label, candidate in (
+        ("current", source.get("execution_model")),
+        ("baseline", baseline_source.get("execution_model")),
+    ):
+        if not isinstance(candidate, str) or not candidate:
+            raise SweepError(f"{label} report execution_model is invalid")
     for label, candidate in (
         ("current", source.get("jobs")),
         ("baseline", baseline_source.get("jobs")),
@@ -1143,6 +1180,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
                 width,
                 height,
                 directory,
+                redactions,
             )
             result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
             count_key = f"{backend}:rendered"
@@ -1239,6 +1277,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "input_dimensions": [width, height],
             "backends": list(workers),
             "jobs": args.jobs,
+            "execution_model": EXECUTION_MODEL,
         }
         | source_worker_identity(workers, args.native_run_dllmain),
         "summary": {

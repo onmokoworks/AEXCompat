@@ -964,6 +964,44 @@ mod library_tests {
     }
 
     #[test]
+    fn free_library_releases_logical_reference_but_keeps_manifest_module_pinned() {
+        let primary = fixture(0x180000000, "EffectMain", None, false);
+        let dep = fixture(0x1800000000, "answer", None, true);
+        let mut engine =
+            GuestEngine::load_with_libraries(&primary, &[("C:/runtime/dep.dll", dep)]).unwrap();
+        let free = STUB_BASE + 0x100;
+        let get = STUB_BASE + 0x110;
+        let load = STUB_BASE + 0x120;
+        install_win64_import(&mut engine.unicorn, free, "kernel32.dll", "FreeLibrary").unwrap();
+        install_win64_import(&mut engine.unicorn, get, "kernel32.dll", "GetProcAddress").unwrap();
+        install_win64_import(&mut engine.unicorn, load, "kernel32.dll", "LoadLibraryA").unwrap();
+        let name = engine.allocate(32, 8).unwrap();
+        let export_name = engine.allocate(32, 8).unwrap();
+        engine.write(name, b"dep.dll\0").unwrap();
+        engine.write(export_name, b"answer\0").unwrap();
+        assert_eq!(
+            engine.call_win64(load, [name, 0, 0, 0, 0, 0]).unwrap(),
+            0x1800000000
+        );
+        assert_eq!(
+            engine
+                .call_win64(free, [0x1800000000, 0, 0, 0, 0, 0])
+                .unwrap(),
+            1
+        );
+        let entry = engine
+            .call_win64(get, [0x1800000000, export_name, 0, 0, 0, 0])
+            .unwrap();
+        assert_eq!(engine.call_win64(entry, [0; 6]).unwrap(), 42);
+        assert_eq!(
+            engine
+                .call_win64(free, [0x1800000000, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn exception_type_names_resolve_within_the_owning_dll() {
         let primary = fixture(0x180000000, "EffectMain", None, false);
         let dep = fixture(0x1800000000, "answer", None, true);

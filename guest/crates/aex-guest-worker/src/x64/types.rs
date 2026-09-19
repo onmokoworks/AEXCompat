@@ -277,6 +277,7 @@ struct GuestState {
     guest_files: GuestFiles,
     performance_counter_origin: Option<std::time::Instant>,
     windows_module_refcounts: HashMap<u64, u32>,
+    windows_pinned_modules: HashSet<u64>,
     windows_thread_error_mode: u32,
     windows_socket_startups: u32,
     windows_private_heaps: BTreeMap<u64, BTreeSet<u64>>,

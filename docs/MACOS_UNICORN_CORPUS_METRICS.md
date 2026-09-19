@@ -12,11 +12,12 @@ SHA-256 order and durable reports contain no absolute plug-in paths.
 
 ## Metrics
 
-Schema version 2 records exact numerator/denominator pairs rather than rounded
+Schema version 3 records exact numerator/denominator pairs rather than rounded
 percentages for these cumulative milestones:
 
-- `admission_success`: setup and the disposable admission render completed;
-- `render_success`: a fresh process produced a validated minimal frame;
+- `admission_success`: setup and the admission render completed;
+- `render_success`: the same per-AEX isolated process produced a subsequent
+  validated minimal frame;
 - `cleanup_success`: the rendered session completed clean setdown and exited.
 
 Each failure retains its first known stage and a bounded failure class. Typed
@@ -26,7 +27,7 @@ crash, timeout, unsupported import, or cleanup failure into success.
 
 ## Baseline comparison
 
-Pass `--baseline-report <schema-v2-report.json>` to compare two runs. Inventory,
+Pass `--baseline-report <schema-v3-report.json>` to compare two runs. Inventory,
 Windows summary, input image, dimensions, selected backend list, parallel job
 count, and mapped SHA order must match exactly. Worker SHA values may differ so
 a new implementation can be measured; both identities are retained in the
@@ -58,7 +59,9 @@ python3 tools/sweep_macos_x64_aex.py \
 parallel completion order never changes the durable report. Each AEX/backend
 attempt keeps its own process group and run directory. Runner-initiated cleanup
 therefore targets only that attempt, and results from completed attempts remain
-in the final report when another worker crashes or times out.
+in the final report when another worker crashes or times out. Admission and the
+measured render share that one process so plug-in setup is paid once per AEX;
+process state is never shared between different AEX identities.
 
 The Rosetta native carrier remains an explicit comparison-only choice via
 `--backend native --native-worker <path>`; it is not part of the default path.

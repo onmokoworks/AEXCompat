@@ -143,6 +143,33 @@ def test_validate_ready_rejects_nonzero_setup_error():
         SWEEP.validate_ready(message, 42)
 
 
+def test_validate_ready_accepts_exact_optional_custom_ui_contract():
+    setup = _setup_message()
+    setup["custom_ui"] = {
+        "events": 4,
+        "comp_width": 640,
+        "comp_height": 360,
+        "comp_alignment": 0,
+        "layer_width": 320,
+        "layer_height": 180,
+        "layer_alignment": 0,
+        "preview_width": 160,
+        "preview_height": 90,
+        "preview_alignment": 0,
+    }
+    message = {
+        "v": 1,
+        "type": "session_ready",
+        "worker_pid": 42,
+        "setup": setup,
+    }
+
+    SWEEP.validate_ready(message, 42)
+    setup["custom_ui"]["events"] = True
+    with pytest.raises(SWEEP.SweepError, match="invalid session custom_ui"):
+        SWEEP.validate_ready(message, 42)
+
+
 def test_require_backend_rejects_swapped_worker_label():
     ready = {"setup": _setup_message()}
 
@@ -327,6 +354,16 @@ def test_validate_close_accepts_complete_clean_contract():
     SWEEP.validate_close(_close_message(), 42, 1)
 
 
+def test_validate_close_rejects_global_setdown_diagnostic_on_claimed_clean_close():
+    message = _close_message()
+    message["close"]["global_setdown_diagnostic"] = {
+        "message": "cleanup failed"
+    }
+
+    with pytest.raises(SWEEP.SweepError, match="cleanup was not clean"):
+        SWEEP.validate_close(message, 42, 1)
+
+
 def test_validate_close_rejects_unknown_nested_field():
     message = _close_message()
     message["close"]["unexpected"] = True
@@ -348,6 +385,7 @@ def test_validate_frame_binds_report_to_output_checksum():
             "height": 1,
             "rowbytes": 4,
             "pixel_format": "argb8",
+            "render_path": "smartfx",
             "checksum": checksum,
             "guards_intact": True,
         },
@@ -476,6 +514,7 @@ def test_sweep_runs_isolated_backends_concurrently_and_keeps_sha_order(
 
     def fake_run_backend(*_args):
         nonlocal active, maximum_active
+        redactions = _args[-1]
         with lock:
             active += 1
             maximum_active = max(maximum_active, active)
@@ -485,6 +524,9 @@ def test_sweep_runs_isolated_backends_concurrently_and_keeps_sha_order(
         return {
             "status": "rendered",
             "output_sha256": "a" * 64,
+            "worker_stderr": SWEEP.sanitize_error_text(
+                f"warning for {corpus}/private.aex", redactions
+            ),
             "milestones": {
                 "admission_success": True,
                 "render_success": True,
@@ -513,10 +555,14 @@ def test_sweep_runs_isolated_backends_concurrently_and_keeps_sha_order(
 
     assert maximum_active == 3
     assert report["source"]["jobs"] == 3
+    assert report["source"]["execution_model"] == SWEEP.EXECUTION_MODEL
     assert [entry["sha256"] for entry in report["entries"]] == [
         item["sha256"] for item in mapped
     ]
     assert report["summary"]["counts"] == {"unicorn:rendered": 6}
+    assert report["entries"][0]["backends"]["unicorn"]["worker_stderr"] == (
+        "warning for <corpus-root:0>/private.aex"
+    )
 
 
 def test_explicit_native_mode_still_requires_native_worker(tmp_path, capsys):
@@ -625,6 +671,110 @@ def test_spawn_worker_applies_explicit_environment_without_mutating_parent(
     assert process is sentinel
     assert captured["options"]["env"]["AEXCOMPAT_NATIVE_RUN_DLLMAIN"] == "1"
     assert SWEEP.os.environ["AEXCOMPAT_NATIVE_RUN_DLLMAIN"] == "ambient"
+
+
+def test_close_worker_preserves_bounded_stderr_when_structured_close_is_clean(
+    monkeypatch,
+):
+    process = Namespace(
+        pid=42,
+        stdin=Namespace(close=lambda: None),
+        stdout=object(),
+        wait=lambda timeout: 0,
+    )
+    response = _close_message()
+    monkeypatch.setattr(SWEEP, "write_message", lambda *_: None)
+    monkeypatch.setattr(SWEEP, "read_message", lambda *_: response)
+    monkeypatch.setattr(
+        SWEEP,
+        "read_stderr_bounded",
+        lambda _: f"warning from {Path.home()}/private/plugin.aex",
+    )
+
+    result = SWEEP.close_worker(process, 1)
+
+    assert result["worker_stderr"] == "warning from <home>/private/plugin.aex"
+
+
+def test_close_worker_redacts_external_path_before_durable_truncation(monkeypatch):
+    process = Namespace(
+        pid=42,
+        stdin=Namespace(close=lambda: None),
+        stdout=object(),
+        wait=lambda timeout: 0,
+    )
+    response = _close_message()
+    private_root = "/Volumes/AEX Corpus"
+    monkeypatch.setattr(SWEEP, "write_message", lambda *_: None)
+    monkeypatch.setattr(SWEEP, "read_message", lambda *_: response)
+    monkeypatch.setattr(
+        SWEEP,
+        "read_stderr_bounded",
+        lambda _: "x" * 1000 + f" {private_root}/private/plugin.aex",
+    )
+
+    result = SWEEP.close_worker(process, 1, {private_root: "<corpus-root:0>"})
+
+    assert "/Volumes" not in result["worker_stderr"]
+    assert len(result["worker_stderr"].encode("utf-8")) <= SWEEP.MAX_DURABLE_ERROR_BYTES
+
+
+def test_run_backend_reuses_one_isolated_worker_for_probe_and_render(tmp_path, monkeypatch):
+    process = Namespace(pid=42, stdin=object(), stdout=object())
+    ready = {
+        "worker_pid": 42,
+        "setup": {"execution_backend": "unicorn-x86_64"},
+    }
+    launches = []
+    closed = []
+    responses = [{"probe": True}, {"frame": True}]
+
+    def fake_launch(*args):
+        launches.append(args)
+        return process, ready
+
+    monkeypatch.setattr(SWEEP, "launch_ready", fake_launch)
+    monkeypatch.setattr(SWEEP, "write_message", lambda *_: None)
+    monkeypatch.setattr(SWEEP, "read_message", lambda *_: responses.pop(0))
+    monkeypatch.setattr(SWEEP, "validate_probe", lambda *_: None)
+    monkeypatch.setattr(SWEEP, "validate_frame", lambda *_: None)
+
+    def fake_close(candidate, expected_frames, redactions):
+        closed.append((candidate, expected_frames, redactions))
+        return {
+            "close": {
+                "suite_requests": [],
+                "unsupported_suite_calls": [],
+            },
+            "worker_stderr": "bounded warning",
+        }
+
+    monkeypatch.setattr(SWEEP, "close_worker", fake_close)
+    plugin = tmp_path / "plugin.aex"
+    plugin.write_bytes(b"fixture")
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+
+    result = SWEEP.run_backend(
+        tmp_path / "worker",
+        "unicorn-x86_64",
+        {},
+        plugin,
+        b"\x00\x01\x02\x03",
+        1,
+        1,
+        run_directory,
+    )
+
+    assert len(launches) == 1
+    assert closed == [(process, 1, None)]
+    assert result["fresh_after_probe"] is False
+    assert result["worker_stderr"] == "bounded warning"
+    assert result["milestones"] == {
+        "admission_success": True,
+        "render_success": True,
+        "cleanup_success": True,
+    }
 
 
 def test_cleanup_failure_is_not_misclassified_as_suite_gap():
@@ -738,6 +888,7 @@ def _report(entries, worker_sha="f" * 64):
             "input_dimensions": [64, 64],
             "backends": ["unicorn"],
             "jobs": 4,
+            "execution_model": SWEEP.EXECUTION_MODEL,
             "unicorn_worker_sha256": worker_sha,
         },
         "entries": entries,
@@ -811,6 +962,27 @@ def test_baseline_comparison_rejects_parallelism_drift():
     current["source"]["jobs"] = 8
 
     with pytest.raises(SWEEP.SweepError, match="execution conditions differ"):
+        SWEEP.compare_baseline(current, baseline)
+
+
+def test_baseline_comparison_rejects_execution_model_drift():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    baseline["source"]["execution_model"] = "fresh-worker-after-probe-v1"
+
+    with pytest.raises(SWEEP.SweepError, match="execution conditions differ"):
+        SWEEP.compare_baseline(current, baseline)
+
+
+def test_baseline_comparison_rejects_missing_execution_model():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    del baseline["source"]["execution_model"]
+    del current["source"]["execution_model"]
+
+    with pytest.raises(SWEEP.SweepError, match="execution_model is invalid"):
         SWEEP.compare_baseline(current, baseline)
 
 

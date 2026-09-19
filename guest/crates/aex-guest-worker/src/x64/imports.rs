@@ -311,6 +311,7 @@ enum LegacyWin64Import {
     LoadLibraryExA,
     LoadLibraryA,
     LoadLibraryExW,
+    FreeLibrary,
     FlsAlloc,
     FlsGetValue,
     FlsSetValue,
@@ -830,6 +831,13 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::LoadLibraryExW
         }
         (_, "LoadLibraryExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (
+            "kernel32.dll"
+            | "api-ms-win-core-libraryloader-l1-1-0.dll"
+            | "api-ms-win-core-libraryloader-l1-2-0.dll",
+            "FreeLibrary",
+        ) => LegacyWin64Import::FreeLibrary,
+        (_, "FreeLibrary") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
         ("kernel32.dll", "FlsSetValue") => LegacyWin64Import::FlsSetValue,
@@ -3384,6 +3392,15 @@ fn install_win64_import(
                         }),
                     )?;
                 }
+                LegacyWin64Import::FreeLibrary => {
+                    uc("write FreeLibrary return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install FreeLibrary import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_free_library(unicorn);
+                        }),
+                    )?;
+                }
                 LegacyWin64Import::FlsAlloc
                 | LegacyWin64Import::FlsGetValue
                 | LegacyWin64Import::FlsSetValue => {
@@ -5762,6 +5779,27 @@ fn emulate_set_thread_error_mode(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn retain_windows_module_reference(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    module: u64,
+) -> bool {
+    let count = unicorn
+        .get_data()
+        .windows_module_refcounts
+        .get(&module)
+        .copied()
+        .unwrap_or_default();
+    if count >= MAX_WINDOWS_MODULE_REFERENCES {
+        unicorn.get_data_mut().windows_last_error = ERROR_NOT_ENOUGH_MEMORY;
+        return false;
+    }
+    unicorn
+        .get_data_mut()
+        .windows_module_refcounts
+        .insert(module, count + 1);
+    true
+}
+
 fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
     const LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR: u32 = 0x0000_0100;
@@ -5841,8 +5879,11 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
         }
     })();
     match result {
-        Ok(module) => {
-            let _ = unicorn.reg_write(RegisterX86::RAX, module.unwrap_or_default());
+        Ok(Some(module)) if retain_windows_module_reference(unicorn, module) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, module);
+        }
+        Ok(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -5912,8 +5953,11 @@ fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
         }
     })();
     match result {
-        Ok(module) => {
-            let _ = unicorn.reg_write(RegisterX86::RAX, module.unwrap_or_default());
+        Ok(Some(module)) if retain_windows_module_reference(unicorn, module) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, module);
+        }
+        Ok(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -5923,6 +5967,39 @@ fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn emulate_free_library(unicorn: &mut Unicorn<'_, GuestState>) {
+    let module = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let count = unicorn
+        .get_data()
+        .windows_module_refcounts
+        .get(&module)
+        .copied()
+        .unwrap_or_default();
+    let pinned = unicorn
+        .get_data()
+        .windows_pinned_modules
+        .contains(&module);
+    if count == 0 {
+        if !pinned {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+        }
+    } else if count == 1 {
+        unicorn
+            .get_data_mut()
+            .windows_module_refcounts
+            .remove(&module);
+    } else {
+        unicorn
+            .get_data_mut()
+            .windows_module_refcounts
+            .insert(module, count - 1);
+    }
+    // Manifest-backed dependency images and modeled system modules are pinned
+    // for the guest-engine lifetime. FreeLibrary consumes exactly one logical
+    // LoadLibrary reference while preserving the mapped module and exports.
+    let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(count != 0 || pinned));
 }
 
 fn read_msvcp_exception_ptr(
@@ -6479,15 +6556,22 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     };
-    if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false)
-        || unicorn.mem_write(output, &module.to_le_bytes()).is_err()
-    {
+    if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false) {
         fail(unicorn, ERROR_INVALID_PARAMETER);
         return;
     }
-    // Guest images and synthetic system modules live for the worker lifetime,
-    // so default, PIN, and UNCHANGED_REFCOUNT all preserve the same stable
-    // handle while retaining their documented lookup behavior.
+    if flags & PIN != 0 {
+        unicorn.get_data_mut().windows_pinned_modules.insert(module);
+    } else if flags & UNCHANGED_REFCOUNT == 0
+        && !retain_windows_module_reference(unicorn, module)
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
+    if unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
     let _ = unicorn.reg_write(RegisterX86::RAX, 1);
 }
 
@@ -6559,13 +6643,18 @@ fn emulate_get_module_handle_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     };
+    if flags & PIN != 0 {
+        unicorn.get_data_mut().windows_pinned_modules.insert(module);
+    } else if flags & UNCHANGED_REFCOUNT == 0
+        && !retain_windows_module_reference(unicorn, module)
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
         fail(unicorn, ERROR_INVALID_PARAMETER);
         return;
     }
-    // Both modeled modules have worker-lifetime storage. The default lookup's
-    // increment, PIN, and UNCHANGED_REFCOUNT therefore differ only in lifetime
-    // policy, not in the stable handle observable by this guest.
     let _ = unicorn.reg_write(RegisterX86::RAX, 1);
 }
 
@@ -6692,21 +6781,11 @@ fn emulate_load_library_w(unicorn: &mut Unicorn<'_, GuestState>) {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     };
-    let count = unicorn
-        .get_data()
-        .windows_module_refcounts
-        .get(&module)
-        .copied()
-        .unwrap_or_default();
-    if count >= MAX_WINDOWS_MODULE_REFERENCES {
-        fail(unicorn, ERROR_NOT_ENOUGH_MEMORY);
-        return;
+    if retain_windows_module_reference(unicorn, module) {
+        let _ = unicorn.reg_write(RegisterX86::RAX, module);
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
     }
-    unicorn
-        .get_data_mut()
-        .windows_module_refcounts
-        .insert(module, count + 1);
-    let _ = unicorn.reg_write(RegisterX86::RAX, module);
 }
 
 fn install_windows_condition_variable_callbacks(
@@ -10269,7 +10348,14 @@ fn emulate_load_library_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
         Ok(0)
-    })();
+    })()
+    .map(|module| {
+        if module == 0 || retain_windows_module_reference(unicorn, module) {
+            module
+        } else {
+            0
+        }
+    });
     finish_guest_stdio(unicorn, result);
 }
 
