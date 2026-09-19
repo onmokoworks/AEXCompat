@@ -691,6 +691,23 @@ unresolved input-equal `BCC Obsolete` set from 9 to 8. This establishes the
 tested two-layer exponential boost response, not exact After Effects pixel
 parity or the other boost modes.
 
+Legacy `BCCSuperBlend.aex` exposes five compositing layers; the focused boundary
+uses inspected layer 1 slot 13 and layer 2 slot 22 while explicitly disabling
+layers 3 through 5. On a transparent background, layer 1 used the two-axis
+primary gradient at Normal 100%, and layer 2 used alternating red or blue
+patterns at Normal 50%. Both layers fixed `Thickness = 0`, avoiding the default
+matte expansion. With layer 2 disabled, output matched the primary byte-for-byte.
+With it enabled, every RGB channel stayed within two levels of the arithmetic
+50/50 input average, alpha remained opaque, and the red and blue secondary
+cases differed at all 36,864 pixels. Twelve mutations cover primary-only,
+secondary-only, uniform, transparent, active-input-swapped, channel-swapped,
+wrong-weight, additive, mirrored, wrong-base, locally corrupted, and truncated
+outputs. The installed AEX plus those mutations passed 13/13 in 10.90 seconds in
+`test_bcc_obsolete_super_blend_response.py`, reducing the unresolved input-equal
+`BCC Obsolete` set from 8 to 7. This establishes the tested two-layer Normal
+composition path, not exact After Effects pixel parity or all five layers and
+apply modes.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
