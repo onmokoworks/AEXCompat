@@ -292,6 +292,23 @@ constant midpoints, transparency, and truncation. This is behavioral evidence
 for the tested manual transition path, not exhaustive parameter coverage or
 exact After Effects pixel equivalence.
 
+Fourteen additional multi-layer wipe effects form seven AE/Premiere pairs.
+They share slot 2 `Background`, slot 3 `Animation`, and slot 4 `Percent Done`,
+but advertise four additional effect-specific layer inputs. The four
+two-choice wipe pairs use `Animation = 2`; the three `Manual / Auto /
+Pct. Done` pairs use `Animation = 3`. The focused installed-AEX test passed
+14/14 in 94.18 seconds. Every zero-percent output matched the patterned source
+byte-for-byte, every 100-percent output matched the gradient background
+byte-for-byte, and every midpoint satisfied the existing nonconstant,
+non-endpoint, all-pixels-nonzero-alpha effect validator. The test also asserts
+that each
+effect really exposes multiple layers, so it cannot silently collapse back to
+the earlier single-secondary-layer cohort.
+`test_bcc_transition_slot2_multilayer_response.py` preserves the exact cohort,
+choice/value mapping, parameter receipt, and image response. This establishes
+the tested first-background transition path; it does not claim behavior for
+the four optional effect-specific layers.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
