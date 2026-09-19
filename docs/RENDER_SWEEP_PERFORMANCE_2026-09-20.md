@@ -470,6 +470,22 @@ plus those mutations passed 11/11 in 16.71 seconds in
 input-equal `BCC Obsolete` set from 23 to 21. This is a bounded ray-control
 contract, not exact ray-kernel or After Effects pixel parity.
 
+The legacy Fast Film Process and Film Process pair shares slot 6 `Host Layer`
+and slot 14 `Brightness`. On a 0-to-255 horizontal grayscale ramp, values -50,
+0, and +50 produced mean levels 71.625, 127.5, and 183.375 in both installed
+effects; zero returned the input byte-for-byte. The validator requires opaque
+grayscale output, the per-pixel order dark <= source <= bright, strict changes
+on at least three quarters of the pixels in each direction, monotonic rows,
+identical behavior across rows, at least 64 output levels, and mean movement of
+at least 40 levels in each direction. Nine mutations reject copied dark or
+bright frames, transparency, color contamination, nonmonotonic and spatially
+varying transforms, reversed direction, a wrong neutral frame, and truncation.
+The two installed effects plus those mutations passed 11/11 in 15.29 seconds
+in `test_bcc_obsolete_film_process_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 21 to 19. This verifies the shared
+brightness control, not every film-processing control or After Effects pixel
+parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
