@@ -421,6 +421,14 @@ effects plus eight corruption mutations passed 12/12 in 20.75 seconds.
 numeric/angle receipts, and spatial response, reducing the unresolved
 input-equal `BCC Obsolete` set from 33 to 29.
 
+The existing `test_static_blur_response.py` already covers three other members
+of that same input-equal baseline set: Directional Blur, Fast Blur, and
+Gaussian Blur. It was rerun against the same Release worker and installed AEX
+files; the three zero/active responses plus six corruption mutations passed
+9/9 in 14.96 seconds. Accounting for this previously durable coverage reduces
+the unresolved input-equal `BCC Obsolete` set from 29 to 26 without duplicating
+the tests.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
