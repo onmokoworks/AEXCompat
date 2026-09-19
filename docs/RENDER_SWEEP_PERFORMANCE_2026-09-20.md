@@ -486,6 +486,15 @@ input-equal `BCC Obsolete` set from 21 to 19. This verifies the shared
 brightness control, not every film-processing control or After Effects pixel
 parity.
 
+The remaining legacy `BCCBlur.aex` is already the installed target of
+`test_bcc_blur_response.py`: its inspected slots 4 and 5 are the test's
+`Horizontal Blur` and `Vertical Blur` controls. Rerunning that test with this
+exact AEX path exercised zero, radius 2, radius 20, and independent horizontal
+and vertical blur. The installed case and ten corruption mutations passed
+11/11 in 12.16 seconds against the same Release worker. Accounting for this
+existing behavioral coverage reduces the unresolved input-equal `BCC Obsolete`
+set from 19 to 18 without adding a duplicate test.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
