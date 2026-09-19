@@ -449,7 +449,7 @@ def test_default_mode_is_unicorn_only_and_does_not_require_native_worker(tmp_pat
     assert args.native_worker is None
 
 
-def test_default_jobs_is_four_and_cli_accepts_explicit_parallelism(tmp_path):
+def test_default_jobs_is_six_and_cli_accepts_explicit_parallelism(tmp_path):
     unicorn = tmp_path / "unicorn-worker"
 
     default = SWEEP.parse_args(
@@ -460,7 +460,7 @@ def test_default_jobs_is_four_and_cli_accepts_explicit_parallelism(tmp_path):
         + ["--unicorn-worker", str(unicorn), "--jobs", "12"]
     )
 
-    assert default.jobs == 4
+    assert default.jobs == 6
     assert parallel.jobs == 12
 
 

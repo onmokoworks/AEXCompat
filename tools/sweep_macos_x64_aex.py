@@ -1326,10 +1326,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--jobs",
         type=int,
-        default=4,
+        default=6,
         choices=range(1, 33),
         metavar="N",
-        help="run up to N isolated worker processes concurrently (default: 4)",
+        help="run up to N isolated worker processes concurrently (default: 6)",
     )
     parser.add_argument(
         "--native-run-dllmain",

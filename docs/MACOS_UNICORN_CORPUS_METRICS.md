@@ -47,7 +47,7 @@ python3 tools/sweep_macos_x64_aex.py \
   --corpus-root <sha-addressed-aex-directory> \
   --input-png <control.png> \
   --unicorn-worker guest/target/release/aex-guest-worker \
-  --jobs 4 \
+  --jobs 6 \
   --output <current-report.json> \
   --baseline-report <previous-report.json> \
   --expected-inventory-sha256 <sha256> \
@@ -55,7 +55,7 @@ python3 tools/sweep_macos_x64_aex.py \
 ```
 
 `--jobs` controls how many isolated worker processes run concurrently (default
-4, maximum 32). Report entry order remains the deterministic SHA-256 order;
+6, maximum 32). Report entry order remains the deterministic SHA-256 order;
 parallel completion order never changes the durable report. Each AEX/backend
 attempt keeps its own process group and run directory. Runner-initiated cleanup
 therefore targets only that attempt, and results from completed attempts remain
