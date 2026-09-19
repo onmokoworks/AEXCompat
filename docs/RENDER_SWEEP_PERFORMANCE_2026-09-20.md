@@ -270,12 +270,32 @@ invalid alpha is zero and the worker/session are clean. The report is
 same CLI `cc96567e...` and worker `94071433...` fingerprints as the
 DistanceGradation semantic probe. The two previously transparent records are
 therefore valid effect responses under effect-appropriate inputs, not image
-render failures. The seven opaque input-equal OLM defaults remain a semantic
+render failures. Six opaque input-equal OLM defaults remain a semantic
 parameter-response backlog. On the verified shipping Smart route and these
 effect-appropriate inputs, no OLM native execution or visibility failure
 remains. The separate `DistanceGradation` Classic close crash described above
 is still unresolved; Classic is diagnostic-only for this result. No After
 Effects process was used.
+
+`OLMBlur` is resolved by the opted-in real-AEX behavioral fixture in
+`tests/test_render_fixture_semantic_response.py`. The fixture rendered the
+same structured 256x144 ARGB8 image through the shipping Smart path at time 0
+with `Blur Amount` 1 and 20. Both outputs remained fully opaque and nonconstant,
+all 36,864 pixels changed between the two parameter values, and horizontal red
+edge energy fell from 22.4666 to 0.0635 (ratio 0.00283). The low/high raw-frame
+SHA-256 values are respectively
+`efb5279c9a452932f8b8cfb46e381066b3db33e9b9046daa59005c407d7f6c22`
+and `e62d497d49bde705c14a04fe3b02c1abbf502ebaf78bb948cf1bade6139389e9`.
+The input PNG SHA-256 is
+`018b20de0910a6327933dbd3cd27d2a832e7ad0587467ad48ed627a430b9082c`;
+the installed AEX SHA-256 is
+`f0611785e7b14ac4fcfc75f23b8862beb4539eee52d25d472556849535e96e5b`.
+The Release harness and worker SHA-256 values are respectively
+`b4b264a11629e7542231ebae73477b31cbbe62e09b2fba7ddf9bdfa47a36a26b`
+and `94071433e24859e52a340bd94a758deaec9c7a442d59d05c9d6ed6c717d6f88d`.
+The focused real-AEX test passed in 1.08 s; its negative behavioral cases reject
+no-op, constant, truncated, and transparent false positives. No After Effects
+process was used.
 
 ## ONMK subdirectory cohort
 
