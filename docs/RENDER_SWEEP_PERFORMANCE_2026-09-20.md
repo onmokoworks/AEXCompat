@@ -203,11 +203,26 @@ The nine transparent execution probes are `BCCCartoonLight`,
 `BCCLinearLumaKey`, `BCCMotionBlur`, `BCCParticleEmitter`, `BCCRadiantEdges`,
 `Composite`, `Linear Luma Key`, `ColorKeep`, and `DistanceGradation`.
 `ColorKeep` and `DistanceGradation` already have effect-appropriate semantic
-fixtures below; the seven Boris effects remain a semantic-input cohort and are
-not counted as valid visible-effect success. Likewise, the other 558 rows are
-transport/decode successes, not blanket proof that every default applied its
-intended effect; previously recorded demo overlays and input-equal defaults
-remain separate semantic work.
+fixtures below. The seven Boris defaults were subsequently resolved with
+effect-appropriate inputs and parameters: Cartoon Light responds to line width,
+BCC Linear Luma Key and Linear Luma Key move their alpha boundaries with the
+threshold, Particle Emitter responds to time and birthrate, Radiant Edges tracks
+the source boundary, and Composite follows a spatial graded matte. BCC Motion
+Blur additionally receives explicit Host/Source layers and previous/next timed
+samples; amount zero is input-identical while amounts two and eight change
+increasing numbers of pixels only around the moving box's trajectory, with the
+far background unchanged. At the same amount, static previous/current/next
+samples produce the transparent default, proving that the timed samples affect
+the result. The corresponding eight test modules passed
+55/55 against the installed AEX files and the fingerprinted Release worker.
+`test_bcc_motion_blur_response.py` and `test_linear_luma_key_response.py` add
+the previously missing behavioral coverage, including validators that reject
+fixed, empty, corrupt, and parameter-insensitive outputs. These results resolve
+the seven transparent defaults as semantic successes for the tested behaviors,
+not as exact AE pixel equivalence or exhaustive effect coverage. Likewise, the
+other 558 rows are transport/decode successes, not blanket proof that every
+default applied its intended effect; previously recorded demo overlays and
+input-equal defaults remain separate semantic work.
 
 One focused command intended for `onmk/DistortChroma.aex` used a basename
 substring filter against both default roots and also executed Sapphire's
