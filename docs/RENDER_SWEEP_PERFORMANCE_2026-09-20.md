@@ -296,3 +296,17 @@ fingerprint. Raw-frame inspection shows an opaque scanline/waveform pattern
 instead of a warning or license image. This proves native execution and decoded
 image output, but not effect semantics without an AE reference. No After
 Effects process was used.
+
+## DepthAnythingV2 cohort
+
+The DepthAnythingV2 subdirectory contains one installed image effect. Its
+single focused run is also the complete cohort milestone. The report
+`%TEMP%/aexcompat-depthanythingv2-render-all-2026-09-20.json` records 1/1
+visible render in 1,465 ms with 36,864 nonzero-alpha pixels, no frame/session/
+worker failure, and the complete accepted fingerprint. It rendered without a
+manual runtime-folder choice. Raw-frame inspection shows an opaque 255-level
+grayscale image, dark through the center and bright at the top and bottom,
+rather than a warning or license image. That is inference-shaped output, but
+the model selection/load path was not independently verified and effect
+semantics remain unverified without an AE reference for the same solid input.
+No After Effects process was used.
