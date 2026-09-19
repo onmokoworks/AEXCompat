@@ -372,6 +372,14 @@ seven corruption mutations also passed separately. The durable coverage is in
 `BCC Obsolete` set from 49 to 39 while leaving every effect-specific wipe
 control outside the stated contract.
 
+The legacy `BCCSwishPan` AE/Premiere pair has a third operation layout: slot 2
+`Animation = Pct. Done`, slot 3 `Percent Done`, and slot 4 `Layer to Reveal`.
+Both installed effects passed the byte-exact endpoint and nonconstant midpoint
+oracle. The pair plus the seven corruption mutations passed 9/9 in 14.14
+seconds. `test_bcc_obsolete_swish_pan_response.py` preserves this layout and
+image response, reducing the unresolved input-equal `BCC Obsolete` set from 39
+to 37.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
