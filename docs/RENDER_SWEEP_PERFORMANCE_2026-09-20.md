@@ -310,3 +310,58 @@ rather than a warning or license image. That is inference-shaped output, but
 the model selection/load path was not independently verified and effect
 semantics remain unverified without an AE reference for the same solid input.
 No After Effects process was used.
+
+## DepthONNX cohort
+
+The DepthONNX subdirectory contains one installed image effect,
+`DepthONNX.aex` (SHA-256
+`a6a2e3e60797e08af1f0db177f4ab8df9a58b6c445329412b8627ea52f98408c`).
+Its initial Smart run returned `frame_error:-6`. The old forced-Classic path
+instead reported `rendered`, but byte inspection found that the output was the
+allocation's unchanged `0xCC` fill, not a frame produced by the plug-in. That
+was a host false positive.
+
+Classic output storage is now seeded immediately before `RENDER` with a
+non-uniform canary and compared with its packed pre-render snapshot during
+finalization. Exact equality is reported as `frame_error:-6` at
+`classic_finalize`; a legitimate uniform frame, including all `0xCC`, remains
+valid. Host-populated `PF_OutFlag_NOP_RENDER` passthrough is explicitly exempt.
+The compiled behavioral self-test covers all three cases.
+
+The post-fix focused report is
+`%TEMP%/aexcompat-depthonnx-classic-canary-final-2026-09-20.json`:
+
+| result | value |
+|---|---:|
+| installed image effects | 1 |
+| valid rendered images | 0 |
+| explicit frame errors | 1 (`-6`, `classic_finalize`) |
+| worker/session termination | clean |
+| plug-in row elapsed | 273 ms |
+| complete report elapsed | 461 ms |
+
+The plug-in's Classic `RENDER` selector returned zero, but the final payload
+still exactly matched the canary (SHA-256
+`626e48b2a4b79fde239a0f7045333dfe6e294bee8ef4a42cd9efb195d987f8f1`).
+The report records the saved 256x144 ARGB8, time 0, one-frame conditions and a
+complete fingerprint: CLI
+`73c42eb09624819ba009ce36a859ea5c43d764e26a01dcef88a7762bbbcf5404`
+and worker
+`a243fb31ec9103cad8485082724a5693c12929f948580ef57d8e5d771c82dba7`.
+
+The installed directory, `C:/Program Files/Adobe/Adobe After Effects
+2026/Support Files/Plug-ins/Effects/DepthONNX`, contains both required ONNX
+Runtime DLLs and a `models/depth_anything_v2_small/manifest.json`, but none of
+the three ONNX files named by that manifest. An exact-filename search under the
+user profile also found no copy. Strings embedded in the installed AEX include
+`no models found; add packs under MediaCore/DepthONNX/models or use Browse
+Model Folder`, consistent with a separately supplied model pack. A cached
+public project listing identified three export commands for these same manifest
+filenames, but its source URL returned 404 during the final evidence check and
+is not treated as durable proof. The missing weights are therefore retained as
+`external_blocked:missing_model_assets`, and the effect is not counted as a
+render success. This does not yet prove that missing weights alone caused the
+untouched Classic output: the same report records one
+`effect_sequence_data` callback denial (`no_active_state`, result 516), which
+remains an independent host-compatibility lead. No After Effects process was
+used.

@@ -447,6 +447,7 @@ struct ClassicRenderDispatchOwner {
   // Why `prepare_output` returned what it did, for the stage marker its caller
   // emits. Static strings only; null means it had nothing to add.
   const char* resize_reason{};
+  std::vector<unsigned char>& initial_output_payload;
 
   int32_t run(int32_t error) {
     return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
@@ -513,6 +514,23 @@ struct ClassicRenderDispatchOwner {
     hint = aexcompat::render::extent_hint_within(hint, output_width, output_height);
     std::memcpy(input.data() + kInExtentHint, hint.data(), sizeof(hint));
   }
+  int32_t seed_output_canary() {
+    try {
+      initial_output_payload.resize(
+          static_cast<std::size_t>(width) * height * pixel_bytes);
+    } catch (const std::bad_alloc&) {
+      return -3;
+    }
+    for (std::size_t index = 0; index < initial_output_payload.size(); ++index)
+      initial_output_payload[index] =
+          static_cast<unsigned char>((index * 131u + 0x5Du) & 0xFFu);
+    for (int32_t y = 0; y < height; ++y)
+      std::memcpy(destination + static_cast<std::size_t>(y) * rowbytes,
+                  initial_output_payload.data() +
+                      static_cast<std::size_t>(y) * width * pixel_bytes,
+                  static_cast<std::size_t>(width) * pixel_bytes);
+    return 0;
+  }
   int32_t prepare_output() {
     const auto fail = [this](int32_t error) {
       if (frame_output) frame_output->validation_failed = true;
@@ -544,7 +562,7 @@ struct ClassicRenderDispatchOwner {
     if (aexcompat::render::output_extent_unchanged(width, height, next_width, next_height)) {
       if (frame_setup_output.origin_x != 0 || frame_setup_output.origin_y != 0)
         resize_reason = "origin_without_resize";
-      return 0;
+      return seed_output_canary();
     }
     if (!aexcompat::render::validate_output_extent(width, height, next_width, next_height,
             read<uint32_t>(output, kOutFlags))) {
@@ -634,7 +652,7 @@ struct ClassicRenderDispatchOwner {
       frame_output->input_origin_x = origin_x;
       frame_output->input_origin_y = origin_y;
     }
-    return 0;
+    return seed_output_canary();
   }
   int32_t dispatch_selector() {
     struct LayerContextScope {
@@ -864,6 +882,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   input_hash = sha256_bytes(logical_source.data(), logical_source.size());
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
+  std::vector<unsigned char> initial_output_payload;
   if (nop_render) {
     // PF_OutFlag_NOP_RENDER means the host copies the input through instead of
     // dispatching RENDER, so there is no `prepare_output` on this branch and no
@@ -914,7 +933,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
         external_total_time, external_time_scale, case_id, requested, external_rgba,
         external_layers, external_width, external_height, *classic_context, logical_source,
-        width, height, lifecycle_owner.frame_setup_output, frame_output};
+        width, height, lifecycle_owner.frame_setup_output, frame_output, nullptr,
+        initial_output_payload};
     // The per-frame `stage:classic_*` markers are emitted from inside RenderHooks
     // (see ClassicRenderDispatchOwner) so each brackets only the step it names.
     // UI markers are gated on a draw request or a live UI context, so ordinary
@@ -939,7 +959,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       destination, rowbytes, width, height, pixel_bytes, error,
       external_current_time, external_time_step, external_time_scale,
       read<int32_t>(input, kInQuality), dispatch_pixel_format, &output_hash,
-      &guards_intact, captured_argb, guarded.sentinels_intact()};
+      &guards_intact, captured_argb, guarded.sentinels_intact(), nop_render,
+      nop_render ? nullptr : &initial_output_payload};
   error = aexcompat::worker_runtime::classic_execution::finalize(final_context, {
       +[](const unsigned char* data, int32_t rowbytes, int32_t width, int32_t height,
           int32_t bytes, std::vector<unsigned char>& output) {

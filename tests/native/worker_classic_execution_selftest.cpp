@@ -1,4 +1,5 @@
-// Behavioral self-test for classic_execution's lifecycle/dispatch contract.
+// Behavioral self-test for classic_execution's lifecycle, dispatch, and
+// output-finalization contracts.
 //
 // These are pure functions over a hook table, so the whole contract can be
 // exercised with counting fakes and no plug-in, no worker process, and no AEX.
@@ -18,6 +19,7 @@
 #include "worker_classic_execution.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -110,6 +112,143 @@ void check(bool condition, const char* what) {
   if (condition) return;
   std::fprintf(stderr, "FAIL: %s\n", what);
   ++failures;
+}
+
+struct FinalizeProbe {
+  int publish_calls{};
+  int dump_calls{};
+  std::vector<unsigned char> published;
+};
+
+FinalizeProbe* finalize_probe{};
+
+const Hooks& finalize_hooks() {
+  static const Hooks value{
+      +[](const unsigned char* source, int32_t rowbytes, int32_t width,
+          int32_t height, int32_t pixel_bytes,
+          std::vector<unsigned char>& output) {
+        if (!source || rowbytes < width * pixel_bytes || width <= 0 ||
+            height <= 0 || pixel_bytes <= 0) return false;
+        output.resize(static_cast<std::size_t>(width) * height * pixel_bytes);
+        for (int32_t y = 0; y < height; ++y)
+          std::memcpy(output.data() + static_cast<std::size_t>(y) * width * pixel_bytes,
+                      source + static_cast<std::size_t>(y) * rowbytes,
+                      static_cast<std::size_t>(width) * pixel_bytes);
+        return true;
+      },
+      +[](const unsigned char* data, std::size_t size) {
+        return std::string(reinterpret_cast<const char*>(data), size);
+      },
+      +[](aexcompat::suite_abi::AegpTime, aexcompat::suite_abi::AegpTime,
+          int8_t, int32_t,
+          int32_t width, int32_t height, const void* pixels) {
+        ++finalize_probe->publish_calls;
+        const auto* bytes = static_cast<const unsigned char*>(pixels);
+        finalize_probe->published.assign(bytes, bytes + width * height * 4);
+        return true;
+      },
+      +[](const void*, int32_t, int32_t, int32_t) {
+        ++finalize_probe->dump_calls;
+      },
+      +[](const char*) {}};
+  return value;
+}
+
+Context finalize_context(std::vector<unsigned char>& destination,
+                         int32_t rowbytes, int32_t width, int32_t height,
+                         std::string& hash, bool& guards,
+                         std::vector<unsigned char>& captured,
+                         const std::vector<unsigned char>& initial_payload,
+                         bool host_wrote_output = false) {
+  return Context{destination.data(), rowbytes, width, height, 4, 0,
+                 0, 1, 1, 0, 0, &hash, &guards, &captured, true,
+                 host_wrote_output, &initial_payload};
+}
+
+void an_untouched_classic_payload_is_not_a_rendered_frame() {
+  constexpr int32_t width = 2;
+  constexpr int32_t height = 2;
+  constexpr int32_t rowbytes = width * 4 + 3;
+  std::vector<unsigned char> destination(rowbytes * height, 0xCC);
+  std::vector<unsigned char> initial(width * height * 4);
+  for (std::size_t index = 0; index < initial.size(); ++index) {
+    initial[index] = static_cast<unsigned char>((index * 131u + 0x5Du) & 0xFFu);
+    destination[(index / (width * 4)) * rowbytes + index % (width * 4)] = initial[index];
+  }
+  std::string hash;
+  bool guards = false;
+  std::vector<unsigned char> captured;
+  FinalizeProbe probe;
+  finalize_probe = &probe;
+  auto context = finalize_context(destination, rowbytes, width, height,
+                                  hash, guards, captured, initial);
+
+  const int32_t error = finalize(context, finalize_hooks());
+
+  check(error == -6, "an unchanged classic canary is rejected as untouched");
+  check(probe.publish_calls == 0,
+        "an untouched classic payload is not published as a staged world");
+  check(captured == initial,
+        "the untouched payload remains available for diagnostics");
+  check(probe.dump_calls == 1, "the untouched payload can still be dumped");
+  check(guards, "untouched pixels do not imply damaged row or allocation guards");
+}
+
+void a_written_classic_payload_still_succeeds() {
+  constexpr int32_t width = 2;
+  constexpr int32_t height = 2;
+  constexpr int32_t rowbytes = width * 4 + 3;
+  std::vector<unsigned char> destination(rowbytes * height, 0xCC);
+  std::vector<unsigned char> initial(width * height * 4);
+  for (std::size_t index = 0; index < initial.size(); ++index)
+    initial[index] = static_cast<unsigned char>((index * 131u + 0x5Du) & 0xFFu);
+  std::string hash;
+  bool guards = false;
+  std::vector<unsigned char> captured;
+  FinalizeProbe probe;
+  finalize_probe = &probe;
+  auto context = finalize_context(destination, rowbytes, width, height,
+                                  hash, guards, captured, initial);
+
+  const int32_t error = finalize(context, finalize_hooks());
+
+  check(error == 0, "a plugin-written all-0xCC classic payload remains valid");
+  check(probe.publish_calls == 1,
+        "a written classic payload is published exactly once");
+  check(probe.published == captured,
+        "the staged and captured written payloads match");
+  check(guards, "a written payload preserves untouched row and allocation guards");
+}
+
+void a_host_copied_payload_equal_to_the_canary_still_succeeds() {
+  constexpr int32_t width = 2;
+  constexpr int32_t height = 2;
+  constexpr int32_t rowbytes = width * 4 + 3;
+  // NOP_RENDER asks the host to copy the input. Make that valid input exactly
+  // equal to the canary so this succeeds only because the explicit host write
+  // is authoritative, not because ordinary byte comparison sees a change.
+  std::vector<unsigned char> destination(rowbytes * height, 0xCC);
+  std::vector<unsigned char> initial(width * height * 4);
+  for (std::size_t index = 0; index < initial.size(); ++index) {
+    initial[index] = static_cast<unsigned char>((index * 131u + 0x5Du) & 0xFFu);
+    destination[(index / (width * 4)) * rowbytes + index % (width * 4)] = initial[index];
+  }
+  std::string hash;
+  bool guards = false;
+  std::vector<unsigned char> captured;
+  FinalizeProbe probe;
+  finalize_probe = &probe;
+  auto context = finalize_context(destination, rowbytes, width, height,
+                                  hash, guards, captured, initial, true);
+
+  const int32_t error = finalize(context, finalize_hooks());
+
+  check(error == 0, "a host-copied frame equal to the canary remains valid");
+  check(probe.publish_calls == 1,
+        "a host-copied canary-equal frame is published exactly once");
+  check(probe.published == captured,
+        "the staged and captured host-copied payloads match");
+  check(guards, "the host-copied payload preserves row and allocation guards");
 }
 
 // A failed FRAME_SETUP has to surface as LifecycleResult::error. Before #725 it
@@ -285,6 +424,9 @@ void a_failing_close_ui_never_overwrites_an_existing_error() {
 }  // namespace
 
 int main() {
+  an_untouched_classic_payload_is_not_a_rendered_frame();
+  a_written_classic_payload_still_succeeds();
+  a_host_copied_payload_equal_to_the_canary_still_succeeds();
   a_refused_setup_reaches_the_caller();
   a_clean_setup_still_runs_every_step();
   a_failing_pre_render_hook_is_still_minus_five();

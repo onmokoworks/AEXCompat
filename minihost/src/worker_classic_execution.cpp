@@ -70,6 +70,13 @@ int finalize(Context& c, const Hooks& h) {
   if (!h.copy_packed || !h.hash || !h.copy_packed(c.destination, c.rowbytes, c.width,
       c.height, c.pixel_bytes, logical)) return -3;
   if (c.output_hash) *c.output_hash = h.hash(logical.data(), logical.size());
+  // The classic runtime places a non-uniform canary in the active pixels just
+  // before RENDER. Exact equality means the plug-in wrote nothing. Comparing
+  // that snapshot instead of a fixed fill color keeps legitimate uniform
+  // frames (including all 0xCC) distinguishable from untouched storage.
+  const bool untouched = c.initial_payload && !logical.empty() &&
+      logical == *c.initial_payload;
+  if (c.error == 0 && untouched && !c.host_wrote_output) c.error = -6;
   if (c.error == 0 && (!h.publish_stage || !h.publish_stage(
       {c.current_time, c.time_scale}, {c.time_step, c.time_scale},
       static_cast<int8_t>(c.quality == 0 ? 0 : 1), c.pixel_format,

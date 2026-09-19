@@ -53,6 +53,14 @@ struct Context {
   std::string* output_hash{}; bool* guards_intact{};
   std::vector<unsigned char>* captured{};
   bool sentinels_intact{};
+  // True when the host deliberately populated the payload (currently the
+  // PF_OutFlag_NOP_RENDER input passthrough). Such bytes are valid even when
+  // every value happens to equal the allocation sentinel.
+  bool host_wrote_output{};
+  // Packed active pixels placed in the destination immediately before the
+  // plug-in's RENDER selector. Equality after RENDER means no byte was written;
+  // unlike a fixed fill color, a legitimate uniform frame does not collide.
+  const std::vector<unsigned char>* initial_payload{};
 };
 int finalize(Context& context, const Hooks& hooks);
 }
