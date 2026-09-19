@@ -392,6 +392,17 @@ mutations passed 7/7 in 15.40 seconds.
 receipts as well as the spatial image response, reducing the unresolved
 input-equal `BCC Obsolete` set from 37 to 35.
 
+The legacy `BCCFlutterCut` AE/Premiere pair is time-driven rather than manually
+percent-driven. With the saved 300-frame duration and the inspected two-frame
+incoming/outgoing defaults, frames 0, 146, 148, 150, 152, 154, and 299 produced
+the exact state sequence source, reveal, source, reveal, source, reveal,
+reveal. `test_bcc_obsolete_flutter_cut_response.py` preserves that bounded
+timeline and rejects source-only, reveal-only, monotonic, blended, corrupt,
+truncated, missing, and reordered sequences. The pair plus eight mutations
+passed 10/10 in 30.39 seconds, reducing the unresolved input-equal
+`BCC Obsolete` set from 35 to 33. This is evidence for the saved timing
+conditions, not a complete After Effects timing-equivalence claim.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
