@@ -617,6 +617,23 @@ plus those mutations passed 12/12 in 5.56 seconds in
 `BCC Obsolete` set from 13 to 12. This establishes strong chroma-block smoothing
 for the tested controls, not exact DV reconstruction or After Effects parity.
 
+Legacy `BCCPrism.aex` operates directly on the primary input rather than an
+inspected Host Layer parameter. On vertical grayscale bars, slot 17 `Mix with
+Original = 100` returned the input byte-for-byte. With inspected start/end points
+`(30,50)`/`(70,50)`, depths `0.5`/`2`, slot 10 `Prism Amount = 100`, reflect
+outside pattern, and mix 0, 35,072 pixels changed and 33,280 became chromatic.
+At the center column the red/green/blue profiles had 15/7/5 threshold crossings,
+each retained range 20..230 and mean approximately 125, and pairwise channel
+differences covered at least 128 of 144 rows. Horizontal variation within each
+row remained at most one level; the top color ordered red > green > blue and the
+bottom ordered red < green < blue, establishing directed spectral separation.
+Eleven mutations cover copied, grayscale, uniform, row-damaged, transparent,
+channel-swapped, vertically reversed, low-dynamic, mean-shifted, wrong-neutral,
+and truncated outputs. The installed AEX plus those mutations passed 12/12 in
+5.75 seconds in `test_bcc_obsolete_prism_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 12 to 11. This establishes the tested prism
+dispersion response, not exact optical or After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
