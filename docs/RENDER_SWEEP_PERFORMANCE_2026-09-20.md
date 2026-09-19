@@ -251,8 +251,31 @@ and worker fingerprint
 The Classic comparison also produced visible pixels but still crashed during
 session close; that diagnostic-only fallback issue does not invalidate the
 clean shipping Smart route and remains recorded separately. No After Effects
-process was used. `ColorKeep` is now the only unresolved OLM compatibility
-candidate.
+process was used.
+
+`ColorKeep` is also resolved by a semantic-input probe. The vendor describes
+the effect as retaining only selected flat colors
+(`https://www.olm.co.jp/post/color-keep`). Shipping discovery records one
+enabled default keep color, opaque black; the original `(32,64,128)` solid did
+not contain it, so full transparency was the expected response. A 256x144
+fully opaque input with a black left half and red right half (PNG SHA-256
+`88b5713342cdfcb391d842140fd2dbf426de3e8d00b229cf424b407a02345040`)
+produced a clean Smart render in 191 ms. The 18,432 left-half pixels are exactly
+`RGBA(0,0,0,255)` and the 18,432 right-half pixels are exactly
+`RGBA(255,0,0,0)`: the selected black is retained and the unselected red is
+made transparent without discarding its RGB. The output SHA-256 is
+`2d77561232b362877b496d1e76a32c0bd7caf53da80fbcd35e8ff321aee26e6f`;
+invalid alpha is zero and the worker/session are clean. The report is
+`%TEMP%/aexcompat-olm-ColorKeep-flat-colors-smart-2026-09-20.json`, with the
+same CLI `cc96567e...` and worker `94071433...` fingerprints as the
+DistanceGradation semantic probe. The two previously transparent records are
+therefore valid effect responses under effect-appropriate inputs, not image
+render failures. The seven opaque input-equal OLM defaults remain a semantic
+parameter-response backlog. On the verified shipping Smart route and these
+effect-appropriate inputs, no OLM native execution or visibility failure
+remains. The separate `DistanceGradation` Classic close crash described above
+is still unresolved; Classic is diagnostic-only for this result. No After
+Effects process was used.
 
 ## ONMK subdirectory cohort
 
