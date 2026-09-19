@@ -13,7 +13,8 @@ mod windows_e2e {
         RenderPixelFormat,
     };
     use aexcompat_broker::render_session::{
-        ClusterRenderPlugins, FrameStatus, RenderSession, SessionOpenRequest, SwapOutcome,
+        ClusterRenderPlugins, FrameStatus, RenderSession, SessionLayer, SessionOpenRequest,
+        SwapOutcome,
     };
     use aexcompat_broker::secure_image_dispatch::ApprovedImageArtifact;
     use sha2::{Digest, Sha256};
@@ -221,6 +222,146 @@ mod windows_e2e {
             close["worker"]["diagnostics"]["first_failure_stage"], "global_setup",
             "the plug-in-local swap failure must remain visible at close: {close}"
         );
+    }
+
+    #[test]
+    fn smart_cluster_swap_preserves_dynamic_secondary_layer_pixels() {
+        let root = de_verbatim(&repository_root());
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let fixture = root.join(
+            "target/pf-smart-timed-multilayer-probe-build/Release/pf_smart_timed_multilayer_probe.aex",
+        );
+        if !worker.is_file() || !fixture.is_file() {
+            eprintln!(
+                "skipping clustered layer pixels: build aex_worker.exe and pf_smart_timed_multilayer_probe.aex first"
+            );
+            return;
+        }
+
+        let scratch = scratch_dir("cluster-layers");
+        let first = scratch.join("first.aex");
+        let second = scratch.join("second.aex");
+        std::fs::copy(&fixture, &first).unwrap();
+        std::fs::copy(&fixture, &second).unwrap();
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&first).unwrap()));
+        let (width, height) = (16u32, 8u32);
+        let solid = |rgba: [u8; 4]| {
+            std::iter::repeat_n(rgba, (width * height) as usize)
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        let initial_layer = solid([10, 20, 30, 255]);
+        let updated_layer = solid([50, 60, 70, 255]);
+        let layers = vec![SessionLayer {
+            slot: 1,
+            width,
+            height,
+            rgba: initial_layer.clone(),
+            timed: None,
+            dynamic: true,
+        }];
+        let input = solid([1, 2, 3, 255]);
+        fn request<'a>(
+            root: &'a Path,
+            plugin_path: &'a Path,
+            sha: &'a str,
+            layers: &'a [SessionLayer],
+            scratch: &Path,
+            width: u32,
+            height: u32,
+        ) -> SessionOpenRequest<'a> {
+            SessionOpenRequest {
+                repository: root,
+                plugin_path,
+                plugin_sha256: sha,
+                parameters: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers,
+                dependencies: Vec::new(),
+                companions: Vec::new(),
+                dependency_search_dirs: vec![scratch.to_path_buf()],
+                width,
+                height,
+                pixel_format: RenderPixelFormat::Argb8,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: std::time::Duration::from_secs(30),
+                smart: true,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                payload_override: None,
+                launch_environment: Default::default(),
+            }
+        }
+        let pixels = |session: &mut RenderSession, frame_index| match session
+            .render_frame(frame_index, 0, &input)
+            .unwrap()
+            .status
+        {
+            FrameStatus::Rendered { pixels, .. } => pixels,
+            status => panic!("layer-dependent frame did not render: {status:?}"),
+        };
+
+        let mut cluster = RenderSession::open_cluster(
+            request(&root, &first, &sha, &layers, &scratch, width, height),
+            ClusterRenderPlugins {
+                plugins: vec![approved_artifact(&first), approved_artifact(&second)],
+                swap_payloads: vec![None, None],
+                module_bound: 64,
+            },
+        )
+        .expect("open layer-dependent cluster");
+        let first_pixels = pixels(&mut cluster, 0);
+        assert_eq!(
+            first_pixels, initial_layer,
+            "effect A did not read its dynamic layer"
+        );
+        cluster
+            .update_dynamic_layer(1, &updated_layer)
+            .expect("update the shipping dynamic layer before swap");
+        assert!(matches!(cluster.swap_plugin(1), Ok(SwapOutcome::Swapped)));
+        let clustered = pixels(&mut cluster, 1);
+        let cluster_close = cluster.close();
+        assert_eq!(cluster_close["session_clean"], true, "{cluster_close}");
+
+        let fresh_layers = vec![SessionLayer {
+            slot: 1,
+            width,
+            height,
+            rgba: updated_layer.clone(),
+            timed: None,
+            dynamic: true,
+        }];
+        let mut fresh = RenderSession::open(request(
+            &root,
+            &second,
+            &sha,
+            &fresh_layers,
+            &scratch,
+            width,
+            height,
+        ))
+        .expect("open fresh layer session");
+        let individual = pixels(&mut fresh, 0);
+        let fresh_close = fresh.close();
+        assert_eq!(fresh_close["session_clean"], true, "{fresh_close}");
+        assert_eq!(clustered, individual, "swap changed secondary-layer pixels");
+        assert_eq!(
+            clustered, updated_layer,
+            "effect B did not read the updated dynamic layer"
+        );
+
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 
     #[test]

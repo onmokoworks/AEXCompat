@@ -112,3 +112,45 @@ Bucket counts sum to the record count. The report is
 `%TEMP%/aexcompat-inventory-all-2026-09-20.json`; absolute scan paths remain
 omitted. `--blocked-path` retains matching candidates in the denominator and
 labels them instead of silently excluding them.
+
+## Boris Continuum cohort
+
+Shipping discovery inspected all 496 Continuum AEX files successfully in
+13,408 ms. All share one dependency closure; 490 advertise the supported
+SmartFX route. A focused layerless pair showed the resident-process benefit:
+`BCCWoodPlanks.aex` fell from 1,687 ms in its own session to 505 ms after a
+same-process plug-in swap, with identical bucket and pixel SHA-256.
+
+The first attempt to extend clustering to effects with a secondary layer used
+equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
+two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
+two clusters even though focused single runs rendered. That unsafeguarded form
+was rejected. The accepted form abandons a cluster on every non-`rendered`
+member and replays all of its members through the established one-plug-in path.
+Pixel-determinism mode remains available across the optimized path, so a
+clustered result can be compared with a fresh single session.
+A compiled SmartFX fixture now renders A with the shipping dynamic-layer
+transport, updates that layer, swaps to B, and compares every output byte with
+a fresh B session using the updated image. It also asserts the exact
+layer-derived pixels before and after the update. Verification elapsed time is
+included in each clustered row's `elapsed_ms`.
+
+The final report is
+`%TEMP%/aexcompat-boris-render-all-safe-layer-cluster-2026-09-20.json`:
+
+| result | value |
+|---|---:|
+| rendered / total | 496 / 496 |
+| invalid or empty | 0 |
+| distinct pixel SHA-256 values | 192 |
+| accepted clustered rows | 211 |
+| single or safe-fallback rows | 285 |
+| discovery | 12,828 ms |
+| total | 680,757 ms |
+
+The run used the saved 256x144 ARGB8, time 0, one-frame conditions with the
+first declared secondary layer when present. The report has a complete boundary
+fingerprint and the accepted worker SHA-256 `f9494e5163cb3fd1e993617cc648b70f`
+`b817c14cf928141c90e6511b6fd36602`. No After Effects process was used. The
+post-change PSOFT regression rendered 19/19 in 3,427 ms with zero bucket or
+pixel-SHA differences from the known-worker control.

@@ -739,12 +739,19 @@ fn main() {
         let mut finished = Vec::with_capacity(lane.len());
         let mut position = 0;
         while position < lane.len() {
-            let end = cluster_candidate_run_end(lane, position, &records);
+            let end = cluster_candidate_run_end(lane, position, &records, &options);
             let run = &lane[position..end];
             let clustered = (run.len() >= 2)
                 .then(|| {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        sweep_cluster_candidates(&repository, run, &records, &options, &input)
+                        sweep_cluster_candidates(
+                            &repository,
+                            run,
+                            &records,
+                            &options,
+                            &input,
+                            &layer_pixels,
+                        )
                     }))
                     .ok()
                     .flatten()
@@ -774,6 +781,7 @@ fn main() {
                                 &layer_pixels,
                             )
                         });
+                let verification_started = Instant::now();
                 verify_pixel_determinism(&mut outcome, options.verify_pixel_determinism, || {
                     let mut repeat_options = options.clone();
                     // The primary frame dump is the artifact requested by the
@@ -792,8 +800,15 @@ fn main() {
                     }))
                     .unwrap_or_else(|_| Outcome::bare("sweep_panicked"))
                 });
-                let elapsed_ms =
-                    clustered_elapsed_ms.unwrap_or_else(|| plugin_started.elapsed().as_millis());
+                let elapsed_ms = clustered_elapsed_ms
+                    .map(|clustered| {
+                        clustered
+                            + options
+                                .verify_pixel_determinism
+                                .then(|| verification_started.elapsed().as_millis())
+                                .unwrap_or_default()
+                    })
+                    .unwrap_or_else(|| plugin_started.elapsed().as_millis());
                 finished.push((index, finish_plugin(index, record, outcome, elapsed_ms)));
             }
             position = end;
@@ -849,7 +864,8 @@ fn sweep_one_caught(
 }
 
 /// Uses the same in-place cluster session as the shipping bridge for the safe
-/// subset it pools there: SmartFX effects with no secondary layer. Healthy
+/// subset it pools there: SmartFX effects which share the one secondary-layer
+/// slot supplied by the shipping bridge (or all omit it). Healthy
 /// members amortize worker/bootstrap teardown across the closure. Any ambiguous
 /// session-wide failure rejects the whole fast path; the caller then re-runs
 /// every member through the existing one-plugin path so failure attribution is
@@ -860,6 +876,7 @@ fn sweep_cluster_candidates(
     records: &[DiagnosticDiscovery],
     options: &Options,
     input: &[u8],
+    layer_pixels: &[u8],
 ) -> Option<HashMap<usize, (Outcome, u128)>> {
     if !cluster_fast_path_enabled(options) {
         return None;
@@ -875,6 +892,7 @@ fn sweep_cluster_candidates(
             !cluster_fast_path_eligible(record)
                 || record.closure_identity_sha256 != first.closure_identity_sha256
                 || record.search_roots != first.search_roots
+                || cluster_layer_slot(record, options) != cluster_layer_slot(first, options)
         })
     {
         return None;
@@ -894,6 +912,7 @@ fn sweep_cluster_candidates(
     companions.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
     companions.dedup_by(|left, right| left.artifact.path == right.artifact.path);
 
+    let layers = probe_layers(first, options, layer_pixels);
     let open_started = Instant::now();
     let mut session = match RenderSession::open_cluster(
         SessionOpenRequest {
@@ -911,7 +930,7 @@ fn sweep_cluster_candidates(
             audio_trailer: None,
             alpha_as_coverage_params: &[],
             conformance_render_settings: None,
-            layers: &[],
+            layers: &layers,
             dependencies: Vec::new(),
             companions,
             dependency_search_dirs: first.search_roots.clone(),
@@ -967,13 +986,7 @@ fn sweep_cluster_candidates(
         // These cases require the per-plugin close evidence used by the existing
         // fallback/classification logic. Abandon the optimization and let the
         // caller reproduce every candidate independently.
-        if outcome.bucket == "render_frame_failed"
-            || outcome
-                .detail
-                .get("host_failure_reason")
-                .and_then(Value::as_str)
-                == Some("smart_output_untouched")
-        {
+        if outcome.bucket != "rendered" {
             return None;
         }
         outcome.detail.insert(
@@ -1022,7 +1035,6 @@ fn cluster_fast_path_enabled(options: &Options) -> bool {
     options.frames == 1
         && options.dump_frames.is_none()
         && !options.close_report
-        && !options.verify_pixel_determinism
         && !options.force_classic
 }
 
@@ -1030,8 +1042,13 @@ fn cluster_fast_path_eligible(record: &DiagnosticDiscovery) -> bool {
     record.ok
         && record.plugin_kind == aexcompat_aviutl2_multifilter::DiscoveredPluginKind::Effect
         && record.closure_identity_sha256.is_some()
-        && layer_slots_of(&record.parameters).is_empty()
         && smart_render_route_supported(record.smart, record.out_flags2)
+}
+
+fn cluster_layer_slot(record: &DiagnosticDiscovery, options: &Options) -> Option<u32> {
+    (!options.no_layer)
+        .then(|| layer_slots_of(&record.parameters).into_iter().next())
+        .flatten()
 }
 
 /// Finds the next order-preserving cluster transaction. With one render job a
@@ -1042,6 +1059,7 @@ fn cluster_candidate_run_end(
     lane: &[usize],
     start: usize,
     records: &[DiagnosticDiscovery],
+    options: &Options,
 ) -> usize {
     let first_index = lane[start];
     let first = &records[first_index];
@@ -1057,6 +1075,7 @@ fn cluster_candidate_run_end(
             cluster_fast_path_eligible(record)
                 && record.closure_identity_sha256 == first.closure_identity_sha256
                 && record.search_roots == first.search_roots
+                && cluster_layer_slot(record, options) == cluster_layer_slot(first, options)
         })
         .last()
         .map_or(start + 1, |(position, _)| position + 1)
@@ -2624,7 +2643,7 @@ mod tests {
     }
 
     #[test]
-    fn cluster_fast_path_matches_the_shipping_smart_layerless_boundary() {
+    fn cluster_fast_path_tracks_the_shipping_layer_slot_and_verification_stays_enabled() {
         let mut record = failed_discovery(PathBuf::from("smart.aex"));
         record.ok = true;
         record.smart = true;
@@ -2633,22 +2652,31 @@ mod tests {
         record.failure_diagnostics = None;
         assert!(cluster_fast_path_eligible(&record));
 
+        let mut options = discovery_options(PathBuf::from("unused.json"));
+        options.discovery_only = false;
+        assert_eq!(cluster_layer_slot(&record, &options), None);
+
         record.parameters.push(parameter(3, "layer"));
-        assert!(!cluster_fast_path_eligible(&record));
-        record.parameters.clear();
+        record.parameters.push(parameter(8, "layer"));
+        assert!(cluster_fast_path_eligible(&record));
+        assert_eq!(cluster_layer_slot(&record, &options), Some(3));
+        options.no_layer = true;
+        assert_eq!(cluster_layer_slot(&record, &options), None);
+
         record.plugin_kind = DiscoveredPluginKind::Aegp;
         assert!(!cluster_fast_path_eligible(&record));
 
-        let mut options = discovery_options(PathBuf::from("unused.json"));
-        options.discovery_only = false;
+        options.no_layer = false;
+        assert!(cluster_fast_path_enabled(&options));
+        options.verify_pixel_determinism = true;
         assert!(cluster_fast_path_enabled(&options));
         options.frames = 2;
         assert!(!cluster_fast_path_enabled(&options));
     }
 
     #[test]
-    fn cluster_runs_preserve_order_and_stop_at_closure_or_runtime_root_boundaries() {
-        let eligible = |name: &str, closure: &str, root: &str| {
+    fn cluster_runs_preserve_order_and_stop_at_closure_root_or_layer_boundaries() {
+        let eligible = |name: &str, closure: &str, root: &str, layer: Option<u32>| {
             let mut record = failed_discovery(PathBuf::from(name));
             record.ok = true;
             record.smart = true;
@@ -2656,23 +2684,31 @@ mod tests {
             record.search_roots = vec![PathBuf::from(root)];
             record.failure_classification = None;
             record.failure_diagnostics = None;
+            if let Some(slot) = layer {
+                record.parameters.push(parameter(slot, "layer"));
+            }
             record
         };
         let records = vec![
-            eligible("a.aex", "same", "root-a"),
-            eligible("b.aex", "same", "root-a"),
-            eligible("c.aex", "other", "root-a"),
-            eligible("d.aex", "other", "root-b"),
-            eligible("e.aex", "same", "root-a"),
+            eligible("a.aex", "same", "root-a", Some(3)),
+            eligible("b.aex", "same", "root-a", Some(3)),
+            eligible("c.aex", "same", "root-a", Some(8)),
+            eligible("d.aex", "other", "root-b", Some(8)),
+            eligible("e.aex", "same", "root-a", Some(3)),
         ];
         // This is the default jobs=1 scheduler shape: one lane containing the
         // whole corpus. Only the first adjacent pair is one safe transaction;
         // a later matching identity cannot jump over intervening boundaries.
         let lane = vec![0, 1, 2, 3, 4];
-        assert_eq!(cluster_candidate_run_end(&lane, 0, &records), 2);
-        assert_eq!(cluster_candidate_run_end(&lane, 2, &records), 3);
-        assert_eq!(cluster_candidate_run_end(&lane, 3, &records), 4);
-        assert_eq!(cluster_candidate_run_end(&lane, 4, &records), 5);
+        let mut options = discovery_options(PathBuf::from("unused.json"));
+        options.discovery_only = false;
+        assert_eq!(cluster_candidate_run_end(&lane, 0, &records, &options), 2);
+        assert_eq!(cluster_candidate_run_end(&lane, 2, &records, &options), 3);
+        assert_eq!(cluster_candidate_run_end(&lane, 3, &records, &options), 4);
+        assert_eq!(cluster_candidate_run_end(&lane, 4, &records, &options), 5);
+
+        options.no_layer = true;
+        assert_eq!(cluster_candidate_run_end(&lane, 0, &records, &options), 3);
     }
 
     #[test]
