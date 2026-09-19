@@ -329,6 +329,26 @@ The installed effect plus the seven corruption mutations passed 8/8 in 7.79
 seconds. `test_prism_dissolve_response.py` preserves the parameter receipt and
 image response without claiming byte-exact endpoints or After Effects parity.
 
+`Displacement Dissolve` uses slot 8 `Animation = Manual Pct Done`, slot 9
+`Layer to Reveal`, and slot 10 `Percent Done`. Its inspected slot 12 default is
+the built-in `Displacement Map`, so no external map behavior is claimed. The
+installed effect produced byte-exact source and reveal endpoints and a
+10,373-color displacement midpoint. The effect plus the seven corruption
+mutations passed 8/8 in 8.52 seconds.
+`test_displacement_dissolve_response.py` preserves the built-in-map contract,
+requested values, and image response. The existing `Flutter Cut` five-frame
+cut/reversal test was also rerun against the same Release worker and passed
+10/10 including its nine mutations in 11.62 seconds.
+
+Together, the 42 slot-2 transitions, 33 slot-8 transitions, 14 multi-layer
+wipes, two Burnt Film variants, Prism Dissolve, Displacement Dissolve, and
+Flutter Cut account for all 94 effects in the baseline `BCC Transitions`
+category. Each now has a durable installed-AEX behavioral test for its selected
+manual transition path. This closes the category's previously input-identical
+generic-default ambiguity; it does not assert exhaustive parameter coverage or
+pixel equivalence with After Effects. No full-corpus sweep was repeated while
+developing these focused contracts.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
