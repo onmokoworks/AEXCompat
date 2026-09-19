@@ -380,6 +380,18 @@ seconds. `test_bcc_obsolete_swish_pan_response.py` preserves this layout and
 image response, reducing the unresolved input-equal `BCC Obsolete` set from 39
 to 37.
 
+The legacy `BCCLensTransition` AE/Premiere pair was exercised with its explicit
+`Zoom In` type, slot 8 reveal layer, slot 9 percent-driven animation, and slot
+10 progress. Both effects produced byte-exact endpoints and a 14,838-color
+midpoint that differed from a plain 50/50 crossfade at all 36,864 pixels. The
+validator also requires a dark outer frame around a nonblack center and a
+large-magnitude difference from the plain blend. The pair plus fixed,
+transparent, crossfade-only, one-pixel-noise, and uniform-color-transform
+mutations passed 7/7 in 15.40 seconds.
+`test_bcc_obsolete_lens_transition_response.py` verifies the type and progress
+receipts as well as the spatial image response, reducing the unresolved
+input-equal `BCC Obsolete` set from 37 to 35.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
