@@ -319,6 +319,16 @@ in 13.98 seconds. `test_bcc_burnt_film_transition_response.py` preserves the
 five-layer parameter layout, requested values, and image response while making
 no claim about behavior of the four optional layer inputs.
 
+`Prism Dissolve` uses slot 7 `Animation = Manual Pct Done`, slot 8
+`Layer to Reveal`, and slot 9 `Percent Done`. Its effect processing remains
+visible at the endpoints, so it uses the proximity-based transition oracle:
+zero percent is closer to the patterned source, 100 percent is closer to the
+gradient reveal, and the 7,431-color midpoint contains non-endpoint effect
+pixels. All three states have distinct hashes and nonzero alpha at every pixel.
+The installed effect plus the seven corruption mutations passed 8/8 in 7.79
+seconds. `test_prism_dissolve_response.py` preserves the parameter receipt and
+image response without claiming byte-exact endpoints or After Effects parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
