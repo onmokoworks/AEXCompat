@@ -270,7 +270,7 @@ invalid alpha is zero and the worker/session are clean. The report is
 same CLI `cc96567e...` and worker `94071433...` fingerprints as the
 DistanceGradation semantic probe. The two previously transparent records are
 therefore valid effect responses under effect-appropriate inputs, not image
-render failures. Six opaque input-equal OLM defaults remain a semantic
+render failures. Five opaque input-equal OLM defaults remain a semantic
 parameter-response backlog. On the verified shipping Smart route and these
 effect-appropriate inputs, no OLM native execution or visibility failure
 remains. The separate `DistanceGradation` Classic close crash described above
@@ -296,6 +296,27 @@ and `94071433e24859e52a340bd94a758deaec9c7a442d59d05c9d6ed6c717d6f88d`.
 The focused real-AEX test passed in 1.08 s; its negative behavioral cases reject
 no-op, constant, truncated, and transparent false positives. No After Effects
 process was used.
+
+`OLMColorKey` is resolved by another opted-in real-AEX behavioral fixture in
+the same test module. This matches the vendor's multi-color keying description
+(`https://www.olm.co.jp/post/olm-color-key`). The fixture used an opaque
+two-color 256x144 ARGB8 image, selected the left-half color in `Color 1`, and
+compared `Use Color 1` off and on through the shipping Smart path at time 0.
+The disabled output exactly matched the input; enabling the key changed exactly
+18,432 pixels, making the selected half transparent while preserving its RGB
+and leaving all 18,432 unselected pixels byte-identical and opaque. The input
+PNG SHA-256 is
+`1878f55a9bc0f9eabefb8c3b86ce7c8f181157fc6e173a3bda3c3c466b11108b`;
+the disabled/keyed raw-frame SHA-256 values are respectively
+`b8d4180a9208ba2950b9409b29808861da0735b1815f706181057d2330477aad`
+and `12775b7253f65ea10217f0fccd2df29b34181daee78b211e31182dd4935680c6`.
+The installed AEX SHA-256 is
+`9c6cca226a52d35ce7833fcc4c0f914f6b15b3abe0202e0957ba97ba3bb2cf2c`;
+the Release harness/worker fingerprints remain `b4b264a1...` / `94071433...`.
+The real-AEX case passed in 1.36 s and the full focused module passed 14 tests
+with two unrelated opt-in cases skipped in 1.42 s. Its negative behavioral
+cases reject no-op, all-transparent, wrong-color, and truncated false positives.
+No After Effects process was used.
 
 ## ONMK subdirectory cohort
 

@@ -1,8 +1,9 @@
-"""Pixel-level fixture regression, with explicitly opted-in real OLMBlur coverage.
+"""Pixel-level fixture regression with explicitly opted-in real OLM coverage.
 
-Set AEXCOMPAT_TEST_OLM_BLUR to the installed AEX path to run the Windows CLI
-case. Build the Release harness and native worker from this checkout first.
-No AE process, license operation, or installed-file mutation is performed.
+Set the test-specific AEXCOMPAT_TEST_* variable to the installed AEX path to
+run a Windows CLI case. Build the Release harness and native worker from this
+checkout first. No AE process, license operation, or installed-file mutation is
+performed.
 """
 import copy
 import hashlib
@@ -193,3 +194,83 @@ def test_installed_colorkeep_fixture_color_response(tmp_path):
         assert output == read_artifact(destination / 'final', report['final_artifact'])
         outputs.append(output)
     assert_color_keep_response(*outputs, source)
+
+
+def assert_color_key_response(default, keyed, source):
+    assert len(default) == len(keyed) == len(source) == WIDTH * HEIGHT * 4
+    assert default == source
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            offset = (y * WIDTH + x) * 4
+            if x < WIDTH // 2:
+                assert keyed[offset] == 0
+                assert keyed[offset + 1:offset + 4] == source[offset + 1:offset + 4]
+            else:
+                assert keyed[offset:offset + 4] == source[offset:offset + 4]
+
+
+@pytest.mark.parametrize('fault', ['noop', 'all_transparent', 'wrong_color', 'truncated'])
+def test_color_key_check_rejects_invalid_response(fault):
+    source = two_color_argb()
+    keyed = bytearray(source)
+    for y in range(HEIGHT):
+        for x in range(WIDTH // 2):
+            keyed[(y * WIDTH + x) * 4] = 0
+    wrong = bytearray(keyed)
+    wrong[1] ^= 1
+    candidate = {
+        'noop': source,
+        'all_transparent': bytes(len(source)),
+        'wrong_color': bytes(wrong),
+        'truncated': bytes(keyed[:-4]),
+    }[fault]
+    with pytest.raises(AssertionError):
+        assert_color_key_response(source, candidate, source)
+
+
+def test_installed_olmcolorkey_fixture_color_response(tmp_path):
+    plugin_value = os.environ.get('AEXCOMPAT_TEST_OLM_COLOR_KEY')
+    if not plugin_value:
+        pytest.skip('real AEX execution requires AEXCOMPAT_TEST_OLM_COLOR_KEY')
+    assert os.name == 'nt', 'opted-in native test requires Windows'
+    plugin = Path(plugin_value).resolve()
+    harness = ROOT / 'broker/target/release/aexcompat-harness.exe'
+    assert plugin.is_file() and harness.is_file()
+    assert (ROOT / 'target/minihost-build/aex_worker.exe').is_file()
+
+    def run(*args):
+        result = subprocess.run([str(harness), '--headless', *map(str, args)],
+                                cwd=ROOT, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
+        return json.loads(result.stdout)
+
+    parameters = run('--inspect-experimental', plugin)
+    use_color = next(p for p in parameters if p['name'] == 'Use Color 1')
+    color = next(p for p in parameters if p['name'] == 'Color 1')
+    assert use_color['value'] == 0 and color['kind'] == 'color'
+    source = two_color_argb()
+    rgba = bytes(c for i in range(0, len(source), 4)
+                 for c in (*source[i + 1:i + 4], source[i]))
+    Image.frombytes('RGBA', (WIDTH, HEIGHT), rgba).save(tmp_path / 'input.png')
+    outputs = []
+    for variant, enabled in [('default', 0), ('keyed', 1)]:
+        edited = copy.deepcopy(parameters)
+        next(p for p in edited if p['slot'] == use_color['slot'])['value'] = enabled
+        next(p for p in edited if p['slot'] == color['slot'])['color'] = [255, 32, 64, 128]
+        fixture = dict(schema='aexcompat.render_fixture', schema_version=1,
+                       primary_layer='input.png', parameters=edited,
+                       pixel_format='argb8', render_path='smart', premultiplication='straight',
+                       timing=dict(current_time=0, time_step=1, total_time=300, time_scale=30),
+                       final_artifact='raw', checkpoints=[
+                           dict(id='input', stage='smart-input'),
+                           dict(id='output', stage='smart-output')])
+        fixture_path = tmp_path / f'{variant}.json'
+        fixture_path.write_text(json.dumps(fixture), encoding='utf-8')
+        destination = tmp_path / variant
+        report = run('--render-fixture', plugin, fixture_path, destination)
+        checkpoints = report['checkpoints']
+        assert read_artifact(destination / 'checkpoints/input', checkpoints['input']) == source
+        output = read_artifact(destination / 'checkpoints/output', checkpoints['output'])
+        assert output == read_artifact(destination / 'final', report['final_artifact'])
+        outputs.append(output)
+    assert_color_key_response(*outputs, source)
