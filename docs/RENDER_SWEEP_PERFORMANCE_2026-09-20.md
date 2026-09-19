@@ -531,6 +531,21 @@ mutations passed
 input-equal `BCC Obsolete` set from 17 to 16. This establishes saturation-limit
 behavior, not exact After Effects color-management or pixel parity.
 
+Legacy `BCCSpillRemover.aex` requires inspected slot 6 `Host Layer`. A four-band
+green/red/blue/gray input rendered byte-for-byte at slot 17 `Amount = 0`. With
+slot 10 `Screen Type = Green`, slot 14 `Spill Ratio = 50`, and `Amount = 100`,
+only the green-dominant band changed, from `(80, 200, 80)` to `(80, 80, 80)`;
+the red, blue, and gray bands and all alpha values remained unchanged. The
+validator requires removal of green dominance across exactly the green quarter,
+preservation of its red/blue channels, byte-exact preservation of all non-green
+bands, and row/spatial stability. Eleven mutations cover a copied or uniform
+result, retained or over-removed green, red/blue collateral damage, a changed
+non-green band, lost alpha, spatial corruption, a wrong neutral frame, and
+truncation. The installed AEX plus those mutations passed 12/12 in 5.57 seconds
+in `test_bcc_obsolete_spill_remover_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 16 to 15. This establishes selective green
+spill suppression for the tested controls, not exact After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
