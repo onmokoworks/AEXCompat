@@ -309,6 +309,16 @@ choice/value mapping, parameter receipt, and image response. This establishes
 the tested first-background transition path; it does not claim behavior for
 the four optional effect-specific layers.
 
+The `BCCBurntFilm` AE/Premiere pair uses a distinct contract: slot 2
+`Animation = Pct. Done` (value 3), slot 3 `Percent Done`, and slot 5
+`Layer to Reveal`, followed by four optional Burn/Flare/Char inputs. Both
+installed effects passed the shared transition oracle: exact source and reveal
+endpoints, three distinct states, a nonconstant effect midpoint, and nonzero
+alpha at every pixel. The pair plus the seven corruption mutations passed 9/9
+in 13.98 seconds. `test_bcc_burnt_film_transition_response.py` preserves the
+five-layer parameter layout, requested values, and image response while making
+no claim about behavior of the four optional layer inputs.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
