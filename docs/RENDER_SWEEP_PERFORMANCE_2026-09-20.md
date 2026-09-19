@@ -270,8 +270,8 @@ invalid alpha is zero and the worker/session are clean. The report is
 same CLI `cc96567e...` and worker `94071433...` fingerprints as the
 DistanceGradation semantic probe. The two previously transparent records are
 therefore valid effect responses under effect-appropriate inputs, not image
-render failures. Two opaque input-equal OLM defaults remain a semantic
-parameter-response backlog (`OLMSmoother2` and `OLMToonDilate`). On the verified shipping Smart route and these
+render failures. One opaque input-equal OLM default remains a semantic
+parameter-response backlog (`OLMToonDilate`). On the verified shipping Smart route and these
 effect-appropriate inputs, no OLM native execution or visibility failure
 remains. The separate `DistanceGradation` Classic close crash described above
 is still unresolved; Classic is diagnostic-only for this result. No After
@@ -393,6 +393,27 @@ pixel SHA-256 is
 `64a2111a6142d4793d4a43310155483c9e145ae65678433924341faa77d64df1`;
 the installed AEX, CLI, and worker SHA-256 values are respectively
 `6206f601b645dc915b78269ae403e5cbee642ac2812e320d85838ec72135fe82`,
+`cc96567e93c05c633d5a94c67d1ee5444b0032656e31d5ba3687691e85f8ac3b`,
+and `68816d7a5963f4864a1ed0f0787592d6afcd2241d3c2bbb46f9b0e9e5bd3308f`.
+No After Effects process was used.
+
+`OLMSmoother2` is resolved by the same binary stair-step semantic fixture on
+the shipping Smart route. Its discovered defaults are `Smoothness=100`,
+`Smooth Range=2`, and `Smoother Version=v2`. The effect changed 286 of 36,864
+pixels, kept alpha opaque, produced 286 grayscale intermediate pixels (858 RGB
+components), and preserved the remaining flat interiors. The decoded input and output SHA-256
+values are respectively
+`ebc35a2f579a4653e01fa6ba3d6170331cb83eb1e2d69bf52ace5c8146bd9f6e`
+and `4fa3870911332403f6c9866b8fe1fae1ef5808ef8a42934d7d1f413064c55c7d`;
+the final artifact exactly matches the output checkpoint. The focused real-AEX
+behavioral test passed in 0.77 s. The shipping report
+`%TEMP%/aexcompat-olm-smoother2-semantic-20260920.json` records `rendered` in
+172 ms (364 ms including discovery), a clean session, worker exit 0, 147,456
+decoded bytes, 36,864 nonzero-alpha pixels, and zero invalid-alpha pixels. Its
+shipping-boundary pixel SHA-256 is
+`5976f5ba06d46bf4c640730acc825278cb3d2ae1dfd67c82fac231d5b5b2a725`.
+The installed AEX, CLI, and worker SHA-256 values are respectively
+`7d42c00fe382304ea8a2b9d72af4f3a55f18b6fc03f6174786c97d7618b744c7`,
 `cc96567e93c05c633d5a94c67d1ee5444b0032656e31d5ba3687691e85f8ac3b`,
 and `68816d7a5963f4864a1ed0f0787592d6afcd2241d3c2bbb46f9b0e9e5bd3308f`.
 No After Effects process was used.

@@ -543,3 +543,48 @@ def test_installed_olmsmoother_fixture_default_response(tmp_path):
     output = read_artifact(destination / 'checkpoints/output', checkpoints['output'])
     assert output == read_artifact(destination / 'final', report['final_artifact'])
     assert_smoother_response(output, source)
+
+
+def test_installed_olmsmoother2_fixture_default_response(tmp_path):
+    plugin_value = os.environ.get('AEXCOMPAT_TEST_OLM_SMOOTHER2')
+    if not plugin_value:
+        pytest.skip('real AEX execution requires AEXCOMPAT_TEST_OLM_SMOOTHER2')
+    assert os.name == 'nt', 'opted-in native test requires Windows'
+    plugin = Path(plugin_value).resolve()
+    harness = ROOT / 'broker/target/release/aexcompat-harness.exe'
+    assert plugin.is_file() and harness.is_file()
+    assert (ROOT / 'target/minihost-build/aex_worker.exe').is_file()
+
+    def run(*args):
+        result = subprocess.run([str(harness), '--headless', *map(str, args)],
+                                cwd=ROOT, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
+        return json.loads(result.stdout)
+
+    parameters = run('--inspect-experimental', plugin)
+    smoothness = next(p for p in parameters if p['name'] == 'Smoothness')
+    smooth_range = next(p for p in parameters if p['name'] == 'Smooth Range')
+    smoother_version = next(p for p in parameters if p['name'] == 'Smoother Version')
+    assert smoothness['kind'] == 'integer' and smoothness['value'] == 100
+    assert smooth_range['kind'] == 'integer' and smooth_range['value'] == 2
+    assert smoother_version['choices'] == ['v1', 'v2'] and smoother_version['value'] == 2
+    source = smoother_stair_argb()
+    source_rgba = bytes(c for i in range(0, len(source), 4)
+                        for c in (*source[i + 1:i + 4], source[i]))
+    Image.frombytes('RGBA', (WIDTH, HEIGHT), source_rgba).save(tmp_path / 'input.png')
+    fixture = dict(schema='aexcompat.render_fixture', schema_version=1,
+                   primary_layer='input.png', parameters=parameters,
+                   pixel_format='argb8', render_path='smart', premultiplication='straight',
+                   timing=dict(current_time=0, time_step=1, total_time=300, time_scale=30),
+                   final_artifact='raw', checkpoints=[
+                       dict(id='input', stage='smart-input'),
+                       dict(id='output', stage='smart-output')])
+    fixture_path = tmp_path / 'fixture.json'
+    fixture_path.write_text(json.dumps(fixture), encoding='utf-8')
+    destination = tmp_path / 'render'
+    report = run('--render-fixture', plugin, fixture_path, destination)
+    checkpoints = report['checkpoints']
+    assert read_artifact(destination / 'checkpoints/input', checkpoints['input']) == source
+    output = read_artifact(destination / 'checkpoints/output', checkpoints['output'])
+    assert output == read_artifact(destination / 'final', report['final_artifact'])
+    assert_smoother_response(output, source)
