@@ -2,6 +2,8 @@ import importlib.util
 import json
 import subprocess
 import sys
+import threading
+import time
 from argparse import Namespace
 from pathlib import Path
 
@@ -409,6 +411,114 @@ def test_default_mode_is_unicorn_only_and_does_not_require_native_worker(tmp_pat
     assert args.native_worker is None
 
 
+def test_default_jobs_is_four_and_cli_accepts_explicit_parallelism(tmp_path):
+    unicorn = tmp_path / "unicorn-worker"
+
+    default = SWEEP.parse_args(
+        _required_cli_args(tmp_path) + ["--unicorn-worker", str(unicorn)]
+    )
+    parallel = SWEEP.parse_args(
+        _required_cli_args(tmp_path)
+        + ["--unicorn-worker", str(unicorn), "--jobs", "12"]
+    )
+
+    assert default.jobs == 4
+    assert parallel.jobs == 12
+
+
+def test_sweep_runs_isolated_backends_concurrently_and_keeps_sha_order(
+    tmp_path, monkeypatch
+):
+    inventory = tmp_path / "inventory.json"
+    summary = tmp_path / "summary.json"
+    corpus = tmp_path / "corpus"
+    input_png = tmp_path / "input.png"
+    worker = tmp_path / "worker"
+    output = tmp_path / "report.json"
+    corpus.mkdir()
+    inventory.write_text('{"schema_version":1,"entries":[{}]}', encoding="utf-8")
+    inventory_sha = SWEEP.sha256_file(inventory)
+    summary.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "corpus": {
+                    "inventory_sha256": inventory_sha,
+                    "canonical_count": 1,
+                    "processed": 1,
+                    "remaining": 0,
+                    "ordered_path_sha_identity_exact": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    SWEEP.Image.new("RGBA", (1, 1)).save(input_png)
+    worker.write_bytes(b"worker")
+    mapped = []
+    for index in range(6):
+        plugin = corpus / f"{index}.aex"
+        plugin.write_bytes(bytes([index]))
+        mapped.append(
+            {
+                "path": plugin,
+                "name": plugin.name,
+                "sha256": f"{index + 1:064x}",
+                "windows_match_count": 1,
+                "windows_root_categories": [],
+                "windows_source_categories": [],
+            }
+        )
+    monkeypatch.setattr(SWEEP, "map_corpus", lambda *_: mapped)
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+
+    def fake_run_backend(*_args):
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return {
+            "status": "rendered",
+            "output_sha256": "a" * 64,
+            "milestones": {
+                "admission_success": True,
+                "render_success": True,
+                "cleanup_success": True,
+            },
+        }
+
+    monkeypatch.setattr(SWEEP, "run_backend", fake_run_backend)
+    args = Namespace(
+        inventory=inventory,
+        windows_summary=summary,
+        corpus_root=[corpus],
+        input_png=input_png,
+        native_worker=None,
+        unicorn_worker=worker,
+        backend=None,
+        output=output,
+        baseline_report=None,
+        expected_inventory_sha256=inventory_sha,
+        expected_summary_sha256=SWEEP.sha256_file(summary),
+        native_run_dllmain=False,
+        jobs=3,
+    )
+
+    report = SWEEP.run_sweep(args)
+
+    assert maximum_active == 3
+    assert report["source"]["jobs"] == 3
+    assert [entry["sha256"] for entry in report["entries"]] == [
+        item["sha256"] for item in mapped
+    ]
+    assert report["summary"]["counts"] == {"unicorn:rendered": 6}
+
+
 def test_explicit_native_mode_still_requires_native_worker(tmp_path, capsys):
     with pytest.raises(SystemExit) as captured:
         SWEEP.parse_args(_required_cli_args(tmp_path) + ["--backend", "native"])
@@ -627,6 +737,7 @@ def _report(entries, worker_sha="f" * 64):
             "input_png_sha256": "c" * 64,
             "input_dimensions": [64, 64],
             "backends": ["unicorn"],
+            "jobs": 4,
             "unicorn_worker_sha256": worker_sha,
         },
         "entries": entries,
@@ -691,6 +802,32 @@ def test_baseline_comparison_allows_worker_change_and_records_both_identities():
     assert comparison["baseline_workers"] == {"unicorn_worker_sha256": "a" * 64}
     assert comparison["current_workers"] == {"unicorn_worker_sha256": "b" * 64}
     assert comparison["regression"] is False
+
+
+def test_baseline_comparison_rejects_parallelism_drift():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    current["source"]["jobs"] = 8
+
+    with pytest.raises(SWEEP.SweepError, match="execution conditions differ"):
+        SWEEP.compare_baseline(current, baseline)
+
+
+@pytest.mark.parametrize("value", [None, True, 0, 33, "4"])
+def test_baseline_comparison_rejects_missing_or_invalid_jobs(value):
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    if value is None:
+        del baseline["source"]["jobs"]
+        del current["source"]["jobs"]
+    else:
+        baseline["source"]["jobs"] = value
+        current["source"]["jobs"] = value
+
+    with pytest.raises(SWEEP.SweepError, match="report jobs is invalid"):
+        SWEEP.compare_baseline(current, baseline)
 
 
 def test_baseline_comparison_rejects_missing_worker_identity():

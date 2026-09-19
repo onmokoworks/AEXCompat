@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import BinaryIO
 
@@ -986,6 +987,7 @@ def compare_baseline(
         "input_png_sha256",
         "input_dimensions",
         "backends",
+        "jobs",
         "native_run_dllmain",
     }
     conditions = {key: source.get(key) for key in condition_keys if key in source}
@@ -996,6 +998,12 @@ def compare_baseline(
     }
     if conditions != baseline_conditions:
         raise SweepError("baseline report execution conditions differ")
+    for label, candidate in (
+        ("current", source.get("jobs")),
+        ("baseline", baseline_source.get("jobs")),
+    ):
+        if type(candidate) is not int or not 1 <= candidate <= 32:
+            raise SweepError(f"{label} report jobs is invalid")
     backends = source["backends"]
     if (
         not isinstance(backends, list)
@@ -1109,87 +1117,116 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             for name, (worker, _, _) in workers.items()
         },
     }
-    entries = []
+    backend_results_by_index: list[dict[str, object]] = [
+        {} for _ in mapped
+    ]
     counts: Counter[str] = Counter()
-    for index, item in enumerate(mapped):
-        backend_results = {}
-        for backend, (worker, expected_backend, extra_environment) in workers.items():
-            directory = run_root / f"{index:04d}-{item['sha256'][:12]}-{backend}"
-            directory.mkdir(parents=True, exist_ok=True)
-            started = time.monotonic()
-            try:
-                result = run_backend(
-                    worker,
-                    expected_backend,
-                    extra_environment,
-                    item["path"],
-                    argb8,
-                    width,
-                    height,
-                    directory,
-                )
-                result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
-                counts[f"{backend}:rendered"] += 1
-            except AdmissionFailure as error:
-                diagnostic = sanitize_diagnostic(error.diagnostic, redactions)
-                result = {
-                    "status": "failed",
-                    "failure_class": classify_diagnostic(diagnostic),
-                    "failure_stage": "admission_probe",
-                    "render_error": error.render_error,
-                    "diagnostic": diagnostic,
-                    "termination_evidence": sanitize_error_text(
-                        error.termination_evidence, redactions
-                    ),
-                    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-                    "milestones": {
-                        "admission_success": False,
-                        "render_success": False,
-                        "cleanup_success": False,
-                    },
-                }
-                counts[f"{backend}:{result['failure_class']}"] += 1
-            except BackendFailure as error:
-                message = sanitize_error_text(str(error), redactions)
-                bucket = classify_failure(message)
-                result = {
-                    "status": "failed",
-                    "failure_class": bucket,
-                    "failure_stage": error.failure_stage,
-                    "error": message,
-                    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-                    "milestones": {
-                        "admission_success": error.admission_success,
-                        "render_success": error.render_success,
-                        "cleanup_success": False,
-                    },
-                }
-                counts[f"{backend}:{bucket}"] += 1
-            except Exception as error:
-                message = sanitize_error_text(str(error), redactions)
-                bucket = classify_failure(message)
-                result = {
-                    "status": "failed",
-                    "failure_class": bucket,
-                    "failure_stage": "runner",
-                    "error": message,
-                    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
-                    "milestones": {
-                        "admission_success": False,
-                        "render_success": False,
-                        "cleanup_success": False,
-                    },
-                }
-                counts[f"{backend}:{bucket}"] += 1
-            backend_results[backend] = result
-        entries.append(
-            {
-                key: value
-                for key, value in item.items()
-                if key != "path"
+
+    def execute_backend(
+        index: int,
+        item: dict[str, object],
+        backend: str,
+        worker: Path,
+        expected_backend: str,
+        extra_environment: dict[str, str],
+    ) -> tuple[int, str, dict[str, object], str]:
+        directory = run_root / f"{index:04d}-{item['sha256'][:12]}-{backend}"
+        directory.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        try:
+            result = run_backend(
+                worker,
+                expected_backend,
+                extra_environment,
+                item["path"],
+                argb8,
+                width,
+                height,
+                directory,
+            )
+            result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
+            count_key = f"{backend}:rendered"
+        except AdmissionFailure as error:
+            diagnostic = sanitize_diagnostic(error.diagnostic, redactions)
+            result = {
+                "status": "failed",
+                "failure_class": classify_diagnostic(diagnostic),
+                "failure_stage": "admission_probe",
+                "render_error": error.render_error,
+                "diagnostic": diagnostic,
+                "termination_evidence": sanitize_error_text(
+                    error.termination_evidence, redactions
+                ),
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                "milestones": {
+                    "admission_success": False,
+                    "render_success": False,
+                    "cleanup_success": False,
+                },
             }
-            | {"backends": backend_results}
-        )
+            count_key = f"{backend}:{result['failure_class']}"
+        except BackendFailure as error:
+            message = sanitize_error_text(str(error), redactions)
+            bucket = classify_failure(message)
+            result = {
+                "status": "failed",
+                "failure_class": bucket,
+                "failure_stage": error.failure_stage,
+                "error": message,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                "milestones": {
+                    "admission_success": error.admission_success,
+                    "render_success": error.render_success,
+                    "cleanup_success": False,
+                },
+            }
+            count_key = f"{backend}:{bucket}"
+        except Exception as error:
+            message = sanitize_error_text(str(error), redactions)
+            bucket = classify_failure(message)
+            result = {
+                "status": "failed",
+                "failure_class": bucket,
+                "failure_stage": "runner",
+                "error": message,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                "milestones": {
+                    "admission_success": False,
+                    "render_success": False,
+                    "cleanup_success": False,
+                },
+            }
+            count_key = f"{backend}:{bucket}"
+        return index, backend, result, count_key
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        futures = [
+            pool.submit(
+                execute_backend,
+                index,
+                item,
+                backend,
+                worker,
+                expected_backend,
+                extra_environment,
+            )
+            for index, item in enumerate(mapped)
+            for backend, (
+                worker,
+                expected_backend,
+                extra_environment,
+            ) in workers.items()
+        ]
+        for future in as_completed(futures):
+            index, backend, result, count_key = future.result()
+            backend_results_by_index[index][backend] = result
+            counts[count_key] += 1
+
+    entries = [
+        {key: value for key, value in item.items() if key != "path"}
+        | {"backends": backend_results_by_index[index]}
+        for index, item in enumerate(mapped)
+    ]
     report = {
         "schema_version": SCHEMA_VERSION,
         "mode": "macos_x64_guest_inventory_sweep",
@@ -1201,6 +1238,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, object]:
             "input_png_sha256": sha256_file(input_png),
             "input_dimensions": [width, height],
             "backends": list(workers),
+            "jobs": args.jobs,
         }
         | source_worker_identity(workers, args.native_run_dllmain),
         "summary": {
@@ -1246,6 +1284,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--expected-inventory-sha256", required=True)
     parser.add_argument("--expected-summary-sha256", required=True)
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=4,
+        choices=range(1, 33),
+        metavar="N",
+        help="run up to N isolated worker processes concurrently (default: 4)",
+    )
     parser.add_argument(
         "--native-run-dllmain",
         action="store_true",
