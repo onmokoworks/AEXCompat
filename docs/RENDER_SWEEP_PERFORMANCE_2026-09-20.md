@@ -581,6 +581,24 @@ seconds in `test_bcc_obsolete_edge_cleaner_response.py`, reducing the unresolved
 input-equal `BCC Obsolete` set from 14 to 13. This establishes alpha-edge
 cleaning for the tested controls, not exact After Effects pixel parity.
 
+`BCCDegrain.aex` remains semantically unresolved and is not counted as a
+successful effect response. A deterministic grayscale-noise probe with both
+inspected slot 6 `Host Layer` and slot 13 `Sample Layer` assigned confirmed that
+slot 22 `Mix with Original = 100` is byte-exact identity. With mix 0, slot 18
+`Filter Strength = 100`, and slot 19 `HiPass Filter = 10`, thresholds 20 and 40
+were also identity, while threshold 60 changed 20,081 pixels but shifted mean
+from 127.95 to 112.03 and increased variance from 351.81 to 1324.11. Enabling
+slot 11 `Lock Sample` worsened that result to mean 76.91 and variance 1611.99.
+An earlier threshold-100/HiPass-0 probe collapsed the image to mean 0.54 rather
+than producing a valid denoise response. The shipping harness command contract
+offers one parameterized render per process; it does not currently expose a
+same-session parameter-changing `Setup: Select Sample` then `Setup: Normal`
+sequence. The temporary probe was removed after the bounded replan. Resolving
+this item requires either a resident preparation/render sequence or evidence
+that the plug-in can initialize its sample model during a normal shipping
+render; identity, near-black, and increased-noise outputs remain failures. The
+unresolved input-equal `BCC Obsolete` count therefore remains 13.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
