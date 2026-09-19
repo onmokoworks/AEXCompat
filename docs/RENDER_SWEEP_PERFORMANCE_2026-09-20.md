@@ -232,3 +232,27 @@ and the unchanged accepted worker SHA-256
 No After Effects process was used. `ColorKeep` and `DistanceGradation` are the
 remaining OLM compatibility candidates; neither is counted as a successful
 image render.
+
+## ONMK subdirectory cohort
+
+The eight AEX files in the `onmk` MediaCore subdirectory were measured under
+the saved 256x144 ARGB8, time 0, one-frame conditions. The final report is
+`%TEMP%/aexcompat-onmk-render-all-2026-09-20.json`:
+
+| result | value |
+|---|---:|
+| visible rendered | 8 / 8 |
+| transparent / invalid alpha | 0 |
+| default outputs equal to the opaque solid input | 5 |
+| elapsed | 2,589 ms |
+
+All eight rows have 36,864 nonzero-alpha pixels and a complete build
+fingerprint (CLI `73c42eb09624819ba009ce36a859ea5c43d764e26a01dcef88a7762bbbcf5404`,
+worker `f9494e5163cb3fd1e993617cc648b70fb817c14cf928141c90e6511b6fd36602`).
+Focused raw-frame inspection found no common warning or license image:
+`DistortChroma.aex` returned opaque `(32,63,128)` instead of the input
+`(32,64,128)`; `RioGradeRust.aex` returned a 500-color opaque gradient;
+`UltraGlow.aex` returned opaque black. These are observed output differences,
+not proof that the intended effects were applied. All eight defaults remain
+semantically unverified without a parameter-response test or AE reference. No
+After Effects process was used.
