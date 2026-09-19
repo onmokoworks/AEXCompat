@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import os
+import struct
 import subprocess
 import sys
 import threading
@@ -17,6 +19,34 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 SWEEP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SWEEP)
+
+
+def test_control_protocol_has_separate_bounded_request_and_response_budgets(tmp_path):
+    oversized_request = {"payload": "x" * SWEEP.MAX_REQUEST_MESSAGE_BYTES}
+    with (tmp_path / "request.bin").open("wb") as stream:
+        with pytest.raises(SWEEP.SweepError, match="request exceeds"):
+            SWEEP.write_message(stream, oversized_request)
+
+    payload = json.dumps(
+        {"payload": "x" * SWEEP.MAX_REQUEST_MESSAGE_BYTES}, separators=(",", ":")
+    ).encode("ascii")
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb") as reader, os.fdopen(write_fd, "wb") as writer:
+        def send_response():
+            writer.write(struct.pack("<I", len(payload)) + payload)
+            writer.flush()
+
+        sender = threading.Thread(target=send_response)
+        sender.start()
+        assert SWEEP.read_message(reader, 1.0)["payload"].startswith("x")
+        sender.join()
+
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb") as reader, os.fdopen(write_fd, "wb") as writer:
+        writer.write(struct.pack("<I", SWEEP.MAX_RESPONSE_MESSAGE_BYTES + 1))
+        writer.flush()
+        with pytest.raises(SWEEP.SweepError, match="invalid control response length"):
+            SWEEP.read_message(reader, 1.0)
 
 
 def test_load_json_strict_rejects_duplicate_keys(tmp_path):

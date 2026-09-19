@@ -564,6 +564,8 @@ uc_err uc_close(uc_engine *uc)
     }
 
     free(uc->mapped_blocks);
+    free(uc->code_hook_exact_addresses);
+    free(uc->code_hook_ranges);
     free(uc->x86_avx_sync_addresses);
     free(uc->x86_avx_sync_actions);
 
@@ -1965,10 +1967,110 @@ uc_err uc_mem_unmap(struct uc_struct *uc, uint64_t address, uint64_t size)
 
 static void invalidate_code_hook_cache(uc_engine *uc)
 {
+    uc->code_hook_index_generation = 0;
     if (++uc->code_hook_generation == 0) {
         memset(uc->code_hook_cache, 0, sizeof(uc->code_hook_cache));
         uc->code_hook_generation = 1;
     }
+}
+
+static int compare_code_hook_address(const void *left, const void *right)
+{
+    uint64_t lhs = *(const uint64_t *)left;
+    uint64_t rhs = *(const uint64_t *)right;
+    return (lhs > rhs) - (lhs < rhs);
+}
+
+static bool rebuild_code_hook_index(uc_engine *uc)
+{
+    struct list_item *cur;
+    size_t exact_count = 0;
+    size_t range_count = 0;
+    bool global = false;
+
+    for (cur = uc->hook[UC_HOOK_CODE_IDX].head; cur; cur = cur->next) {
+        struct hook *hook = cur->data;
+        if (hook->to_delete) {
+            continue;
+        }
+        if (hook->begin > hook->end) {
+            global = true;
+        } else if (hook->begin == hook->end) {
+            exact_count++;
+        } else {
+            range_count++;
+        }
+    }
+    if (exact_count > SIZE_MAX / sizeof(uint64_t) ||
+        range_count > SIZE_MAX / sizeof(UcCodeHookRange)) {
+        return false;
+    }
+    uint64_t *exact = exact_count ? malloc(exact_count * sizeof(*exact)) : NULL;
+    UcCodeHookRange *ranges =
+        range_count ? malloc(range_count * sizeof(*ranges)) : NULL;
+    if ((exact_count && !exact) || (range_count && !ranges)) {
+        free(exact);
+        free(ranges);
+        return false;
+    }
+    size_t exact_index = 0;
+    size_t range_index = 0;
+    for (cur = uc->hook[UC_HOOK_CODE_IDX].head; cur; cur = cur->next) {
+        struct hook *hook = cur->data;
+        if (hook->to_delete || hook->begin > hook->end) {
+            continue;
+        }
+        if (hook->begin == hook->end) {
+            exact[exact_index++] = hook->begin;
+        } else {
+            ranges[range_index++] =
+                (UcCodeHookRange){ .begin = hook->begin, .end = hook->end };
+        }
+    }
+    if (exact_count > 1) {
+        qsort(exact, exact_count, sizeof(*exact), compare_code_hook_address);
+    }
+    free(uc->code_hook_exact_addresses);
+    free(uc->code_hook_ranges);
+    uc->code_hook_exact_addresses = exact;
+    uc->code_hook_exact_count = exact_count;
+    uc->code_hook_ranges = ranges;
+    uc->code_hook_range_count = range_count;
+    uc->code_hook_global = global;
+    uc->code_hook_index_generation = uc->code_hook_generation;
+    return true;
+}
+
+bool uc_code_hook_exists_bounded(uc_engine *uc, uint64_t address)
+{
+    if (uc->code_hook_index_generation != uc->code_hook_generation &&
+        !rebuild_code_hook_index(uc)) {
+        return _hook_exists_bounded(uc->hook[UC_HOOK_CODE_IDX].head, address);
+    }
+    if (uc->code_hook_global) {
+        return true;
+    }
+    size_t low = 0;
+    size_t high = uc->code_hook_exact_count;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        if (uc->code_hook_exact_addresses[middle] < address) {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if (low < uc->code_hook_exact_count &&
+        uc->code_hook_exact_addresses[low] == address) {
+        return true;
+    }
+    for (size_t i = 0; i < uc->code_hook_range_count; i++) {
+        if (address >= uc->code_hook_ranges[i].begin &&
+            address <= uc->code_hook_ranges[i].end) {
+            return true;
+        }
+    }
+    return false;
 }
 
 UNICORN_EXPORT

@@ -23594,6 +23594,79 @@ fn code_hook_cache_observes_callback_addition_deletion_and_stop() {
 }
 
 #[test]
+fn code_hook_translation_index_tracks_exact_range_global_and_removal() {
+    let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, Vec::<u8>::new()).unwrap();
+    uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
+    uc.mem_write(TEST_CODE, &[0x90; 0x100]).unwrap();
+
+    let exact_address = TEST_CODE + 0x10;
+    let exact = uc
+        .add_code_hook(exact_address, exact_address, |uc, _, _| {
+            uc.get_data_mut().push(1)
+        })
+        .unwrap();
+    uc.emu_start(exact_address + 1, exact_address + 2, 1_000_000, 0)
+        .unwrap();
+    assert!(uc.get_data().is_empty());
+    uc.emu_start(exact_address, exact_address + 1, 1_000_000, 0)
+        .unwrap();
+    assert_eq!(uc.get_data(), &[1]);
+
+    let range_begin = TEST_CODE + 0x30;
+    let range_end = TEST_CODE + 0x3f;
+    let range = uc
+        .add_code_hook(range_begin, range_end, |uc, _, _| {
+            uc.get_data_mut().push(2)
+        })
+        .unwrap();
+    uc.get_data_mut().clear();
+    uc.emu_start(range_end + 1, range_end + 2, 1_000_000, 0)
+        .unwrap();
+    assert!(uc.get_data().is_empty());
+    uc.emu_start(range_begin + 5, range_begin + 6, 1_000_000, 0)
+        .unwrap();
+    assert_eq!(uc.get_data(), &[2]);
+
+    uc.remove_hook(range).unwrap();
+    uc.get_data_mut().clear();
+    let untranslated_range_address = range_begin + 7;
+    uc.emu_start(
+        untranslated_range_address,
+        untranslated_range_address + 1,
+        1_000_000,
+        0,
+    )
+    .unwrap();
+    assert!(uc.get_data().is_empty());
+
+    let global = uc
+        .add_code_hook(1, 0, |uc, _, _| uc.get_data_mut().push(3))
+        .unwrap();
+    let untranslated_global_address = TEST_CODE + 0x70;
+    uc.emu_start(
+        untranslated_global_address,
+        untranslated_global_address + 1,
+        1_000_000,
+        0,
+    )
+    .unwrap();
+    assert_eq!(uc.get_data(), &[3]);
+
+    uc.remove_hook(global).unwrap();
+    uc.remove_hook(exact).unwrap();
+    uc.get_data_mut().clear();
+    let post_removal_address = TEST_CODE + 0x80;
+    uc.emu_start(
+        post_removal_address,
+        post_removal_address + 1,
+        1_000_000,
+        0,
+    )
+    .unwrap();
+    assert!(uc.get_data().is_empty());
+}
+
+#[test]
 fn strcpy_s_requires_terminator_and_ignores_fourth_register() {
     let mut engine = test_engine(&[0xc3]);
     let entry = STUB_BASE + 0x100;

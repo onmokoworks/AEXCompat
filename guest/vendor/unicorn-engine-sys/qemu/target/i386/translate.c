@@ -4858,7 +4858,7 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
 
     // Unicorn: callback might need to access to EFLAGS,
     // or want to stop emulation immediately
-    if (HOOK_EXISTS_BOUNDED(env->uc, UC_HOOK_CODE, pc_start)) {
+    if (uc_code_hook_exists_bounded(env->uc, pc_start)) {
         if (s->last_cc_op != s->cc_op) {
             sync_eflags(s, tcg_ctx);
             s->last_cc_op = s->cc_op;

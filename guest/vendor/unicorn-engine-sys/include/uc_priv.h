@@ -272,6 +272,11 @@ typedef struct UcMemoryMappingCacheEntry {
     MemoryRegion *region;
 } UcMemoryMappingCacheEntry;
 
+typedef struct UcCodeHookRange {
+    uint64_t begin;
+    uint64_t end;
+} UcCodeHookRange;
+
 typedef struct TargetPageBits TargetPageBits;
 typedef struct TCGContext TCGContext;
 
@@ -375,6 +380,12 @@ struct uc_struct {
         uint64_t generation;
         struct list_item *single;
     } code_hook_cache[1024];
+    uint64_t code_hook_index_generation;
+    uint64_t *code_hook_exact_addresses;
+    size_t code_hook_exact_count;
+    UcCodeHookRange *code_hook_ranges;
+    size_t code_hook_range_count;
+    bool code_hook_global;
     uint64_t *x86_avx_sync_addresses;
     uint8_t *x86_avx_sync_actions;
     size_t x86_avx_sync_count;
@@ -454,6 +465,7 @@ struct uc_struct {
 };
 
 uint8_t uc_x86_avx_sync_for_pc(struct uc_struct *uc, uint64_t address);
+bool uc_code_hook_exists_bounded(struct uc_struct *uc, uint64_t address);
 
 // Metadata stub for the variable-size cpu context used with uc_context_*()
 struct uc_context {

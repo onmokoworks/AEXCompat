@@ -23,7 +23,8 @@ from PIL import Image
 
 SCHEMA_VERSION = 3
 EXECUTION_MODEL = "per-aex-resident-probe-render-v1"
-MAX_MESSAGE_BYTES = 64 * 1024
+MAX_REQUEST_MESSAGE_BYTES = 64 * 1024
+MAX_RESPONSE_MESSAGE_BYTES = 512 * 1024
 MAX_ERROR_BYTES = 4096
 MAX_DURABLE_ERROR_BYTES = 1024
 START_TIMEOUT_SECONDS = 10.0
@@ -204,7 +205,7 @@ def png_to_argb8(path: Path) -> tuple[int, int, bytes]:
 
 def write_message(stream: BinaryIO, value: dict[str, object]) -> None:
     payload = json.dumps(value, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-    if not payload or len(payload) > MAX_MESSAGE_BYTES:
+    if not payload or len(payload) > MAX_REQUEST_MESSAGE_BYTES:
         raise SweepError("control request exceeds the protocol bound")
     stream.write(struct.pack("<I", len(payload)))
     stream.write(payload)
@@ -231,7 +232,7 @@ def _read_exact_timeout(stream: BinaryIO, size: int, deadline: float) -> bytes:
 def read_message(stream: BinaryIO, timeout: float) -> dict[str, object]:
     deadline = time.monotonic() + timeout
     length = struct.unpack("<I", _read_exact_timeout(stream, 4, deadline))[0]
-    if length == 0 or length > MAX_MESSAGE_BYTES:
+    if length == 0 or length > MAX_RESPONSE_MESSAGE_BYTES:
         raise SweepError(f"invalid control response length: {length}")
     payload = _read_exact_timeout(stream, length, deadline)
     try:
