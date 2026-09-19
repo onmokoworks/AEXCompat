@@ -448,6 +448,28 @@ value receipts are checked by `test_bcc_obsolete_glow_response.py`. This
 reduces the unresolved input-equal `BCC Obsolete` set from 26 to 23 without
 claiming exact glow-kernel or After Effects pixel parity.
 
+The legacy Glare and Glint pair was then exercised on a 32x32 white emitter.
+An initial 6x6 emitter remained byte-identical even with an explicitly assigned
+background-map layer and maximum-brightness controls; enlarging only the
+emitter exposed the effect, and removing that optional layer left the resulting
+pixels unchanged. The accepted minimal path therefore uses only the primary
+input, threshold zero, brightness 300, scale 3, four rays, and explicit 0- and
+45-degree angles; Glare's ring is disabled to isolate the shared ray contract.
+`Mix With Original = 100` returns the emitter source byte-for-byte. At zero mix,
+both effects produce opaque, multi-level ray images spanning at least 95 pixels
+in each dimension, with at least 5,000 lit pixels. The 0-degree image has at
+least 1.5 times as much axial as diagonal mean energy in the 30-to-60-pixel
+annulus, and changing the angle changes at least 4,000 pixels. Eight mutations
+reject copying, an ignored angle, isotropic blur, transparency, localized or
+uniform output, truncation, and a wrong neutral frame. A ninth mutation dims
+the zero-degree rays without changing their direction; the 90-degree-periodic
+directional-energy profile must move its dominant direction by at least 20
+degrees, so that false response is also rejected. The two installed AEX cases
+plus those mutations passed 11/11 in 16.71 seconds in
+`test_bcc_obsolete_glare_glint_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 23 to 21. This is a bounded ray-control
+contract, not exact ray-kernel or After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
