@@ -140,13 +140,11 @@ void WorkerSession::release_directory_cookies() noexcept {
   }
 }
 
-void WorkerSession::restore_stdout() noexcept {
-  if (!stdout_redirected_) return;
-  std::cout.flush();
-  if (restore_native_stdout_) restore_native_stdout_();
-  std::cout.clear();
-  std::cout.flush();
+bool WorkerSession::restore_stdout() noexcept {
+  if (!stdout_redirected_) return true;
+  const bool restored = !restore_native_stdout_ || restore_native_stdout_();
   stdout_redirected_ = false;
+  return restored;
 }
 
 void WorkerSession::emit_audit_failure() noexcept {
@@ -159,10 +157,10 @@ void WorkerSession::emit_audit_failure() noexcept {
 
 bool WorkerSession::prepare_protocol_report() {
   const bool passed = capture_terminal_audit();
-  restore_stdout();
+  const bool stdout_restored = restore_stdout();
   if (!passed) emit_audit_failure();
-  protocol_report_prepared_ = passed;
-  return passed;
+  protocol_report_prepared_ = passed && stdout_restored;
+  return protocol_report_prepared_;
 }
 
 [[noreturn]] void WorkerSession::terminate_after_protocol_report(
@@ -174,11 +172,8 @@ bool WorkerSession::prepare_protocol_report() {
     __fastfail(FAST_FAIL_FATAL_APP_EXIT);
   }
   stop_trace();
-  std::cout.flush();
   std::cerr.flush();
-  std::fflush(stdout);
   std::fflush(stderr);
-  if (!std::cout.good()) __fastfail(FAST_FAIL_FATAL_APP_EXIT);
   if (!TerminateProcess(GetCurrentProcess(), static_cast<UINT>(exit_code)))
     __fastfail(FAST_FAIL_FATAL_APP_EXIT);
   __assume(0);
@@ -188,26 +183,26 @@ bool WorkerSession::shutdown_before_report() {
   const bool passed = capture_terminal_audit();
   stop_trace();
   unload_module();
-  restore_stdout();
-  return passed;
+  return restore_stdout() && passed;
 }
 
 int WorkerSession::finish_integrated_report(int exit_code) noexcept {
   (void)capture_terminal_audit();
   stop_trace();
   unload_module();
-  restore_stdout();
+  const bool stdout_restored = restore_stdout();
   // Suppress destructor fallback: this path has already serialized the audit
   // inside its own compatibility report, including rejection details.
   audit_failure_reported_ = true;
-  return exit_code;
+  return stdout_restored ? exit_code : 23;
 }
 
 int WorkerSession::finish(int exit_code) noexcept {
   const bool passed = capture_terminal_audit();
   stop_trace();
   unload_module();
-  restore_stdout();
+  const bool stdout_restored = restore_stdout();
+  if (!stdout_restored) return 23;
   if (!passed) {
     emit_audit_failure();
     return 14;

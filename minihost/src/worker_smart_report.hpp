@@ -61,6 +61,6 @@ struct SmartCompletionInputs {
   std::array<int32_t, 2> context_extent{};
 };
 
-void emit_smart_completion_report(const SmartCompletionInputs& inputs);
+bool emit_smart_completion_report(const SmartCompletionInputs& inputs);
 
 }  // namespace aexcompat::l2_detail

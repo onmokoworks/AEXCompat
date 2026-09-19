@@ -13,7 +13,7 @@ namespace aexcompat::worker_runtime {
 // bytes or audit paths to the caller.
 using RuntimeFileHash = bool(*)(const std::filesystem::path&, std::string&);
 using RuntimeStdoutRedirect = bool(*)();
-using RuntimeStdoutRestore = void(*)();
+using RuntimeStdoutRestore = bool(*)();
 
 struct RuntimeHostHooks {
   RuntimeFileHash hash_file{};

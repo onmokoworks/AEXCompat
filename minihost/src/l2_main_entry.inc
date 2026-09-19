@@ -3255,7 +3255,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   classic_inputs.context_extent = {
       read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET),
       read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET)};
-  emit_classic_completion_report(classic_inputs);
+  if (!emit_classic_completion_report(classic_inputs))
+    session.terminate_after_protocol_report(23);
   } else if (is_smart_worker()) {
   restore_native_stdout();
   SmartCompletionInputs smart_inputs;
@@ -3311,8 +3312,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   smart_inputs.context_extent = {
       read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET),
       read<int32_t>(input, aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET)};
-  emit_smart_completion_report(smart_inputs);
-  std::cout.flush();
+  if (!emit_smart_completion_report(smart_inputs))
+    session.terminate_after_protocol_report(23);
   } else {
   report(global_error == 0 && params_error == 0 ? "selectors_completed" : "selector_error",
          global_error, params_error, setdown_error, output, about_message, lifecycle_errors, lifecycle_data_null);

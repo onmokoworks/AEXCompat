@@ -65,6 +65,6 @@ struct ClassicCompletionInputs {
   std::array<int32_t, 2> context_extent{};
 };
 
-void emit_classic_completion_report(const ClassicCompletionInputs& inputs);
+bool emit_classic_completion_report(const ClassicCompletionInputs& inputs);
 
 }  // namespace aexcompat::l2_detail

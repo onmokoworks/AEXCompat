@@ -5,7 +5,7 @@
 namespace aexcompat::worker_runtime {
 
 bool redirect_native_stdout();
-void restore_native_stdout();
+bool restore_native_stdout();
 
 // Writes one complete worker protocol document and makes every byte visible
 // before the caller returns. Session workers may be collected immediately

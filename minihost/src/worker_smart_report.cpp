@@ -4,6 +4,7 @@
 #include "gpu_memory_world_transport.hpp"
 #include "gpu_opencl_backend.hpp"
 #include "host_audio_runtime.hpp"
+#include "native_stdout_guard.hpp"
 #include "runtime_module_audit.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_mask_runtime.hpp"
@@ -20,6 +21,7 @@
 #include <atomic>
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 namespace aexcompat::l2_detail {
@@ -63,7 +65,7 @@ std::size_t mask_open_count();
 std::size_t mask_tangent_vertex_count();
 bool mask_lifetimes_balanced();
 
-void emit_smart_completion_report(const SmartCompletionInputs& in) {
+bool emit_smart_completion_report(const SmartCompletionInputs& in) {
   namespace report = aexcompat::worker_render_report;
   namespace gpu_transport = aexcompat::gpu_runtime::memory_world_transport;
   namespace opencl = aexcompat::gpu_runtime::opencl;
@@ -74,7 +76,8 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   const auto& arbitrary = worker_runtime::parameters::state().arbitrary;
   const auto& checkout = worker_runtime::parameters::state().checkout;
   const auto mask_report = aexcompat::mask_runtime::snapshot();
-  report::ReportSnapshot report_snapshot(std::cout);
+  std::ostringstream protocol;
+  report::ReportSnapshot report_snapshot(protocol);
   const auto& host_telemetry = aexcompat::worker_runtime::smart::host_telemetry();
   const bool host_state_clean =
                 in.parameter_count_contract_valid &&
@@ -243,7 +246,9 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       requested_value(*in.requested_parameters, L"mix"),
       static_cast<int32_t>(requested_value(*in.requested_parameters, L"invert_map")),
       !in.nop_render_advertised, worker_runtime::module_audit_json()});
-  report::emit(report_snapshot, std::cout);
+  report::emit(report_snapshot, protocol);
+  if (!protocol.good()) return false;
+  return worker_runtime::emit_protocol_stdout(protocol.str());
 }
 
 }  // namespace aexcompat::l2_detail

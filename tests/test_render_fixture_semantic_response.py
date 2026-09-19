@@ -449,3 +449,97 @@ def test_installed_olmradialblur_fixture_strength_response(tmp_path):
         assert output == read_artifact(destination / 'final', report['final_artifact'])
         outputs.append(output)
     assert_radial_blur_response(*outputs, source)
+
+
+def smoother_stair_argb():
+    return bytes(component for y in range(HEIGHT) for x in range(WIDTH)
+                 for component in ((255, 0, 0, 0) if x < y + 56
+                                   else (255, 255, 255, 255)))
+
+
+def assert_smoother_response(smoothed, source):
+    assert len(smoothed) == len(source) == WIDTH * HEIGHT * 4
+    changed = changed_pixel_count(source, smoothed)
+    assert HEIGHT <= changed <= HEIGHT * 2
+    assert min(smoothed[0::4]) >= 254 and max(smoothed[0::4]) == 255
+    black_outputs, white_outputs = [], []
+    for offset in range(0, len(source), 4):
+        source_rgb = source[offset + 1:offset + 4]
+        output_rgb = smoothed[offset + 1:offset + 4]
+        if source_rgb == bytes(3):
+            black_outputs.append(output_rgb)
+        else:
+            assert source_rgb == bytes([255, 255, 255])
+            white_outputs.append(output_rgb)
+        if output_rgb != source_rgb:
+            pixel = offset // 4
+            y, x = divmod(pixel, WIDTH)
+            assert x in (y + 55, y + 56)
+    assert any(pixel == bytes(3) for pixel in black_outputs)
+    assert any(pixel != bytes(3) for pixel in black_outputs)
+    assert any(pixel == bytes([255, 255, 255]) for pixel in white_outputs)
+    assert any(pixel != bytes([255, 255, 255]) for pixel in white_outputs)
+    assert any(0 < component < 255 for component in smoothed[1::4])
+
+
+@pytest.mark.parametrize(
+    'fault', ['noop', 'constant', 'transparent', 'global_gray', 'sparse', 'truncated'])
+def test_smoother_check_rejects_invalid_response(fault):
+    source = smoother_stair_argb()
+    global_gray = bytearray(source)
+    for offset in range(0, len(global_gray), 4):
+        if global_gray[offset + 1] == 255:
+            global_gray[offset + 1:offset + 4] = bytes([128, 128, 128])
+    sparse = bytearray(source)
+    sparse[(56 * 4) + 1:(56 * 4) + 4] = bytes([128, 128, 128])
+    candidate = {
+        'noop': source,
+        'constant': bytes([255, 0, 0, 0]) * (WIDTH * HEIGHT),
+        'transparent': bytes(len(source)),
+        'global_gray': bytes(global_gray),
+        'sparse': bytes(sparse),
+        'truncated': source[:-4],
+    }[fault]
+    with pytest.raises(AssertionError):
+        assert_smoother_response(candidate, source)
+
+
+def test_installed_olmsmoother_fixture_default_response(tmp_path):
+    plugin_value = os.environ.get('AEXCOMPAT_TEST_OLM_SMOOTHER')
+    if not plugin_value:
+        pytest.skip('real AEX execution requires AEXCOMPAT_TEST_OLM_SMOOTHER')
+    assert os.name == 'nt', 'opted-in native test requires Windows'
+    plugin = Path(plugin_value).resolve()
+    harness = ROOT / 'broker/target/release/aexcompat-harness.exe'
+    assert plugin.is_file() and harness.is_file()
+    assert (ROOT / 'target/minihost-build/aex_worker.exe').is_file()
+
+    def run(*args):
+        result = subprocess.run([str(harness), '--headless', *map(str, args)],
+                                cwd=ROOT, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
+        return json.loads(result.stdout)
+
+    parameters = run('--inspect-experimental', plugin)
+    smooth_range = next(p for p in parameters if p['name'] == 'Do Smooth Range')
+    assert smooth_range['kind'] == 'integer' and smooth_range['value'] == 6
+    source = smoother_stair_argb()
+    source_rgba = bytes(c for i in range(0, len(source), 4)
+                        for c in (*source[i + 1:i + 4], source[i]))
+    Image.frombytes('RGBA', (WIDTH, HEIGHT), source_rgba).save(tmp_path / 'input.png')
+    fixture = dict(schema='aexcompat.render_fixture', schema_version=1,
+                   primary_layer='input.png', parameters=parameters,
+                   pixel_format='argb8', render_path='classic', premultiplication='straight',
+                   timing=dict(current_time=0, time_step=1, total_time=300, time_scale=30),
+                   final_artifact='raw', checkpoints=[
+                       dict(id='input', stage='classic-input'),
+                       dict(id='output', stage='classic-output')])
+    fixture_path = tmp_path / 'fixture.json'
+    fixture_path.write_text(json.dumps(fixture), encoding='utf-8')
+    destination = tmp_path / 'render'
+    report = run('--render-fixture', plugin, fixture_path, destination)
+    checkpoints = report['checkpoints']
+    assert read_artifact(destination / 'checkpoints/input', checkpoints['input']) == source
+    output = read_artifact(destination / 'checkpoints/output', checkpoints['output'])
+    assert output == read_artifact(destination / 'final', report['final_artifact'])
+    assert_smoother_response(output, source)

@@ -2,6 +2,7 @@
 
 #include "gpu_memory_world_transport.hpp"
 #include "host_audio_runtime.hpp"
+#include "native_stdout_guard.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
 #include "worker_classic_runtime.hpp"
 #include "worker_handle_runtime.hpp"
@@ -19,6 +20,7 @@
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 namespace aexcompat::l2_detail {
@@ -59,7 +61,7 @@ std::string world_debug_report_json();
 const aexcompat::host_audio::Telemetry& audio_telemetry();
 bool audio_handle_lifetimes_balanced();
 
-void emit_classic_completion_report(const ClassicCompletionInputs& in) {
+bool emit_classic_completion_report(const ClassicCompletionInputs& in) {
   namespace report = aexcompat::worker_render_report;
   namespace gpu_transport = aexcompat::gpu_runtime::memory_world_transport;
   using aexcompat::worker_runtime::parameter_execution::requested_parameters_json;
@@ -67,7 +69,8 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
   const auto& arbitrary = worker_runtime::parameters::state().arbitrary;
   const auto& parameter_ui = worker_runtime::parameters::state().ui;
   const auto classic_diagnostics = aexcompat::worker_runtime::classic::diagnostics();
-  report::ReportSnapshot report_snapshot(std::cout);
+  std::ostringstream protocol;
+  report::ReportSnapshot report_snapshot(protocol);
   report::ClassicReport classic_report;
   classic_report.head = {
       in.render_error == 0 && in.parameter_count_contract_valid && in.guards_intact &&
@@ -163,7 +166,9 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
       report::capture_gpu_diagnostics(), report::capture_seh_diagnostics(), classic_requested,
       aexcompat::worker_runtime::classic::last_selector_dispatched(),
       in.depth_supported, in.render_error});
-  report::emit(report_snapshot, std::cout);
+  report::emit(report_snapshot, protocol);
+  if (!protocol.good()) return false;
+  return worker_runtime::emit_protocol_stdout(protocol.str());
 }
 
 }  // namespace aexcompat::l2_detail

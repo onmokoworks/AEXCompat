@@ -270,8 +270,8 @@ invalid alpha is zero and the worker/session are clean. The report is
 same CLI `cc96567e...` and worker `94071433...` fingerprints as the
 DistanceGradation semantic probe. The two previously transparent records are
 therefore valid effect responses under effect-appropriate inputs, not image
-render failures. Three opaque input-equal OLM defaults remain a semantic
-parameter-response backlog. On the verified shipping Smart route and these
+render failures. Two opaque input-equal OLM defaults remain a semantic
+parameter-response backlog (`OLMSmoother2` and `OLMToonDilate`). On the verified shipping Smart route and these
 effect-appropriate inputs, no OLM native execution or visibility failure
 remains. The separate `DistanceGradation` Classic close crash described above
 is still unresolved; Classic is diagnostic-only for this result. No After
@@ -363,6 +363,39 @@ the Release harness/worker fingerprints remain `b4b264a1...` / `94071433...`.
 The fixture rejects no-op, constant, transparent, uniform per-pixel
 color-transform, and truncated false positives. The marker-based real-AEX case
 passed in 1.46 s. No After Effects process was used.
+
+`OLMSmoother` is resolved by a Classic real-AEX fixture using a binary stair-step
+edge, matching the vendor's MLAA-like jagged-line smoothing description
+(`https://www.olm.co.jp/post/olm-smoother`). At the discovered default `Do Smooth
+Range` value 6, the effect changed only 287 of 36,864 pixels to intermediate
+values along the diagonal boundary while preserving 18,217 source-black pixels
+and 18,360 source-white pixels exactly; the other 143 black and 144 white
+boundary pixels became intermediate values. The input PNG
+SHA-256 is
+`b3e64f490d115a24544ff7785265ad5e50d1d78d449c91551a9b4843c61de417`;
+the raw ARGB8 output SHA-256 is
+`e5aafb3817ae32f40cf27e407127d6cff94a1451438e270a28ade6972ed274a7`.
+The fixture's six mutations reject no-op, constant, transparent, whole-region
+gray, sparse single-pixel, and truncated false positives. Requested range values 0 and 6 were both
+recorded correctly but produced the same output on this binary edge, so a range
+difference is not claimed as semantic evidence.
+
+The same plug-in originally produced a valid frame but exited with
+`0xC0000005` after `GLOBAL_SETDOWN`, terminal quiescence, and module-audit
+completion, before the final close report. The worker now restores the protocol
+fd and emits the Classic/Smart completion JSON without touching the global
+`std::cout` state after plug-in execution. The final shipping sweep report
+`%TEMP%/aexcompat-olm-smoother-final-review-clean-20260920.json` records
+`rendered` in 170 ms (363 ms including discovery), a clean session, worker exit
+0, 147,456 decoded
+bytes, 36,864 nonzero-alpha pixels, and zero invalid-alpha pixels. Its output
+pixel SHA-256 is
+`64a2111a6142d4793d4a43310155483c9e145ae65678433924341faa77d64df1`;
+the installed AEX, CLI, and worker SHA-256 values are respectively
+`6206f601b645dc915b78269ae403e5cbee642ac2812e320d85838ec72135fe82`,
+`cc96567e93c05c633d5a94c67d1ee5444b0032656e31d5ba3687691e85f8ac3b`,
+and `68816d7a5963f4864a1ed0f0787592d6afcd2241d3c2bbb46f9b0e9e5bd3308f`.
+No After Effects process was used.
 
 ## ONMK subdirectory cohort
 

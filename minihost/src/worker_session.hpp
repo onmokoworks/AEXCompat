@@ -102,7 +102,7 @@ class WorkerSession final {
   void stop_trace() noexcept;
   void unload_module() noexcept;
   void release_directory_cookies() noexcept;
-  void restore_stdout() noexcept;
+  bool restore_stdout() noexcept;
   void emit_audit_failure() noexcept;
 
   std::filesystem::path plugin_path_;
