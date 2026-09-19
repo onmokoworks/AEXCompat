@@ -588,3 +588,87 @@ def test_installed_olmsmoother2_fixture_default_response(tmp_path):
     output = read_artifact(destination / 'checkpoints/output', checkpoints['output'])
     assert output == read_artifact(destination / 'final', report['final_artifact'])
     assert_smoother_response(output, source)
+
+
+def toon_dilate_source_argb():
+    return bytes(component for y in range(HEIGHT) for x in range(WIDTH)
+                 for component in ((255, 32, 64, 128)
+                                   if 96 <= x < 160 and 56 <= y < 88
+                                   else (0, 0, 0, 0)))
+
+
+def assert_toon_dilate_response(dilated, source):
+    assert len(dilated) == len(source) == WIDTH * HEIGHT * 4
+    changed = [offset for offset in range(0, len(source), 4)
+               if source[offset:offset + 4] != dilated[offset:offset + 4]]
+    expected = {(y * WIDTH + x) * 4
+                for y in range(54, 90) for x in range(94, 162)
+                if not (56 <= y < 88 and 96 <= x < 160)}
+    assert set(changed) == expected
+    opaque = [offset for offset in range(0, len(source), 4) if source[offset] == 255]
+    assert all(dilated[offset:offset + 4] == source[offset:offset + 4]
+               for offset in opaque)
+    assert all(source[offset:offset + 4] == bytes([0, 0, 0, 0])
+               and dilated[offset:offset + 4] == bytes([255, 32, 64, 128])
+               for offset in changed)
+    assert any(source[offset] == 0 and dilated[offset:offset + 4] == bytes([0, 0, 0, 0])
+               for offset in range(0, len(source), 4))
+
+
+@pytest.mark.parametrize('fault', ['noop', 'alpha_fill', 'opaque_overwrite', 'global_fill'])
+def test_toon_dilate_check_rejects_invalid_response(fault):
+    source = toon_dilate_source_argb()
+    candidate = bytearray(source)
+    if fault == 'alpha_fill':
+        candidate[0] = 255
+        candidate[1:4] = bytes([32, 64, 128])
+    elif fault == 'opaque_overwrite':
+        offset = (56 * WIDTH + 96) * 4
+        candidate[offset + 1:offset + 4] = bytes([255, 255, 255])
+    elif fault == 'global_fill':
+        for offset in range(0, len(candidate), 4):
+            if candidate[offset] == 0:
+                candidate[offset + 1:offset + 4] = bytes([32, 64, 128])
+    with pytest.raises(AssertionError):
+        assert_toon_dilate_response(source if fault == 'noop' else bytes(candidate), source)
+
+
+def test_installed_olmtoon_dilate_fixture_default_response(tmp_path):
+    plugin_value = os.environ.get('AEXCOMPAT_TEST_OLM_TOON_DILATE')
+    if not plugin_value:
+        pytest.skip('real AEX execution requires AEXCOMPAT_TEST_OLM_TOON_DILATE')
+    assert os.name == 'nt', 'opted-in native test requires Windows'
+    plugin = Path(plugin_value).resolve()
+    harness = ROOT / 'broker/target/release/aexcompat-harness.exe'
+    assert plugin.is_file() and harness.is_file()
+    assert (ROOT / 'target/minihost-build/aex_worker.exe').is_file()
+
+    def run(*args):
+        result = subprocess.run([str(harness), '--headless', *map(str, args)],
+                                cwd=ROOT, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
+        return json.loads(result.stdout)
+
+    parameters = run('--inspect-experimental', plugin)
+    radius = next(p for p in parameters if p['name'] == 'Search Radius')
+    assert radius['kind'] == 'float' and radius['value'] == 2
+    source = toon_dilate_source_argb()
+    source_rgba = bytes(c for i in range(0, len(source), 4)
+                        for c in (*source[i + 1:i + 4], source[i]))
+    Image.frombytes('RGBA', (WIDTH, HEIGHT), source_rgba).save(tmp_path / 'input.png')
+    fixture = dict(schema='aexcompat.render_fixture', schema_version=1,
+                   primary_layer='input.png', parameters=parameters,
+                   pixel_format='argb8', render_path='smart', premultiplication='straight',
+                   timing=dict(current_time=0, time_step=1, total_time=300, time_scale=30),
+                   final_artifact='raw', checkpoints=[
+                       dict(id='input', stage='smart-input'),
+                       dict(id='output', stage='smart-output')])
+    fixture_path = tmp_path / 'fixture.json'
+    fixture_path.write_text(json.dumps(fixture), encoding='utf-8')
+    destination = tmp_path / 'render'
+    report = run('--render-fixture', plugin, fixture_path, destination)
+    checkpoints = report['checkpoints']
+    assert read_artifact(destination / 'checkpoints/input', checkpoints['input']) == source
+    output = read_artifact(destination / 'checkpoints/output', checkpoints['output'])
+    assert output == read_artifact(destination / 'final', report['final_artifact'])
+    assert_toon_dilate_response(output, source)

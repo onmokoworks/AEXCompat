@@ -270,8 +270,8 @@ invalid alpha is zero and the worker/session are clean. The report is
 same CLI `cc96567e...` and worker `94071433...` fingerprints as the
 DistanceGradation semantic probe. The two previously transparent records are
 therefore valid effect responses under effect-appropriate inputs, not image
-render failures. One opaque input-equal OLM default remains a semantic
-parameter-response backlog (`OLMToonDilate`). On the verified shipping Smart route and these
+render failures. The two opaque input-equal OLM defaults (`OLMSmoother2` and
+`OLMToonDilate`) are also resolved below with effect-appropriate inputs. On the verified shipping Smart route and these
 effect-appropriate inputs, no OLM native execution or visibility failure
 remains. The separate `DistanceGradation` Classic close crash described above
 is still unresolved; Classic is diagnostic-only for this result. No After
@@ -417,6 +417,32 @@ The installed AEX, CLI, and worker SHA-256 values are respectively
 `cc96567e93c05c633d5a94c67d1ee5444b0032656e31d5ba3687691e85f8ac3b`,
 and `68816d7a5963f4864a1ed0f0787592d6afcd2241d3c2bbb46f9b0e9e5bd3308f`.
 No After Effects process was used.
+
+`OLMToonDilate` is resolved with a transparent-background fixture containing a
+64x32 opaque rectangle, matching the vendor's closest-color dilation semantics
+(`https://www.olm.co.jp/post/olm-toon-dilate`). At the discovered default
+`Search Radius=2`, the output preserves the original rectangle and expands it
+exactly two pixels on every side. All 400 changed pixels copy the source ARGB
+value `[255, 32, 64, 128]` without blending; distant transparent pixels remain
+unchanged. The decoded input and output SHA-256 values are respectively
+`cf11f06bfecfbc5231926b9559558d69c13705403fe2fe7ac0f7233be91c912e`
+and `415ef2679e8cd5138ce50d1a8006079e9f9d88cc14c38c938aa11d7d00529c53`;
+the final artifact exactly matches the output checkpoint. Four negative
+mutations plus the focused real-AEX case passed in 0.86 s. The shipping report
+`%TEMP%/aexcompat-olm-toon-dilate-semantic-20260920.json` records `rendered` in
+170 ms (644 ms including discovery), a clean session, worker exit 0, 147,456
+decoded bytes, 2,448 nonzero-alpha pixels, and zero invalid-alpha pixels. Its
+shipping-boundary pixel SHA-256 is
+`afc3d5b6f6e126c8e35b2d7239320e923e9c878aa9600b136264cae59426e005`.
+The installed AEX, CLI, and worker SHA-256 values are respectively
+`c05db8c118029ff3216d3cae8e6423e2eb41ca8f56de2fb3668db81b9b8c32b3`,
+`cc96567e93c05c633d5a94c67d1ee5444b0032656e31d5ba3687691e85f8ac3b`,
+and `68816d7a5963f4864a1ed0f0787592d6afcd2241d3c2bbb46f9b0e9e5bd3308f`.
+The first combined semantic-module run saw one transient parameter-inspection
+error for this AEX; an immediate focused retry passed, followed by a clean full
+module retry (35 passed, 5 skipped in 2.90 s). The failure did not reproduce and
+is retained here rather than counted as a render failure. No After Effects
+process was used.
 
 ## ONMK subdirectory cohort
 
