@@ -654,6 +654,24 @@ unresolved input-equal `BCC Obsolete` set from 11 to 10. This establishes strong
 edge-aware tone smoothing for the tested controls, not exact skin processing or
 After Effects pixel parity.
 
+Legacy `BCCWitnessProtection.aex` operates directly on the primary input and
+does not expose a Host Layer parameter. A deterministic high-frequency color
+pattern was rendered with inspected `Effect Method = Mosaic`, amount 80,
+`Apply Mix = 100`, circular shape, center `(50,50)`, region radius 25, zero
+softness, and output view. Slot 11 `Mix with Original = 100` returned the input
+byte-for-byte. With mix 0, 12,892 pixels changed inside bounds
+`(64,8)..(191,135)`, matching the requested center and an approximately
+64-pixel circular radius. Every pixel at least 66 pixels from the image center
+remained byte-identical, alpha remained opaque, and the inner 40-pixel radius
+became neutral grayscale with per-channel range zero. Twelve mutations cover
+copied, globally flattened, uniform, undersized, square, off-center, colored,
+transparent, exterior-damaged, mirrored, wrong-neutral, and truncated outputs.
+The installed AEX plus those mutations passed 13/13 in 6.27 seconds in
+`test_bcc_obsolete_witness_protection_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 10 to 9. This establishes localized visual
+anonymization for the tested mosaic controls, not exact After Effects pixel
+parity or the untested blur, brightness/contrast, and tint methods.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
