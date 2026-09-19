@@ -239,6 +239,35 @@ SmartFX route. A focused layerless pair showed the resident-process benefit:
 `BCCWoodPlanks.aex` fell from 1,687 ms in its own session to 505 ms after a
 same-process plug-in swap, with identical bucket and pixel SHA-256.
 
+The fresh 570-record milestone placed 94 effects in `BCC Transitions`; 93
+returned the input-identical default hash because the generic probe did not
+select manual progress. A focused inspection of all 94 succeeded in 42,031 ms
+and grouped them into ten parameter signatures. The largest compatible
+signature contains 42 effects with slot 2 `Layer to Reveal`, slot 3
+`Animation = Pct. Done`, and slot 4 `Percent Done`. Report
+`%TEMP%/aexcompat-bcc-transition-slot2-semantic-20260920.json` records 42/42
+passing in 285,250 ms: percent zero equals the patterned source byte-for-byte,
+percent 100 equals a distinct reveal image byte-for-byte, and percent 50 is a
+valid non-endpoint image with nonzero alpha at every pixel. The report is
+52,875 bytes with SHA-256
+`46bc629112949df9938351b68c5236d0f2f89d04561ab38e554d263f3c70abfc`,
+harness SHA-256
+`b4b264a11629e7542231ebae73477b31cbbe62e09b2fba7ddf9bdfa47a36a26b`,
+and worker SHA-256
+`2b00eb2793abcfce3cec7d9647bf09133c47c1a7507b813a456dcd1e71fbdac3`.
+`test_bcc_transition_slot2_response.py` preserves the exact 42-file cohort,
+parameter contract, endpoints, midpoint response, and corruption-rejecting
+validator. Its first full run passed 40 real effects and exposed an overstrict
+opaque-alpha assertion on the two RGB Displacement variants; those variants
+produce nonzero but slightly reduced midpoint alpha. After correcting the
+oracle, the validator plus both affected installed AEX tests passed 8/8. No
+full-corpus sweep was repeated. A focused 50-percent-only follow-up rendered
+all 42 again in 89,672 ms and found no constant midpoint: the minimum was 137
+distinct RGBA values in the two Lens Flash variants. The durable validator
+therefore rejects a constant midpoint as well as fixed endpoints, transparency,
+and truncation. This establishes the tested transition state change, not exact
+midpoint parity with After Effects.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
