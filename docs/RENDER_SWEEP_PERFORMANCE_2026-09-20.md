@@ -256,3 +256,31 @@ Focused raw-frame inspection found no common warning or license image:
 not proof that the intended effects were applied. All eight defaults remain
 semantically unverified without a parameter-response test or AE reference. No
 After Effects process was used.
+
+## Rowbyte cohort
+
+The six AEX files in the Rowbyte MediaCore subdirectory all completed native
+render and RGBA decode under the saved 256x144 ARGB8, time 0, one-frame
+conditions. The report is
+`%TEMP%/aexcompat-rowbyte-render-all-2026-09-20.json`:
+
+| execution result | value |
+|---|---:|
+| rendered buffers | 6 / 6 |
+| transparent / invalid alpha | 0 |
+| explicit DEMO-watermarked outputs | 4 |
+| elapsed | 1,372 ms |
+
+Raw-frame inspection is required for the final classification. `BadTV_x64`,
+`DataGlitch_x64`, `DotPixels64`, and `SepRGB_x64` visibly contain a red diagonal
+cross and `DEMO`; they are therefore recorded as external license-blocked, not
+as successful production images. `SepRGB_x64` also expands to 258x146 at origin
+(-1,-1), with 36,864 nonzero-alpha pixels inside that larger frame.
+`TVPixel64` produces an opaque cyan pixel-grid pattern without the watermark;
+`FastBokeh` returns the opaque input unchanged at its default. Those two remain
+semantically unverified, as do the intended effects beneath the four demo
+overlays. The report fingerprint is complete and matches CLI
+`73c42eb09624819ba009ce36a859ea5c43d764e26a01dcef88a7762bbbcf5404`
+and worker
+`f9494e5163cb3fd1e993617cc648b70fb817c14cf928141c90e6511b6fd36602`.
+No After Effects process was used.
