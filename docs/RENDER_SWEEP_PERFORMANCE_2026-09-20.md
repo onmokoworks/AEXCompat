@@ -599,6 +599,24 @@ that the plug-in can initialize its sample model during a normal shipping
 render; identity, near-black, and increased-noise outputs remain failures. The
 unresolved input-equal `BCC Obsolete` count therefore remains 13.
 
+Legacy `BCCDVFixer.aex` requires inspected slot 6 `Host Layer`. On repeating
+two-pixel red/blue chroma blocks, slot 14 `Mix with Original = 100` returned the
+input byte-for-byte. With slot 9 `Threshold = 0`, slot 11 `Iterations = 20`, and
+mix 0, all 36,864 pixels changed while red and blue horizontal adjacent-pixel
+variation within a row fell from 19,812 to 32. Red/blue channel means remained
+142, green remained exactly
+64, alpha and identical rows were preserved, and 15 output colors retained the
+red-dominant first edge and blue-dominant last edge instead of collapsing to a
+constant. Preview probes independently produced all-black at threshold 100 and
+all-white at threshold 0, confirming the threshold direction used by the
+normal-output test. Eleven mutations cover a copied, constant, or high-variation
+result, grayscale/brightness/color-direction corruption, lost alpha, spatial or
+green-channel damage, a wrong neutral frame, and truncation. The installed AEX
+plus those mutations passed 12/12 in 5.56 seconds in
+`test_bcc_obsolete_dv_fixer_response.py`, reducing the unresolved input-equal
+`BCC Obsolete` set from 13 to 12. This establishes strong chroma-block smoothing
+for the tested controls, not exact DV reconstruction or After Effects parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
