@@ -634,6 +634,26 @@ and truncated outputs. The installed AEX plus those mutations passed 12/12 in
 input-equal `BCC Obsolete` set from 12 to 11. This establishes the tested prism
 dispersion response, not exact optical or After Effects pixel parity.
 
+Legacy `BCCSmoothTone.aex` requires inspected slot 6 `Host Layer`. A grayscale
+two-region image used base levels 80/180 with deterministic +/-20 noise and a
+hard center boundary. Slot 17 `Mix with Original = 100` returned it byte-for-byte.
+With method `Smoother`, locked radius X/Y 8, blur cutoff 5, maximum deviation
+100, five iterations, and mix 0, 35,908 pixels changed. Interior variance fell
+from 139.98/138.06 to 0.26/0.39 while the two means moved by less than 0.04.
+The center transition became a controlled ramp with contrast 81.9 between
+samples eight pixels to either side and maximum adjacent gradient 8. Across all
+112 internal rows, contrast stayed 79.5..82.4 and maximum gradient stayed 7..8,
+preserving the large-scale 80/180 structure rather than flattening the image.
+The validator also requires grayscale and alpha preservation and the original
+left-to-right direction. Twelve mutations cover copied, uniform, full-frame
+ramp, hard-edge, mean-shifted, colored, transparent, locally corrupted,
+boundary-band-corrupted, reversed, wrong-neutral, and truncated outputs. The
+installed AEX plus those mutations passed 13/13 in 6.23 seconds in
+`test_bcc_obsolete_smooth_tone_response.py`, reducing the
+unresolved input-equal `BCC Obsolete` set from 11 to 10. This establishes strong
+edge-aware tone smoothing for the tested controls, not exact skin processing or
+After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
