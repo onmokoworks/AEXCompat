@@ -708,6 +708,23 @@ outputs. The installed AEX plus those mutations passed 13/13 in 10.90 seconds in
 composition path, not exact After Effects pixel parity or all five layers and
 apply modes.
 
+Legacy `BCCLinearColorKey.aex` requires inspected slot 6 `Host Layer`. A
+three-band opaque input used exact green, red, and blue regions. With Composite
+output, RGB color matching, similarity 40, zero softness/post-blur/alpha offset/
+choke, and the full-frame region, the requested key color was switched between
+green and blue. The green request made every green-band alpha zero while leaving
+the red and blue bands at 255; the blue request made every blue-band alpha zero
+while leaving the other two bands at 255. Both outputs preserved all source RGB
+bytes exactly, so the evidence distinguishes a correct keyed alpha from a
+blackened or arbitrarily changed image. Twelve mutations cover copied,
+all-transparent, all-opaque, wrong-green-band, wrong-blue-band, same-matte,
+inverted, output-swapped, RGB-damaged, two locally alpha-damaged, and truncated
+outputs. The installed AEX plus those mutations passed 13/13 in 6.03 seconds in
+`test_bcc_obsolete_linear_color_key_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 7 to 6. This establishes exact-band RGB key
+selection for the tested settings, not exact After Effects edge softness or the
+HSL, chroma, and hue matching modes.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
