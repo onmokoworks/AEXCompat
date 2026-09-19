@@ -429,6 +429,25 @@ files; the three zero/active responses plus six corruption mutations passed
 the unresolved input-equal `BCC Obsolete` set from 29 to 26 without duplicating
 the tests.
 
+Three legacy glow effects form the next coherent semantic cohort. Fast Film
+Glow and Film Glow use slot 10 `Glow Intensity`; Rough Glow uses slot 18
+`Glow Opacity Scale`. All three also require the inspected slot 6 `Host Layer`.
+For every effect, contribution zero returned the patterned source byte-for-byte,
+while the installed default contribution kept every pixel of the white interior
+unchanged and added a nonconstant halo outside it. The validator requires at
+least 1,000 lit outside pixels, at least 500 intermediate-intensity outside
+pixels, at least eight distinct outside colors, 95% of the lit pixels within
+24 pixels of the original rectangle, no light beyond 32 pixels, opaque output,
+and black corners. Its synthetic valid case uses additive light rather than
+ordinary blur, and seven mutations cover copy, transparency, interior
+darkening, remote light, whole-image uniform output, a constant-width and
+constant-color ring, and truncation. The three installed effects plus those
+mutations passed 10/10 in 15.61 seconds after the Release rebuild. The
+parameter descriptors and applied
+value receipts are checked by `test_bcc_obsolete_glow_response.py`. This
+reduces the unresolved input-equal `BCC Obsolete` set from 26 to 23 without
+claiming exact glow-kernel or After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
