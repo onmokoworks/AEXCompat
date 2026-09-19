@@ -90,3 +90,25 @@ observed module is not acceptable. Before another native optimization, retain
 the validation ladder used here: focused behavioral self-test, clean Release
 worker build, the two PSOFT regressions, one 19-effect PSOFT milestone, and
 bucket/pixel SHA comparison.
+
+## Full shipping-scan inventory
+
+The shipping `scan_for_diagnostics` path found 984 AEX files after configured
+ignore processing. An inventory-only pass hashed every candidate without
+loading an AEX or starting `aex_worker`, After Effects, or aerender:
+
+| classification | count |
+|---|---:|
+| external blocked (Sapphire) | 292 |
+| external blocked (Trapcode) | 3 |
+| unexecuted | 689 |
+| total | 984 |
+
+The pass took 17,937 ms. Every row has a 64-character canonical-path identity,
+file SHA-256 and size, scan-root-relative identity, final stage, execution and
+failure classification, and the boundary-verified CLI/worker build fingerprint.
+The requested render conditions are recorded once as report-wide conditions.
+Bucket counts sum to the record count. The report is
+`%TEMP%/aexcompat-inventory-all-2026-09-20.json`; absolute scan paths remain
+omitted. `--blocked-path` retains matching candidates in the denominator and
+labels them instead of silently excluding them.

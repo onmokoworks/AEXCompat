@@ -28,6 +28,12 @@
 //!   --discovery-only     stop after shipping discovery. With --json, completed
 //!                        discovery tasks are appended to the partial sidecar,
 //!                        so a long or interrupted pass retains exact progress
+//!   --inventory-only     stop after the shipping folder scan, without loading
+//!                        any AEX. Records file and path identities for every
+//!                        selected candidate
+//!   --blocked-path <substr>
+//!                        in inventory mode, retain matching candidates but
+//!                        classify them as external_blocked (repeatable, no case)
 //!   --limit <n>          sweep at most n plug-ins
 //!   --skip <n>           start at the n-th, to sweep the corpus in slices.
 //!                        Each run reports exactly what it swept and overwrites
@@ -310,6 +316,7 @@ struct Options {
     render_jobs: usize,
     filter: Option<String>,
     exclude_paths: Vec<String>,
+    blocked_paths: Vec<String>,
     pixel_format: RenderPixelFormat,
     width: u32,
     height: u32,
@@ -321,6 +328,7 @@ struct Options {
     plugin_defaults: bool,
     frames: u32,
     discovery_only: bool,
+    inventory_only: bool,
     verify_pixel_determinism: bool,
     dump_frames: Option<PathBuf>,
     dirs: Vec<PathBuf>,
@@ -336,6 +344,7 @@ fn parse_options() -> Options {
         render_jobs: 1,
         filter: None,
         exclude_paths: Vec::new(),
+        blocked_paths: Vec::new(),
         pixel_format: RenderPixelFormat::Argb8,
         width: 256,
         height: 144,
@@ -347,6 +356,7 @@ fn parse_options() -> Options {
         plugin_defaults: false,
         frames: 1,
         discovery_only: false,
+        inventory_only: false,
         verify_pixel_determinism: false,
         dump_frames: None,
         dirs: Vec::new(),
@@ -368,6 +378,7 @@ fn parse_options() -> Options {
             }
             "--filter" => options.filter = Some(value().to_lowercase()),
             "--exclude-path" => options.exclude_paths.push(value().to_lowercase()),
+            "--blocked-path" => options.blocked_paths.push(value().to_lowercase()),
             "--depth" => {
                 options.pixel_format = match value().as_str() {
                     "8" => RenderPixelFormat::Argb8,
@@ -411,6 +422,7 @@ fn parse_options() -> Options {
                 assert!(options.frames >= 1, "--frames takes at least 1");
             }
             "--discovery-only" => options.discovery_only = true,
+            "--inventory-only" => options.inventory_only = true,
             "--verify-pixel-determinism" => options.verify_pixel_determinism = true,
             other if other.starts_with("--") => panic!("unknown option {other}"),
             other => options.dirs.push(PathBuf::from(other)),
@@ -427,6 +439,14 @@ fn parse_options() -> Options {
     assert!(
         last <= TOTAL_TIME.unsigned_abs() as u64,
         "--time plus --frames runs to {last}, past the session's total time of {TOTAL_TIME}",
+    );
+    assert!(
+        !(options.discovery_only && options.inventory_only),
+        "--discovery-only and --inventory-only are mutually exclusive",
+    );
+    assert!(
+        options.inventory_only || options.blocked_paths.is_empty(),
+        "--blocked-path requires --inventory-only",
     );
     if let Some(path) = input_image {
         options.input_rgba = Some(
@@ -592,6 +612,20 @@ fn main() {
     }
 
     let started = Instant::now();
+    if options.inventory_only {
+        eprintln!(
+            "inventorying {} plug-in file(s) without loading AEX...",
+            targets.len()
+        );
+        let plugins = targets
+            .iter()
+            .map(|path| inventory_record(path, &scan.dirs, &options, &build))
+            .collect::<Vec<_>>();
+        let build = finalize_report_build_fingerprint(&build, &repository, cli_path);
+        let report = inventory_report(&options, &scan, &build, plugins, started.elapsed());
+        finish_report(&options, &report);
+        return;
+    }
     eprintln!("discovering {} plug-in(s)...", targets.len());
     let discovery_started = Instant::now();
     let partial = options
@@ -1082,6 +1116,109 @@ fn discovery_only_report(
         plugins,
         None,
     )
+}
+
+fn inventory_path_sha256(path: &Path) -> String {
+    let identity = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized = identity.to_string_lossy().replace('\\', "/").to_lowercase();
+    format!("{:x}", Sha256::digest(normalized.as_bytes()))
+}
+
+fn inventory_record(
+    path: &Path,
+    roots: &[PathBuf],
+    options: &Options,
+    build: &ReportBuildFingerprint,
+) -> Value {
+    let name = plugin_name(path, roots);
+    let full_path = path.to_string_lossy().to_lowercase();
+    let blocked_by = options
+        .blocked_paths
+        .iter()
+        .filter(|needle| full_path.contains(needle.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let blocked = !blocked_by.is_empty();
+    let fingerprint = fingerprint_executable(path);
+    json!({
+        "plugin": name.basename,
+        "plugin_relative_path": name.relative,
+        "scan_folder": name.root,
+        "plugin_path_sha256": inventory_path_sha256(path),
+        "plugin_sha256": fingerprint.sha256,
+        "plugin_size_bytes": fingerprint.size_bytes,
+        "identity_error": fingerprint.error,
+        "build": build,
+        "final_stage": "scan",
+        "execution_classification": if blocked { "external_blocked" } else { "unexecuted" },
+        "failure_classification": if blocked { Some("external_blocked") } else { None },
+        "bucket": if blocked { "external_blocked" } else { "unexecuted" },
+        "detail": {
+            "aex_loaded": false,
+            "blocked_path_substrings": blocked_by,
+        },
+        "elapsed_ms": 0,
+    })
+}
+
+fn inventory_report(
+    options: &Options,
+    scan: &DiagnosticScan,
+    build: &ReportBuildFingerprint,
+    mut plugins: Vec<Value>,
+    elapsed: Duration,
+) -> Value {
+    for plugin in &mut plugins {
+        plugin["build"] = json!(build);
+    }
+    let mut buckets: BTreeMap<String, usize> = BTreeMap::new();
+    for plugin in &plugins {
+        let bucket = plugin["bucket"]
+            .as_str()
+            .unwrap_or("inventory_record_error");
+        *buckets.entry(bucket.to_owned()).or_default() += 1;
+    }
+    json!({
+        "schema_version": 1,
+        "build": build,
+        "scan": {
+            "folder_count": scan.dirs.len(),
+            "seen": scan.seen,
+            "after_ignore": scan.plugins.len(),
+            "swept": plugins.len(),
+            "incomplete_reason": scan.incomplete_reason,
+            "selection": {
+                "filter": options.filter,
+                "excluded_path_substrings": options.exclude_paths,
+                "blocked_path_substrings": options.blocked_paths,
+                "limit": options.limit,
+                "skip": options.skip,
+            },
+            "folders": options.include_scan_paths.then(|| {
+                scan.dirs
+                    .iter()
+                    .map(|root| root.to_string_lossy().into_owned())
+                    .collect::<Vec<String>>()
+            }),
+        },
+        "mode": "inventory_only",
+        "render": Value::Null,
+        "requested_render_conditions": {
+            "width": options.width,
+            "height": options.height,
+            "pixel_format": options.pixel_format.report_name(),
+            "current_time": options.current_time,
+            "frames": options.frames,
+            "secondary_layer": !options.no_layer,
+            "force_classic": options.force_classic,
+            "plugin_defaults": options.plugin_defaults,
+            "effective_input_policy": effective_input_policy(options),
+        },
+        "discovery_elapsed_ms": 0,
+        "elapsed_ms": elapsed.as_millis(),
+        "buckets": buckets,
+        "plugins": plugins,
+    })
 }
 
 fn finish_report(options: &Options, report: &Value) {
@@ -2193,6 +2330,7 @@ mod tests {
             render_jobs: 1,
             filter: None,
             exclude_paths: Vec::new(),
+            blocked_paths: Vec::new(),
             pixel_format: RenderPixelFormat::Argb8,
             width: 1,
             height: 1,
@@ -2204,6 +2342,7 @@ mod tests {
             plugin_defaults: false,
             frames: 1,
             discovery_only: true,
+            inventory_only: false,
             verify_pixel_determinism: false,
             dump_frames: None,
             dirs: Vec::new(),
@@ -3080,6 +3219,78 @@ mod tests {
             .is_none()
         );
         assert_eq!(rejected_launches.get(), 0);
+    }
+
+    #[test]
+    fn inventory_records_identity_and_blocking_without_discovery() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-inventory-{}-{nonce:032x}",
+            std::process::id()
+        ));
+        let vendor = root.join("Maxon");
+        std::fs::create_dir_all(&vendor).unwrap();
+        let plugin = vendor.join("effect.aex");
+        std::fs::write(&plugin, b"first identity").unwrap();
+
+        let mut options = discovery_options(root.join("unused.json"));
+        options.discovery_only = false;
+        options.inventory_only = true;
+        options.blocked_paths = vec!["maxon".to_owned()];
+        let build = capture_report_build_fingerprint(&root, Err(()));
+        let first = inventory_record(&plugin, std::slice::from_ref(&root), &options, &build);
+        assert_eq!(first["plugin_relative_path"], "Maxon/effect.aex");
+        assert_eq!(first["scan_folder"], 0);
+        assert_eq!(first["final_stage"], "scan");
+        assert_eq!(first["execution_classification"], "external_blocked");
+        assert_eq!(first["failure_classification"], "external_blocked");
+        assert_eq!(first["detail"]["aex_loaded"], false);
+        assert_eq!(first["detail"]["blocked_path_substrings"], json!(["maxon"]));
+        assert_eq!(first["plugin_size_bytes"], 14);
+        assert!(
+            first["plugin_path_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)
+        );
+
+        std::fs::write(&plugin, b"second identity").unwrap();
+        let second = inventory_record(&plugin, std::slice::from_ref(&root), &options, &build);
+        assert_eq!(second["plugin_path_sha256"], first["plugin_path_sha256"]);
+        assert_ne!(second["plugin_sha256"], first["plugin_sha256"]);
+
+        let scan = DiagnosticScan {
+            dirs: vec![root.clone()],
+            plugins: vec![plugin],
+            seen: 1,
+            dependency_dirs: Vec::new(),
+            incomplete_reason: None,
+        };
+        let report = inventory_report(
+            &options,
+            &scan,
+            &build,
+            vec![second],
+            Duration::from_millis(3),
+        );
+        assert_eq!(report["mode"], "inventory_only");
+        assert!(report["render"].is_null());
+        assert_eq!(report["scan"]["after_ignore"], 1);
+        assert_eq!(report["scan"]["swept"], 1);
+        assert_eq!(report["buckets"]["external_blocked"], 1);
+        assert_eq!(
+            report["buckets"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|v| v.as_u64().unwrap())
+                .sum::<u64>(),
+            report["plugins"].as_array().unwrap().len() as u64
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
