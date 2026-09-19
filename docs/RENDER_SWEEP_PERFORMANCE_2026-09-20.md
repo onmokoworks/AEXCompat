@@ -362,6 +362,16 @@ cohort, parameter receipt, and image response. This resolves those 24 neutral
 defaults for their selected manual transition path, not the remaining 49
 input-equal `BCC Obsolete` effects or every effect-specific control.
 
+A second legacy cohort contains ten Linear, Radial, Rectangular, Textured, and
+Vignette wipe effects (five AE/Premiere pairs). They share slot 2 `Background`,
+slot 3 `Animation = Pct. Done` (value 3), and slot 4 `Percent Done`. All ten
+installed effects passed in 67.14 seconds with byte-exact source/reveal
+endpoints and a nonconstant, non-endpoint midpoint; the shared validator's
+seven corruption mutations also passed separately. The durable coverage is in
+`test_bcc_obsolete_wipe_response.py`. This reduces the unresolved input-equal
+`BCC Obsolete` set from 49 to 39 while leaving every effect-specific wipe
+control outside the stated contract.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
