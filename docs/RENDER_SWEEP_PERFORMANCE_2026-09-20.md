@@ -562,6 +562,25 @@ neutral frame, and truncation. The installed AEX plus those mutations passed
 the unresolved input-equal `BCC Obsolete` set from 15 to 14. This establishes a
 strong fine-pass sharpening response, not exact After Effects pixel parity.
 
+Legacy `BCCEdgeCleaner.aex` requires inspected slot 6 `Host Layer`. On a
+four-step jagged 0/255 alpha edge, slot 8 `Cleaning Radius = 0` preserved alpha
+byte-for-byte. At radius 20 with temporal smoothing and alpha contrast disabled,
+the result changed 7,716 edge-local pixels to intermediate alpha values across
+x=70..133 while retaining transparent and opaque far fields. Each row changed
+52..55 pixels, total alpha changed by only 0.2%, and the 50% edge-position
+standard deviation fell from 4.47 to 3.52 while four input positions were
+interpolated into 13 output positions. Adjacent-row midpoint differences fell
+from mean/max 5.96/12 to 0.084/1. The validator checks local feathering,
+alpha-mass preservation, per-row extent, and both distributional and spatial
+reduction of boundary jaggedness. Eleven mutations cover a copied or uniform
+alpha, nonlocal transparent/opaque damage, row corruption, an unsmoothed
+midpoint, alternating low/high midpoint row reordering, alpha-mass shift, a
+wrong neutral frame, and truncation. The installed AEX plus those mutations
+passed 12/12 in 5.66
+seconds in `test_bcc_obsolete_edge_cleaner_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 14 to 13. This establishes alpha-edge
+cleaning for the tested controls, not exact After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
