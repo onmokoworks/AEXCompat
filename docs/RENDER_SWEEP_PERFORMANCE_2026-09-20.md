@@ -154,3 +154,35 @@ fingerprint and the accepted worker SHA-256 `f9494e5163cb3fd1e993617cc648b70f`
 `b817c14cf928141c90e6511b6fd36602`. No After Effects process was used. The
 post-change PSOFT regression rendered 19/19 in 3,427 ms with zero bucket or
 pixel-SHA differences from the known-worker control.
+
+## MediaCore root cohort
+
+The files directly under the MediaCore scan root were measured separately from
+vendor subdirectories. `RGSGrowBounds.aex` remains external-blocked with the
+Maxon/Red Giant family and was not loaded. Shipping discovery classified the
+remaining 27 records as 25 image effects and two AEGPs
+(`AeTimelineSyncAEGP.aex` and `nexpression.aex`).
+
+The final report is
+`%TEMP%/aexcompat-mediacore-root-render-2026-09-20.json`. Under the saved
+256x144 ARGB8, time 0, one-frame conditions it records:
+
+| result | value |
+|---|---:|
+| rendered image effects | 25 / 25 |
+| non-image AEGP | 2 |
+| invalid or empty images | 0 |
+| expanded-output images | 2 |
+| output SHA equal to the solid input | 14 |
+| total | 27 |
+| elapsed | 23,597 ms |
+
+The two expanded frames are `ONMK_ParticleLab.aex` (2054x1942, origin
+-899/-899) and `ParticleKit.aex` (1878x1766, origin -811/-811); both carry
+non-empty pixel SHA-256 evidence. The 14 unchanged default renders remain
+explicitly **semantically unverified**. Several are plausibly correct no-op
+defaults (zero-strength transforms, time effects at time zero, or analysis
+effects), but this execution probe does not prove that. They must receive a
+parameter/input response test or an AE reference before counting as verified
+effect semantics. The report's build fingerprint is complete and uses the
+accepted `f9494e...` worker.
