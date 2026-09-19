@@ -846,7 +846,7 @@ fn sweep_one_caught(
     input: &[u8],
     layer_pixels: &[u8],
 ) -> Outcome {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    catch_sweep_outcome(|| {
         sweep_one(
             repository,
             record,
@@ -856,11 +856,39 @@ fn sweep_one_caught(
             input,
             layer_pixels,
         )
-    }))
-    .unwrap_or_else(|_| Outcome {
+    })
+}
+
+fn catch_sweep_outcome<F>(launch: F) -> Outcome
+where
+    F: FnOnce() -> Outcome,
+{
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(launch)).unwrap_or_else(|_| Outcome {
         bucket: "sweep_panicked".to_owned(),
         detail: Map::new(),
     })
+}
+
+fn attach_classic_comparison<F>(primary: &mut Outcome, launch: F)
+where
+    F: FnOnce() -> Outcome,
+{
+    let comparison = catch_sweep_outcome(launch);
+    primary.detail.insert(
+        "classic_comparison".to_owned(),
+        json!({
+            "bucket": comparison.bucket,
+            "pixel_sha256": comparison.detail.get("pixel_sha256"),
+            "nonzero_alpha_pixels": comparison.detail.get("nonzero_alpha_pixels"),
+            "phase_elapsed_ms": comparison.detail.get("phase_elapsed_ms"),
+            "session_clean": comparison.detail.get("session_clean"),
+            "invalidated_reason": comparison.detail.get("invalidated_reason")
+        }),
+    );
+    primary.detail.insert(
+        "comparison_reason".to_owned(),
+        json!("smart_output_transparent"),
+    );
 }
 
 /// Uses the same in-place cluster session as the shipping bridge for the safe
@@ -981,6 +1009,7 @@ fn sweep_cluster_candidates(
                 None,
             ),
             None,
+            options.pixel_format,
         );
         let frame_ms = frame_started.elapsed().as_millis();
         // These cases require the per-plugin close evidence used by the existing
@@ -1590,6 +1619,7 @@ fn sweep_one(
                 parameters,
             ),
             dump,
+            options.pixel_format,
         );
         // A refused frame invalidates the session, so there is no next frame to
         // ask for; anything else leaves it usable.
@@ -1647,6 +1677,7 @@ fn sweep_one(
             .get("host_failure_reason")
             .and_then(Value::as_str)
             == Some("smart_output_untouched");
+    let smart_output_transparent = smart && outcome.bucket == "rendered_transparent";
     // A frame the session refused is not one failure but several, and which one
     // decides who is at fault: `worker_exited` is the plug-in taking the process
     // down, `worker_invariant_failure` is the host refusing what came back, and
@@ -1673,16 +1704,40 @@ fn sweep_one(
             "frames_ok": close.get("frames_ok"),
             "frames_errored": close.get("frames_errored"),
             "smart_output_untouched_frames": close.get("smart_output_untouched_frames"),
+            "bucket": outcome.bucket,
+            "pixel_sha256": outcome.detail.get("pixel_sha256"),
+            "nonzero_alpha_pixels": outcome.detail.get("nonzero_alpha_pixels"),
             "worker_classification": close.pointer("/worker/classification"),
             "invalidated": close.get("invalidated")
         })
     });
+    let transparent_comparison_authorized =
+        smart_output_transparent && validate_smart_transparent_close(&close).is_ok();
     attach_close(&mut outcome, close, options.close_report);
     if fallback_reason.is_some() && !fallback_authorized {
         outcome.detail.insert(
             "fallback_rejected".to_owned(),
             json!("smart_attempt_validation"),
         );
+    }
+    if transparent_comparison_authorized {
+        let mut classic_options = options.clone();
+        classic_options.force_classic = true;
+        // Preserve the Smart dump as the primary evidence. The comparison is
+        // represented by its hash/alpha/bucket and must not overwrite it with
+        // Classic bytes under the same deterministic dump name.
+        classic_options.dump_frames = None;
+        attach_classic_comparison(&mut outcome, || {
+            sweep_one(
+                repository,
+                record,
+                records,
+                &classic_options,
+                corpus_index,
+                input,
+                layer_pixels,
+            )
+        });
     }
     if let Some(mut fallback) = orchestrate_sweep_classic_fallback(
         options,
@@ -1706,7 +1761,7 @@ fn sweep_one(
             .insert("smart_attempt_phase_elapsed_ms".to_owned(), phase_elapsed);
         return fallback;
     }
-    if outcome.bucket == "rendered" && !close_clean {
+    if matches!(outcome.bucket.as_str(), "rendered" | "rendered_transparent") && !close_clean {
         outcome.bucket = "session_close_failed".to_owned();
     }
     outcome
@@ -1755,6 +1810,53 @@ fn smart_fallback_reason(
     }
     (smart && validate_abandoned_smart_heap_corruption_close(close).is_ok())
         .then_some("smart_worker_heap_corruption")
+}
+
+/// A fully transparent Smart frame is not publishable sweep evidence, but a
+/// cleanly closed session is safe to abandon and replay through Classic. Keep
+/// this stricter than a generic successful close: the replay must never hide a
+/// frame error, invalidation, worker failure, or selector refusal.
+fn validate_smart_transparent_close(close: &Value) -> Result<(), &'static str> {
+    if close.get("render_path").and_then(Value::as_str) != Some("smart") {
+        return Err("render_path");
+    }
+    if close.get("session_clean").and_then(Value::as_bool) != Some(true) {
+        return Err("session_clean");
+    }
+    if close.get("invalidated").and_then(Value::as_bool) != Some(false) {
+        return Err("invalidated");
+    }
+    if close.get("frames_ok").and_then(Value::as_u64).unwrap_or(0) == 0 {
+        return Err("frames_ok");
+    }
+    if close.get("frames_errored").and_then(Value::as_u64) != Some(0) {
+        return Err("frames_errored");
+    }
+    if close
+        .pointer("/worker/classification")
+        .and_then(Value::as_str)
+        != Some("ok")
+    {
+        return Err("worker_classification");
+    }
+    if close.pointer("/worker/exit_code").and_then(Value::as_i64) != Some(0) {
+        return Err("worker_exit_code");
+    }
+    if close
+        .pointer("/final_report/smart_render_selector_dispatched")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("smart_render_selector_dispatched");
+    }
+    if close
+        .pointer("/final_report/smart_render_error")
+        .and_then(Value::as_i64)
+        != Some(0)
+    {
+        return Err("smart_render_error");
+    }
+    Ok(())
 }
 
 fn discovery_failure_bucket(diagnostics: Option<&Value>, classification: Option<&str>) -> String {
@@ -2007,7 +2109,50 @@ fn attach_shared_cluster_close(outcome: &mut Outcome, close: &Value) {
 /// The unit tests' shape of `frame_outcome_dumping`: no dump.
 #[cfg(test)]
 fn frame_outcome(outcome: std::io::Result<FrameOutcome>) -> Outcome {
-    frame_outcome_dumping(outcome, None)
+    frame_outcome_dumping(outcome, None, RenderPixelFormat::Argb8)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AlphaEvidence {
+    nonzero: usize,
+    invalid: usize,
+}
+
+fn alpha_evidence(pixels: &[u8], format: RenderPixelFormat) -> Option<AlphaEvidence> {
+    let pixel_bytes = match format {
+        RenderPixelFormat::Argb8 => 4,
+        RenderPixelFormat::Argb16 => 8,
+        RenderPixelFormat::Argb32f => 16,
+    };
+    if pixels.len() % pixel_bytes != 0 {
+        return None;
+    }
+    let mut evidence = AlphaEvidence {
+        nonzero: 0,
+        invalid: 0,
+    };
+    match format {
+        RenderPixelFormat::Argb8 => {
+            evidence.nonzero = pixels.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
+        }
+        RenderPixelFormat::Argb16 => {
+            evidence.nonzero = pixels
+                .chunks_exact(8)
+                .filter(|pixel| u16::from_le_bytes([pixel[6], pixel[7]]) != 0)
+                .count();
+        }
+        RenderPixelFormat::Argb32f => {
+            for pixel in pixels.chunks_exact(16) {
+                let alpha = f32::from_le_bytes([pixel[12], pixel[13], pixel[14], pixel[15]]);
+                if !alpha.is_finite() || alpha < 0.0 {
+                    evidence.invalid += 1;
+                } else if alpha > 0.0 {
+                    evidence.nonzero += 1;
+                }
+            }
+        }
+    }
+    Some(evidence)
 }
 
 /// Where a rendered frame's raw pixels go under `--dump-frames`: the directory,
@@ -2031,6 +2176,7 @@ struct FrameDump<'a> {
 fn frame_outcome_dumping(
     outcome: std::io::Result<FrameOutcome>,
     dump: Option<FrameDump<'_>>,
+    format: RenderPixelFormat,
 ) -> Outcome {
     let mut detail = Map::new();
     let bucket = match outcome {
@@ -2047,6 +2193,15 @@ fn frame_outcome_dumping(
                 detail.insert("height".to_owned(), json!(height));
                 detail.insert("origin_x".to_owned(), json!(origin_x));
                 detail.insert("origin_y".to_owned(), json!(origin_y));
+                let alpha = alpha_evidence(&pixels, format);
+                detail.insert(
+                    "nonzero_alpha_pixels".to_owned(),
+                    json!(alpha.map(|evidence| evidence.nonzero)),
+                );
+                detail.insert(
+                    "invalid_alpha_pixels".to_owned(),
+                    json!(alpha.map(|evidence| evidence.invalid)),
+                );
                 // The hash of the bytes the worker answered, so two runs (or a
                 // run and an AE reference decoded to the same layout) can be
                 // compared without carrying the pixels in the report.
@@ -2083,6 +2238,10 @@ fn frame_outcome_dumping(
                 // `rendered` is how a sweep reports progress it did not make.
                 if pixels.is_empty() || width == 0 || height == 0 {
                     "rendered_empty".to_owned()
+                } else if alpha.is_some_and(|evidence| evidence.invalid != 0) {
+                    "rendered_invalid_alpha".to_owned()
+                } else if alpha.is_some_and(|evidence| evidence.nonzero == 0) {
+                    "rendered_transparent".to_owned()
                 } else {
                     "rendered".to_owned()
                 }
@@ -2752,7 +2911,7 @@ mod tests {
         let rendered = frame_outcome(Ok(FrameOutcome {
             frame_index: 0,
             status: FrameStatus::Rendered {
-                pixels: vec![0; 16],
+                pixels: [1, 2, 3, 255].repeat(4),
                 width: 2,
                 height: 2,
                 origin_x: 0,
@@ -2761,6 +2920,20 @@ mod tests {
         }));
         assert_eq!(rendered.bucket, "rendered");
         assert_eq!(rendered.detail["pixel_bytes"], 16);
+        assert_eq!(rendered.detail["nonzero_alpha_pixels"], 4);
+
+        let transparent = frame_outcome(Ok(FrameOutcome {
+            frame_index: 0,
+            status: FrameStatus::Rendered {
+                pixels: [32, 64, 128, 0].repeat(4),
+                width: 2,
+                height: 2,
+                origin_x: 0,
+                origin_y: 0,
+            },
+        }));
+        assert_eq!(transparent.bucket, "rendered_transparent");
+        assert_eq!(transparent.detail["nonzero_alpha_pixels"], 0);
 
         let empty = frame_outcome(Ok(FrameOutcome {
             frame_index: 0,
@@ -2774,6 +2947,54 @@ mod tests {
         }));
         assert_eq!(empty.bucket, "rendered_empty");
         assert_eq!(empty.detail["pixel_bytes"], 0);
+    }
+
+    #[test]
+    fn alpha_evidence_handles_16_bit_and_rejects_invalid_float_alpha() {
+        let mut rgba16 = Vec::new();
+        for alpha in [0u16, 32768u16] {
+            for channel in [1u16, 2, 3, alpha] {
+                rgba16.extend_from_slice(&channel.to_le_bytes());
+            }
+        }
+        assert_eq!(
+            alpha_evidence(&rgba16, RenderPixelFormat::Argb16),
+            Some(AlphaEvidence {
+                nonzero: 1,
+                invalid: 0
+            })
+        );
+
+        let mut rgba32 = Vec::new();
+        for alpha in [-0.0f32, -0.25, f32::NAN, f32::INFINITY, 0.5] {
+            for channel in [0.0f32, 0.0, 0.0, alpha] {
+                rgba32.extend_from_slice(&channel.to_le_bytes());
+            }
+        }
+        assert_eq!(
+            alpha_evidence(&rgba32, RenderPixelFormat::Argb32f),
+            Some(AlphaEvidence {
+                nonzero: 1,
+                invalid: 3
+            })
+        );
+
+        let invalid = frame_outcome_dumping(
+            Ok(FrameOutcome {
+                frame_index: 0,
+                status: FrameStatus::Rendered {
+                    pixels: rgba32,
+                    width: 5,
+                    height: 1,
+                    origin_x: 0,
+                    origin_y: 0,
+                },
+            }),
+            None,
+            RenderPixelFormat::Argb32f,
+        );
+        assert_eq!(invalid.bucket, "rendered_invalid_alpha");
+        assert_eq!(invalid.detail["invalid_alpha_pixels"], 3);
     }
 
     #[test]
@@ -2808,6 +3029,7 @@ mod tests {
                     frame_index: 0,
                     format: "argb8",
                 }),
+                RenderPixelFormat::Argb8,
             )
         };
         let first = dump(7, vec![1, 2, 3, 4]);
@@ -3197,6 +3419,57 @@ mod tests {
         let mut wrong_exit = close;
         *wrong_exit.pointer_mut("/worker/exit_code").unwrap() = json!(0xC000_0005u64);
         assert_eq!(smart_fallback_reason(true, false, &wrong_exit), None);
+    }
+
+    #[test]
+    fn transparent_smart_comparison_requires_a_clean_completed_selector() {
+        let close = json!({
+            "render_path": "smart",
+            "session_clean": true,
+            "invalidated": false,
+            "frames_ok": 1,
+            "frames_errored": 0,
+            "final_report": {
+                "smart_render_selector_dispatched": true,
+                "smart_render_error": 0
+            },
+            "worker": { "classification": "ok", "exit_code": 0 }
+        });
+        assert_eq!(validate_smart_transparent_close(&close), Ok(()));
+
+        let mut refused = close.clone();
+        *refused
+            .pointer_mut("/final_report/smart_render_error")
+            .unwrap() = json!(4);
+        assert_eq!(
+            validate_smart_transparent_close(&refused),
+            Err("smart_render_error")
+        );
+    }
+
+    #[test]
+    fn classic_comparison_panic_preserves_the_primary_smart_evidence() {
+        let mut primary = Outcome::bare("rendered_transparent");
+        primary
+            .detail
+            .insert("pixel_sha256".into(), json!("smart-sha"));
+        primary
+            .detail
+            .insert("nonzero_alpha_pixels".into(), json!(0));
+
+        attach_classic_comparison(&mut primary, || panic!("comparison fixture"));
+
+        assert_eq!(primary.bucket, "rendered_transparent");
+        assert_eq!(primary.detail["pixel_sha256"], "smart-sha");
+        assert_eq!(primary.detail["nonzero_alpha_pixels"], 0);
+        assert_eq!(
+            primary.detail["classic_comparison"]["bucket"],
+            "sweep_panicked"
+        );
+        assert_eq!(
+            primary.detail["comparison_reason"],
+            "smart_output_transparent"
+        );
     }
 
     #[test]

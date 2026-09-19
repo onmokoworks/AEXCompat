@@ -186,3 +186,49 @@ effects), but this execution probe does not prove that. They must receive a
 parameter/input response test or an AE reference before counting as verified
 effect semantics. The report's build fingerprint is complete and uses the
 accepted `f9494e...` worker.
+
+## OLM cohort and visible-image classification
+
+The first OLM milestone reported 10/10 `rendered` in 2,631 ms, but that bucket
+only proved positive geometry and a non-empty byte buffer. Raw-frame inspection
+showed that `ColorKeep.aex` and `DistanceGradation.aex` had zero alpha in every
+pixel; counting either as a usable image violated the sweep's acceptance
+condition. `ColorKeep` retained RGB `(32,64,128)` under zero alpha, while
+`DistanceGradation` was all-zero. `OLMKiraKira.aex` produced a visible 63-color
+gradient. The other seven effects returned the opaque solid input under their
+defaults and remain semantically unverified no-op candidates.
+
+The sweep now records `nonzero_alpha_pixels` and `invalid_alpha_pixels` for
+every rendered frame and classifies a positive-size frame with no visible alpha
+as `rendered_transparent`, not `rendered`. Float alpha must be finite and
+non-negative; invalid values receive `rendered_invalid_alpha`. A clean SmartFX
+transparent result is replayed once through Classic only as comparison evidence
+when close evidence proves the Smart selector ran without an error, the session
+was not invalidated, and the worker exited normally. The Classic comparison
+never replaces the Smart result: transparency alone cannot prove which route
+matches AE semantics. `DistanceGradation` has a visible Classic comparison
+(36,864 nonzero-alpha pixels, white with alpha 50), while `ColorKeep` is fully
+transparent on both routes. Both remain explicitly unresolved.
+
+The corrected milestone report is
+`%TEMP%/aexcompat-olm-render-visible-final-2026-09-20.json`:
+
+| result | value |
+|---|---:|
+| visible rendered | 8 / 10 |
+| fully transparent | 2 |
+| visible Classic comparison (not counted as success) | 1 |
+| default outputs equal to the opaque solid input | 7 |
+| elapsed | 3,936 ms |
+
+Focused before/after evidence is in
+`%TEMP%/aexcompat-olm-DistanceGradation-smart-close-2026-09-20.json`,
+`%TEMP%/aexcompat-olm-DistanceGradation-classic-2026-09-20.json`, and
+`%TEMP%/aexcompat-olm-DistanceGradation-transparent-comparison-2026-09-20.json`.
+The corrected report has a complete fingerprint: CLI SHA-256
+`73c42eb09624819ba009ce36a859ea5c43d764e26a01dcef88a7762bbbcf5404`
+and the unchanged accepted worker SHA-256
+`f9494e5163cb3fd1e993617cc648b70fb817c14cf928141c90e6511b6fd36602`.
+No After Effects process was used. `ColorKeep` and `DistanceGradation` are the
+remaining OLM compatibility candidates; neither is counted as a successful
+image render.
