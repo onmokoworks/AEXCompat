@@ -349,6 +349,19 @@ generic-default ambiguity; it does not assert exhaustive parameter coverage or
 pixel equivalence with After Effects. No full-corpus sweep was repeated while
 developing these focused contracts.
 
+The next input-identical-default cohort comes from the baseline `BCC Obsolete`
+category. Inspection of its 73 input-equal rows completed in 33,796 ms and
+found 53 complete parameter signatures. Grouping only by the leading operation
+contract identified 24 legacy transition effects (12 AE/Premiere pairs) with
+slot 2 `Layer to Reveal`, slot 3 `Animation = Pct. Done`, and slot 4
+`Percent Done`; later controls remain effect-specific. All 24 installed effects
+passed the byte-exact source/reveal endpoint and nonconstant midpoint oracle in
+163.22 seconds, and the shared validator's seven corruption mutations passed
+7/7 separately. `test_bcc_obsolete_transition_response.py` preserves the exact
+cohort, parameter receipt, and image response. This resolves those 24 neutral
+defaults for their selected manual transition path, not the remaining 49
+input-equal `BCC Obsolete` effects or every effect-specific control.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
