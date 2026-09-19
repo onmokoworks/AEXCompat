@@ -403,6 +403,24 @@ passed 10/10 in 30.39 seconds, reducing the unresolved input-equal
 `BCC Obsolete` set from 35 to 33. This is evidence for the saved timing
 conditions, not a complete After Effects timing-equivalence claim.
 
+Four remaining spatial blur effects required the inspected slot 6 `Host Layer`
+as well as their effect-specific control. An initial Directional Blur probe
+without that layer failed closed in Smart Pre-Render with a `missing_world`
+checkout; the existing Directional/Gaussian behavioral test already documents
+and supplies the required layer, so those effects were not duplicated. The new
+cohort covers Fast Lens Blur and Lens Blur `Iris Scale`, Radial Blur `Blur
+Amount`, and Spiral Blur's typed `Spin Angle`. For every effect, control zero
+returned the patterned source byte-for-byte while the active value changed
+4,768 to 8,981 localized pixels into grayscale intermediates, retained black
+corners, and kept alpha nonzero. At least 95% of each effect's changed pixels
+remain within 24 pixels of the original rectangle boundary, with intermediate
+values on both its inside and outside. A remote-gradient mutation ensures that
+unrelated localized changes do not satisfy the oracle. The four installed
+effects plus eight corruption mutations passed 12/12 in 20.75 seconds.
+`test_bcc_obsolete_spatial_blur_response.py` preserves the Host Layer,
+numeric/angle receipts, and spatial response, reducing the unresolved
+input-equal `BCC Obsolete` set from 33 to 29.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
