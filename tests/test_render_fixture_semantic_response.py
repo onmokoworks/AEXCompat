@@ -274,3 +274,76 @@ def test_installed_olmcolorkey_fixture_color_response(tmp_path):
         assert output == read_artifact(destination / 'final', report['final_artifact'])
         outputs.append(output)
     assert_color_key_response(*outputs, source)
+
+
+def assert_directional_blur_response(default, blurred, source):
+    assert len(default) == len(blurred) == len(source) == WIDTH * HEIGHT * 4
+    assert default == source
+    assert blurred != source
+    assert min(blurred[0::4]) >= 254 and max(blurred[0::4]) == 255
+    assert max(blurred[2::4]) - min(blurred[2::4]) > 64
+    assert edge_energy(blurred) < edge_energy(source) * 0.75
+
+
+@pytest.mark.parametrize('fault', ['noop', 'constant', 'transparent', 'truncated'])
+def test_directional_blur_check_rejects_invalid_response(fault):
+    source = argb(structured_rgba())
+    blurred = bytearray(source)
+    for y in range(HEIGHT):
+        for x in range(1, WIDTH):
+            offset = (y * WIDTH + x) * 4
+            blurred[offset + 1] = (source[offset + 1] + source[offset - 3]) // 2
+    candidate = {
+        'noop': source,
+        'constant': bytes([255, 0, 0, 0]) * (WIDTH * HEIGHT),
+        'transparent': bytes(len(source)),
+        'truncated': bytes(blurred[:-4]),
+    }[fault]
+    with pytest.raises(AssertionError):
+        assert_directional_blur_response(source, candidate, source)
+
+
+def test_installed_olmdirectionalblur_fixture_strength_response(tmp_path):
+    plugin_value = os.environ.get('AEXCOMPAT_TEST_OLM_DIRECTIONAL_BLUR')
+    if not plugin_value:
+        pytest.skip('real AEX execution requires AEXCOMPAT_TEST_OLM_DIRECTIONAL_BLUR')
+    assert os.name == 'nt', 'opted-in native test requires Windows'
+    plugin = Path(plugin_value).resolve()
+    harness = ROOT / 'broker/target/release/aexcompat-harness.exe'
+    assert plugin.is_file() and harness.is_file()
+    assert (ROOT / 'target/minihost-build/aex_worker.exe').is_file()
+
+    def run(*args):
+        result = subprocess.run([str(harness), '--headless', *map(str, args)],
+                                cwd=ROOT, capture_output=True, check=False)
+        assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
+        return json.loads(result.stdout)
+
+    parameters = run('--inspect-experimental', plugin)
+    strength = next(p for p in parameters if p['slot'] == 5)
+    assert strength['name'] == 'Blur Strength'
+    assert strength['kind'] == 'integer' and strength['value'] == 0
+    source_rgba = structured_rgba()
+    source = argb(source_rgba)
+    Image.frombytes('RGBA', (WIDTH, HEIGHT), source_rgba).save(tmp_path / 'input.png')
+    outputs = []
+    for value in (0, 20):
+        edited = copy.deepcopy(parameters)
+        next(p for p in edited if p['slot'] == strength['slot'])['value'] = value
+        fixture = dict(schema='aexcompat.render_fixture', schema_version=1,
+                       primary_layer='input.png', parameters=edited,
+                       pixel_format='argb8', render_path='smart', premultiplication='straight',
+                       timing=dict(current_time=0, time_step=1, total_time=300, time_scale=30),
+                       final_artifact='raw', checkpoints=[
+                           dict(id='input', stage='smart-input'),
+                           dict(id='output', stage='smart-output')])
+        fixture_path = tmp_path / f'fixture-{value}.json'
+        fixture_path.write_text(json.dumps(fixture), encoding='utf-8')
+        destination = tmp_path / f'render-{value}'
+        report = run('--render-fixture', plugin, fixture_path, destination)
+        checkpoints = report['checkpoints']
+        assert read_artifact(destination / 'checkpoints/input', checkpoints['input']) == source
+        output = read_artifact(destination / 'checkpoints/output', checkpoints['output'])
+        assert output == read_artifact(destination / 'final', report['final_artifact'])
+        outputs.append(output)
+    assert_directional_blur_response(*outputs, source)

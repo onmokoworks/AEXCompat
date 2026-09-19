@@ -270,7 +270,7 @@ invalid alpha is zero and the worker/session are clean. The report is
 same CLI `cc96567e...` and worker `94071433...` fingerprints as the
 DistanceGradation semantic probe. The two previously transparent records are
 therefore valid effect responses under effect-appropriate inputs, not image
-render failures. Five opaque input-equal OLM defaults remain a semantic
+render failures. Four opaque input-equal OLM defaults remain a semantic
 parameter-response backlog. On the verified shipping Smart route and these
 effect-appropriate inputs, no OLM native execution or visibility failure
 remains. The separate `DistanceGradation` Classic close crash described above
@@ -317,6 +317,29 @@ The real-AEX case passed in 1.36 s and the full focused module passed 14 tests
 with two unrelated opt-in cases skipped in 1.42 s. Its negative behavioral
 cases reject no-op, all-transparent, wrong-color, and truncated false positives.
 No After Effects process was used.
+
+`OLMDirectionalBlur` is resolved by a shipping Smart fixture that changes the
+front `Blur Strength` from its no-op default 0 to 20. This matches the vendor's
+directional, detail-preserving description
+(`https://www.olm.co.jp/post/olm-directional-blur`). On the same structured
+256x144 ARGB8 input at time 0, strength 0 was byte-identical to the input while
+strength 20 changed 36,387 pixels and reduced horizontal red edge energy from
+27.2314 to 8.9952 (ratio 0.3303), without collapsing the nonconstant image.
+The input PNG SHA-256 is
+`018b20de0910a6327933dbd3cd27d2a832e7ad0587467ad48ed627a430b9082c`;
+the strength 0/20 raw-frame SHA-256 values are respectively
+`a7e790d7bb7cc3a220d96bea96c112dca0bc284a256333221f44e9ba243a5379`
+and `d406eb0e81c1b03628dbdd5ce4d25a878bbdc265254da3c80ac0ca666b7770e8`.
+The installed AEX SHA-256 is
+`d3e5e4079a759d521dc7457ebf998487fe43b00f182a1e2f910b187936b6c06e`;
+the Release harness/worker fingerprints remain `b4b264a1...` / `94071433...`.
+An initial exact-opaque assertion was rejected because 81 processed pixels
+round alpha from 255 to 254; the accepted check requires valid near-opaque
+alpha (254-255), a nonconstant image, and the measured directional edge-energy
+reduction. Its four negative cases reject no-op, constant, transparent, and
+truncated false positives. The real-AEX case passed in 1.10 s and the focused
+module passed 18 tests with three unrelated opt-in cases skipped in 1.17 s. No
+After Effects process was used.
 
 ## ONMK subdirectory cohort
 
