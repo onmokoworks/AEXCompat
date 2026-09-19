@@ -208,7 +208,7 @@ was not invalidated, and the worker exited normally. The Classic comparison
 never replaces the Smart result: transparency alone cannot prove which route
 matches AE semantics. `DistanceGradation` has a visible Classic comparison
 (36,864 nonzero-alpha pixels, white with alpha 50), while `ColorKeep` is fully
-transparent on both routes. Both remain explicitly unresolved.
+transparent on both routes. At that point both remained explicitly unresolved.
 
 The corrected milestone report is
 `%TEMP%/aexcompat-olm-render-visible-final-2026-09-20.json`:
@@ -229,9 +229,30 @@ The corrected report has a complete fingerprint: CLI SHA-256
 `73c42eb09624819ba009ce36a859ea5c43d764e26a01dcef88a7762bbbcf5404`
 and the unchanged accepted worker SHA-256
 `f9494e5163cb3fd1e993617cc648b70fb817c14cf928141c90e6511b6fd36602`.
-No After Effects process was used. `ColorKeep` and `DistanceGradation` are the
-remaining OLM compatibility candidates; neither is counted as a successful
-image render.
+
+`DistanceGradation` is now resolved by a semantic-input probe rather than a
+host change. The vendor describes the effect as generating a gradation from an
+alpha-channel border
+(`https://www.olm.co.jp/post/distance-gradation`); the original fully opaque
+solid has no internal alpha border and was therefore not a valid success
+oracle. A 256x144 input with a transparent left half and opaque right half
+(PNG SHA-256
+`d115d69549310799f0b08097a72fc0f98759c056f21def8fb1a3cc85d375f2b5`)
+produced a clean Smart render in 271 ms. The output SHA-256 is
+`4aef35ff5d76d27c8f1473f7e458ad869c1b68ef9278b32e072b641505ca7d58`;
+18,288 pixels have nonzero alpha, invalid alpha is zero, and the output carries
+128 total alpha values; each of the 127 nonzero values occupies exactly one
+144-pixel column in a gradient away from the vertical boundary. The report is
+`%TEMP%/aexcompat-olm-DistanceGradation-alpha-edge-smart-2026-09-20.json`,
+with CLI fingerprint
+`cc96567e93c05c633d5a94c67d1ee5444b0032656e31d5ba3687691e85f8ac3b`
+and worker fingerprint
+`94071433e24859e52a340bd94a758deaec9c7a442d59d05c9d6ed6c717d6f88d`.
+The Classic comparison also produced visible pixels but still crashed during
+session close; that diagnostic-only fallback issue does not invalidate the
+clean shipping Smart route and remains recorded separately. No After Effects
+process was used. `ColorKeep` is now the only unresolved OLM compatibility
+candidate.
 
 ## ONMK subdirectory cohort
 
