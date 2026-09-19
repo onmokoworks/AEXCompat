@@ -539,7 +539,10 @@ fn crt_realloc_preserves_bytes_shrinks_in_place_and_frees_zero_size() {
     let original = engine.unicorn.reg_read(RegisterX86::RAX).unwrap();
     engine.unicorn.mem_write(original, b"realloc!").unwrap();
 
-    engine.unicorn.reg_write(RegisterX86::RCX, original).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::RCX, original)
+        .unwrap();
     engine.unicorn.reg_write(RegisterX86::RDX, 8192).unwrap();
     emulate_crt_realloc(&mut engine.unicorn);
     let grown = engine.unicorn.reg_read(RegisterX86::RAX).unwrap();
@@ -5845,27 +5848,28 @@ fn get_module_handle_ex_a_resolves_name_and_address_with_win32_flags() {
         WINDOWS_KERNEL32_MODULE_TOKEN
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
-    assert!(engine
-        .unicorn
-        .get_data()
-        .windows_pinned_modules
-        .contains(&WINDOWS_KERNEL32_MODULE_TOKEN));
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_pinned_modules
+            .contains(&WINDOWS_KERNEL32_MODULE_TOKEN)
+    );
     for _ in 0..2 {
         assert_eq!(
             engine
-                .call_win64(
-                    FREE_LIBRARY,
-                    [WINDOWS_KERNEL32_MODULE_TOKEN, 0, 0, 0, 0, 0],
-                )
+                .call_win64(FREE_LIBRARY, [WINDOWS_KERNEL32_MODULE_TOKEN, 0, 0, 0, 0, 0],)
                 .unwrap(),
             1
         );
     }
-    assert!(!engine
-        .unicorn
-        .get_data()
-        .windows_module_refcounts
-        .contains_key(&WINDOWS_KERNEL32_MODULE_TOKEN));
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_module_refcounts
+            .contains_key(&WINDOWS_KERNEL32_MODULE_TOKEN)
+    );
 
     for flags in [0, UNCHANGED_REFCOUNT] {
         engine.write(output, &[0; 8]).unwrap();
@@ -6040,27 +6044,28 @@ fn get_module_handle_ex_w_resolves_guest_modules_with_win32_flags() {
         WINDOWS_KERNEL32_MODULE_TOKEN
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
-    assert!(engine
-        .unicorn
-        .get_data()
-        .windows_pinned_modules
-        .contains(&WINDOWS_KERNEL32_MODULE_TOKEN));
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .windows_pinned_modules
+            .contains(&WINDOWS_KERNEL32_MODULE_TOKEN)
+    );
     for _ in 0..2 {
         assert_eq!(
             engine
-                .call_win64(
-                    FREE_LIBRARY,
-                    [WINDOWS_KERNEL32_MODULE_TOKEN, 0, 0, 0, 0, 0],
-                )
+                .call_win64(FREE_LIBRARY, [WINDOWS_KERNEL32_MODULE_TOKEN, 0, 0, 0, 0, 0],)
                 .unwrap(),
             1
         );
     }
-    assert!(!engine
-        .unicorn
-        .get_data()
-        .windows_module_refcounts
-        .contains_key(&WINDOWS_KERNEL32_MODULE_TOKEN));
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .windows_module_refcounts
+            .contains_key(&WINDOWS_KERNEL32_MODULE_TOKEN)
+    );
 
     for flags in [0, UNCHANGED_REFCOUNT] {
         engine.write(output, &[0; 8]).unwrap();
@@ -10099,7 +10104,13 @@ fn get_console_mode_rejects_foreign_handles_without_touching_guest_memory() {
 fn file_api_encoding_mode_is_ansi_and_kernel32_scoped() {
     let mut engine = test_engine(&[0xc3]);
     let entry = STUB_BASE + 0x100;
-    install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", "AreFileApisANSI").unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "kernel32.dll",
+        "AreFileApisANSI",
+    )
+    .unwrap();
     assert_eq!(engine.call_win64(entry, [u64::MAX; 6]).unwrap(), 1);
     assert_eq!(
         dispatch_win64_import("foreign.dll", "AreFileApisANSI"),
@@ -10111,14 +10122,39 @@ fn file_api_encoding_mode_is_ansi_and_kernel32_scoped() {
 fn global_memory_status_ex_validates_layout_and_reports_bounded_capacity() {
     let mut engine = test_engine(&[0xc3]);
     let entry = STUB_BASE + 0x110;
-    install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", "GlobalMemoryStatusEx").unwrap();
-    engine.unicorn.mem_write(DATA_BASE, &64u32.to_le_bytes()).unwrap();
-    assert_eq!(engine.call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap(), 1);
+    install_win64_import(
+        &mut engine.unicorn,
+        entry,
+        "kernel32.dll",
+        "GlobalMemoryStatusEx",
+    )
+    .unwrap();
+    engine
+        .unicorn
+        .mem_write(DATA_BASE, &64u32.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
     let bytes = engine.unicorn.mem_read_as_vec(DATA_BASE, 64).unwrap();
     assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 50);
-    assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 8 * 1024 * 1024 * 1024);
-    engine.unicorn.mem_write(DATA_BASE, &63u32.to_le_bytes()).unwrap();
-    assert_eq!(engine.call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        8 * 1024 * 1024 * 1024
+    );
+    engine
+        .unicorn
+        .mem_write(DATA_BASE, &63u32.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(entry, [DATA_BASE, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
 }
 
@@ -10128,19 +10164,52 @@ fn init_once_begin_complete_and_initialize_preserve_context() {
     let begin = STUB_BASE + 0x140;
     let complete = begin + 16;
     let initialize = complete + 16;
-    for (entry, name) in [(begin, "InitOnceBeginInitialize"), (complete, "InitOnceComplete"), (initialize, "InitOnceInitialize")] {
+    for (entry, name) in [
+        (begin, "InitOnceBeginInitialize"),
+        (complete, "InitOnceComplete"),
+        (initialize, "InitOnceInitialize"),
+    ] {
         install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", name).unwrap();
     }
     let object = DATA_BASE + 0x100;
     let pending = DATA_BASE + 0x200;
     let context_out = DATA_BASE + 0x208;
-    assert_eq!(engine.call_win64(begin, [object, 0, pending, context_out, 0, 0]).unwrap(), 1);
-    assert_eq!(engine.unicorn.mem_read_as_vec(pending, 4).unwrap(), 1u32.to_le_bytes());
-    assert_eq!(engine.call_win64(complete, [object, 0, 0x12340, 0, 0, 0]).unwrap(), 1);
-    assert_eq!(engine.call_win64(begin, [object, 0, pending, context_out, 0, 0]).unwrap(), 1);
-    assert_eq!(engine.unicorn.mem_read_as_vec(pending, 4).unwrap(), 0u32.to_le_bytes());
-    assert_eq!(engine.unicorn.mem_read_as_vec(context_out, 8).unwrap(), 0x12340u64.to_le_bytes());
-    assert_eq!(engine.call_win64(initialize, [object, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine
+            .call_win64(begin, [object, 0, pending, context_out, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(pending, 4).unwrap(),
+        1u32.to_le_bytes()
+    );
+    assert_eq!(
+        engine
+            .call_win64(complete, [object, 0, 0x12340, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine
+            .call_win64(begin, [object, 0, pending, context_out, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(pending, 4).unwrap(),
+        0u32.to_le_bytes()
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(context_out, 8).unwrap(),
+        0x12340u64.to_le_bytes()
+    );
+    assert_eq!(
+        engine
+            .call_win64(initialize, [object, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
     assert_eq!(engine.unicorn.mem_read_as_vec(object, 8).unwrap(), [0; 8]);
 }
 
@@ -12478,7 +12547,10 @@ fn fdclass_returns_ucrt_fpclass_masks() {
             } else {
                 xmm[..8].copy_from_slice(&value.to_bits().to_le_bytes());
             }
-            engine.unicorn.reg_write_long(RegisterX86::XMM0, &xmm).unwrap();
+            engine
+                .unicorn
+                .reg_write_long(RegisterX86::XMM0, &xmm)
+                .unwrap();
             assert_eq!(engine.call_win64(target, [0; 6]).unwrap(), expected);
         }
     }
@@ -15451,9 +15523,7 @@ fn win64_strlen_scans_a_live_crt_allocation_beyond_the_generic_string_limit() {
         .unwrap();
     engine.unicorn.mem_write(pointer + length, &[0]).unwrap();
     assert_eq!(
-        engine
-            .call_win64(STRLEN, [pointer, 0, 0, 0, 0, 0])
-            .unwrap(),
+        engine.call_win64(STRLEN, [pointer, 0, 0, 0, 0, 0]).unwrap(),
         length
     );
     let copy = allocate_crt_region(&mut engine.unicorn, length + 1).unwrap();
@@ -15477,10 +15547,12 @@ fn win64_strlen_scans_a_live_crt_allocation_beyond_the_generic_string_limit() {
         0
     );
     engine.unicorn.mem_write(copy + length - 1, b"y").unwrap();
-    assert!((engine
-        .call_win64(STRCMP, [copy, pointer, 0, 0, 0, 0])
-        .unwrap() as u32 as i32)
-        > 0);
+    assert!(
+        (engine
+            .call_win64(STRCMP, [copy, pointer, 0, 0, 0, 0])
+            .unwrap() as u32 as i32)
+            > 0
+    );
 }
 
 #[test]
@@ -15920,8 +15992,10 @@ fn descriptor_dacl_setter_preserves_references_and_unrelated_fields() {
 
 #[test]
 fn msvcp_codecvt_converts_ascii_paths_and_updates_next_pointers() {
-    const OUT_NAME: &str = "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z";
-    const IN_NAME: &str = "?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z";
+    const OUT_NAME: &str =
+        "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z";
+    const IN_NAME: &str =
+        "?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z";
     let mut engine = test_engine(&[0xc3]);
     let entry = STUB_BASE + 0x100;
     let input = DATA_BASE + 0x100;
@@ -15930,15 +16004,55 @@ fn msvcp_codecvt_converts_ascii_paths_and_updates_next_pointers() {
     let to_next = DATA_BASE + 0x308;
     install_win64_import(&mut engine.unicorn, entry, "msvcp140.dll", OUT_NAME).unwrap();
     engine.unicorn.mem_write(input, b"A\0E\0X\0").unwrap();
-    assert_eq!(engine.call_win64_with_timeout(entry, &[0, 0, input, input + 6, from_next, output, output + 3, to_next], TIMEOUT_MICROSECONDS).unwrap(), 0);
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                entry,
+                &[
+                    0,
+                    0,
+                    input,
+                    input + 6,
+                    from_next,
+                    output,
+                    output + 3,
+                    to_next
+                ],
+                TIMEOUT_MICROSECONDS
+            )
+            .unwrap(),
+        0
+    );
     assert_eq!(engine.unicorn.mem_read_as_vec(output, 3).unwrap(), b"AEX");
-    assert_eq!(u64::from_le_bytes(engine.unicorn.mem_read_as_vec(from_next, 8).unwrap().try_into().unwrap()), input + 6);
+    assert_eq!(
+        u64::from_le_bytes(
+            engine
+                .unicorn
+                .mem_read_as_vec(from_next, 8)
+                .unwrap()
+                .try_into()
+                .unwrap()
+        ),
+        input + 6
+    );
     let narrow = DATA_BASE + 0x400;
     let wide = DATA_BASE + 0x500;
     install_win64_import(&mut engine.unicorn, entry + 16, "msvcp140.dll", IN_NAME).unwrap();
     engine.unicorn.mem_write(narrow, b"Mac").unwrap();
-    assert_eq!(engine.call_win64_with_timeout(entry + 16, &[0, 0, narrow, narrow + 3, from_next, wide, wide + 6, to_next], TIMEOUT_MICROSECONDS).unwrap(), 0);
-    assert_eq!(engine.unicorn.mem_read_as_vec(wide, 6).unwrap(), b"M\0a\0c\0");
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                entry + 16,
+                &[0, 0, narrow, narrow + 3, from_next, wide, wide + 6, to_next],
+                TIMEOUT_MICROSECONDS
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(wide, 6).unwrap(),
+        b"M\0a\0c\0"
+    );
     assert!(prefer_emulated_dependency_import("MSVCP140.DLL", OUT_NAME));
 }
 
@@ -16131,7 +16245,10 @@ fn putenv_updates_all_guest_readers_and_preserves_snapshots() {
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
-    assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), remaining);
+    assert_eq!(
+        guest_environment_block_w(engine.unicorn.get_data()),
+        remaining
+    );
     engine.write(text, b"INVALID\0").unwrap();
     assert_eq!(
         engine
@@ -16144,7 +16261,10 @@ fn putenv_updates_all_guest_readers_and_preserves_snapshots() {
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect::<Vec<_>>();
-    assert_eq!(guest_environment_block_w(engine.unicorn.get_data()), remaining);
+    assert_eq!(
+        guest_environment_block_w(engine.unicorn.get_data()),
+        remaining
+    );
 }
 
 #[test]
@@ -16250,11 +16370,25 @@ fn crt_64_bit_stream_seek_and_tell_track_mounted_file_position() {
     let stream = GUEST_STREAM_BASE;
     engine.unicorn.get_data_mut().guest_files.streams.insert(
         stream,
-        GuestFileStream { name: Some("c:/fixture".into()), bytes: Box::from(*b"abcdef"), position: 1, readable: true, share_read_access: true, eof: false, buffer_state: None, fast_buffer: None },
+        GuestFileStream {
+            name: Some("c:/fixture".into()),
+            bytes: Box::from(*b"abcdef"),
+            position: 1,
+            readable: true,
+            share_read_access: true,
+            eof: false,
+            buffer_state: None,
+            fast_buffer: None,
+        },
     );
     install_win64_import(&mut engine.unicorn, seek, "ucrtbase.dll", "_fseeki64").unwrap();
     install_win64_import(&mut engine.unicorn, tell, "ucrtbase.dll", "_ftelli64").unwrap();
-    assert_eq!(engine.call_win64(seek, [stream, (-2i64) as u64, 2, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine
+            .call_win64(seek, [stream, (-2i64) as u64, 2, 0, 0, 0])
+            .unwrap(),
+        0
+    );
     assert_eq!(engine.call_win64(tell, [stream, 0, 0, 0, 0, 0]).unwrap(), 4);
     assert_eq!(engine.call_win64(seek, [stream, 3, 0, 0, 0, 0]).unwrap(), 0);
     assert_eq!(engine.call_win64(tell, [stream, 0, 0, 0, 0, 0]).unwrap(), 3);
@@ -17423,8 +17557,12 @@ fn sapphire_filebuf_fgetc_bulk_loads_large_stream_and_frees_buffer_on_close() {
         },
     );
     engine.unicorn.get_data_mut().sapphire_filebuf_fgetc_return = Some(RETURN_ADDRESS);
-    engine.write(filebuf + 0x38, &pointer_cell.to_le_bytes()).unwrap();
-    engine.write(filebuf + 0x50, &count_cell.to_le_bytes()).unwrap();
+    engine
+        .write(filebuf + 0x38, &pointer_cell.to_le_bytes())
+        .unwrap();
+    engine
+        .write(filebuf + 0x50, &count_cell.to_le_bytes())
+        .unwrap();
     install_win64_import(&mut engine.unicorn, fgetc, "ucrtbase.dll", "fgetc").unwrap();
     install_win64_import(&mut engine.unicorn, close, "ucrtbase.dll", "fclose").unwrap();
     engine.unicorn.reg_write(RegisterX86::RSI, filebuf).unwrap();
@@ -17455,12 +17593,14 @@ fn sapphire_filebuf_fgetc_bulk_loads_large_stream_and_frees_buffer_on_close() {
     );
 
     assert_eq!(engine.call_win64(close, [token, 0, 0, 0, 0, 0]).unwrap(), 0);
-    assert!(engine
-        .unicorn
-        .get_data()
-        .crt_heap
-        .regular_allocation(buffer)
-        .is_err());
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .crt_heap
+            .regular_allocation(buffer)
+            .is_err()
+    );
     assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
 }
 
@@ -17492,7 +17632,10 @@ fn fgets_reads_bounded_lines_terminates_and_reports_eof() {
                 .unwrap(),
             output
         );
-        assert_eq!(engine.unicorn.mem_read_as_vec(output, 4).unwrap(), b"ab\n\0");
+        assert_eq!(
+            engine.unicorn.mem_read_as_vec(output, 4).unwrap(),
+            b"ab\n\0"
+        );
         assert_eq!(
             engine
                 .call_win64(entry, [output, 3, token, 0, 0, 0])
@@ -18753,8 +18896,7 @@ fn localeconv_returns_stable_readonly_windows_c_locale_layout() {
         assert_eq!(engine.unicorn.get_data().crt_errno, 71);
         assert!(guest_range_has_permission(&engine.unicorn, address, 92, Prot::READ).unwrap());
         assert!(!guest_range_has_permission(&engine.unicorn, address, 92, Prot::WRITE).unwrap());
-        install_win64_import(&mut engine.unicorn, query + 16, "foreign.dll", "localeconv")
-            .unwrap();
+        install_win64_import(&mut engine.unicorn, query + 16, "foreign.dll", "localeconv").unwrap();
         assert!(engine.call_win64(query + 16, [0; 6]).is_err());
     }
 }
@@ -19281,7 +19423,10 @@ fn beep_validates_windows_range_without_delaying_guest_execution() {
     let entry = STUB_BASE + 0x100;
     install_win64_import(&mut engine.unicorn, entry, "kernel32.dll", "Beep").unwrap();
     engine.unicorn.get_data_mut().windows_last_error = 71;
-    assert_eq!(engine.call_win64(entry, [440, 1000, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(
+        engine.call_win64(entry, [440, 1000, 0, 0, 0, 0]).unwrap(),
+        1
+    );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 71);
     assert_eq!(engine.call_win64(entry, [36, 1000, 0, 0, 0, 0]).unwrap(), 0);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
@@ -19304,13 +19449,17 @@ fn windows_hook_apis_own_bounded_guest_registrations_without_host_events() {
     ] {
         install_win64_import(&mut engine.unicorn, entry, "user32.dll", symbol).unwrap();
     }
-    let handle = engine
-        .call_win64(set, [5, TEST_CODE, 0, 1, 0, 0])
-        .unwrap();
+    let handle = engine.call_win64(set, [5, TEST_CODE, 0, 1, 0, 0]).unwrap();
     assert_ne!(handle, 0);
     assert_eq!(engine.call_win64(next, [handle, 0, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(engine.call_win64(unhook, [handle, 0, 0, 0, 0, 0]).unwrap(), 1);
-    assert_eq!(engine.call_win64(unhook, [handle, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(
+        engine.call_win64(unhook, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.call_win64(unhook, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        0
+    );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 1404);
     assert_eq!(engine.call_win64(set, [5, 0, 0, 1, 0, 0]).unwrap(), 0);
     assert_eq!(engine.unicorn.get_data().windows_last_error, 87);
@@ -19323,9 +19472,7 @@ fn windows_timer_apis_register_replace_and_cancel_without_wall_clock_waits() {
     let kill = set + 16;
     install_win64_import(&mut engine.unicorn, set, "user32.dll", "SetTimer").unwrap();
     install_win64_import(&mut engine.unicorn, kill, "user32.dll", "KillTimer").unwrap();
-    let generated = engine
-        .call_win64(set, [0, 0, 1, TEST_CODE, 0, 0])
-        .unwrap();
+    let generated = engine.call_win64(set, [0, 0, 1, TEST_CODE, 0, 0]).unwrap();
     assert_ne!(generated, 0);
     assert_eq!(
         engine.unicorn.get_data().windows_timers[&(0, generated)],
@@ -19359,7 +19506,12 @@ fn message_box_records_text_and_returns_dismissive_button_without_host_ui() {
         };
         engine.write(text, &encode("license unavailable")).unwrap();
         engine.write(caption, &encode("Sapphire")).unwrap();
-        assert_eq!(engine.call_win64(entry, [0, text, caption, 4, 0, 0]).unwrap(), 7);
+        assert_eq!(
+            engine
+                .call_win64(entry, [0, text, caption, 4, 0, 0])
+                .unwrap(),
+            7
+        );
         assert_eq!(
             engine.unicorn.get_data().windows_message_boxes[0],
             ("Sapphire".into(), "license unavailable".into(), 4)
@@ -19688,7 +19840,10 @@ fn secure_scanf_character_consumes_its_size_argument() {
             .unwrap(),
         2
     );
-    assert_eq!(engine.unicorn.mem_read_as_vec(output, 5).unwrap(), [7, 0, 0, 0, b'X']);
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 5).unwrap(),
+        [7, 0, 0, 0, b'X']
+    );
 }
 
 #[test]
@@ -19834,7 +19989,9 @@ fn strtol_handles_windows_long_bases_end_pointer_and_overflow() {
             ("2147483648", 10, i32::MAX, 10, 34),
             ("-2147483649", 10, i32::MIN, 11, 34),
         ] {
-            engine.write(DATA_BASE, format!("{text}\0").as_bytes()).unwrap();
+            engine
+                .write(DATA_BASE, format!("{text}\0").as_bytes())
+                .unwrap();
             engine.unicorn.get_data_mut().crt_errno = 71;
             assert_eq!(
                 engine
@@ -19864,9 +20021,11 @@ fn strtol_handles_windows_long_bases_end_pointer_and_overflow() {
             0
         );
         assert_eq!(engine.unicorn.get_data().crt_errno, 22);
-        assert!(engine
-            .call_win64(entry, [0, end_pointer, 10, 0, 0, 0])
-            .is_err());
+        assert!(
+            engine
+                .call_win64(entry, [0, end_pointer, 10, 0, 0, 0])
+                .is_err()
+        );
     }
     assert_eq!(
         dispatch_win64_import("other.dll", "strtol"),
@@ -19888,7 +20047,9 @@ fn strtoul_uses_windows_32_bit_unsigned_long_semantics() {
             ("4294967296", 10, u32::MAX, 10, 34),
             ("-4294967296", 10, u32::MAX, 11, 34),
         ] {
-            engine.write(DATA_BASE, format!("{text}\0").as_bytes()).unwrap();
+            engine
+                .write(DATA_BASE, format!("{text}\0").as_bytes())
+                .unwrap();
             engine.unicorn.get_data_mut().crt_errno = 71;
             assert_eq!(
                 engine
@@ -21526,11 +21687,8 @@ fn wfsopen_enforces_read_sharing_and_releases_it_on_close() {
         let mut engine = test_engine(&[0xc3]);
         install_win64_import(&mut engine.unicorn, OPEN, dll, "_wfsopen").unwrap();
         install_win64_import(&mut engine.unicorn, CLOSE, dll, "fclose").unwrap();
-        let source = std::env::temp_dir().join(format!(
-            "aex-wfsopen-{}-{}",
-            std::process::id(),
-            dll.len()
-        ));
+        let source =
+            std::env::temp_dir().join(format!("aex-wfsopen-{}-{}", std::process::id(), dll.len()));
         std::fs::write(&source, b"asset").unwrap();
         engine
             .unicorn
@@ -21547,17 +21705,33 @@ fn wfsopen_enforces_read_sharing_and_releases_it_on_close() {
             .call_win64(OPEN, [name, mode, 0x10, 0, 0, 0])
             .unwrap();
         assert_ne!(exclusive_read, 0);
-        assert_eq!(engine.call_win64(OPEN, [name, mode, 0x40, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(
+            engine
+                .call_win64(OPEN, [name, mode, 0x40, 0, 0, 0])
+                .unwrap(),
+            0
+        );
         assert_eq!(engine.unicorn.get_data().crt_errno, 13);
-        assert_eq!(engine.call_win64(CLOSE, [exclusive_read, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(
+            engine
+                .call_win64(CLOSE, [exclusive_read, 0, 0, 0, 0, 0])
+                .unwrap(),
+            0
+        );
 
         let shared = engine
             .call_win64(OPEN, [name, mode, 0x40, 0, 0, 0])
             .unwrap();
         assert_ne!(shared, 0);
-        assert_eq!(engine.call_win64(CLOSE, [shared, 0, 0, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(
+            engine.call_win64(CLOSE, [shared, 0, 0, 0, 0, 0]).unwrap(),
+            0
+        );
         engine.unicorn.get_data_mut().crt_errno = 0;
-        assert_eq!(engine.call_win64(OPEN, [name, mode, 7, 0, 0, 0]).unwrap(), 0);
+        assert_eq!(
+            engine.call_win64(OPEN, [name, mode, 7, 0, 0, 0]).unwrap(),
+            0
+        );
         assert_eq!(engine.unicorn.get_data().crt_errno, 22);
         assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
         std::fs::remove_file(source).unwrap();
@@ -21609,9 +21783,7 @@ fn fsopen_uses_the_same_bounded_read_sharing_contract() {
         .unwrap();
     assert_ne!(shared, 0);
     assert_eq!(
-        engine
-            .call_win64(CLOSE, [shared, 0, 0, 0, 0, 0])
-            .unwrap(),
+        engine.call_win64(CLOSE, [shared, 0, 0, 0, 0, 0]).unwrap(),
         0
     );
     assert_eq!(engine.unicorn.get_data().guest_files.live_bytes, 0);
@@ -22914,10 +23086,19 @@ fn create_file_opens_nul_as_a_session_owned_character_device() {
     install_win64_import(&mut engine.unicorn, kind, "kernel32.dll", "GetFileType").unwrap();
     install_win64_import(&mut engine.unicorn, close, "kernel32.dll", "CloseHandle").unwrap();
     engine.unicorn.mem_write(DATA_BASE, b"NUL\0").unwrap();
-    let handle = engine.call_win64_with_timeout(open, &[DATA_BASE, 0x80000000, 7, 0, 3, 0, 0], TIMEOUT_MICROSECONDS).unwrap();
+    let handle = engine
+        .call_win64_with_timeout(
+            open,
+            &[DATA_BASE, 0x80000000, 7, 0, 3, 0, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
     assert_ne!(handle, u64::MAX);
     assert_eq!(engine.call_win64(kind, [handle, 0, 0, 0, 0, 0]).unwrap(), 2);
-    assert_eq!(engine.call_win64(close, [handle, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(
+        engine.call_win64(close, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -22989,7 +23170,12 @@ fn windows_file_apis_open_read_seek_and_close_mounted_assets() {
             engine.unicorn.mem_read_as_vec(count, 8).unwrap(),
             6u64.to_le_bytes()
         );
-        assert_eq!(engine.call_win64(info, [handle, output, 0, 0, 0, 0]).unwrap(), 1);
+        assert_eq!(
+            engine
+                .call_win64(info, [handle, output, 0, 0, 0, 0])
+                .unwrap(),
+            1
+        );
         let metadata = engine.unicorn.mem_read_as_vec(output, 52).unwrap();
         assert_eq!(u32::from_le_bytes(metadata[0..4].try_into().unwrap()), 0x80);
         assert_eq!(u32::from_le_bytes(metadata[36..40].try_into().unwrap()), 6);
@@ -23615,9 +23801,7 @@ fn code_hook_translation_index_tracks_exact_range_global_and_removal() {
     let range_begin = TEST_CODE + 0x30;
     let range_end = TEST_CODE + 0x3f;
     let range = uc
-        .add_code_hook(range_begin, range_end, |uc, _, _| {
-            uc.get_data_mut().push(2)
-        })
+        .add_code_hook(range_begin, range_end, |uc, _, _| uc.get_data_mut().push(2))
         .unwrap();
     uc.get_data_mut().clear();
     uc.emu_start(range_end + 1, range_end + 2, 1_000_000, 0)
@@ -23656,13 +23840,8 @@ fn code_hook_translation_index_tracks_exact_range_global_and_removal() {
     uc.remove_hook(exact).unwrap();
     uc.get_data_mut().clear();
     let post_removal_address = TEST_CODE + 0x80;
-    uc.emu_start(
-        post_removal_address,
-        post_removal_address + 1,
-        1_000_000,
-        0,
-    )
-    .unwrap();
+    uc.emu_start(post_removal_address, post_removal_address + 1, 1_000_000, 0)
+        .unwrap();
     assert!(uc.get_data().is_empty());
 }
 

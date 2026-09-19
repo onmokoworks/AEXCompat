@@ -9,8 +9,8 @@ const SAPPHIRE_LUT_COPY_SITE_BYTES: &[u8] = &[
     0x49, 0x29, 0xd0, 0x48, 0x8d, 0x8d, 0xe0, 0x09, 0x00, 0x00, 0x48, 0x89, 0xce, 0xe8,
 ];
 const SAPPHIRE_LARGE_STRING_ASSIGN_PROLOGUE: &[u8] = &[
-    0x56, 0x57, 0x53, 0x48, 0x83, 0xec, 0x40, 0x4c, 0x89, 0xc7, 0x48, 0x89, 0xce, 0x48, 0x8b,
-    0x41, 0x18,
+    0x56, 0x57, 0x53, 0x48, 0x83, 0xec, 0x40, 0x4c, 0x89, 0xc7, 0x48, 0x89, 0xce, 0x48, 0x8b, 0x41,
+    0x18,
 ];
 const SAPPHIRE_LARGE_STRING_MIN_BYTES: u64 = 1024 * 1024;
 const SAPPHIRE_FILEBUF_FGETC_CALL_RVA: u64 = 0x05cc_caf;
@@ -94,9 +94,7 @@ fn emulate_sapphire_lut_copy(
     let Some(length) = end.checked_sub(source) else {
         return Ok(());
     };
-    if source == 0
-        || length < SAPPHIRE_LARGE_STRING_MIN_BYTES
-        || length > MAX_CRT_ALLOCATION_BYTES
+    if source == 0 || length < SAPPHIRE_LARGE_STRING_MIN_BYTES || length > MAX_CRT_ALLOCATION_BYTES
     {
         return Ok(());
     }
@@ -473,58 +471,58 @@ impl GuestEngine<'static> {
                     } else {
                         None
                     };
-                    let address =
-                        if let Some(index) = basenames.get(&import.name.to_ascii_lowercase())
-                            && !prefer_emulated_dependency_import(&import.name, &symbol.name)
-                        {
-                            symbol
-                                .ordinal
-                                .and_then(|ordinal| libraries[*index].1.ordinal_address(ordinal.into()))
-                                .or_else(|| libraries[*index].1.symbol_address(&symbol.name))
-                                .ok_or_else(|| {
-                                    GuestError::Callback(format!(
-                                        "DLL export unavailable: {}!{}",
-                                        import.name, symbol.name
-                                    ))
-                                })?
-                        } else if let Some(data) =
-                            engine.resolve_emulated_import_data(&import.name, &symbol.name)?
-                        {
-                            data
-                        } else if let Some(stub) = primary_stub {
-                            deferred_primary_hooks.push((
-                                stub,
-                                import.name.clone(),
-                                symbol.name.clone(),
-                            ));
-                            stub
-                        } else {
-                            let stub = STUB_BASE
-                                .checked_add(engine.next_import_stub * STUB_STRIDE)
-                                .ok_or(GuestError::StubCapacity)?;
-                            if stub + STUB_STRIDE > HOST_ADD_PARAM {
-                                return Err(GuestError::StubCapacity);
-                            }
-                            uc(
-                                "write DLL import stub",
-                                engine.unicorn.mem_write(stub, &[0xc3]),
-                            )?;
-                            install_win64_import(
-                                &mut engine.unicorn,
-                                stub,
-                                &import.name,
-                                &symbol.name,
-                            )?;
-                            engine.unicorn.get_data_mut().trace_labels.insert(
-                                stub,
-                                TraceLabel {
-                                    kind: TraceLabelKind::Import,
-                                    name: canonical_import_trace_label(&import.name, &symbol.name),
-                                },
-                            );
-                            engine.next_import_stub += 1;
-                            stub
-                        };
+                    let address = if let Some(index) =
+                        basenames.get(&import.name.to_ascii_lowercase())
+                        && !prefer_emulated_dependency_import(&import.name, &symbol.name)
+                    {
+                        symbol
+                            .ordinal
+                            .and_then(|ordinal| libraries[*index].1.ordinal_address(ordinal.into()))
+                            .or_else(|| libraries[*index].1.symbol_address(&symbol.name))
+                            .ok_or_else(|| {
+                                GuestError::Callback(format!(
+                                    "DLL export unavailable: {}!{}",
+                                    import.name, symbol.name
+                                ))
+                            })?
+                    } else if let Some(data) =
+                        engine.resolve_emulated_import_data(&import.name, &symbol.name)?
+                    {
+                        data
+                    } else if let Some(stub) = primary_stub {
+                        deferred_primary_hooks.push((
+                            stub,
+                            import.name.clone(),
+                            symbol.name.clone(),
+                        ));
+                        stub
+                    } else {
+                        let stub = STUB_BASE
+                            .checked_add(engine.next_import_stub * STUB_STRIDE)
+                            .ok_or(GuestError::StubCapacity)?;
+                        if stub + STUB_STRIDE > HOST_ADD_PARAM {
+                            return Err(GuestError::StubCapacity);
+                        }
+                        uc(
+                            "write DLL import stub",
+                            engine.unicorn.mem_write(stub, &[0xc3]),
+                        )?;
+                        install_win64_import(
+                            &mut engine.unicorn,
+                            stub,
+                            &import.name,
+                            &symbol.name,
+                        )?;
+                        engine.unicorn.get_data_mut().trace_labels.insert(
+                            stub,
+                            TraceLabel {
+                                kind: TraceLabelKind::Import,
+                                name: canonical_import_trace_label(&import.name, &symbol.name),
+                            },
+                        );
+                        engine.next_import_stub += 1;
+                        stub
+                    };
                     let rva = symbol.iat_rva;
                     if rva
                         .checked_add(8)
@@ -641,7 +639,9 @@ impl GuestEngine<'static> {
             || self.primary_poisoned
             || image.report().sha256 != self.image_sha256
             || image.image_base() != self.image_base
-            || image.image_base().checked_add(image.mapped_bytes().len() as u64)
+            || image
+                .image_base()
+                .checked_add(image.mapped_bytes().len() as u64)
                 != Some(self.image_end)
         {
             return Err(GuestError::Callback(
@@ -666,7 +666,9 @@ impl GuestEngine<'static> {
             || self.primary_poisoned
             || image.report().sha256 != self.image_sha256
             || image.image_base() != self.image_base
-            || image.image_base().checked_add(image.mapped_bytes().len() as u64)
+            || image
+                .image_base()
+                .checked_add(image.mapped_bytes().len() as u64)
                 != Some(self.image_end)
         {
             return Err(GuestError::Callback(
@@ -723,10 +725,7 @@ impl GuestEngine<'static> {
             }
             Ok(bytes)
         }
-        fn parse_dependency(
-            name: &str,
-            path: &std::path::Path,
-        ) -> Result<PeImage, GuestError> {
+        fn parse_dependency(name: &str, path: &std::path::Path) -> Result<PeImage, GuestError> {
             let bytes = read_bounded(path, 128 * 1024 * 1024).map_err(|error| {
                 GuestError::Callback(format!("read dependency DLL {name}: {error}"))
             })?;
@@ -789,9 +788,7 @@ impl GuestEngine<'static> {
                         .into_iter()
                         .map(|handle| {
                             handle.join().map_err(|_| {
-                                GuestError::Callback(
-                                    "dependency DLL parser thread panicked".into(),
-                                )
+                                GuestError::Callback("dependency DLL parser thread panicked".into())
                             })
                         })
                         .collect::<Result<Vec<_>, _>>()
@@ -1063,7 +1060,10 @@ mod library_tests {
             .unwrap();
 
         engine
-            .call_win64(primary.entry_address().unwrap(), [destination, 0, 0, 0, 0, 0])
+            .call_win64(
+                primary.entry_address().unwrap(),
+                [destination, 0, 0, 0, 0, 0],
+            )
             .unwrap();
 
         let mut actual = [0xff; 32];
@@ -1306,7 +1306,10 @@ mod library_tests {
             assert_eq!(&value[..16], [index as u8 + 1; 16]);
             assert_eq!(&value[16..], [0; 16]);
         }
-        assert_eq!(aex_unicorn_buffer::x86_avx_defined_mask(&engine.unicorn), 0xffff);
+        assert_eq!(
+            aex_unicorn_buffer::x86_avx_defined_mask(&engine.unicorn),
+            0xffff
+        );
     }
 
     #[test]
@@ -1379,25 +1382,29 @@ mod library_tests {
         other_bytes[0x246] = 0x7b;
         let other = PeImage::parse_and_map(&other_bytes).unwrap();
         let dependency = fixture(DEPENDENCY_IMAGE_BASE, "answer", None, true);
-        let mut engine = GuestEngine::load_with_libraries_deferred_primary(
-            &primary,
-            &[("dep.dll", dependency)],
-        )
-        .unwrap();
+        let mut engine =
+            GuestEngine::load_with_libraries_deferred_primary(&primary, &[("dep.dll", dependency)])
+                .unwrap();
         let mut witness = [0u8];
-        engine.read(primary.image_base() + 0x2080, &mut witness).unwrap();
+        engine
+            .read(primary.image_base() + 0x2080, &mut witness)
+            .unwrap();
         assert_eq!(witness, [0]);
-        assert!(engine
-            .unicorn
-            .get_data()
-            .loaded_libraries
-            .values()
-            .all(|library| library.initialized));
+        assert!(
+            engine
+                .unicorn
+                .get_data()
+                .loaded_libraries
+                .values()
+                .all(|library| library.initialized)
+        );
         assert!(engine.validate_attached_primary(&primary).is_err());
         assert!(engine.attach_deferred_primary(&other).is_err());
 
         engine.attach_deferred_primary(&primary).unwrap();
-        engine.read(primary.image_base() + 0x2080, &mut witness).unwrap();
+        engine
+            .read(primary.image_base() + 0x2080, &mut witness)
+            .unwrap();
         assert_eq!(witness, [0x7a]);
         assert!(engine.validate_attached_primary(&primary).is_ok());
         assert!(engine.validate_attached_primary(&other).is_err());
@@ -1411,8 +1418,9 @@ mod library_tests {
             )],
         )
         .unwrap();
-        assert!(crate::classic::ClassicHost::from_engine_with_effect(detached, &primary, None)
-            .is_err());
+        assert!(
+            crate::classic::ClassicHost::from_engine_with_effect(detached, &primary, None).is_err()
+        );
 
         let mut failing_bytes = fixture_bytes(0x180000000, "EffectMain", None, true);
         failing_bytes[0x240..0x243].copy_from_slice(&[0x31, 0xc0, 0xc3]);

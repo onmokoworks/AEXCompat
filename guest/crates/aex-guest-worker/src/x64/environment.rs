@@ -137,10 +137,10 @@ fn emulate_crt_putenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
         {
             return Err(12);
         }
-        unicorn.get_data_mut().environment_overrides.insert(
-            name,
-            if value.is_empty() { None } else { Some(value) },
-        );
+        unicorn
+            .get_data_mut()
+            .environment_overrides
+            .insert(name, if value.is_empty() { None } else { Some(value) });
         Ok(())
     })();
     let returned = match result {
@@ -203,9 +203,15 @@ fn emulate_crt_wenviron(unicorn: &mut Unicorn<'_, GuestState>) {
         if used as u64 > GUEST_WENVIRON_BYTES {
             return Err("CRT __p__wenviron storage exceeds bound".into());
         }
-        unicorn.mem_write(cell, &array.to_le_bytes()).map_err(|error| format!("CRT __p__wenviron cell write failed: {error}"))?;
-        unicorn.mem_write(array, &pointers).map_err(|error| format!("CRT __p__wenviron pointer array write failed: {error}"))?;
-        unicorn.mem_write(strings, &text).map_err(|error| format!("CRT __p__wenviron strings write failed: {error}"))?;
+        unicorn
+            .mem_write(cell, &array.to_le_bytes())
+            .map_err(|error| format!("CRT __p__wenviron cell write failed: {error}"))?;
+        unicorn
+            .mem_write(array, &pointers)
+            .map_err(|error| format!("CRT __p__wenviron pointer array write failed: {error}"))?;
+        unicorn
+            .mem_write(strings, &text)
+            .map_err(|error| format!("CRT __p__wenviron strings write failed: {error}"))?;
         Ok(cell)
     })();
     match result {

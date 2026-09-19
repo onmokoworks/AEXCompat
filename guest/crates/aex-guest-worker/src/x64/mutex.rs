@@ -35,10 +35,14 @@ impl WindowsKernelObjects {
             return Ok((0, 8));
         }
         let existing = name.as_ref().and_then(|name| self.names.get(name)).copied();
-        if existing.is_some_and(|id| self.semaphores.contains_key(&id) || self.events.contains_key(&id)) {
+        if existing
+            .is_some_and(|id| self.semaphores.contains_key(&id) || self.events.contains_key(&id))
+        {
             return Ok((0, 6));
         }
-        if existing.is_none() && self.objects.len() + self.semaphores.len() + self.events.len() >= 1024 {
+        if existing.is_none()
+            && self.objects.len() + self.semaphores.len() + self.events.len() >= 1024
+        {
             return Ok((0, 8));
         }
         let handle = WINDOWS_KERNEL_OBJECT_BASE + self.issued * 8;
@@ -71,7 +75,9 @@ impl WindowsKernelObjects {
         maximum: i32,
     ) -> Result<(u64, u32), String> {
         let existing = name.as_ref().and_then(|n| self.names.get(n)).copied();
-        if existing.is_some_and(|id| self.objects.contains_key(&id) || self.events.contains_key(&id)) {
+        if existing
+            .is_some_and(|id| self.objects.contains_key(&id) || self.events.contains_key(&id))
+        {
             return Ok((0, 6));
         }
         if existing.is_none() && (initial < 0 || maximum <= 0 || initial > maximum) {
@@ -79,7 +85,8 @@ impl WindowsKernelObjects {
         }
         if self.handles.len() >= 4096
             || self.issued >= 65536
-            || (existing.is_none() && self.objects.len() + self.semaphores.len() + self.events.len() >= 1024)
+            || (existing.is_none()
+                && self.objects.len() + self.semaphores.len() + self.events.len() >= 1024)
         {
             return Ok((0, 8));
         }
@@ -105,13 +112,20 @@ impl WindowsKernelObjects {
         self.handles.insert(handle, object);
         Ok((handle, if existing.is_some() { 183 } else { 0 }))
     }
-    fn create_event(&mut self, name: Option<String>, manual_reset: bool, signaled: bool) -> (u64, u32) {
+    fn create_event(
+        &mut self,
+        name: Option<String>,
+        manual_reset: bool,
+        signaled: bool,
+    ) -> (u64, u32) {
         let existing = name.as_ref().and_then(|n| self.names.get(n)).copied();
         if existing.is_some_and(|id| !self.events.contains_key(&id)) {
             return (0, 6);
         }
-        if self.handles.len() >= 4096 || self.issued >= 65536
-            || (existing.is_none() && self.objects.len() + self.semaphores.len() + self.events.len() >= 1024)
+        if self.handles.len() >= 4096
+            || self.issued >= 65536
+            || (existing.is_none()
+                && self.objects.len() + self.semaphores.len() + self.events.len() >= 1024)
         {
             return (0, 8);
         }
@@ -121,7 +135,9 @@ impl WindowsKernelObjects {
         if let Some(event) = self.events.get_mut(&object) {
             event.references += 1;
         } else {
-            if let Some(name) = &name { self.names.insert(name.clone(), object); }
+            if let Some(name) = &name {
+                self.names.insert(name.clone(), object);
+            }
             self.events.insert(
                 object,
                 WindowsEvent {
@@ -137,10 +153,17 @@ impl WindowsKernelObjects {
         (handle, if existing.is_some() { 183 } else { 0 })
     }
     fn open_event(&mut self, name: &str) -> (u64, u32) {
-        let Some(object) = self.names.get(name).copied().filter(|id| self.events.contains_key(id)) else {
+        let Some(object) = self
+            .names
+            .get(name)
+            .copied()
+            .filter(|id| self.events.contains_key(id))
+        else {
             return (0, 2);
         };
-        if self.handles.len() >= 4096 || self.issued >= 65536 { return (0, 8); }
+        if self.handles.len() >= 4096 || self.issued >= 65536 {
+            return (0, 8);
+        }
         let handle = WINDOWS_KERNEL_OBJECT_BASE + self.issued * 8;
         self.issued += 1;
         self.events.get_mut(&object).unwrap().references += 1;
@@ -151,7 +174,9 @@ impl WindowsKernelObjects {
         let object = self.handles.get(&handle).ok_or("invalid mutex handle")?;
         if let Some(event) = self.events.get_mut(object) {
             if event.signaled {
-                if !event.manual_reset { event.signaled = false; }
+                if !event.manual_reset {
+                    event.signaled = false;
+                }
                 return Ok(0);
             }
             return if timeout != u32::MAX {
@@ -220,7 +245,9 @@ impl WindowsKernelObjects {
             event.references -= 1;
             if event.references == 0 {
                 let event = self.events.remove(&object).unwrap();
-                if let Some(name) = event.name { self.names.remove(&name); }
+                if let Some(name) = event.name {
+                    self.names.remove(&name);
+                }
             }
             return Ok(());
         }
@@ -254,17 +281,27 @@ fn emulate_windows_kernel_object(
 ) {
     let result = (|| -> Result<u64, String> {
         let thread = unicorn.get_data().current_windows_thread_id;
-        if matches!(operation, LegacyWin64Import::OpenEventA | LegacyWin64Import::OpenEventW) {
+        if matches!(
+            operation,
+            LegacyWin64Import::OpenEventA | LegacyWin64Import::OpenEventW
+        ) {
             let _access = read_win64_import_argument(unicorn, 0)? as u32;
             let inherit = read_win64_import_argument(unicorn, 1)? as u32;
             let pointer = read_win64_import_argument(unicorn, 2)?;
-            if inherit != 0 { return Err("inheritable event handles are unsupported".into()); }
-            if pointer == 0 { unicorn.get_data_mut().windows_last_error = 87; return Ok(0); }
+            if inherit != 0 {
+                return Err("inheritable event handles are unsupported".into());
+            }
+            if pointer == 0 {
+                unicorn.get_data_mut().windows_last_error = 87;
+                return Ok(0);
+            }
             let name = if operation == LegacyWin64Import::OpenEventW {
                 read_guest_wide_file_string(unicorn, pointer, 260, "OpenEventW name")?
             } else {
                 let bytes = read_crt_stdio_c_string(unicorn, pointer, 260, "OpenEventA name")?;
-                if bytes.is_empty() || !bytes.is_ascii() { return Err("unsupported event name".into()); }
+                if bytes.is_empty() || !bytes.is_ascii() {
+                    return Err("unsupported event name".into());
+                }
                 String::from_utf8(bytes).unwrap()
             };
             let key = name.strip_prefix("Local\\").unwrap_or(&name);
@@ -274,13 +311,18 @@ fn emulate_windows_kernel_object(
         }
         if matches!(
             operation,
-            LegacyWin64Import::CreateMutexA | LegacyWin64Import::CreateSemaphoreA
-                | LegacyWin64Import::CreateEventA | LegacyWin64Import::CreateEventW
+            LegacyWin64Import::CreateMutexA
+                | LegacyWin64Import::CreateSemaphoreA
+                | LegacyWin64Import::CreateEventA
+                | LegacyWin64Import::CreateEventW
         ) {
             let attributes = read_win64_import_argument(unicorn, 0)?;
             let initial = read_win64_import_argument(unicorn, 1)? as u32;
             let semaphore = operation == LegacyWin64Import::CreateSemaphoreA;
-            let event = matches!(operation, LegacyWin64Import::CreateEventA | LegacyWin64Import::CreateEventW);
+            let event = matches!(
+                operation,
+                LegacyWin64Import::CreateEventA | LegacyWin64Import::CreateEventW
+            );
             let maximum = if semaphore || event {
                 read_win64_import_argument(unicorn, 2)? as u32 as i32
             } else {
@@ -298,7 +340,9 @@ fn emulate_windows_kernel_object(
                     read_guest_wide_file_string(unicorn, name, 260, "CreateEventW name")?
                 } else {
                     let bytes = read_crt_stdio_c_string(unicorn, name, 260, "kernel object name")?;
-                    if bytes.is_empty() || !bytes.is_ascii() { return Err("unsupported kernel object name".into()); }
+                    if bytes.is_empty() || !bytes.is_ascii() {
+                        return Err("unsupported kernel object name".into());
+                    }
                     String::from_utf8(bytes).unwrap()
                 };
                 let (key, remainder) = if let Some(local) = name.strip_prefix("Local\\") {
@@ -320,7 +364,11 @@ fn emulate_windows_kernel_object(
                     maximum,
                 )?
             } else if event {
-                unicorn.get_data_mut().windows_objects.create_event(name, initial != 0, maximum != 0)
+                unicorn.get_data_mut().windows_objects.create_event(
+                    name,
+                    initial != 0,
+                    maximum != 0,
+                )
             } else {
                 unicorn
                     .get_data_mut()
@@ -358,8 +406,15 @@ fn emulate_windows_kernel_object(
                     }
                 };
                 for thread_id in wake {
-                    if !unicorn.get_data().scheduler_woken_threads.contains(&thread_id) {
-                        unicorn.get_data_mut().scheduler_woken_threads.push_back(thread_id);
+                    if !unicorn
+                        .get_data()
+                        .scheduler_woken_threads
+                        .contains(&thread_id)
+                    {
+                        unicorn
+                            .get_data_mut()
+                            .scheduler_woken_threads
+                            .push_back(thread_id);
                     }
                 }
                 Ok(1)
@@ -439,7 +494,9 @@ fn emulate_windows_kernel_object(
                 };
                 if waiting_event && timeout == u32::MAX {
                     if unicorn.get_data().pending_windows_thread.is_none() {
-                        return Err("infinite event wait on the main guest thread is unsupported".into());
+                        return Err(
+                            "infinite event wait on the main guest thread is unsupported".into(),
+                        );
                     }
                     let object = unicorn.get_data().windows_objects.handles[&handle];
                     let event = unicorn
@@ -465,7 +522,8 @@ fn emulate_windows_kernel_object(
                     unicorn
                         .reg_write(RegisterX86::RIP, return_address)
                         .map_err(|error| format!("event wait return advance failed: {error}"))?;
-                    unicorn.get_data_mut().scheduler_yield_reason = Some(SchedulerYieldReason::Event);
+                    unicorn.get_data_mut().scheduler_yield_reason =
+                        Some(SchedulerYieldReason::Event);
                     unicorn.get_data_mut().scheduler_resume_rip = return_address;
                     unicorn
                         .emu_stop()

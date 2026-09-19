@@ -177,18 +177,11 @@ fn open_guest_stream_with_share(
         Err(e) => return Err(format!("guest asset metadata: {e}")),
     }
     let files = &unicorn.get_data().guest_files;
-    if files
-        .windows_files
-        .values()
-        .any(|file| {
-            file.name == name
-                && (file.share & 1 == 0 || (!share_read_access && file.readable))
-        })
-        || files.streams.values().any(|file| {
-            file.name.as_deref() == Some(&name)
-                && (!file.share_read_access || !share_read_access)
-        })
-    {
+    if files.windows_files.values().any(|file| {
+        file.name == name && (file.share & 1 == 0 || (!share_read_access && file.readable))
+    }) || files.streams.values().any(|file| {
+        file.name.as_deref() == Some(&name) && (!file.share_read_access || !share_read_access)
+    }) {
         return Ok((0, 13));
     }
     if files.streams.len() + files.windows_files.len() >= 64
@@ -273,7 +266,10 @@ fn open_guest_stream(
 // Standard FILE objects have stable identities, including after fclose. The
 // worker has no guest stdin input; stdout/stderr are output-only. Output calls
 // remain explicit unsupported imports until their capture semantics are provided.
-fn emulate_crt_stream_position(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
+fn emulate_crt_stream_position(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
     let result = (|| -> Result<u64, String> {
         let stream = read_win64_import_argument(unicorn, 0)?;
         let Some(file) = unicorn.get_data().guest_files.streams.get(&stream) else {
@@ -308,7 +304,12 @@ fn emulate_crt_stream_position(unicorn: &mut Unicorn<'_, GuestState>, operation:
                 set_guest_crt_errno(unicorn, 22)?;
                 return Ok(u32::MAX as u64);
             }
-            let file = unicorn.get_data_mut().guest_files.streams.get_mut(&stream).unwrap();
+            let file = unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&stream)
+                .unwrap();
             file.position = position as usize;
             file.eof = false;
             return Ok(0);
@@ -321,7 +322,13 @@ fn emulate_crt_stream_position(unicorn: &mut Unicorn<'_, GuestState>, operation:
                 .get_mut(&stream)
                 .unwrap()
                 .position = 0;
-            unicorn.get_data_mut().guest_files.streams.get_mut(&stream).unwrap().eof = false;
+            unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&stream)
+                .unwrap()
+                .eof = false;
             set_guest_crt_errno(unicorn, 0)?;
             return Ok(0);
         }
@@ -341,7 +348,12 @@ fn emulate_crt_stream_position(unicorn: &mut Unicorn<'_, GuestState>, operation:
             set_guest_crt_errno(unicorn, 22)?;
             return Ok(u32::MAX as u64);
         }
-        let file = unicorn.get_data_mut().guest_files.streams.get_mut(&stream).unwrap();
+        let file = unicorn
+            .get_data_mut()
+            .guest_files
+            .streams
+            .get_mut(&stream)
+            .unwrap();
         file.position = next as usize;
         file.eof = false;
         Ok(0)
@@ -382,14 +394,21 @@ fn emulate_crt_descriptor(unicorn: &mut Unicorn<'_, GuestState>, operation: Lega
                 set_guest_crt_errno(unicorn, 24)?;
                 return Ok(u32::MAX as u64);
             }
-            let stream = unicorn.get_data_mut().guest_files.streams.remove(&token).unwrap();
+            let stream = unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .remove(&token)
+                .unwrap();
             unicorn
                 .mem_unmap(token, PAGE_SIZE)
                 .map_err(|error| format!("descriptor FILE token unmap failed: {error}"))?;
             let files = &mut unicorn.get_data_mut().guest_files;
             files.next_descriptor = fd + 1;
             files.descriptors.insert(fd, stream);
-            files.descriptor_modes.insert(fd, if binary { 0x8000 } else { 0x4000 });
+            files
+                .descriptor_modes
+                .insert(fd, if binary { 0x8000 } else { 0x4000 });
             return Ok(fd as u64);
         }
         let fd = read_win64_import_argument(unicorn, 0)? as u32 as i32;
@@ -399,23 +418,36 @@ fn emulate_crt_descriptor(unicorn: &mut Unicorn<'_, GuestState>, operation: Lega
                 let count = read_win64_import_argument(unicorn, 2)? as u32 as usize;
                 let stream = match unicorn.get_data().guest_files.descriptors.get(&fd) {
                     Some(stream) => stream,
-                    None => { set_guest_crt_errno(unicorn, 9)?; return Ok(u32::MAX as u64); }
+                    None => {
+                        set_guest_crt_errno(unicorn, 9)?;
+                        return Ok(u32::MAX as u64);
+                    }
                 };
                 let actual = count.min(stream.bytes.len().saturating_sub(stream.position));
                 if actual != 0 {
-                    if output == 0 || !guest_range_has_permission(unicorn, output, actual as u64, Prot::WRITE)? {
+                    if output == 0
+                        || !guest_range_has_permission(unicorn, output, actual as u64, Prot::WRITE)?
+                    {
                         return Err("_read output is not writable".into());
                     }
                     let bytes = stream.bytes[stream.position..stream.position + actual].to_vec();
-                    unicorn.mem_write(output, &bytes).map_err(|error| format!("_read output failed: {error}"))?;
+                    unicorn
+                        .mem_write(output, &bytes)
+                        .map_err(|error| format!("_read output failed: {error}"))?;
                 }
-                let stream = unicorn.get_data_mut().guest_files.descriptors.get_mut(&fd).unwrap();
+                let stream = unicorn
+                    .get_data_mut()
+                    .guest_files
+                    .descriptors
+                    .get_mut(&fd)
+                    .unwrap();
                 stream.position += actual;
                 stream.eof = actual < count;
                 Ok(actual as u64)
             }
             LegacyWin64Import::CrtClose => {
-                let Some(stream) = unicorn.get_data_mut().guest_files.descriptors.remove(&fd) else {
+                let Some(stream) = unicorn.get_data_mut().guest_files.descriptors.remove(&fd)
+                else {
                     set_guest_crt_errno(unicorn, 9)?;
                     return Ok(u32::MAX as u64);
                 };
@@ -427,13 +459,20 @@ fn emulate_crt_descriptor(unicorn: &mut Unicorn<'_, GuestState>, operation: Lega
             LegacyWin64Import::CrtLseek64 => {
                 let offset = read_win64_import_argument(unicorn, 1)? as i64;
                 let origin = read_win64_import_argument(unicorn, 2)? as u32;
-                let Some(stream) = unicorn.get_data_mut().guest_files.descriptors.get_mut(&fd) else {
+                let Some(stream) = unicorn.get_data_mut().guest_files.descriptors.get_mut(&fd)
+                else {
                     set_guest_crt_errno(unicorn, 9)?;
                     return Ok(u64::MAX);
                 };
-                let base = match origin { 0 => 0i128, 1 => stream.position as i128, 2 => stream.bytes.len() as i128, _ => {
-                    set_guest_crt_errno(unicorn, 22)?; return Ok(u64::MAX);
-                }};
+                let base = match origin {
+                    0 => 0i128,
+                    1 => stream.position as i128,
+                    2 => stream.bytes.len() as i128,
+                    _ => {
+                        set_guest_crt_errno(unicorn, 22)?;
+                        return Ok(u64::MAX);
+                    }
+                };
                 let next = base + offset as i128;
                 if !(0..=i64::MAX as i128).contains(&next) {
                     set_guest_crt_errno(unicorn, 22)?;
@@ -449,11 +488,18 @@ fn emulate_crt_descriptor(unicorn: &mut Unicorn<'_, GuestState>, operation: Lega
                     set_guest_crt_errno(unicorn, 22)?;
                     return Ok(u32::MAX as u64);
                 }
-                if fd < 0 || (fd > 2 && !unicorn.get_data().guest_files.descriptors.contains_key(&fd)) {
+                if fd < 0
+                    || (fd > 2 && !unicorn.get_data().guest_files.descriptors.contains_key(&fd))
+                {
                     set_guest_crt_errno(unicorn, 9)?;
                     return Ok(u32::MAX as u64);
                 }
-                Ok(unicorn.get_data_mut().guest_files.descriptor_modes.insert(fd, mode).unwrap_or(0x4000) as u32 as u64)
+                Ok(unicorn
+                    .get_data_mut()
+                    .guest_files
+                    .descriptor_modes
+                    .insert(fd, mode)
+                    .unwrap_or(0x4000) as u32 as u64)
             }
             _ => Err("invalid CRT descriptor operation".into()),
         }
@@ -603,7 +649,10 @@ fn require_unbuffered_guest_stream(
             });
             return Err(format!(
                 "guest-modified FILE buffering state is not implemented: state={} fast_buffer={:?} fast_allocation={fast_allocation:?}",
-                values.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+                values
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
                 stream.fast_buffer
             ));
         }
@@ -676,9 +725,7 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
         }
         if matches!(
             import,
-            LegacyWin64Import::Ferror
-                | LegacyWin64Import::LockFile
-                | LegacyWin64Import::UnlockFile
+            LegacyWin64Import::Ferror | LegacyWin64Import::LockFile | LegacyWin64Import::UnlockFile
         ) {
             let token = read_win64_import_argument(unicorn, 0)?;
             require_unbuffered_guest_stream(unicorn, token)?;
@@ -896,7 +943,13 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
         let actual = (wanted as usize).min(stream.bytes.len().saturating_sub(stream.position));
         let hit_eof = actual < wanted as usize;
         if actual == 0 {
-            unicorn.get_data_mut().guest_files.streams.get_mut(&token).unwrap().eof = hit_eof;
+            unicorn
+                .get_data_mut()
+                .guest_files
+                .streams
+                .get_mut(&token)
+                .unwrap()
+                .eof = hit_eof;
             return Ok(0);
         }
         if output == 0 || !guest_range_has_permission(unicorn, output, actual as u64, Prot::WRITE)?
@@ -914,7 +967,13 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
             .get_mut(&token)
             .unwrap()
             .position += actual;
-        unicorn.get_data_mut().guest_files.streams.get_mut(&token).unwrap().eof = hit_eof;
+        unicorn
+            .get_data_mut()
+            .guest_files
+            .streams
+            .get_mut(&token)
+            .unwrap()
+            .eof = hit_eof;
         Ok(actual as u64 / size)
     })();
     finish_guest_stdio(unicorn, result);
@@ -1302,11 +1361,7 @@ fn guest_stat64i32(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) -> Result<
         return Err("_wstat64i32 non-ASCII path normalization is not implemented".into());
     };
     let mut record = [0u8; 48];
-    let result = guest_stat_record(
-        &unicorn.get_data().guest_files,
-        &normalized,
-        &mut record,
-    )?;
+    let result = guest_stat_record(&unicorn.get_data().guest_files, &normalized, &mut record)?;
     unicorn
         .mem_write(output, &record)
         .map_err(|e| e.to_string())?;
@@ -1628,7 +1683,8 @@ fn emulate_fsopen(unicorn: &mut Unicorn<'_, GuestState>) {
                 return Ok(0);
             }
         };
-        let name = read_crt_stdio_c_string(unicorn, name, MAX_CRT_STRING_BYTES, "_fsopen filename")?;
+        let name =
+            read_crt_stdio_c_string(unicorn, name, MAX_CRT_STRING_BYTES, "_fsopen filename")?;
         let mode = read_crt_stdio_c_string(unicorn, mode, 64, "_fsopen mode")?;
         let (stream, errno) =
             open_guest_stream_with_share(unicorn, &name, &mode, share_read_access)?;

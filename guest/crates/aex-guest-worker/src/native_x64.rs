@@ -454,7 +454,9 @@ impl GuestEngine<'static> {
     pub fn validate_attached_primary(&self, image: &PeImage) -> Result<(), GuestError> {
         if image.report().sha256 != self.image_sha256
             || image.image_base() != self.state.image_start
-            || image.image_base().checked_add(image.mapped_bytes().len() as u64)
+            || image
+                .image_base()
+                .checked_add(image.mapped_bytes().len() as u64)
                 != Some(self.state.image_end)
         {
             return Err(GuestError::Callback(

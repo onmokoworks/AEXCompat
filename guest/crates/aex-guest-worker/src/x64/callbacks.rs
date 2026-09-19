@@ -664,13 +664,27 @@ fn install_double_import(
 
 fn emulate_fdclass(unicorn: &mut Unicorn<'_, GuestState>, float: bool) {
     let result = (|| -> Result<u64, String> {
-        let xmm = unicorn.reg_read_long(RegisterX86::XMM0).map_err(|e| e.to_string())?;
+        let xmm = unicorn
+            .reg_read_long(RegisterX86::XMM0)
+            .map_err(|e| e.to_string())?;
         let (sign, exponent, fraction, max_exponent, quiet_bit) = if float {
             let bits = u32::from_le_bytes(xmm[..4].try_into().unwrap()) as u64;
-            (bits >> 31 != 0, (bits >> 23) & 0xff, bits & ((1 << 23) - 1), 0xff, 1 << 22)
+            (
+                bits >> 31 != 0,
+                (bits >> 23) & 0xff,
+                bits & ((1 << 23) - 1),
+                0xff,
+                1 << 22,
+            )
         } else {
             let bits = u64::from_le_bytes(xmm[..8].try_into().unwrap());
-            (bits >> 63 != 0, (bits >> 52) & 0x7ff, bits & ((1u64 << 52) - 1), 0x7ff, 1u64 << 51)
+            (
+                bits >> 63 != 0,
+                (bits >> 52) & 0x7ff,
+                bits & ((1u64 << 52) - 1),
+                0x7ff,
+                1u64 << 51,
+            )
         };
         let _ = (sign, quiet_bit);
         Ok(match (exponent, fraction) {
@@ -889,10 +903,11 @@ fn allocate_crt_region(
     let result: Result<u64, CrtHeapError> = (|| {
         ensure_crt_heap_mapping(unicorn)?;
         let allocation = unicorn.get_data().crt_heap.prepare_allocation(size)?;
-        let pointer = unicorn
-            .get_data()
-            .crt_heap
-            .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
+        let pointer =
+            unicorn
+                .get_data()
+                .crt_heap
+                .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
         unicorn
             .get_data_mut()
             .crt_heap
@@ -1098,10 +1113,7 @@ fn emulate_crt_free(unicorn: &mut Unicorn<'_, GuestState>) {
     let _ = unicorn.reg_write(RegisterX86::RAX, 0);
 }
 
-fn emulate_windows_hook_api(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    operation: LegacyWin64Import,
-) {
+fn emulate_windows_hook_api(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
         match operation {
             LegacyWin64Import::SetWindowsHookExA => {
@@ -1133,7 +1145,12 @@ fn emulate_windows_hook_api(
             }
             LegacyWin64Import::UnhookWindowsHookEx => {
                 let handle = read_win64_import_argument(unicorn, 0)?;
-                if unicorn.get_data_mut().windows_hooks.remove(&handle).is_some() {
+                if unicorn
+                    .get_data_mut()
+                    .windows_hooks
+                    .remove(&handle)
+                    .is_some()
+                {
                     Ok(1)
                 } else {
                     unicorn.get_data_mut().windows_last_error = 1404;
@@ -1151,10 +1168,7 @@ fn emulate_windows_hook_api(
     finish_guest_stdio(unicorn, result);
 }
 
-fn emulate_windows_timer_api(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    operation: LegacyWin64Import,
-) {
+fn emulate_windows_timer_api(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
         let window = read_win64_import_argument(unicorn, 0)?;
         let requested_id = read_win64_import_argument(unicorn, 1)?;
@@ -1173,8 +1187,7 @@ fn emulate_windows_timer_api(
         let interval = read_win64_import_argument(unicorn, 2)?;
         let callback = read_win64_import_argument(unicorn, 3)?;
         if interval > u32::MAX as u64
-            || (callback != 0
-                && !guest_range_has_permission(unicorn, callback, 1, Prot::EXEC)?)
+            || (callback != 0 && !guest_range_has_permission(unicorn, callback, 1, Prot::EXEC)?)
         {
             unicorn.get_data_mut().windows_last_error = 87;
             return Ok(0);
@@ -1234,10 +1247,10 @@ fn emulate_message_box(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
             .push((caption, text, style));
         // Choose the dismissive/default-safe result for each button group.
         Ok(match style & 0xf {
-            0 => 1, // IDOK
+            0 => 1,             // IDOK
             1 | 3 | 5 | 6 => 2, // IDCANCEL
-            2 => 3, // IDABORT
-            4 => 7, // IDNO
+            2 => 3,             // IDABORT
+            4 => 7,             // IDNO
             _ => 1,
         })
     })();
@@ -1283,14 +1296,15 @@ fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
                 .map_err(|error| error.to_string())?;
             return Ok(pointer);
         }
-        let new_pointer = match unicorn.get_data().crt_heap.first_fit(
-            CRT_HEAP_BASE,
-            CRT_HEAP_END,
-            replacement,
-        ) {
-            Ok(pointer) => pointer,
-            Err(_) => return Ok(0),
-        };
+        let new_pointer =
+            match unicorn
+                .get_data()
+                .crt_heap
+                .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, replacement)
+            {
+                Ok(pointer) => pointer,
+                Err(_) => return Ok(0),
+            };
         let bytes = unicorn
             .mem_read_as_vec(pointer, old.requested_size.min(size) as usize)
             .map_err(|error| format!("CRT realloc read old block: {error}"))?;
@@ -1469,10 +1483,7 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
             .and_then(|bytes| bytes.try_into().ok())
             .map(u64::from_le_bytes)
             .unwrap_or_default();
-        let live_allocation = unicorn
-            .get_data()
-            .crt_heap
-            .allocation_containing(source);
+        let live_allocation = unicorn.get_data().crt_heap.allocation_containing(source);
         let error = if let Some((base, allocation)) = live_allocation {
             let remaining = allocation.requested_size - (source - base);
             let mut scanned = 0u64;
@@ -1519,7 +1530,12 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
                     .filter_map(|(slot, bytes)| {
                         let address = u64::from_le_bytes(bytes.try_into().ok()?);
                         let module = guest_module_from_address(unicorn.get_data(), address)?;
-                        Some(format!("+{:#x}:{:#x}+{:#x}", slot * 8, module, address - module))
+                        Some(format!(
+                            "+{:#x}:{:#x}+{:#x}",
+                            slot * 8,
+                            module,
+                            address - module
+                        ))
                     })
                     .take(16)
                     .collect::<Vec<_>>()
@@ -1769,7 +1785,9 @@ fn read_crt_stdio_c_string(
         }
         let chunk = unicorn
             .mem_read_as_vec(current, chunk_len)
-            .map_err(|error| format!("stdio {label} address {current:#x} is not readable: {error}"))?;
+            .map_err(|error| {
+                format!("stdio {label} address {current:#x} is not readable: {error}")
+            })?;
         if let Some(end) = chunk.iter().position(|byte| *byte == 0) {
             bytes.extend_from_slice(&chunk[..end]);
             return Ok(bytes);
@@ -1824,12 +1842,18 @@ fn emulate_crt_strcmp(unicorn: &mut Unicorn<'_, GuestState>) {
             let left_bytes = unicorn
                 .mem_read_as_vec(left + offset, count)
                 .map_err(|error| {
-                    format!("strcmp left string address {:#x} is not readable: {error}", left + offset)
+                    format!(
+                        "strcmp left string address {:#x} is not readable: {error}",
+                        left + offset
+                    )
                 })?;
             let right_bytes = unicorn
                 .mem_read_as_vec(right + offset, count)
                 .map_err(|error| {
-                    format!("strcmp right string address {:#x} is not readable: {error}", right + offset)
+                    format!(
+                        "strcmp right string address {:#x} is not readable: {error}",
+                        right + offset
+                    )
                 })?;
             for (&left_byte, &right_byte) in left_bytes.iter().zip(&right_bytes) {
                 let ordering = left_byte.cmp(&right_byte);
@@ -1933,7 +1957,9 @@ fn emulate_crt_stricmp(unicorn: &mut Unicorn<'_, GuestState>, bounded: bool) {
         } else {
             MAX_CRT_STRING_BYTES
         };
-        if limit == 0 { return Ok(0); }
+        if limit == 0 {
+            return Ok(0);
+        }
         let left = read_win64_import_argument(unicorn, 0)?;
         let right = read_win64_import_argument(unicorn, 1)?;
         if left == 0 || right == 0 {
@@ -2483,11 +2509,15 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
             "__RTDynamicCast target type",
         )?;
         let read_u32 = |uc: &mut Unicorn<'_, GuestState>, address: u64| -> Result<u32, String> {
-            let bytes = uc.mem_read_as_vec(address, 4).map_err(|error| format!("__RTDynamicCast RTTI read {address:#x}: {error}"))?;
+            let bytes = uc
+                .mem_read_as_vec(address, 4)
+                .map_err(|error| format!("__RTDynamicCast RTTI read {address:#x}: {error}"))?;
             Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
         };
         let read_u64 = |uc: &mut Unicorn<'_, GuestState>, address: u64| -> Result<u64, String> {
-            let bytes = uc.mem_read_as_vec(address, 8).map_err(|error| format!("__RTDynamicCast pointer read {address:#x}: {error}"))?;
+            let bytes = uc
+                .mem_read_as_vec(address, 8)
+                .map_err(|error| format!("__RTDynamicCast pointer read {address:#x}: {error}"))?;
             Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
         };
         let add_signed = |base: u64, displacement: i32| -> Result<u64, String> {
@@ -2497,18 +2527,31 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
         let vf_delta = read_win64_import_argument(unicorn, 1)? as u32 as i32;
         let vf_address = add_signed(object, vf_delta)?;
         let vftable = read_u64(unicorn, vf_address)?;
-        let locator = read_u64(unicorn, vftable.checked_sub(8).ok_or("__RTDynamicCast invalid vftable")?)?;
+        let locator = read_u64(
+            unicorn,
+            vftable
+                .checked_sub(8)
+                .ok_or("__RTDynamicCast invalid vftable")?,
+        )?;
         let signature = read_u32(unicorn, locator)?;
         if signature != 1 {
-            return Err(format!("__RTDynamicCast unsupported RTTI locator signature {signature}"));
+            return Err(format!(
+                "__RTDynamicCast unsupported RTTI locator signature {signature}"
+            ));
         }
         let locator_offset = read_u32(unicorn, locator + 4)? as u64;
         let self_rva = read_u32(unicorn, locator + 20)? as u64;
-        let image_base = locator.checked_sub(self_rva).ok_or("__RTDynamicCast invalid image base")?;
-        let complete = vf_address.checked_sub(locator_offset).ok_or("__RTDynamicCast invalid complete object offset")?;
+        let image_base = locator
+            .checked_sub(self_rva)
+            .ok_or("__RTDynamicCast invalid image base")?;
+        let complete = vf_address
+            .checked_sub(locator_offset)
+            .ok_or("__RTDynamicCast invalid complete object offset")?;
         let hierarchy = image_base + read_u32(unicorn, locator + 16)? as u64;
         let base_count = read_u32(unicorn, hierarchy + 8)? as usize;
-        if base_count > 1024 { return Err("__RTDynamicCast base class count exceeds bound".into()); }
+        if base_count > 1024 {
+            return Err("__RTDynamicCast base class count exceeds bound".into());
+        }
         let base_array = image_base + read_u32(unicorn, hierarchy + 12)? as u64;
         let mut hierarchy_names = Vec::new();
         for index in 0..base_count {
@@ -2523,7 +2566,9 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
             if hierarchy_names.len() < 8 {
                 hierarchy_names.push(String::from_utf8_lossy(&descriptor_name).into_owned());
             }
-            if descriptor_type != target_type && descriptor_name != target_name { continue; }
+            if descriptor_type != target_type && descriptor_name != target_name {
+                continue;
+            }
             let mdisp = read_u32(unicorn, descriptor + 8)? as i32;
             let pdisp = read_u32(unicorn, descriptor + 12)? as i32;
             let vdisp = read_u32(unicorn, descriptor + 16)? as i32;
@@ -2553,7 +2598,12 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
                         .filter_map(|(slot, bytes)| {
                             let address = u64::from_le_bytes(bytes.try_into().ok()?);
                             let module = guest_module_from_address(unicorn.get_data(), address)?;
-                            Some(format!("+{:#x}:{:#x}+{:#x}", slot * 8, module, address - module))
+                            Some(format!(
+                                "+{:#x}:{:#x}+{:#x}",
+                                slot * 8,
+                                module,
+                                address - module
+                            ))
                         })
                         .take(16)
                         .collect::<Vec<_>>()
@@ -2562,7 +2612,8 @@ fn emulate_rt_dynamic_cast(unicorn: &mut Unicorn<'_, GuestState>) {
                 .unwrap_or_default();
             return Err(format!(
                 "__RTDynamicCast target reference is absent from RTTI: {}; hierarchy={}; caller={caller:#x}; stack_code={stack_code}",
-                String::from_utf8_lossy(&target_name), hierarchy_names.join("|")
+                String::from_utf8_lossy(&target_name),
+                hierarchy_names.join("|")
             ));
         }
         Ok(0)
@@ -4266,7 +4317,11 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                 let character_width = if width == usize::MAX { 1 } else { width };
                 let count = character_width.min(input.len().saturating_sub(pos));
                 if count == 0 {
-                    return Ok(if assigned != 0 { assigned } else { u32::MAX as u64 });
+                    return Ok(if assigned != 0 {
+                        assigned
+                    } else {
+                        u32::MAX as u64
+                    });
                 }
                 if !suppress {
                     let slot = args
@@ -4276,8 +4331,11 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                         return Err("scanf va_list unreadable".into());
                     }
                     let output = u64::from_le_bytes(
-                        unicorn.mem_read_as_vec(slot, 8).map_err(|e| e.to_string())?[..]
-                            .try_into().unwrap(),
+                        unicorn
+                            .mem_read_as_vec(slot, 8)
+                            .map_err(|e| e.to_string())?[..]
+                            .try_into()
+                            .unwrap(),
                     );
                     arg_index += 1;
                     if options & 1 != 0 {
@@ -4285,8 +4343,11 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                             .checked_add(arg_index * 8)
                             .ok_or("scanf va_list overflow")?;
                         let size = u64::from_le_bytes(
-                            unicorn.mem_read_as_vec(size_slot, 8).map_err(|e| e.to_string())?[..]
-                                .try_into().unwrap(),
+                            unicorn
+                                .mem_read_as_vec(size_slot, 8)
+                                .map_err(|e| e.to_string())?[..]
+                                .try_into()
+                                .unwrap(),
                         );
                         arg_index += 1;
                         if size < count as u64 {
@@ -4312,7 +4373,11 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                     pos += 1;
                 }
                 if pos == input.len() {
-                    return Ok(if assigned != 0 { assigned } else { u32::MAX as u64 });
+                    return Ok(if assigned != 0 {
+                        assigned
+                    } else {
+                        u32::MAX as u64
+                    });
                 }
                 let end = pos.saturating_add(width).min(input.len());
                 let start = pos;
@@ -4352,7 +4417,9 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                 if !suppress {
                     let text = std::str::from_utf8(&input[start..pos])
                         .map_err(|_| "scanf float is not ASCII")?;
-                    let value = text.parse::<f32>().map_err(|_| "scanf float parse failed")?;
+                    let value = text
+                        .parse::<f32>()
+                        .map_err(|_| "scanf float parse failed")?;
                     let slot = args
                         .checked_add(arg_index * 8)
                         .ok_or("scanf va_list overflow")?;
@@ -4360,10 +4427,14 @@ fn emulate_stdio_common_vsscanf(unicorn: &mut Unicorn<'_, GuestState>) {
                         return Err("scanf va_list unreadable".into());
                     }
                     let output = u64::from_le_bytes(
-                        unicorn.mem_read_as_vec(slot, 8).map_err(|e| e.to_string())?[..]
-                            .try_into().unwrap(),
+                        unicorn
+                            .mem_read_as_vec(slot, 8)
+                            .map_err(|e| e.to_string())?[..]
+                            .try_into()
+                            .unwrap(),
                     );
-                    if output == 0 || !guest_range_has_permission(unicorn, output, 4, Prot::WRITE)? {
+                    if output == 0 || !guest_range_has_permission(unicorn, output, 4, Prot::WRITE)?
+                    {
                         return Err("scanf float output unwritable".into());
                     }
                     unicorn
@@ -4849,11 +4920,17 @@ fn emulate_crt_strtod(unicorn: &mut Unicorn<'_, GuestState>) {
         if end_pointer != 0 && !guest_range_has_permission(unicorn, end_pointer, 8, Prot::WRITE)? {
             return Err("strtod end pointer is not writable".into());
         }
-        let bytes = read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strtod source")?;
-        let first = bytes.iter().position(|byte| !byte.is_ascii_whitespace()).unwrap_or(bytes.len());
+        let bytes =
+            read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strtod source")?;
+        let first = bytes
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(bytes.len());
         let mut parsed = None;
         for end in (first + 1..=bytes.len()).rev() {
-            let Ok(text) = std::str::from_utf8(&bytes[first..end]) else { continue };
+            let Ok(text) = std::str::from_utf8(&bytes[first..end]) else {
+                continue;
+            };
             if let Ok(value) = text.parse::<f64>() {
                 parsed = Some((value, end));
                 break;
@@ -4862,14 +4939,20 @@ fn emulate_crt_strtod(unicorn: &mut Unicorn<'_, GuestState>) {
         let (value, consumed) = parsed.unwrap_or((0.0, 0));
         if end_pointer != 0 {
             let end = source + consumed as u64;
-            unicorn.mem_write(end_pointer, &end.to_le_bytes()).map_err(|error| format!("strtod end pointer write failed: {error}"))?;
+            unicorn
+                .mem_write(end_pointer, &end.to_le_bytes())
+                .map_err(|error| format!("strtod end pointer write failed: {error}"))?;
         }
         Ok(value)
     })();
     match result {
-        Ok(value) => { let _ = unicorn.reg_write(RegisterX86::XMM0, value.to_bits()); }
+        Ok(value) => {
+            let _ = unicorn.reg_write(RegisterX86::XMM0, value.to_bits());
+        }
         Err(error) => {
-            if unicorn.get_data().callback_error.is_none() { unicorn.get_data_mut().callback_error = Some(error); }
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
             let _ = unicorn.emu_stop();
         }
     }
@@ -4897,9 +4980,7 @@ fn emulate_crt_strto(unicorn: &mut Unicorn<'_, GuestState>, signed: bool) {
         if source == 0 {
             return Err("strtol null source: invalid parameter handler is not implemented".into());
         }
-        if end_pointer != 0
-            && !guest_range_has_permission(unicorn, end_pointer, 8, Prot::WRITE)?
-        {
+        if end_pointer != 0 && !guest_range_has_permission(unicorn, end_pointer, 8, Prot::WRITE)? {
             return Err("strtol end pointer is not writable".into());
         }
         if requested_base != 0 && !(2..=36).contains(&requested_base) {
@@ -4921,7 +5002,9 @@ fn emulate_crt_strto(unicorn: &mut Unicorn<'_, GuestState>, signed: bool) {
                 .checked_add(offset as u64)
                 .ok_or("strtol source range overflow")?;
             if !guest_range_has_permission(unicorn, address, 1, Prot::READ)? {
-                return Err(format!("strtol source address {address:#x} is not readable"));
+                return Err(format!(
+                    "strtol source address {address:#x} is not readable"
+                ));
             }
             let mut byte = [0];
             unicorn
@@ -4995,7 +5078,11 @@ fn emulate_crt_strto(unicorn: &mut Unicorn<'_, GuestState>, signed: bool) {
             position += 1;
         }
         let consumed = position != digits_begin;
-        let end = if consumed { source + position as u64 } else { source };
+        let end = if consumed {
+            source + position as u64
+        } else {
+            source
+        };
         if end_pointer != 0 {
             unicorn
                 .mem_write(end_pointer, &end.to_le_bytes())

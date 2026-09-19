@@ -1139,10 +1139,12 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
                 }
                 let bytes = unicorn.mem_read_as_vec(exception + 8, 8).ok()?;
                 let what = u64::from_le_bytes(bytes.try_into().ok()?);
-                let message = read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
+                let message =
+                    read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
                 Some(String::from_utf8_lossy(&message).into_owned())
             });
-        let message_suffix = cv_message.or(std_message)
+        let message_suffix = cv_message
+            .or(std_message)
             .map(|message| format!(", cv_message={message}"))
             .unwrap_or_default();
         let caller = unicorn
@@ -1166,7 +1168,12 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
                     .filter_map(|(slot, bytes)| {
                         let address = u64::from_le_bytes(bytes.try_into().ok()?);
                         let module = guest_module_from_address(unicorn.get_data(), address)?;
-                        Some(format!("+{:#x}:{:#x}+{:#x}", slot * 8, module, address - module))
+                        Some(format!(
+                            "+{:#x}:{:#x}+{:#x}",
+                            slot * 8,
+                            module,
+                            address - module
+                        ))
                     })
                     .take(24)
                     .collect::<Vec<_>>()
@@ -1261,13 +1268,16 @@ fn try_emulate_ocio_missing_file_rule(unicorn: &mut Unicorn<'_, GuestState>) -> 
         Ok(value) => value,
         Err(_) => return false,
     };
-    let Some(message) = cv_exception_message(unicorn, exception, ".?AVException@OpenColorIO_v2_4@@")
-        .or_else(|| {
-            let bytes = unicorn.mem_read_as_vec(exception + 8, 8).ok()?;
-            let what = u64::from_le_bytes(bytes.try_into().ok()?);
-            let message = read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
-            Some(String::from_utf8_lossy(&message).into_owned())
-        })
+    let Some(message) =
+        cv_exception_message(unicorn, exception, ".?AVException@OpenColorIO_v2_4@@").or_else(
+            || {
+                let bytes = unicorn.mem_read_as_vec(exception + 8, 8).ok()?;
+                let what = u64::from_le_bytes(bytes.try_into().ok()?);
+                let message =
+                    read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
+                Some(String::from_utf8_lossy(&message).into_owned())
+            },
+        )
     else {
         return false;
     };

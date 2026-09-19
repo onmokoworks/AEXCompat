@@ -116,10 +116,14 @@ fn emulate_msvcp_codecvt(unicorn: &mut Unicorn<'_, GuestState>, wide_to_narrow: 
         for index in 0..converted {
             let source = from + index * input_width;
             let value = if wide_to_narrow {
-                let bytes = unicorn.mem_read_as_vec(source, 2).map_err(|e| e.to_string())?;
+                let bytes = unicorn
+                    .mem_read_as_vec(source, 2)
+                    .map_err(|e| e.to_string())?;
                 u16::from_le_bytes([bytes[0], bytes[1]])
             } else {
-                unicorn.mem_read_as_vec(source, 1).map_err(|e| e.to_string())?[0] as u16
+                unicorn
+                    .mem_read_as_vec(source, 1)
+                    .map_err(|e| e.to_string())?[0] as u16
             };
             if wide_to_narrow && value > 0x7f {
                 return Ok(2); // codecvt_base::error in the C locale
@@ -152,7 +156,9 @@ fn emulate_global_memory_status_ex(unicorn: &mut Unicorn<'_, GuestState>) {
             return Ok(0);
         }
         let mut length = [0; 4];
-        unicorn.mem_read(output, &mut length).map_err(|e| e.to_string())?;
+        unicorn
+            .mem_read(output, &mut length)
+            .map_err(|e| e.to_string())?;
         if u32::from_le_bytes(length) != STRUCT_BYTES as u32 {
             unicorn.get_data_mut().windows_last_error = 87;
             return Ok(0);
@@ -171,7 +177,9 @@ fn emulate_global_memory_status_ex(unicorn: &mut Unicorn<'_, GuestState>) {
         ] {
             bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         }
-        unicorn.mem_write(output, &bytes).map_err(|e| e.to_string())?;
+        unicorn
+            .mem_write(output, &bytes)
+            .map_err(|e| e.to_string())?;
         Ok(1)
     })();
     finish_guest_stdio(unicorn, result);
@@ -188,13 +196,16 @@ fn emulate_init_once(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin
             return Ok(0);
         }
         if operation == LegacyWin64Import::InitOnceInitialize {
-            unicorn.mem_write(object, &[0; 8]).map_err(|e| e.to_string())?;
+            unicorn
+                .mem_write(object, &[0; 8])
+                .map_err(|e| e.to_string())?;
             unicorn.get_data_mut().windows_init_once.remove(&object);
             return Ok(0);
         }
         let flags = read_win64_import_argument(unicorn, 1)? as u32;
         if operation == LegacyWin64Import::InitOnceComplete {
-            if flags & !(ASYNC | INIT_FAILED) != 0 || flags & ASYNC != 0 && flags & INIT_FAILED != 0 {
+            if flags & !(ASYNC | INIT_FAILED) != 0 || flags & ASYNC != 0 && flags & INIT_FAILED != 0
+            {
                 unicorn.get_data_mut().windows_last_error = 87;
                 return Ok(0);
             }
@@ -209,7 +220,9 @@ fn emulate_init_once(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin
             }
             if flags & INIT_FAILED != 0 {
                 unicorn.get_data_mut().windows_init_once.remove(&object);
-                unicorn.mem_write(object, &[0; 8]).map_err(|e| e.to_string())?;
+                unicorn
+                    .mem_write(object, &[0; 8])
+                    .map_err(|e| e.to_string())?;
             } else {
                 if context & 3 != 0 {
                     unicorn.get_data_mut().windows_last_error = 87;
@@ -217,9 +230,15 @@ fn emulate_init_once(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin
                 }
                 unicorn.get_data_mut().windows_init_once.insert(
                     object,
-                    WindowsInitOnceState { owner: None, context, complete: true },
+                    WindowsInitOnceState {
+                        owner: None,
+                        context,
+                        complete: true,
+                    },
                 );
-                unicorn.mem_write(object, &(context | 1).to_le_bytes()).map_err(|e| e.to_string())?;
+                unicorn
+                    .mem_write(object, &(context | 1).to_le_bytes())
+                    .map_err(|e| e.to_string())?;
             }
             return Ok(1);
         }
@@ -249,16 +268,26 @@ fn emulate_init_once(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin
                     let owner = unicorn.get_data().current_windows_thread_id;
                     unicorn.get_data_mut().windows_init_once.insert(
                         object,
-                        WindowsInitOnceState { owner: Some(owner), context: 0, complete: false },
+                        WindowsInitOnceState {
+                            owner: Some(owner),
+                            context: 0,
+                            complete: false,
+                        },
                     );
-                    unicorn.mem_write(object, &2u64.to_le_bytes()).map_err(|e| e.to_string())?;
+                    unicorn
+                        .mem_write(object, &2u64.to_le_bytes())
+                        .map_err(|e| e.to_string())?;
                 }
                 (1, 0)
             }
         };
-        unicorn.mem_write(pending_out, &pending.to_le_bytes()).map_err(|e| e.to_string())?;
+        unicorn
+            .mem_write(pending_out, &pending.to_le_bytes())
+            .map_err(|e| e.to_string())?;
         if context_out != 0 {
-            unicorn.mem_write(context_out, &context.to_le_bytes()).map_err(|e| e.to_string())?;
+            unicorn
+                .mem_write(context_out, &context.to_le_bytes())
+                .map_err(|e| e.to_string())?;
         }
         Ok(1)
     })();
@@ -419,27 +448,29 @@ fn emulate_crt_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
 // char fields. The deterministic C locale uses "." for decimal_point, empty
 // strings for every other string field, and CHAR_MAX for monetary metadata.
 fn crt_lconv_address(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
-        if let Some(address) = unicorn.get_data().crt_lconv_buffer {
-            return Ok(address);
-        }
-        // Keep this page immediately before the disjoint errno thread arena.
-        // The lower stream namespace after `+3 pages` belongs to popup text.
-        let address = CRT_ERRNO_BASE - PAGE_SIZE;
-        let decimal = address + 88;
-        let empty = decimal + 2;
-        let mut bytes = [0u8; 96];
-        bytes[0..8].copy_from_slice(&decimal.to_le_bytes());
-        for offset in (8..80).step_by(8) {
-            bytes[offset..offset + 8].copy_from_slice(&empty.to_le_bytes());
-        }
-        bytes[80..88].fill(i8::MAX as u8);
-        bytes[88..92].copy_from_slice(b".\0\0\0");
-        unicorn
-            .mem_map(address, PAGE_SIZE, Prot::READ)
-            .map_err(|e| e.to_string())?;
-        unicorn.mem_write(address, &bytes).map_err(|e| e.to_string())?;
-        unicorn.get_data_mut().crt_lconv_buffer = Some(address);
-        Ok(address)
+    if let Some(address) = unicorn.get_data().crt_lconv_buffer {
+        return Ok(address);
+    }
+    // Keep this page immediately before the disjoint errno thread arena.
+    // The lower stream namespace after `+3 pages` belongs to popup text.
+    let address = CRT_ERRNO_BASE - PAGE_SIZE;
+    let decimal = address + 88;
+    let empty = decimal + 2;
+    let mut bytes = [0u8; 96];
+    bytes[0..8].copy_from_slice(&decimal.to_le_bytes());
+    for offset in (8..80).step_by(8) {
+        bytes[offset..offset + 8].copy_from_slice(&empty.to_le_bytes());
+    }
+    bytes[80..88].fill(i8::MAX as u8);
+    bytes[88..92].copy_from_slice(b".\0\0\0");
+    unicorn
+        .mem_map(address, PAGE_SIZE, Prot::READ)
+        .map_err(|e| e.to_string())?;
+    unicorn
+        .mem_write(address, &bytes)
+        .map_err(|e| e.to_string())?;
+    unicorn.get_data_mut().crt_lconv_buffer = Some(address);
+    Ok(address)
 }
 
 fn emulate_crt_localeconv(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -450,12 +481,13 @@ fn emulate_crt_localeconv(unicorn: &mut Unicorn<'_, GuestState>) {
 // UCRT allocates these colon-delimited C-locale tables for the caller, which
 // releases them through the ordinary CRT heap.
 fn emulate_crt_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
-    const DAYS: &[u8] = b":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday\0";
+    const DAYS: &[u8] =
+        b":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday\0";
     const MONTHS: &[u8] = b":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:November:Dec:December\0";
     let result = (|| -> Result<u64, String> {
         let bytes = if months { MONTHS } else { DAYS };
-        let pointer = allocate_crt_region(unicorn, bytes.len() as u64)
-            .map_err(|error| error.to_string())?;
+        let pointer =
+            allocate_crt_region(unicorn, bytes.len() as u64).map_err(|error| error.to_string())?;
         unicorn.mem_write(pointer, bytes).map_err(|error| {
             let _ = free_crt_region(unicorn, pointer);
             error.to_string()
@@ -466,7 +498,8 @@ fn emulate_crt_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
 }
 
 fn emulate_crt_wide_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bool) {
-    const DAYS: &str = ":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday";
+    const DAYS: &str =
+        ":Sun:Sunday:Mon:Monday:Tue:Tuesday:Wed:Wednesday:Thu:Thursday:Fri:Friday:Sat:Saturday";
     const MONTHS: &str = ":Jan:January:Feb:February:Mar:March:Apr:April:May:May:Jun:June:Jul:July:Aug:August:Sep:September:Oct:October:Nov:November:Dec:December";
     let result = (|| -> Result<u64, String> {
         let value = if months { MONTHS } else { DAYS };
@@ -474,8 +507,8 @@ fn emulate_crt_wide_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bo
         for unit in value.encode_utf16().chain([0]) {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
-        let pointer = allocate_crt_region(unicorn, bytes.len() as u64)
-            .map_err(|error| error.to_string())?;
+        let pointer =
+            allocate_crt_region(unicorn, bytes.len() as u64).map_err(|error| error.to_string())?;
         unicorn.mem_write(pointer, &bytes).map_err(|error| {
             let _ = free_crt_region(unicorn, pointer);
             error.to_string()
@@ -487,11 +520,49 @@ fn emulate_crt_wide_time_names(unicorn: &mut Unicorn<'_, GuestState>, months: bo
 
 fn emulate_crt_time_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
     const NAMES: [&str; 43] = [
-        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sunday", "Monday", "Tuesday",
-        "Wednesday", "Thursday", "Friday", "Saturday", "Jan", "Feb", "Mar", "Apr", "May",
-        "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "January", "February", "March",
-        "April", "May", "June", "July", "August", "September", "October", "November",
-        "December", "AM", "PM", "MM/dd/yy", "dddd, MMMM dd, yyyy", "HH:mm:ss",
+        "Sun",
+        "Mon",
+        "Tue",
+        "Wed",
+        "Thu",
+        "Fri",
+        "Sat",
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+        "AM",
+        "PM",
+        "MM/dd/yy",
+        "dddd, MMMM dd, yyyy",
+        "HH:mm:ss",
     ];
     const POINTER_COUNT: usize = 43;
     const HEADER_BYTES: usize = POINTER_COUNT * 8 + 8 + POINTER_COUNT * 8 + 8;
@@ -502,8 +573,8 @@ fn emulate_crt_time_locale_names(unicorn: &mut Unicorn<'_, GuestState>) {
         let total = wide_start
             .checked_add(wide_bytes)
             .ok_or("_Gettnames size overflow")?;
-        let pointer = allocate_crt_region(unicorn, total as u64)
-            .map_err(|error| error.to_string())?;
+        let pointer =
+            allocate_crt_region(unicorn, total as u64).map_err(|error| error.to_string())?;
         let mut bytes = vec![0u8; total];
         let mut narrow = HEADER_BYTES;
         let mut wide = wide_start;
@@ -538,10 +609,7 @@ fn supported_crt_locale(unicorn: &Unicorn<'_, GuestState>, locale: u64) -> bool 
     locale == 0 || unicorn.get_data().crt_locales.contains(&locale)
 }
 
-fn emulate_crt_locale_object(
-    unicorn: &mut Unicorn<'_, GuestState>,
-    operation: LegacyWin64Import,
-) {
+fn emulate_crt_locale_object(unicorn: &mut Unicorn<'_, GuestState>, operation: LegacyWin64Import) {
     let result = (|| -> Result<u64, String> {
         if operation == LegacyWin64Import::CrtFreeLocale {
             let locale = read_win64_import_argument(unicorn, 0)?;
