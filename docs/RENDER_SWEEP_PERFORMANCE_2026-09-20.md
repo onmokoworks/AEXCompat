@@ -113,6 +113,109 @@ Bucket counts sum to the record count. The report is
 omitted. `--blocked-path` retains matching candidates in the denominator and
 labels them instead of silently excluding them.
 
+## Current 984-record reconciliation and clean-build recovery
+
+After the OLM semantic cycles, the current shipping scan still found exactly
+984 AEX files across the two default roots. The load-free inventory report is
+`%TEMP%/aexcompat-inventory-fresh-worker-current-20260920.json`. It records 570
+in-scope records and 414 external-blocked records: 292 Sapphire files plus 122
+Maxon/Red Giant/Trapcode/Magic Bullet records. The blocked selectors are saved
+in the report, and blocked rows remain in the 984-record denominator. The
+inventory completed in 485 ms with CLI SHA-256
+`cc96567e93c05c633d5a94c67d1ee5444b0032656e31d5ba3687691e85f8ac3b`
+and worker SHA-256
+`2b00eb2793abcfce3cec7d9647bf09133c47c1a7507b813a456dcd1e71fbdac3`,
+matching the render milestone below.
+
+The reconciliation found one record present in the inventory but absent from
+the MediaCore-root cohort: `LogiPlugin.aex` (SHA-256
+`561b2971d2bf2350646b3496274a9bd9ae453b5034395f1ebba367649fa33f13`)
+under the newest After Effects Plug-ins scan root. A default two-root shipping
+probe classified it as `plugin_kind=aegp`, category `General Plugin`, with zero
+parameters and no image-render route. The report is
+`%TEMP%/aexcompat-logiplugin-focused-20260920.json`; it is now the third
+evidence-backed non-image record rather than an unmeasured image failure.
+
+The first current-fingerprint render milestone exposed a build-artifact
+problem. Report
+`%TEMP%/aexcompat-render-current-nonmaxon-nonsapphire-20260920.json` took
+928,797 ms and recorded 425 rendered, seven transparent, three AEGP, and 135
+`session_close_failed` rows. Every close failure exited 22 after producing a
+decoded frame. Of those failures, 127 shared the main Continuum dependency
+closure; the remaining eight occupied five smaller closures. A focused
+`Beauty Studio.aex` close report showed a valid frame but one live output world
+(`worlds_created=1`, `worlds_disposed=0`), which failed the worker's terminal
+world-lifetime invariant.
+
+This matched the already-recorded incremental-build discriminator. A fresh
+Release build from the same source, isolated at
+`target/minihost-build-fresh-boris-close-20260920`, produced worker SHA-256
+`2b00eb2793abcfce3cec7d9647bf09133c47c1a7507b813a456dcd1e71fbdac3`.
+The same `Beauty Studio.aex` then rendered with the identical pixel SHA-256,
+one created and one disposed world, zero live worlds, and a clean session.
+One representative from each of the six failing dependency closures also
+rendered cleanly: `Primatte Studio`, `RefractionDispersion`, `FastBokeh`,
+`P_Texture`, `P_BlurCelLayer`, and `onmk/DistortChroma`. The fresh worker was
+then placed at the canonical shipping development path
+`target/minihost-build/aex_worker.exe`; the replaced binary is retained in
+`%TEMP%` under its full `68816d...` hash. Native stdout routing passed 2 tests
+with 16 unrelated fixture-dependent skips, and broker render-session tests
+passed 18/18.
+
+The single post-recovery milestone report is
+`%TEMP%/aexcompat-render-fresh-worker-nonmaxon-nonsapphire-20260920.json`:
+
+| result | count |
+|---|---:|
+| rendered, nontransparent execution probes | 558 |
+| rendered but fully transparent | 9 |
+| non-image AEGP | 3 |
+| session-open / frame / close / worker failures | 0 |
+| executed in-scope records | 570 |
+| external blocked, not executed | 414 |
+| inventory total | 984 |
+
+The merged per-record ledger is
+`%TEMP%/aexcompat-ledger-fresh-worker-20260920.json` (1,802,696 bytes,
+SHA-256
+`26cc4ad9d5466711fad05325dfbb3793a57c81040c2e077aaa348dd10d01acf1`).
+It contains exactly 984 records and preserves every inventory row, including
+blocked and non-image entries. Each row records the relative AEX identity,
+path hash, plug-in hash and size, host/worker build fingerprint, render
+conditions reference, final stage, execution and failure classification,
+plug-in kind, and—when executed—decoded-output size/hash/alpha validation,
+session state, and worker exit. Its bucket counts are 558 rendered, nine
+rendered-transparent, three AEGP, and 414 external-blocked, which sum to the
+inventory total and use the same CLI/worker fingerprint as the milestone.
+
+Discovery took 17,566 ms and the complete 570-record run took 724,866 ms. All
+570 identities and AEX hashes match the failed milestone. The fresh worker
+changed 133 close failures to `rendered` and two to `rendered_transparent`.
+Only four pixel SHA-256 values differed. `ONMK_ParticleLab` and `ParticleKit`
+returned exactly to their earlier accepted hashes. `DeBlock` matched its prior
+accepted hash in the full run but produced the other observed hash in a later
+fresh process. `signal` produced different hashes across prior, failed-worker,
+fresh-milestone, and focused-process runs. Both pass same-run fresh-session
+determinism checks, so these two remain recorded as process-dependent outputs,
+not evidence that the clean rebuild changed their effect semantics.
+
+The nine transparent execution probes are `BCCCartoonLight`,
+`BCCLinearLumaKey`, `BCCMotionBlur`, `BCCParticleEmitter`, `BCCRadiantEdges`,
+`Composite`, `Linear Luma Key`, `ColorKeep`, and `DistanceGradation`.
+`ColorKeep` and `DistanceGradation` already have effect-appropriate semantic
+fixtures below; the seven Boris effects remain a semantic-input cohort and are
+not counted as valid visible-effect success. Likewise, the other 558 rows are
+transport/decode successes, not blanket proof that every default applied its
+intended effect; previously recorded demo overlays and input-equal defaults
+remain separate semantic work.
+
+One focused command intended for `onmk/DistortChroma.aex` used a basename
+substring filter against both default roots and also executed Sapphire's
+`S_DistortChroma.aex` once. This violated the execution exclusion even though
+it did not start After Effects or change licensing. The corrected probe was
+restricted to the exact `onmk` folder, and subsequent commands retain explicit
+Sapphire/Maxon exclusions or exact cohort roots.
+
 ## Boris Continuum cohort
 
 Shipping discovery inspected all 496 Continuum AEX files successfully in
@@ -621,3 +724,17 @@ package's absent model weights remain
 `external_blocked:missing_model_assets`; the local probe model is evidence,
 not a claim that AEXCompat ships that third-party asset. No After Effects
 process was used.
+
+The current-corpus reconciliation supersedes that external state. The two
+registered shipping roots now contain six matching weights: three under
+`MediaCore/DepthAnythingV2/model` and three under
+`MediaCore/models/depth_anything_v2_small`. No model-path environment override
+was present. The current full shipping run resolved those roots without a
+manual folder choice and rendered the installed `DepthONNX.aex` in 1,076 ms:
+147,456 decoded bytes, 36,864 nonzero-alpha pixels, zero invalid-alpha pixels,
+clean session, worker exit 0, and output SHA-256
+`0a2790a19134fba12c809edf952e4831002416f5c044b39c19fb4bad0f30f377`.
+The missing-model external block is therefore no longer current. This proves
+automatic model/runtime resolution and nonempty native output, but the solid
+input result remains semantically unverified against an AE reference or an
+effect-appropriate depth fixture.
