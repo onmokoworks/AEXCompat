@@ -519,6 +519,8 @@ pub struct GuestEngine<'a> {
     image_sha256: String,
     entry_export: String,
     trace_modules: Vec<TraceModule>,
+    primary_attached: bool,
+    primary_poisoned: bool,
 }
 
 struct ParkedWindowsThread {

@@ -970,6 +970,8 @@ impl GuestEngine<'static> {
             image_sha256: image_report.sha256,
             entry_export: image_report.entry_export,
             trace_modules,
+            primary_attached: attach,
+            primary_poisoned: false,
         };
         engine.link_emulated_import_data(image)?;
         initialize_windows_command_line_a(&mut engine)?;

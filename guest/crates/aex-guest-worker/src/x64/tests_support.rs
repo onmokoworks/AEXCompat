@@ -408,6 +408,8 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
             sha256: None,
             symbols: vec!["fixture_entry".into()],
         }],
+        primary_attached: true,
+        primary_poisoned: false,
     }
 }
 

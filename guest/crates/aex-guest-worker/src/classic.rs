@@ -678,7 +678,18 @@ impl ClassicHost {
         image: &PeImage,
         effect_selector: Option<&str>,
     ) -> Result<Self, ClassicError> {
-        let mut engine = GuestEngine::load(image)?;
+        Self::from_engine_with_effect(GuestEngine::load(image)?, image, effect_selector)
+    }
+
+    /// Finish Classic-host construction from an already loaded engine. This is
+    /// used by forkserver children after they attach the same-SHA primary from
+    /// a deferred template; ordinary callers should use `new_with_effect`.
+    pub fn from_engine_with_effect(
+        mut engine: GuestEngine<'static>,
+        image: &PeImage,
+        effect_selector: Option<&str>,
+    ) -> Result<Self, ClassicError> {
+        engine.validate_attached_primary(image)?;
         let input = engine.allocate(abi::PF_IN_DATA_SIZE, 8)?;
         let output = engine.allocate(abi::PF_OUT_DATA_SIZE, 8)?;
         let utils = engine.allocate(abi::PF_UTIL_CALLBACKS_SIZE, 8)?;

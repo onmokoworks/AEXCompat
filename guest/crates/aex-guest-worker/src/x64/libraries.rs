@@ -238,6 +238,13 @@ fn normalized_library_name(name: &str) -> Result<String, GuestError> {
     Ok(name)
 }
 
+fn dependency_parse_batch_len(pending: usize, maximum_workers: usize) -> usize {
+    if pending == 0 {
+        return 0;
+    }
+    maximum_workers.min(pending)
+}
+
 fn prefer_emulated_dependency_import(library: &str, symbol: &str) -> bool {
     library.eq_ignore_ascii_case("msvcp140.dll")
         && matches!(
@@ -283,8 +290,26 @@ impl GuestEngine<'static> {
         image: &PeImage,
         libraries: &[(&str, PeImage)],
     ) -> Result<Self, GuestError> {
+        Self::load_with_libraries_inner(image, libraries, true)
+    }
+
+    /// Build a process template with every explicit dependency initialized,
+    /// while leaving the primary image before process attach. A forkserver can
+    /// copy this quiescent state and attach one primary image in each child.
+    pub fn load_with_libraries_deferred_primary(
+        image: &PeImage,
+        libraries: &[(&str, PeImage)],
+    ) -> Result<Self, GuestError> {
+        Self::load_with_libraries_inner(image, libraries, false)
+    }
+
+    fn load_with_libraries_inner(
+        image: &PeImage,
+        libraries: &[(&str, PeImage)],
+        attach_primary: bool,
+    ) -> Result<Self, GuestError> {
         if libraries.is_empty() {
-            return Self::load_primary(image, true);
+            return Self::load_primary(image, attach_primary);
         }
         if libraries.len() > 64 {
             return Err(GuestError::Callback("DLL count exceeds 64".into()));
@@ -544,12 +569,56 @@ impl GuestEngine<'static> {
                 .unwrap()
                 .initialized = true;
         }
-        engine.run_process_attach_addresses(
+        if attach_primary {
+            engine.run_process_attach_addresses(
+                image.image_base(),
+                image.tls_callbacks(),
+                image.dll_entry_address(),
+            )?;
+            engine.primary_attached = true;
+        }
+        Ok(engine)
+    }
+
+    /// Complete process attach for the primary image of a deferred template.
+    pub fn attach_deferred_primary(&mut self, image: &PeImage) -> Result<(), GuestError> {
+        if self.primary_attached
+            || self.primary_poisoned
+            || image.report().sha256 != self.image_sha256
+            || image.image_base() != self.image_base
+            || image.image_base().checked_add(image.mapped_bytes().len() as u64)
+                != Some(self.image_end)
+        {
+            return Err(GuestError::Callback(
+                "deferred primary image does not match the prepared mapping".into(),
+            ));
+        }
+        if let Err(error) = self.run_process_attach_addresses(
             image.image_base(),
             image.tls_callbacks(),
             image.dll_entry_address(),
-        )?;
-        Ok(engine)
+        ) {
+            self.primary_poisoned = true;
+            return Err(error);
+        }
+        self.unicorn.get_data_mut().sealed_image_reads = true;
+        self.primary_attached = true;
+        Ok(())
+    }
+
+    pub fn validate_attached_primary(&self, image: &PeImage) -> Result<(), GuestError> {
+        if !self.primary_attached
+            || self.primary_poisoned
+            || image.report().sha256 != self.image_sha256
+            || image.image_base() != self.image_base
+            || image.image_base().checked_add(image.mapped_bytes().len() as u64)
+                != Some(self.image_end)
+        {
+            return Err(GuestError::Callback(
+                "Classic host primary does not match the attached guest image".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Explicit local manifest for the Unicorn backend. This records actual
@@ -557,6 +626,21 @@ impl GuestEngine<'static> {
     pub fn load_with_library_manifest(
         image: &PeImage,
         path: &std::path::Path,
+    ) -> Result<Self, GuestError> {
+        Self::load_with_library_manifest_inner(image, path, true)
+    }
+
+    pub fn load_with_library_manifest_deferred_primary(
+        image: &PeImage,
+        path: &std::path::Path,
+    ) -> Result<Self, GuestError> {
+        Self::load_with_library_manifest_inner(image, path, false)
+    }
+
+    fn load_with_library_manifest_inner(
+        image: &PeImage,
+        path: &std::path::Path,
+        attach_primary: bool,
     ) -> Result<Self, GuestError> {
         use std::io::Read;
         #[derive(serde::Deserialize)]
@@ -584,39 +668,97 @@ impl GuestEngine<'static> {
             }
             Ok(bytes)
         }
+        fn parse_dependency(
+            name: &str,
+            path: &std::path::Path,
+        ) -> Result<PeImage, GuestError> {
+            let bytes = read_bounded(path, 128 * 1024 * 1024).map_err(|error| {
+                GuestError::Callback(format!("read dependency DLL {name}: {error}"))
+            })?;
+            PeImage::parse_library(&bytes).map_err(|error| {
+                GuestError::Callback(format!("parse dependency DLL {name}: {error}"))
+            })
+        }
         let manifest: Manifest = serde_json::from_slice(&read_bounded(path, 1024 * 1024)?)
             .map_err(|e| GuestError::Callback(format!("parse DLL manifest: {e}")))?;
         if manifest.libraries.len() > 64 {
             return Err(GuestError::Callback("DLL count exceeds 64".into()));
         }
-        let mut libraries = Vec::new();
-        let mut base = DEPENDENCY_IMAGE_BASE;
-        let mut total = image.mapped_bytes().len();
-        for entry in manifest.libraries {
+        let manifest_directory = path.parent().unwrap_or(std::path::Path::new("."));
+        let mut inputs = Vec::with_capacity(manifest.libraries.len());
+        for (index, entry) in manifest.libraries.into_iter().enumerate() {
             normalized_library_name(&entry.name)?;
             let file_path = if entry.path.is_absolute() {
                 entry.path
             } else {
-                path.parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join(entry.path)
+                manifest_directory.join(entry.path)
             };
-            let library = PeImage::parse_library(&read_bounded(&file_path, 128 * 1024 * 1024)?)
-                .and_then(|image| image.rebase(base))
-                .map_err(|e| {
-                    GuestError::Callback(format!("parse dependency DLL {}: {e}", entry.name))
+            inputs.push((index, entry.name, file_path));
+        }
+
+        // Reading and parsing dependency images is independent work. Parse at
+        // most four at once and charge each completed batch to the retained
+        // 1 GiB set before starting another. With the 256 MiB per-image parser
+        // bound, transient mapped-image memory is therefore bounded below
+        // 2 GiB instead of retaining all 64 manifest entries (up to 16 GiB).
+        let maximum_workers = inputs
+            .len()
+            .min(
+                std::thread::available_parallelism()
+                    .map(std::num::NonZeroUsize::get)
+                    .unwrap_or(1),
+            )
+            .min(4);
+        const MAX_MAPPED_SET_BYTES: usize = 1024 * 1024 * 1024;
+        let mut libraries = Vec::with_capacity(inputs.len());
+        let mut base = DEPENDENCY_IMAGE_BASE;
+        let mut total = image.mapped_bytes().len();
+        let mut offset = 0;
+        while offset < inputs.len() {
+            let batch_len = dependency_parse_batch_len(inputs.len() - offset, maximum_workers);
+            let batch = &inputs[offset..offset + batch_len];
+            let parsed = if batch_len == 1 {
+                let (index, name, file_path) = &batch[0];
+                vec![(*index, name.clone(), parse_dependency(name, file_path))]
+            } else {
+                std::thread::scope(|scope| {
+                    let handles = batch
+                        .iter()
+                        .map(|(index, name, file_path)| {
+                            scope.spawn(move || {
+                                (*index, name.clone(), parse_dependency(name, file_path))
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    handles
+                        .into_iter()
+                        .map(|handle| {
+                            handle.join().map_err(|_| {
+                                GuestError::Callback(
+                                    "dependency DLL parser thread panicked".into(),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })?
+            };
+            for (_, name, library) in parsed {
+                let library = library?.rebase(base).map_err(|error| {
+                    GuestError::Callback(format!("parse dependency DLL {name}: {error}"))
                 })?;
-            total = total
-                .checked_add(library.mapped_bytes().len())
-                .ok_or(GuestError::DataCapacity)?;
-            if total > 1024 * 1024 * 1024 {
-                return Err(GuestError::Callback("mapped DLL set exceeds 1 GiB".into()));
+                total = total
+                    .checked_add(library.mapped_bytes().len())
+                    .ok_or(GuestError::DataCapacity)?;
+                if total > MAX_MAPPED_SET_BYTES {
+                    return Err(GuestError::Callback("mapped DLL set exceeds 1 GiB".into()));
+                }
+                base = base
+                    .checked_add(library.mapped_bytes().len() as u64 + 65535)
+                    .ok_or(GuestError::ImageAlignment)?
+                    & !65535;
+                libraries.push((name, library));
             }
-            base = base
-                .checked_add(library.mapped_bytes().len() as u64 + 65535)
-                .ok_or(GuestError::ImageAlignment)?
-                & !65535;
-            libraries.push((entry.name, library));
+            offset += batch_len;
         }
         let borrowed: Vec<_> = libraries
             .into_iter()
@@ -629,7 +771,7 @@ impl GuestEngine<'static> {
             .zip(names.iter())
             .map(|((_, image), name)| (name.as_str(), image))
             .collect();
-        Self::load_with_libraries(image, &images)
+        Self::load_with_libraries_inner(image, &images, attach_primary)
     }
 
     pub fn library_reports(&self) -> Vec<crate::pe::PeReport> {
@@ -1050,6 +1192,147 @@ mod library_tests {
                 .to_string()
                 .contains("DLL initialization dep.dll sha256=")
         );
+    }
+
+    #[test]
+    fn deferred_primary_attach_runs_only_after_dependencies_are_ready() {
+        let mut primary_bytes = fixture_bytes(0x180000000, "EffectMain", None, true);
+        // DllMain writes a witness byte into the primary data section, then
+        // returns TRUE. The deferred template must not expose that mutation.
+        primary_bytes[0x240..0x24d].copy_from_slice(&[
+            0xc6, 0x05, 0x39, 0x10, 0x00, 0x00, 0x7a, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+        ]);
+        let primary = PeImage::parse_and_map(&primary_bytes).unwrap();
+        let mut other_bytes = primary_bytes.clone();
+        other_bytes[0x246] = 0x7b;
+        let other = PeImage::parse_and_map(&other_bytes).unwrap();
+        let dependency = fixture(DEPENDENCY_IMAGE_BASE, "answer", None, true);
+        let mut engine = GuestEngine::load_with_libraries_deferred_primary(
+            &primary,
+            &[("dep.dll", dependency)],
+        )
+        .unwrap();
+        let mut witness = [0u8];
+        engine.read(primary.image_base() + 0x2080, &mut witness).unwrap();
+        assert_eq!(witness, [0]);
+        assert!(engine
+            .unicorn
+            .get_data()
+            .loaded_libraries
+            .values()
+            .all(|library| library.initialized));
+        assert!(engine.validate_attached_primary(&primary).is_err());
+        assert!(engine.attach_deferred_primary(&other).is_err());
+
+        engine.attach_deferred_primary(&primary).unwrap();
+        engine.read(primary.image_base() + 0x2080, &mut witness).unwrap();
+        assert_eq!(witness, [0x7a]);
+        assert!(engine.validate_attached_primary(&primary).is_ok());
+        assert!(engine.validate_attached_primary(&other).is_err());
+        assert!(engine.attach_deferred_primary(&primary).is_err());
+
+        let detached = GuestEngine::load_with_libraries_deferred_primary(
+            &primary,
+            &[(
+                "dep.dll",
+                fixture(DEPENDENCY_IMAGE_BASE, "answer", None, true),
+            )],
+        )
+        .unwrap();
+        assert!(crate::classic::ClassicHost::from_engine_with_effect(detached, &primary, None)
+            .is_err());
+
+        let mut failing_bytes = fixture_bytes(0x180000000, "EffectMain", None, true);
+        failing_bytes[0x240..0x243].copy_from_slice(&[0x31, 0xc0, 0xc3]);
+        let failing = PeImage::parse_and_map(&failing_bytes).unwrap();
+        let mut poisoned = GuestEngine::load_with_libraries_deferred_primary(
+            &failing,
+            &[(
+                "dep.dll",
+                fixture(DEPENDENCY_IMAGE_BASE, "answer", None, true),
+            )],
+        )
+        .unwrap();
+        assert!(poisoned.attach_deferred_primary(&failing).is_err());
+        assert!(poisoned.attach_deferred_primary(&failing).is_err());
+        assert!(poisoned.validate_attached_primary(&failing).is_err());
+    }
+
+    #[test]
+    fn manifest_parallel_parse_preserves_declared_order_and_first_error() {
+        struct TemporaryDirectory(std::path::PathBuf);
+        impl Drop for TemporaryDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let unique = format!(
+            "aexcompat-library-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let directory = TemporaryDirectory(std::env::temp_dir().join(unique));
+        std::fs::create_dir(&directory.0).unwrap();
+        std::fs::write(
+            directory.0.join("first.dll"),
+            fixture_bytes(0x1800000000, "first", None, true),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.0.join("second.dll"),
+            fixture_bytes(DEPENDENCY_IMAGE_BASE + 0x10000, "second", None, true),
+        )
+        .unwrap();
+        let manifest_path = directory.0.join("libraries.json");
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&serde_json::json!({"libraries": [
+                {"name": "first.dll", "path": "first.dll"},
+                {"name": "second.dll", "path": "second.dll"}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let primary = fixture(0x180000000, "EffectMain", None, false);
+        let engine = GuestEngine::load_with_library_manifest(&primary, &manifest_path).unwrap();
+        assert_eq!(
+            guest_library_by_name(engine.unicorn.get_data(), "first.dll")
+                .unwrap()
+                .base,
+            DEPENDENCY_IMAGE_BASE
+        );
+        assert!(
+            guest_library_by_name(engine.unicorn.get_data(), "second.dll")
+                .unwrap()
+                .base
+                > DEPENDENCY_IMAGE_BASE
+        );
+
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec(&serde_json::json!({"libraries": [
+                {"name": "first-missing.dll", "path": "missing-1.dll"},
+                {"name": "second-missing.dll", "path": "missing-2.dll"}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = GuestEngine::load_with_library_manifest(&primary, &manifest_path)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("first-missing.dll"), "{error}");
+    }
+
+    #[test]
+    fn manifest_parse_batch_charges_worst_case_images_before_parallel_work() {
+        assert_eq!(dependency_parse_batch_len(64, 4), 4);
+        assert_eq!(dependency_parse_batch_len(3, 4), 3);
+        assert_eq!(dependency_parse_batch_len(1, 4), 1);
+        assert_eq!(dependency_parse_batch_len(0, 4), 0);
     }
 
     #[test]
