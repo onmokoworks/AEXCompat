@@ -268,6 +268,30 @@ therefore rejects a constant midpoint as well as fixed endpoints, transparency,
 and truncation. This establishes the tested transition state change, not exact
 midpoint parity with After Effects.
 
+The next compatible signature contains 33 effects with slot 7
+`Animation = Manual Pct Done`, slot 8 `Layer to Reveal`, and slot 9
+`Percent Done`. A single focused 0/50/100 run completed 33/33 in 233,599 ms
+with no session, frame, decode, empty-image, or alpha failures. Every effect
+produced three distinct pixel hashes, a nonconstant midpoint containing pixels
+from neither endpoint, a zero-percent result closer to the patterned source
+than the reveal, and a 100-percent result closer to the reveal than the source.
+Some animated transitions intentionally retain blur, glow, or particle tails
+at an endpoint, so the shared contract uses endpoint proximity rather than
+false byte-exact parity. `Atmospheric Glow Dissolve` explicitly selects its
+documented `Style = Blend` mode; that mode produced byte-exact endpoints and a
+21,269-color midpoint. A repeated `Smoke Wipe` zero-percent render had an
+identical pixel SHA-256, establishing that its sparse residual is reproducible.
+Separate visual inspection showed only faint blue particle-like pixels and no
+text or logo watermark; this is not a general license-state assertion. The
+report is
+`%TEMP%/aexcompat-bcc-transition-slot8-semantic-20260920.json` with SHA-256
+`2de31fab63e2296eb74ee18b68ec3cb447f85d848158b5aa35f7fc0e3ed95d1c`.
+`test_bcc_transition_slot8_response.py` preserves the 33-file parameter and
+image-response contract and includes mutations for wrong endpoints, fixed or
+constant midpoints, transparency, and truncation. This is behavioral evidence
+for the tested manual transition path, not exhaustive parameter coverage or
+exact After Effects pixel equivalence.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
