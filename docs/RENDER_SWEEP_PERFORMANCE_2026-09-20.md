@@ -495,6 +495,23 @@ and vertical blur. The installed case and ten corruption mutations passed
 existing behavioral coverage reduces the unresolved input-equal `BCC Obsolete`
 set from 19 to 18 without adding a duplicate test.
 
+Legacy `BCCMosaic.aex` requires its inspected slot 6 `Host Layer` before the
+pixelation controls produce their semantic output. On a per-pixel color ramp,
+slot 9/10 `Pixelate X/Y = 0` returned the input byte-for-byte, while value 25
+reduced 36,864 input colors to 5,184 and produced 26,496 equal horizontal and
+18,432 equal vertical neighbor pairs. The validator requires opaque,
+nonconstant output with at most one quarter as many colors as pixels, at least
+two-thirds equal horizontal neighbors, and at least half equal vertical
+neighbors. The ramp also binds output to input location: every output red and
+green value remains within four and two levels of its pixel's x and y
+coordinate, respectively (the installed maxima were three and one). Ten
+mutations reject copying, blur, uniform output, transparency, horizontal-only
+or vertical-only blocking, RGB inversion, horizontal mirroring, a wrong neutral
+frame, and truncation. The installed AEX plus those mutations passed 11/11 in
+5.86 seconds in `test_bcc_obsolete_mosaic_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 18 to 17. This is a block-pixelation
+contract, not exact sampling-grid or After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
