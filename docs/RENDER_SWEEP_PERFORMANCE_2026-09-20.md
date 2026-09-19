@@ -512,6 +512,25 @@ frame, and truncation. The installed AEX plus those mutations passed 11/11 in
 input-equal `BCC Obsolete` set from 18 to 17. This is a block-pixelation
 contract, not exact sampling-grid or After Effects pixel parity.
 
+Legacy `BCCSafeColors.aex` likewise requires inspected slot 6 `Host Layer`.
+On a fully saturated horizontal hue ramp, inspected slots 8/9 `Saturation
+Soft Clip/Hard Clip = 100/100` returned the input byte-for-byte, while `0/50`
+changed all 36,864 pixels and reduced mean RGB chroma from 255.0 to 127.5.
+The validator requires an opaque, row-preserving result with at least 200
+distinct colors, per-pixel chroma between 120 and 135, and overlap between the
+source and result maximum/minimum channel sets so a hue rotation cannot satisfy
+the saturation contract. Mean Rec.709 luminance was preserved at 127.5008, and
+the validator requires mean luminance drift at most 1 plus mean absolute
+per-pixel drift at most 15 so simple dimming cannot masquerade as lower
+saturation. Ten mutations cover a copied source, grayscale or uniform output,
+missing saturation reduction, simple dimming, hue shift, lost alpha, spatial
+corruption, a wrong neutral frame, and truncation. The installed AEX plus those
+mutations passed
+11/11 in 5.81 seconds in
+`test_bcc_obsolete_safe_colors_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 17 to 16. This establishes saturation-limit
+behavior, not exact After Effects color-management or pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
