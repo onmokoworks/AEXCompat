@@ -546,6 +546,22 @@ in `test_bcc_obsolete_spill_remover_response.py`, reducing the unresolved
 input-equal `BCC Obsolete` set from 16 to 15. This establishes selective green
 spill suppression for the tested controls, not exact After Effects pixel parity.
 
+Legacy `BCCMagicSharp.aex` requires inspected slot 6 `Host Layer`, and its main
+slot 8 `Sharpen Amount` only produced a response after the inspected slot 13
+`Fine Pass` was enabled. With the other detail passes, range tuning, and grit
+disabled, a grayscale soft edge returned byte-for-byte at `Sharpen Amount = 0`.
+At slots 8/14 `Sharpen Amount/Fine Sharpen = 3000`, the result changed 14 pixels
+per row only near the edge, increased maximum adjacent gradient from 8 to 255,
+and produced local 0/255 undershoot/overshoot while preserving flat fields,
+grayscale channels, alpha, and identical rows. The validator requires that
+localized two-sided edge response rather than exact filter samples. Ten
+mutations cover a copied or weak response, nonlocal damage, color or alpha
+damage, row/spatial corruption, a shifted response, one-sided clipping, a wrong
+neutral frame, and truncation. The installed AEX plus those mutations passed
+11/11 in 5.75 seconds in `test_bcc_obsolete_magic_sharp_response.py`, reducing
+the unresolved input-equal `BCC Obsolete` set from 15 to 14. This establishes a
+strong fine-pass sharpening response, not exact After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
