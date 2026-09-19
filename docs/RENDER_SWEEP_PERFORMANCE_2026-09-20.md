@@ -725,6 +725,29 @@ input-equal `BCC Obsolete` set from 7 to 6. This establishes exact-band RGB key
 selection for the tested settings, not exact After Effects edge softness or the
 HSL, chroma, and hue matching modes.
 
+`BCCTwoWayKey.aex` remains semantically unresolved and is not counted as a
+success. A four-band opaque input uses exact green, two distinct near-green
+colors, and far red. With green as `Key Color`, similarity 100, softness zero,
+and the full-frame region, both near-green bands and green become fully
+transparent while far red remains opaque, proving that the key side is active.
+However, changing inspected slot 11 `Keep Color` between the two exact
+near-green band colors with slot 12 `Keep Similarity` at 0 or 1 produces
+byte-identical output; neither exact keep color regains opacity. Similarity 255
+with Keep Similarity 40 was also fully transparent and did not respond to the
+keep color. This contradicts the Boris FX Two Way Key contract that an exact
+Keep Color remains opaque inside the Key Color region. A separate existing
+`PF_Cmd_USER_CHANGED_PARAM` probe for slot 11 returned error 0 and reported the
+requested Keep Color plus Keep Similarity 1 in that probe's plug-in parameter
+table. This confirms encoding, slot mapping, and callback delivery only within
+the separate probe path; it does not prove which values or internal state reach
+the render callback. The next hypothesis to test is whether supervised
+parameter-change notification must occur in the same classic/SmartFX render
+lifecycle before frame evaluation. The real-AEX reproduction is retained as a
+strict expected failure limited to the known key-active/keep-inert signature in
+`test_bcc_obsolete_two_way_key_response.py`; it currently reports one xfailed
+case in 4.91 seconds. The unresolved input-equal `BCC Obsolete` count therefore
+remains 6, and this result must not be promoted to a rendered semantic success.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
