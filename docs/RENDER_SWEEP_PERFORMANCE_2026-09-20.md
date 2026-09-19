@@ -270,7 +270,7 @@ invalid alpha is zero and the worker/session are clean. The report is
 same CLI `cc96567e...` and worker `94071433...` fingerprints as the
 DistanceGradation semantic probe. The two previously transparent records are
 therefore valid effect responses under effect-appropriate inputs, not image
-render failures. Four opaque input-equal OLM defaults remain a semantic
+render failures. Three opaque input-equal OLM defaults remain a semantic
 parameter-response backlog. On the verified shipping Smart route and these
 effect-appropriate inputs, no OLM native execution or visibility failure
 remains. The separate `DistanceGradation` Classic close crash described above
@@ -340,6 +340,29 @@ reduction. Its four negative cases reject no-op, constant, transparent, and
 truncated false positives. The real-AEX case passed in 1.10 s and the focused
 module passed 18 tests with three unrelated opt-in cases skipped in 1.17 s. No
 After Effects process was used.
+
+`OLMRadialBlur` is resolved by the corresponding real-AEX Smart fixture. This
+matches the vendor's radial zoom/rotation blur description
+(`https://www.olm.co.jp/post/olm-radial-blur`). With the default Zoom mode and
+center, changing outer `Strength` from 0 to 20 on a 256x144 ARGB8 image with a
+16x16 colored marker on an otherwise identical opaque-black field changed
+1,472 pixels. Strength 0 was byte-identical to the input. At strength 20, 416
+source-black background pixels became colored inside bounds x=30..64,
+y=62..81, while 36,192 other source-black pixels remained exactly black. Thus
+identical input pixels produce both affected and unaffected outputs according
+to their neighborhood; a spatially independent pixel transform cannot satisfy
+the fixture. Alpha remains valid and near-opaque (810 pixels at 254, 36,054 at
+255). The input PNG SHA-256 is
+`1ebfb9fd330b0f079e06996128dc6b0bb64aac21fe5fc14efbaea3ad4a9272fd`;
+the strength 0/20 raw-frame SHA-256 values are respectively
+`7b511db8308ba3b98466c5bc6ef560beab1082459343eb4a16e6b7764ab2d828`
+and `452a6d78bfe9d464f83aa89c4ad277218b5ee1f2aed75f85f4ca4aaababe74fa`.
+The installed AEX SHA-256 is
+`ffbb1d0109671e3ea9b1a12cd1126f2c72f965197577a57cc602fb096414ccdb`;
+the Release harness/worker fingerprints remain `b4b264a1...` / `94071433...`.
+The fixture rejects no-op, constant, transparent, uniform per-pixel
+color-transform, and truncated false positives. The marker-based real-AEX case
+passed in 1.46 s. No After Effects process was used.
 
 ## ONMK subdirectory cohort
 
