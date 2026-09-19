@@ -309,7 +309,7 @@ impl GuestEngine<'static> {
         attach_primary: bool,
     ) -> Result<Self, GuestError> {
         if libraries.is_empty() {
-            return Self::load_primary(image, attach_primary);
+            return Self::load_primary(image, attach_primary, PrimaryImportHooks::Eager);
         }
         if libraries.len() > 64 {
             return Err(GuestError::Callback("DLL count exceeds 64".into()));
@@ -365,7 +365,10 @@ impl GuestEngine<'static> {
         for index in 0..libraries.len() {
             visit(index, libraries, &basenames, &mut visiting, &mut order)?;
         }
-        let mut engine = Self::load_primary(image, false)?;
+        // Primary IAT slots are patched below before any guest code runs. Delay
+        // their emulation hooks until after dependency DllMain so hooks for
+        // imports resolved to real dependency exports are never installed.
+        let mut engine = Self::load_primary(image, false, PrimaryImportHooks::Deferred)?;
         for (name, library) in libraries {
             let size = library.mapped_bytes().len() as u64;
             let base = library.image_base();
@@ -456,9 +459,20 @@ impl GuestEngine<'static> {
         install_translated_avx_state_sync(&mut engine.unicorn)?;
         // Re-link primary imports as well: a named dependency must resolve to
         // its real code/data export, never an unrelated emulation stub.
+        let mut primary_stub_index = 0u64;
+        let mut deferred_primary_hooks = Vec::new();
         for target in std::iter::once(image).chain(libraries.iter().map(|(_, image)| image)) {
             for import in target.imports() {
                 for symbol in &import.symbols {
+                    let primary_stub = if std::ptr::eq(target, image) {
+                        let stub = STUB_BASE
+                            .checked_add(primary_stub_index * STUB_STRIDE)
+                            .ok_or(GuestError::StubCapacity)?;
+                        primary_stub_index += 1;
+                        Some(stub)
+                    } else {
+                        None
+                    };
                     let address =
                         if let Some(index) = basenames.get(&import.name.to_ascii_lowercase())
                             && !prefer_emulated_dependency_import(&import.name, &symbol.name)
@@ -477,8 +491,13 @@ impl GuestEngine<'static> {
                             engine.resolve_emulated_import_data(&import.name, &symbol.name)?
                         {
                             data
-                        } else if std::ptr::eq(target, image) {
-                            continue; // primary's emulated imports already installed
+                        } else if let Some(stub) = primary_stub {
+                            deferred_primary_hooks.push((
+                                stub,
+                                import.name.clone(),
+                                symbol.name.clone(),
+                            ));
+                            stub
                         } else {
                             let stub = STUB_BASE
                                 .checked_add(engine.next_import_stub * STUB_STRIDE)
@@ -522,6 +541,26 @@ impl GuestEngine<'static> {
                 }
             }
         }
+        let deferred_primary_guard = (primary_stub_index > 0)
+            .then(|| {
+                let end = STUB_BASE + primary_stub_index * STUB_STRIDE - 1;
+                uc(
+                    "install deferred primary import guard",
+                    engine.unicorn.add_code_hook(
+                        STUB_BASE,
+                        end,
+                        |unicorn, address, _| {
+                            if unicorn.get_data().callback_error.is_none() {
+                                unicorn.get_data_mut().callback_error = Some(format!(
+                                    "dependency initialization called deferred primary import stub {address:#x}"
+                                ));
+                            }
+                            let _ = unicorn.emu_stop();
+                        },
+                    ),
+                )
+            })
+            .transpose()?;
         // Each module receives a distinct TLS index, template block and array
         // slot. This supersedes primary's initial one-slot array before attach.
         let tls_images: Vec<_> = std::iter::once(image)
@@ -568,6 +607,22 @@ impl GuestEngine<'static> {
                 .get_mut(&normalized_library_name(name)?)
                 .unwrap()
                 .initialized = true;
+        }
+        if let Some(hook) = deferred_primary_guard {
+            uc(
+                "remove deferred primary import guard",
+                engine.unicorn.remove_hook(hook),
+            )?;
+        }
+        for (stub, library, symbol) in deferred_primary_hooks {
+            install_win64_import(&mut engine.unicorn, stub, &library, &symbol)?;
+            engine.unicorn.get_data_mut().trace_labels.insert(
+                stub,
+                TraceLabel {
+                    kind: TraceLabelKind::Import,
+                    name: canonical_import_trace_label(&library, &symbol),
+                },
+            );
         }
         if attach_primary {
             engine.run_process_attach_addresses(
@@ -935,6 +990,85 @@ mod library_tests {
             .read(primary.image_base() + 0x2180, &mut pointer)
             .unwrap();
         assert_eq!(u64::from_le_bytes(pointer), 0x1800001000);
+    }
+
+    #[test]
+    fn activates_deferred_primary_emulated_imports_before_primary_attach() {
+        let primary = fixture(
+            0x180000000,
+            "EffectMain",
+            Some(("kernel32.dll", "GetCurrentProcessId")),
+            true,
+        );
+        let dependency = fixture(DEPENDENCY_IMAGE_BASE, "answer", None, true);
+        let mut engine =
+            GuestEngine::load_with_libraries(&primary, &[("dep.dll", dependency)]).unwrap();
+
+        assert_eq!(
+            engine
+                .call_win64(primary.entry_address().unwrap(), [0; 6])
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn dependency_calling_deferred_primary_import_fails_closed() {
+        let primary = fixture(
+            0x180000000,
+            "EffectMain",
+            Some(("kernel32.dll", "GetCurrentProcessId")),
+            false,
+        );
+        let mut dependency_bytes = fixture_bytes(DEPENDENCY_IMAGE_BASE, "answer", None, true);
+        let primary_iat = primary.image_base() + 0x2180;
+        let mut dll_main = vec![0x48, 0xb8]; // mov rax, primary_iat
+        dll_main.extend_from_slice(&primary_iat.to_le_bytes());
+        dll_main.extend_from_slice(&[
+            0xff, 0x10, // call qword ptr [rax]
+            0xb8, 1, 0, 0, 0, // mov eax, TRUE
+            0xc3,
+        ]);
+        dependency_bytes[0x240..0x240 + dll_main.len()].copy_from_slice(&dll_main);
+        let dependency = PeImage::parse_library(&dependency_bytes).unwrap();
+
+        let error = GuestEngine::load_with_libraries(&primary, &[("dep.dll", dependency)])
+            .err()
+            .unwrap();
+
+        assert!(
+            error
+                .to_string()
+                .contains("dependency initialization called deferred primary import stub"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn primary_uses_translated_avx_state_sync_with_dependencies() {
+        let mut primary_bytes = fixture_bytes(0x180000000, "EffectMain", None, false);
+        primary_bytes[0x200..0x209].copy_from_slice(&[
+            0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+            0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
+            0xc3,
+        ]);
+        let primary = PeImage::parse_and_map(&primary_bytes).unwrap();
+        let dependency = fixture(DEPENDENCY_IMAGE_BASE, "answer", None, true);
+        let mut engine =
+            GuestEngine::load_with_libraries(&primary, &[("dep.dll", dependency)]).unwrap();
+        let destination = engine.allocate(32, 8).unwrap();
+        engine
+            .unicorn
+            .reg_write_long(RegisterX86::YMM0, &[0x5a; 32])
+            .unwrap();
+
+        engine
+            .call_win64(primary.entry_address().unwrap(), [destination, 0, 0, 0, 0, 0])
+            .unwrap();
+
+        let mut actual = [0xff; 32];
+        engine.read(destination, &mut actual).unwrap();
+        assert_eq!(actual, [0; 32]);
     }
 
     #[test]

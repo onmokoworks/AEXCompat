@@ -107,6 +107,12 @@ fn initialize_static_tls_image(
     Ok(next_data)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrimaryImportHooks {
+    Eager,
+    Deferred,
+}
+
 impl GuestEngine<'static> {
     fn run_process_attach_addresses(
         &mut self,
@@ -175,7 +181,7 @@ impl GuestEngine<'static> {
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
         let mut engine = match std::env::var_os("AEXCOMPAT_GUEST_LIBRARIES") {
             Some(path) => Self::load_with_library_manifest(image, std::path::Path::new(&path)),
-            None => Self::load_primary(image, true),
+            None => Self::load_primary(image, true, PrimaryImportHooks::Eager),
         }?;
         // All primary and dependency PE pages have now passed
         // `seal_unicorn_image`, which always grants read access and never
@@ -184,7 +190,11 @@ impl GuestEngine<'static> {
         Ok(engine)
     }
 
-    fn load_primary(image: &PeImage, attach: bool) -> Result<Self, GuestError> {
+    fn load_primary(
+        image: &PeImage,
+        attach: bool,
+        import_hooks: PrimaryImportHooks,
+    ) -> Result<Self, GuestError> {
         let trace_points = discover_trace_points(image);
         let image_report = image.report();
         let mut trace_modules = vec![TraceModule {
@@ -250,7 +260,16 @@ impl GuestEngine<'static> {
             "write PE image",
             unicorn.mem_write(image.image_base(), image.mapped_bytes()),
         )?;
-        install_avx_state_sync_points(&mut unicorn, discover_image_avx_state_sync_points(image)?)?;
+        let primary_avx_sync_points = discover_image_avx_state_sync_points(image)?;
+        if import_hooks == PrimaryImportHooks::Deferred {
+            // Library-backed loads install one translator-side table for both
+            // the primary and dependencies. This preserves exact AVX repair
+            // semantics without adding thousands of Rust code hooks before
+            // dependency initialization begins.
+            install_runtime_avx_state_sync(&mut unicorn, primary_avx_sync_points)?;
+        } else {
+            install_avx_state_sync_points(&mut unicorn, primary_avx_sync_points)?;
+        }
         uc(
             "map import stubs",
             unicorn.mem_map(STUB_BASE, STUB_SIZE, Prot::ALL),
@@ -293,14 +312,16 @@ impl GuestEngine<'static> {
                     "write import stub",
                     unicorn.mem_write(stub, &[0x31, 0xc0, 0xc3]),
                 )?;
-                install_win64_import(&mut unicorn, stub, &library.name, &symbol.name)?;
-                unicorn.get_data_mut().trace_labels.insert(
-                    stub,
-                    TraceLabel {
-                        kind: TraceLabelKind::Import,
-                        name: canonical_import_trace_label(&library.name, &symbol.name),
-                    },
-                );
+                if import_hooks == PrimaryImportHooks::Eager {
+                    install_win64_import(&mut unicorn, stub, &library.name, &symbol.name)?;
+                    unicorn.get_data_mut().trace_labels.insert(
+                        stub,
+                        TraceLabel {
+                            kind: TraceLabelKind::Import,
+                            name: canonical_import_trace_label(&library.name, &symbol.name),
+                        },
+                    );
+                }
                 let iat_rva = u64::try_from(symbol.iat_rva).map_err(|_| GuestError::IatRange)?;
                 let iat = image
                     .image_base()
