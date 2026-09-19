@@ -284,3 +284,15 @@ overlays. The report fingerprint is complete and matches CLI
 and worker
 `f9494e5163cb3fd1e993617cc648b70fb817c14cf928141c90e6511b6fd36602`.
 No After Effects process was used.
+
+## Zaebects cohort
+
+The Zaebects subdirectory contains one installed image effect, `signal.aex`.
+Its single focused run is also the complete cohort milestone, so the same AEX
+was not swept twice. `%TEMP%/aexcompat-zaebects-render-all-2026-09-20.json`
+records 1/1 visible render in 461 ms, with 36,864 nonzero-alpha pixels, no
+transparent or invalid-alpha result, and the complete accepted CLI/worker
+fingerprint. Raw-frame inspection shows an opaque scanline/waveform pattern
+instead of a warning or license image. This proves native execution and decoded
+image output, but not effect semantics without an AE reference. No After
+Effects process was used.
