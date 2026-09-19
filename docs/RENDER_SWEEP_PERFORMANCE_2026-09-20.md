@@ -672,6 +672,25 @@ input-equal `BCC Obsolete` set from 10 to 9. This establishes localized visual
 anonymization for the tested mosaic controls, not exact After Effects pixel
 parity or the untested blur, brightness/contrast, and tint methods.
 
+Legacy `BCCBoostBlend.aex` exposes inspected slot 6 `Host Layer` and slot 8
+`Blend Layer`. A two-axis primary gradient was paired with alternating red and
+blue secondary patterns. With Exponential mode, minimum weight 20, zero
+exponent offset, `Boost Mix = 100`, and PixelChooser off, slot 9
+`Mix Back = 100` returned the red secondary layer byte-for-byte. At mix back 0,
+the red and blue secondary cases produced different results at all 36,864
+pixels. The red case changed 35,034 pixels from the primary and the blue case
+changed all 36,864. For every pixel and RGB channel both active results stayed
+within two levels of `max(primary, secondary)`, demonstrating that both assigned
+layers participate in the selected boost/lighten response rather than accepting
+an arbitrary changed image. Twelve mutations cover primary-only,
+secondary-only, uniform, transparent, active-input-swapped, channel-swapped,
+minimum-operator, mirrored, wrong-bypass, alternate-bypass, locally corrupted,
+and truncated outputs. The installed AEX plus those mutations passed 13/13 in
+10.53 seconds in `test_bcc_obsolete_boost_blend_response.py`, reducing the
+unresolved input-equal `BCC Obsolete` set from 9 to 8. This establishes the
+tested two-layer exponential boost response, not exact After Effects pixel
+parity or the other boost modes.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
