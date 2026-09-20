@@ -214,6 +214,7 @@ struct GuestState {
     next_pf_handle_data: u64,
     image_region: Option<(u64, u64)>,
     image_executable_ranges: Vec<(u64, u64)>,
+    sealed_image_read_ranges: Vec<(u64, u64)>,
     sealed_image_reads: bool,
     latest_runtime_target: Option<TraceRuntimeTarget>,
     handles: HashMap<u64, GuestHandle>,
@@ -312,6 +313,42 @@ struct GuestState {
     avx_state_sync_points: HashMap<u64, AvxStateSync>,
     gpu_runtime: GpuRuntime,
     gpu_suite: GpuSuiteState,
+}
+
+impl GuestState {
+    fn seal_image_reads(&mut self) {
+        let mut ranges = Vec::with_capacity(self.loaded_libraries.len() + 1);
+        ranges.extend(self.image_region);
+        ranges.extend(
+            self.loaded_libraries
+                .values()
+                .map(|library| (library.base, library.end)),
+        );
+        ranges.sort_unstable_by_key(|range| range.0);
+
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            if let Some(last) = merged.last_mut()
+                && start <= last.1
+            {
+                last.1 = last.1.max(end);
+            } else {
+                merged.push((start, end));
+            }
+        }
+        self.sealed_image_read_ranges = merged;
+        self.sealed_image_reads = true;
+    }
+
+    fn sealed_image_contains(&self, address: u64, inclusive_end: u64) -> bool {
+        if !self.sealed_image_reads {
+            return false;
+        }
+        let index = self
+            .sealed_image_read_ranges
+            .partition_point(|range| range.0 <= address);
+        index > 0 && inclusive_end < self.sealed_image_read_ranges[index - 1].1
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]

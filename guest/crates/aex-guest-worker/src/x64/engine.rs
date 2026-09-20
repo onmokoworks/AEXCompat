@@ -186,7 +186,7 @@ impl GuestEngine<'static> {
         // All primary and dependency PE pages have now passed
         // `seal_unicorn_image`, which always grants read access and never
         // exposes an image unmap/protection capability to the guest.
-        engine.unicorn.get_data_mut().sealed_image_reads = true;
+        engine.unicorn.get_data_mut().seal_image_reads();
         Ok(engine)
     }
 

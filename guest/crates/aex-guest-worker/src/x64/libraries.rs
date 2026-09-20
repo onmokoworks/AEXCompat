@@ -656,7 +656,7 @@ impl GuestEngine<'static> {
             self.primary_poisoned = true;
             return Err(error);
         }
-        self.unicorn.get_data_mut().sealed_image_reads = true;
+        self.unicorn.get_data_mut().seal_image_reads();
         self.primary_attached = true;
         Ok(())
     }
@@ -1558,6 +1558,26 @@ mod library_tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn sealed_image_read_index_covers_primary_and_dependencies_without_crossing_ranges() {
+        let primary = fixture(0x180000000, "EffectMain", None, false);
+        let dependency = fixture(DEPENDENCY_IMAGE_BASE, "answer", None, false);
+        let primary_start = primary.image_base();
+        let primary_end = primary_start + primary.mapped_bytes().len() as u64;
+        let dependency_start = dependency.image_base();
+        let dependency_end = dependency_start + dependency.mapped_bytes().len() as u64;
+        let mut engine =
+            GuestEngine::load_with_libraries(&primary, &[("dep.dll", dependency)]).unwrap();
+
+        let state = engine.unicorn.get_data_mut();
+        state.seal_image_reads();
+        assert!(state.sealed_image_contains(primary_start, primary_end - 1));
+        assert!(state.sealed_image_contains(dependency_start, dependency_end - 1));
+        assert!(!state.sealed_image_contains(primary_end - 1, primary_end));
+        assert!(!state.sealed_image_contains(primary_end, primary_end));
+    }
+
     #[test]
     fn imported_cpp_data_is_shared_writable_and_not_executable() {
         let make = |base, symbol| {
