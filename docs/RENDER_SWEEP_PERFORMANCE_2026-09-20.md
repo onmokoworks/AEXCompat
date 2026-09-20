@@ -777,6 +777,25 @@ input-equal `BCC Obsolete` set from 6 to 5. This establishes strong comb
 suppression for the tested field order and controls, not exact After Effects
 deinterlacing parity.
 
+Legacy `BCCBeautyStudio.aex` (SHA-256
+`ef06d9d25a8952fcfc92772fedd4d528dd0c459b0082764c98133a858b0e8535`)
+requires inspected slot 6 `Host Layer`. Its slot 45 `PixelChooser` is an
+integer choice with `1 = Off`, `2 = On`, and a default of 2; leaving that
+skin-selection path enabled weakly exercised the initial grayscale probe.
+With PixelChooser explicitly off, slot 9 `Master Amount = 300`, all five
+detail smoothing amounts at 100, five detail levels, Preserve Contrast 90,
+and slot 43 `Mix with Original = 0`, 35,888 of 36,864 pixels changed. Interior
+variance fell from about 200/196 to 12/10 while the two region means stayed at
+71.8/183.5 and the central edge jump remained 82 levels. Mix 100 returned the
+source byte-for-byte. Eleven mutations cover copying, constant or global-blur
+substitution, one-region-only smoothing, mean shift, alpha/color damage,
+neutral damage, multi-row boundary corruption, reversal, and truncation. The
+installed AEX plus those mutations passed 12/12 in 5.94 seconds in
+`test_bcc_obsolete_beauty_studio_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 5 to 4. This establishes edge-aware detail
+smoothing with PixelChooser disabled, not every Beauty Studio subgroup or
+exact After Effects pixel parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
