@@ -163,6 +163,47 @@ mod tests {
     }
 
     #[test]
+    fn x86_cvttss2si_preserves_common_and_exceptional_results() {
+        const CODE: u64 = 0x1000;
+        let cases = [
+            (3.75_f32.to_bits(), 3_u32),
+            ((-3.75_f32).to_bits(), (-3_i32) as u32),
+            (42.0_f32.to_bits(), 42_u32),
+            (0.0_f32.to_bits(), 0_u32),
+            ((-0.0_f32).to_bits(), 0_u32),
+            (2_147_483_520.0_f32.to_bits(), 0x7fff_ff80),
+            ((-2_147_483_648.0_f32).to_bits(), 0x8000_0000),
+            (2_147_483_648.0_f32.to_bits(), 0x8000_0000),
+            (f32::NAN.to_bits(), 0x8000_0000),
+            (f32::INFINITY.to_bits(), 0x8000_0000),
+            (f32::NEG_INFINITY.to_bits(), 0x8000_0000),
+            (1_u32, 0_u32),
+            (0x8000_0001, 0_u32),
+        ];
+
+        for (input, expected) in cases {
+            let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+            unicorn.mem_map(CODE, 0x1000, Prot::ALL).unwrap();
+            // movd xmm0,eax; cvttss2si ecx,xmm0; hlt
+            unicorn
+                .mem_write(
+                    CODE,
+                    &[0x66, 0x0f, 0x6e, 0xc0, 0xf3, 0x0f, 0x2c, 0xc8, 0xf4],
+                )
+                .unwrap();
+            unicorn.reg_write(RegisterX86::EAX, input as u64).unwrap();
+
+            unicorn.emu_start(CODE, CODE + 9, 0, 0).unwrap();
+
+            assert_eq!(
+                unicorn.reg_read(RegisterX86::ECX).unwrap() as u32,
+                expected,
+                "input bits {input:#010x}"
+            );
+        }
+    }
+
+    #[test]
     fn range_protection_spans_adjacent_regions_without_snapshot_allocation() {
         let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
         unicorn.mem_map(0x1000, 4096, Prot::READ).unwrap();
