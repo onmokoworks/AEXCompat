@@ -141,6 +141,28 @@ mod tests {
     }
 
     #[test]
+    fn x86_indirect_call_and_return_honor_nonzero_code_segment_base() {
+        const CS: u64 = 0x100;
+        const BASE: u64 = CS * 16;
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_16).unwrap();
+        unicorn.mem_map(0, 0x4000, Prot::ALL).unwrap();
+
+        unicorn.reg_write(RegisterX86::CS, CS).unwrap();
+        unicorn.reg_write(RegisterX86::SP, 0x800).unwrap();
+
+        let mut code = vec![0x90; 0x21];
+        // mov ax, 0x10; call ax; mov bx, 0x1234; jmp 0x20
+        code[0..10].copy_from_slice(&[0xb8, 0x10, 0x00, 0xff, 0xd0, 0xbb, 0x34, 0x12, 0xeb, 0x16]);
+        // mov cx, 0x5678; ret
+        code[0x10..0x14].copy_from_slice(&[0xb9, 0x78, 0x56, 0xc3]);
+        unicorn.mem_write(BASE, &code).unwrap();
+
+        unicorn.emu_start(BASE, BASE + 0x21, 0, 0).unwrap();
+        assert_eq!(unicorn.reg_read(RegisterX86::BX).unwrap(), 0x1234);
+        assert_eq!(unicorn.reg_read(RegisterX86::CX).unwrap(), 0x5678);
+    }
+
+    #[test]
     fn range_protection_spans_adjacent_regions_without_snapshot_allocation() {
         let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
         unicorn.mem_map(0x1000, 4096, Prot::READ).unwrap();

@@ -21,11 +21,25 @@
 #include "cpu.h"
 #include "exec/helper-proto.h"
 #include "exec/exec-all.h"
+#include "exec/tb-lookup.h"
 #include "exec/cpu_ldst.h"
 #include "exec/ioport.h"
 
 #include "uc_priv.h"
 #include "tcg/tcg-apple-jit.h"
+
+void *HELPER(lookup_tb_ptr_fast)(CPUX86State *env, target_ulong pc,
+                                 target_ulong cs_base, uint32_t flags)
+{
+    CPUState *cpu = env_cpu(env);
+    TranslationBlock *tb = tb_lookup__explicit_state(cpu, pc, cs_base,
+                                                      flags, curr_cflags());
+
+    if (tb == NULL) {
+        return env->uc->tcg_ctx->code_gen_epilogue;
+    }
+    return tb->tc.ptr;
+}
 
 void helper_outb(CPUX86State *env, uint32_t port, uint32_t data)
 {
