@@ -590,14 +590,25 @@ were also identity, while threshold 60 changed 20,081 pixels but shifted mean
 from 127.95 to 112.03 and increased variance from 351.81 to 1324.11. Enabling
 slot 11 `Lock Sample` worsened that result to mean 76.91 and variance 1611.99.
 An earlier threshold-100/HiPass-0 probe collapsed the image to mean 0.54 rather
-than producing a valid denoise response. The shipping harness command contract
-offers one parameterized render per process; it does not currently expose a
-same-session parameter-changing `Setup: Select Sample` then `Setup: Normal`
-sequence. The temporary probe was removed after the bounded replan. Resolving
-this item requires either a resident preparation/render sequence or evidence
-that the plug-in can initialize its sample model during a normal shipping
-render; identity, near-black, and increased-noise outputs remain failures. The
-unresolved input-equal `BCC Obsolete` count therefore remains 13.
+than producing a valid denoise response. A later bounded replan used five
+independently grained frames around a two-level clean reference. Extended
+diagnostics proved that Normal/Lock-off requested slot 13 at time 0 and received
+the supplied timed Sample Layer, yet its mix-0 output remained byte-identical.
+One-shot `Setup: Select Sample` changed the image but worsened MSE-to-clean from
+140.713 to 285.758 without reducing the approximately 140 variance in either
+flat region. A temporary same-resident probe then completed Select Sample at
+frame 0 and Normal at frame 2 in one worker (`frame_index` 0 then 1, clean
+session close); the final output was still byte-identical. That exhausted the
+three-hypothesis exploration budget. The temporary resident-layer and sequence
+command changes were removed rather than shipping an unproved GUI path. The
+known successful-transport/identity signature is preserved as a strict xfail
+in `test_bcc_obsolete_degrain_response.py`; darkening, increased noise, session
+failure, or any other signature remains a test failure. The root cause remains
+unidentified; the next justified investigation needs concrete evidence for
+either a sample-selection lifecycle requirement or a different documented
+fixture prerequisite, not a wider parameter grid. At this point in the
+chronology the unresolved input-equal `BCC Obsolete` count remained 13; after
+the later cohorts below it is currently 4, unchanged by this investigation.
 
 Legacy `BCCDVFixer.aex` requires inspected slot 6 `Host Layer`. On repeating
 two-pixel red/blue chroma blocks, slot 14 `Mix with Original = 100` returned the
