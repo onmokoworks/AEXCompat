@@ -758,6 +758,25 @@ and canonical Release worker were rebuilt from the clean tree. Further
 notification-order exploration is stopped for this effect, which remains the
 same strict expected failure while the next unresolved cohort is selected.
 
+Legacy `BCCDeInterlace.aex` requires inspected slot 6 `Host Layer`. A
+deterministic combed edge alternates its step between x=80 and x=120 on
+successive rows. With inspected slot 9 `Operation = Only Deinterlace`, upper
+field first, maximum motion sensitivity and filter size, and slot 16
+`Mix with Original = 0`, adjacent-row luma difference fell from 1,098,240 to
+3,840 while 2,879 pixels changed. The result remained non-uniform grayscale
+with fully opaque alpha, retained the far-left dark and far-right bright fields,
+and confined changes to the central edge band. The Mix 100 control retained the comb and differed at
+only 693 boundary pixels, with adjacent-row difference 1,103,542; the validator
+therefore permits that bounded edge handling instead of claiming byte-exact
+neutral parity. Nine mutations cover a copied output, constant collapse,
+retained comb, alpha or color corruption, excessive neutral damage, truncation,
+a horizontal-gradient replacement, and a left/right reversal. The installed
+AEX plus those mutations passed 10/10 in 5.73 seconds
+in `test_bcc_obsolete_deinterlace_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 6 to 5. This establishes strong comb
+suppression for the tested field order and controls, not exact After Effects
+deinterlacing parity.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
