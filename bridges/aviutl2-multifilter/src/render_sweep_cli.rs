@@ -140,8 +140,8 @@ const FRAME_DEADLINE: Duration = Duration::from_secs(60);
 /// a later member invalidates the session.
 const MAX_SWEEP_CLUSTER_MEMBERS: usize = 16;
 
-/// A known-bad member can be removed and the healthy remainder retried, but a
-/// corpus full of quick explicit errors must not turn one failed optimization
+/// A member whose local outcome requires authoritative fallback can be removed
+/// and the healthy remainder retried, but a corpus full of quick boundaries
 /// into fifteen extra worker launches before the authoritative single-plugin
 /// fallback. The first attempt plus three member-removal retries is enough to
 /// salvage the common one-outlier case while keeping the overhead bounded.
@@ -352,6 +352,7 @@ Core options:
   --render-jobs <count>            global render worker cap (default 1)
   --same-closure-render-jobs <n>    per resolved-closure cap (default 1)
   --dynamic-same-closure-groups    closure-capped ready-queue scheduling
+  --clean-prefix-cluster-salvage   retain cleanly closed prefix results on retry
   --depth <8|16|32>                output depth (default 8)
   --size <width>x<height>           frame size (default 256x144)
   --time <position>                first timeline position (default 0)
@@ -380,6 +381,7 @@ struct Options {
     render_jobs: usize,
     same_closure_render_jobs: usize,
     dynamic_same_closure_groups: bool,
+    clean_prefix_cluster_salvage: bool,
     filter: Option<String>,
     exclude_paths: Vec<String>,
     blocked_paths: Vec<String>,
@@ -516,6 +518,7 @@ fn parse_options_from(args: impl IntoIterator<Item = OsString>) -> Result<CliAct
         render_jobs: 1,
         same_closure_render_jobs: 1,
         dynamic_same_closure_groups: false,
+        clean_prefix_cluster_salvage: false,
         filter: None,
         exclude_paths: Vec::new(),
         blocked_paths: Vec::new(),
@@ -599,6 +602,7 @@ fn parse_options_from(args: impl IntoIterator<Item = OsString>) -> Result<CliAct
                 }
             }
             Some("--dynamic-same-closure-groups") => options.dynamic_same_closure_groups = true,
+            Some("--clean-prefix-cluster-salvage") => options.clean_prefix_cluster_salvage = true,
             Some("--filter") => {
                 let value = option_value(&args, &mut index, "--filter")?;
                 options.filter = Some(value.to_string_lossy().to_lowercase());
@@ -1636,10 +1640,10 @@ fn run(options: Options) -> Result<(), CliError> {
         }
         record
     };
-    let render_member = |index: usize, clustered: &HashMap<usize, (Outcome, u128)>| {
+    let render_member = |index: usize, clustered: &ClusteredGroupResults| {
         let record = &records[index];
         let plugin_started = Instant::now();
-        let clustered_result = clustered.get(&index).cloned();
+        let clustered_result = clustered.outcomes.get(&index).cloned();
         let clustered_elapsed_ms = clustered_result.as_ref().map(|(_, elapsed)| *elapsed);
         let mut outcome = clustered_result
             .map(|(outcome, _)| outcome)
@@ -1654,6 +1658,11 @@ fn run(options: Options) -> Result<(), CliError> {
                     &layer_pixels,
                 )
             });
+        if let Some(evidence) = clustered.evidence.get(&index) {
+            outcome
+                .detail
+                .insert("cluster_salvage".to_owned(), evidence.clone());
+        }
         let verification_started = Instant::now();
         verify_pixel_determinism(&mut outcome, options.verify_pixel_determinism, || {
             let mut repeat_options = options.clone();
@@ -1869,26 +1878,141 @@ fn sweep_cluster_candidates_salvaging(
     options: &Options,
     input: &[u8],
     layer_pixels: &[u8],
-) -> HashMap<usize, (Outcome, u128)> {
+) -> ClusteredGroupResults {
     let mut attempt = |subset: &[usize]| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sweep_cluster_candidates(repository, subset, records, options, input, layer_pixels)
         }))
         .unwrap_or(ClusterAttempt::HardFailure)
     };
-    salvage_cluster_candidates(candidates, MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS, &mut attempt)
+    if !options.clean_prefix_cluster_salvage || candidates.len() < 2 {
+        return ClusteredGroupResults {
+            outcomes: salvage_cluster_candidates(
+                candidates,
+                MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+                &mut attempt,
+            ),
+            evidence: HashMap::new(),
+        };
+    }
+    let salvage = salvage_clean_prefix_cluster_candidates(
+        candidates,
+        MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+        &mut attempt,
+    );
+    let (outcomes, evidence) = publish_clean_prefix_salvage(candidates, salvage);
+    ClusteredGroupResults { outcomes, evidence }
+}
+
+fn publish_clean_prefix_salvage<T>(
+    candidates: &[usize],
+    salvage: CleanPrefixSalvage<T>,
+) -> (HashMap<usize, T>, HashMap<usize, Value>) {
+    let preserved_prefix_members = salvage
+        .accepted
+        .values()
+        .filter(|member| member.accepted_as == AcceptedAs::CleanPrefix)
+        .count();
+    let fallback_members = candidates.len().saturating_sub(salvage.accepted.len());
+    let evidence = candidates
+        .iter()
+        .enumerate()
+        .map(|(position, &index)| {
+            let accepted = salvage.accepted.get(&index);
+            let member_disposition = match accepted.map(|member| member.accepted_as) {
+                Some(AcceptedAs::CleanPrefix) => "clean_prefix_preserved",
+                Some(AcceptedAs::Complete) if accepted.is_some_and(|member| member.attempt > 1) => {
+                    "suffix_complete"
+                }
+                Some(AcceptedAs::Complete) => "cluster_complete",
+                None if salvage.rejected.contains(&index) => "boundary_single_fallback",
+                None => "unresolved_single_fallback",
+            };
+            (
+                index,
+                json!({
+                    "policy": "clean_prefix_v1",
+                    "max_attempts": MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+                    "group_attempts": salvage.attempt_count,
+                    "preserved_prefix_members": preserved_prefix_members,
+                    "boundary_fallback_members": salvage.rejected.len(),
+                    "fallback_members": fallback_members,
+                    "terminal": salvage.terminal,
+                    "member_disposition": member_disposition,
+                    "accepted_attempt": accepted.map(|member| member.attempt),
+                    "original_group_position": position,
+                }),
+            )
+        })
+        .collect();
+    let outcomes = salvage
+        .accepted
+        .into_iter()
+        .map(|(index, member)| (index, member.value))
+        .collect();
+    (outcomes, evidence)
+}
+
+struct ClusteredGroupResults {
+    outcomes: HashMap<usize, (Outcome, u128)>,
+    evidence: HashMap<usize, Value>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum CleanPrefixBoundary {
+    /// The boundary member was not classified as bad; include it in the next
+    /// suffix attempt. A zero-length prefix is rejected as non-progress.
+    RetryFrom(usize),
+    /// The boundary member produced a member-local plug-in error or a
+    /// non-rendered outcome. Exclude it from later cluster attempts; the caller
+    /// still runs its authoritative one-member path.
+    Reject(usize),
+}
+
+impl CleanPrefixBoundary {
+    fn index(self) -> usize {
+        match self {
+            Self::RetryFrom(index) | Self::Reject(index) => index,
+        }
+    }
 }
 
 enum ClusterAttempt<T> {
     Complete(HashMap<usize, T>),
-    /// The worker reached this member and produced an explicit member-local
-    /// setup/frame failure. It may be removed before retrying the remainder;
+    /// A contiguous prefix completed and its shared session closed cleanly.
+    /// Only the suffix described by `boundary` may be attempted again.
+    CleanPrefix {
+        outcomes: Vec<(usize, T)>,
+        boundary: CleanPrefixBoundary,
+    },
+    /// The worker reached this member and produced a member-local outcome that
+    /// requires fallback. It may be removed before retrying the remainder;
     /// the caller still renders it independently for authoritative evidence.
     RejectMember(usize),
     /// Opening, transport, close validation, panic, or another session-wide
     /// ambiguity. Retrying smaller subsets could repeat the same expensive
     /// failure without adding a discriminating fact, so fall back immediately.
     HardFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AcceptedAs {
+    Complete,
+    CleanPrefix,
+}
+
+struct Salvaged<T> {
+    value: T,
+    attempt: usize,
+    accepted_as: AcceptedAs,
+}
+
+struct CleanPrefixSalvage<T> {
+    accepted: HashMap<usize, Salvaged<T>>,
+    rejected: std::collections::BTreeSet<usize>,
+    attempt_count: usize,
+    terminal: &'static str,
 }
 
 fn cluster_close_is_clean(close: &Value) -> bool {
@@ -1904,10 +2028,87 @@ fn rejected_member_after_close<T>(member: usize, close: &Value) -> ClusterAttemp
     }
 }
 
-/// Recovers the healthy remainder after an explicitly identified bad member.
-/// A cluster is accepted only when it returns one result for every requested
-/// member. Hard/ambiguous failures stop after one attempt, known bad members
-/// are never retried, and `attempts_remaining` bounds a run of explicit errors.
+fn finalize_clean_cluster_outcomes(
+    candidates: &[usize],
+    outcomes: &mut HashMap<usize, (Outcome, u128)>,
+    close: &Value,
+    close_ms: u128,
+) -> bool {
+    if candidates.is_empty()
+        || !cluster_close_is_clean(close)
+        || !exact_cluster_outcomes(candidates, outcomes)
+    {
+        return false;
+    }
+    let last = *candidates.last().expect("non-empty checked above");
+    for &record_index in candidates {
+        let Some((outcome, elapsed)) = outcomes.get_mut(&record_index) else {
+            return false;
+        };
+        if record_index == last {
+            *elapsed += close_ms;
+            if let Some(phases) = outcome
+                .detail
+                .get_mut("phase_elapsed_ms")
+                .and_then(Value::as_object_mut)
+            {
+                phases.insert("session_close".to_owned(), json!(close_ms));
+            }
+        }
+        attach_shared_cluster_close(outcome, close);
+    }
+    true
+}
+
+fn member_failure_after_close(
+    member: usize,
+    prefix: &[usize],
+    mut outcomes: HashMap<usize, (Outcome, u128)>,
+    close: &Value,
+    close_ms: u128,
+    preserve_clean_prefix: bool,
+) -> ClusterAttempt<(Outcome, u128)> {
+    if !preserve_clean_prefix || prefix.is_empty() {
+        if !preserve_clean_prefix {
+            return rejected_member_after_close(member, close);
+        }
+        return if cluster_close_is_clean(close) {
+            ClusterAttempt::CleanPrefix {
+                outcomes: Vec::new(),
+                boundary: CleanPrefixBoundary::Reject(member),
+            }
+        } else {
+            ClusterAttempt::HardFailure
+        };
+    }
+    if !cluster_close_is_clean(close) {
+        return ClusterAttempt::HardFailure;
+    }
+    if !finalize_clean_cluster_outcomes(prefix, &mut outcomes, close, close_ms) {
+        return ClusterAttempt::HardFailure;
+    }
+    let ordered = prefix
+        .iter()
+        .map(|index| {
+            outcomes
+                .remove(index)
+                .map(|outcome| (*index, outcome))
+                .expect("exact prefix was validated")
+        })
+        .collect();
+    ClusterAttempt::CleanPrefix {
+        outcomes: ordered,
+        boundary: CleanPrefixBoundary::Reject(member),
+    }
+}
+
+fn exact_cluster_outcomes<T>(candidates: &[usize], outcomes: &HashMap<usize, T>) -> bool {
+    outcomes.len() == candidates.len()
+        && candidates.iter().all(|index| outcomes.contains_key(index))
+}
+
+/// The unchanged opt-out policy: remove an explicitly identified member and
+/// retry all other candidates, including any previously rendered prefix.
 fn salvage_cluster_candidates<T, F>(
     candidates: &[usize],
     attempts_remaining: usize,
@@ -1920,10 +2121,7 @@ where
         return HashMap::new();
     }
     match attempt(candidates) {
-        ClusterAttempt::Complete(outcomes)
-            if outcomes.len() == candidates.len()
-                && candidates.iter().all(|index| outcomes.contains_key(index)) =>
-        {
+        ClusterAttempt::Complete(outcomes) if exact_cluster_outcomes(candidates, &outcomes) => {
             outcomes
         }
         ClusterAttempt::RejectMember(rejected) if candidates.contains(&rejected) => {
@@ -1935,8 +2133,121 @@ where
             salvage_cluster_candidates(&remaining, attempts_remaining - 1, attempt)
         }
         ClusterAttempt::Complete(_)
+        | ClusterAttempt::CleanPrefix { .. }
         | ClusterAttempt::RejectMember(_)
         | ClusterAttempt::HardFailure => HashMap::new(),
+    }
+}
+
+/// The opt-in policy. Accepted members always came from either an exact full
+/// result or an ordered contiguous prefix whose session had already closed
+/// cleanly. Anything else remains on the existing single-plugin fallback.
+fn salvage_clean_prefix_cluster_candidates<T, F>(
+    candidates: &[usize],
+    maximum_attempts: usize,
+    attempt: &mut F,
+) -> CleanPrefixSalvage<T>
+where
+    F: FnMut(&[usize]) -> ClusterAttempt<T>,
+{
+    let mut accepted = HashMap::new();
+    let mut rejected = std::collections::BTreeSet::new();
+    let mut pending = candidates.to_vec();
+    let mut attempt_count = 0;
+    let mut terminal = "pending";
+    while pending.len() >= 2 && attempt_count < maximum_attempts {
+        attempt_count += 1;
+        match attempt(&pending) {
+            ClusterAttempt::Complete(mut outcomes)
+                if exact_cluster_outcomes(&pending, &outcomes) =>
+            {
+                if pending.iter().any(|index| accepted.contains_key(index)) {
+                    terminal = "malformed_attempt";
+                    break;
+                }
+                for index in &pending {
+                    let value = outcomes.remove(index).expect("exact result was validated");
+                    accepted.insert(
+                        *index,
+                        Salvaged {
+                            value,
+                            attempt: attempt_count,
+                            accepted_as: AcceptedAs::Complete,
+                        },
+                    );
+                }
+                terminal = "remaining_complete";
+                pending.clear();
+                break;
+            }
+            ClusterAttempt::CleanPrefix { outcomes, boundary } => {
+                let boundary_index = boundary.index();
+                let Some(boundary_position) =
+                    pending.iter().position(|index| *index == boundary_index)
+                else {
+                    terminal = "malformed_attempt";
+                    break;
+                };
+                let prefix = &pending[..boundary_position];
+                let retry_without_progress =
+                    matches!(boundary, CleanPrefixBoundary::RetryFrom(_)) && prefix.is_empty();
+                if retry_without_progress
+                    || outcomes.len() != prefix.len()
+                    || outcomes
+                        .iter()
+                        .zip(prefix)
+                        .any(|((actual, _), expected)| actual != expected)
+                    || outcomes
+                        .iter()
+                        .any(|(index, _)| accepted.contains_key(index))
+                {
+                    terminal = "malformed_attempt";
+                    break;
+                }
+                for (index, value) in outcomes {
+                    accepted.insert(
+                        index,
+                        Salvaged {
+                            value,
+                            attempt: attempt_count,
+                            accepted_as: AcceptedAs::CleanPrefix,
+                        },
+                    );
+                }
+                pending = match boundary {
+                    CleanPrefixBoundary::RetryFrom(_) => pending[boundary_position..].to_vec(),
+                    CleanPrefixBoundary::Reject(_) => {
+                        rejected.insert(boundary_index);
+                        pending[boundary_position + 1..].to_vec()
+                    }
+                };
+            }
+            ClusterAttempt::Complete(_) => {
+                terminal = "malformed_attempt";
+                break;
+            }
+            ClusterAttempt::RejectMember(_) => {
+                terminal = "unexpected_legacy_reject";
+                break;
+            }
+            ClusterAttempt::HardFailure => {
+                terminal = "hard_failure";
+                break;
+            }
+        }
+    }
+    if terminal == "pending" {
+        terminal = if pending.len() >= 2 && attempt_count == maximum_attempts {
+            "attempt_limit"
+        } else {
+            "suffix_too_small"
+        };
+    }
+    CleanPrefixSalvage {
+        accepted,
+        rejected,
+        attempt_count,
+        terminal,
     }
 }
 
@@ -2041,8 +2352,17 @@ fn sweep_cluster_candidates(
             match session.swap_plugin(plugin_index as u32) {
                 Ok(SwapOutcome::Swapped) => {}
                 Ok(SwapOutcome::PluginError { .. }) => {
+                    let close_started = Instant::now();
                     let close = session.close();
-                    return rejected_member_after_close(record_index, &close);
+                    let close_ms = close_started.elapsed().as_millis();
+                    return member_failure_after_close(
+                        record_index,
+                        &candidates[..plugin_index],
+                        outcomes,
+                        &close,
+                        close_ms,
+                        options.clean_prefix_cluster_salvage,
+                    );
                 }
                 Err(_) => {
                     let _ = session.close();
@@ -2062,14 +2382,24 @@ fn sweep_cluster_candidates(
         let mut outcome = frame_outcome_dumping(frame, None, options.pixel_format);
         let frame_ms = frame_started.elapsed().as_millis();
         // These cases require the per-plugin close evidence used by the existing
-        // fallback/classification logic. Abandon the optimization and let the
-        // caller reproduce every candidate independently.
+        // fallback/classification logic. A clean prefix may already be final;
+        // the boundary and any still-unresolved suffix remain authoritative
+        // one-plugin work.
         if outcome.bucket != "rendered" {
+            let close_started = Instant::now();
             let close = session.close();
+            let close_ms = close_started.elapsed().as_millis();
             return if transport_failed {
                 ClusterAttempt::HardFailure
             } else {
-                rejected_member_after_close(record_index, &close)
+                member_failure_after_close(
+                    record_index,
+                    &candidates[..plugin_index],
+                    outcomes,
+                    &close,
+                    close_ms,
+                    options.clean_prefix_cluster_salvage,
+                )
             };
         }
         outcome.detail.insert(
@@ -2092,24 +2422,8 @@ fn sweep_cluster_candidates(
     let close_started = Instant::now();
     let close = session.close();
     let close_ms = close_started.elapsed().as_millis();
-    if !cluster_close_is_clean(&close) {
+    if !finalize_clean_cluster_outcomes(candidates, &mut outcomes, &close, close_ms) {
         return ClusterAttempt::HardFailure;
-    }
-    for (position, record_index) in candidates.iter().enumerate() {
-        let Some((outcome, elapsed)) = outcomes.get_mut(record_index) else {
-            return ClusterAttempt::HardFailure;
-        };
-        if position + 1 == candidates.len() {
-            *elapsed += close_ms;
-            if let Some(phases) = outcome
-                .detail
-                .get_mut("phase_elapsed_ms")
-                .and_then(Value::as_object_mut)
-            {
-                phases.insert("session_close".to_owned(), json!(close_ms));
-            }
-        }
-        attach_shared_cluster_close(outcome, &close);
     }
     ClusterAttempt::Complete(outcomes)
 }
@@ -3469,6 +3783,8 @@ fn report(
         })
         .collect::<std::collections::BTreeSet<_>>()
         .len();
+    let clean_prefix_cluster_salvage_effective = options.clean_prefix_cluster_salvage
+        && render_group_count.is_some_and(|group_count| group_count < plugins.len());
     let render = (!options.discovery_only).then(|| {
         let mut render = json!({
             "width": options.width,
@@ -3505,6 +3821,17 @@ fn report(
                     "effective_same_closure_cap": effective_same_closure_render_jobs,
                     "render_group_count": render_group_count,
                     "unresolved_closure_unit": "original_serial_lane",
+                }),
+            );
+        }
+        if options.clean_prefix_cluster_salvage {
+            render.as_object_mut().unwrap().insert(
+                "clean_prefix_cluster_salvage".to_owned(),
+                json!({
+                    "requested": true,
+                    "effective": clean_prefix_cluster_salvage_effective,
+                    "maximum_attempts_per_group": MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+                    "acceptance_boundary": "member_local_plugin_error_or_non_rendered_outcome_and_clean_close",
                 }),
             );
         }
@@ -3683,6 +4010,7 @@ mod tests {
             render_jobs: 1,
             same_closure_render_jobs: 1,
             dynamic_same_closure_groups: false,
+            clean_prefix_cluster_salvage: false,
             filter: None,
             exclude_paths: Vec::new(),
             blocked_paths: Vec::new(),
@@ -4532,12 +4860,18 @@ mod tests {
                 .is_none()
         );
         assert!(
+            static_report["render"]
+                .get("clean_prefix_cluster_salvage")
+                .is_none()
+        );
+        assert!(
             static_report["plugins"][0]
                 .get("render_work_group")
                 .is_none()
         );
 
         options.dynamic_same_closure_groups = true;
+        options.clean_prefix_cluster_salvage = true;
         let mut dynamic_plugin = static_report["plugins"][0].clone();
         attach_render_work_group_evidence(&mut dynamic_plugin, 2, 3);
         let dynamic_report = report(
@@ -4546,12 +4880,12 @@ mod tests {
             &build,
             Duration::from_millis(3),
             Duration::from_millis(5),
-            BTreeMap::from([("rendered".to_owned(), 1)]),
-            vec![dynamic_plugin],
+            BTreeMap::from([("rendered".to_owned(), 2)]),
+            vec![dynamic_plugin.clone(), dynamic_plugin],
             Some(1),
             Some(2),
             Some(2),
-            Some(3),
+            Some(1),
         );
         assert_eq!(
             dynamic_report["render"]["dynamic_group_schedule"]["requested_mode"],
@@ -4567,7 +4901,23 @@ mod tests {
         );
         assert_eq!(
             dynamic_report["render"]["dynamic_group_schedule"]["render_group_count"],
-            3
+            1
+        );
+        assert_eq!(
+            dynamic_report["render"]["clean_prefix_cluster_salvage"]["requested"],
+            true
+        );
+        assert_eq!(
+            dynamic_report["render"]["clean_prefix_cluster_salvage"]["effective"],
+            true
+        );
+        assert_eq!(
+            dynamic_report["render"]["clean_prefix_cluster_salvage"]["acceptance_boundary"],
+            "member_local_plugin_error_or_non_rendered_outcome_and_clean_close"
+        );
+        assert_eq!(
+            dynamic_report["render"]["clean_prefix_cluster_salvage"]["maximum_attempts_per_group"],
+            MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS
         );
         assert_eq!(
             dynamic_report["plugins"][0]["same_closure_shard"],
@@ -4896,6 +5246,251 @@ mod tests {
     }
 
     #[test]
+    fn clean_closed_prefixes_are_never_retried_and_boundaries_are_exact() {
+        let candidates = (0..8).collect::<Vec<_>>();
+        let mut attempts = Vec::<Vec<usize>>::new();
+        let mut attempt = |subset: &[usize]| {
+            attempts.push(subset.to_vec());
+            match attempts.len() {
+                1 => ClusterAttempt::CleanPrefix {
+                    outcomes: [0, 1, 2]
+                        .into_iter()
+                        .map(|index| (index, index * 10))
+                        .collect(),
+                    boundary: CleanPrefixBoundary::Reject(3),
+                },
+                2 => ClusterAttempt::CleanPrefix {
+                    outcomes: [4, 5]
+                        .into_iter()
+                        .map(|index| (index, index * 10))
+                        .collect(),
+                    boundary: CleanPrefixBoundary::RetryFrom(6),
+                },
+                3 => ClusterAttempt::Complete(
+                    [6, 7]
+                        .into_iter()
+                        .map(|index| (index, index * 10))
+                        .collect(),
+                ),
+                _ => panic!("unexpected extra cluster attempt"),
+            }
+        };
+
+        let salvage = salvage_clean_prefix_cluster_candidates(
+            &candidates,
+            MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+            &mut attempt,
+        );
+
+        assert_eq!(
+            attempts,
+            vec![vec![0, 1, 2, 3, 4, 5, 6, 7], vec![4, 5, 6, 7], vec![6, 7],]
+        );
+        assert_eq!(
+            salvage.accepted.keys().copied().collect::<Vec<_>>().len(),
+            7
+        );
+        assert_eq!(
+            salvage
+                .accepted
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [0, 1, 2, 4, 5, 6, 7].into_iter().collect()
+        );
+        assert_eq!(salvage.attempt_count, 3);
+        assert_eq!(
+            salvage
+                .accepted
+                .iter()
+                .filter_map(
+                    |(&index, member)| (member.accepted_as == AcceptedAs::CleanPrefix)
+                        .then_some(index)
+                )
+                .collect::<std::collections::BTreeSet<_>>(),
+            [0, 1, 2, 4, 5].into_iter().collect()
+        );
+        assert_eq!(salvage.rejected, [3].into_iter().collect());
+        assert_eq!(salvage.terminal, "remaining_complete");
+        assert_eq!(salvage.accepted[&6].value, 60);
+        assert_eq!(salvage.accepted[&6].attempt, 3);
+    }
+
+    #[test]
+    fn malformed_clean_prefixes_fail_closed_without_retrying() {
+        let candidates = vec![0, 1, 2, 3];
+        let malformed = vec![
+            (vec![(0, 0), (1, 10)], CleanPrefixBoundary::Reject(3)),
+            (
+                vec![(0, 0), (1, 10), (99, 990)],
+                CleanPrefixBoundary::Reject(3),
+            ),
+            (vec![], CleanPrefixBoundary::RetryFrom(0)),
+            (vec![(0, 0), (1, 10)], CleanPrefixBoundary::Reject(99)),
+            (
+                vec![(0, 0), (0, 10), (2, 20)],
+                CleanPrefixBoundary::Reject(3),
+            ),
+            (
+                vec![(1, 10), (0, 0), (2, 20)],
+                CleanPrefixBoundary::Reject(3),
+            ),
+        ];
+        for (outcomes, boundary) in malformed {
+            let mut returned = Some((outcomes, boundary));
+            let mut attempt = |_: &[usize]| {
+                let (outcomes, boundary) = returned.take().expect("called only once");
+                ClusterAttempt::CleanPrefix { outcomes, boundary }
+            };
+            let salvage = salvage_clean_prefix_cluster_candidates(
+                &candidates,
+                MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+                &mut attempt,
+            );
+            assert!(salvage.accepted.is_empty());
+            assert_eq!(salvage.attempt_count, 1);
+            assert_eq!(salvage.terminal, "malformed_attempt");
+        }
+    }
+
+    #[test]
+    fn clean_prefix_attempt_cap_keeps_only_prior_closed_sessions() {
+        let candidates = (0..10).collect::<Vec<_>>();
+        let mut calls = 0;
+        let mut attempt = |subset: &[usize]| {
+            calls += 1;
+            ClusterAttempt::CleanPrefix {
+                outcomes: vec![(subset[0], subset[0] * 10)],
+                boundary: CleanPrefixBoundary::RetryFrom(subset[1]),
+            }
+        };
+
+        let salvage = salvage_clean_prefix_cluster_candidates(
+            &candidates,
+            MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+            &mut attempt,
+        );
+
+        assert_eq!(calls, MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS);
+        assert_eq!(salvage.attempt_count, MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS);
+        assert_eq!(salvage.terminal, "attempt_limit");
+        assert_eq!(
+            salvage
+                .accepted
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [0, 1, 2, 3].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn clean_prefix_survives_a_later_hard_failure_but_legacy_reject_does_not() {
+        let candidates = vec![0, 1, 2, 3];
+        let mut calls = 0;
+        let mut hard_after_prefix = |_: &[usize]| {
+            calls += 1;
+            if calls == 1 {
+                ClusterAttempt::CleanPrefix {
+                    outcomes: vec![(0, 0), (1, 10)],
+                    boundary: CleanPrefixBoundary::RetryFrom(2),
+                }
+            } else {
+                ClusterAttempt::HardFailure
+            }
+        };
+        let salvage = salvage_clean_prefix_cluster_candidates(
+            &candidates,
+            MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+            &mut hard_after_prefix,
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(salvage.terminal, "hard_failure");
+        assert_eq!(
+            salvage
+                .accepted
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [0, 1].into_iter().collect()
+        );
+
+        let mut unexpected = |_: &[usize]| ClusterAttempt::<usize>::RejectMember(0);
+        let salvage = salvage_clean_prefix_cluster_candidates(
+            &candidates,
+            MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+            &mut unexpected,
+        );
+        assert!(salvage.accepted.is_empty());
+        assert_eq!(salvage.terminal, "unexpected_legacy_reject");
+
+        let mut immediate_hard = |_: &[usize]| ClusterAttempt::<usize>::HardFailure;
+        let salvage = salvage_clean_prefix_cluster_candidates(&candidates, 1, &mut immediate_hard);
+        assert_eq!(salvage.attempt_count, 1);
+        assert_eq!(salvage.terminal, "hard_failure");
+    }
+
+    #[test]
+    fn clean_prefix_reject_at_first_member_progresses_and_malformed_complete_stops() {
+        let candidates = vec![0, 1, 2, 3];
+        let mut calls = 0;
+        let mut reject_first = |subset: &[usize]| {
+            calls += 1;
+            if calls == 1 {
+                ClusterAttempt::CleanPrefix {
+                    outcomes: Vec::new(),
+                    boundary: CleanPrefixBoundary::Reject(0),
+                }
+            } else {
+                ClusterAttempt::Complete(subset.iter().map(|&index| (index, index * 10)).collect())
+            }
+        };
+        let salvage = salvage_clean_prefix_cluster_candidates(
+            &candidates,
+            MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+            &mut reject_first,
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(salvage.rejected, [0].into_iter().collect());
+        assert_eq!(salvage.accepted.len(), 3);
+        assert_eq!(salvage.terminal, "remaining_complete");
+        let (outcomes, evidence) = publish_clean_prefix_salvage(&candidates, salvage);
+        assert_eq!(
+            outcomes
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [1, 2, 3].into_iter().collect()
+        );
+        assert_eq!(
+            evidence[&0]["member_disposition"],
+            "boundary_single_fallback"
+        );
+        assert!(evidence[&0]["accepted_attempt"].is_null());
+        assert_eq!(evidence[&1]["member_disposition"], "suffix_complete");
+        assert_eq!(evidence[&1]["accepted_attempt"], 2);
+        assert_eq!(evidence[&1]["group_attempts"], 2);
+        assert_eq!(evidence[&1]["fallback_members"], 1);
+        assert_eq!(evidence[&1]["boundary_fallback_members"], 1);
+        assert_eq!(evidence[&1]["terminal"], "remaining_complete");
+
+        for malformed in [
+            HashMap::from([(0, 0), (1, 10), (2, 20)]),
+            HashMap::from([(0, 0), (1, 10), (2, 20), (3, 30), (99, 990)]),
+        ] {
+            let mut value = Some(malformed);
+            let mut attempt = |_: &[usize]| ClusterAttempt::Complete(value.take().unwrap());
+            let salvage = salvage_clean_prefix_cluster_candidates(
+                &candidates,
+                MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+                &mut attempt,
+            );
+            assert!(salvage.accepted.is_empty());
+            assert_eq!(salvage.terminal, "malformed_attempt");
+        }
+    }
+
+    #[test]
     fn hard_cluster_failure_is_not_retried_and_member_retries_are_bounded() {
         let candidates = (0..8).collect::<Vec<_>>();
         let mut hard_attempts = 0;
@@ -4950,6 +5545,95 @@ mod tests {
                 &json!({ "session_clean": true, "invalidated": false })
             ),
             ClusterAttempt::RejectMember(3)
+        ));
+    }
+
+    #[test]
+    fn member_failure_exposes_only_an_exact_clean_closed_prefix() {
+        fn prefix_outcome(index: usize) -> (Outcome, u128) {
+            let mut outcome = Outcome::bare("rendered");
+            outcome.detail.insert(
+                "phase_elapsed_ms".to_owned(),
+                json!({
+                    "session_open": if index == 0 { 3 } else { 0 },
+                    "plugin_swap": 1,
+                    "frames": 2,
+                    "session_close": 0,
+                }),
+            );
+            outcome.detail.insert(
+                "cluster_session".to_owned(),
+                json!({ "plugin_index": index, "plugin_count": 3 }),
+            );
+            (outcome, 6)
+        }
+
+        let dirty = member_failure_after_close(
+            2,
+            &[0, 1],
+            HashMap::from([(0, prefix_outcome(0)), (1, prefix_outcome(1))]),
+            &json!({ "session_clean": false, "invalidated": true }),
+            7,
+            true,
+        );
+        assert!(matches!(dirty, ClusterAttempt::HardFailure));
+
+        let malformed = member_failure_after_close(
+            2,
+            &[0, 1],
+            HashMap::from([(0, prefix_outcome(0))]),
+            &json!({ "session_clean": true, "invalidated": false }),
+            7,
+            true,
+        );
+        assert!(matches!(malformed, ClusterAttempt::HardFailure));
+
+        let clean = member_failure_after_close(
+            2,
+            &[0, 1],
+            HashMap::from([(0, prefix_outcome(0)), (1, prefix_outcome(1))]),
+            &json!({
+                "session_clean": true,
+                "invalidated": false,
+                "invalidated_reason": Value::Null,
+                "worker": { "classification": "ok", "exit_code": 0 },
+            }),
+            7,
+            true,
+        );
+        let ClusterAttempt::CleanPrefix { outcomes, boundary } = clean else {
+            panic!("clean exact prefix was not exposed");
+        };
+        assert_eq!(boundary, CleanPrefixBoundary::Reject(2));
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].0, 0);
+        assert_eq!(outcomes[1].0, 1);
+        assert_eq!(outcomes[0].1.1, 6);
+        assert_eq!(outcomes[1].1.1, 13);
+        assert_eq!(
+            outcomes[1].1.0.detail["phase_elapsed_ms"]["session_close"],
+            7
+        );
+        for (_, (outcome, _)) in &outcomes {
+            assert_eq!(outcome.detail["session_clean"], true);
+            assert_eq!(outcome.detail["worker"]["classification"], "ok");
+            assert_eq!(outcome.detail["cluster_session"]["close_shared"], true);
+        }
+
+        let first_member = member_failure_after_close(
+            0,
+            &[],
+            HashMap::new(),
+            &json!({ "session_clean": true, "invalidated": false }),
+            3,
+            true,
+        );
+        assert!(matches!(
+            first_member,
+            ClusterAttempt::CleanPrefix {
+                outcomes,
+                boundary: CleanPrefixBoundary::Reject(0),
+            } if outcomes.is_empty()
         ));
     }
 

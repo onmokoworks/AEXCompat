@@ -59,7 +59,8 @@ pwsh -File tools\build-render-sweep.ps1
 target\aexcompat-render-sweep-package\aexcompat-render-sweep.exe `
   --json target\render-sweep.json `
   --render-jobs 3 --same-closure-render-jobs 3 `
-  --dynamic-same-closure-groups
+  --dynamic-same-closure-groups `
+  --clean-prefix-cluster-salvage
 ```
 
 packageは次の配置になり、`--repository` や手動runtime-folder選択なしでworkerを解決する。
@@ -79,7 +80,11 @@ DLLやAdobe runtimeを複製しない。
 引数エラーはexit 64、worker/input/output等の実行環境エラーはexit 1、成功はexit 0。
 最終stderr行のerrorはschema version付きJSONで、0件選択も成功扱いの完全report
 (`plugins=[]`, `buckets={}`, 各effective count=0)を出す。`--dynamic-same-closure-groups` は
-batch専用の明示opt-inであり、AviUtl2/YMM4/Harnessの単体frame pathやsession所有規則は変えない。
+batch専用の明示opt-inである。`--clean-prefix-cluster-salvage` も既定offで、後続memberが
+member-local plugin errorまたはnon-rendered outcomeを返し、sessionがclean closeした場合だけ、
+確定済みの連続prefixを再renderせず保持する。transport/closeが曖昧なattemptは何も採用せず、
+以前のclean-close済みprefix以外の未確定memberを従来どおり単体fallbackへ回す。
+どちらもAviUtl2/YMM4/Harnessの単体frame pathやsession所有規則は変えない。
 
 ### worker の置き場所 (issue #650)
 

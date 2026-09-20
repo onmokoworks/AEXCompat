@@ -105,6 +105,7 @@ fn help_succeeds_without_worker_resolution() {
         "--close-report",
         "--plugin-defaults",
         "--verify-pixel-determinism",
+        "--clean-prefix-cluster-salvage",
     ] {
         assert!(stdout.contains(option), "help omitted {option}");
     }
@@ -192,7 +193,7 @@ fn packaged_cli_resolves_worker_and_publishes_complete_zero_record_report() {
     let mut command = command(&packaged);
     command
         .env("AEXCOMPAT_MULTIFILTER_CONFIG", root.join("missing.toml"))
-        .args(["--limit", "0", "--json"])
+        .args(["--clean-prefix-cluster-salvage", "--limit", "0", "--json"])
         .arg(&report)
         .arg(&scan);
     let output = output_with_deadline(command);
@@ -215,6 +216,10 @@ fn packaged_cli_resolves_worker_and_publishes_complete_zero_record_report() {
     assert_eq!(value["render"]["effective_render_jobs"], 0);
     assert_eq!(value["render"]["effective_same_closure_render_jobs"], 0);
     assert_eq!(value["render"]["distinct_dependency_closure_count"], 0);
+    assert_eq!(
+        value["render"]["clean_prefix_cluster_salvage"]["effective"],
+        false
+    );
     assert_eq!(value["build"]["complete"], true);
     assert_eq!(value["build"]["verification"], "run_boundary_verified");
     assert!(!report.with_extension("partial.jsonl").exists());
