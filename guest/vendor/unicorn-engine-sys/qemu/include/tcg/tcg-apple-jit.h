@@ -112,13 +112,17 @@ static inline void jit_write_protect(int enabled)
     return pthread_jit_write_protect_np(enabled);
 }
 
-#define JIT_CALLBACK_GUARD(x)                       \
-{                                                   \
-    bool executable = uc->current_executable;       \
-    assert_executable(executable);                  \
-    x;                                              \
-    jit_write_protect(executable);                  \
-}                                                   \
+#define JIT_CALLBACK_GUARD(x)                           \
+{                                                       \
+    bool executable = uc->current_executable;           \
+    assert_executable(executable);                      \
+    x;                                                  \
+    if (thread_executable() != executable) {            \
+        jit_write_protect(executable);                  \
+    }                                                   \
+    uc->current_executable = executable;                \
+    assert_executable(executable);                      \
+}                                                       \
 
 
 #define JIT_CALLBACK_GUARD_VAR(var, x)                  \
@@ -126,7 +130,11 @@ static inline void jit_write_protect(int enabled)
     bool executable = uc->current_executable;           \
     assert_executable(executable);                      \
     var = x;                                            \
-    jit_write_protect(executable);                      \
+    if (thread_executable() != executable) {            \
+        jit_write_protect(executable);                  \
+    }                                                   \
+    uc->current_executable = executable;                \
+    assert_executable(executable);                      \
 }                                                       \
 
 

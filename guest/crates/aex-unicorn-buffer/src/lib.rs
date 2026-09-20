@@ -116,6 +116,18 @@ mod tests {
     use super::*;
     use unicorn_engine::{Arch, HookType, Mode, TlbEntry, TlbType};
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    unsafe extern "C" {
+        fn pthread_jit_write_protect_np(enabled: i32);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    fn make_current_thread_jit_writable() {
+        // SAFETY: This is the platform API Unicorn itself uses. The callback
+        // guard must restore executable mode before translated code resumes.
+        unsafe { pthread_jit_write_protect_np(0) };
+    }
+
     #[test]
     fn ymm_value_has_native_register_alignment() {
         assert_eq!(std::mem::align_of::<YmmValue>(), 32);
@@ -257,6 +269,53 @@ mod tests {
             faulting.emu_start(CODE, CODE + 3, 0, 0),
             Err(uc_error::WRITE_UNMAPPED),
         );
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn code_hook_restores_thread_global_jit_protection_after_external_change() {
+        const CODE: u64 = 0x1000;
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(CODE, 4096, Prot::ALL).unwrap();
+        // inc eax; nop
+        unicorn.mem_write(CODE, &[0xff, 0xc0, 0x90]).unwrap();
+        unicorn
+            .add_code_hook(CODE, CODE, |_, _, _| {
+                make_current_thread_jit_writable();
+            })
+            .unwrap();
+
+        unicorn.emu_start(CODE, CODE + 3, 1_000_000, 4).unwrap();
+        assert_eq!(unicorn.reg_read(RegisterX86::EAX).unwrap(), 1);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn value_hook_restores_jit_protection_after_nested_api_and_external_change() {
+        const CODE: u64 = 0x1000;
+        const DATA: u64 = 0x2000;
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(CODE, 4096, Prot::ALL).unwrap();
+        // mov byte ptr [rax], 7; hlt
+        unicorn.mem_write(CODE, &[0xc6, 0x00, 0x07, 0xf4]).unwrap();
+        unicorn.reg_write(RegisterX86::RAX, DATA).unwrap();
+        unicorn
+            .add_mem_hook(
+                HookType::MEM_WRITE_UNMAPPED,
+                DATA,
+                DATA,
+                |unicorn, _, _, _, _| {
+                    unicorn
+                        .mem_map(DATA, 4096, Prot::READ | Prot::WRITE)
+                        .unwrap();
+                    make_current_thread_jit_writable();
+                    true
+                },
+            )
+            .unwrap();
+
+        unicorn.emu_start(CODE, CODE + 4, 0, 0).unwrap();
+        assert_eq!(unicorn.mem_read_as_vec(DATA, 1).unwrap(), [7]);
     }
 
     #[test]
