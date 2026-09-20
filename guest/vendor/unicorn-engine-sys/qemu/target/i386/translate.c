@@ -2866,7 +2866,8 @@ static void gen_bnd_jmp(DisasContext *s)
    If RECHECK_TF, emit a rechecking helper for #DB, ignoring the state of
    S->TF.  This is used by the syscall/sysret insns.  */
 static void
-do_gen_eob_worker(DisasContext *s, bool inhibit, bool recheck_tf, bool jr)
+do_gen_eob_worker(DisasContext *s, bool inhibit, bool recheck_tf, bool jr,
+                  bool explicit_state)
 {
     TCGContext *tcg_ctx = s->uc->tcg_ctx;
     gen_update_cc_op(s);
@@ -2888,6 +2889,21 @@ do_gen_eob_worker(DisasContext *s, bool inhibit, bool recheck_tf, bool jr)
         tcg_gen_exit_tb(tcg_ctx, NULL, 0);
     } else if (s->tf) {
         gen_helper_single_step(tcg_ctx, tcg_ctx->cpu_env);
+    } else if (jr && explicit_state &&
+               !(s->base.tb->flags & HF_RF_MASK) &&
+               !((s->flags & HF_MPX_EN_MASK) &&
+                 (s->flags & HF_MPX_IU_MASK))) {
+        TCGv_ptr ptr = tcg_temp_new_ptr(tcg_ctx);
+        TCGv pc = tcg_temp_new(tcg_ctx);
+
+        tcg_gen_addi_tl(tcg_ctx, pc, s->T0, s->cs_base);
+        gen_helper_lookup_tb_ptr_fast(tcg_ctx, ptr, tcg_ctx->cpu_env,
+                                      pc,
+                                      tcg_const_tl(tcg_ctx, s->cs_base),
+                                      tcg_const_i32(tcg_ctx, s->flags));
+        tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, ptr));
+        tcg_temp_free(tcg_ctx, pc);
+        tcg_temp_free_ptr(tcg_ctx, ptr);
     } else if (jr) {
         tcg_gen_lookup_and_goto_ptr(tcg_ctx);
     } else {
@@ -2899,7 +2915,7 @@ do_gen_eob_worker(DisasContext *s, bool inhibit, bool recheck_tf, bool jr)
 static inline void
 gen_eob_worker(DisasContext *s, bool inhibit, bool recheck_tf)
 {
-    do_gen_eob_worker(s, inhibit, recheck_tf, false);
+    do_gen_eob_worker(s, inhibit, recheck_tf, false, false);
 }
 
 /* End of block.
@@ -2918,7 +2934,14 @@ static void gen_eob(DisasContext *s)
 /* Jump to register */
 static void gen_jr(DisasContext *s, TCGv dest)
 {
-    do_gen_eob_worker(s, false, false, true);
+    tcg_gen_mov_tl(s->uc->tcg_ctx, s->T0, dest);
+    do_gen_eob_worker(s, false, false, true, true);
+}
+
+/* Jump after a helper that may have changed CS or translation flags. */
+static void gen_jr_dynamic(DisasContext *s)
+{
+    do_gen_eob_worker(s, false, false, true, false);
 }
 
 /* generate a jump to eip. No segment change must happen before as a
@@ -5604,7 +5627,7 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
                                       tcg_const_i32(tcg_ctx, s->pc - s->cs_base));
             }
             tcg_gen_ld_tl(tcg_ctx, s->tmp4, tcg_ctx->cpu_env, offsetof(CPUX86State, eip));
-            gen_jr(s, s->tmp4);
+            gen_jr_dynamic(s);
             break;
         case 4: /* jmp Ev */
             if (dflag == MO_16) {
@@ -5631,7 +5654,7 @@ static target_ulong disas_insn(DisasContext *s, CPUState *cpu)
                 gen_op_jmp_v(tcg_ctx, s->T1);
             }
             tcg_gen_ld_tl(tcg_ctx, s->tmp4, tcg_ctx->cpu_env, offsetof(CPUX86State, eip));
-            gen_jr(s, s->tmp4);
+            gen_jr_dynamic(s);
             break;
         case 6: /* push Ev */
             gen_push_v(s, s->T0);
