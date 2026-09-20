@@ -125,6 +125,13 @@ const FRAME_DEADLINE: Duration = Duration::from_secs(60);
 /// a later member invalidates the session.
 const MAX_SWEEP_CLUSTER_MEMBERS: usize = 16;
 
+/// A known-bad member can be removed and the healthy remainder retried, but a
+/// corpus full of quick explicit errors must not turn one failed optimization
+/// into fifteen extra worker launches before the authoritative single-plugin
+/// fallback. The first attempt plus three member-removal retries is enough to
+/// salvage the common one-outlier case while keeping the overhead bounded.
+const MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS: usize = 4;
+
 const PRIMARY_RGBA: [u8; 4] = [32, 64, 128, 255];
 
 fn primary_pixels(width: u32, height: u32) -> Vec<u8> {
@@ -704,11 +711,24 @@ fn main() {
     let lanes = serial_lanes_by_key(&records, options.render_jobs, |record| {
         record.closure_identity_sha256.clone()
     });
+    let render_plans = lanes
+        .iter()
+        .map(|lane| cluster_candidate_groups(lane, &records, &options))
+        .collect::<Vec<_>>();
+    let planned_sessions = render_plans.iter().map(Vec::len).sum::<usize>();
+    let planned_clustered_plugins = render_plans
+        .iter()
+        .flatten()
+        .filter(|group| group.len() >= 2)
+        .map(Vec::len)
+        .sum::<usize>();
     eprintln!(
-        "rendering {} plug-in(s) in {} dependency lane(s) with {} job(s)...",
+        "rendering {} plug-in(s) in {} dependency lane(s) with {} job(s); {} planned session(s), {} clustered plug-in(s)...",
         records.len(),
         lanes.len(),
         options.render_jobs.min(lanes.len()),
+        planned_sessions,
+        planned_clustered_plugins,
     );
     let finish_plugin =
         |index: usize, record: &DiagnosticDiscovery, outcome: Outcome, elapsed_ms: u128| {
@@ -735,37 +755,23 @@ fn main() {
             }
             record
         };
-    let grouped = bounded_parallel_map_ordered(&lanes, options.render_jobs, |_, lane| {
-        let mut finished = Vec::with_capacity(lane.len());
-        let mut position = 0;
-        while position < lane.len() {
-            let end = cluster_candidate_run_end(lane, position, &records, &options);
-            let run = &lane[position..end];
-            let clustered = (run.len() >= 2)
-                .then(|| {
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        sweep_cluster_candidates(
-                            &repository,
-                            run,
-                            &records,
-                            &options,
-                            &input,
-                            &layer_pixels,
-                        )
-                    }))
-                    .ok()
-                    .flatten()
-                })
-                .flatten();
+    let grouped = bounded_parallel_map_ordered(&render_plans, options.render_jobs, |_, plan| {
+        let mut finished = Vec::with_capacity(plan.iter().map(Vec::len).sum());
+        for run in plan {
+            let clustered = sweep_cluster_candidates_salvaging(
+                &repository,
+                run,
+                &records,
+                &options,
+                &input,
+                &layer_pixels,
+            );
             for &index in run {
                 let record = &records[index];
                 let plugin_started = Instant::now();
                 // Third-party AEX in-process code paths (the PE read, the parameter
                 // translation) can panic; one plug-in must not end the sweep.
-                let clustered_result = clustered
-                    .as_ref()
-                    .and_then(|outcomes| outcomes.get(&index))
-                    .cloned();
+                let clustered_result = clustered.get(&index).cloned();
                 let clustered_elapsed_ms = clustered_result.as_ref().map(|(_, elapsed)| *elapsed);
                 let mut outcome =
                     clustered_result
@@ -811,7 +817,6 @@ fn main() {
                     .unwrap_or_else(|| plugin_started.elapsed().as_millis());
                 finished.push((index, finish_plugin(index, record, outcome, elapsed_ms)));
             }
-            position = end;
         }
         finished
     });
@@ -894,10 +899,89 @@ where
 /// Uses the same in-place cluster session as the shipping bridge for the safe
 /// subset it pools there: SmartFX effects which share the one secondary-layer
 /// slot supplied by the shipping bridge (or all omit it). Healthy
-/// members amortize worker/bootstrap teardown across the closure. Any ambiguous
-/// session-wide failure rejects the whole fast path; the caller then re-runs
-/// every member through the existing one-plugin path so failure attribution is
+/// members amortize worker/bootstrap teardown across the closure. An explicit
+/// member-local failure can be removed under the bounded salvage policy; any
+/// ambiguous session-wide failure rejects the whole fast path. Every unresolved
+/// member still takes the existing one-plugin path, so failure attribution is
 /// never weakened for speed.
+fn sweep_cluster_candidates_salvaging(
+    repository: &Path,
+    candidates: &[usize],
+    records: &[DiagnosticDiscovery],
+    options: &Options,
+    input: &[u8],
+    layer_pixels: &[u8],
+) -> HashMap<usize, (Outcome, u128)> {
+    let mut attempt = |subset: &[usize]| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sweep_cluster_candidates(repository, subset, records, options, input, layer_pixels)
+        }))
+        .unwrap_or(ClusterAttempt::HardFailure)
+    };
+    salvage_cluster_candidates(candidates, MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS, &mut attempt)
+}
+
+enum ClusterAttempt<T> {
+    Complete(HashMap<usize, T>),
+    /// The worker reached this member and produced an explicit member-local
+    /// setup/frame failure. It may be removed before retrying the remainder;
+    /// the caller still renders it independently for authoritative evidence.
+    RejectMember(usize),
+    /// Opening, transport, close validation, panic, or another session-wide
+    /// ambiguity. Retrying smaller subsets could repeat the same expensive
+    /// failure without adding a discriminating fact, so fall back immediately.
+    HardFailure,
+}
+
+fn cluster_close_is_clean(close: &Value) -> bool {
+    close.get("session_clean") == Some(&Value::Bool(true))
+        && close.get("invalidated") == Some(&Value::Bool(false))
+}
+
+fn rejected_member_after_close<T>(member: usize, close: &Value) -> ClusterAttempt<T> {
+    if cluster_close_is_clean(close) {
+        ClusterAttempt::RejectMember(member)
+    } else {
+        ClusterAttempt::HardFailure
+    }
+}
+
+/// Recovers the healthy remainder after an explicitly identified bad member.
+/// A cluster is accepted only when it returns one result for every requested
+/// member. Hard/ambiguous failures stop after one attempt, known bad members
+/// are never retried, and `attempts_remaining` bounds a run of explicit errors.
+fn salvage_cluster_candidates<T, F>(
+    candidates: &[usize],
+    attempts_remaining: usize,
+    attempt: &mut F,
+) -> HashMap<usize, T>
+where
+    F: FnMut(&[usize]) -> ClusterAttempt<T>,
+{
+    if candidates.len() < 2 || attempts_remaining == 0 {
+        return HashMap::new();
+    }
+    match attempt(candidates) {
+        ClusterAttempt::Complete(outcomes)
+            if outcomes.len() == candidates.len()
+                && candidates.iter().all(|index| outcomes.contains_key(index)) =>
+        {
+            outcomes
+        }
+        ClusterAttempt::RejectMember(rejected) if candidates.contains(&rejected) => {
+            let remaining = candidates
+                .iter()
+                .copied()
+                .filter(|index| *index != rejected)
+                .collect::<Vec<_>>();
+            salvage_cluster_candidates(&remaining, attempts_remaining - 1, attempt)
+        }
+        ClusterAttempt::Complete(_)
+        | ClusterAttempt::RejectMember(_)
+        | ClusterAttempt::HardFailure => HashMap::new(),
+    }
+}
+
 fn sweep_cluster_candidates(
     repository: &Path,
     candidates: &[usize],
@@ -905,12 +989,12 @@ fn sweep_cluster_candidates(
     options: &Options,
     input: &[u8],
     layer_pixels: &[u8],
-) -> Option<HashMap<usize, (Outcome, u128)>> {
+) -> ClusterAttempt<(Outcome, u128)> {
     if !cluster_fast_path_enabled(options) {
-        return None;
+        return ClusterAttempt::HardFailure;
     }
     if candidates.len() < 2 || candidates.len() > MAX_SWEEP_CLUSTER_MEMBERS {
-        return None;
+        return ClusterAttempt::HardFailure;
     }
 
     let first = &records[candidates[0]];
@@ -923,19 +1007,25 @@ fn sweep_cluster_candidates(
                 || cluster_layer_slot(record, options) != cluster_layer_slot(first, options)
         })
     {
-        return None;
+        return ClusterAttempt::HardFailure;
     }
 
     let mut plugins = Vec::with_capacity(candidates.len());
     let mut companions = Vec::new();
     for &index in candidates {
         let record = &records[index];
+        let Some(expected_sha256) = decode_sha256(&record.sha256) else {
+            return ClusterAttempt::HardFailure;
+        };
         plugins.push(ApprovedImageArtifact {
             path: record.path.clone(),
-            expected_sha256: decode_sha256(&record.sha256)?,
+            expected_sha256,
             expected_size: record.byte_size,
         });
-        companions.extend(companion_providers_for(record, records).ok()?);
+        let Ok(providers) = companion_providers_for(record, records) else {
+            return ClusterAttempt::HardFailure;
+        };
+        companions.extend(providers);
     }
     companions.sort_by(|left, right| left.artifact.path.cmp(&right.artifact.path));
     companions.dedup_by(|left, right| left.artifact.path == right.artifact.path);
@@ -982,7 +1072,7 @@ fn sweep_cluster_candidates(
         },
     ) {
         Ok(session) => session,
-        Err(_) => return None,
+        Err(_) => return ClusterAttempt::HardFailure,
     };
     let open_ms = open_started.elapsed().as_millis();
 
@@ -992,31 +1082,37 @@ fn sweep_cluster_candidates(
         if plugin_index > 0 {
             match session.swap_plugin(plugin_index as u32) {
                 Ok(SwapOutcome::Swapped) => {}
-                Ok(SwapOutcome::PluginError { .. }) => return None,
+                Ok(SwapOutcome::PluginError { .. }) => {
+                    let close = session.close();
+                    return rejected_member_after_close(record_index, &close);
+                }
                 Err(_) => {
                     let _ = session.close();
-                    return None;
+                    return ClusterAttempt::HardFailure;
                 }
             }
         }
         let swap_ms = swap_started.elapsed().as_millis();
         let frame_started = Instant::now();
-        let mut outcome = frame_outcome_dumping(
-            session.render_frame_with_parameters(
-                plugin_index as u32,
-                options.current_time,
-                input,
-                None,
-            ),
+        let frame = session.render_frame_with_parameters(
+            plugin_index as u32,
+            options.current_time,
+            input,
             None,
-            options.pixel_format,
         );
+        let transport_failed = frame.is_err();
+        let mut outcome = frame_outcome_dumping(frame, None, options.pixel_format);
         let frame_ms = frame_started.elapsed().as_millis();
         // These cases require the per-plugin close evidence used by the existing
         // fallback/classification logic. Abandon the optimization and let the
         // caller reproduce every candidate independently.
         if outcome.bucket != "rendered" {
-            return None;
+            let close = session.close();
+            return if transport_failed {
+                ClusterAttempt::HardFailure
+            } else {
+                rejected_member_after_close(record_index, &close)
+            };
         }
         outcome.detail.insert(
             "phase_elapsed_ms".to_owned(),
@@ -1038,13 +1134,13 @@ fn sweep_cluster_candidates(
     let close_started = Instant::now();
     let close = session.close();
     let close_ms = close_started.elapsed().as_millis();
-    if close.get("session_clean") != Some(&Value::Bool(true))
-        || close.get("invalidated") != Some(&Value::Bool(false))
-    {
-        return None;
+    if !cluster_close_is_clean(&close) {
+        return ClusterAttempt::HardFailure;
     }
     for (position, record_index) in candidates.iter().enumerate() {
-        let (outcome, elapsed) = outcomes.get_mut(record_index)?;
+        let Some((outcome, elapsed)) = outcomes.get_mut(record_index) else {
+            return ClusterAttempt::HardFailure;
+        };
         if position + 1 == candidates.len() {
             *elapsed += close_ms;
             if let Some(phases) = outcome
@@ -1057,7 +1153,7 @@ fn sweep_cluster_candidates(
         }
         attach_shared_cluster_close(outcome, &close);
     }
-    Some(outcomes)
+    ClusterAttempt::Complete(outcomes)
 }
 
 fn cluster_fast_path_enabled(options: &Options) -> bool {
@@ -1080,34 +1176,60 @@ fn cluster_layer_slot(record: &DiagnosticDiscovery, options: &Options) -> Option
         .flatten()
 }
 
-/// Finds the next order-preserving cluster transaction. With one render job a
-/// lane is the whole corpus, so the boundary must be derived from the records,
-/// not from scheduler membership. With multiple jobs this remains an explicit
-/// defence against a scheduler change silently broadening dependency scope.
-fn cluster_candidate_run_end(
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ClusterCandidateKey {
+    closure_identity_sha256: String,
+    search_roots: Vec<PathBuf>,
+    layer_slot: Option<u32>,
+}
+
+fn cluster_candidate_key(
+    record: &DiagnosticDiscovery,
+    options: &Options,
+) -> Option<ClusterCandidateKey> {
+    cluster_fast_path_eligible(record).then(|| ClusterCandidateKey {
+        closure_identity_sha256: record
+            .closure_identity_sha256
+            .clone()
+            .expect("eligible cluster candidate has a closure identity"),
+        search_roots: record.search_roots.clone(),
+        layer_slot: cluster_layer_slot(record, options),
+    })
+}
+
+/// Plans stable, bounded cluster transactions for one serial dependency lane.
+/// Compatible members need not be adjacent: the sweep restores corpus order at
+/// the report boundary, while grouping them here avoids another vendor/runtime
+/// bootstrap for every interleaved layer layout. Group order and member order
+/// both follow first encounter order, and no group can exceed the close-
+/// validation checkpoint bound.
+fn cluster_candidate_groups(
     lane: &[usize],
-    start: usize,
     records: &[DiagnosticDiscovery],
     options: &Options,
-) -> usize {
-    let first_index = lane[start];
-    let first = &records[first_index];
-    if !cluster_fast_path_eligible(first) {
-        return start + 1;
+) -> Vec<Vec<usize>> {
+    if !cluster_fast_path_enabled(options) {
+        return lane.iter().map(|&index| vec![index]).collect();
     }
-    lane.iter()
-        .enumerate()
-        .skip(start + 1)
-        .take(MAX_SWEEP_CLUSTER_MEMBERS - 1)
-        .take_while(|(_, index)| {
-            let record = &records[**index];
-            cluster_fast_path_eligible(record)
-                && record.closure_identity_sha256 == first.closure_identity_sha256
-                && record.search_roots == first.search_roots
-                && cluster_layer_slot(record, options) == cluster_layer_slot(first, options)
-        })
-        .last()
-        .map_or(start + 1, |(position, _)| position + 1)
+
+    let mut groups = Vec::<Vec<usize>>::new();
+    let mut latest_group_by_key = HashMap::<ClusterCandidateKey, usize>::new();
+    for &index in lane {
+        let Some(key) = cluster_candidate_key(&records[index], options) else {
+            groups.push(vec![index]);
+            continue;
+        };
+        if let Some(&group_index) = latest_group_by_key.get(&key)
+            && groups[group_index].len() < MAX_SWEEP_CLUSTER_MEMBERS
+        {
+            groups[group_index].push(index);
+            continue;
+        }
+        let group_index = groups.len();
+        groups.push(vec![index]);
+        latest_group_by_key.insert(key, group_index);
+    }
+    groups
 }
 
 fn record_discovery_progress(
@@ -2834,7 +2956,7 @@ mod tests {
     }
 
     #[test]
-    fn cluster_runs_preserve_order_and_stop_at_closure_root_or_layer_boundaries() {
+    fn cluster_groups_join_interleaved_exact_keys_and_keep_safe_boundaries() {
         let eligible = |name: &str, closure: &str, root: &str, layer: Option<u32>| {
             let mut record = failed_discovery(PathBuf::from(name));
             record.ok = true;
@@ -2848,26 +2970,142 @@ mod tests {
             }
             record
         };
-        let records = vec![
+        let mut records = vec![
             eligible("a.aex", "same", "root-a", Some(3)),
-            eligible("b.aex", "same", "root-a", Some(3)),
-            eligible("c.aex", "same", "root-a", Some(8)),
-            eligible("d.aex", "other", "root-b", Some(8)),
-            eligible("e.aex", "same", "root-a", Some(3)),
+            eligible("b.aex", "same", "root-a", Some(8)),
+            eligible("c.aex", "other", "root-b", Some(3)),
+            eligible("d.aex", "same", "root-a", Some(3)),
+            failed_discovery(PathBuf::from("not-smart.aex")),
+            eligible("e.aex", "same", "root-a", Some(8)),
+            eligible("f.aex", "same", "root-b", Some(3)),
         ];
-        // This is the default jobs=1 scheduler shape: one lane containing the
-        // whole corpus. Only the first adjacent pair is one safe transaction;
-        // a later matching identity cannot jump over intervening boundaries.
-        let lane = vec![0, 1, 2, 3, 4];
+        let lane = (0..records.len()).collect::<Vec<_>>();
         let mut options = discovery_options(PathBuf::from("unused.json"));
         options.discovery_only = false;
-        assert_eq!(cluster_candidate_run_end(&lane, 0, &records, &options), 2);
-        assert_eq!(cluster_candidate_run_end(&lane, 2, &records, &options), 3);
-        assert_eq!(cluster_candidate_run_end(&lane, 3, &records, &options), 4);
-        assert_eq!(cluster_candidate_run_end(&lane, 4, &records, &options), 5);
+        assert_eq!(
+            cluster_candidate_groups(&lane, &records, &options),
+            vec![vec![0, 3], vec![1, 5], vec![2], vec![4], vec![6]]
+        );
 
         options.no_layer = true;
-        assert_eq!(cluster_candidate_run_end(&lane, 0, &records, &options), 3);
+        assert_eq!(
+            cluster_candidate_groups(&lane, &records, &options),
+            vec![vec![0, 1, 3, 5], vec![2], vec![4], vec![6]]
+        );
+
+        options.frames = 2;
+        assert_eq!(
+            cluster_candidate_groups(&lane, &records, &options),
+            lane.iter().map(|&index| vec![index]).collect::<Vec<_>>()
+        );
+
+        records = (0..MAX_SWEEP_CLUSTER_MEMBERS * 2 + 2)
+            .map(|index| eligible(&format!("bounded-{index}.aex"), "same", "root", Some(3)))
+            .collect();
+        options.frames = 1;
+        options.no_layer = false;
+        let groups =
+            cluster_candidate_groups(&(0..records.len()).collect::<Vec<_>>(), &records, &options);
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0], (0..16).collect::<Vec<_>>());
+        assert_eq!(groups[1], (16..32).collect::<Vec<_>>());
+        assert_eq!(groups[2], vec![32, 33]);
+    }
+
+    #[test]
+    fn identified_failed_member_is_excluded_once_before_salvaging_the_remainder() {
+        let candidates = (0..8).collect::<Vec<_>>();
+        let mut attempts = Vec::<Vec<usize>>::new();
+        let mut attempt = |subset: &[usize]| {
+            attempts.push(subset.to_vec());
+            if subset.contains(&5) {
+                ClusterAttempt::RejectMember(5)
+            } else {
+                ClusterAttempt::Complete(
+                    subset
+                        .iter()
+                        .map(|&index| (index, index * 10))
+                        .collect::<HashMap<_, _>>(),
+                )
+            }
+        };
+
+        let outcomes = salvage_cluster_candidates(
+            &candidates,
+            MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+            &mut attempt,
+        );
+
+        assert_eq!(
+            attempts,
+            vec![vec![0, 1, 2, 3, 4, 5, 6, 7], vec![0, 1, 2, 3, 4, 6, 7],]
+        );
+        assert_eq!(
+            outcomes
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [0, 1, 2, 3, 4, 6, 7].into_iter().collect()
+        );
+        assert_eq!(outcomes[&6], 60);
+    }
+
+    #[test]
+    fn hard_cluster_failure_is_not_retried_and_member_retries_are_bounded() {
+        let candidates = (0..8).collect::<Vec<_>>();
+        let mut hard_attempts = 0;
+        let mut hard = |_: &[usize]| {
+            hard_attempts += 1;
+            ClusterAttempt::<usize>::HardFailure
+        };
+        assert!(
+            salvage_cluster_candidates(&candidates, MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS, &mut hard,)
+                .is_empty()
+        );
+        assert_eq!(hard_attempts, 1);
+
+        let mut rejected = Vec::new();
+        let mut every_member_fails = |subset: &[usize]| {
+            rejected.push(subset[0]);
+            ClusterAttempt::<usize>::RejectMember(subset[0])
+        };
+        assert!(
+            salvage_cluster_candidates(
+                &candidates,
+                MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+                &mut every_member_fails,
+            )
+            .is_empty()
+        );
+        assert_eq!(rejected, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn member_failure_with_dirty_close_stops_salvage_after_one_attempt() {
+        let candidates = (0..8).collect::<Vec<_>>();
+        let dirty_close = json!({ "session_clean": false, "invalidated": true });
+        let mut attempts = 0;
+        let mut attempt = |_: &[usize]| {
+            attempts += 1;
+            rejected_member_after_close::<usize>(0, &dirty_close)
+        };
+
+        assert!(
+            salvage_cluster_candidates(
+                &candidates,
+                MAX_SWEEP_CLUSTER_SALVAGE_ATTEMPTS,
+                &mut attempt,
+            )
+            .is_empty()
+        );
+        assert_eq!(attempts, 1);
+        assert!(matches!(
+            rejected_member_after_close::<usize>(
+                3,
+                &json!({ "session_clean": true, "invalidated": false })
+            ),
+            ClusterAttempt::RejectMember(3)
+        ));
     }
 
     #[test]
