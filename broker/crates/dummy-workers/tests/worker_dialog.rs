@@ -164,6 +164,71 @@ fn a_warning_dialog_is_silenced_without_weakening_private_desktop_containment() 
 }
 
 #[test]
+fn a_spawned_helper_has_its_own_sound_target_and_remains_dialog_contained() {
+    use aexcompat_broker::windows_process::run_isolated;
+
+    let title = format!(
+        "aexcompat-spawned-helper-silenced-warning-{}",
+        std::process::id()
+    );
+    let result = run_isolated(
+        Path::new(env!("CARGO_BIN_EXE_dummy_messagebox")),
+        &[title.clone(), "spawned-helper-warning-parent".into()],
+        Some(Duration::from_secs(30)),
+    )
+    .expect("launch the spawned-helper warning worker");
+
+    assert_eq!(
+        result.classification.as_str(),
+        "ok",
+        "stdout={:?} stderr={:?} windows={:?}",
+        result.stdout,
+        result.stderr,
+        result.dismissed_windows
+    );
+    let markers = [
+        "parent_messagebeep_redirect_active",
+        "child_messagebeep_target_original",
+        "child_messagebeep_redirect_installed",
+        "messagebox_open",
+        "messagebeep_observed_before_dismissal",
+        "messagebox_dismissed",
+        "messagebeep_calls:1",
+        "worker_still_running",
+        "spawned_helper_exit_success",
+    ];
+    let positions = markers
+        .iter()
+        .map(|marker| {
+            assert_eq!(
+                result.stdout.matches(marker).count(),
+                1,
+                "marker {marker:?} was missing or repeated: {:?}",
+                result.stdout
+            );
+            result.stdout.find(marker).expect("marker counted above")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "spawned-helper markers were out of order: {:?}",
+        result.stdout
+    );
+
+    // The sweep only enumerates the broker's private desktop and accepts a
+    // window after proving its owner belongs to this worker's Job. Recording
+    // this child-owned title therefore proves both containment boundaries.
+    let dialog = result
+        .dismissed_windows
+        .iter()
+        .find(|window| window.title == title)
+        .unwrap_or_else(|| panic!("child dialog not recorded: {:?}", result.dismissed_windows));
+    assert_eq!(dialog.class, aexcompat_broker::worker_dialog::DIALOG_CLASS);
+    assert!(dialog.asked_to_close, "{dialog:?}");
+    assert!(dialog.closed, "{dialog:?}");
+}
+
+#[test]
 fn a_window_that_is_not_a_dialog_is_recorded_and_left_alone() {
     use aexcompat_broker::windows_process::run_isolated;
 

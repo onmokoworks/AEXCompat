@@ -7,6 +7,11 @@
 //! - `dialog-silenced-warning`: a warning-icon message box with a process-local
 //!   system-alert redirect. It proves the alert is intercepted while the
 //!   private-desktop dialog remains visible to the broker and is still closed.
+//! - `spawned-helper-warning-parent`: installs and exercises that redirect in
+//!   the parent, then starts this executable in `spawned-helper-warning-child`
+//!   mode. The fresh child proves the parent's process-local patch was not
+//!   inherited before installing its own silent observer and opening a warning
+//!   dialog.
 //! - `dialog-then-live`: the same message box, but the worker keeps running for
 //!   a while after it is answered. That gives the broker a poll while the
 //!   worker is still alive in which to observe the window gone, which is the
@@ -43,9 +48,29 @@ fn main() {
         own_window(&title);
         return;
     }
+    if shape == "spawned-helper-warning-parent" {
+        spawned_helper_warning_parent(&title);
+        return;
+    }
 
-    let sound_suppression =
-        (shape == "dialog-silenced-warning").then(SystemSoundSuppression::install);
+    if shape == "spawned-helper-warning-child" {
+        assert!(
+            SystemSoundSuppression::targets_original_message_beep(),
+            "a fresh child unexpectedly inherited its parent's USER32 redirect"
+        );
+        println!("child_messagebeep_target_original");
+        let _ = std::io::stdout().flush();
+    }
+
+    let sound_suppression = matches!(
+        shape.as_str(),
+        "dialog-silenced-warning" | "spawned-helper-warning-child"
+    )
+    .then(SystemSoundSuppression::install);
+    if shape == "spawned-helper-warning-child" {
+        println!("child_messagebeep_redirect_installed");
+        let _ = std::io::stdout().flush();
+    }
     use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONWARNING, MB_OK, MessageBoxW};
     // Announced before the call so a reader can tell "never got there" apart
     // from "got there and is stuck".
@@ -80,15 +105,24 @@ fn main() {
         )
     };
     MESSAGEBOX_DISMISSED.store(true, std::sync::atomic::Ordering::Release);
-    println!("messagebox_dismissed:{answer}");
     if let Some(monitor) = suppression_monitor {
         monitor.join().expect("beep probe monitor");
+        // The hook runs synchronously inside MessageBox, but its observer is a
+        // separate thread. Join it before publishing dismissal so stdout
+        // order remains evidence of call-before-return rather than scheduler
+        // luck.
+        println!("messagebox_dismissed:{answer}");
         println!(
             "messagebeep_calls:{}",
             BEEP_CALLS.load(std::sync::atomic::Ordering::Acquire)
         );
+    } else {
+        println!("messagebox_dismissed:{answer}");
     }
-    if shape == "dialog-then-live" || shape == "dialog-silenced-warning" {
+    if matches!(
+        shape.as_str(),
+        "dialog-then-live" | "dialog-silenced-warning" | "spawned-helper-warning-child"
+    ) {
         let _ = std::io::stdout().flush();
         // Longer than one sweep poll, so the broker sees the window gone before
         // the process is.
@@ -118,9 +152,8 @@ struct SystemSoundSuppression {
 
 #[cfg(windows)]
 impl SystemSoundSuppression {
-    fn install() -> Self {
+    fn slot_and_original_target() -> (*mut *mut std::ffi::c_void, *mut std::ffi::c_void) {
         use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-        use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
 
         let user32 = unsafe { GetModuleHandleW(wide("user32.dll").as_ptr()) };
         assert!(!user32.is_null());
@@ -132,11 +165,35 @@ impl SystemSoundSuppression {
         let displacement = unsafe { std::ptr::read_unaligned(entry.add(3).cast::<i32>()) };
         let slot = (entry.addr() + 7).wrapping_add_signed(displacement as isize)
             as *mut *mut std::ffi::c_void;
-        let original = unsafe { *slot };
         let win32u = unsafe { GetModuleHandleW(wide("win32u.dll").as_ptr()) };
         assert!(!win32u.is_null());
         let expected = unsafe { GetProcAddress(win32u, c"NtUserMessageBeep".as_ptr().cast()) }
             .expect("NtUserMessageBeep export") as *mut std::ffi::c_void;
+        (slot, expected)
+    }
+
+    fn targets_original_message_beep() -> bool {
+        let (slot, expected) = Self::slot_and_original_target();
+        unsafe { *slot == expected }
+    }
+
+    fn call_message_beep(kind: u32) -> i32 {
+        use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+
+        let user32 = unsafe { GetModuleHandleW(wide("user32.dll").as_ptr()) };
+        assert!(!user32.is_null());
+        let entry = unsafe { GetProcAddress(user32, c"MessageBeep".as_ptr().cast()) }
+            .expect("MessageBeep export");
+        let message_beep: unsafe extern "system" fn(u32) -> i32 =
+            unsafe { std::mem::transmute(entry) };
+        unsafe { message_beep(kind) }
+    }
+
+    fn install() -> Self {
+        use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtect};
+
+        let (slot, expected) = Self::slot_and_original_target();
+        let original = unsafe { *slot };
         assert_eq!(original, expected);
         let mut old_protect = 0;
         assert_ne!(
@@ -165,6 +222,30 @@ impl SystemSoundSuppression {
         );
         Self { slot, original }
     }
+}
+
+#[cfg(windows)]
+fn spawned_helper_warning_parent(title: &str) {
+    use std::io::Write;
+    use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONWARNING;
+
+    let _sound_suppression = SystemSoundSuppression::install();
+    let before = BEEP_CALLS.load(std::sync::atomic::Ordering::Acquire);
+    assert_ne!(SystemSoundSuppression::call_message_beep(MB_ICONWARNING), 0);
+    let after = BEEP_CALLS.load(std::sync::atomic::Ordering::Acquire);
+    assert_eq!(after, before + 1);
+    println!("parent_messagebeep_redirect_active");
+    let _ = std::io::stdout().flush();
+
+    let executable = std::env::current_exe().expect("current dummy messagebox executable");
+    let status = std::process::Command::new(executable)
+        .arg(title)
+        .arg("spawned-helper-warning-child")
+        .status()
+        .expect("spawn warning-dialog child");
+    assert!(status.success(), "warning-dialog child failed: {status}");
+    println!("spawned_helper_exit_success");
+    let _ = std::io::stdout().flush();
 }
 
 #[cfg(windows)]
