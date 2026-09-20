@@ -1454,3 +1454,55 @@ The missing-model external block is therefore no longer current. This proves
 automatic model/runtime resolution and nonempty native output, but the solid
 input result remains semantically unverified against an AE reference or an
 effect-appropriate depth fixture.
+
+## Desktop PSOFT copy cohort
+
+The user-approved `C:/Users/optim/Desktop/PSOFT` root contains 19 AEX files and
+no DLL or other regular companion files. The files have the same sizes as the
+historically measured MediaCore PSOFT cohort but 19/19 have different SHA-256
+identities, so the Desktop copies were inventoried and measured as a distinct
+corpus. The prohibited
+`C:/Program Files/Adobe/Common/Plug-ins/7.0/MediaCore/PSOFT` root was not
+scanned, loaded, or rendered during this cycle.
+
+The shipping inventory and one complete shipping render baseline are retained
+under `target/desktop-psoft-cycle`. Under 256x144 ARGB8, time zero, one frame,
+and the first declared secondary layer, all 19 records opened, rendered, and
+decoded valid nonempty pixels with clean sessions. Discovery took 620 ms and
+the complete baseline took 3,473 ms. The worker SHA-256 was
+`b4bcb4671f40a384e84e04d77ce32c1f02720dc3cbc23b7a3b6f6a532e5e066a`;
+the shipping render-sweep CLI SHA-256 was
+`b11aa6d8f19c5be05e6b1cd8ec9df876d21e9fc9e14d51009bd6c69e103893d1`.
+
+Visual and pixel inspection changes the final classification: every output
+contains the PSOFT Version 1.1.1 DEMO card/overlay and red diamond. All 19 pixel
+hashes also match the retained historical PSOFT outputs despite the different
+AEX identities. The cohort is therefore 19/19 transport/decode success but
+19/19 `external_blocked:demo_version`, not usable semantic render success. No
+license bypass was attempted.
+
+## BCC Invert semantic follow-up
+
+`BCCInvert.aex` is now verified for three bounded SmartFX ARGB8 behaviors. A
+non-uniform 256x144 opaque fixture exercised inspected slot 6 `Host Layer`,
+slot 8 `Channels`, and slot 9 `Mix with Original`. Default RGB complemented
+every RGB component exactly while preserving alpha; `Channels = Red`
+complemented only red; and `Mix with Original = 100` returned the source
+byte-for-byte. Each relation held for all 36,864 pixels. This rejects the solid
+baseline's unresolved alternatives of a fixed fill, channel leakage, or a
+parameter-insensitive output.
+
+`test_bcc_invert_response.py` adds an opt-in installed-AEX test plus eight
+behavioral mutations covering passthrough, fixed output, RGB corruption, red
+channel leakage/inaction, alpha damage, wrong mix endpoint, and truncation. The
+installed AEX and mutations passed 9/9; the ordinary non-corpus run passed
+8 tests with the real-AEX case explicitly skipped. The identity-bound ledger
+is `target/all-aex-with-bcc-invert-followup.json`. Evidence used plug-in
+SHA-256 `0b617d528c2220a04915ff39709edd4c151d02d286d07f81cf586eed88223739`,
+worker SHA-256
+`b4bcb4671f40a384e84e04d77ce32c1f02720dc3cbc23b7a3b6f6a532e5e066a`,
+and Release harness SHA-256
+`62778b0ca7b7f2af4bc8ed1fe09aada6f82d365ac875606e86fc4c6fa5e2bc82`.
+Other channel modes, PixelChooser/Matte controls, bit depths, and exact After
+Effects parity remain outside this bounded result. No After Effects process or
+PSOFT path was used.
