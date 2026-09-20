@@ -235,6 +235,35 @@ mod tests {
     }
 
     #[test]
+    fn executable_guest_writes_still_invalidate_translated_code() {
+        const CODE: u64 = 0x1000;
+        const TARGET: u64 = CODE + 0x20;
+        const END: u64 = CODE + 0x40;
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(CODE, 4096, Prot::ALL).unwrap();
+
+        let mut code = vec![0x90; 0x2a];
+        // mov byte ptr [rip + 0x1a], 2; jmp TARGET
+        code[0..12].copy_from_slice(&[
+            0xc6, 0x05, 0x1a, 0x00, 0x00, 0x00, 0x02, 0xe9, 0x14, 0x00, 0x00, 0x00,
+        ]);
+        // TARGET: mov eax, 1; jmp END
+        code[0x20..0x2a].copy_from_slice(&[
+            0xb8, 0x01, 0x00, 0x00, 0x00, 0xe9, 0x16, 0x00, 0x00, 0x00,
+        ]);
+        unicorn.mem_write(CODE, &code).unwrap();
+        set_memory_exit_checks(&unicorn, false).unwrap();
+
+        // Translate TARGET before the guest modifies its immediate operand.
+        unicorn.emu_start(TARGET, END, 0, 0).unwrap();
+        assert_eq!(unicorn.reg_read(RegisterX86::RAX).unwrap(), 1);
+        unicorn.reg_write(RegisterX86::RAX, 0).unwrap();
+
+        unicorn.emu_start(CODE, END, 0, 0).unwrap();
+        assert_eq!(unicorn.reg_read(RegisterX86::RAX).unwrap(), 2);
+    }
+
+    #[test]
     fn fragmented_ram_remaps_preserve_contents_and_page_permissions() {
         use unicorn_engine::Prot;
         let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();

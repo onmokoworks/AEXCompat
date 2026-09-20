@@ -83,12 +83,7 @@ typedef uint64_t target_ulong;
 #endif
 
 #define CPU_TLB_DYN_MIN_BITS 6
-/*
- * AEXCompat commonly walks multiple full-resolution frame buffers in lockstep.
- * Starting with 4096 entries keeps a 1440p input/output pair on the generated
- * fast path instead of relearning almost every page on every resident frame.
- */
-#define CPU_TLB_DYN_DEFAULT_BITS 12
+#define CPU_TLB_DYN_DEFAULT_BITS 8
 
 # if HOST_LONG_BITS == 32
 /* Make sure we do not require a double-word shift for the TLB load */
