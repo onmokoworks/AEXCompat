@@ -1591,6 +1591,36 @@ Exact thresholds, unequal per-channel counts, other controls, bit depths, and
 exact After Effects parity remain outside this result. No After Effects process
 or PSOFT path was used.
 
+## BCC Colorize semantic follow-up
+
+`BCCColorize.aex` is now verified for bounded SmartFX ARGB8 endpoint-color and
+neutral responses. An opaque 256x144 grayscale fixture covers all 256 values
+in every row while `(x + 37*y) mod 256` changes their spatial order by row.
+With Input=Luma, RGB space, no interior colors, black Color 1, red Color 6, a
+linear 0..100 range, and PixelChooser off, every input value `v` maps exactly to
+`(v,0,0,255)`. Changing only Color 6 to blue maps it to `(0,0,v,255)`.
+Both active mappings are single-valued, monotonic, use all 256 levels, and have
+no inactive-channel leakage. `Mix with Original = 100` returns the grayscale
+source byte-for-byte. This establishes both input dependence and direct
+endpoint-color response.
+
+`test_bcc_colorize_response.py` adds an opt-in installed-AEX test plus eleven
+behavioral mutations covering passthrough, fixed output, a coordinate-only
+gradient that ignores the rearranged source, wrong active value, red/blue
+channel leakage, endpoint-color insensitivity, nonmonotonic output, a damaged
+neutral endpoint, alpha damage, and truncation. The installed AEX and mutations
+passed 12/12; the ordinary non-corpus run passed 11 tests with the
+real-AEX case explicitly skipped. The identity-bound ledger is
+`target/all-aex-with-bcc-colorize-spatial-followup.json`. Evidence used plug-in SHA-256
+`723f48278603610d24073f7ecf975d7dc9ce36b86786a0d91bd658ac51143bbd`,
+worker SHA-256
+`b4bcb4671f40a384e84e04d77ce32c1f02720dc3cbc23b7a3b6f6a532e5e066a`,
+and Release harness SHA-256
+`62778b0ca7b7f2af4bc8ed1fe09aada6f82d365ac875606e86fc4c6fa5e2bc82`.
+Other inputs, colors, color spaces, interior points, gradient controls,
+PixelChooser, bit depths, and exact After Effects parity remain outside this
+result. No After Effects process or PSOFT path was used.
+
 ## BCC Broadcast Safe semantic follow-up
 
 `BCCBroadcastSafe.aex` is now verified for a bounded SmartFX ARGB8 Custom RGB
