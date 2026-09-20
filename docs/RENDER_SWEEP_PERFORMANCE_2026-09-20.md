@@ -1658,6 +1658,35 @@ Exact thresholds, unequal per-channel counts, other controls, bit depths, and
 exact After Effects parity remain outside this result. No After Effects process
 or PSOFT path was used.
 
+## BCC Tritone semantic follow-up
+
+`BCCTritone.aex` is now verified for a bounded SmartFX ARGB8 three-color,
+two-color, and neutral-mix response. An opaque 256x144 grayscale fixture covers
+all 256 values in changing spatial order. With custom red, green, and blue
+controls and midpoint 128, Tritone produces a single-valued monotonic red-to-
+green-to-blue mapping. Disabling the midpoint produces a distinct single-valued
+monotonic red-to-blue mapping. Both preserve alpha and use every input value;
+`Mix with Original = 100` restores the source byte-for-byte. Their ARGB SHA-256
+values are respectively
+`f473ee4ec92f92f908178bb3e54c172c615c8eba998d92f5aa26874456564366`,
+`abda64b314cb28e2c37c52df3b7d9f08b2a36444b72a4d559b58f9c3ae42c68a`,
+and `d5e81a6330b8a1a02bd8f8e79e81b640345d27926102b050ce042f84da90698b`
+for both the source and Mix 100.
+
+`test_bcc_tritone_response.py` combines the installed-AEX render with nine
+behavioral mutations covering passthrough, midpoint loss, channel swap, fixed
+output, nonmonotonic output, a coordinate-only gradient that ignores the
+rearranged source, alpha damage, neutral-mix damage, and truncation. All 10
+tests passed in 8.34 seconds. Evidence used plug-in SHA-256
+`07fba7c2c51adc43528f03a112859f0f20a3556de01c1ddcda84c465d0a1a1ab`,
+worker SHA-256
+`b33cf0f1710301ffdc99fae7d2389da1236abf9a498460473270ca8d01e95548`,
+and Release harness SHA-256
+`62778b0ca7b7f2af4bc8ed1fe09aada6f82d365ac875606e86fc4c6fa5e2bc82`.
+Exact vendor interpolation, other controls, bit depths, and exact After Effects
+parity remain outside this result. No product code changed, and no After
+Effects, Maxon, Sapphire, or PSOFT path was used.
+
 ## BCC Colorize semantic follow-up
 
 `BCCColorize.aex` is now verified for bounded SmartFX ARGB8 endpoint-color and
