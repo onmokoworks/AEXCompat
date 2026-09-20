@@ -839,6 +839,114 @@ static bool check_mem_area(uc_engine *uc, uint64_t address, size_t size)
 }
 
 UNICORN_EXPORT
+uc_err uc_mem_read_protected(uc_engine *uc, uint64_t address, void *_bytes,
+                             uint64_t size)
+{
+    uint64_t count = 0, len;
+    uint64_t current = address;
+    uint8_t *bytes = _bytes;
+    uint8_t *staging;
+    MemoryRegion *mr;
+
+    UC_INIT(uc);
+    if ((bytes == NULL && size != 0) ||
+        (size != 0 && address > UINT64_MAX - (size - 1))) {
+        restore_jit_state(uc);
+        return bytes == NULL ? UC_ERR_ARG : UC_ERR_READ_UNMAPPED;
+    }
+    if (size == 0) {
+        restore_jit_state(uc);
+        return UC_ERR_OK;
+    }
+
+    /* The string scanner deliberately stays within one guest page, and its
+     * normal RAM mapping therefore reaches this one-lookup fast path. */
+    mr = uc->memory_mapping(uc, current);
+    if (mr == NULL) {
+        restore_jit_state(uc);
+        return UC_ERR_READ_UNMAPPED;
+    }
+    if ((mr->perms & UC_PROT_READ) == 0) {
+        restore_jit_state(uc);
+        return UC_ERR_READ_PROT;
+    }
+    len = memory_region_len(uc, mr, current, size);
+    if (len == 0) {
+        restore_jit_state(uc);
+        return UC_ERR_READ_UNMAPPED;
+    }
+    if (len == size && mr->ram) {
+        bool copied = uc->read_mem(&uc->address_space_memory, current, bytes,
+                                   len);
+        restore_jit_state(uc);
+        return copied ? UC_ERR_OK : UC_ERR_READ_UNMAPPED;
+    }
+
+    /* Preflight every remaining region before copying so a later permission
+     * or mapping failure cannot leave a partially modified destination. */
+    count = len;
+    current += len;
+    while (count < size) {
+        mr = uc->memory_mapping(uc, current);
+        if (mr == NULL) {
+            restore_jit_state(uc);
+            return UC_ERR_READ_UNMAPPED;
+        }
+        if ((mr->perms & UC_PROT_READ) == 0) {
+            restore_jit_state(uc);
+            return UC_ERR_READ_PROT;
+        }
+        len = memory_region_len(uc, mr, current, size - count);
+        if (len == 0) {
+            restore_jit_state(uc);
+            return UC_ERR_READ_UNMAPPED;
+        }
+        count += len;
+        current += len;
+    }
+
+    if (size > SIZE_MAX) {
+        restore_jit_state(uc);
+        return UC_ERR_NOMEM;
+    }
+    staging = g_try_malloc((size_t)size);
+    if (staging == NULL) {
+        restore_jit_state(uc);
+        return UC_ERR_NOMEM;
+    }
+
+    count = 0;
+    current = address;
+    while (count < size) {
+        mr = uc->memory_mapping(uc, current);
+        if (mr == NULL) {
+            g_free(staging);
+            restore_jit_state(uc);
+            return UC_ERR_READ_UNMAPPED;
+        }
+        if ((mr->perms & UC_PROT_READ) == 0) {
+            g_free(staging);
+            restore_jit_state(uc);
+            return UC_ERR_READ_PROT;
+        }
+        len = memory_region_len(uc, mr, current, size - count);
+        if (len == 0 ||
+            !uc->read_mem(&uc->address_space_memory, current, staging + count,
+                          len)) {
+            g_free(staging);
+            restore_jit_state(uc);
+            return UC_ERR_READ_UNMAPPED;
+        }
+        count += len;
+        current += len;
+    }
+    memcpy(bytes, staging, (size_t)size);
+    g_free(staging);
+    restore_jit_state(uc);
+    return UC_ERR_OK;
+}
+
+UNICORN_EXPORT
 uc_err uc_mem_range_has_prot(uc_engine *uc, uint64_t address, uint64_t size,
                              uint32_t prot, bool *allowed)
 {

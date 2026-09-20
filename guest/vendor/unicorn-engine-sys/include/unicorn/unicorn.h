@@ -1088,6 +1088,13 @@ UNICORN_EXPORT
 uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
                    void *user_data, uint64_t begin, uint64_t end, ...);
 
+/* AEXCompat extension: copy a fully mapped readable range without the
+ * duplicate mapping walks required by uc_mem_range_has_prot + uc_mem_read.
+ * Permission and mapping failures leave the destination untouched. */
+UNICORN_EXPORT
+uc_err uc_mem_read_protected(uc_engine *uc, uint64_t address, void *bytes,
+                             uint64_t size);
+
 /* AEXCompat extension: check a mapped range's protection without allocating
  * the full uc_mem_regions snapshot. */
 UNICORN_EXPORT

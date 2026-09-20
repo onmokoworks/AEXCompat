@@ -1809,13 +1809,8 @@ fn scan_crt_stdio_c_string(
         let chunk_len = page_remaining
             .min(limit - offset)
             .min(chunk.len() as u64) as usize;
-        if !guest_range_has_permission(unicorn, current, chunk_len as u64, Prot::READ)? {
-            return Err(format!(
-                "stdio {label} address {current:#x} is not readable"
-            ));
-        }
         let current_chunk = &mut chunk[..chunk_len];
-        unicorn.mem_read(current, current_chunk).map_err(|error| {
+        aex_unicorn_buffer::read_protected(unicorn, current, current_chunk).map_err(|error| {
             format!("stdio {label} address {current:#x} is not readable: {error}")
         })?;
         if let Some(end) = current_chunk.iter().position(|byte| *byte == 0) {
