@@ -21,6 +21,7 @@
 #include "qemu/host-utils.h"
 #include "cpu.h"
 #include "exec/exec-all.h"
+#include "exec/tb-hash.h"
 #include "tcg/tcg-op.h"
 #include "exec/cpu_ldst.h"
 #include "exec/translator.h"
@@ -2861,6 +2862,97 @@ static void gen_bnd_jmp(DisasContext *s)
     }
 }
 
+/* Use only the existing per-CPU jump cache: its invalidation and ownership
+ * remain identical to tb_lookup__explicit_state_cached(). */
+static void gen_lookup_explicit_tb(DisasContext *s)
+{
+    TCGContext *tcg_ctx = s->uc->tcg_ctx;
+    TCGv pc = tcg_temp_local_new(tcg_ctx);
+    TCGv_ptr ptr = tcg_temp_local_new_ptr(tcg_ctx);
+
+    tcg_gen_addi_tl(tcg_ctx, pc, s->T0, s->cs_base);
+#if defined(TARGET_X86_64) && TCG_TARGET_REG_BITS == 64
+    {
+        const intptr_t cpu_off = offsetof(X86CPU, parent_obj) -
+                                 (intptr_t)offsetof(X86CPU, env);
+        TCGLabel *miss = gen_new_label(tcg_ctx);
+        TCGv a = tcg_temp_new(tcg_ctx);
+        TCGv b = tcg_temp_new(tcg_ctx);
+        TCGv mismatch = tcg_temp_new(tcg_ctx);
+        TCGv_i32 x = tcg_temp_new_i32(tcg_ctx);
+        TCGv_i32 y = tcg_temp_new_i32(tcg_ctx);
+        TCGv_ptr slot = tcg_temp_new_ptr(tcg_ctx);
+
+        tcg_gen_shri_tl(tcg_ctx, a, pc, TARGET_PAGE_BITS - TB_JMP_PAGE_BITS);
+        tcg_gen_xor_tl(tcg_ctx, a, a, pc);
+        tcg_gen_shri_tl(tcg_ctx, b, a, TARGET_PAGE_BITS - TB_JMP_PAGE_BITS);
+        tcg_gen_andi_tl(tcg_ctx, b, b, TB_JMP_PAGE_MASK);
+        tcg_gen_andi_tl(tcg_ctx, a, a, TB_JMP_ADDR_MASK);
+        tcg_gen_or_tl(tcg_ctx, a, a, b);
+        tcg_gen_shli_tl(tcg_ctx, a, a, 3);
+        tcg_gen_trunc_i64_ptr(tcg_ctx, slot, a);
+        tcg_gen_add_ptr(tcg_ctx, slot, slot, tcg_ctx->cpu_env);
+        tcg_gen_ld_ptr(tcg_ctx, ptr, slot,
+                      cpu_off + offsetof(CPUState, tb_jmp_cache));
+        tcg_gen_brcondi_ptr(tcg_ctx, TCG_COND_EQ, ptr, 0, miss);
+
+        /* pc and ptr survive the null-check's basic-block boundary. Other
+         * temporaries are defined afresh here. Aggregate mismatches so key
+         * checks do not each introduce a spill/reload boundary. */
+        tcg_gen_ld_tl(tcg_ctx, a, ptr, offsetof(TranslationBlock, pc));
+        tcg_gen_xor_tl(tcg_ctx, mismatch, a, pc);
+        tcg_gen_ld_tl(tcg_ctx, a, ptr, offsetof(TranslationBlock, cs_base));
+        tcg_gen_xori_tl(tcg_ctx, a, a, s->cs_base);
+        tcg_gen_or_tl(tcg_ctx, mismatch, mismatch, a);
+        tcg_gen_ld_i32(tcg_ctx, x, ptr, offsetof(TranslationBlock, flags));
+        tcg_gen_xori_i32(tcg_ctx, x, x, s->flags);
+        tcg_gen_extu_i32_tl(tcg_ctx, a, x);
+        tcg_gen_or_tl(tcg_ctx, mismatch, mismatch, a);
+
+        tcg_gen_ld_i32(tcg_ctx, x, ptr, offsetof(TranslationBlock, cflags));
+        tcg_gen_andi_i32(tcg_ctx, x, x, CF_HASH_MASK | CF_INVALID);
+        tcg_gen_ld_i32(tcg_ctx, y, tcg_ctx->cpu_env,
+                      cpu_off + offsetof(CPUState, cluster_index));
+        tcg_gen_shli_i32(tcg_ctx, y, y, CF_CLUSTER_SHIFT);
+        tcg_gen_ori_i32(tcg_ctx, y, y, curr_cflags() & ~CF_CLUSTER_MASK);
+        tcg_gen_xor_i32(tcg_ctx, x, x, y);
+        tcg_gen_extu_i32_tl(tcg_ctx, a, x);
+        tcg_gen_or_tl(tcg_ctx, mismatch, mismatch, a);
+
+        tcg_gen_ld_i32(tcg_ctx, x, ptr,
+                      offsetof(TranslationBlock, trace_vcpu_dstate));
+        tcg_gen_extu_i32_tl(tcg_ctx, a, x);
+        if (sizeof(unsigned long) == 8) {
+            tcg_gen_ld_tl(tcg_ctx, b, tcg_ctx->cpu_env,
+                         cpu_off + offsetof(CPUState, trace_dstate));
+        } else {
+            tcg_gen_ld_i32(tcg_ctx, y, tcg_ctx->cpu_env,
+                          cpu_off + offsetof(CPUState, trace_dstate));
+            tcg_gen_extu_i32_tl(tcg_ctx, b, y);
+        }
+        tcg_gen_xor_tl(tcg_ctx, a, a, b);
+        tcg_gen_or_tl(tcg_ctx, mismatch, mismatch, a);
+        tcg_gen_brcondi_tl(tcg_ctx, TCG_COND_NE, mismatch, 0, miss);
+        tcg_gen_ld_ptr(tcg_ctx, ptr, ptr, offsetof(TranslationBlock, tc.ptr));
+        tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, ptr));
+        gen_set_label(tcg_ctx, miss);
+
+        tcg_temp_free_ptr(tcg_ctx, slot);
+        tcg_temp_free_i32(tcg_ctx, y);
+        tcg_temp_free_i32(tcg_ctx, x);
+        tcg_temp_free(tcg_ctx, mismatch);
+        tcg_temp_free(tcg_ctx, b);
+        tcg_temp_free(tcg_ctx, a);
+    }
+#endif
+    gen_helper_lookup_tb_ptr_fast(tcg_ctx, ptr, tcg_ctx->cpu_env, pc,
+                                 tcg_const_tl(tcg_ctx, s->cs_base),
+                                 tcg_const_i32(tcg_ctx, s->flags));
+    tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, ptr));
+    tcg_temp_free_ptr(tcg_ctx, ptr);
+    tcg_temp_free(tcg_ctx, pc);
+}
+
 /* Generate an end of block. Trace exception is also generated if needed.
    If INHIBIT, set HF_INHIBIT_IRQ_MASK if it isn't already set.
    If RECHECK_TF, emit a rechecking helper for #DB, ignoring the state of
@@ -2893,17 +2985,7 @@ do_gen_eob_worker(DisasContext *s, bool inhibit, bool recheck_tf, bool jr,
                !(s->base.tb->flags & HF_RF_MASK) &&
                !((s->flags & HF_MPX_EN_MASK) &&
                  (s->flags & HF_MPX_IU_MASK))) {
-        TCGv_ptr ptr = tcg_temp_new_ptr(tcg_ctx);
-        TCGv pc = tcg_temp_new(tcg_ctx);
-
-        tcg_gen_addi_tl(tcg_ctx, pc, s->T0, s->cs_base);
-        gen_helper_lookup_tb_ptr_fast(tcg_ctx, ptr, tcg_ctx->cpu_env,
-                                      pc,
-                                      tcg_const_tl(tcg_ctx, s->cs_base),
-                                      tcg_const_i32(tcg_ctx, s->flags));
-        tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, ptr));
-        tcg_temp_free(tcg_ctx, pc);
-        tcg_temp_free_ptr(tcg_ctx, ptr);
+        gen_lookup_explicit_tb(s);
     } else if (jr) {
         tcg_gen_lookup_and_goto_ptr(tcg_ctx);
     } else {
