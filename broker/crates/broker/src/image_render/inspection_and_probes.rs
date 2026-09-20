@@ -16,11 +16,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         None,
         None,
     )?;
-    record_identity_compatibility_actions(
-        &observed_sha256,
-        &mut parameters,
-        &mut diagnostics,
-    );
+    record_identity_compatibility_actions(&observed_sha256, &mut parameters, &mut diagnostics);
     Ok((parameters, diagnostics))
 }
 
@@ -67,14 +63,16 @@ fn record_identity_compatibility_actions(
 ) {
     let slots = apply_identity_compatibility_actions(approved_sha256, parameters);
     if !slots.is_empty() {
-        diagnostics["compatibility_actions"] = json!(slots
-            .into_iter()
-            .map(|slot| json!({
-                "slot": slot,
-                "dispatch": "forced_user_changed_param",
-                "reason": "identity_and_descriptor_verified_unsupervised_action"
-            }))
-            .collect::<Vec<_>>());
+        diagnostics["compatibility_actions"] = json!(
+            slots
+                .into_iter()
+                .map(|slot| json!({
+                    "slot": slot,
+                    "dispatch": "forced_user_changed_param",
+                    "reason": "identity_and_descriptor_verified_unsupervised_action"
+                }))
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -99,8 +97,7 @@ fn prepare_user_changed_parameters(
     slot: u32,
     parameters: &[InteractiveParameter],
 ) -> (bool, Vec<InteractiveParameter>) {
-    let compatibility_action =
-        is_promoted_compatibility_action(approved_sha256, slot, parameters);
+    let compatibility_action = is_promoted_compatibility_action(approved_sha256, slot, parameters);
     let mut effective_parameters = parameters.to_vec();
     if compatibility_action {
         // PF button parameters carry no value, but this malformed action is a
@@ -191,6 +188,9 @@ fn inspect_experimental_impl(
     let mut diagnostics = isolated_worker_diagnostics(&isolated, started.elapsed().as_millis());
     let worker_report: Option<Value> = serde_json::from_str(isolated.stdout.trim()).ok();
     if let Some(report) = &worker_report {
+        // A selector rejection can still provide an observed loaded identity.
+        // Retain it before the failure return without changing that verdict.
+        propagate_execution_images(&mut diagnostics, report);
         if let Some(plugin_data) = report.get("plugin_data") {
             diagnostics["plugin_data"] = plugin_data.clone();
         }
@@ -320,11 +320,7 @@ fn refresh_experimental_parameter_ui_impl(
             "AEX rejected PF_Cmd_UPDATE_PARAMS_UI: {diagnostics}"
         )));
     }
-    record_identity_compatibility_actions(
-        &observed_sha256,
-        &mut parameters,
-        &mut diagnostics,
-    );
+    record_identity_compatibility_actions(&observed_sha256, &mut parameters, &mut diagnostics);
     Ok((parameters, diagnostics))
 }
 
@@ -986,18 +982,16 @@ fn trigger_experimental_user_changed_impl(
     // application is open. Identity-bound compatibility behavior, however,
     // must be authorized by the bytes that are about to execute, never by the
     // cached selection SHA or its previously promoted descriptor.
-    let compatibility_action =
-        is_promoted_compatibility_action(&actual, slot, parameters);
+    let compatibility_action = is_promoted_compatibility_action(&actual, slot, parameters);
     let force_unsupervised = force_diagnostic || compatibility_action;
     if !force_unsupervised
         && !parameters
-        .iter()
-        .any(|parameter| parameter.slot == slot && parameter.supervised)
+            .iter()
+            .any(|parameter| parameter.slot == slot && parameter.supervised)
     {
         return Err(invalid("parameter is not supervised by the AEX"));
     }
-    let (_, effective_parameters) =
-        prepare_user_changed_parameters(&actual, slot, parameters);
+    let (_, effective_parameters) = prepare_user_changed_parameters(&actual, slot, parameters);
     let payload = encode_interactive_payload(&effective_parameters)?;
     let args_before_plugin = vec![if force_unsupervised {
         "--force-user-changed-diagnostic".into()
@@ -1758,8 +1752,7 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
         }
         let id = format!("param_{}", item.slot);
         match item.kind.as_str() {
-            "integer" | "path" | COMPATIBILITY_ACTION_KIND
-                if item.value.fract() == 0.0 => {
+            "integer" | "path" | COMPATIBILITY_ACTION_KIND if item.value.fract() == 0.0 => {
                 payload.push_str(&format!("{id}@{}:i32={}", item.slot, item.value as i64))
             }
             "float" => payload.push_str(&format!("{id}@{}:f64={}", item.slot, item.value)),
@@ -1839,8 +1832,7 @@ pub fn normalize_default_interactive_parameters(
             if matches!(
                 item.kind.as_str(),
                 "integer" | "float" | "path" | COMPATIBILITY_ACTION_KIND
-            )
-                && item.value.is_finite()
+            ) && item.value.is_finite()
                 && item.minimum.is_finite()
                 && item.maximum.is_finite()
                 && item.minimum <= item.maximum

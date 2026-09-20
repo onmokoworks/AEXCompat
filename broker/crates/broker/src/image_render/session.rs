@@ -760,6 +760,7 @@ fn render_classic_via_length_one_session(
         .unwrap_or("unknown")
         .to_owned();
     let mut diagnostics = close["worker"]["diagnostics"].clone();
+    propagate_execution_images(&mut diagnostics, &final_report);
     // Lift the worker's structured suite records into the diagnostics, the way
     // the deleted one-shot dispatch did after every launch. Without this a
     // session render silently drops `missing_suites` /

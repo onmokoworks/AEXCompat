@@ -20,6 +20,11 @@ WorkerSession::WorkerSession(RuntimeContext& context, TraceWriter* trace_writer,
       stdout_redirected_(context.stdout_redirected),
       trace_writer_(trace_writer),
       active_trace_writer_(active_trace_writer) {
+  // A successful production admission closes this best-effort observation
+  // handle immediately after the HMODULE comparison. Keep the ownership
+  // boundary leak-free if a future caller constructs a session earlier.
+  if (context.plugin_observation_handle != INVALID_HANDLE_VALUE)
+    CloseHandle(context.plugin_observation_handle);
   context = {};
   if (trace_writer_ && trace_writer_->enabled()) {
     if (active_trace_writer_) *active_trace_writer_ = trace_writer_;
@@ -243,6 +248,10 @@ bool WorkerSession::swap_release_module(uint32_t outgoing_index) noexcept {
 bool WorkerSession::swap_adopt_module(HMODULE module,
                                       const std::filesystem::path& plugin_path,
                                       uint32_t incoming_index) noexcept {
+  // Execution-image provenance currently observes only the initial admission
+  // (index 0). A cluster swap has no matching pre-load observation in this
+  // bounded implementation, so never copy or relabel index 0 as the incoming
+  // module's identity.
   (void)incoming_index;  // the epoch records the outgoing index by design
   if (!swap_pending_ || !module) return false;
   ModuleAuditReport& audit = module_audit_report();

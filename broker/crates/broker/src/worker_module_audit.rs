@@ -20,6 +20,9 @@ struct AuditReport {
     observed_union: AuditSnapshot,
     phase_count: u32,
     unknown_count: u32,
+    #[serde(default)]
+    #[allow(dead_code)]
+    execution_images: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -270,6 +273,8 @@ struct ClusterAuditReport {
     epochs: Vec<AuditEpoch>,
     phase_count: u32,
     unknown_count: u32,
+    #[serde(default)]
+    execution_images: Option<serde::de::IgnoredAny>,
 }
 
 /// One swap epoch (design §5): `pre_unload` is the snapshot taken right
@@ -283,6 +288,66 @@ struct AuditEpoch {
     plugin_index: u32,
     pre_unload: AuditSnapshot,
     post_load: AuditSnapshot,
+}
+
+/// Extracts the worker's bounded, path-free plug-in execution identities for
+/// public diagnostics. Invalid or unsafe observations are omitted; they never
+/// change dispatch, audit, or render verdicts.
+pub(crate) fn execution_images_summary(report: &Value) -> Option<Value> {
+    let images = report
+        .get("module_audit")?
+        .get("execution_images")?
+        .as_array()?;
+    if images.is_empty() || images.len() > 64 {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut safe = Vec::with_capacity(images.len());
+    for image in images {
+        let object = image.as_object()?;
+        let expected = [
+            "plugin_index",
+            "basename",
+            "sha256",
+            "size_bytes",
+            "binding_status",
+        ];
+        if object.len() != expected.len() || expected.iter().any(|key| !object.contains_key(*key)) {
+            return None;
+        }
+        let plugin_index = object.get("plugin_index")?.as_u64()?;
+        if plugin_index > 4095 || !seen.insert(plugin_index) {
+            return None;
+        }
+        let basename = object.get("basename")?.as_str()?;
+        validate_basename(basename).ok()?;
+        let sha256 = object.get("sha256")?.as_str()?;
+        if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let size_bytes = object.get("size_bytes")?.as_u64()?;
+        if size_bytes == 0 {
+            return None;
+        }
+        let binding_status = object.get("binding_status")?.as_str()?;
+        if !matches!(
+            binding_status,
+            "same_file_identity_matches_loaded_module"
+                | "loaded_module_path_unavailable"
+                | "loaded_module_identity_unavailable"
+                | "loaded_module_identity_mismatch"
+        ) {
+            return None;
+        }
+        safe.push(serde_json::json!({
+            "plugin_index": plugin_index,
+            "basename": basename,
+            "sha256": sha256.to_ascii_lowercase(),
+            "size_bytes": size_bytes,
+            "binding_status": binding_status,
+        }));
+    }
+    Some(Value::Array(safe))
 }
 
 fn validate_basename(name: &str) -> io::Result<()> {
@@ -354,6 +419,40 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[test]
+    fn execution_images_are_path_free_and_record_only() {
+        let mut report: Value = serde_json::from_str(&valid_report()).unwrap();
+        report["module_audit"]["execution_images"] = json!([{
+            "plugin_index": 0,
+            "basename": "Fixture.aex",
+            "sha256": "AB".repeat(32),
+            "size_bytes": 12345,
+            "binding_status": "loaded_module_identity_mismatch"
+        }]);
+        let summary = execution_images_summary(&report).unwrap();
+        assert_eq!(summary[0]["plugin_index"], 0);
+        assert_eq!(summary[0]["basename"], "Fixture.aex");
+        assert_eq!(summary[0]["sha256"], "ab".repeat(32));
+        assert_eq!(
+            summary[0]["binding_status"],
+            "loaded_module_identity_mismatch"
+        );
+        assert!(validate_required_worker_audit(&report.to_string(), false).is_ok());
+
+        report["module_audit"]["execution_images"][0]["basename"] =
+            json!(r"C:\private\Fixture.aex");
+        assert!(execution_images_summary(&report).is_none());
+        assert!(validate_required_worker_audit(&report.to_string(), false).is_ok());
+
+        // Optional observations must not change the audit verdict even when a
+        // newer or faulty worker emits a schema the summary cannot publish.
+        for malformed in [json!(null), json!("not an array"), json!([{}])] {
+            report["module_audit"]["execution_images"] = malformed;
+            assert!(execution_images_summary(&report).is_none());
+            assert!(validate_required_worker_audit(&report.to_string(), false).is_ok());
+        }
     }
 
     fn snapshot() -> Value {

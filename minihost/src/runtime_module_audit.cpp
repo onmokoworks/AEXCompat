@@ -248,6 +248,18 @@ std::string audit_basename(const std::filesystem::path& path) {
   return result;
 }
 
+std::string json_string(const std::string& value) {
+  std::string result;
+  result.reserve(value.size() + 2);
+  result.push_back('"');
+  for (unsigned char ch : value) {
+    if (ch == '"' || ch == '\\') result.push_back('\\');
+    if (ch >= 0x20 && ch < 0x7f) result.push_back(static_cast<char>(ch));
+  }
+  result.push_back('"');
+  return result;
+}
+
 std::optional<ModulePathMetadata> resolve_module_path_metadata(HMODULE module) {
   std::array<wchar_t, 32768> module_buffer{};
   const DWORD module_length = GetModuleFileNameExW(
@@ -559,6 +571,31 @@ void record_module_audit_epoch(uint32_t plugin_index,
       {plugin_index, std::move(pre_unload), std::move(post_load)});
 }
 
+void record_plugin_execution_image(uint32_t plugin_index,
+                                   const std::filesystem::path& plugin_path,
+                                   const std::string& sha256,
+                                   uint64_t size_bytes,
+                                   const char* binding_status) noexcept {
+  try {
+    PluginExecutionImage image{
+        plugin_index, audit_basename(plugin_path), sha256, size_bytes,
+        binding_status ? binding_status : "unavailable"};
+    const auto found = std::find_if(
+        g_module_audit.execution_images.begin(),
+        g_module_audit.execution_images.end(),
+        [plugin_index](const PluginExecutionImage& existing) {
+          return existing.plugin_index == plugin_index;
+        });
+    if (found == g_module_audit.execution_images.end())
+      g_module_audit.execution_images.push_back(std::move(image));
+    else
+      *found = std::move(image);
+  } catch (...) {
+    // Provenance is mandatory when observable, but it is never an execution
+    // gate. Out-of-memory/path conversion failure cannot change a render.
+  }
+}
+
 bool parse_runtime_module_authorization(const std::filesystem::path& plugin_path,
                                         const std::filesystem::path& manifest_name,
                                         bool in_place_transport) {
@@ -774,6 +811,22 @@ std::string module_audit_json() {
       output << "{\"plugin_index\":" << epoch.plugin_index
              << ",\"pre_unload\":" << module_audit_snapshot_json(epoch.pre_unload)
              << ",\"post_load\":" << module_audit_snapshot_json(epoch.post_load)
+             << '}';
+    }
+    output << ']';
+  }
+  if (!g_module_audit.execution_images.empty()) {
+    output << ",\"execution_images\":[";
+    for (std::size_t index = 0;
+         index < g_module_audit.execution_images.size(); ++index) {
+      if (index) output << ',';
+      const PluginExecutionImage& image =
+          g_module_audit.execution_images[index];
+      output << "{\"plugin_index\":" << image.plugin_index
+             << ",\"basename\":" << json_string(image.basename)
+             << ",\"sha256\":" << json_string(image.sha256)
+             << ",\"size_bytes\":" << image.size_bytes
+             << ",\"binding_status\":" << json_string(image.binding_status)
              << '}';
     }
     output << ']';

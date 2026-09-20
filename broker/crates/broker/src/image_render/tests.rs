@@ -3085,6 +3085,8 @@ mod tests {
     #[test]
     fn isolated_worker_diagnostics_expose_kill_reason_and_memory_peaks() {
         let isolated = crate::secure_launch::SecureLaunchResult {
+            worker_sha256: [0xab; 32],
+            worker_size_bytes: 4_096,
             classification: crate::ExitClassification::NonzeroExit,
             exit_code: 42,
             stdout: String::new(),
@@ -3118,8 +3120,22 @@ mod tests {
         assert_eq!(diagnostics["process_memory_limit_bytes"], 536_870_912u64);
         assert_eq!(diagnostics["classification"], "nonzero_exit");
         assert_eq!(diagnostics["elapsed_ms"], 1_234);
+        assert_eq!(
+            diagnostics["execution_identity"]["worker"]["sha256"],
+            "abababababababababababababababababababababababababababababababab"
+        );
+        assert_eq!(
+            diagnostics["execution_identity"]["worker"]["size_bytes"],
+            4_096
+        );
+        assert_eq!(
+            diagnostics["execution_identity"]["worker"]["binding"],
+            "broker_authenticated_pinned_stage"
+        );
 
         let alive = crate::secure_launch::SecureLaunchResult {
+            worker_sha256: [0xcd; 32],
+            worker_size_bytes: 8_192,
             classification: crate::ExitClassification::Ok,
             exit_code: 0,
             stdout: String::new(),
@@ -3282,34 +3298,30 @@ mod tests {
         assert_eq!(parameters[0].value, 0.0);
         assert_eq!(diagnostics["compatibility_actions"][0]["slot"], 5);
 
-        let (forced, dispatched) = prepare_user_changed_parameters(
-            MASK_TRANSFORM_1_SHA256,
-            5,
-            &parameters,
-        );
+        let (forced, dispatched) =
+            prepare_user_changed_parameters(MASK_TRANSFORM_1_SHA256, 5, &parameters);
         assert!(forced);
         assert_eq!(dispatched[0].value, 1.0);
-        assert!(encode_interactive_payload(&dispatched)
-            .expect("compatibility action remains a typed checkbox assignment")
-            .contains("param_5@5:i32=1"));
+        assert!(
+            encode_interactive_payload(&dispatched)
+                .expect("compatibility action remains a typed checkbox assignment")
+                .contains("param_5@5:i32=1")
+        );
 
         let mut wrong_identity = vec![descriptor.clone()];
-        assert!(apply_identity_compatibility_actions(
-            &"00".repeat(32),
-            &mut wrong_identity,
-        )
-        .is_empty());
+        assert!(
+            apply_identity_compatibility_actions(&"00".repeat(32), &mut wrong_identity,).is_empty()
+        );
         assert_eq!(wrong_identity[0].kind, "integer");
 
         let mut wrong_descriptor = vec![InteractiveParameter {
             name: "Enable Transform".into(),
             ..descriptor
         }];
-        assert!(apply_identity_compatibility_actions(
-            MASK_TRANSFORM_1_SHA256,
-            &mut wrong_descriptor,
-        )
-        .is_empty());
+        assert!(
+            apply_identity_compatibility_actions(MASK_TRANSFORM_1_SHA256, &mut wrong_descriptor,)
+                .is_empty()
+        );
         assert_eq!(wrong_descriptor[0].kind, "integer");
     }
 
@@ -3352,11 +3364,7 @@ mod tests {
             5,
             &promoted,
         ));
-        let (forced, dispatched) = prepare_user_changed_parameters(
-            &observed_sha256,
-            5,
-            &promoted,
-        );
+        let (forced, dispatched) = prepare_user_changed_parameters(&observed_sha256, 5, &promoted);
         assert!(!forced);
         assert_eq!(dispatched[0].value, 0.0);
     }

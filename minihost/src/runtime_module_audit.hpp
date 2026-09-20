@@ -31,6 +31,17 @@ struct ModuleAuditEpoch {
   ModuleAuditSnapshot post_load;
 };
 
+// Bounded, path-free evidence for one plug-in image admitted into this
+// process. `binding_status` is an observation only: it never participates in
+// module-audit or render verdicts (issue #678's record-only floor).
+struct PluginExecutionImage {
+  uint32_t plugin_index{};
+  std::string basename;
+  std::string sha256;
+  uint64_t size_bytes{};
+  std::string binding_status;
+};
+
 struct ModuleAuditReport {
   bool required{};
   // In-place plugin loads (issue #751) capture and report the loaded-module
@@ -45,6 +56,7 @@ struct ModuleAuditReport {
   uint32_t phase_count{};
   std::filesystem::path plugin_path;
   std::vector<ModuleAuditEpoch> epochs;
+  std::vector<PluginExecutionImage> execution_images;
 };
 
 enum class LoadedModuleProvenance {
@@ -96,6 +108,16 @@ void configure_module_audit_search_roots(
 void record_module_audit_epoch(uint32_t plugin_index,
                                ModuleAuditSnapshot pre_unload,
                                ModuleAuditSnapshot post_load);
+
+// Records one best-effort image observation without exposing its path.
+// Re-recording an index replaces the prior observation. This is diagnostic-
+// only and never changes module_audit_passed(); allocation failure drops the
+// observation rather than changing the execution verdict.
+void record_plugin_execution_image(uint32_t plugin_index,
+                                   const std::filesystem::path& plugin_path,
+                                   const std::string& sha256,
+                                   uint64_t size_bytes,
+                                   const char* binding_status) noexcept;
 
 // The GPU-framework backend id (1=cuda, 2=opencl, 3=directx, 4=opengl) carried
 // by the AEXRMA1 manifest that the last successful

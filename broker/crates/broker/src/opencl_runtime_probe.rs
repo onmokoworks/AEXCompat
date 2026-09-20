@@ -1263,6 +1263,8 @@ mod tests {
 
     fn launch_result(classification: ExitClassification, stdout: &str) -> SecureLaunchResult {
         SecureLaunchResult {
+            worker_sha256: [0x22; 32],
+            worker_size_bytes: 456,
             classification,
             exit_code: match classification {
                 ExitClassification::Ok => 0,

@@ -298,6 +298,12 @@ fn cli_contract() -> serde_json::Value {
                 "result": "parameter-inspection-json"
             },
             {
+                "name": "--inspect-experimental-report",
+                "argv": ["--inspect-experimental-report", "<aex>"],
+                "result": "parameter-inspection-and-diagnostics-json",
+                "note": "Preserves the legacy raw-array command while exposing path-free execution provenance."
+            },
+            {
                 "name": "--refresh-experimental-params-ui",
                 "argv": ["--refresh-experimental-params-ui", "<aex>"],
                 "aliases": ["--refresh-experimental-params-ui-request"],
@@ -436,6 +442,10 @@ mod artifact_cli_contract_tests {
                 .len(),
             4
         );
+        assert_eq!(
+            command("--inspect-experimental-report")["result"],
+            "parameter-inspection-and-diagnostics-json"
+        );
     }
 }
 
@@ -521,7 +531,7 @@ fn required_plugin_parameters(
 
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --refresh-experimental-params-ui <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-report <aex>\n  --refresh-experimental-params-ui <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
     );
 }
 
@@ -1656,6 +1666,29 @@ fn main() -> eframe::Result {
         println!("{}", serde_json::to_string_pretty(&parameters).unwrap());
         return Ok(());
     }
+    if args.len() == 3 && args[1] == "--inspect-experimental-report" {
+        let plugin = Path::new(&args[2]);
+        let hash = required_plugin_hash(plugin);
+        match aexcompat_broker::image_render::inspect_experimental_with_diagnostics(
+            &repository,
+            plugin,
+            &hash,
+        ) {
+            Ok((parameters, diagnostics)) => println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "parameters": parameters,
+                    "diagnostics": diagnostics,
+                }))
+                .unwrap()
+            ),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
     if args.len() == 3 && args[1] == "--refresh-experimental-params-ui" {
         let plugin = Path::new(&args[2]);
         let hash = required_plugin_hash(plugin);
@@ -2037,9 +2070,7 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    if args.len() == 5
-        && args[1] == "--diagnose-experimental-forced-user-changed-request"
-    {
+    if args.len() == 5 && args[1] == "--diagnose-experimental-forced-user-changed-request" {
         let plugin = Path::new(&args[2]);
         let slot = args[3].to_string_lossy().parse::<u32>().unwrap_or(0);
         let request_path = Path::new(&args[4]);

@@ -424,6 +424,20 @@ target_compile_definitions(runtime_module_path_cache_selftest PRIVATE
 target_compile_options(runtime_module_path_cache_selftest PRIVATE /UNDEBUG)
 target_include_directories(runtime_module_path_cache_selftest PRIVATE src)
 
+add_executable(worker_execution_identity_selftest
+    ../tests/native/worker_execution_identity_selftest.cpp
+    src/worker_runtime_admission.cpp
+    src/runtime_module_audit.cpp
+    src/runtime_module_path_cache.cpp)
+add_dependencies(worker_execution_identity_selftest
+    runtime_module_path_cache_fixture)
+target_compile_features(worker_execution_identity_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_execution_identity_selftest PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(worker_execution_identity_selftest PRIVATE /UNDEBUG)
+target_include_directories(worker_execution_identity_selftest PRIVATE src)
+target_link_libraries(worker_execution_identity_selftest PRIVATE bcrypt psapi)
+
 add_executable(worker_temporal_checkout_report_selftest
     ../tests/native/worker_temporal_checkout_report_selftest.cpp)
 target_compile_features(worker_temporal_checkout_report_selftest PRIVATE cxx_std_17)

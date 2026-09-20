@@ -543,6 +543,22 @@ pub(crate) fn isolated_worker_diagnostics(
     let object = diagnostics
         .as_object_mut()
         .expect("worker_diagnostics returns an object");
+    let worker_sha256 = isolated
+        .worker_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    object.insert(
+        "execution_identity".into(),
+        json!({
+            "schema_version": 1,
+            "worker": {
+                "sha256": worker_sha256,
+                "size_bytes": isolated.worker_size_bytes,
+                "binding": "broker_authenticated_pinned_stage",
+            },
+        }),
+    );
     object.insert("kill_reason".into(), json!(isolated.kill_reason));
     // The worker's own trace, when the operator asked for one. Everything above
     // is derived from this stream, and a derivation only answers the questions
@@ -596,6 +612,22 @@ pub(crate) fn isolated_worker_diagnostics(
         object.insert("module_audit_warning".into(), json!(reason));
     }
     diagnostics
+}
+
+/// Adds only the bounded, path-free identity that the native worker observed
+/// after loading the plug-in. Missing, malformed, or mismatched observations
+/// remain diagnostics and never alter the render/inspection verdict.
+pub(crate) fn propagate_execution_images(diagnostics: &mut Value, worker_report: &Value) {
+    let Some(images) = crate::worker_module_audit::execution_images_summary(worker_report) else {
+        return;
+    };
+    let Some(identity) = diagnostics
+        .get_mut("execution_identity")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    identity.insert("plugin_images".into(), images);
 }
 
 fn worker_diagnostics(

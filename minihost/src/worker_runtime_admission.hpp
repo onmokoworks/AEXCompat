@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -36,8 +37,28 @@ struct RuntimeAdmissionRequest {
   std::vector<std::filesystem::path> dependency_search_dirs;
 };
 
+// Best-effort, path-free observation of one file handle. The handle is opened
+// with normal sharing so collecting provenance cannot pin or otherwise change
+// the plug-in's load semantics. Consequently this proves that the selected
+// file object and the loaded module path named the same file at observation
+// time; it deliberately does not claim immutability against a concurrent
+// same-file write.
+struct PluginFileObservation {
+  BY_HANDLE_FILE_INFORMATION file_information{};
+  std::string sha256;
+  uint64_t size_bytes{};
+};
+
 struct RuntimeContext {
   std::filesystem::path plugin_path;
+  // Optional observation handle retained only across LoadLibraryExW. It uses
+  // share-read/write/delete and is closed as soon as execution identity has
+  // been recorded, so failure to acquire it never rejects a load.
+  HANDLE plugin_observation_handle{INVALID_HANDLE_VALUE};
+  PluginFileObservation plugin_file_observation{};
+  bool plugin_file_observation_available{};
+  std::string plugin_sha256;
+  uint64_t plugin_size_bytes{};
   HMODULE module{};
   DLL_DIRECTORY_COOKIE sealed_directory_cookie{};
   // Cookies for the in-place dependency search directories (issue #751);
@@ -68,6 +89,21 @@ int prepare_runtime_environment(const RuntimeHostHooks& hooks,
                                 RuntimeContext& context);
 int load_runtime_plugin(const RuntimeAdmissionRequest& request,
                         RuntimeContext& context);
+
+// Hashes and sizes exactly the bytes read through `file`. This is exposed so
+// the behavioral native self-test can exercise the same production primitive;
+// callers retain ownership of the handle. Failure is diagnostic-only.
+bool capture_plugin_file_observation(
+    HANDLE file, PluginFileObservation& observation) noexcept;
+
+// Records which loaded image was observed for one manifest index. `selected`
+// is the pre-load observation when available. A missing/mismatched observation
+// is emitted as provenance state and never changes admission, module-audit, or
+// render verdicts. No absolute path is serialized.
+void record_loaded_plugin_execution_image(
+    uint32_t plugin_index, const std::filesystem::path& requested_path,
+    HMODULE loaded_module, const PluginFileObservation* selected,
+    const std::string& fallback_sha256, uint64_t fallback_size_bytes) noexcept;
 
 // Builds the bounded request consumed by admission without loading the
 // plug-in. Returns the historical malformed-argument code for non-ASCII

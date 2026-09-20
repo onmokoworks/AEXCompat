@@ -99,6 +99,11 @@ impl LaunchEnvironment {
 
 #[derive(Debug)]
 pub struct SecureLaunchResult {
+    /// Identity authenticated by `TrustedWorkerStage`: both the source and
+    /// staged executable were checked against these bytes, and the staged
+    /// file handle stayed pinned through process collection.
+    pub worker_sha256: [u8; 32],
+    pub worker_size_bytes: u64,
     pub classification: ExitClassification,
     pub exit_code: u32,
     pub stdout: String,
@@ -295,6 +300,8 @@ fn secure_launch_impl(
         })
         .flatten();
     Ok(SecureLaunchResult {
+        worker_sha256: worker_expected_sha256,
+        worker_size_bytes: worker_expected_size,
         classification: result.classification,
         exit_code: result.exit_code,
         stdout: result.stdout,
@@ -323,6 +330,8 @@ pub struct SecureSessionProcess {
     /// See `SecureLaunchResult::worker_freshness_warning`; recorded by the
     /// dispatch that admitted the worker and carried into `finish`'s result.
     worker_freshness_warning: Option<&'static str>,
+    worker_sha256: [u8; 32],
+    worker_size_bytes: u64,
     _stage: crate::trusted_worker_stage::TrustedWorkerStage,
 }
 
@@ -381,6 +390,8 @@ impl SecureSessionProcess {
             })
             .flatten();
         Ok(SecureLaunchResult {
+            worker_sha256: self.worker_sha256,
+            worker_size_bytes: self.worker_size_bytes,
             classification: result.classification,
             exit_code: result.exit_code,
             stdout: result.stdout,
@@ -478,6 +489,8 @@ fn secure_launch_session_impl(
         launched: Some(launched),
         require_module_audit: request.require_module_audit,
         worker_freshness_warning: None,
+        worker_sha256: request.worker_expected_sha256,
+        worker_size_bytes: request.worker_expected_size,
         _stage: worker_stage,
     })
 }
