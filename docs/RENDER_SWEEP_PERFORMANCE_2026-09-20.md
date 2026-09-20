@@ -1157,6 +1157,54 @@ must use captured subprocess reports and an input/intensity response oracle
 before claiming the Auto32 route works. No further vendor frames were run in
 this cycle, no full sweep was repeated, and no AE process was used.
 
+### Fast Grain follow-up: captured GPU response (2026-09-21)
+
+A subsequent bounded capture now proves the earlier Auto32 image came from
+an actual CUDA render: `gpu_render_dispatched` and `cuda_context_used` are
+true, with no GPU fallback, setup/setdown/synchronization errors, or missing
+suite calls. CPU32 still returns the fixed diagnostic card. No GPU algorithm
+or new CLI route was added: the existing shipping
+`--render-experimental-session-param` accepts `argb32f smart 0 300 30 1 VALUE`
+after the AEX/input/output arguments. This selects time 0, total time 300,
+time scale 30 and Intensity slot 1; other discovered defaults are retained,
+including Overlay blend mode 8, Grain Color 18 and Blend Opacity 100.
+
+Four fresh-process frames cross opaque gray and a color checker with
+Intensity 0/100. At 0, both sources are reproduced within one 8-bit level per
+sample, including the float output check. At 100, 36,864/36,864 gray pixels
+and 36,847/36,864 checker pixels change by more than one level. Gray residual
+standard deviation is 79.33 levels and its mean is -0.64; both positive and
+negative changes are widespread. Outputs are substantially nearer their
+matched sources than swapped sources (summed RGB mean absolute errors 89.99
+versus 183.23), rejecting an input-independent fixed noise image. All raw
+float samples are finite, alpha remains 1, the native ARGB float checksum
+matches the saved RGBA float output after channel reordering, and the decoded
+PNG agrees with its float preview.
+
+Worker execution records bind the same Fast Grain SHA above to worker
+`6c75657c04c8d60df9d6cc14a12efb62f80390096c8dc06b7a08c4bf59d51213`.
+The separately recorded harness file remains `3dca9494...`; pre/post binary
+identities match. The four CLI processes took 2.258 seconds total; the real
+pytest case, including image verification, took 3.26 seconds. This is a
+focused correctness measurement, not a new all-AEX sweep or a speedup claim.
+The reports were captured through `subprocess` (direct PowerShell invocation
+of the GUI-subsystem executable had lost stdout in the previous cycle).
+
+`test_fast_grain_gpu_response.py` preserves all four process reports before
+semantic assertions and supports offline revalidation without another AEX
+run. Its corruption cases reject passthrough, fixed or swapped-source output,
+small watermarks, brightness-only changes, invalid floats, alpha damage and
+truncation. Companion report tests reject plausible pixels paired with wrong
+GPU, timing, parameter, checksum or identity evidence.
+
+The result is **bounded GPU grain-like source/intensity response**, not full
+Fast Grain verification or Adobe equivalence. CPU/ARGB8 remains a card; the
+noise spectrum/seed, exact blend/color/amplitude, intermediate intensities,
+temporal behavior and other GPU backends are unverified. A generic signed
+noise overlay could meet this bounded oracle. Historical ARGB8 sweep buckets
+are retained, and only this exact AEX identity receives the GPU follow-up.
+No AE, excluded vendor, or full installed-AEX sweep was executed.
+
 ## OLM cohort and visible-image classification
 
 The first OLM milestone reported 10/10 `rendered` in 2,631 ms, but that bucket
