@@ -28,8 +28,12 @@
 #include "uc_priv.h"
 #include "tcg/tcg-apple-jit.h"
 
-void *HELPER(lookup_tb_ptr_fast)(CPUX86State *env, target_ulong pc,
-                                 target_ulong cs_base, uint32_t flags)
+/* Keep miss handling out of the hit path. A tail call with the same argument
+ * list lets cache hits return without saving registers for tb_htable_lookup.
+ * The shared lookup retains all key checks and the existing invalidation
+ * lifecycle; no translated-code pointers are cached separately here. */
+static QEMU_NOINLINE void *lookup_tb_ptr_slow(CPUX86State *env, target_ulong pc,
+                                            target_ulong cs_base, uint32_t flags)
 {
     CPUState *cpu = env_cpu(env);
     TranslationBlock *tb = tb_lookup__explicit_state(cpu, pc, cs_base,
@@ -39,6 +43,19 @@ void *HELPER(lookup_tb_ptr_fast)(CPUX86State *env, target_ulong pc,
         return env->uc->tcg_ctx->code_gen_epilogue;
     }
     return tb->tc.ptr;
+}
+
+void *HELPER(lookup_tb_ptr_fast)(CPUX86State *env, target_ulong pc,
+                               target_ulong cs_base, uint32_t flags)
+{
+    TranslationBlock *tb = tb_lookup__explicit_state_cached(env_cpu(env), pc,
+                                                           cs_base, flags,
+                                                           curr_cflags());
+
+    if (likely(tb)) {
+        return tb->tc.ptr;
+    }
+    return lookup_tb_ptr_slow(env, pc, cs_base, flags);
 }
 
 void helper_outb(CPUX86State *env, uint32_t port, uint32_t data)
