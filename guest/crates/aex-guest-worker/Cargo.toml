@@ -33,6 +33,7 @@ unicode-width = "0.1.14"
 goblin.workspace = true
 iced-x86.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
+memchr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
