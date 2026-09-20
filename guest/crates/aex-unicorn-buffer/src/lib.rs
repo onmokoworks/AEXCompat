@@ -190,9 +190,167 @@ mod tests {
         code[0x10..0x14].copy_from_slice(&[0xb9, 0x78, 0x56, 0xc3]);
         unicorn.mem_write(BASE, &code).unwrap();
 
-        unicorn.emu_start(BASE, BASE + 0x21, 0, 0).unwrap();
-        assert_eq!(unicorn.reg_read(RegisterX86::BX).unwrap(), 0x1234);
-        assert_eq!(unicorn.reg_read(RegisterX86::CX).unwrap(), 0x5678);
+        for _ in 0..8 {
+            unicorn.reg_write(RegisterX86::BX, 0).unwrap();
+            unicorn.reg_write(RegisterX86::CX, 0).unwrap();
+            unicorn.emu_start(BASE, BASE + 0x21, 0, 0).unwrap();
+            assert_eq!(unicorn.reg_read(RegisterX86::BX).unwrap(), 0x1234);
+            assert_eq!(unicorn.reg_read(RegisterX86::CX).unwrap(), 0x5678);
+            assert_eq!(unicorn.reg_read(RegisterX86::SP).unwrap(), 0x800);
+        }
+    }
+
+    #[test]
+    fn x86_indirect_calls_preserve_registers_with_warm_and_colliding_targets() {
+        for second in [0x5000u64, 0x0100_4000] {
+            let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+            for base in [0x1000, 0x4000, second, 0x8000] {
+                unicorn.mem_map(base, 4096, Prot::ALL).unwrap();
+            }
+            // The second case has identical jump-cache hash bits for both
+            // callees. Full PC validation must reject the colliding entry.
+            unicorn.mem_write(0x4000, &[0x83, 0xc3, 3, 0xc3]).unwrap();
+            unicorn.mem_write(second, &[0x83, 0xc3, 7, 0xc3]).unwrap();
+            // mov ecx,64; xor ebx,ebx; (mov rax,target; call rax) x2;
+            // dec ecx; jnz to the first mov rax.
+            let mut code = vec![0xb9, 64, 0, 0, 0, 0x31, 0xdb];
+            for target in [0x4000u64, second] {
+                code.extend_from_slice(&[0x48, 0xb8]);
+                code.extend_from_slice(&target.to_le_bytes());
+                code.extend_from_slice(&[0xff, 0xd0]);
+            }
+            code.extend_from_slice(&[0xff, 0xc9, 0x75, 0xe4]);
+            unicorn.mem_write(0x1000, &code).unwrap();
+            for _ in 0..8 {
+                unicorn.reg_write(RegisterX86::RSP, 0x8800).unwrap();
+                unicorn
+                    .emu_start(0x1000, 0x1000 + code.len() as u64, 0, 0)
+                    .unwrap();
+                assert_eq!(unicorn.reg_read(RegisterX86::RBX).unwrap(), 640);
+                assert_eq!(unicorn.reg_read(RegisterX86::RCX).unwrap(), 0);
+                assert_eq!(unicorn.reg_read(RegisterX86::RSP).unwrap(), 0x8800);
+            }
+        }
+    }
+
+    fn indirect_call_engine(target: u64) -> Unicorn<'static, ()> {
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(0x1000, 4096, Prot::ALL).unwrap();
+        unicorn.mem_map(target & !0xfff, 8192, Prot::ALL).unwrap();
+        unicorn
+            .mem_map(0x8000, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        let mut code = vec![0x48, 0xb8]; // mov rax,target; call rax; nop
+        code.extend_from_slice(&target.to_le_bytes());
+        code.extend_from_slice(&[0xff, 0xd0, 0x90]);
+        unicorn.mem_write(0x1000, &code).unwrap();
+        unicorn
+    }
+
+    fn run_indirect_call(unicorn: &mut Unicorn<'_, ()>) -> Result<u64, uc_error> {
+        unicorn.reg_write(RegisterX86::RSP, 0x8800)?;
+        unicorn.reg_write(RegisterX86::RBX, 0)?;
+        unicorn.emu_start(0x1000, 0x100d, 0, 0)?;
+        assert_eq!(unicorn.reg_read(RegisterX86::RSP)?, 0x8800);
+        unicorn.reg_read(RegisterX86::RBX)
+    }
+
+    #[test]
+    fn x86_indirect_cache_respects_second_page_code_invalidation_and_flush() {
+        const TARGET: u64 = 0x4ffe;
+        let mut unicorn = indirect_call_engine(TARGET);
+        // mov ebx,0x11223344; ret -- the immediate crosses a page boundary.
+        unicorn
+            .mem_write(TARGET, &[0xbb, 0x44, 0x33, 0x22, 0x11, 0xc3])
+            .unwrap();
+        for _ in 0..8 {
+            assert_eq!(run_indirect_call(&mut unicorn), Ok(0x11223344));
+        }
+        unicorn.mem_write(0x5000, &[0x66, 0x77, 0x88]).unwrap();
+        unicorn.ctl_remove_cache(0x5000, 0x6000).unwrap();
+        for _ in 0..8 {
+            assert_eq!(run_indirect_call(&mut unicorn), Ok(0x88776644));
+        }
+        unicorn.ctl_flush_tb().unwrap();
+        assert_eq!(run_indirect_call(&mut unicorn), Ok(0x88776644));
+        unicorn.ctl_flush_tlb().unwrap();
+        assert_eq!(run_indirect_call(&mut unicorn), Ok(0x88776644));
+    }
+
+    #[test]
+    fn x86_indirect_cache_respects_remap_and_explicit_permission_invalidation() {
+        let mut unicorn = indirect_call_engine(0x4000);
+        unicorn
+            .mem_write(0x4000, &[0xbb, 1, 0, 0, 0, 0xc3])
+            .unwrap();
+        for _ in 0..8 {
+            assert_eq!(run_indirect_call(&mut unicorn), Ok(1));
+        }
+        unicorn.mem_unmap(0x4000, 8192).unwrap();
+        unicorn.mem_map(0x4000, 8192, Prot::ALL).unwrap();
+        unicorn
+            .mem_write(0x4000, &[0xbb, 2, 0, 0, 0, 0xc3])
+            .unwrap();
+        for _ in 0..8 {
+            assert_eq!(run_indirect_call(&mut unicorn), Ok(2));
+        }
+        unicorn
+            .mem_protect(0x4000, 8192, Prot::READ | Prot::WRITE)
+            .unwrap();
+        // Warm TBs require explicit invalidation after host permission changes
+        // in the baseline too; automatic invalidation is tracked separately.
+        unicorn.ctl_remove_cache(0x4000, 0x6000).unwrap();
+        assert_eq!(run_indirect_call(&mut unicorn), Err(uc_error::FETCH_PROT));
+        assert_eq!(unicorn.reg_read(RegisterX86::RIP).unwrap(), 0x4000);
+        unicorn.mem_protect(0x4000, 8192, Prot::ALL).unwrap();
+        for _ in 0..8 {
+            assert_eq!(run_indirect_call(&mut unicorn), Ok(2));
+        }
+        unicorn.mem_unmap(0x4000, 8192).unwrap();
+        assert_eq!(
+            run_indirect_call(&mut unicorn),
+            Err(uc_error::FETCH_UNMAPPED)
+        );
+        assert_eq!(unicorn.reg_read(RegisterX86::RIP).unwrap(), 0x4000);
+    }
+
+    #[test]
+    fn x86_indirect_cache_keeps_hooks_and_instruction_stops_after_invalidation() {
+        let mut unicorn = indirect_call_engine(0x4000);
+        unicorn
+            .mem_write(0x4000, &[0xbb, 42, 0, 0, 0, 0xc3])
+            .unwrap();
+        for _ in 0..8 {
+            assert_eq!(run_indirect_call(&mut unicorn), Ok(42));
+        }
+        let hook = unicorn
+            .add_code_hook(0x4000, 0x4000, |uc, _, _| {
+                uc.reg_write(RegisterX86::RBX, 99).unwrap();
+                uc.emu_stop().unwrap();
+            })
+            .unwrap();
+        // New hooks do not instrument baseline TBs retroactively. Exercise
+        // the existing explicit cache lifecycle, not that separate behavior.
+        unicorn.ctl_remove_cache(0x1000, 0x6000).unwrap();
+        unicorn.reg_write(RegisterX86::RSP, 0x8800).unwrap();
+        unicorn.emu_start(0x1000, 0x100d, 0, 0).unwrap();
+        assert_eq!(unicorn.reg_read(RegisterX86::RBX).unwrap(), 99);
+        assert_eq!(unicorn.reg_read(RegisterX86::RIP).unwrap(), 0x4000);
+        unicorn.remove_hook(hook).unwrap();
+        unicorn.ctl_remove_cache(0x1000, 0x6000).unwrap();
+        assert_eq!(run_indirect_call(&mut unicorn), Ok(42));
+        // Enabling instruction counting installs a hook in the caller too.
+        // Flush once, then cover both cold and warm count-limited calls.
+        unicorn.ctl_flush_tb().unwrap();
+        for _ in 0..8 {
+            unicorn.reg_write(RegisterX86::RSP, 0x8800).unwrap();
+            unicorn.reg_write(RegisterX86::RBX, 0).unwrap();
+            // Only mov rax,target and call rax may execute.
+            unicorn.emu_start(0x1000, 0x100d, 0, 2).unwrap();
+            assert_eq!(unicorn.reg_read(RegisterX86::RBX).unwrap(), 0);
+            assert_eq!(unicorn.reg_read(RegisterX86::RIP).unwrap(), 0x4000);
+            assert_eq!(unicorn.reg_read(RegisterX86::RSP).unwrap(), 0x87f8);
+        }
     }
 
     #[test]

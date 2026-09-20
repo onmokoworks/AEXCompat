@@ -17,9 +17,9 @@
 #include "exec/tb-hash.h"
 
 static inline TranslationBlock *
-tb_lookup__explicit_state(CPUState *cpu, target_ulong pc,
-                          target_ulong cs_base, uint32_t flags,
-                          uint32_t cf_mask)
+tb_lookup__explicit_state_cached(CPUState *cpu, target_ulong pc,
+                                target_ulong cs_base, uint32_t flags,
+                                uint32_t cf_mask)
 {
     TranslationBlock *tb;
     uint32_t hash;
@@ -38,11 +38,27 @@ tb_lookup__explicit_state(CPUState *cpu, target_ulong pc,
                (tb_cflags(tb) & (CF_HASH_MASK | CF_INVALID)) == cf_mask)) {
         return tb;
     }
+    return NULL;
+}
+
+static inline TranslationBlock *
+tb_lookup__explicit_state(CPUState *cpu, target_ulong pc,
+                          target_ulong cs_base, uint32_t flags,
+                          uint32_t cf_mask)
+{
+    TranslationBlock *tb = tb_lookup__explicit_state_cached(cpu, pc, cs_base,
+                                                           flags, cf_mask);
+
+    if (likely(tb)) {
+        return tb;
+    }
+    cf_mask &= ~CF_CLUSTER_MASK;
+    cf_mask |= ((uint32_t)cpu->cluster_index) << CF_CLUSTER_SHIFT;
     tb = tb_htable_lookup(cpu, pc, cs_base, flags, cf_mask);
     if (tb == NULL) {
         return NULL;
     }
-    cpu->tb_jmp_cache[hash] = tb;
+    cpu->tb_jmp_cache[tb_jmp_cache_hash_func(cpu->uc, pc)] = tb;
     return tb;
 }
 
