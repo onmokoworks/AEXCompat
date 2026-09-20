@@ -91,6 +91,41 @@ the validation ladder used here: focused behavioral self-test, clean Release
 worker build, the two PSOFT regressions, one 19-effect PSOFT milestone, and
 bucket/pixel SHA comparison.
 
+## Accepted loader-generation module-path cache
+
+The later implementation uses the unload-aware direction above rather than
+the rejected all-HMODULE cache. It dynamically registers
+`LdrRegisterDllNotification`; its loader-lock callback performs only a
+lock-free atomic generation increment. Cached entries are keyed by that
+generation and HMODULE, retain a share-all file handle, and contain only raw
+and canonical path metadata. A generation change clears the whole bounded
+cache. If notification registration is unavailable, the worker uses the
+legacy uncached path. If the generation changes during a capture, it retries
+once and then fails the snapshot closed.
+
+The cache is enabled only for the shipping in-place audit when it is recorded
+but not required. Every snapshot still enumerates loaded modules and reruns
+root canonicalization, classification, raw/canonical reparse checks, and
+authorized-module size/SHA validation. Required GPU/security audits remain
+uncached.
+
+A fresh Release worker (`6d360e4e07f544118de491d76dc0222f04f5bcff6209fb8bde3291c6fe33f3ca`)
+passed the behavioral generation-cache self-test. The focused three-member
+`Channel Blur` shipping run remained 3/3 rendered with identical pixel hashes
+and cluster evidence. A controlled comparison using the exact same CLI binary
+improved its cluster follower from 890 ms to 602 ms (32.36%) and report elapsed
+from 5,861 ms to 5,280 ms (9.91%). The reports are
+`%TEMP%/aexcompat-channel-blur-pre-cache-current-cli-20260920.json` and
+`%TEMP%/aexcompat-channel-blur-module-cache-final-20260920.json`.
+
+The 34-member BorisFX `blur` cohort then improved from 66,514 ms to 62,777 ms
+(5.62%; summed row time 8.32%) with zero bucket, pixel-SHA, or cluster-evidence
+differences: 33 rendered and one intentionally transparent render. Its report
+is `%TEMP%/aexcompat-blur-module-cache-20260920.json`, produced by the immediate
+predecessor worker `38cd6e5edc89474d3c46180c3d19241a99c5f8355985a297da131ba6c30ad237`
+before a move-only return cleanup. These tests did not start After Effects and
+did not execute Maxon, Sapphire, or either PSOFT tree.
+
 ## Full shipping-scan inventory
 
 The shipping `scan_for_diagnostics` path found 984 AEX files after configured

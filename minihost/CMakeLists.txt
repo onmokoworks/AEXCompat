@@ -230,6 +230,7 @@ set(AEXCOMPAT_WORKER_RUNTIME_CORE_SOURCES
     src/render_pixel_buffer.cpp
     src/render_pixel_transport.cpp
     src/render_subsystem.cpp
+    src/runtime_module_path_cache.cpp
     src/runtime_module_audit.cpp
     src/strict_json.cpp
     src/suite_lease_tracker.cpp
@@ -405,6 +406,23 @@ add_executable(l2_mode_execution_selftest
 target_compile_features(l2_mode_execution_selftest PRIVATE cxx_std_17)
 target_include_directories(l2_mode_execution_selftest PRIVATE src)
 target_compile_options(l2_mode_execution_selftest PRIVATE /UNDEBUG)
+
+add_library(runtime_module_path_cache_fixture SHARED
+    ../tests/native/runtime_module_path_cache_fixture.cpp)
+target_compile_features(runtime_module_path_cache_fixture PRIVATE cxx_std_17)
+target_compile_definitions(runtime_module_path_cache_fixture PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+
+add_executable(runtime_module_path_cache_selftest
+    ../tests/native/runtime_module_path_cache_selftest.cpp
+    src/runtime_module_path_cache.cpp)
+add_dependencies(runtime_module_path_cache_selftest
+    runtime_module_path_cache_fixture)
+target_compile_features(runtime_module_path_cache_selftest PRIVATE cxx_std_17)
+target_compile_definitions(runtime_module_path_cache_selftest PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(runtime_module_path_cache_selftest PRIVATE /UNDEBUG)
+target_include_directories(runtime_module_path_cache_selftest PRIVATE src)
 
 add_executable(worker_temporal_checkout_report_selftest
     ../tests/native/worker_temporal_checkout_report_selftest.cpp)

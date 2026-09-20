@@ -1,4 +1,5 @@
 #include "runtime_module_audit.hpp"
+#include "runtime_module_path_cache.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -20,6 +21,7 @@ namespace {
 #pragma comment(lib, "bcrypt.lib")
 
 constexpr std::size_t kMaxAuditedModules = 512;
+constexpr std::size_t kMaxCachedModulePaths = 4096;
 constexpr std::size_t kMaxAuditFailureRejections = 16;
 // Cluster sessions (issue #405) replace the fixed bound with the manifest's
 // launch-time authenticated module_bound (design §5) and narrow the `plugin`
@@ -51,6 +53,45 @@ std::array<unsigned char, 32> g_authorized_session_identity{};
 uint32_t g_authorized_backend{};
 ModuleAuditReport g_module_audit;
 FileSha256 g_file_sha256{};
+
+class RetainedFileHandle final {
+ public:
+  RetainedFileHandle() noexcept = default;
+  explicit RetainedFileHandle(HANDLE value) noexcept : value_(value) {}
+  ~RetainedFileHandle() noexcept { reset(); }
+
+  RetainedFileHandle(const RetainedFileHandle&) = delete;
+  RetainedFileHandle& operator=(const RetainedFileHandle&) = delete;
+
+  RetainedFileHandle(RetainedFileHandle&& other) noexcept
+      : value_(std::exchange(other.value_, INVALID_HANDLE_VALUE)) {}
+
+  RetainedFileHandle& operator=(RetainedFileHandle&& other) noexcept {
+    if (this == &other) return *this;
+    reset();
+    value_ = std::exchange(other.value_, INVALID_HANDLE_VALUE);
+    return *this;
+  }
+
+ private:
+  void reset() noexcept {
+    if (value_ != INVALID_HANDLE_VALUE) CloseHandle(value_);
+    value_ = INVALID_HANDLE_VALUE;
+  }
+
+  HANDLE value_{INVALID_HANDLE_VALUE};
+};
+
+struct ModulePathMetadata {
+  RetainedFileHandle anchor;
+  std::filesystem::path raw_path;
+  std::filesystem::path canonical_path;
+  std::filesystem::path canonical_parent;
+  std::string basename;
+};
+
+module_path_cache::GenerationMetadataCache<HMODULE, ModulePathMetadata>
+    g_module_path_cache(kMaxCachedModulePaths);
 
 // SHA-256 domain separation prefix for module path tokens; must match the broker
 // `runtime_module_policy::PATH_TOKEN_DOMAIN` byte-for-byte (two embedded NULs).
@@ -207,6 +248,42 @@ std::string audit_basename(const std::filesystem::path& path) {
   return result;
 }
 
+std::optional<ModulePathMetadata> resolve_module_path_metadata(HMODULE module) {
+  std::array<wchar_t, 32768> module_buffer{};
+  const DWORD module_length = GetModuleFileNameExW(
+      GetCurrentProcess(), module, module_buffer.data(),
+      static_cast<DWORD>(module_buffer.size()));
+  if (module_length == 0 || module_length >= module_buffer.size())
+    return std::nullopt;
+
+  std::filesystem::path raw_path(module_buffer.data());
+  HANDLE file = CreateFileW(raw_path.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return std::nullopt;
+  RetainedFileHandle anchor(file);
+
+  std::vector<wchar_t> canonical_buffer(32768);
+  const DWORD canonical_length = GetFinalPathNameByHandleW(
+      file, canonical_buffer.data(), static_cast<DWORD>(canonical_buffer.size()),
+      FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  if (canonical_length == 0 || canonical_length >= canonical_buffer.size())
+    return std::nullopt;
+  std::wstring normalized(canonical_buffer.data(), canonical_length);
+  if (normalized.rfind(L"\\\\?\\", 0) == 0) normalized.erase(0, 4);
+  std::filesystem::path resolved =
+      std::filesystem::path(normalized).lexically_normal();
+  if (!resolved.is_absolute()) return std::nullopt;
+
+  ModulePathMetadata metadata;
+  metadata.anchor = std::move(anchor);
+  metadata.raw_path = std::move(raw_path);
+  metadata.canonical_path = std::move(resolved);
+  metadata.canonical_parent = metadata.canonical_path.parent_path();
+  metadata.basename = audit_basename(metadata.canonical_path);
+  return metadata;
+}
+
 template <typename T>
 bool read_manifest_le(const std::vector<unsigned char>& bytes,
                       std::size_t& offset, T& value) {
@@ -232,7 +309,9 @@ bool authorized_runtime_module(const std::filesystem::path& module_path) {
       digest == found->sha256;
 }
 
-ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_path) {
+ModuleAuditSnapshot audit_loaded_modules_once(
+    const std::filesystem::path& plugin_path,
+    std::optional<uint64_t> loader_generation) {
   ModuleAuditSnapshot snapshot;
   snapshot.status = "failed";
   const std::size_t module_bound = audit_module_bound();
@@ -282,18 +361,28 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
 
   const std::size_t count = needed / sizeof(HMODULE);
   for (std::size_t index = 0; index < count; ++index) {
-    std::array<wchar_t, 32768> module_buffer{};
-    const DWORD module_length = GetModuleFileNameExW(GetCurrentProcess(), modules[index],
-        module_buffer.data(), static_cast<DWORD>(module_buffer.size()));
-    std::filesystem::path module_path;
-    if (module_length == 0 || module_length >= module_buffer.size() ||
-        !canonical_path(module_buffer.data(), module_path)) {
+    std::optional<ModulePathMetadata> uncached_metadata;
+    module_path_cache::GenerationMetadataCache<
+        HMODULE, ModulePathMetadata>::MetadataPtr cached_metadata;
+    const ModulePathMetadata* metadata = nullptr;
+    if (loader_generation) {
+      cached_metadata = g_module_path_cache.resolve(
+          *loader_generation, modules[index], [&] {
+            return resolve_module_path_metadata(modules[index]);
+          });
+      metadata = cached_metadata.get();
+    } else {
+      uncached_metadata = resolve_module_path_metadata(modules[index]);
+      if (uncached_metadata) metadata = &*uncached_metadata;
+    }
+    if (!metadata) {
       ++snapshot.unknown_count;
       continue;
     }
-    const std::string basename = audit_basename(module_path);
+    const std::filesystem::path& module_path = metadata->canonical_path;
+    const std::string& basename = metadata->basename;
     if (same_path(module_path, executable)) snapshot.worker.push_back(basename);
-    else if (same_path(module_path.parent_path(), plugin_root)) {
+    else if (same_path(metadata->canonical_parent, plugin_root)) {
       // Cluster sessions narrow the plugin class to the manifest's declared
       // basename set (design §5): anything else under the sealed root is an
       // unknown module and fails the audit closed.
@@ -307,12 +396,12 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
     }
     else if (std::any_of(g_audit_search_roots.begin(), g_audit_search_roots.end(),
                          [&](const std::filesystem::path& root) {
-                           return same_path(module_path.parent_path(), root);
+                           return same_path(metadata->canonical_parent, root);
                          }))
       snapshot.plugin.push_back(basename);
-    else if (same_path(module_path.parent_path(), system32)) snapshot.system32.push_back(basename);
+    else if (same_path(metadata->canonical_parent, system32)) snapshot.system32.push_back(basename);
     else if (is_winsxs_module(module_path, winsxs_root) &&
-             !contains_reparse_component(module_buffer.data()))
+             !contains_reparse_component(metadata->raw_path))
       snapshot.winsxs.push_back(basename);
     else if (is_driverstore_module(module_path, driverstore_root))
       snapshot.driverstore.push_back(basename);
@@ -323,6 +412,33 @@ ModuleAuditSnapshot audit_loaded_modules(const std::filesystem::path& plugin_pat
     }
   }
   snapshot.status = snapshot.unknown_count == 0 ? "passed" : "failed";
+  return snapshot;
+}
+
+ModuleAuditSnapshot audit_loaded_modules(
+    const std::filesystem::path& plugin_path) {
+  // Required audits remain on the original uncached path. Only the shipping
+  // in-place audit, which records provenance without enforcing it, reuses
+  // generation-stable path metadata; every mutable policy check still runs in
+  // audit_loaded_modules_once for every snapshot.
+  if (!g_module_audit.recorded || g_module_audit.required)
+    return audit_loaded_modules_once(plugin_path, std::nullopt);
+
+  auto result = module_path_cache::capture_consistent_generation(
+      module_path_cache::current_loader_generation,
+      [&](uint64_t generation) {
+        return audit_loaded_modules_once(plugin_path, generation);
+      });
+  if (result.captured()) return std::move(*result.value);
+
+  g_module_path_cache.clear();
+  if (result.status ==
+      module_path_cache::ConsistentCaptureStatus::generation_unavailable)
+    return audit_loaded_modules_once(plugin_path, std::nullopt);
+
+  ModuleAuditSnapshot snapshot;
+  snapshot.status = "failed";
+  snapshot.unknown_count = 1;
   return snapshot;
 }
 
