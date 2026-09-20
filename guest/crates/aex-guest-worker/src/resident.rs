@@ -341,6 +341,7 @@ pub fn run_resident_session(
     })();
 
     let close = host.close_resident_session();
+    host.flush_guest_console_diagnostics()?;
     let mut close_value = serde_json::to_value(&close)
         .map_err(|error| SessionError::Protocol(format!("serialize close report: {error}")))?;
     bound_session_close(&setup, std::process::id(), &mut close_value)?;

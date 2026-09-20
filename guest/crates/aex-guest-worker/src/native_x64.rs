@@ -354,6 +354,10 @@ impl GuestEngine<'static> {
         "native-x86_64-carrier"
     }
 
+    pub fn flush_guest_console_diagnostics(&mut self) -> Result<(), GuestError> {
+        Ok(())
+    }
+
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
         let image_size = image.mapped_bytes().len();
         let image_mapping =
