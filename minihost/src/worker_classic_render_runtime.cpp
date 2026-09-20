@@ -774,10 +774,15 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         (layer.slot > 0 && g_params[layer.slot - 1].type != 0) || layer.rgba.size() !=
             static_cast<std::size_t>(layer.width) * layer.height * 4) return -3;
     auto& pixels = hosted_pixels[layer_index];
-      pixels.resize(static_cast<std::size_t>(layer.width) * layer.height * pixel_bytes);
+    pixels.resize(static_cast<std::size_t>(layer.width) * layer.height * pixel_bytes);
+    if (pixel_bytes == 4) {
+      aexcompat::render_pixel_transport::rgba8_to_argb8_pixels(
+          pixels.data(), layer.rgba.data(), layer.rgba.size() / 4);
+    } else {
       for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4) {
-      rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
-                    layer.rgba.data() + offset, pixel_bytes);
+        rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
+                      layer.rgba.data() + offset, pixel_bytes);
+      }
     }
     dump_world_snapshot("classic-layer-slot" + std::to_string(layer.slot),
                         pixels.data(), layer.width, layer.height, pixel_bytes);

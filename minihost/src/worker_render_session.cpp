@@ -1226,9 +1226,14 @@ void run_session_frame_loop(
       }
     }
     unsigned char* slot = channels.view() + output_offset;
-    for (std::size_t pixel = 0; pixel < expected_pixels; ++pixel)
-      argb_to_rgba_native(slot + pixel * pixel_bytes,
-                          captured.data() + pixel * pixel_bytes, pixel_bytes);
+    if (pixel_bytes == 4) {
+      render_pixel_transport::argb8_to_rgba8_pixels(
+          slot, captured.data(), expected_pixels);
+    } else {
+      for (std::size_t pixel = 0; pixel < expected_pixels; ++pixel)
+        argb_to_rgba_native(slot + pixel * pixel_bytes,
+                            captured.data() + pixel * pixel_bytes, pixel_bytes);
+    }
     // Mirrors the one-shot finalize checksum hook (gated on the opt-in aux
     // option): detail is computed from the same transferred RGBA bytes the
     // broker reads. The final report carries the last rendered frame's
@@ -1503,9 +1508,8 @@ SmartRenderSessionOutcome run_smart_render_session(
               // to the broker; retain the actual internal float hashes in the
               // attempt record instead of relabelling those bytes as ARGB8.
               std::vector<unsigned char> input_argb(frame_rgba.size());
-              for (std::size_t i = 0; i < frame_rgba.size(); i += 4)
-                render_pixel_transport::rgba8_to_argb(
-                    input_argb.data() + i, frame_rgba.data() + i, 4);
+              render_pixel_transport::rgba8_to_argb8_pixels(
+                  input_argb.data(), frame_rgba.data(), frame_rgba.size() / 4);
               frame_result.input_hash = sha256_bytes(input_argb.data(), input_argb.size());
               frame_result.output_hash = sha256_bytes(captured.data(), captured.size());
               frame_result.output_rowbytes = frame_result.output_width * 4;

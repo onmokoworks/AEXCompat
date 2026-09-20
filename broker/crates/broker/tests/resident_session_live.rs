@@ -432,12 +432,33 @@ mod windows_e2e {
         };
         let scratch = scratch_dir("latency");
         let (width, height) = (1920u32, 1080u32);
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                rgba.extend_from_slice(&[
+                    (x * 17 + y * 3) as u8,
+                    (x * 5 + y * 29 + 11) as u8,
+                    (x * 13 + y * 7 + 23) as u8,
+                    255,
+                ]);
+            }
+        }
         let input = scratch.join("input.png");
-        image::RgbaImage::from_pixel(width, height, image::Rgba([8, 16, 32, 255]))
+        image::RgbaImage::from_raw(width, height, rgba.clone())
+            .expect("nonuniform input dimensions match")
             .save(&input)
             .unwrap();
-        let rgba = vec![0u8; (width * height * 4) as usize];
         let runs = 12usize;
+        let worker_path = root.join("target/minihost-build/aex_worker.exe");
+        let worker_sha256 = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(&worker_path).expect("read benchmark worker"))
+        );
+        let input_rgba_sha256 = format!("{:x}", Sha256::digest(&rgba));
+        let input_png_sha256 = format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(&input).expect("read benchmark input PNG"))
+        );
 
         let median = |mut samples: Vec<f64>| {
             samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -447,32 +468,35 @@ mod windows_e2e {
         // One-shot per parameter change: the pre-#107 GUI behavior (each
         // render pays worker start + AEX load + lifecycle + staging).
         let mut one_shot = Vec::new();
+        let mut one_shot_reports = Vec::new();
         for index in 0..runs {
             let parameters = [echo_parameter((index % 200) as f64)];
             let output = scratch.join(format!("oneshot-{index}.png"));
             let started = std::time::Instant::now();
-            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
-                &root,
-                &aex,
-                &sha,
-                &input,
-                &output,
-                &parameters,
-                aexcompat_broker::image_render::RenderTiming {
-                    current_time: 0,
-                    time_step: 1,
-                    total_time: 300,
-                    time_scale: 30,
-                },
-                false,
-                RenderPixelFormat::Argb8,
-                None,
-                None,
-                aexcompat_broker::image_render::RenderGpuBackend::Auto,
-                Vec::new(),
-            )
-            .expect("one-shot render");
+            let report =
+                aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies(
+                    &root,
+                    &aex,
+                    &sha,
+                    &input,
+                    &output,
+                    &parameters,
+                    aexcompat_broker::image_render::RenderTiming {
+                        current_time: 0,
+                        time_step: 1,
+                        total_time: 300,
+                        time_scale: 30,
+                    },
+                    false,
+                    RenderPixelFormat::Argb8,
+                    None,
+                    None,
+                    aexcompat_broker::image_render::RenderGpuBackend::Auto,
+                    Vec::new(),
+                )
+                .expect("one-shot render");
             one_shot.push(started.elapsed().as_secs_f64() * 1000.0);
+            one_shot_reports.push(report);
         }
 
         // Resident session: open once, per-frame parameter updates.
@@ -505,6 +529,7 @@ mod windows_e2e {
         let open_ms = open_started.elapsed().as_secs_f64() * 1000.0;
         let mut resident = Vec::new();
         let mut worker = Vec::new();
+        let mut resident_reports = Vec::new();
         for index in 0..runs {
             let update = [echo_parameter((index % 200) as f64)];
             let output = scratch.join(format!("resident-{index}.png"));
@@ -514,9 +539,61 @@ mod windows_e2e {
                 .expect("resident render");
             resident.push(started.elapsed().as_secs_f64() * 1000.0);
             worker.push(report["resident_session"]["render_ms"].as_u64().unwrap() as f64);
+            resident_reports.push(report);
         }
         let close = session.close();
         assert_eq!(close["session_clean"], true, "close: {close}");
+
+        // Correctness work is deliberately outside both timed regions.  The
+        // echo fixture ignores source colour and fills every output pixel, so
+        // checking all pixels also rejects partial-frame/crop success.
+        let decoded_input = image::open(&input)
+            .expect("benchmark input PNG decodes")
+            .to_rgba8();
+        assert_eq!(decoded_input.dimensions(), (width, height));
+        assert_eq!(decoded_input.as_raw(), &rgba);
+        let mut one_shot_output_digests = Vec::with_capacity(runs);
+        let mut resident_output_digests = Vec::with_capacity(runs);
+        for index in 0..runs {
+            let value = (index % 200) as u8;
+            let expected = [value, 255 - value, 128, 255];
+            let one_shot_report = &one_shot_reports[index];
+            let resident_report = &resident_reports[index];
+            assert_eq!(
+                one_shot_report["passed"], true,
+                "one-shot report {index}: {one_shot_report}"
+            );
+            assert_eq!(
+                resident_report["passed"], true,
+                "resident report {index}: {resident_report}"
+            );
+
+            let one_shot_image = image::open(scratch.join(format!("oneshot-{index}.png")))
+                .expect("one-shot output PNG decodes")
+                .to_rgba8();
+            let resident_image = image::open(scratch.join(format!("resident-{index}.png")))
+                .expect("resident output PNG decodes")
+                .to_rgba8();
+            assert_eq!(one_shot_image.dimensions(), (width, height));
+            assert_eq!(resident_image.dimensions(), (width, height));
+            assert!(
+                one_shot_image.pixels().all(|pixel| pixel.0 == expected),
+                "one-shot frame {index} did not echo every pixel"
+            );
+            assert!(
+                resident_image.pixels().all(|pixel| pixel.0 == expected),
+                "resident frame {index} did not echo every pixel"
+            );
+
+            let one_shot_digest = format!("{:x}", Sha256::digest(one_shot_image.as_raw()));
+            let resident_digest = format!("{:x}", Sha256::digest(resident_image.as_raw()));
+            assert_eq!(
+                one_shot_digest, resident_digest,
+                "frame {index} decoded output digests differ"
+            );
+            one_shot_output_digests.push(one_shot_digest);
+            resident_output_digests.push(resident_digest);
+        }
 
         println!(
             "one_shot_ms median={:.1} min={:.1} max={:.1}",
@@ -536,6 +613,33 @@ mod windows_e2e {
             median(worker.clone()),
             worker.iter().cloned().fold(f64::INFINITY, f64::min),
             worker.iter().cloned().fold(0.0, f64::max),
+        );
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "schema_version": 1,
+                "benchmark": "resident_session_latency_versus_one_shot",
+                "width": width,
+                "height": height,
+                "runs": runs,
+                "provenance": {
+                    "worker_sha256": worker_sha256,
+                    "plugin_sha256": sha,
+                    "input_rgba_sha256": input_rgba_sha256,
+                    "input_png_sha256": input_png_sha256,
+                },
+                "timings_ms": {
+                    "one_shot_frames": one_shot,
+                    "resident_open": open_ms,
+                    "resident_frames": resident,
+                    "resident_worker_frames": worker,
+                },
+                "output_digests": {
+                    "decoded_rgba_one_shot": one_shot_output_digests,
+                    "decoded_rgba_resident": resident_output_digests,
+                },
+            }))
+            .expect("serialize benchmark JSON")
         );
         let _ = std::fs::remove_dir_all(&scratch);
     }

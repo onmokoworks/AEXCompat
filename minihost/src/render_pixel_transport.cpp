@@ -8,6 +8,26 @@
 
 namespace aexcompat::render_pixel_transport {
 
+void rgba8_to_argb8_pixels(unsigned char* destination, const unsigned char* source,
+                           std::size_t pixels) {
+  for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+    uint32_t value;
+    std::memcpy(&value, source + pixel * 4, sizeof(value));
+    value = (value << 8) | (value >> 24);
+    std::memcpy(destination + pixel * 4, &value, sizeof(value));
+  }
+}
+
+void argb8_to_rgba8_pixels(unsigned char* destination, const unsigned char* source,
+                           std::size_t pixels) {
+  for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+    uint32_t value;
+    std::memcpy(&value, source + pixel * 4, sizeof(value));
+    value = (value >> 8) | (value << 24);
+    std::memcpy(destination + pixel * 4, &value, sizeof(value));
+  }
+}
+
 void rgba8_to_argb(void* destination, const unsigned char* rgba,
                    int32_t pixel_bytes) {
   if (pixel_bytes == 4) {

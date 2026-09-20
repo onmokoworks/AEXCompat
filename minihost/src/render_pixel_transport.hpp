@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace aexcompat::render_pixel_transport {
@@ -9,6 +10,15 @@ void rgba8_to_argb(void* destination, const unsigned char* rgba,
 void argb_to_rgba8(unsigned char* rgba, const void* source,
                    int32_t pixel_bytes);
 void argb_to_rgba_native(void* rgba, const void* source, int32_t pixel_bytes);
+
+// Packed native Windows little-endian ARGB8/RGBA8 channel permutations.
+// Both ranges contain 4 * pixels bytes and are disjoint or exactly identical;
+// partial overlap is not supported. Zero pixels accesses neither pointer.
+// Callers retain their existing geometry/slot bounds and stride validation.
+void rgba8_to_argb8_pixels(unsigned char* destination, const unsigned char* source,
+                           std::size_t pixels);
+void argb8_to_rgba8_pixels(unsigned char* destination, const unsigned char* source,
+                           std::size_t pixels);
 
 // Depth conversion between a host ARGB world and float32 ARGB (issue #1271).
 // The Premiere GPU-filter route (xGPUFilterEntry, the VR family) renders 32f

@@ -156,6 +156,13 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
   if (external_rgba && external_rgba->size() !=
       static_cast<std::size_t>(plan.width) * plan.height * 4) return false;
   for (int32_t y = 0; y < plan.height; ++y) {
+    if (external_rgba && plan.pixel_bytes == 4) {
+      render_pixel_transport::rgba8_to_argb8_pixels(
+          source.data() + static_cast<std::size_t>(y) * plan.rowbytes,
+          external_rgba->data() + static_cast<std::size_t>(y) * plan.width * 4,
+          static_cast<std::size_t>(plan.width));
+      continue;
+    }
     for (int32_t x = 0; x < plan.width; ++x) {
       auto* pixel = &source[static_cast<std::size_t>(y) * plan.rowbytes +
                             static_cast<std::size_t>(x) * plan.pixel_bytes];
@@ -282,10 +289,15 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
       auto& pixels = prepared.hosted_pixels[layer_index];
       pixels.resize(static_cast<std::size_t>(layer.width) * layer.height *
                     plan.pixel_bytes);
-      for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4)
-        render_pixel_transport::rgba8_to_argb(
-            pixels.data() + (offset / 4) * plan.pixel_bytes,
-            layer.rgba.data() + offset, plan.pixel_bytes);
+      if (plan.pixel_bytes == 4) {
+        render_pixel_transport::rgba8_to_argb8_pixels(
+            pixels.data(), layer.rgba.data(), layer.rgba.size() / 4);
+      } else {
+        for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4)
+          render_pixel_transport::rgba8_to_argb(
+              pixels.data() + (offset / 4) * plan.pixel_bytes,
+              layer.rgba.data() + offset, plan.pixel_bytes);
+      }
       hooks.dump_world("smart-layer-slot" + std::to_string(layer.slot),
                        pixels.data(), layer.width, layer.height, plan.pixel_bytes);
       auto& world = prepared.hosted_worlds[layer_index];

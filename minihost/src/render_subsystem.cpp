@@ -1,5 +1,6 @@
 #include "render_subsystem.h"
 
+#include "render_pixel_transport.hpp"
 #include "worker_pf_world_facade.hpp"
 
 #include <algorithm>
@@ -345,6 +346,15 @@ bool build_argb_input(const ImageRequest& request,
   const std::size_t pixels = static_cast<std::size_t>(request.width) * request.height;
   if (external_rgba && external_rgba->size() != pixels * 4) return false;
   logical_argb.assign(pixels * request.pixel_bytes, 0);
+  if (external_rgba && request.pixel_bytes == 4) {
+    render_pixel_transport::rgba8_to_argb8_pixels(
+        logical_argb.data(), external_rgba->data(), pixels);
+    const auto row_size = static_cast<std::size_t>(request.width) * 4;
+    for (int32_t y = 0; y < request.height; ++y)
+      std::memcpy(strided_destination + static_cast<std::size_t>(y) * request.rowbytes,
+                  logical_argb.data() + static_cast<std::size_t>(y) * row_size, row_size);
+    return true;
+  }
   for (int32_t y = 0; y < request.height; ++y) {
     for (int32_t x = 0; x < request.width; ++x) {
       auto* argb = logical_argb.data() +
