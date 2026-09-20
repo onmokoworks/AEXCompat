@@ -2223,7 +2223,8 @@ fn register_discovered(
             .push(ClusterMember {
                 plugin: plugin.to_path_buf(),
                 sha: entry.sha.clone(),
-                smart: entry.smart,
+                smart: userdata.smart,
+                first_layer_slot: userdata.layer_slots.first().copied(),
                 companions,
             });
     }

@@ -4849,6 +4849,160 @@ mod tests {
         assert!(layer_slots_of(&survivors).is_empty());
     }
 
+    /// Pooling a layer-fed filter is safe only when this frame supplies the
+    /// exact dynamic layer the session will keep. Missing pixels must stay on
+    /// the per-effect route, and secondary geometry is part of the identity so
+    /// equal byte lengths cannot be interpreted with swapped dimensions.
+    #[test]
+    fn layer_pool_contract_requires_present_matching_dynamic_pixels_and_geometry() {
+        let layer = |slot, width, height| SessionLayer {
+            slot,
+            width,
+            height,
+            rgba: vec![7; (width * height * 4) as usize],
+            timed: None,
+            dynamic: true,
+        };
+
+        assert_eq!(
+            pool_layer_contract(&[], None),
+            Some(PoolLayerContract::NoLayer)
+        );
+        assert_eq!(
+            pool_layer_contract(&[6], None),
+            None,
+            "a declared layer with no pixels cannot enter a shared session"
+        );
+
+        let landscape = layer(6, 4, 2);
+        let portrait = layer(6, 2, 4);
+        let landscape_contract = pool_layer_contract(&[6, 9], Some(&landscape));
+        let portrait_contract = pool_layer_contract(&[6, 9], Some(&portrait));
+        assert_eq!(
+            landscape_contract,
+            Some(PoolLayerContract::Dynamic {
+                slot: 6,
+                width: 4,
+                height: 2,
+            })
+        );
+        assert_ne!(
+            landscape_contract, portrait_contract,
+            "same byte length with different row geometry needs another pool"
+        );
+        assert_eq!(pool_layer_contract(&[7], Some(&landscape)), None);
+
+        let mut static_layer = landscape.clone();
+        static_layer.dynamic = false;
+        assert_eq!(pool_layer_contract(&[6], Some(&static_layer)), None);
+        let mut malformed = landscape;
+        malformed.rgba.pop();
+        assert_eq!(pool_layer_contract(&[6], Some(&malformed)), None);
+    }
+
+    /// A cluster manifest never mixes layer layouts: matching the dependency
+    /// closure is insufficient when the supplied slot is a numeric parameter
+    /// (or a different layer) in another member.
+    #[test]
+    fn cluster_members_are_partitioned_by_smart_route_and_first_layer_slot() {
+        let member = |name: &str, smart, first_layer_slot| ClusterMember {
+            plugin: PathBuf::from(name),
+            sha: format!("sha-{name}"),
+            smart,
+            first_layer_slot,
+            companions: Vec::new(),
+        };
+        let requester = Path::new("requester.aex");
+        let selected = select_cluster_members(
+            vec![
+                member("peer.aex", true, Some(6)),
+                member("numeric-slot-6.aex", true, None),
+                member("other-layer.aex", true, Some(7)),
+                member("classic.aex", false, Some(6)),
+                member("requester.aex", true, Some(6)),
+            ],
+            true,
+            Some(6),
+            requester,
+        );
+        let paths: Vec<&Path> = selected.iter().map(|member| member.plugin.as_path()).collect();
+        assert_eq!(
+            paths,
+            vec![Path::new("requester.aex"), Path::new("peer.aex")]
+        );
+
+        let no_layer = select_cluster_members(
+            vec![
+                member("layer.aex", true, Some(6)),
+                member("plain.aex", true, None),
+            ],
+            true,
+            None,
+            Path::new("plain.aex"),
+        );
+        assert_eq!(no_layer.len(), 1);
+        assert_eq!(no_layer[0].plugin, Path::new("plain.aex"));
+    }
+
+    /// Geometry animation cannot retain one worker forever per observed size.
+    /// LRU cleanup keeps the newest bounded set, while an in-flight lease makes
+    /// even an old entry ineligible until its request completes.
+    #[test]
+    fn pooled_session_eviction_is_bounded_and_never_selects_a_busy_entry() {
+        let key = |width| PoolKey {
+            closure_identity: "closure".to_owned(),
+            geom: GeomIdentity {
+                width: 256,
+                height: 144,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+            },
+            smart: true,
+            layer: PoolLayerContract::Dynamic {
+                slot: 6,
+                width,
+                height: 8,
+            },
+        };
+        let now = Instant::now();
+        let preserve = key(39);
+        let candidates = (0..40)
+            .map(|width| {
+                (
+                    key(width),
+                    now - Duration::from_secs(u64::from(40 - width)),
+                    0,
+                )
+            })
+            .collect();
+        let evicted = choose_pool_evictions(candidates, &preserve, now, 40, MAX_POOL_SESSIONS);
+        assert_eq!(evicted.len(), 40 - MAX_POOL_SESSIONS);
+        assert!(!evicted.contains(&preserve));
+        assert!(evicted.contains(&key(0)), "the oldest idle entry goes first");
+
+        let busy = key(1);
+        let idle = key(2);
+        let kept = key(3);
+        let old = now - SESSION_IDLE_TIMEOUT - Duration::from_secs(1);
+        let expired = choose_pool_evictions(
+            vec![(busy.clone(), old, 1), (idle.clone(), old, 0)],
+            &kept,
+            now,
+            2,
+            MAX_POOL_SESSIONS,
+        );
+        assert!(expired.len() == 1 && expired[0] == idle);
+        assert!(!expired.contains(&busy));
+
+        let active = Arc::new(AtomicUsize::new(0));
+        {
+            let _lease = PoolLease::acquire(&active);
+            assert_eq!(active.load(Ordering::Acquire), 1);
+        }
+        assert_eq!(active.load(Ordering::Acquire), 0);
+    }
+
     #[test]
     fn exposed_defaults_match_the_values_the_ui_can_send() {
         let parameter = InteractiveParameter {

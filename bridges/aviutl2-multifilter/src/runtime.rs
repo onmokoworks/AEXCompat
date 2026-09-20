@@ -500,15 +500,13 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
     // serialize on the map. An AEX sharing its dependency closure with other
     // registered AEXes routes through the pooled cluster session (issue
     // #405); everything else keeps the per-effect session.
-    // Read once, only if this session actually opens: map AviUtl2's virtual
-    // buffer onto the AEX's first layer parameter (issue #645). Empty when the
-    // AEX has no layer input or nothing is written to the virtual buffer.
-    let read_layers = || -> Vec<SessionLayer> {
-        let Some(&slot) = ctx.layer_slots.first() else {
-            return Vec::new();
-        };
-        match read_virtual_buffer_rgba8(video) {
-            Some((layer_width, layer_height, rgba)) => vec![SessionLayer {
+    // Read the current virtual buffer once and reuse those bytes both to open a
+    // fresh session and to update its first frame (issue #645/#674). The old
+    // path read and copied the host texture twice on every session-opening
+    // frame. Empty means either no declared layer or no upstream buffer.
+    let current_layer = ctx.layer_slots.first().and_then(|&slot| {
+        read_virtual_buffer_rgba8(video).map(|(layer_width, layer_height, rgba)| {
+            SessionLayer {
                 slot,
                 width: layer_width,
                 height: layer_height,
@@ -519,29 +517,24 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
                 // keeps: a virtual buffer that changes size needs a new
                 // session, which a changed object geometry already forces.
                 dynamic: true,
-            }],
-            None => Vec::new(),
-        }
-    };
-    let route = match route_session(ctx, effect_id, &identity, &read_layers) {
+            }
+        })
+    });
+    let route = match route_session(ctx, effect_id, &identity, current_layer.as_ref()) {
         Ok(route) => route,
         Err(()) => return false,
     };
     let (tx, plugin_index) = match &route {
         SessionRoute::PerEffect(tx, _) => (tx.clone(), 0),
-        SessionRoute::Pooled(tx, _, plugin_index, _) => (tx.clone(), *plugin_index),
+        SessionRoute::Pooled {
+            tx, plugin_index, ..
+        } => (tx.clone(), *plugin_index),
     };
 
-    // Re-read the virtual buffer for this frame, so a moving scene moves the map
-    // (issue #674). Only when this AEX has a layer slot: without one the
-    // readback is pure cost. A buffer that cannot be read this frame leaves the
-    // layer as it was rather than blanking it, and one whose size no longer
-    // matches the session is refused by the update below, which drops the
-    // session so the next frame reopens at the new geometry.
-    let layer = ctx
-        .layer_slots
-        .first()
-        .and_then(|&slot| read_virtual_buffer_rgba8(video).map(|(_, _, rgba)| (slot, rgba)));
+    // A buffer that cannot be read this frame leaves a per-effect session's
+    // layer as it was rather than blanking it. Layer-fed pooled sessions are
+    // never selected in that case, so pixels cannot leak between objects.
+    let layer = current_layer.map(|layer| (layer.slot, layer.rgba));
     let reply = render_on(&tx, plugin_index, current_time, rgba, parameters, layer);
     let reply = match reply {
         FrameReply::RenderedClassicFallback(frame) => {
@@ -549,7 +542,7 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
                 SessionRoute::PerEffect(_, serial) => {
                     remove_session(&ctx.sessions, effect_id, *serial)
                 }
-                SessionRoute::Pooled(_, serial, _, key) => pool_remove(key, *serial),
+                SessionRoute::Pooled { serial, key, .. } => pool_remove(key, *serial),
             }
             if let Ok(mut fallbacks) = ctx.classic_fallbacks.lock() {
                 fallbacks.insert(effect_id, identity.clone());
@@ -636,7 +629,7 @@ fn render_frame(ctx: &FilterCtx, video: *mut FILTER_PROC_VIDEO) -> bool {
                 SessionRoute::PerEffect(_, serial) => {
                     remove_session(&ctx.sessions, effect_id, serial)
                 }
-                SessionRoute::Pooled(_, serial, _, key) => pool_remove(&key, serial),
+                SessionRoute::Pooled { serial, key, .. } => pool_remove(&key, serial),
             }
             true
         }
@@ -806,11 +799,17 @@ fn report_frame_recovered(plugin: &Path) {
 
 /// Which session serves one frame (issue #405): the per-effect session (one
 /// AEX, keyed by `effect_id`), or the pooled cluster session keyed by
-/// (closure identity, geometry, smart) with the frame's plugin selected by
-/// manifest index.
+/// (closure identity, geometry, smart, layer contract) with the frame's plugin
+/// selected by manifest index. The lease prevents LRU eviction during a frame.
 enum SessionRoute {
     PerEffect(Sender<RenderReq>, u64),
-    Pooled(Sender<RenderReq>, u64, u32, PoolKey),
+    Pooled {
+        tx: Sender<RenderReq>,
+        serial: u64,
+        plugin_index: u32,
+        key: PoolKey,
+        _lease: PoolLease,
+    },
 }
 
 /// Selects the session for one frame. The pooled cluster session wins
@@ -821,9 +820,7 @@ fn route_session(
     ctx: &FilterCtx,
     effect_id: i64,
     identity: &GeomIdentity,
-    // Called only when a session is actually opened, so an existing session's
-    // reuse never pays for reading the host virtual buffer (issue #645).
-    open_layers: &dyn Fn() -> Vec<SessionLayer>,
+    current_layer: Option<&SessionLayer>,
 ) -> Result<SessionRoute, ()> {
     let use_classic_fallback = ctx
         .classic_fallbacks
@@ -832,35 +829,40 @@ fn route_session(
         .and_then(|fallbacks| fallbacks.get(&effect_id).cloned())
         .is_some_and(|fallback_identity| fallback_identity == *identity);
     let route_smart = ctx.smart && !use_classic_fallback;
-    // An AEX with a layer parameter stays on its per-effect session: only there
-    // can the virtual buffer be supplied (a pooled session is shared by members
-    // whose parameter layouts differ, so a layer slot valid for one member may
-    // be a non-layer parameter in another, which the worker fails closed).
-    //
     // Issue #816: discovery and render are both in-place, so a search-root
-    // identity can always pool compatible members.
+    // identity can pool compatible members. A layer-fed member additionally
+    // needs a valid buffer this frame and a pool contract that isolates its
+    // first layer slot and secondary geometry. Missing buffers stay per-effect
+    // so one object can never inherit another object's last pooled layer.
     let identity_pools = ctx.closure_identity.is_some();
     if route_smart
-        && ctx.layer_slots.is_empty()
         && identity_pools
+        && let Some(layer_contract) = pool_layer_contract(&ctx.layer_slots, current_layer)
         && let Some(closure_identity) = &ctx.closure_identity
     {
         let key = PoolKey {
             closure_identity: closure_identity.clone(),
             geom: identity.clone(),
             smart: route_smart,
+            layer: layer_contract,
         };
-        if let Some((tx, serial, plugin_index)) = pool_sender(&key, &ctx.plugin) {
-            return Ok(SessionRoute::Pooled(tx, serial, plugin_index, key));
+        if let Some((tx, serial, plugin_index, lease)) = pool_sender(&key, &ctx.plugin) {
+            return Ok(SessionRoute::Pooled {
+                tx,
+                serial,
+                plugin_index,
+                key,
+                _lease: lease,
+            });
         }
         let members = cluster_registry_members(&key, &ctx.plugin);
         if members.len() >= 2 && members.len() <= MAX_CLUSTER_PLUGINS {
-            return pool_open_route(ctx, &key, members).map_err(|_| ());
+            return pool_open_route(ctx, &key, members, current_layer).map_err(|_| ());
         }
     }
     let (tx, serial) = match existing_sender(&ctx.sessions, effect_id, identity) {
         Some(pair) => pair,
-        None => open_and_get_sender(ctx, effect_id, identity, route_smart, open_layers)
+        None => open_and_get_sender(ctx, effect_id, identity, route_smart, current_layer)
             .map_err(|_| ())?,
     };
     Ok(SessionRoute::PerEffect(tx, serial))
@@ -874,6 +876,7 @@ fn pool_open_route(
     ctx: &FilterCtx,
     key: &PoolKey,
     members: Vec<ClusterMember>,
+    current_layer: Option<&SessionLayer>,
 ) -> Result<SessionRoute, String> {
     let plugins: Vec<(PathBuf, String)> = members
         .iter()
@@ -902,12 +905,11 @@ fn pool_open_route(
         smart: ctx.smart,
         plugin_data_selector: ctx.plugin_data_selector.clone(),
         identity: key.geom.clone(),
-        // No virtual-buffer layer on a pooled cluster session: the members share
-        // one dependency closure but not a parameter layout, so the opener's
-        // layer slot may be a non-layer parameter in another member, which the
-        // worker fails closed (-3) — a regression for members that rendered
-        // fine before. A layer-fed AEX keeps its per-effect session (issue #645).
-        layers: Vec::new(),
+        // `cluster_registry_members` admitted only members whose first layer
+        // slot matches this contract. The pool key also fixes its geometry, so
+        // every request can safely update this one dynamic sidecar before its
+        // frame. No-layer clusters still receive an empty vector.
+        layers: current_layer.cloned().into_iter().collect(),
         companions,
         cluster: Some(ClusterLaunch {
             plugins: plugins.clone(),
@@ -916,26 +918,22 @@ fn pool_open_route(
     })?;
     let serial = opened.serial;
     let plugin_paths: Vec<PathBuf> = plugins.iter().map(|(path, _)| path.clone()).collect();
-    let mut discard = None;
-    let (tx, serial, plugin_index) = {
+    let mut discard = Vec::new();
+    let (tx, serial, plugin_index, lease) = {
         let mut guard = SESSION_POOL
             .lock()
             .map_err(|_| "session pool poisoned".to_owned())?;
         let map = guard.get_or_insert_with(HashMap::new);
-        let existing = map.get_mut(key).and_then(|entry| {
-            let index = entry.plugins.iter().position(|path| path == &ctx.plugin)?;
-            entry.session.last_used = Instant::now();
-            entry
-                .session
-                .sender()
-                .map(|tx| (tx, entry.session.serial, index as u32))
-        });
-        match existing {
+        let routed = match map
+            .get_mut(key)
+            .and_then(|entry| pool_entry_sender(entry, &ctx.plugin))
+        {
             // Lost the race; keep the installed session, discard ours off-lock.
             Some(installed) => {
-                discard = Some(PoolEntry {
+                discard.push(PoolEntry {
                     session: opened,
                     plugins: plugin_paths,
+                    active: Arc::new(AtomicUsize::new(0)),
                 });
                 installed
             }
@@ -943,19 +941,30 @@ fn pool_open_route(
                 let tx = opened
                     .sender()
                     .expect("a freshly opened session has a live sender");
+                let active = Arc::new(AtomicUsize::new(0));
+                let lease = PoolLease::acquire(&active);
                 map.insert(
                     key.clone(),
                     PoolEntry {
                         session: opened,
                         plugins: plugin_paths,
+                        active,
                     },
                 );
-                (tx, serial, plugin_index)
+                (tx, serial, plugin_index, lease)
             }
-        }
+        };
+        discard.extend(reap_pool_entries(map, key));
+        routed
     };
     drop(discard);
-    Ok(SessionRoute::Pooled(tx, serial, plugin_index, key.clone()))
+    Ok(SessionRoute::Pooled {
+        tx,
+        serial,
+        plugin_index,
+        key: key.clone(),
+        _lease: lease,
+    })
 }
 
 /// The owned launch config moved into a session's thread.
@@ -1601,7 +1610,7 @@ fn open_and_get_sender(
     effect_id: i64,
     identity: &GeomIdentity,
     smart: bool,
-    open_layers: &dyn Fn() -> Vec<SessionLayer>,
+    current_layer: Option<&SessionLayer>,
 ) -> Result<(Sender<RenderReq>, u64), String> {
     let opened = open_mf_session(MfSessionConfig {
         repository: ctx.repository.clone(),
@@ -1611,7 +1620,7 @@ fn open_and_get_sender(
         smart,
         plugin_data_selector: ctx.plugin_data_selector.clone(),
         identity: identity.clone(),
-        layers: open_layers(),
+        layers: current_layer.cloned().into_iter().collect(),
         companions: ctx.companions.clone(),
         cluster: None,
     })?;

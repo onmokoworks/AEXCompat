@@ -21,7 +21,7 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -75,6 +75,12 @@ const FRAME_DEADLINE_MS: u64 = 30_000;
 /// revisited; without reaping its session would leak until DLL unload. Well
 /// above the frame deadline so an in-flight frame is never reaped.
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Global pooled workers are shared across filter objects, but geometry is part
+/// of their key. Keep animation through many primary/secondary sizes from
+/// retaining one worker per size until plug-in unload. Busy entries carry a
+/// lease and are never selected; a burst may temporarily exceed this cap only
+/// while every older entry is still serving a request.
+const MAX_POOL_SESSIONS: usize = 16;
 /// Monotonic instance counter, so a lost session is removed by the exact
 /// instance that failed rather than by `effect_id` alone (a concurrent reopen
 /// may have installed a healthy session at the same id).
@@ -111,33 +117,84 @@ static SESSION_MAPS: Mutex<Vec<&'static SessionMap>> = Mutex::new(Vec::new());
 
 /// One registered AEX in a closure-identity cluster (issue #405): what the
 /// render pool needs to put the member into a cluster manifest — its path,
-/// its discovered SHA-256, and its supported render route.
+/// its discovered SHA-256, supported render route, and the first layer slot
+/// the shipping virtual-buffer bridge can feed.
 #[derive(Clone)]
 struct ClusterMember {
     plugin: PathBuf,
     sha: String,
     smart: bool,
+    first_layer_slot: Option<u32>,
     companions: Vec<ApprovedCompanion>,
 }
 
 /// Registered AEXes grouped by dependency-closure identity (issue #405),
 /// populated at filter registration. The render pool opens one cluster
-/// session per (identity, geometry, smart) covering exactly these members.
+/// session per compatible subset of these members.
 static CLUSTER_REGISTRY: Mutex<Option<HashMap<String, Vec<ClusterMember>>>> = Mutex::new(None);
 
 /// Pooled cluster render sessions (issue #405, design §8): one session per
-/// key, shared by every registered AEX with the same closure identity and
-/// render configuration; switching between those effects is a `swap_plugin`
-/// inside the session instead of a new worker process. Entries live until
-/// `UninitializePlugin` drains them (no idle reaping — the per-effect path
-/// keeps its own, and a pooled session serves every object of the cluster).
+/// key, shared by every registered AEX with the same closure identity, render
+/// configuration, and safe layer contract; switching between those effects is
+/// a `swap_plugin` inside the session instead of a new worker process. Idle/LRU
+/// entries are reaped opportunistically; `UninitializePlugin` drains the rest.
 static SESSION_POOL: Mutex<Option<HashMap<PoolKey, PoolEntry>>> = Mutex::new(None);
+
+/// The secondary-layer shape fixed when a pooled session opens. A no-layer
+/// member may only share with other no-layer members. A layer-fed member may
+/// only share with members whose first declared layer uses the same slot; the
+/// dimensions additionally separate live sessions so equal byte lengths with
+/// different row geometry can never alias.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PoolLayerContract {
+    NoLayer,
+    Dynamic { slot: u32, width: u32, height: u32 },
+}
+
+impl PoolLayerContract {
+    fn slot(self) -> Option<u32> {
+        match self {
+            Self::NoLayer => None,
+            Self::Dynamic { slot, .. } => Some(slot),
+        }
+    }
+}
+
+/// Returns the pool contract for this frame, or `None` when sharing would be
+/// unsafe. In particular, a filter that declares a layer but has no virtual
+/// buffer this frame stays on its per-effect session: otherwise it could see a
+/// different object's last pooled layer pixels.
+fn pool_layer_contract(
+    declared_slots: &[u32],
+    layer: Option<&SessionLayer>,
+) -> Option<PoolLayerContract> {
+    let Some(&declared_slot) = declared_slots.first() else {
+        return layer.is_none().then_some(PoolLayerContract::NoLayer);
+    };
+    let layer = layer?;
+    let expected_bytes = usize::try_from(layer.width)
+        .ok()?
+        .checked_mul(usize::try_from(layer.height).ok()?)?
+        .checked_mul(4)?;
+    (layer.slot == declared_slot
+        && layer.width > 0
+        && layer.height > 0
+        && layer.rgba.len() == expected_bytes
+        && layer.timed.is_none()
+        && layer.dynamic)
+        .then_some(PoolLayerContract::Dynamic {
+            slot: layer.slot,
+            width: layer.width,
+            height: layer.height,
+        })
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct PoolKey {
     closure_identity: String,
     geom: GeomIdentity,
     smart: bool,
+    layer: PoolLayerContract,
 }
 
 struct PoolEntry {
@@ -145,6 +202,46 @@ struct PoolEntry {
     /// The manifest order the session was opened with; a member's position
     /// is its `plugin_index` for swaps.
     plugins: Vec<PathBuf>,
+    active: Arc<AtomicUsize>,
+}
+
+/// Pins a pooled entry while its sender is in use. Eviction runs under the pool
+/// lock but dropping a session joins its owner thread, so it may only remove an
+/// entry with no live lease and always drops removed entries after unlocking.
+struct PoolLease {
+    active: Arc<AtomicUsize>,
+}
+
+impl PoolLease {
+    fn acquire(active: &Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::AcqRel);
+        Self {
+            active: Arc::clone(active),
+        }
+    }
+}
+
+impl Drop for PoolLease {
+    fn drop(&mut self) {
+        let previous = self.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "pooled session lease underflow");
+    }
+}
+
+fn select_cluster_members(
+    members: Vec<ClusterMember>,
+    smart: bool,
+    first_layer_slot: Option<u32>,
+    requester: &Path,
+) -> Vec<ClusterMember> {
+    let mut ordered: Vec<ClusterMember> = members
+        .into_iter()
+        .filter(|member| member.smart == smart && member.first_layer_slot == first_layer_slot)
+        .collect();
+    // The requester leads the manifest: it is the launch plugin (design
+    // §2.2), so the session opens already swapped to whoever asked first.
+    ordered.sort_by_key(|member| usize::from(member.plugin != requester));
+    ordered
 }
 
 fn cluster_registry_members(key: &PoolKey, requester: &Path) -> Vec<ClusterMember> {
@@ -157,27 +254,81 @@ fn cluster_registry_members(key: &PoolKey, requester: &Path) -> Vec<ClusterMembe
                 .and_then(|registry| registry.get(&key.closure_identity).cloned())
         })
         .unwrap_or_default();
-    let mut ordered: Vec<ClusterMember> = members
+    select_cluster_members(members, key.smart, key.layer.slot(), requester)
+}
+
+fn pool_entry_sender(
+    entry: &mut PoolEntry,
+    plugin: &Path,
+) -> Option<(Sender<RenderReq>, u64, u32, PoolLease)> {
+    let index = entry.plugins.iter().position(|path| path == plugin)? as u32;
+    let tx = entry.session.sender()?;
+    entry.session.last_used = Instant::now();
+    let lease = PoolLease::acquire(&entry.active);
+    Some((tx, entry.session.serial, index, lease))
+}
+
+/// Chooses idle entries to remove, oldest first. Expired entries go even below
+/// the capacity; otherwise only the excess above the cap is removed. Busy
+/// entries and the key being routed are never candidates.
+fn choose_pool_evictions(
+    mut candidates: Vec<(PoolKey, Instant, usize)>,
+    preserve: &PoolKey,
+    now: Instant,
+    total: usize,
+    maximum: usize,
+) -> Vec<PoolKey> {
+    candidates.retain(|(key, _, active)| key != preserve && *active == 0);
+    candidates.sort_by_key(|(_, last_used, _)| *last_used);
+    let expired = candidates
+        .iter()
+        .take_while(|(_, last_used, _)| {
+            now.saturating_duration_since(*last_used) > SESSION_IDLE_TIMEOUT
+        })
+        .count();
+    let remove = expired
+        .max(total.saturating_sub(maximum))
+        .min(candidates.len());
+    candidates
         .into_iter()
-        .filter(|member| member.smart == key.smart)
+        .take(remove)
+        .map(|(key, _, _)| key)
+        .collect()
+}
+
+fn reap_pool_entries(map: &mut HashMap<PoolKey, PoolEntry>, preserve: &PoolKey) -> Vec<PoolEntry> {
+    let now = Instant::now();
+    let candidates = map
+        .iter()
+        .map(|(key, entry)| {
+            (
+                key.clone(),
+                entry.session.last_used,
+                entry.active.load(Ordering::Acquire),
+            )
+        })
         .collect();
-    // The requester leads the manifest: it is the launch plugin (design
-    // §2.2), so the session opens already swapped to whoever asked first.
-    ordered.sort_by_key(|member| usize::from(member.plugin != requester));
-    ordered
+    choose_pool_evictions(candidates, preserve, now, map.len(), MAX_POOL_SESSIONS)
+        .into_iter()
+        .filter_map(|key| map.remove(&key))
+        .collect()
 }
 
 /// Returns the sender + serial + this plugin's manifest index of a live
-/// pooled session, or `None` to open one.
-fn pool_sender(key: &PoolKey, plugin: &Path) -> Option<(Sender<RenderReq>, u64, u32)> {
-    let mut guard = SESSION_POOL.lock().ok()?;
-    let entry = guard.as_mut()?.get_mut(key)?;
-    let index = entry.plugins.iter().position(|path| path == plugin)? as u32;
-    entry.session.last_used = Instant::now();
-    entry
-        .session
-        .sender()
-        .map(|tx| (tx, entry.session.serial, index))
+/// pooled session, or `None` to open one. Opportunistic LRU/idle cleanup is
+/// dropped off-lock.
+fn pool_sender(key: &PoolKey, plugin: &Path) -> Option<(Sender<RenderReq>, u64, u32, PoolLease)> {
+    let (result, removed) = {
+        let mut guard = SESSION_POOL.lock().ok()?;
+        let map = guard.as_mut()?;
+        let result = map
+            .get_mut(key)
+            .and_then(|entry| pool_entry_sender(entry, plugin));
+        let removed = reap_pool_entries(map, key);
+        (result, removed)
+    };
+    drop(removed);
+    result
 }
 
 /// Removes and drops the pooled session at `key` matching `serial` (dropped
