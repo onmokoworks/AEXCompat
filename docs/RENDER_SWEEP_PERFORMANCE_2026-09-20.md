@@ -1561,3 +1561,32 @@ and Release harness SHA-256
 Stereo formats, other radii, exact kernel shape, bit depths, and exact After
 Effects parity remain outside this result. No After Effects process or PSOFT
 path was used.
+
+## BCC Posterize semantic follow-up
+
+`BCCPosterize.aex` is now verified for bounded SmartFX ARGB8 level-count
+response. A non-uniform fixture covers every 8-bit value independently in all
+three RGB channels. With bias, soften, pre/post blur, scramble, and
+PixelChooser neutralized, level count 2 produces exactly `{0,255}` in each
+channel and level count 8 produces exactly
+`{0,36,72,109,145,182,218,255}`. For all 256 source values, each channel's
+input-to-output mapping is single-valued and monotonic, while alpha stays 255.
+With the same eight-level settings, `Mix with Original = 100` returns the input
+byte-for-byte. This establishes input-dependent quantization and level-count
+response without assuming the vendor's exact threshold formula.
+
+`test_bcc_posterize_response.py` adds an opt-in installed-AEX test plus nine
+behavioral mutations covering passthrough, fixed output, wrong palette,
+cross-channel leakage, nonmonotonic mapping, level insensitivity, a damaged
+neutral endpoint, alpha damage, and truncation. The installed AEX and mutations
+passed 10/10; the ordinary non-corpus run passed 9 tests with the real-AEX case
+explicitly skipped. The identity-bound ledger is
+`target/all-aex-with-bcc-posterize-followup.json`. Evidence used plug-in
+SHA-256 `565341539276ed2c0567cd47b8aedcab0a1b614836eb95b1f98266091b627bb0`,
+worker SHA-256
+`b4bcb4671f40a384e84e04d77ce32c1f02720dc3cbc23b7a3b6f6a532e5e066a`,
+and Release harness SHA-256
+`62778b0ca7b7f2af4bc8ed1fe09aada6f82d365ac875606e86fc4c6fa5e2bc82`.
+Exact thresholds, unequal per-channel counts, other controls, bit depths, and
+exact After Effects parity remain outside this result. No After Effects process
+or PSOFT path was used.
