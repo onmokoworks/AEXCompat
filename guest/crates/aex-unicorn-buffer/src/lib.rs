@@ -1,6 +1,6 @@
 //! Allocation-free fixed-size register reads missing from unicorn-engine's safe API.
 
-use unicorn_engine::{RegisterX86, Unicorn, uc_error, uc_reg_read};
+use unicorn_engine::{Prot, RegisterX86, Unicorn, uc_error, uc_reg_read};
 
 /// Installs exact x86 instruction addresses where the vendored translator must
 /// apply VEX.128 upper-lane semantics before executing the instruction.
@@ -29,6 +29,27 @@ pub fn set_x86_avx_sync_points<D>(
 pub fn reset_x86_avx_defined_mask<D>(unicorn: &Unicorn<'_, D>) -> Result<(), uc_error> {
     unsafe { unicorn_engine::unicorn_const::uc_x86_reset_avx_defined_mask(unicorn.get_handle()) }
         .into()
+}
+
+/// Checks a mapped guest range without allocating Unicorn's complete region
+/// snapshot.
+pub fn range_has_protection<D>(
+    unicorn: &Unicorn<'_, D>,
+    address: u64,
+    size: u64,
+    protection: Prot,
+) -> Result<bool, uc_error> {
+    let mut allowed = false;
+    unsafe {
+        unicorn_engine::uc_mem_range_has_prot(
+            unicorn.get_handle(),
+            address,
+            size,
+            protection.0 as u32,
+            &raw mut allowed,
+        )
+    }
+    .and(Ok(allowed))
 }
 
 #[must_use]
@@ -107,6 +128,19 @@ mod tests {
             read_ymm(&unicorn, RegisterX86::XMM3, &mut actual),
             Err(uc_error::ARG)
         );
+    }
+
+    #[test]
+    fn range_protection_spans_adjacent_regions_without_snapshot_allocation() {
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(0x1000, 4096, Prot::READ).unwrap();
+        unicorn.mem_map(0x2000, 4096, Prot::READ).unwrap();
+        unicorn.mem_map(0x3000, 4096, Prot::WRITE).unwrap();
+
+        assert!(range_has_protection(&unicorn, 0x1800, 4096, Prot::READ).unwrap());
+        assert!(!range_has_protection(&unicorn, 0x2800, 4096, Prot::READ).unwrap());
+        assert!(!range_has_protection(&unicorn, u64::MAX, 2, Prot::READ).unwrap());
+        assert!(range_has_protection(&unicorn, u64::MAX, 0, Prot::READ).unwrap());
     }
     #[test]
     fn fragmented_ram_remaps_preserve_contents_and_page_permissions() {

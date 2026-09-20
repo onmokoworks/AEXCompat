@@ -1088,6 +1088,12 @@ UNICORN_EXPORT
 uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
                    void *user_data, uint64_t begin, uint64_t end, ...);
 
+/* AEXCompat extension: check a mapped range's protection without allocating
+ * the full uc_mem_regions snapshot. */
+UNICORN_EXPORT
+uc_err uc_mem_range_has_prot(uc_engine *uc, uint64_t address, uint64_t size,
+                             uint32_t prot, bool *allowed);
+
 /* AEXCompat x86 extension: install sorted instruction addresses whose VEX.128
  * upper-lane semantics are emitted directly by the translator. `actions`
  * contains 1..16 for one destination register, 17 for VZEROUPPER, and 18 for

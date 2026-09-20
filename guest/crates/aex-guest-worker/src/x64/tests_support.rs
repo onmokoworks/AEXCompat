@@ -23780,6 +23780,52 @@ fn code_hook_cache_observes_callback_addition_deletion_and_stop() {
 }
 
 #[test]
+fn multiple_code_hooks_stop_before_executing_the_hooked_instruction() {
+    let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, Vec::<u8>::new()).unwrap();
+    uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
+    uc.mem_write(TEST_CODE, &[0x48, 0xff, 0xc0, 0x90, 0x48, 0xff, 0xc0])
+        .unwrap();
+    let hook_address = TEST_CODE + 3;
+    uc.add_code_hook(hook_address, hook_address, |uc, _, _| {
+        uc.get_data_mut().push(1)
+    })
+    .unwrap();
+    uc.add_code_hook(hook_address, hook_address, |uc, _, _| {
+        uc.get_data_mut().push(2);
+        uc.emu_stop().unwrap();
+    })
+    .unwrap();
+
+    uc.emu_start(TEST_CODE, TEST_CODE + 7, 1_000_000, 0)
+        .unwrap();
+
+    assert_eq!(uc.get_data(), &[1, 2]);
+    assert_eq!(uc.reg_read(RegisterX86::RAX).unwrap(), 1);
+    assert_eq!(uc.reg_read(RegisterX86::RIP).unwrap(), hook_address);
+}
+
+#[test]
+fn multiple_code_hooks_honor_program_counter_changes() {
+    let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, Vec::<u8>::new()).unwrap();
+    uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
+    uc.mem_write(TEST_CODE, &[0x48, 0xff, 0xc0, 0x90])
+        .unwrap();
+    uc.add_code_hook(TEST_CODE, TEST_CODE, |uc, _, _| uc.get_data_mut().push(1))
+        .unwrap();
+    uc.add_code_hook(TEST_CODE, TEST_CODE, |uc, _, _| {
+        uc.get_data_mut().push(2);
+        uc.reg_write(RegisterX86::RIP, TEST_CODE + 3).unwrap();
+    })
+    .unwrap();
+
+    uc.emu_start(TEST_CODE, TEST_CODE + 4, 1_000_000, 0)
+        .unwrap();
+
+    assert_eq!(uc.get_data(), &[1, 2]);
+    assert_eq!(uc.reg_read(RegisterX86::RAX).unwrap(), 0);
+}
+
+#[test]
 fn code_hook_translation_index_tracks_exact_range_global_and_removal() {
     let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, Vec::<u8>::new()).unwrap();
     uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();

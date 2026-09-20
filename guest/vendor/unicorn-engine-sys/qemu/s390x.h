@@ -5,6 +5,7 @@
 #define UNICORN_ARCH_POSTFIX _s390x
 #endif
 #define gen_helper_check_exit_request gen_helper_check_exit_request_s390x
+#define gen_helper_uc_tracecode_checked gen_helper_uc_tracecode_checked_s390x
 #define unicorn_fill_tlb unicorn_fill_tlb_s390x
 #define reg_read reg_read_s390x
 #define reg_write reg_write_s390x
@@ -589,6 +590,7 @@
 #define tcg_gen_goto_tb tcg_gen_goto_tb_s390x
 #define tcg_gen_lookup_and_goto_ptr tcg_gen_lookup_and_goto_ptr_s390x
 #define check_exit_request check_exit_request_s390x
+#define uc_tracecode_checked uc_tracecode_checked_s390x
 #define tcg_gen_qemu_ld_i32 tcg_gen_qemu_ld_i32_s390x
 #define tcg_gen_qemu_st_i32 tcg_gen_qemu_st_i32_s390x
 #define tcg_gen_qemu_ld_i64 tcg_gen_qemu_ld_i64_s390x

@@ -5,6 +5,7 @@
 #define UNICORN_ARCH_POSTFIX _m68k
 #endif
 #define gen_helper_check_exit_request gen_helper_check_exit_request_m68k
+#define gen_helper_uc_tracecode_checked gen_helper_uc_tracecode_checked_m68k
 #define unicorn_fill_tlb unicorn_fill_tlb_m68k
 #define reg_read reg_read_m68k
 #define reg_write reg_write_m68k
@@ -589,6 +590,7 @@
 #define tcg_gen_goto_tb tcg_gen_goto_tb_m68k
 #define tcg_gen_lookup_and_goto_ptr tcg_gen_lookup_and_goto_ptr_m68k
 #define check_exit_request check_exit_request_m68k
+#define uc_tracecode_checked uc_tracecode_checked_m68k
 #define tcg_gen_qemu_ld_i32 tcg_gen_qemu_ld_i32_m68k
 #define tcg_gen_qemu_st_i32 tcg_gen_qemu_st_i32_m68k
 #define tcg_gen_qemu_ld_i64 tcg_gen_qemu_ld_i64_m68k

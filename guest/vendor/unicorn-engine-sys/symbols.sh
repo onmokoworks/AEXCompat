@@ -5,6 +5,7 @@ SOURCE_DIR=$(dirname ${CMD_PATH})
 
 COMMON_SYMBOLS="
 gen_helper_check_exit_request \
+gen_helper_uc_tracecode_checked \
 unicorn_fill_tlb \
 reg_read \
 reg_write \
@@ -589,6 +590,7 @@ tcg_gen_exit_tb \
 tcg_gen_goto_tb \
 tcg_gen_lookup_and_goto_ptr \
 check_exit_request \
+uc_tracecode_checked \
 tcg_gen_qemu_ld_i32 \
 tcg_gen_qemu_st_i32 \
 tcg_gen_qemu_ld_i64 \

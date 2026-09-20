@@ -117,6 +117,18 @@ struct ResidentFrameDone {
     output: Option<ResidentFrameOutput>,
     render_error: i32,
     generation: Option<u64>,
+    #[serde(default)]
+    timings_us: Option<ResidentFrameTimingsUs>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResidentFrameTimingsUs {
+    request_prepare: u64,
+    input_read: u64,
+    effect_render: u64,
+    output_write: u64,
+    checksum: u64,
 }
 
 fn validate_resident_frame(
@@ -134,6 +146,14 @@ fn validate_resident_frame(
     let Some(output) = done.output else {
         return Err(format!("resident frame has no output: {value}"));
     };
+    let _profiled_micros = done.timings_us.map(|timings| {
+        timings
+            .request_prepare
+            .saturating_add(timings.input_read)
+            .saturating_add(timings.effect_render)
+            .saturating_add(timings.output_write)
+            .saturating_add(timings.checksum)
+    });
     if done.v != 1
         || done.kind != "frame_done"
         || done.frame_index != frame_index
@@ -3488,9 +3508,19 @@ mod tests {
                 "guards_intact": true
             },
             "render_error": 0,
-            "generation": 1
+            "generation": 1,
+            "timings_us": {
+                "request_prepare": 11,
+                "input_read": 12,
+                "effect_render": 13,
+                "output_write": 14,
+                "checksum": 15
+            }
         });
         assert!(validate_resident_frame(&valid, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
+        let mut legacy = valid.clone();
+        legacy.as_object_mut().unwrap().remove("timings_us");
+        assert!(validate_resident_frame(&legacy, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
         let mut stale = valid.clone();
         stale["generation"] = json!(0);
         assert!(validate_resident_frame(&stale, 0, 2, 1, MacRenderFormat::PngArgb8).is_err());
@@ -3516,7 +3546,14 @@ mod tests {
                 "guards_intact": true
             },
             "render_error": 0,
-            "generation": 4
+            "generation": 4,
+            "timings_us": {
+                "request_prepare": 11,
+                "input_read": 12,
+                "effect_render": 13,
+                "output_write": 14,
+                "checksum": 15
+            }
         });
         assert!(validate_resident_frame(&response, 3, 1, 1, MacRenderFormat::ExrArgb32f).is_ok());
         assert!(validate_resident_frame(&response, 3, 1, 1, MacRenderFormat::PngArgb8).is_err());

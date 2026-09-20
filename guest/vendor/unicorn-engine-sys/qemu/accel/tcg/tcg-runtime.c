@@ -192,3 +192,14 @@ void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {
         check_exit_request_slow(uc, GETPC());
     }
 }
+
+void HELPER(uc_tracecode_checked)(uint32_t size, uint32_t index, void *handle,
+                                  uint64_t address) {
+    uc_engine *uc = handle;
+    uintptr_t return_address = GETPC();
+
+    helper_uc_tracecode(size, index, handle, address);
+    if (unlikely(cpu_loop_exit_requested(uc->cpu))) {
+        check_exit_request_slow(uc, return_address);
+    }
+}

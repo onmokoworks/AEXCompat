@@ -838,6 +838,41 @@ static bool check_mem_area(uc_engine *uc, uint64_t address, size_t size)
     return (count == size);
 }
 
+UNICORN_EXPORT
+uc_err uc_mem_range_has_prot(uc_engine *uc, uint64_t address, uint64_t size,
+                             uint32_t prot, bool *allowed)
+{
+    uint64_t count = 0;
+
+    UC_INIT(uc);
+    if (allowed == NULL || (prot & ~UC_PROT_ALL) != 0) {
+        restore_jit_state(uc);
+        return UC_ERR_ARG;
+    }
+    *allowed = false;
+    if (size != 0 && address > UINT64_MAX - (size - 1)) {
+        restore_jit_state(uc);
+        return UC_ERR_OK;
+    }
+    while (count < size) {
+        MemoryRegion *mr = uc->memory_mapping(uc, address);
+        if (mr == NULL || (mr->perms & prot) != prot) {
+            restore_jit_state(uc);
+            return UC_ERR_OK;
+        }
+        uint64_t len = memory_region_len(uc, mr, address, size - count);
+        if (len == 0) {
+            restore_jit_state(uc);
+            return UC_ERR_OK;
+        }
+        count += len;
+        address += len;
+    }
+    *allowed = true;
+    restore_jit_state(uc);
+    return UC_ERR_OK;
+}
+
 uc_err uc_vmem_translate(uc_engine *uc, uint64_t address, uc_prot prot,
                               uint64_t *paddress)
 {

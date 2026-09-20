@@ -491,11 +491,18 @@ def validate_close(value: dict[str, object], pid: int, expected_frames: int) -> 
 def validate_frame(
     value: dict[str, object], width: int, height: int, expected_checksum: str
 ) -> None:
-    require_exact_keys(
-        value,
-        {"v", "type", "frame_index", "status", "output", "render_error", "generation"},
-        "frame_done",
-    )
+    frame_keys = {
+        "v",
+        "type",
+        "frame_index",
+        "status",
+        "output",
+        "render_error",
+        "generation",
+    }
+    if "timings_us" in value:
+        frame_keys.add("timings_us")
+    require_exact_keys(value, frame_keys, "frame_done")
     output = value.get("output")
     if not isinstance(output, dict):
         raise SweepError(f"frame_done has no output: {value}")
@@ -512,6 +519,17 @@ def validate_frame(
         },
         "frame output",
     )
+    timings = value.get("timings_us")
+    if timings is not None:
+        if not isinstance(timings, dict):
+            raise SweepError(f"frame timings are invalid: {value}")
+        require_exact_keys(
+            timings,
+            {"request_prepare", "input_read", "effect_render", "output_write", "checksum"},
+            "frame timings",
+        )
+        if any(type(duration) is not int or duration < 0 for duration in timings.values()):
+            raise SweepError(f"frame timings are invalid: {value}")
     if (
         value.get("v") != 1
         or value.get("type") != "frame_done"
@@ -542,6 +560,7 @@ def spawn_worker(
     environment = os.environ.copy()
     environment.pop("AEXCOMPAT_NATIVE_RUN_DLLMAIN", None)
     environment.update(extra_environment or {})
+    environment["AEXCOMPAT_RESIDENT_TIMINGS"] = "1"
     return subprocess.Popen(
         [
             os.fspath(worker),
@@ -771,6 +790,7 @@ def run_backend(
         "fresh_after_probe": False,
         "execution_backend": ready["setup"].get("execution_backend"),
         "output_sha256": checksum,
+        "frame_timings_us": frame.get("timings_us"),
         "suite_requests": close["close"].get("suite_requests", []),
         "unsupported_suite_calls": close["close"].get("unsupported_suite_calls", []),
         "session_clean": True,

@@ -5,6 +5,7 @@
 #define UNICORN_ARCH_POSTFIX _mips64el
 #endif
 #define gen_helper_check_exit_request gen_helper_check_exit_request_mips64el
+#define gen_helper_uc_tracecode_checked gen_helper_uc_tracecode_checked_mips64el
 #define unicorn_fill_tlb unicorn_fill_tlb_mips64el
 #define reg_read reg_read_mips64el
 #define reg_write reg_write_mips64el
@@ -589,6 +590,7 @@
 #define tcg_gen_goto_tb tcg_gen_goto_tb_mips64el
 #define tcg_gen_lookup_and_goto_ptr tcg_gen_lookup_and_goto_ptr_mips64el
 #define check_exit_request check_exit_request_mips64el
+#define uc_tracecode_checked uc_tracecode_checked_mips64el
 #define tcg_gen_qemu_ld_i32 tcg_gen_qemu_ld_i32_mips64el
 #define tcg_gen_qemu_st_i32 tcg_gen_qemu_st_i32_mips64el
 #define tcg_gen_qemu_ld_i64 tcg_gen_qemu_ld_i64_mips64el

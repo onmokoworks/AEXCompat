@@ -418,11 +418,26 @@ def test_validate_frame_binds_report_to_output_checksum():
         },
         "render_error": 0,
         "generation": 1,
+        "timings_us": {
+            "request_prepare": 11,
+            "input_read": 12,
+            "effect_render": 13,
+            "output_write": 14,
+            "checksum": 15,
+        },
     }
 
     SWEEP.validate_frame(message, 1, 1, checksum)
     with pytest.raises(SWEEP.SweepError, match="frame invariants failed"):
         SWEEP.validate_frame(message, 1, 1, "0" * 64)
+
+    without_timings = dict(message)
+    without_timings.pop("timings_us")
+    SWEEP.validate_frame(without_timings, 1, 1, checksum)
+
+    message["timings_us"]["effect_render"] = -1
+    with pytest.raises(SWEEP.SweepError, match="frame timings are invalid"):
+        SWEEP.validate_frame(message, 1, 1, checksum)
 
 
 def test_report_json_has_no_duplicate_keys(tmp_path):
@@ -754,7 +769,14 @@ def test_run_backend_reuses_one_isolated_worker_for_probe_and_render(tmp_path, m
     }
     launches = []
     closed = []
-    responses = [{"probe": True}, {"frame": True}]
+    timings = {
+        "request_prepare": 11,
+        "input_read": 12,
+        "effect_render": 13,
+        "output_write": 14,
+        "checksum": 15,
+    }
+    responses = [{"probe": True}, {"frame": True, "timings_us": timings}]
 
     def fake_launch(*args):
         launches.append(args)
@@ -797,6 +819,7 @@ def test_run_backend_reuses_one_isolated_worker_for_probe_and_render(tmp_path, m
     assert closed == [(process, 1, None)]
     assert result["fresh_after_probe"] is False
     assert result["worker_stderr"] == "bounded warning"
+    assert result["frame_timings_us"] == timings
     assert result["milestones"] == {
         "admission_success": True,
         "render_success": True,
