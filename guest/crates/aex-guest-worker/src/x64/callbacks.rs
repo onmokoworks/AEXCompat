@@ -1813,7 +1813,7 @@ fn scan_crt_stdio_c_string(
         aex_unicorn_buffer::read_protected(unicorn, current, current_chunk).map_err(|error| {
             format!("stdio {label} address {current:#x} is not readable: {error}")
         })?;
-        if let Some(end) = current_chunk.iter().position(|byte| *byte == 0) {
+        if let Some(end) = memchr::memchr(0, current_chunk) {
             if let Some(bytes) = output.as_deref_mut() {
                 bytes.extend_from_slice(&current_chunk[..end]);
             }
