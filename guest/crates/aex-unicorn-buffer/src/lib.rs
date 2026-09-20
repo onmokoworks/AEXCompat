@@ -52,6 +52,27 @@ pub fn range_has_protection<D>(
     .and(Ok(allowed))
 }
 
+/// Reads only when the complete guest range is mapped and readable.
+///
+/// Unlike a separate [`range_has_protection`] and `Unicorn::mem_read` pair,
+/// the common single-region path performs one mapping lookup. Mapping and
+/// permission failures leave `destination` untouched.
+pub fn read_protected<D>(
+    unicorn: &Unicorn<'_, D>,
+    address: u64,
+    destination: &mut [u8],
+) -> Result<(), uc_error> {
+    unsafe {
+        unicorn_engine::uc_mem_read_protected(
+            unicorn.get_handle(),
+            address,
+            destination.as_mut_ptr().cast(),
+            destination.len() as u64,
+        )
+    }
+    .into()
+}
+
 /// Enables or disables translated exit polling after every guest memory access.
 ///
 /// Disabling is valid only for engines without memory hooks. Unicorn still
@@ -226,6 +247,80 @@ mod tests {
         assert!(!range_has_protection(&unicorn, 0x2800, 4096, Prot::READ).unwrap());
         assert!(!range_has_protection(&unicorn, u64::MAX, 2, Prot::READ).unwrap());
         assert!(range_has_protection(&unicorn, u64::MAX, 0, Prot::READ).unwrap());
+    }
+
+    #[test]
+    fn protected_read_copies_single_and_adjacent_readable_regions() {
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(0x1000, 4096, Prot::READ).unwrap();
+        unicorn.mem_map(0x2000, 4096, Prot::READ).unwrap();
+        unicorn
+            .mem_write(0x1ffc, &[1, 2, 3, 4, 5, 6, 7, 8])
+            .unwrap();
+
+        let mut single = [0u8; 4];
+        read_protected(&unicorn, 0x1ffc, &mut single).unwrap();
+        assert_eq!(single, [1, 2, 3, 4]);
+
+        let mut adjacent = [0u8; 8];
+        read_protected(&unicorn, 0x1ffc, &mut adjacent).unwrap();
+        assert_eq!(adjacent, [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn protected_read_rejects_denied_and_unmapped_ranges_without_partial_copy() {
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(0x1000, 4096, Prot::READ).unwrap();
+        unicorn.mem_map(0x2000, 4096, Prot::WRITE).unwrap();
+        unicorn
+            .mem_write(0x1ffc, &[1, 2, 3, 4, 5, 6, 7, 8])
+            .unwrap();
+
+        let mut destination = [0xa5; 8];
+        assert_eq!(
+            read_protected(&unicorn, 0x1ffc, &mut destination),
+            Err(uc_error::READ_PROT)
+        );
+        assert_eq!(destination, [0xa5; 8]);
+
+        unicorn.mem_unmap(0x2000, 4096).unwrap();
+        assert_eq!(
+            read_protected(&unicorn, 0x1ffc, &mut destination),
+            Err(uc_error::READ_UNMAPPED)
+        );
+        assert_eq!(destination, [0xa5; 8]);
+    }
+
+    #[test]
+    fn protected_read_rejects_overflow_without_touching_destination() {
+        let unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        let mut destination = [0xa5; 2];
+        assert_eq!(
+            read_protected(&unicorn, u64::MAX, &mut destination),
+            Err(uc_error::READ_UNMAPPED)
+        );
+        assert_eq!(destination, [0xa5; 2]);
+    }
+
+    #[test]
+    fn protected_read_stages_cross_region_mmio_when_callback_unmaps_tail() {
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn
+            .mmio_map_ro(0x1000, 4096, |unicorn, offset, size| {
+                assert_eq!(offset, 4092);
+                assert_eq!(size, 4);
+                unicorn.mem_unmap(0x2000, 4096).unwrap();
+                0x0403_0201
+            })
+            .unwrap();
+        unicorn.mem_map(0x2000, 4096, Prot::READ).unwrap();
+
+        let mut destination = [0xa5; 8];
+        assert_eq!(
+            read_protected(&unicorn, 0x1ffc, &mut destination),
+            Err(uc_error::READ_UNMAPPED)
+        );
+        assert_eq!(destination, [0xa5; 8]);
     }
 
     #[test]
