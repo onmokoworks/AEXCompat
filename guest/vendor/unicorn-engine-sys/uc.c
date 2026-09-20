@@ -838,6 +838,67 @@ static bool check_mem_area(uc_engine *uc, uint64_t address, size_t size)
     return (count == size);
 }
 
+UNICORN_EXPORT
+uc_err uc_mem_range_has_prot(uc_engine *uc, uint64_t address, uint64_t size,
+                             uint32_t prot, bool *allowed)
+{
+    uint64_t count = 0;
+
+    UC_INIT(uc);
+    if (allowed == NULL || (prot & ~UC_PROT_ALL) != 0) {
+        restore_jit_state(uc);
+        return UC_ERR_ARG;
+    }
+    *allowed = false;
+    if (size != 0 && address > UINT64_MAX - (size - 1)) {
+        restore_jit_state(uc);
+        return UC_ERR_OK;
+    }
+    while (count < size) {
+        MemoryRegion *mr = uc->memory_mapping(uc, address);
+        if (mr == NULL || (mr->perms & prot) != prot) {
+            restore_jit_state(uc);
+            return UC_ERR_OK;
+        }
+        uint64_t len = memory_region_len(uc, mr, address, size - count);
+        if (len == 0) {
+            restore_jit_state(uc);
+            return UC_ERR_OK;
+        }
+        count += len;
+        address += len;
+    }
+    *allowed = true;
+    restore_jit_state(uc);
+    return UC_ERR_OK;
+}
+
+UNICORN_EXPORT
+uc_err uc_set_memory_exit_checks(uc_engine *uc, bool enabled)
+{
+    UC_INIT(uc);
+    if (!enabled) {
+        for (int index = UC_HOOK_MEM_READ_UNMAPPED_IDX;
+             index <= UC_HOOK_MEM_READ_AFTER_IDX; index++) {
+            if (uc->hooks_count[index] != 0) {
+                restore_jit_state(uc);
+                return UC_ERR_ARG;
+            }
+        }
+        if (uc->hooks_count[UC_HOOK_TLB_FILL_IDX] != 0) {
+            restore_jit_state(uc);
+            return UC_ERR_ARG;
+        }
+    }
+    bool skip = !enabled;
+    if (uc->skip_memory_exit_checks != skip) {
+        uc->skip_memory_exit_checks = skip;
+        uc->tb_flush(uc);
+    }
+    restore_jit_state(uc);
+    return UC_ERR_OK;
+}
+
 uc_err uc_vmem_translate(uc_engine *uc, uint64_t address, uc_prot prot,
                               uint64_t *paddress)
 {
@@ -2081,6 +2142,12 @@ uc_err uc_hook_add(uc_engine *uc, uc_hook *hh, int type, void *callback,
     int i = 0;
 
     UC_INIT(uc);
+    const int memory_hook_mask = UC_HOOK_MEM_INVALID | UC_HOOK_MEM_VALID |
+                                 UC_HOOK_MEM_READ_AFTER | UC_HOOK_TLB_FILL;
+    if (uc->skip_memory_exit_checks && (type & memory_hook_mask)) {
+        restore_jit_state(uc);
+        return UC_ERR_ARG;
+    }
     invalidate_code_hook_cache(uc);
 
     struct hook *hook = calloc(1, sizeof(struct hook));

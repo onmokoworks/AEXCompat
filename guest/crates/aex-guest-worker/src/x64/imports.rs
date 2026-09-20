@@ -8298,28 +8298,8 @@ fn guest_range_has_permission(
             return Ok(true);
         }
     }
-    let regions = unicorn
-        .mem_regions()
-        .map_err(|error| format!("guest memory-map query failed: {error}"))?;
-    let permission = permission.0 as u32;
-    let mut cursor = address;
-    while cursor <= end {
-        let Some(region) = regions.iter().find(|region| {
-            region.begin <= cursor
-                && cursor <= region.end
-                && region.perms & permission == permission
-        }) else {
-            return Ok(false);
-        };
-        if region.end >= end {
-            return Ok(true);
-        }
-        let Some(next) = region.end.checked_add(1) else {
-            return Ok(false);
-        };
-        cursor = next;
-    }
-    Ok(true)
+    aex_unicorn_buffer::range_has_protection(unicorn, address, length, permission)
+        .map_err(|error| format!("guest memory-map query failed: {error}"))
 }
 
 fn emulate_sh_get_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {

@@ -32,17 +32,30 @@ static inline void gen_io_end(TCGContext *tcg_ctx)
 
 static inline void gen_tb_start(TCGContext *tcg_ctx, TranslationBlock *tb)
 {
+    TCGLabel *continue_execution = gen_new_label(tcg_ctx);
+    TCGv_i32 exit_request = tcg_temp_new_i32(tcg_ctx);
+
+    /*
+     * Keep helper arguments inside the slow-path basic block.  In particular,
+     * no temporary may be live across this branch: the old TCG liveness pass
+     * treats conditional branches as basic-block boundaries.
+     */
+    tcg_gen_ld_i32(tcg_ctx, exit_request, tcg_ctx->cpu_env,
+                   offsetof(ArchCPU, neg.icount_decr) -
+                   offsetof(ArchCPU, env));
+    tcg_gen_brcondi_i32(tcg_ctx, TCG_COND_GE, exit_request, 0,
+                        continue_execution);
+    tcg_temp_free_i32(tcg_ctx, exit_request);
+
     TCGv_ptr puc = tcg_const_ptr(tcg_ctx, tcg_ctx->uc);
     TCGv_i32 tmp = tcg_const_i32(tcg_ctx, 0);
-    // Unicorn:
-    //    We CANT'T use brcondi_i32 here or we will fail liveness analysis
-    //    because it marks the end of BB
     if (tcg_ctx->delay_slot_flag != NULL) {
         tcg_gen_mov_i32(tcg_ctx, tmp, tcg_ctx->delay_slot_flag);
     }
     gen_helper_check_exit_request(tcg_ctx, puc, tmp);
     tcg_temp_free_i32(tcg_ctx, tmp);
     tcg_temp_free_ptr(tcg_ctx, puc);
+    gen_set_label(tcg_ctx, continue_execution);
 }
 
 static inline void gen_tb_end(TCGContext *tcg_ctx, TranslationBlock *tb, int num_insns)

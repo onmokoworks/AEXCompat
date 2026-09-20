@@ -31,6 +31,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         },
     )
     .unwrap();
+    aex_unicorn_buffer::set_memory_exit_checks(&unicorn, false).unwrap();
     install_avx_fallback(&mut unicorn).unwrap();
     unicorn.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
     unicorn
@@ -111,6 +112,9 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         .unwrap();
     unicorn
         .mem_write(HOST_CREATE_THREAD_CONTINUE, &[0x41, 0xff, 0xe3])
+        .unwrap();
+    unicorn
+        .mem_write(HOST_ITERATE_ROW_TRAMPOLINE, ITERATE_ROW_TRAMPOLINE)
         .unwrap();
     unicorn
         .add_code_hook(
@@ -15138,6 +15142,61 @@ fn iterate8_calls_guest_pixel_callback_for_each_argb8_pixel() {
 }
 
 #[test]
+fn iterate8_row_batch_advances_coordinates_and_stops_on_callback_error() {
+    const CODE: u64 = 0x1000_0000;
+    // Increment the refcon counter, write x/y to the output pixel, and fail at
+    // x=2. This exercises pointer/coordinate updates and mid-row short circuit
+    // inside the guest row trampoline rather than only its final output.
+    let mut engine = test_engine(&[
+        0x48, 0x8b, 0x44, 0x24, 0x28, 0xff, 0x01, 0x88, 0x10, 0x44, 0x88, 0x40, 0x01, 0x83, 0xfa,
+        0x02, 0x75, 0x06, 0xb8, 0x11, 0x00, 0x00, 0x00, 0xc3, 0x31, 0xc0, 0xc3,
+    ]);
+    let destination_pixels = engine.allocate(16, 4).unwrap();
+    engine.write(destination_pixels, &[0xcc; 16]).unwrap();
+    let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+    world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+        .copy_from_slice(&destination_pixels.to_le_bytes());
+    world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+        .copy_from_slice(&16i32.to_le_bytes());
+    world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+        .copy_from_slice(&4i32.to_le_bytes());
+    world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+        .copy_from_slice(&1i32.to_le_bytes());
+    engine.write(destination_world, &world).unwrap();
+    let callback_count = engine.allocate(4, 4).unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                HOST_ITERATE8,
+                &[
+                    0,
+                    0,
+                    1,
+                    0,
+                    0,
+                    callback_count,
+                    CODE,
+                    destination_world,
+                ],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        17
+    );
+    let mut count = [0u8; 4];
+    engine.read(callback_count, &mut count).unwrap();
+    assert_eq!(u32::from_le_bytes(count), 3);
+    let mut output = [0u8; 16];
+    engine.read(destination_pixels, &mut output).unwrap();
+    assert_eq!(
+        output,
+        [0, 0, 0xcc, 0xcc, 1, 0, 0xcc, 0xcc, 2, 0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc]
+    );
+}
+
+#[test]
 fn iterate8_aliases_null_source_to_the_destination_pixel() {
     const CODE: u64 = 0x1000_0000;
     // mov rax,[rsp+0x28]; xor edx,edx; test r9,r9; setne dl;
@@ -23777,6 +23836,52 @@ fn code_hook_cache_observes_callback_addition_deletion_and_stop() {
     uc.emu_start(TEST_CODE, TEST_CODE + 2, 1_000_000, 0)
         .unwrap();
     assert_eq!(uc.get_data().0, [2, 3]);
+}
+
+#[test]
+fn multiple_code_hooks_stop_before_executing_the_hooked_instruction() {
+    let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, Vec::<u8>::new()).unwrap();
+    uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
+    uc.mem_write(TEST_CODE, &[0x48, 0xff, 0xc0, 0x90, 0x48, 0xff, 0xc0])
+        .unwrap();
+    let hook_address = TEST_CODE + 3;
+    uc.add_code_hook(hook_address, hook_address, |uc, _, _| {
+        uc.get_data_mut().push(1)
+    })
+    .unwrap();
+    uc.add_code_hook(hook_address, hook_address, |uc, _, _| {
+        uc.get_data_mut().push(2);
+        uc.emu_stop().unwrap();
+    })
+    .unwrap();
+
+    uc.emu_start(TEST_CODE, TEST_CODE + 7, 1_000_000, 0)
+        .unwrap();
+
+    assert_eq!(uc.get_data(), &[1, 2]);
+    assert_eq!(uc.reg_read(RegisterX86::RAX).unwrap(), 1);
+    assert_eq!(uc.reg_read(RegisterX86::RIP).unwrap(), hook_address);
+}
+
+#[test]
+fn multiple_code_hooks_honor_program_counter_changes() {
+    let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, Vec::<u8>::new()).unwrap();
+    uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
+    uc.mem_write(TEST_CODE, &[0x48, 0xff, 0xc0, 0x90])
+        .unwrap();
+    uc.add_code_hook(TEST_CODE, TEST_CODE, |uc, _, _| uc.get_data_mut().push(1))
+        .unwrap();
+    uc.add_code_hook(TEST_CODE, TEST_CODE, |uc, _, _| {
+        uc.get_data_mut().push(2);
+        uc.reg_write(RegisterX86::RIP, TEST_CODE + 3).unwrap();
+    })
+    .unwrap();
+
+    uc.emu_start(TEST_CODE, TEST_CODE + 4, 1_000_000, 0)
+        .unwrap();
+
+    assert_eq!(uc.get_data(), &[1, 2]);
+    assert_eq!(uc.reg_read(RegisterX86::RAX).unwrap(), 0);
 }
 
 #[test]

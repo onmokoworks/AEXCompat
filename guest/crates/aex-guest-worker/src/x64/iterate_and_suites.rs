@@ -47,21 +47,47 @@ fn schedule_iterate_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), S
             + pending.y as u64 * pending.source_rowbytes
             + pending.x as u64 * pending.pixel_bytes
     };
+    let scheduled_pixels = if !pending.zero_outside_source {
+        pending.right - pending.x
+    } else if input != HOST_ZERO_PIXEL {
+        pending.right.min(pending.source_width) - pending.x
+    } else if pending.source_data == 0
+        || pending.y < 0
+        || pending.y >= pending.source_height
+        || pending.x >= pending.source_width
+    {
+        pending.right - pending.x
+    } else {
+        pending.right.min(0) - pending.x
+    };
+    if scheduled_pixels <= 0 {
+        return Err(format!(
+            "{} scheduled an empty pixel batch",
+            pending.callback_name
+        ));
+    }
     let callback_rsp = pending
         .caller_rsp
-        .checked_sub(0x30)
+        .checked_sub(0x60)
         .ok_or_else(|| format!("{} callback stack underflow", pending.callback_name))?;
+    let mut callback_frame = [0u8; 0x50];
+    callback_frame[..8].copy_from_slice(&pending.continuation.to_le_bytes());
+    callback_frame[0x28..0x30].copy_from_slice(&output.to_le_bytes());
+    callback_frame[0x30..0x38].copy_from_slice(&pending.pixel_function.to_le_bytes());
+    callback_frame[0x38..0x40]
+        .copy_from_slice(&(scheduled_pixels as u64).to_le_bytes());
+    callback_frame[0x40..0x48].copy_from_slice(
+        &(if input == HOST_ZERO_PIXEL {
+            0
+        } else {
+            pending.pixel_bytes
+        })
+        .to_le_bytes(),
+    );
+    callback_frame[0x48..0x50].copy_from_slice(&pending.pixel_bytes.to_le_bytes());
     unicorn
-        .mem_write(callback_rsp, &pending.continuation.to_le_bytes())
-        .map_err(|error| format!("{} callback return address: {error}", pending.callback_name))?;
-    unicorn
-        .mem_write(callback_rsp + 0x28, &output.to_le_bytes())
-        .map_err(|error| {
-            format!(
-                "{} callback output argument: {error}",
-                pending.callback_name
-            )
-        })?;
+        .mem_write(callback_rsp, &callback_frame)
+        .map_err(|error| format!("{} callback frame: {error}", pending.callback_name))?;
     for (register, value) in [
         (RegisterX86::RSP, callback_rsp),
         (RegisterX86::RCX, pending.refcon),
@@ -74,7 +100,14 @@ fn schedule_iterate_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), S
             pending.y.wrapping_add(pending.origin_y) as u32 as u64,
         ),
         (RegisterX86::R9, input),
-        (RegisterX86::RIP, pending.pixel_function),
+        (
+            RegisterX86::RIP,
+            if scheduled_pixels > 1 {
+                HOST_ITERATE_ROW_TRAMPOLINE
+            } else {
+                pending.pixel_function
+            },
+        ),
     ] {
         unicorn
             .reg_write(register, value)
@@ -86,6 +119,12 @@ fn schedule_iterate_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), S
         .as_mut()
         .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?
         .callback_phase = IterateCallbackPhase::Pixel;
+    unicorn
+        .get_data_mut()
+        .pending_iterate
+        .as_mut()
+        .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?
+        .scheduled_pixels = scheduled_pixels;
     Ok(())
 }
 
@@ -424,6 +463,7 @@ fn emulate_iterate_common(
             continuation,
             callback_name,
             callback_phase: IterateCallbackPhase::Pixel,
+            scheduled_pixels: 0,
             abort_function,
             progress_function,
             effect_ref,
@@ -461,7 +501,7 @@ fn continue_iterate(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
                         .pending_iterate
                         .as_mut()
                         .ok_or_else(|| "PF iterate continuation has no pending call".to_string())?;
-                    pending.x += 1;
+                    pending.x += pending.scheduled_pixels;
                     if pending.x >= pending.right {
                         pending.x = pending.left;
                         pending.y += 1;

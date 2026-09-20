@@ -71,6 +71,31 @@ static inline void gen_uc_tracecode(TCGContext *tcg_ctx, int32_t size, int32_t t
     tcg_temp_free_i32(tcg_ctx, tsize);
 }
 
+/* Preserve the normal single-hook inline path. When dispatch needs the generic
+ * helper, combine its mandatory exit check with the same helper transition. */
+static inline void gen_uc_tracecode_checked(TCGContext *tcg_ctx, int32_t size,
+                                            int32_t type, void *uc, uint64_t pc)
+{
+    uc_engine *puc = uc;
+    const int hook_type = type & UC_HOOK_IDX_MASK;
+    if (puc->hooks_count[hook_type] == 1 &&
+        !(type & UC_HOOK_FLAG_NO_STOP)) {
+        gen_uc_tracecode(tcg_ctx, size, type, uc, pc);
+        check_exit_request(tcg_ctx);
+        return;
+    }
+    TCGv_i32 tsize = tcg_const_i32(tcg_ctx, size);
+    TCGv_i32 ttype = tcg_const_i32(tcg_ctx, type);
+    TCGv_ptr tuc = tcg_const_ptr(tcg_ctx, uc);
+    TCGv_i64 tpc = tcg_const_i64(tcg_ctx, pc);
+
+    gen_helper_uc_tracecode_checked(tcg_ctx, tsize, ttype, tuc, tpc);
+    tcg_temp_free_i64(tcg_ctx, tpc);
+    tcg_temp_free_ptr(tcg_ctx, tuc);
+    tcg_temp_free_i32(tcg_ctx, ttype);
+    tcg_temp_free_i32(tcg_ctx, tsize);
+}
+
 static inline void gen_uc_traceopcode(TCGContext *tcg_ctx, void* hook, TCGv_i64 arg1, TCGv_i64 arg2, uint32_t size, void *uc, uint64_t pc)
 {
     TCGv_ptr thook = tcg_const_ptr(tcg_ctx, hook);
