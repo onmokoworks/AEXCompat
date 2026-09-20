@@ -961,6 +961,28 @@ parameter/input response test or an AE reference before counting as verified
 effect semantics. The report's build fingerprint is complete and uses the
 accepted `f9494e...` worker.
 
+PSOFT `antialiasing.aex` is now semantically verified through the shipping
+Smart request path. The solid baseline had no edge to process, so its
+byte-identical default was not an informative oracle. A 256x144 opaque binary
+fixture instead places a one-pixel 45-degree stair boundary between white and
+black. With the inspected defaults `color threshold = 10`, `softness = 70`,
+`bias = 0`, and color-key/invert disabled, the plug-in changes exactly two
+pixels on every row (288 total) and no others. The white-side edge becomes 156
+or 229, the black-side edge becomes 25, RGB remains grayscale, and all alpha
+values remain 255. Thus the output adds intermediate edge coverage while
+preserving both flat interiors; it is neither a copied frame nor a global
+blur. Nine mutations reject identity, constant, off-boundary, missing or
+shifted-edge, reversed, color-damaged, alpha-damaged, and truncated results.
+The installed AEX plus those mutations passed 10/10 in 1.17 seconds in
+`test_psoft_antialiasing_response.py`. The focused evidence used AEX SHA-256
+`2ae8ae32560229bcff17ddfe7d7b6c5020d88b224a600579acec9be7d0c11f6a`,
+Release worker
+`d9e5b0f4269f82f34a1bd5a3f7b1bcf72a314303b034b6c1b346a048aa6e39a5`,
+and Release harness
+`93b02981acbddd1b379494ff98a82e113badb7991a48e1c3fedfdcdd23a29350`.
+This resolves this one default-input identity ambiguity without reclassifying
+the other MediaCore-root rows. No After Effects process was used.
+
 ## OLM cohort and visible-image classification
 
 The first OLM milestone reported 10/10 `rendered` in 2,631 ms, but that bucket
