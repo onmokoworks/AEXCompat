@@ -824,6 +824,15 @@ pub fn render_experimental_image_with_timed_layers_context_and_search_dirs(
     )
 }
 
+fn parameter_animation_launch_payload(
+    parameters: &[InteractiveParameter],
+    animations: &[ParameterAnimation],
+) -> io::Result<String> {
+    parameter_animation_sidecar_json(animations)?;
+    validate_animation_bindings(parameters, animations)?;
+    encode_default_interactive_payload(parameters)
+}
+
 pub fn render_experimental_image_with_parameter_animation(
     repository: &Path,
     plugin_path: &Path,
@@ -834,23 +843,15 @@ pub fn render_experimental_image_with_parameter_animation(
     animations: &[ParameterAnimation],
     timing: RenderTiming,
 ) -> io::Result<Value> {
-    parameter_animation_sidecar_json(animations)?;
-    validate_animation_bindings(parameters, animations)?;
+    let launch_payload = parameter_animation_launch_payload(parameters, animations)?;
     let bytes = fs::read(plugin_path)?;
     let actual = observe_selected_plugin_bytes(&bytes, approved_sha256)?;
-    // Issue #227: encode the base payload from the same parameters the session
-    // wrapper reconstructs (`render_session.rs` builds `encode_interactive_payload`
-    // from the parameter set). A fixed `"v5|"` placeholder never matched that
-    // reconstruction, so the length-1 session gate in `render_with_artifact`
-    // (`payload == encode_interactive_payload(interactive_parameters)`) always
-    // failed and parameter animation was forced onto the one-shot argv path.
-    // Deriving the payload here let the gate hold so animation rode the session;
-    // #365 then deleted both the gate and the one-shot, but deriving it is still
-    // what the worker needs. The animation sidecar overwrites every animated
-    // slot's value per frame, and an empty payload is version-agnostic to the
-    // worker, so the only observable effect of deriving it is that a
-    // non-animated parameter's declared value is honored instead of dropped
-    // (matching every other interactive entrypoint).
+    // Use the same launch-default normalization as RenderSession::open. In
+    // particular, an arbitrary parameter that cannot PRINT has no textual base
+    // assignment: the worker retains the plug-in-owned default until the raw
+    // animation key replaces it through ARB_UNFLATTEN. Requiring an explicit
+    // interactive payload here rejected that valid raw-data path before the
+    // worker could consume its sidecar.
     render_with_artifact(
         repository,
         "experimental-parameter-animation",
@@ -859,7 +860,7 @@ pub fn render_experimental_image_with_parameter_animation(
         INTERACTIVE_RENDER_TIMEOUT_MS,
         input_path,
         output_path,
-        Some(encode_interactive_payload(parameters)?),
+        Some(launch_payload),
         Some(parameters),
         None,
         timing,

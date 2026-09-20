@@ -1060,6 +1060,42 @@ mod tests {
     }
 
     #[test]
+    fn raw_arbitrary_animation_replaces_an_unprintable_launch_default() {
+        let parameter = InteractiveParameter {
+            slot: 10,
+            name: "binary state".into(),
+            kind: "arbitrary_data".into(),
+            minimum: 0.0,
+            maximum: 0.0,
+            value: 0.0,
+            choices: vec![],
+            color: [0; 4],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: true,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0, 0],
+        };
+        let animation: ParameterAnimation = serde_json::from_value(json!({
+            "slot": 10,
+            "keys": [{
+                "time": {"value": 0, "scale": 30},
+                "interpolation": "hold",
+                "value": {"type": "arbitrary", "value": [1, 2, 3]},
+            }],
+        }))
+        .unwrap();
+        assert_eq!(
+            parameter_animation_launch_payload(&[parameter], &[animation]).unwrap(),
+            "v2|"
+        );
+    }
+
+    #[test]
     fn ui_only_descriptors_are_filtered_but_path_is_render_assignable() {
         let parameters = [
             "group_start",

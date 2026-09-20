@@ -848,6 +848,53 @@ Release worker
 and Release harness
 `c424f9269dcc3502a791d2d3e1ec2dba00f827de710a2fc9fe46fccbbd8ebd6a`.
 
+Legacy `BCCPrimatteStudio.aex` is now semantically verified through the
+shipping parameter-animation CLI and is counted as a successful core keying
+response. Inspection exposes slot 9 `View Options` and slot 10 `Primatte Data`
+as opaque `arbitrary_data`; the latter has no printable representation. The
+animation entrypoint previously encoded every discovered default as an
+explicit interactive payload, so it failed before worker launch with
+`arbitrary parameter has no printable text` even though the bounded raw-key
+sidecar and native `ARB_UNFLATTEN` transport already existed. The launch now
+uses the same normalized defaults as `RenderSession::open`: an unprintable
+plug-in-owned default is retained until its validated raw animation key
+replaces it. A Rust unit contract fixes that launch payload at `v2|`, and a
+real-process session test covers an unprintable arbitrary default with a raw
+key.
+
+The installed `Default Green Screen.bsp` factory preset contains a 2,388-byte
+Primatte state and declares `BG Color -KF only = (36, 96, 57)`. On a 256x144
+fixture using that screen color around an opaque red foreground rectangle, the
+same preset state with `View Options = Source` returns the input byte-for-byte.
+With `View Options = Final Matte`, all RGB channels are equal and alpha remains
+255; the foreground mean/minimum are 255/255 while the background mean/maximum
+are 56/56. This direction and 199-level separation reject a plain luminance
+conversion as well as an identity frame. Ten mutations cover copy, all-white or
+all-black collapse, foreground/background reversal, weak separation, dim
+foreground, color or alpha corruption, a wrong Source view, and truncation.
+The installed AEX plus those mutations passed 11/11 in 6.08 seconds in
+`test_bcc_obsolete_primatte_studio_response.py`, reducing the unresolved
+input-equal `BCC Obsolete` set from 4 to 3. This verifies factory-state core
+keying, not Auto Analyze/custom-UI sampling or exact After Effects pixel parity.
+The focused evidence used AEX SHA-256
+`c8202749ef82599ed3e96f58e8c393ac18560b42844e052e0ccc9b767cb8da69`,
+preset SHA-256
+`74c1742979ab2982ccce675d55e3f0f648be515a025b2ed27fc5603a9a6ac459`,
+Release worker
+`d9e5b0f4269f82f34a1bd5a3f7b1bcf72a314303b034b6c1b346a048aa6e39a5`,
+and Release harness
+`93b02981acbddd1b379494ff98a82e113badb7991a48e1c3fedfdcdd23a29350`.
+The affected Release broker was
+`9a57f60f183f27143e9a32a791211fa42b228fa8588a2dbf1aba2b8d7cdef1fe`.
+Focused raw-animation unit/integration tests, the five worker animation
+transport tests, five-scenario broker self-test, and the real AEX test all
+passed. A broader 70-test `image_render` unit filter reported 69 passed and one
+pre-existing unrelated failure: `--self-test-pf-private-callbacks` exits with
+`0xC0000005` after emitting its callback-denial markers. The same failure
+reproduces alone after a current-checkout Release worker rebuild (`ninja: no
+work to do`); it is not treated as Primatte or raw-animation success and remains
+a separate worker self-test issue.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of

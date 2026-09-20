@@ -1629,7 +1629,7 @@ mod windows_e2e {
             "choices": [], "color": [0, 0, 0, 0], "components": [0.0, 0.0, 0.0],
             "component_count": 0, "layer_path": null,
             "enabled": true, "visible": true, "supervised": false,
-            "debug_summary": "state",
+            "debug_summary": null,
         }))
         .expect("arbitrary parameter fixture")];
         let animations: [ParameterAnimation; 1] = [serde_json::from_value(serde_json::json!({
