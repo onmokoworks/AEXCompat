@@ -884,6 +884,23 @@ not retained: observed AE parameter animation does not emit it, and invoking it
 on an unflattened live sequence handle would not be a valid host-equivalence
 experiment.
 
+A final orchestration experiment tested whether Motion Key accumulates private
+analysis state only when earlier frames are rendered inside the same sequence.
+Using Release worker SHA-256
+`6d360e4e07f544118de491d76dc0222f04f5bcff6209fb8bde3291c6fe33f3ca`, a fresh
+session rendered time 5 directly, while a second fresh session rendered times
+0 through 5 in order with the same eleven-frame temporal fixture. Both sessions
+closed cleanly; the sequential session completed six frames and balanced all
+301 temporal checkout/checkin operations. Its final frame matched the direct
+result and current input byte-for-byte, all with SHA-256
+`2fab73b9fa8ab9bf14eccddee1854a3f6adbe87229ef18bf483a6a8d83e559e5`.
+Sequential resident priming is therefore not the missing shipping path and was
+not connected to the UI/CLI. The one-off probe was removed, no After Effects
+process was used, and the canonical worker was restored byte-for-byte to
+SHA-256 `b33cf0f1710301ffdc99fae7d2389da1236abf9a498460473270ca8d01e95548`.
+Motion Key remains a strict semantic expected failure pending evidence for a
+concrete vendor analysis-start prerequisite.
+
 `test_bcc_obsolete_motion_key_response.py` preserves the exact known signature
 as a strict, signature-bounded expected failure: transport and parameter
 receipts must succeed, the neutral frame must remain exact, and both Remove and
