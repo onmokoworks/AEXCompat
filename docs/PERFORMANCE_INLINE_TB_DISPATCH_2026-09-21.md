@@ -118,4 +118,69 @@ Median of the four warm-session medians per binary (microseconds):
 Evidence: `inline-resident-abba.jsonl` and `.stderr` in the private evidence
 directory above; the latter is empty. These are representative resident results,
 not a threefold speedup or proof of full-corpus compatibility. Full workspace
-tests and the 292-plugin sweep remain pending before acceptance.
+tests and the 292-plugin sweep were pending at that checkpoint.
+
+## Follow-up regression and profile validation
+
+The Release workspace suite completed with 735 passed, zero failed and five
+existing ignored tests. The bounded command exited zero in 236.93 seconds,
+verified its process group empty, and observed a minimum 37,146,169,344 free
+bytes. Worker SHA-256 remained unchanged after this test build.
+
+Fresh Blur and PrismLens profiles each validated 2,050 frames (50 warmup plus
+2,000 sampled-run frames), closed successfully and verified empty worker
+process groups. The collapsed exclusive samples for `helper_lookup_tb_ptr_fast`
+fell from 633 to 54 for Blur and from 658 to 50 for PrismLens. These counts
+corroborate removal of helper work on cache hits; they are neither a precise
+call-count ratio nor an overall-render speedup percentage. Profiling was run
+separately from all timing and compilation.
+
+Private evidence: `inline-workspace-tests.log`,
+`inline-blur-profile-summary.json` and `inline-prism-profile-summary.json`, with
+per-frame results and sampler files in the directories identified by those
+summaries.
+
+## Full Sapphire sweep
+
+The jobs=1 candidate sweep completed 292/292 plugins successfully. The strict
+comparison against the retained baseline sweep found zero mismatches in plugin
+identity, raw pixels, PNG bytes, extent/format, guards, render status and cleanup.
+The bounded command exited zero, verified its process group empty and observed
+at least 37,359,362,048 free bytes. Both runs retained the corpus's known RLM
+license diagnostic; success here means compatibility with that recorded corpus,
+not a claim of licensed After Effects equivalence.
+
+The candidate whole-command elapsed time was 514.71 seconds. Sum of individual
+plugin times was 500.9427 seconds versus baseline 499.5659 seconds. This
+non-interleaved cold-start comparison establishes no sweep speedup. The measured
+benefit remains resident rendering; startup/translation and cold sweep cost
+still require future optimization under a separately claimed issue.
+
+Evidence: `runs/issue19-inline-j1-20260921/report.json` and its PNGs compared
+against `runs/issue17-before-j1-20260921/report.json`, plus `inline-sweep.log` in
+this issue's evidence directory. Actual candidate worker identity matches the
+resident benchmark above.
+
+## Generated-code inspection
+
+A bounded LLDB attempt did not advance beyond launching the focused test within
+60 seconds; its process group was terminated and verified empty. This did not
+produce disassembly and is not counted as a passing debugger test.
+
+As an alternative, a private standalone C fixture linked the same built Unicorn
+archive without modifying production source. It executed eight indirect calls,
+checked the accumulated register result, copied the caller TB bytes before
+closing its engine, and exited zero with an empty process group. Capstone 5.0.7
+decoded the resulting 368-byte AArch64 block. At block offset 0x88, a null cache
+entry branches to the miss path; offset 0xfc branches there on a key mismatch.
+The hit path loads `tc.ptr` and executes `br x20` at 0x108. Only the miss path
+performs the lookup helper call (`blr x30` at 0x124) followed by `br x0`.
+Architectural stack/PC stores precede lookup. This fixture uses a constant
+target, so the hash arithmetic is constant-folded; dynamic-target behavior is
+covered separately by the warm/colliding-target tests.
+
+Private evidence includes `dump_inline_tb.c`, its executable, and
+`inline-tb-bytes.log`; the unsuccessful debugger attempt is retained in
+`inline-generated-code-lldb.log`. These diagnostic artifacts are not used as
+timing evidence. The full threefold-render and faster-cold-sweep objectives
+remain unmet despite accepting this incremental resident optimization.
