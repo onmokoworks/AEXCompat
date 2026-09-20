@@ -23788,6 +23788,40 @@ fn benchmark_dense_runtime_hook_with_unrelated_import_hooks() {
 }
 
 #[test]
+fn logicq_materializes_x86_status_flags() {
+    const STATUS_MASK: u64 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+    let mut cases = (0u64..=255)
+        .map(|value| {
+            let parity = u64::from(value.count_ones() % 2 == 0) << 2;
+            let zero = u64::from(value == 0) << 6;
+            (value, parity | zero)
+        })
+        .collect::<Vec<_>>();
+    cases.extend([(1 << 63, (1 << 2) | (1 << 7)), ((1 << 63) | 1, 1 << 7)]);
+
+    for (value, expected) in cases {
+        let mut code = vec![0x48, 0xb8]; // mov rax, imm64
+        code.extend_from_slice(&value.to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x21, 0xc0, 0x9c, 0x5b]); // and rax, rax; pushfq; pop rbx
+
+        let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, ()).unwrap();
+        uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
+        uc.mem_map(STACK_BASE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+            .unwrap();
+        uc.mem_write(TEST_CODE, &code).unwrap();
+        uc.reg_write(RegisterX86::RSP, STACK_BASE + PAGE_SIZE - 8)
+            .unwrap();
+        uc.emu_start(TEST_CODE, TEST_CODE + code.len() as u64, 1_000_000, 0)
+            .unwrap();
+        assert_eq!(
+            uc.reg_read(RegisterX86::RBX).unwrap() & STATUS_MASK,
+            expected,
+            "value={value:#018x}"
+        );
+    }
+}
+
+#[test]
 fn code_hook_cache_observes_callback_addition_deletion_and_stop() {
     let mut uc =
         Unicorn::new_with_data(Arch::X86, Mode::MODE_64, (Vec::<u8>::new(), false)).unwrap();

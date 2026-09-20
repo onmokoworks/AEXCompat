@@ -841,6 +841,42 @@ static void gen_compute_eflags(DisasContext *s)
         set_cc_op(s, CC_OP_EFLAGS);
         return;
     }
+#ifdef TARGET_X86_64
+    if (s->cc_op == CC_OP_LOGICQ) {
+        TCGv parity = tcg_temp_new(tcg_ctx);
+        TCGv scratch = tcg_temp_new(tcg_ctx);
+
+        /*
+         * Logic operations clear C/O/A.  Compute P/Z/S directly in TCG
+         * instead of entering the generic condition-code helper for every
+         * subsequent flags consumer.  0x9669 is an even-parity bitmap for
+         * a folded four-bit index.
+         */
+        tcg_gen_shri_tl(tcg_ctx, scratch, tcg_ctx->cpu_cc_dst, 4);
+        tcg_gen_xor_tl(tcg_ctx, parity, tcg_ctx->cpu_cc_dst, scratch);
+        tcg_gen_andi_tl(tcg_ctx, parity, parity, 0xf);
+        tcg_gen_movi_tl(tcg_ctx, scratch, 0x9669);
+        tcg_gen_shr_tl(tcg_ctx, scratch, scratch, parity);
+        tcg_gen_andi_tl(tcg_ctx, parity, scratch, 1);
+        tcg_gen_shli_tl(tcg_ctx, parity, parity, 2);
+
+        tcg_gen_setcondi_tl(tcg_ctx, TCG_COND_EQ, tcg_ctx->cpu_cc_src,
+                            tcg_ctx->cpu_cc_dst, 0);
+        tcg_gen_shli_tl(tcg_ctx, tcg_ctx->cpu_cc_src,
+                        tcg_ctx->cpu_cc_src, 6);
+        tcg_gen_shri_tl(tcg_ctx, scratch, tcg_ctx->cpu_cc_dst, 56);
+        tcg_gen_andi_tl(tcg_ctx, scratch, scratch, CC_S);
+        tcg_gen_or_tl(tcg_ctx, tcg_ctx->cpu_cc_src,
+                      tcg_ctx->cpu_cc_src, parity);
+        tcg_gen_or_tl(tcg_ctx, tcg_ctx->cpu_cc_src,
+                      tcg_ctx->cpu_cc_src, scratch);
+
+        tcg_temp_free(tcg_ctx, scratch);
+        tcg_temp_free(tcg_ctx, parity);
+        set_cc_op(s, CC_OP_EFLAGS);
+        return;
+    }
+#endif
 
     zero = NULL;
     dst = tcg_ctx->cpu_cc_dst;
