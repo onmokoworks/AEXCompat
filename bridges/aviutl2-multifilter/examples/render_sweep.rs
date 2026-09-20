@@ -47,6 +47,10 @@
 //!                        explicitly allow up to n isolated render workers for
 //!                        one resolved dependency closure (default 1). Must not
 //!                        exceed --render-jobs; unresolved closures stay serial
+//!   --dynamic-same-closure-groups
+//!                        opt in to closure-capped work stealing between the
+//!                        already-planned cluster groups. Group membership and
+//!                        report order stay fixed; unresolved closures stay serial
 //!   --filter <substr>    only plug-ins whose file name contains it (no case)
 //!   --exclude-path <substr>
 //!                        skip plug-ins whose full path contains it (repeatable,
@@ -94,11 +98,11 @@
 //! trace on stderr, which is worth having on a re-run of one bucket, not on a
 //! whole sweep.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use aexcompat_aviutl2_multifilter::{
@@ -327,6 +331,7 @@ struct Options {
     skip: usize,
     render_jobs: usize,
     same_closure_render_jobs: usize,
+    dynamic_same_closure_groups: bool,
     filter: Option<String>,
     exclude_paths: Vec<String>,
     blocked_paths: Vec<String>,
@@ -356,6 +361,7 @@ fn parse_options() -> Options {
         skip: 0,
         render_jobs: 1,
         same_closure_render_jobs: 1,
+        dynamic_same_closure_groups: false,
         filter: None,
         exclude_paths: Vec::new(),
         blocked_paths: Vec::new(),
@@ -399,6 +405,7 @@ fn parse_options() -> Options {
                     "--same-closure-render-jobs takes at least 1"
                 );
             }
+            "--dynamic-same-closure-groups" => options.dynamic_same_closure_groups = true,
             "--filter" => options.filter = Some(value().to_lowercase()),
             "--exclude-path" => options.exclude_paths.push(value().to_lowercase()),
             "--blocked-path" => options.blocked_paths.push(value().to_lowercase()),
@@ -553,6 +560,339 @@ where
         .collect()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DynamicGroupResult<T> {
+    Completed(T),
+    Panicked,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GroupMemberResult<T> {
+    Completed(T),
+    Panicked,
+}
+
+/// Builds a complete result list without finalizing receipts or sidecar rows,
+/// even when one member panics. The caller finalizes only after this list has
+/// been accepted by the scheduler, so a late panic cannot duplicate siblings.
+fn catch_group_members_ordered<T, F>(
+    members: &[usize],
+    mut operation: F,
+) -> Vec<(usize, GroupMemberResult<T>)>
+where
+    F: FnMut(usize) -> T,
+{
+    members
+        .iter()
+        .copied()
+        .map(|index| {
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation(index)))
+                    .map_or(GroupMemberResult::Panicked, GroupMemberResult::Completed);
+            (index, result)
+        })
+        .collect()
+}
+
+fn finalize_group_members_ordered<T, U, F>(
+    members: Vec<(usize, GroupMemberResult<T>)>,
+    mut finalize: F,
+) -> Vec<(usize, U)>
+where
+    F: FnMut(usize, GroupMemberResult<T>) -> U,
+{
+    members
+        .into_iter()
+        .map(|(index, result)| (index, finalize(index, result)))
+        .collect()
+}
+
+/// The historical static scheduler persists each completed member before it
+/// begins the next one. Keep this separate from dynamic group's pending-result
+/// transaction so a later hang or process kill cannot erase earlier progress.
+fn map_group_members_immediate<T, U, F, G>(
+    members: &[usize],
+    mut operation: F,
+    mut finalize: G,
+) -> Vec<(usize, U)>
+where
+    F: FnMut(usize) -> T,
+    G: FnMut(usize, T) -> U,
+{
+    members
+        .iter()
+        .copied()
+        .map(|index| {
+            let result = operation(index);
+            (index, finalize(index, result))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum DynamicScheduleKey {
+    Resolved(String),
+    Unresolved,
+}
+
+#[derive(Clone, Debug)]
+struct DynamicScheduleTask {
+    plan_index: usize,
+    first_group: usize,
+    group_count: usize,
+    key: DynamicScheduleKey,
+    active_limit: usize,
+}
+
+struct DynamicScheduleState<T> {
+    ready: VecDeque<DynamicScheduleTask>,
+    active_by_key: HashMap<DynamicScheduleKey, usize>,
+    completed_tasks: usize,
+    finalize_panicked: bool,
+    results: Vec<Vec<Option<T>>>,
+}
+
+#[cfg(test)]
+fn dynamic_render_group_map_ordered<T, F>(
+    plans: &[RenderPlan],
+    jobs: usize,
+    operation: F,
+) -> Vec<Vec<DynamicGroupResult<T>>>
+where
+    T: Send,
+    F: Fn(usize, usize, &[usize]) -> T + Sync,
+{
+    dynamic_render_group_map_ordered_then(plans, jobs, operation, |_, _, _, result| result)
+}
+
+/// Executes the already-planned render groups under both the global process
+/// cap and the per-closure shard cap. Resolved groups are independent isolated
+/// worker transactions and may be stolen from any planning shard. An unresolved
+/// plan is one task containing its complete group chain, so its historical
+/// serial behavior is preserved. Results remain indexed by the stable planning
+/// shard/group coordinates rather than nondeterministic executor threads.
+///
+/// The operation boundary is caught here, outside plug-in-specific catches. A
+/// panicking group is passed to `finalize` as a fail-closed marker. Finalization
+/// runs on the executor before the closure permit is released, allowing durable
+/// progress to be appended once per group rather than delayed until the entire
+/// sweep finishes. A finalizer panic is never retried (which could duplicate a
+/// partial append); it returns its permit, wakes waiters, and aborts the scheduler.
+fn dynamic_render_group_map_ordered_then<T, U, F, G>(
+    plans: &[RenderPlan],
+    jobs: usize,
+    operation: F,
+    finalize: G,
+) -> Vec<Vec<U>>
+where
+    T: Send,
+    U: Send,
+    F: Fn(usize, usize, &[usize]) -> T + Sync,
+    G: Fn(usize, usize, &[usize], DynamicGroupResult<T>) -> U + Sync,
+{
+    assert!(
+        jobs >= 1,
+        "dynamic render scheduling requires at least one job"
+    );
+    for plan in plans {
+        assert!(
+            plan.same_closure_count >= 1,
+            "dynamic render plan has no closure permit"
+        );
+        assert!(
+            plan.same_closure_index < plan.same_closure_count,
+            "dynamic render plan has invalid shard provenance"
+        );
+    }
+
+    // Seed the ready queue by group depth, not plan-major order. The first
+    // group from every shard is therefore admitted before any shard's second
+    // group; once a short shard finishes, its executor can take later work from
+    // a still-busy resolved closure. None is deliberately represented by one
+    // task spanning the whole plan.
+    let max_groups = plans
+        .iter()
+        .filter(|plan| plan.closure_identity.is_some())
+        .map(|plan| plan.groups.len())
+        .max()
+        .unwrap_or(0);
+    let mut ready = VecDeque::new();
+    let mut expected_limit_by_key = HashMap::<DynamicScheduleKey, usize>::new();
+    for group_index in 0..max_groups.max(1) {
+        for (plan_index, plan) in plans.iter().enumerate() {
+            let Some(closure) = plan.closure_identity.as_ref() else {
+                if group_index == 0 && !plan.groups.is_empty() {
+                    ready.push_back(DynamicScheduleTask {
+                        plan_index,
+                        first_group: 0,
+                        group_count: plan.groups.len(),
+                        key: DynamicScheduleKey::Unresolved,
+                        active_limit: 1,
+                    });
+                }
+                continue;
+            };
+            if group_index >= plan.groups.len() {
+                continue;
+            }
+            let key = DynamicScheduleKey::Resolved(closure.clone());
+            let active_limit = plan.same_closure_count;
+            if let Some(previous) = expected_limit_by_key.insert(key.clone(), active_limit) {
+                assert_eq!(
+                    previous, active_limit,
+                    "one resolved closure has inconsistent scheduling caps"
+                );
+            }
+            ready.push_back(DynamicScheduleTask {
+                plan_index,
+                first_group: group_index,
+                group_count: 1,
+                key,
+                active_limit,
+            });
+        }
+    }
+
+    let total_tasks = ready.len();
+    let results = plans
+        .iter()
+        .map(|plan| (0..plan.groups.len()).map(|_| None).collect())
+        .collect();
+    if total_tasks == 0 {
+        return plans.iter().map(|_| Vec::new()).collect();
+    }
+
+    let shared = (
+        Mutex::new(DynamicScheduleState {
+            ready,
+            active_by_key: HashMap::new(),
+            completed_tasks: 0,
+            finalize_panicked: false,
+            results,
+        }),
+        Condvar::new(),
+    );
+    let worker_count = jobs.min(total_tasks);
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let operation = &operation;
+            let finalize = &finalize;
+            let shared = &shared;
+            scope.spawn(move || {
+                loop {
+                    let task = {
+                        let (lock, ready_changed) = shared;
+                        let mut state = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                        loop {
+                            if state.finalize_panicked {
+                                return;
+                            }
+                            if state.completed_tasks == total_tasks {
+                                return;
+                            }
+                            let eligible = state.ready.iter().position(|task| {
+                                state.active_by_key.get(&task.key).copied().unwrap_or(0)
+                                    < task.active_limit
+                            });
+                            if let Some(index) = eligible {
+                                let task = state
+                                    .ready
+                                    .remove(index)
+                                    .expect("eligible dynamic task disappeared");
+                                *state.active_by_key.entry(task.key.clone()).or_default() += 1;
+                                break task;
+                            }
+                            state = ready_changed
+                                .wait(state)
+                                .unwrap_or_else(|poison| poison.into_inner());
+                        }
+                    };
+
+                    let mut completed = Vec::with_capacity(task.group_count);
+                    for group_index in task.first_group..task.first_group + task.group_count {
+                        let run = &plans[task.plan_index].groups[group_index];
+                        let pending =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                operation(task.plan_index, group_index, run)
+                            }))
+                            .map_or(DynamicGroupResult::Panicked, DynamicGroupResult::Completed);
+                        let finalized =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                finalize(task.plan_index, group_index, run, pending)
+                            }));
+                        let Ok(result) = finalized else {
+                            let (lock, ready_changed) = shared;
+                            let mut state =
+                                lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                            let active = state
+                                .active_by_key
+                                .get_mut(&task.key)
+                                .expect("dynamic render task lost its active permit");
+                            assert!(*active > 0, "dynamic render permit underflow");
+                            *active -= 1;
+                            state.finalize_panicked = true;
+                            ready_changed.notify_all();
+                            return;
+                        };
+                        completed.push((group_index, result));
+                    }
+
+                    let (lock, ready_changed) = shared;
+                    let mut state = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+                    for (group_index, result) in completed {
+                        assert!(
+                            state.results[task.plan_index][group_index]
+                                .replace(result)
+                                .is_none(),
+                            "dynamic render group completed twice"
+                        );
+                    }
+                    let active = state
+                        .active_by_key
+                        .get_mut(&task.key)
+                        .expect("dynamic render task lost its active permit");
+                    assert!(*active > 0, "dynamic render permit underflow");
+                    *active -= 1;
+                    state.completed_tasks += 1;
+                    ready_changed.notify_all();
+                }
+            });
+        }
+    });
+
+    let state = shared
+        .0
+        .into_inner()
+        .unwrap_or_else(|poison| poison.into_inner());
+    assert!(
+        state.active_by_key.values().all(|&active| active == 0),
+        "dynamic render scheduler leaked active permits"
+    );
+    assert!(
+        !state.finalize_panicked,
+        "dynamic render group finalization panicked"
+    );
+    assert_eq!(state.completed_tasks, total_tasks);
+    state
+        .results
+        .into_iter()
+        .enumerate()
+        .map(|(plan_index, groups)| {
+            groups
+                .into_iter()
+                .enumerate()
+                .map(|(group_index, result)| {
+                    result.unwrap_or_else(|| {
+                        panic!(
+                            "dynamic render group {plan_index}/{group_index} did not produce a result"
+                        )
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Partitions the corpus into serial lanes. Equal dependency-closure identities
 /// must never overlap: real plug-ins may coordinate through vendor-global
 /// helpers even though each AEXCompat worker is process-isolated. Lanes whose
@@ -651,6 +991,7 @@ struct RenderPlan {
     groups: Vec<Vec<usize>>,
     same_closure_index: usize,
     same_closure_count: usize,
+    closure_identity: Option<String>,
 }
 
 fn attach_same_closure_shard_evidence(
@@ -663,6 +1004,15 @@ fn attach_same_closure_shard_evidence(
     record["same_closure_shard"] = json!({
         "index": same_closure_index,
         "count": same_closure_count,
+    });
+}
+
+fn attach_render_work_group_evidence(record: &mut Value, index: usize, count: usize) {
+    assert!(count >= 1);
+    assert!(index < count);
+    record["render_work_group"] = json!({
+        "index": index,
+        "count": count,
     });
 }
 
@@ -837,6 +1187,10 @@ fn main() {
             groups: cluster_candidate_groups(&shard.indices, &records, &options),
             same_closure_index: shard.same_closure_index,
             same_closure_count: shard.same_closure_count,
+            closure_identity: shard
+                .indices
+                .first()
+                .and_then(|&index| records[index].closure_identity_sha256.clone()),
         })
         .collect::<Vec<_>>();
     let planned_sessions = render_plans
@@ -849,23 +1203,39 @@ fn main() {
         .filter(|group| group.len() >= 2)
         .map(Vec::len)
         .sum::<usize>();
-    eprintln!(
-        "rendering {} plug-in(s) in {} dependency lane(s), {} shard(s), with {} job(s); same-closure jobs {}/{}, {} planned session(s), {} clustered plug-in(s)...",
-        records.len(),
-        lanes.len(),
-        render_plans.len(),
-        options.render_jobs.min(render_plans.len()),
-        effective_same_closure_render_jobs,
-        options.same_closure_render_jobs,
-        planned_sessions,
-        planned_clustered_plugins,
-    );
+    if options.dynamic_same_closure_groups {
+        eprintln!(
+            "rendering {} plug-in(s) in {} dependency lane(s), {} shard(s), with {} job(s); same-closure jobs {}/{}, dynamic closure-capped group schedule, {} planned session(s), {} clustered plug-in(s)...",
+            records.len(),
+            lanes.len(),
+            render_plans.len(),
+            options.render_jobs.min(render_plans.len()),
+            effective_same_closure_render_jobs,
+            options.same_closure_render_jobs,
+            planned_sessions,
+            planned_clustered_plugins,
+        );
+    } else {
+        eprintln!(
+            "rendering {} plug-in(s) in {} dependency lane(s), {} shard(s), with {} job(s); same-closure jobs {}/{}, {} planned session(s), {} clustered plug-in(s)...",
+            records.len(),
+            lanes.len(),
+            render_plans.len(),
+            options.render_jobs.min(render_plans.len()),
+            effective_same_closure_render_jobs,
+            options.same_closure_render_jobs,
+            planned_sessions,
+            planned_clustered_plugins,
+        );
+    }
     let finish_plugin = |index: usize,
                          record: &DiagnosticDiscovery,
                          outcome: Outcome,
                          elapsed_ms: u128,
                          same_closure_index: usize,
-                         same_closure_count: usize| {
+                         same_closure_count: usize,
+                         group_index: usize,
+                         group_count: usize| {
         let name = plugin_name(&record.path, &scan.dirs);
         // Numbered from the corpus, not from this slice: the number an
         // operator reads off the log is the one they pass back as --skip.
@@ -878,6 +1248,9 @@ fn main() {
         );
         let mut record = plugin_record(record, &name, &build, outcome, elapsed_ms);
         attach_same_closure_shard_evidence(&mut record, same_closure_index, same_closure_count);
+        if options.dynamic_same_closure_groups {
+            attach_render_work_group_evidence(&mut record, group_index, group_count);
+        }
         if let Some((path, write_lock)) = &sidecar {
             let mut line = Vec::new();
             if serde_json::to_writer(&mut line, &record).is_ok() {
@@ -890,81 +1263,144 @@ fn main() {
         }
         record
     };
-    let grouped = bounded_parallel_map_ordered(&render_plans, options.render_jobs, |_, plan| {
-        let mut finished = Vec::with_capacity(plan.groups.iter().map(Vec::len).sum());
-        for run in &plan.groups {
-            let clustered = sweep_cluster_candidates_salvaging(
-                &repository,
-                run,
-                &records,
-                &options,
-                &input,
-                &layer_pixels,
-            );
-            for &index in run {
-                let record = &records[index];
-                let plugin_started = Instant::now();
-                // Third-party AEX in-process code paths (the PE read, the parameter
-                // translation) can panic; one plug-in must not end the sweep.
-                let clustered_result = clustered.get(&index).cloned();
-                let clustered_elapsed_ms = clustered_result.as_ref().map(|(_, elapsed)| *elapsed);
-                let mut outcome =
-                    clustered_result
-                        .map(|(outcome, _)| outcome)
-                        .unwrap_or_else(|| {
-                            sweep_one_caught(
-                                &repository,
-                                record,
-                                &records,
-                                &options,
-                                options.skip + index,
-                                &input,
-                                &layer_pixels,
-                            )
-                        });
-                let verification_started = Instant::now();
-                verify_pixel_determinism(&mut outcome, options.verify_pixel_determinism, || {
-                    let mut repeat_options = options.clone();
-                    // The primary frame dump is the artifact requested by the
-                    // caller. A verification pass must not overwrite it.
-                    repeat_options.dump_frames = None;
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        sweep_one(
-                            &repository,
-                            record,
-                            &records,
-                            &repeat_options,
-                            options.skip + index,
-                            &input,
-                            &layer_pixels,
-                        )
-                    }))
-                    .unwrap_or_else(|_| Outcome::bare("sweep_panicked"))
-                });
-                let elapsed_ms = clustered_elapsed_ms
-                    .map(|clustered| {
-                        clustered
-                            + options
-                                .verify_pixel_determinism
-                                .then(|| verification_started.elapsed().as_millis())
-                                .unwrap_or_default()
-                    })
-                    .unwrap_or_else(|| plugin_started.elapsed().as_millis());
-                finished.push((
+    let render_member = |index: usize, clustered: &HashMap<usize, (Outcome, u128)>| {
+        let record = &records[index];
+        let plugin_started = Instant::now();
+        let clustered_result = clustered.get(&index).cloned();
+        let clustered_elapsed_ms = clustered_result.as_ref().map(|(_, elapsed)| *elapsed);
+        let mut outcome = clustered_result
+            .map(|(outcome, _)| outcome)
+            .unwrap_or_else(|| {
+                sweep_one_caught(
+                    &repository,
+                    record,
+                    &records,
+                    &options,
+                    options.skip + index,
+                    &input,
+                    &layer_pixels,
+                )
+            });
+        let verification_started = Instant::now();
+        verify_pixel_determinism(&mut outcome, options.verify_pixel_determinism, || {
+            let mut repeat_options = options.clone();
+            // The primary frame dump is the artifact requested by the caller.
+            // A verification pass must not overwrite it.
+            repeat_options.dump_frames = None;
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sweep_one(
+                    &repository,
+                    record,
+                    &records,
+                    &repeat_options,
+                    options.skip + index,
+                    &input,
+                    &layer_pixels,
+                )
+            }))
+            .unwrap_or_else(|_| Outcome::bare("sweep_panicked"))
+        });
+        let elapsed_ms = clustered_elapsed_ms
+            .map(|clustered| {
+                clustered
+                    + options
+                        .verify_pixel_determinism
+                        .then(|| verification_started.elapsed().as_millis())
+                        .unwrap_or_default()
+            })
+            .unwrap_or_else(|| plugin_started.elapsed().as_millis());
+        (outcome, elapsed_ms)
+    };
+    let execute_dynamic_group = |_plan_index: usize, _group_index: usize, run: &[usize]| {
+        let clustered = sweep_cluster_candidates_salvaging(
+            &repository,
+            run,
+            &records,
+            &options,
+            &input,
+            &layer_pixels,
+        );
+        // Dynamic scheduling catches members into one receipt-free pending
+        // result; its scheduler callback finalizes that group exactly once.
+        catch_group_members_ordered(run, |index| render_member(index, &clustered))
+    };
+    let execute_static_group = |plan_index: usize, group_index: usize, run: &[usize]| {
+        let plan = &render_plans[plan_index];
+        let clustered = sweep_cluster_candidates_salvaging(
+            &repository,
+            run,
+            &records,
+            &options,
+            &input,
+            &layer_pixels,
+        );
+        map_group_members_immediate(
+            run,
+            |index| render_member(index, &clustered),
+            |index, (outcome, elapsed_ms)| {
+                finish_plugin(
                     index,
-                    finish_plugin(
-                        index,
-                        record,
-                        outcome,
-                        elapsed_ms,
-                        plan.same_closure_index,
-                        plan.same_closure_count,
-                    ),
-                ));
-            }
-        }
-        finished
-    });
+                    &records[index],
+                    outcome,
+                    elapsed_ms,
+                    plan.same_closure_index,
+                    plan.same_closure_count,
+                    group_index,
+                    plan.groups.len(),
+                )
+            },
+        )
+    };
+    let finalize_group =
+        |plan_index: usize,
+         group_index: usize,
+         pending: Vec<(usize, GroupMemberResult<(Outcome, u128)>)>| {
+            let plan = &render_plans[plan_index];
+            finalize_group_members_ordered(pending, |index, result| {
+                let (outcome, elapsed_ms) = match result {
+                    GroupMemberResult::Completed(completed) => completed,
+                    GroupMemberResult::Panicked => (Outcome::bare("sweep_panicked"), 0),
+                };
+                finish_plugin(
+                    index,
+                    &records[index],
+                    outcome,
+                    elapsed_ms,
+                    plan.same_closure_index,
+                    plan.same_closure_count,
+                    group_index,
+                    plan.groups.len(),
+                )
+            })
+        };
+    let grouped = if options.dynamic_same_closure_groups {
+        dynamic_render_group_map_ordered_then(
+            &render_plans,
+            options.render_jobs,
+            &execute_dynamic_group,
+            |plan_index, group_index, run, result| {
+                let pending = match result {
+                    DynamicGroupResult::Completed(pending) => pending,
+                    DynamicGroupResult::Panicked => run
+                        .iter()
+                        .map(|&index| (index, GroupMemberResult::Panicked))
+                        .collect(),
+                };
+                finalize_group(plan_index, group_index, pending)
+            },
+        )
+        .into_iter()
+        .map(|groups| groups.into_iter().flatten().collect())
+        .collect()
+    } else {
+        bounded_parallel_map_ordered(&render_plans, options.render_jobs, |plan_index, plan| {
+            plan.groups
+                .iter()
+                .enumerate()
+                .flat_map(|(group_index, run)| execute_static_group(plan_index, group_index, run))
+                .collect()
+        })
+    };
     let plugins = restore_indexed_order(records.len(), grouped);
     let mut buckets: BTreeMap<String, usize> = BTreeMap::new();
     for plugin in &plugins {
@@ -985,6 +1421,7 @@ fn main() {
         Some(lanes.len()),
         Some(render_plans.len()),
         Some(effective_same_closure_render_jobs),
+        Some(planned_sessions),
     );
     finish_report(&options, &report);
 }
@@ -1431,6 +1868,7 @@ fn discovery_only_report(
         elapsed,
         buckets,
         plugins,
+        None,
         None,
         None,
         None,
@@ -2626,6 +3064,7 @@ fn report(
     dependency_lane_count: Option<usize>,
     render_shard_count: Option<usize>,
     effective_same_closure_render_jobs: Option<usize>,
+    render_group_count: Option<usize>,
 ) -> Value {
     // Render partial rows are written as each plug-in completes and retain the
     // explicit pre-run candidate. Only the atomic final report can carry the
@@ -2644,7 +3083,7 @@ fn report(
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     let render = (!options.discovery_only).then(|| {
-        json!({
+        let mut render = json!({
             "width": options.width,
             "height": options.height,
             "pixel_format": options.pixel_format.report_name(),
@@ -2666,7 +3105,22 @@ fn report(
             "time_step": TIME_STEP,
             "total_time": TOTAL_TIME,
             "time_scale": TIME_SCALE,
-        })
+        });
+        if options.dynamic_same_closure_groups {
+            render.as_object_mut().unwrap().insert(
+                "dynamic_group_schedule".to_owned(),
+                json!({
+                    "requested_mode": "closure_capped_ready_queue",
+                    "effective_mode": "closure_capped_ready_queue",
+                    "global_process_cap": options.render_jobs,
+                    "requested_same_closure_cap": options.same_closure_render_jobs,
+                    "effective_same_closure_cap": effective_same_closure_render_jobs,
+                    "render_group_count": render_group_count,
+                    "unresolved_closure_unit": "original_serial_lane",
+                }),
+            );
+        }
+        render
     });
     json!({
         "schema_version": 1,
@@ -2783,6 +3237,7 @@ mod tests {
             skip: 0,
             render_jobs: 1,
             same_closure_render_jobs: 1,
+            dynamic_same_closure_groups: false,
             filter: None,
             exclude_paths: Vec::new(),
             blocked_paths: Vec::new(),
@@ -2837,6 +3292,563 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| {
                 bounded_parallel_map_ordered(&[1u8], 0, |_, value| *value)
+            })
+            .is_err()
+        );
+    }
+
+    fn dynamic_plan(
+        closure_identity: Option<&str>,
+        same_closure_index: usize,
+        same_closure_count: usize,
+        groups: &[&[usize]],
+    ) -> RenderPlan {
+        RenderPlan {
+            groups: groups.iter().map(|group| group.to_vec()).collect(),
+            same_closure_index,
+            same_closure_count,
+            closure_identity: closure_identity.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn group_finalization_keeps_completed_members_and_emits_each_index_once_after_late_panic() {
+        let plans = [dynamic_plan(Some("shared"), 0, 1, &[&[10, 11, 12, 13]])];
+        let attempted = Mutex::new(Vec::new());
+        let finalized_indices = Mutex::new(Vec::new());
+        let finalized = dynamic_render_group_map_ordered_then(
+            &plans,
+            1,
+            |_plan, _group, run| {
+                catch_group_members_ordered(run, |index| {
+                    attempted.lock().unwrap().push(index);
+                    if index == 12 {
+                        panic!("synthetic late member panic");
+                    }
+                    format!("rendered-{index}")
+                })
+            },
+            |_plan, _group, run, pending| {
+                let pending = match pending {
+                    DynamicGroupResult::Completed(pending) => pending,
+                    DynamicGroupResult::Panicked => run
+                        .iter()
+                        .map(|&index| (index, GroupMemberResult::Panicked))
+                        .collect(),
+                };
+                finalize_group_members_ordered(pending, |index, result| {
+                    finalized_indices.lock().unwrap().push(index);
+                    match result {
+                        GroupMemberResult::Completed(value) => value,
+                        GroupMemberResult::Panicked => "sweep_panicked".to_owned(),
+                    }
+                })
+            },
+        );
+
+        assert_eq!(*attempted.lock().unwrap(), vec![10, 11, 12, 13]);
+        assert_eq!(
+            finalized,
+            vec![vec![vec![
+                (10, "rendered-10".to_owned()),
+                (11, "rendered-11".to_owned()),
+                (12, "sweep_panicked".to_owned()),
+                (13, "rendered-13".to_owned()),
+            ]]]
+        );
+        assert_eq!(*finalized_indices.lock().unwrap(), vec![10, 11, 12, 13]);
+        assert_eq!(
+            finalized_indices
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4,
+            "no index may be finalized or appended twice"
+        );
+    }
+
+    #[test]
+    fn static_group_finalizes_each_member_before_starting_the_next() {
+        use std::sync::mpsc::channel;
+
+        let gate = (Mutex::new(false), Condvar::new());
+        let gate_timeouts = AtomicUsize::new(0);
+        let (event_tx, event_rx) = channel::<(&'static str, usize)>();
+
+        let (events, results) = std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                map_group_members_immediate(
+                    &[0, 1],
+                    |index| {
+                        event_tx.send(("started", index)).unwrap();
+                        if index == 1 {
+                            let (lock, changed) = &gate;
+                            let mut released = lock.lock().unwrap();
+                            while !*released {
+                                let (next, timeout) = changed
+                                    .wait_timeout(released, Duration::from_secs(5))
+                                    .unwrap();
+                                released = next;
+                                if timeout.timed_out() {
+                                    gate_timeouts.fetch_add(1, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
+                        }
+                        index * 10
+                    },
+                    |index, result| {
+                        event_tx.send(("finalized", index)).unwrap();
+                        result
+                    },
+                )
+            });
+
+            let events = (0..3)
+                .filter_map(|_| event_rx.recv_timeout(Duration::from_secs(5)).ok())
+                .collect::<Vec<_>>();
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+            (events, handle.join().unwrap())
+        });
+
+        assert_eq!(
+            events,
+            vec![("started", 0), ("finalized", 0), ("started", 1)],
+            "the static path must persist member zero before member one can block"
+        );
+        assert_eq!(gate_timeouts.load(Ordering::SeqCst), 0);
+        assert_eq!(results, vec![(0, 0), (1, 10)]);
+    }
+
+    #[test]
+    fn dynamic_group_finalizes_progress_before_a_following_group_unblocks() {
+        use std::sync::mpsc::channel;
+
+        let plans = [dynamic_plan(Some("shared"), 0, 1, &[&[0], &[1]])];
+        let gate = (Mutex::new(false), Condvar::new());
+        let gate_timeouts = AtomicUsize::new(0);
+        let (event_tx, event_rx) = channel::<(&'static str, usize)>();
+
+        let (events, results) = std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                dynamic_render_group_map_ordered_then(
+                    &plans,
+                    2,
+                    |_plan, group, _| {
+                        event_tx.send(("started", group)).unwrap();
+                        if group == 1 {
+                            let (lock, changed) = &gate;
+                            let mut released = lock.lock().unwrap();
+                            while !*released {
+                                let (next, timeout) = changed
+                                    .wait_timeout(released, Duration::from_secs(5))
+                                    .unwrap();
+                                released = next;
+                                if timeout.timed_out() {
+                                    gate_timeouts.fetch_add(1, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
+                        }
+                        group
+                    },
+                    |_plan, group, _run, result| {
+                        event_tx.send(("finalized", group)).unwrap();
+                        result
+                    },
+                )
+            });
+
+            let events = (0..3)
+                .filter_map(|_| event_rx.recv_timeout(Duration::from_secs(5)).ok())
+                .collect::<Vec<_>>();
+            *gate.0.lock().unwrap() = true;
+            gate.1.notify_all();
+            (events, handle.join().unwrap())
+        });
+
+        assert_eq!(
+            events,
+            vec![("started", 0), ("finalized", 0), ("started", 1)],
+            "the completed group's durable-progress callback must run while the next group is still blocked"
+        );
+        assert_eq!(gate_timeouts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            results,
+            vec![vec![
+                DynamicGroupResult::Completed(0),
+                DynamicGroupResult::Completed(1),
+            ]]
+        );
+    }
+
+    #[test]
+    fn dynamic_group_finalize_panic_returns_its_permit_before_failing_closed() {
+        use std::sync::Barrier;
+
+        let plans = [
+            dynamic_plan(Some("a"), 0, 1, &[&[0]]),
+            dynamic_plan(Some("b"), 0, 1, &[&[1]]),
+        ];
+        let both_active = Barrier::new(2);
+        let result = std::panic::catch_unwind(|| {
+            dynamic_render_group_map_ordered_then(
+                &plans,
+                2,
+                |plan, group, _| {
+                    both_active.wait();
+                    (plan, group)
+                },
+                |plan, _group, _run, result| {
+                    if plan == 0 {
+                        panic!("synthetic finalization panic");
+                    }
+                    result
+                },
+            )
+        });
+        let panic = result.expect_err("finalizer panic must fail the scheduler closed");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&'static str>().copied())
+            .unwrap_or("non-string panic");
+        assert_eq!(message, "dynamic render group finalization panicked");
+    }
+
+    #[test]
+    fn dynamic_group_scheduler_steals_later_work_while_an_earlier_group_is_busy() {
+        use std::sync::Barrier;
+
+        let plans = [
+            dynamic_plan(Some("shared"), 0, 2, &[&[0], &[1]]),
+            dynamic_plan(Some("shared"), 1, 2, &[&[2]]),
+        ];
+        let first_wave = Barrier::new(2);
+        let release_early_group = (Mutex::new(false), Condvar::new());
+        let later_group_ran = AtomicUsize::new(0);
+
+        let results = dynamic_render_group_map_ordered(&plans, 2, |plan, group, _| {
+            if group == 0 {
+                first_wave.wait();
+            }
+            match (plan, group) {
+                (0, 0) => {
+                    let (lock, changed) = &release_early_group;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        let (next, timeout) = changed
+                            .wait_timeout(released, Duration::from_secs(5))
+                            .unwrap();
+                        assert!(!timeout.timed_out(), "later ready work was not stolen");
+                        released = next;
+                    }
+                }
+                (0, 1) => {
+                    later_group_ran.store(1, Ordering::SeqCst);
+                    let (lock, changed) = &release_early_group;
+                    *lock.lock().unwrap() = true;
+                    changed.notify_all();
+                }
+                _ => {}
+            }
+            (plan, group)
+        });
+
+        assert_eq!(later_group_ran.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            results,
+            vec![
+                vec![
+                    DynamicGroupResult::Completed((0, 0)),
+                    DynamicGroupResult::Completed((0, 1)),
+                ],
+                vec![DynamicGroupResult::Completed((1, 0))],
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_group_scheduler_enforces_global_and_per_closure_caps() {
+        use std::collections::BTreeSet;
+        use std::sync::mpsc::{RecvTimeoutError, channel};
+
+        let plans = [
+            dynamic_plan(Some("a"), 0, 3, &[&[0], &[3]]),
+            dynamic_plan(Some("a"), 1, 3, &[&[1], &[4]]),
+            dynamic_plan(Some("a"), 2, 3, &[&[2], &[5]]),
+            dynamic_plan(Some("b"), 0, 1, &[&[6], &[7], &[8]]),
+        ];
+        let gate = (Mutex::new((BTreeSet::new(), false)), Condvar::new());
+        let (started_tx, started_rx) = channel::<(usize, usize)>();
+        let global_active = AtomicUsize::new(0);
+        let global_peak = AtomicUsize::new(0);
+        let closure_a_active = AtomicUsize::new(0);
+        let closure_a_peak = AtomicUsize::new(0);
+        let gate_timeouts = AtomicUsize::new(0);
+
+        let observations = std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                dynamic_render_group_map_ordered(&plans, 4, |plan, group, _| {
+                    let task = (plan, group);
+                    let global_now = global_active.fetch_add(1, Ordering::SeqCst) + 1;
+                    global_peak.fetch_max(global_now, Ordering::SeqCst);
+                    if plan < 3 {
+                        let closure_now = closure_a_active.fetch_add(1, Ordering::SeqCst) + 1;
+                        closure_a_peak.fetch_max(closure_now, Ordering::SeqCst);
+                    }
+                    started_tx.send(task).unwrap();
+
+                    let (lock, changed) = &gate;
+                    let mut state = lock.lock().unwrap();
+                    while !state.1 && !state.0.contains(&task) {
+                        let (next, timeout) =
+                            changed.wait_timeout(state, Duration::from_secs(5)).unwrap();
+                        state = next;
+                        if timeout.timed_out() {
+                            gate_timeouts.fetch_add(1, Ordering::SeqCst);
+                            break;
+                        }
+                    }
+                    drop(state);
+
+                    if plan < 3 {
+                        closure_a_active.fetch_sub(1, Ordering::SeqCst);
+                    }
+                    global_active.fetch_sub(1, Ordering::SeqCst);
+                    task
+                })
+            });
+
+            let initial = (0..4)
+                .filter_map(|_| started_rx.recv_timeout(Duration::from_secs(5)).ok())
+                .collect::<BTreeSet<_>>();
+            let global_cap_held = matches!(
+                started_rx.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            );
+
+            let release = |task| {
+                gate.0.lock().unwrap().0.insert(task);
+                gate.1.notify_all();
+            };
+            release((3, 0));
+            let after_b0 = started_rx.recv_timeout(Duration::from_secs(5)).ok();
+            release((3, 1));
+            let after_b1 = started_rx.recv_timeout(Duration::from_secs(5)).ok();
+            let caps_held = matches!(
+                started_rx.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            );
+
+            release((3, 2));
+            let closure_cap_held = matches!(
+                started_rx.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            );
+            release((0, 0));
+            let after_a0 = started_rx.recv_timeout(Duration::from_secs(5)).ok();
+
+            {
+                let mut state = gate.0.lock().unwrap();
+                state.1 = true;
+            }
+            gate.1.notify_all();
+            let results = handle.join().unwrap();
+            (
+                initial,
+                global_cap_held,
+                after_b0,
+                after_b1,
+                caps_held,
+                closure_cap_held,
+                after_a0,
+                results,
+            )
+        });
+
+        let (
+            initial,
+            global_cap_held,
+            after_b0,
+            after_b1,
+            caps_held,
+            closure_cap_held,
+            after_a0,
+            results,
+        ) = observations;
+        assert_eq!(initial, BTreeSet::from([(0, 0), (1, 0), (2, 0), (3, 0)]));
+        assert!(global_cap_held, "a fifth task exceeded the global cap");
+        assert_eq!(
+            after_b0,
+            Some((3, 1)),
+            "a fourth same-closure task bypassed the three-permit cap"
+        );
+        assert_eq!(after_b1, Some((3, 2)));
+        assert!(caps_held, "work started while all four permits were held");
+        assert!(
+            closure_cap_held,
+            "same-closure work started while all three closure permits were held"
+        );
+        assert!(matches!(after_a0, Some((plan, 1)) if plan < 3));
+        assert_eq!(global_peak.load(Ordering::SeqCst), 4);
+        assert_eq!(closure_a_peak.load(Ordering::SeqCst), 3);
+        assert_eq!(gate_timeouts.load(Ordering::SeqCst), 0);
+        let results = results.into_iter().flatten().collect::<Vec<_>>();
+        assert_eq!(results.len(), 9);
+        assert!(
+            results
+                .into_iter()
+                .all(|result| matches!(result, DynamicGroupResult::Completed((_plan, _group))))
+        );
+    }
+
+    #[test]
+    fn dynamic_group_scheduler_keeps_unresolved_lane_as_one_serial_unit() {
+        let plans = [dynamic_plan(None, 0, 1, &[&[0], &[1], &[2]])];
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let order = Mutex::new(Vec::new());
+
+        let results = dynamic_render_group_map_ordered(&plans, 3, |_plan, group, _| {
+            let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            order.lock().unwrap().push(group);
+            active.fetch_sub(1, Ordering::SeqCst);
+            group
+        });
+
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+        assert_eq!(*order.lock().unwrap(), vec![0, 1, 2]);
+        assert_eq!(
+            results,
+            vec![vec![
+                DynamicGroupResult::Completed(0),
+                DynamicGroupResult::Completed(1),
+                DynamicGroupResult::Completed(2),
+            ]]
+        );
+    }
+
+    #[test]
+    fn dynamic_group_scheduler_releases_permit_after_panic_and_finishes_following_work() {
+        let plans = [dynamic_plan(Some("shared"), 0, 1, &[&[0], &[1]])];
+        let calls = AtomicUsize::new(0);
+        let results = dynamic_render_group_map_ordered(&plans, 2, |_plan, group, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if group == 0 {
+                panic!("synthetic render-group panic");
+            }
+            group
+        });
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            results,
+            vec![vec![
+                DynamicGroupResult::Panicked,
+                DynamicGroupResult::Completed(1),
+            ]]
+        );
+    }
+
+    #[test]
+    fn dynamic_group_scheduler_preserves_final_order_and_missing_duplicate_checks() {
+        let plans = [
+            dynamic_plan(Some("shared"), 0, 2, &[&[4, 0], &[3]]),
+            dynamic_plan(Some("shared"), 1, 2, &[&[5, 1], &[2]]),
+        ];
+        let scheduled = dynamic_render_group_map_ordered(&plans, 2, |_plan, _group, run| {
+            run.iter()
+                .map(|&index| (index, index * 10))
+                .collect::<Vec<_>>()
+        });
+        let grouped = scheduled
+            .into_iter()
+            .map(|groups| {
+                groups
+                    .into_iter()
+                    .flat_map(|result| match result {
+                        DynamicGroupResult::Completed(group) => group,
+                        DynamicGroupResult::Panicked => Vec::new(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            restore_indexed_order(6, grouped),
+            vec![0, 10, 20, 30, 40, 50]
+        );
+
+        let duplicate = [dynamic_plan(Some("duplicate"), 0, 1, &[&[0], &[0]])];
+        let duplicate = dynamic_render_group_map_ordered(&duplicate, 2, |_, _, run| {
+            run.iter().map(|&index| (index, index)).collect::<Vec<_>>()
+        })
+        .into_iter()
+        .map(|groups| {
+            groups
+                .into_iter()
+                .flat_map(|result| match result {
+                    DynamicGroupResult::Completed(group) => group,
+                    DynamicGroupResult::Panicked => Vec::new(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+        assert!(
+            std::panic::catch_unwind(|| restore_indexed_order(2, duplicate)).is_err(),
+            "a dynamically scheduled duplicate must not be hidden"
+        );
+
+        let missing = [dynamic_plan(Some("missing"), 0, 1, &[&[0]])];
+        let missing = dynamic_render_group_map_ordered(&missing, 2, |_, _, run| {
+            run.iter().map(|&index| (index, index)).collect::<Vec<_>>()
+        })
+        .into_iter()
+        .map(|groups| {
+            groups
+                .into_iter()
+                .flat_map(|result| match result {
+                    DynamicGroupResult::Completed(group) => group,
+                    DynamicGroupResult::Panicked => Vec::new(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+        assert!(
+            std::panic::catch_unwind(|| restore_indexed_order(2, missing)).is_err(),
+            "a dynamically scheduled missing result must not be hidden"
+        );
+    }
+
+    #[test]
+    fn dynamic_group_scheduler_preserves_empty_plan_coordinates() {
+        let plans = [dynamic_plan(Some("empty"), 0, 1, &[])];
+        let results = dynamic_render_group_map_ordered(&plans, 3, |_, _, _| unreachable!());
+        assert_eq!(results, vec![Vec::<DynamicGroupResult<()>>::new()]);
+    }
+
+    #[test]
+    fn dynamic_group_scheduler_rejects_invalid_or_inconsistent_closure_caps() {
+        let no_permit = [dynamic_plan(Some("shared"), 0, 0, &[&[0]])];
+        assert!(
+            std::panic::catch_unwind(|| {
+                dynamic_render_group_map_ordered(&no_permit, 1, |_, _, _| ())
+            })
+            .is_err()
+        );
+
+        let inconsistent = [
+            dynamic_plan(Some("shared"), 0, 1, &[&[0]]),
+            dynamic_plan(Some("shared"), 1, 2, &[&[1]]),
+        ];
+        assert!(
+            std::panic::catch_unwind(|| {
+                dynamic_render_group_map_ordered(&inconsistent, 2, |_, _, _| ())
             })
             .is_err()
         );
@@ -3035,7 +4047,7 @@ mod tests {
             "build": Value::Null,
         });
         attach_same_closure_shard_evidence(&mut plugin, 1, 2);
-        let report = report(
+        let static_report = report(
             &options,
             &scan,
             &build,
@@ -3046,16 +4058,80 @@ mod tests {
             Some(1),
             Some(2),
             Some(2),
+            Some(3),
         );
 
-        assert_eq!(report["render"]["render_jobs"], 2);
-        assert_eq!(report["render"]["effective_render_jobs"], 2);
-        assert_eq!(report["render"]["requested_same_closure_render_jobs"], 2);
-        assert_eq!(report["render"]["effective_same_closure_render_jobs"], 2);
-        assert_eq!(report["render"]["dependency_lane_count"], 1);
-        assert_eq!(report["render"]["render_shard_count"], 2);
-        assert_eq!(report["plugins"][0]["same_closure_shard"]["index"], 1);
-        assert_eq!(report["plugins"][0]["same_closure_shard"]["count"], 2);
+        assert_eq!(static_report["render"]["render_jobs"], 2);
+        assert_eq!(static_report["render"]["effective_render_jobs"], 2);
+        assert_eq!(
+            static_report["render"]["requested_same_closure_render_jobs"],
+            2
+        );
+        assert_eq!(
+            static_report["render"]["effective_same_closure_render_jobs"],
+            2
+        );
+        assert_eq!(static_report["render"]["dependency_lane_count"], 1);
+        assert_eq!(static_report["render"]["render_shard_count"], 2);
+        assert_eq!(
+            static_report["plugins"][0]["same_closure_shard"]["index"],
+            1
+        );
+        assert_eq!(
+            static_report["plugins"][0]["same_closure_shard"]["count"],
+            2
+        );
+        assert!(
+            static_report["render"]
+                .get("dynamic_group_schedule")
+                .is_none()
+        );
+        assert!(
+            static_report["plugins"][0]
+                .get("render_work_group")
+                .is_none()
+        );
+
+        options.dynamic_same_closure_groups = true;
+        let mut dynamic_plugin = static_report["plugins"][0].clone();
+        attach_render_work_group_evidence(&mut dynamic_plugin, 2, 3);
+        let dynamic_report = report(
+            &options,
+            &scan,
+            &build,
+            Duration::from_millis(3),
+            Duration::from_millis(5),
+            BTreeMap::from([("rendered".to_owned(), 1)]),
+            vec![dynamic_plugin],
+            Some(1),
+            Some(2),
+            Some(2),
+            Some(3),
+        );
+        assert_eq!(
+            dynamic_report["render"]["dynamic_group_schedule"]["requested_mode"],
+            "closure_capped_ready_queue"
+        );
+        assert_eq!(
+            dynamic_report["render"]["dynamic_group_schedule"]["effective_mode"],
+            "closure_capped_ready_queue"
+        );
+        assert_eq!(
+            dynamic_report["render"]["dynamic_group_schedule"]["global_process_cap"],
+            2
+        );
+        assert_eq!(
+            dynamic_report["render"]["dynamic_group_schedule"]["render_group_count"],
+            3
+        );
+        assert_eq!(
+            dynamic_report["plugins"][0]["same_closure_shard"],
+            json!({"index": 1, "count": 2})
+        );
+        assert_eq!(
+            dynamic_report["plugins"][0]["render_work_group"],
+            json!({"index": 2, "count": 3})
+        );
     }
 
     #[test]
