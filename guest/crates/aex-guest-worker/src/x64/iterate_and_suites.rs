@@ -978,25 +978,49 @@ fn is_msvc_i32_throw_info(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) ->
 fn msvc_throw_type_name(unicorn: &Unicorn<'_, GuestState>, throw_info: u64) -> Option<String> {
     const MAX_TYPE_NAME_BYTES: u64 = 128;
 
-    let (image_start, image_end) = unicorn.get_data().image_region?;
-    if throw_info < image_start || throw_info.checked_add(16)? > image_end {
+    let state = unicorn.get_data();
+    let image_start = guest_module_from_address(state, throw_info)?;
+    let image_end = if state.image_region?.0 == image_start {
+        state.image_region?.1
+    } else {
+        state
+            .loaded_libraries
+            .values()
+            .find(|library| library.base == image_start)?
+            .end
+    };
+    let rva_address = |rva: u32, size: u64| {
+        let address = image_start.checked_add(u64::from(rva))?;
+        if address.checked_add(size)? > image_end
+            || !guest_range_has_permission(unicorn, address, size, Prot::READ).ok()?
+        {
+            return None;
+        }
+        Some(address)
+    };
+    if throw_info < image_start
+        || throw_info.checked_add(16)? > image_end
+        || !guest_range_has_permission(unicorn, throw_info, 16, Prot::READ).ok()?
+    {
         return None;
     }
     let catchable_array_rva = read_guest_u32(unicorn, throw_info.checked_add(12)?)?;
-    let catchable_array = image_rva_address(unicorn, catchable_array_rva, 8)?;
+    let catchable_array = rva_address(catchable_array_rva, 8)?;
     let catchable_count = read_guest_u32(unicorn, catchable_array)?;
     if catchable_count == 0 || catchable_count > 32 {
         return None;
     }
     let catchable_type_rva = read_guest_u32(unicorn, catchable_array.checked_add(4)?)?;
-    let catchable_type = image_rva_address(unicorn, catchable_type_rva, 28)?;
+    let catchable_type = rva_address(catchable_type_rva, 28)?;
     let type_descriptor_rva = read_guest_u32(unicorn, catchable_type.checked_add(4)?)?;
-    let type_descriptor = image_rva_address(unicorn, type_descriptor_rva, 17)?;
+    let type_descriptor = rva_address(type_descriptor_rva, 17)?;
     let name_start = type_descriptor.checked_add(16)?;
     let mut bytes = Vec::new();
     for offset in 0..MAX_TYPE_NAME_BYTES {
         let address = name_start.checked_add(offset)?;
-        if address >= image_end {
+        if address >= image_end
+            || !guest_range_has_permission(unicorn, address, 1, Prot::READ).ok()?
+        {
             return None;
         }
         let byte = unicorn.mem_read_as_vec(address, 1).ok()?[0];
@@ -1088,6 +1112,9 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
     if try_emulate_selector_abort(unicorn) {
         return;
     }
+    if try_emulate_ocio_missing_file_rule(unicorn) {
+        return;
+    }
     // `_CxxThrowException` is noreturn. Returning through the import stub for
     // an exception we cannot faithfully dispatch would execute compiler
     // unreachable code and can corrupt selector/session state. Keep all
@@ -1103,14 +1130,186 @@ fn emulate_cxx_throw_exception(unicorn: &mut Unicorn<'_, GuestState>) {
             .reg_read(RegisterX86::RCX)
             .ok()
             .and_then(|exception| cv_exception_message(unicorn, exception, &throw_type));
+        let std_message = unicorn
+            .reg_read(RegisterX86::RCX)
+            .ok()
+            .and_then(|exception| {
+                if !throw_type.contains("OpenColorIO") {
+                    return None;
+                }
+                let bytes = unicorn.mem_read_as_vec(exception + 8, 8).ok()?;
+                let what = u64::from_le_bytes(bytes.try_into().ok()?);
+                let message =
+                    read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
+                Some(String::from_utf8_lossy(&message).into_owned())
+            });
         let message_suffix = cv_message
+            .or(std_message)
             .map(|message| format!(", cv_message={message}"))
             .unwrap_or_default();
+        let caller = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 8).ok())
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+            .unwrap_or_default();
+        // Keep a bounded view of plausible saved return addresses. This is
+        // diagnostic only, but it lets us identify the enclosing FH4 frames
+        // without enabling the much more expensive instruction trace.
+        let stack_code = unicorn
+            .reg_read(RegisterX86::RSP)
+            .ok()
+            .and_then(|rsp| unicorn.mem_read_as_vec(rsp, 1024).ok())
+            .map(|bytes| {
+                bytes
+                    .chunks_exact(8)
+                    .enumerate()
+                    .filter_map(|(slot, bytes)| {
+                        let address = u64::from_le_bytes(bytes.try_into().ok()?);
+                        let module = guest_module_from_address(unicorn.get_data(), address)?;
+                        Some(format!(
+                            "+{:#x}:{:#x}+{:#x}",
+                            slot * 8,
+                            module,
+                            address - module
+                        ))
+                    })
+                    .take(24)
+                    .collect::<Vec<_>>()
+                    .join("|")
+            })
+            .unwrap_or_default();
+        let heap_live = unicorn.get_data().crt_heap.live_bytes();
+        let heap_allocations = unicorn.get_data().crt_heap.allocations().count();
+        let heap_largest = unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .map(|(_, allocation)| allocation.requested_size)
+            .max()
+            .unwrap_or(0);
+        let heap_failure = format!("{:?}", unicorn.get_data().last_crt_heap_failure);
+        let guest_assets = unicorn
+            .get_data()
+            .guest_files
+            .reports
+            .iter()
+            .rev()
+            .take(8)
+            .map(|report| report.name.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
+        let environment = unicorn
+            .get_data()
+            .environment_overrides
+            .iter()
+            .map(|(name, value)| {
+                format!(
+                    "{}={}",
+                    String::from_utf8_lossy(name),
+                    value
+                        .as_deref()
+                        .map(String::from_utf8_lossy)
+                        .unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
         unicorn.get_data_mut().callback_error = Some(format!(
-            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}{message_suffix})"
+            "guest called _CxxThrowException outside the supported selector-abort contract (msvc_type={throw_type}, caller={caller:#x}, stack_code={stack_code}, crt_heap_live={heap_live}, crt_heap_allocations={heap_allocations}, crt_heap_largest={heap_largest}, crt_heap_failure={heap_failure}, guest_assets={guest_assets}, environment={environment}{message_suffix})"
         ));
     }
     let _ = unicorn.emu_stop();
+}
+
+/// OpenColorIO 2.4 probes the optional `ColorSpaceNamePathSearch` file rule by
+/// calling `FileRules::getIndexForRule` inside a local try/catch. The Windows
+/// runtime normally unwinds the callee and resumes the catch continuation. We
+/// reproduce that concrete FH4 edge while the general dispatcher is absent.
+/// Every address is validated relative to the mapped OpenColorIO image and the
+/// saved return address, so unrelated throws still fail closed.
+fn try_emulate_ocio_missing_file_rule(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
+    const THROW_RETURN_RVA: u64 = 0x0d5a22;
+    const CALL_RETURN_RVA: u64 = 0x0d359a;
+    const CATCH_CONTINUATION_RVA: u64 = 0x0d359d;
+    const THROW_FRAME_TO_RETURN: u64 = 0x180;
+
+    let Some(library) = guest_library_by_name(unicorn.get_data(), "OpenColorIO_2_4.dll") else {
+        return false;
+    };
+    let base = library.base;
+    let rsp = match unicorn.reg_read(RegisterX86::RSP) {
+        Ok(rsp) => rsp,
+        Err(_) => return false,
+    };
+    let read_u64 = |unicorn: &Unicorn<'_, GuestState>, address: u64| {
+        unicorn
+            .mem_read_as_vec(address, 8)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u64::from_le_bytes)
+    };
+    if read_u64(unicorn, rsp) != Some(base + THROW_RETURN_RVA)
+        || read_u64(unicorn, rsp + THROW_FRAME_TO_RETURN) != Some(base + CALL_RETURN_RVA)
+    {
+        return false;
+    }
+    let throw_info = match unicorn.reg_read(RegisterX86::RDX) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    if msvc_throw_type_name(unicorn, throw_info).as_deref()
+        != Some(".?AVException@OpenColorIO_v2_4@@")
+    {
+        return false;
+    }
+    let exception = match unicorn.reg_read(RegisterX86::RCX) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let Some(message) =
+        cv_exception_message(unicorn, exception, ".?AVException@OpenColorIO_v2_4@@").or_else(
+            || {
+                let bytes = unicorn.mem_read_as_vec(exception + 8, 8).ok()?;
+                let what = u64::from_le_bytes(bytes.try_into().ok()?);
+                let message =
+                    read_crt_stdio_c_string(unicorn, what, 4096, "exception what").ok()?;
+                Some(String::from_utf8_lossy(&message).into_owned())
+            },
+        )
+    else {
+        return false;
+    };
+    if message != "File rules: rule name 'ColorSpaceNamePathSearch' not found." {
+        return false;
+    }
+
+    // Apply the unwind codes for getIndexForRule (0xd5900..0xd5a23).
+    // RSP here includes the return address pushed by _CxxThrowException.
+    for (register, offset) in [
+        (RegisterX86::R14, 0x168),
+        (RegisterX86::RDI, 0x170),
+        (RegisterX86::RSI, 0x178),
+        (RegisterX86::RBX, 0x198),
+        (RegisterX86::RBP, 0x1a0),
+    ] {
+        let Some(value) = read_u64(unicorn, rsp + offset) else {
+            return false;
+        };
+        if unicorn.reg_write(register, value).is_err() {
+            return false;
+        }
+    }
+    let caller_rsp = rsp + THROW_FRAME_TO_RETURN + 8;
+    if unicorn.reg_write(RegisterX86::RSP, caller_rsp).is_err()
+        || unicorn
+            .reg_write(RegisterX86::RIP, base + CATCH_CONTINUATION_RVA)
+            .is_err()
+    {
+        return false;
+    }
+    true
 }
 
 fn try_emulate_selector_abort(unicorn: &mut Unicorn<'_, GuestState>) -> bool {

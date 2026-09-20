@@ -4,6 +4,8 @@ members = [
     "crates/aex-apple-opencl",
     "crates/aex-clspv",
     "crates/aex-guest-worker",
+    "crates/aex-host-time",
+    "crates/aex-host-identity",
     "crates/aex-unicorn-buffer",
     "crates/aex-wgpu-compute",
 ]
@@ -21,3 +23,6 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 unicorn-engine = { version = "2.1.5", default-features = false, features = ["arch_x86"] }
+
+[patch.crates-io]
+unicorn-engine-sys = { path = "vendor/unicorn-engine-sys" }

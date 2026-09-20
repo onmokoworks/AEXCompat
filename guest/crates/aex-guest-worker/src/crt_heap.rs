@@ -1,11 +1,14 @@
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 
 pub(crate) const CRT_HEAP_ALIGNMENT: u64 = 16;
 pub(crate) const CRT_HEAP_PAGE_SIZE: u64 = 4096;
-pub(crate) const MAX_CRT_ALLOCATION_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const MAX_CRT_HEAP_BYTES: u64 = 128 * 1024 * 1024;
-pub(crate) const MAX_CRT_ALLOCATIONS: usize = 4096;
+pub(crate) const MAX_CRT_ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_CRT_HEAP_BYTES: u64 = 512 * 1024 * 1024;
+// Sapphire setup holds more than 4096 small C++ objects concurrently. Keep
+// a finite metadata/page-overhead bound while retaining the byte-size limits.
+pub(crate) const MAX_CRT_ALLOCATIONS: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CrtAllocation {
@@ -58,6 +61,7 @@ impl fmt::Display for CrtHeapError {
 #[derive(Default)]
 pub(crate) struct CrtHeap {
     allocations: BTreeMap<u64, CrtAllocation>,
+    allocation_hints: RefCell<BTreeMap<(u64, u64), u64>>,
     live_bytes: u64,
 }
 
@@ -111,7 +115,12 @@ impl CrtHeap {
         if self.live_bytes > MAX_CRT_HEAP_BYTES - requested_size {
             return Err(CrtHeapError::AggregateBudgetExceeded);
         }
-        let backing_size = align_up(requested_size, CRT_HEAP_PAGE_SIZE)?;
+        let backing_alignment = if kind == CrtAllocationKind::EnvironmentStrings {
+            CRT_HEAP_PAGE_SIZE
+        } else {
+            CRT_HEAP_ALIGNMENT
+        };
+        let backing_size = align_up(requested_size, backing_alignment)?;
         Ok(CrtAllocation {
             requested_size,
             backing_size,
@@ -125,7 +134,12 @@ impl CrtHeap {
         range_end: u64,
         allocation: CrtAllocation,
     ) -> Result<u64, CrtHeapError> {
-        self.first_fit_aligned(range_start, range_end, allocation, CRT_HEAP_PAGE_SIZE)
+        let alignment = if allocation.kind == CrtAllocationKind::EnvironmentStrings {
+            CRT_HEAP_PAGE_SIZE
+        } else {
+            CRT_HEAP_ALIGNMENT
+        };
+        self.first_fit_aligned(range_start, range_end, allocation, alignment)
     }
 
     pub(crate) fn first_fit_aligned(
@@ -138,13 +152,31 @@ impl CrtHeap {
         if alignment == 0 || !alignment.is_power_of_two() {
             return Err(CrtHeapError::InvalidAlignment);
         }
-        let mapping_alignment = alignment.max(CRT_HEAP_PAGE_SIZE);
-        let mut candidate = align_up(range_start, mapping_alignment)?;
-        for (&pointer, existing) in self.allocations.range(range_start..range_end) {
+        let mapping_alignment = alignment.max(CRT_HEAP_ALIGNMENT);
+        let hinted = self
+            .allocation_hints
+            .borrow()
+            .get(&(range_start, range_end))
+            .copied()
+            .filter(|hint| (range_start..range_end).contains(hint))
+            .unwrap_or(range_start);
+        let mut candidate = align_up(hinted, mapping_alignment)?;
+        if let Some((&pointer, existing)) = self.allocations.range(..=candidate).next_back() {
+            let existing_end = pointer
+                .checked_add(existing.backing_size)
+                .ok_or(CrtHeapError::AddressSpaceExhausted)?;
+            if existing_end > candidate {
+                candidate = align_up(existing_end, mapping_alignment)?;
+            }
+        }
+        for (&pointer, existing) in self.allocations.range(candidate..range_end) {
             let candidate_end = candidate
                 .checked_add(allocation.backing_size)
                 .ok_or(CrtHeapError::AddressSpaceExhausted)?;
             if candidate_end <= pointer {
+                self.allocation_hints
+                    .borrow_mut()
+                    .insert((range_start, range_end), candidate_end);
                 return Ok(candidate);
             }
             candidate = align_up(
@@ -154,11 +186,15 @@ impl CrtHeap {
                 mapping_alignment,
             )?;
         }
-        candidate
+        let selected = candidate
             .checked_add(allocation.backing_size)
             .filter(|end| *end <= range_end)
             .map(|_| candidate)
-            .ok_or(CrtHeapError::AddressSpaceExhausted)
+            .ok_or(CrtHeapError::AddressSpaceExhausted)?;
+        self.allocation_hints
+            .borrow_mut()
+            .insert((range_start, range_end), selected + allocation.backing_size);
+        Ok(selected)
     }
 
     pub(crate) fn insert(
@@ -209,12 +245,77 @@ impl CrtHeap {
         if retained_bytes > MAX_CRT_HEAP_BYTES - requested_size {
             return Err(CrtHeapError::AggregateBudgetExceeded);
         }
-        let backing_size = align_up(requested_size, CRT_HEAP_PAGE_SIZE)?;
+        let backing_size = align_up(requested_size, CRT_HEAP_ALIGNMENT)?;
         Ok(CrtAllocation {
             requested_size,
             backing_size,
             kind: CrtAllocationKind::ProcessHeap,
         })
+    }
+
+    pub(crate) fn regular_allocation(&self, pointer: u64) -> Result<CrtAllocation, CrtHeapError> {
+        let allocation = *self
+            .allocations
+            .get(&pointer)
+            .ok_or(CrtHeapError::ForeignOrFreedPointer)?;
+        if allocation.kind != CrtAllocationKind::Regular {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        Ok(allocation)
+    }
+
+    pub(crate) fn allocation_containing(&self, pointer: u64) -> Option<(u64, CrtAllocation)> {
+        let (&base, &allocation) = self.allocations.range(..=pointer).next_back()?;
+        (pointer < base.saturating_add(allocation.requested_size)).then_some((base, allocation))
+    }
+
+    pub(crate) fn prepare_regular_reallocation(
+        &self,
+        pointer: u64,
+        requested_size: u64,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.regular_allocation(pointer)?;
+        let requested_size = requested_size.max(1);
+        if requested_size > MAX_CRT_ALLOCATION_BYTES {
+            return Err(CrtHeapError::AllocationTooLarge);
+        }
+        let retained_bytes = self.live_bytes - old.requested_size;
+        if retained_bytes > MAX_CRT_HEAP_BYTES - requested_size {
+            return Err(CrtHeapError::AggregateBudgetExceeded);
+        }
+        Ok(CrtAllocation {
+            requested_size,
+            backing_size: align_up(requested_size, CRT_HEAP_PAGE_SIZE)?,
+            kind: CrtAllocationKind::Regular,
+        })
+    }
+
+    pub(crate) fn commit_regular_reallocation(
+        &mut self,
+        old_pointer: u64,
+        new_pointer: u64,
+        mut allocation: CrtAllocation,
+    ) -> Result<CrtAllocation, CrtHeapError> {
+        let old = self.regular_allocation(old_pointer)?;
+        if allocation.kind != CrtAllocationKind::Regular {
+            return Err(CrtHeapError::AllocatorMismatch);
+        }
+        if new_pointer == 0 || new_pointer % CRT_HEAP_ALIGNMENT != 0 {
+            return Err(CrtHeapError::InvalidPointer);
+        }
+        if new_pointer != old_pointer && self.allocations.contains_key(&new_pointer) {
+            return Err(CrtHeapError::DuplicatePointer);
+        }
+        if new_pointer == old_pointer {
+            allocation.backing_size = old.backing_size;
+        }
+        self.allocations.remove(&old_pointer);
+        self.allocations.insert(new_pointer, allocation);
+        self.live_bytes = self.live_bytes - old.requested_size + allocation.requested_size;
+        if new_pointer != old_pointer {
+            self.rewind_allocation_hints(old_pointer);
+        }
+        Ok(old)
     }
 
     pub(crate) fn prepare_process_heap_in_place_reallocation(
@@ -250,6 +351,9 @@ impl CrtHeap {
         self.allocations.remove(&old_pointer);
         self.allocations.insert(new_pointer, allocation);
         self.live_bytes = self.live_bytes - old.requested_size + allocation.requested_size;
+        if new_pointer != old_pointer {
+            self.rewind_allocation_hints(old_pointer);
+        }
         Ok(old)
     }
 
@@ -285,16 +389,24 @@ impl CrtHeap {
         }
         self.allocations.remove(&pointer);
         self.live_bytes -= allocation.requested_size;
+        self.rewind_allocation_hints(pointer);
         Ok(allocation)
     }
 
-    pub(crate) fn allocations(&self) -> impl Iterator<Item = (u64, CrtAllocation)> + '_ {
+    fn rewind_allocation_hints(&self, pointer: u64) {
+        for (&(start, end), hint) in self.allocation_hints.borrow_mut().iter_mut() {
+            if (start..end).contains(&pointer) && pointer < *hint {
+                *hint = pointer;
+            }
+        }
+    }
+
+    pub(crate) fn allocations(&self) -> impl DoubleEndedIterator<Item = (u64, CrtAllocation)> + '_ {
         self.allocations
             .iter()
             .map(|(&pointer, &allocation)| (pointer, allocation))
     }
 
-    #[cfg(test)]
     pub(crate) fn live_bytes(&self) -> u64 {
         self.live_bytes
     }
@@ -312,11 +424,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zero_size_is_unique_minimum_allocation_and_page_backed() {
+    fn zero_size_is_unique_minimum_allocation_and_aligned() {
         let heap = CrtHeap::default();
         let allocation = heap.prepare_allocation(0).unwrap();
         assert_eq!(allocation.requested_size, 1);
-        assert_eq!(allocation.backing_size, CRT_HEAP_PAGE_SIZE);
+        assert_eq!(allocation.backing_size, CRT_HEAP_ALIGNMENT);
     }
 
     #[test]
@@ -334,7 +446,7 @@ mod tests {
             heap.prepare_allocation(MAX_CRT_ALLOCATION_BYTES + 1),
             Err(CrtHeapError::AllocationTooLarge)
         );
-        for index in 0..2 {
+        for index in 0..(MAX_CRT_HEAP_BYTES / MAX_CRT_ALLOCATION_BYTES) {
             let allocation = heap.prepare_allocation(MAX_CRT_ALLOCATION_BYTES).unwrap();
             heap.insert(0x1000 + index * 0x1000, allocation).unwrap();
         }
@@ -357,10 +469,18 @@ mod tests {
             heap.prepare_allocation(1),
             Err(CrtHeapError::AllocationCountExceeded)
         );
+        // Releasing one live object restores exactly one allocation slot.
+        heap.remove(0x1000).unwrap();
+        let replacement = heap.prepare_allocation(32).unwrap();
+        heap.insert(0x1000, replacement).unwrap();
+        assert_eq!(
+            heap.prepare_allocation(1),
+            Err(CrtHeapError::AllocationCountExceeded)
+        );
     }
 
     #[test]
-    fn first_fit_reuses_freed_page_and_preserves_alignment() {
+    fn first_fit_reuses_freed_slot_and_preserves_alignment() {
         let mut heap = CrtHeap::default();
         let allocation = heap.prepare_allocation(17).unwrap();
         let first = heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap();
@@ -368,7 +488,7 @@ mod tests {
         heap.insert(first, allocation).unwrap();
         let second = heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap();
         heap.insert(second, allocation).unwrap();
-        assert_eq!(second, first + CRT_HEAP_PAGE_SIZE);
+        assert_eq!(second, first + allocation.backing_size);
         heap.remove(first).unwrap();
         assert_eq!(
             heap.first_fit(0x10_0000, 0x20_0000, allocation).unwrap(),
@@ -423,6 +543,21 @@ mod tests {
             heap.remove(0x1000),
             Err(CrtHeapError::ForeignOrFreedPointer)
         );
+    }
+
+    #[test]
+    fn containing_lookup_finds_interior_bytes_without_crossing_requested_end() {
+        let mut heap = CrtHeap::default();
+        let first = heap.prepare_allocation(17).unwrap();
+        let second = heap.prepare_allocation(9).unwrap();
+        heap.insert(0x1000, first).unwrap();
+        heap.insert(0x2000, second).unwrap();
+        assert_eq!(heap.allocation_containing(0x1000), Some((0x1000, first)));
+        assert_eq!(heap.allocation_containing(0x1010), Some((0x1000, first)));
+        assert_eq!(heap.allocation_containing(0x1011), None);
+        assert_eq!(heap.allocation_containing(0x1fff), None);
+        assert_eq!(heap.allocation_containing(0x2008), Some((0x2000, second)));
+        assert_eq!(heap.allocation_containing(0x2009), None);
     }
 
     #[test]

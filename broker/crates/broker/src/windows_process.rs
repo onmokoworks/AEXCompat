@@ -1820,10 +1820,32 @@ mod tests {
             .split('\0')
             .filter(|entry| !entry.is_empty())
             .map(|entry| {
-                let (key, value) = entry.split_once('=').expect("KEY=VALUE");
-                (key.to_owned(), value.to_owned())
+                // Windows drive-directory entries have names like `=C:`.
+                // The leading '=' belongs to the name, not the separator.
+                let separator = entry
+                    .char_indices()
+                    .skip(1)
+                    .find(|(_, ch)| *ch == '=')
+                    .map(|(index, _)| index)
+                    .expect("KEY=VALUE");
+                let (key, value) = entry.split_at(separator);
+                (key.to_owned(), value[1..].to_owned())
             })
             .collect()
+    }
+
+    #[test]
+    fn environment_decoder_preserves_drive_directory_names() {
+        let block: Vec<u16> = "=C:=C:\\Users\\runner\0PATH=C:\\bin\0日本語=x=y\0\0"
+            .encode_utf16()
+            .collect();
+        assert_eq!(
+            value_of(&block, "=C:").as_deref(),
+            Some("C:\\Users\\runner")
+        );
+        assert_eq!(value_of(&block, "PATH").as_deref(), Some("C:\\bin"));
+        assert_eq!(value_of(&block, "日本語").as_deref(), Some("x=y"));
+        assert_eq!(value_of(&block, ""), None);
     }
 
     fn value_of(block: &[u16], key: &str) -> Option<String> {

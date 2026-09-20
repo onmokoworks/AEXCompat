@@ -15,13 +15,46 @@ enum OpenClBridgeSymbol {
     ReleaseKernel,
 }
 
+// The guest CRT remains in its initial C locale; locale mutation is unsupported.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CrtAsciiClass {
+    Alpha,
+    Digit,
+    Graph,
+    Lower,
+    Print,
+    Punct,
+    Upper,
+    Xdigit,
+}
+
+impl CrtAsciiClass {
+    fn contains(self, byte: u8) -> bool {
+        match self {
+            Self::Alpha => byte.is_ascii_alphabetic(),
+            Self::Digit => byte.is_ascii_digit(),
+            Self::Graph => byte.is_ascii_graphic(),
+            Self::Lower => byte.is_ascii_lowercase(),
+            Self::Print => byte.is_ascii_graphic() || byte == b' ',
+            Self::Punct => byte.is_ascii_punctuation(),
+            Self::Upper => byte.is_ascii_uppercase(),
+            Self::Xdigit => byte.is_ascii_hexdigit(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegacyWin64Import {
     Malloc,
+    Realloc,
     Calloc,
     Free,
     CrtStrdup,
     CrtStricmp,
+    CrtWcstombs,
+    CrtIsSpace,
+    CrtIsAlnum,
+    CrtAsciiClass(CrtAsciiClass),
     CrtToLower,
     CrtToUpper,
     AlignedMalloc,
@@ -31,17 +64,130 @@ enum LegacyWin64Import {
     Memset,
     MemoryCopy,
     MemChr,
+    StrStr,
+    CrtAsctime,
+    CrtCtime64,
+    CrtLocaltime64,
+    CrtFtime64,
+    CrtTime64,
+    StrCmp,
+    StrNCmp,
+    StrLen,
+    StrCpy,
+    StrCat,
+    StrNCat,
+    StrChr,
+    StrRChr,
+    Atoi,
+    Strtol,
+    Strtoul,
+    Strtod,
+    Strtof,
+    SetNamedSecurityInfoA,
+    SetEntriesInAclA,
+    IsValidAcl,
+    InitializeAcl,
+    CreateDirectoryA,
+    AreFileApisAnsi,
+    GlobalMemoryStatusEx,
+    InitOnceBeginInitialize,
+    InitOnceComplete,
+    InitOnceInitialize,
+    GetVolumeInformationA,
+    Errno,
+    GetHostByName,
+    GetAdaptersAddresses,
+    ExitThread,
+    CoCreateInstance,
+    CoInitializeSecurity,
+    CoInitializeEx,
+    CoUninitialize,
+    ShellExecuteA,
+    GetFileAttributesExA,
+    GetFileAttributesExW,
+    Rename,
+    Stat64i32,
+    Wstat64i32,
+    Fullpath,
+    AddAccessAllowedAceEx,
+    LocalFree,
+    AllocateAndInitializeSid,
+    CreateWellKnownSid,
+    FreeSid,
+    RegSetValueExA,
+    RegQueryValueExA,
+    RegCreateKeyExA,
+    RegOpenKeyExA,
+    RegCloseKey,
     MemCmp,
     StdioVsnprintfS,
+    StdioVsscanf,
+    StdioVsprintfS,
     StdioVsprintf,
+    EncodePointer,
+    DecodePointer,
+    CrtLocaleNames,
+    CrtLocaleConv,
+    CrtCreateLocale,
+    CrtFreeLocale,
+    CrtPctype,
+    CrtMbCurMax,
+    CrtLocaleCodePage,
+    CrtLocaleCollateCodePage,
+    CrtSetLocale(bool),
+    CrtLocaleLock,
+    CrtLocaleUnlock,
+    CrtTimeNames(bool),
+    CrtWideTimeNames(bool),
+    CrtTimeLocaleNames,
+    StreamBufferPointers,
+    AcRtIobFunc,
+    Fgetc,
+    Ungetc,
+    Fgets,
+    Fflush,
+    Fwrite,
+    Fread,
+    Feof,
+    Ferror,
+    LockFile,
+    UnlockFile,
+    Fclose,
+    Fseeki64,
+    Ftelli64,
+    Fsetpos,
+    Fgetpos,
+    Rewind,
+    CrtOpen(bool),
+    CrtRead,
+    CrtClose,
+    CrtLseek64,
+    CrtSetMode,
+    Fopen,
+    Fsopen,
+    Wfopen,
+    Wfsopen,
+    Strerror,
     FopenS,
+    CrtSrand,
+    CrtRand,
+    MbsuprS,
+    DupenvS,
+    StrcatS,
+    StrcpyS,
     StrncpyS,
+    CrtStrnicmpLocale,
+    MsvcpLockitCtor,
+    MsvcpLockitDtor,
     MsvcpMutexInit,
     MsvcpMutexLock,
     MsvcpMutexUnlock,
     MsvcpMutexDestroy,
     MsvcpHardwareConcurrency,
+    MsvcpCodecvtIn,
+    MsvcpCodecvtOut,
     ShGetFolderPathA,
+    ShGetSpecialFolderPathA,
     MsvcpExceptionPtrCreate,
     MsvcpExceptionPtrCopy,
     MsvcpExceptionPtrAssign,
@@ -50,7 +196,10 @@ enum LegacyWin64Import {
     MsvcpExceptionPtrRethrow,
     VcruntimeExceptionCopy,
     VcruntimeExceptionDestroy,
+    UncaughtExceptions,
     CxxThrowException,
+    RtDynamicCast,
+    CopySign,
     Cos,
     CosF,
     Ceil,
@@ -59,8 +208,11 @@ enum LegacyWin64Import {
     Floor,
     FloorF,
     FmodF,
+    FdClass,
+    DClass,
     LRound,
     LRoundF,
+    Log,
     Round,
     RoundF,
     PowF,
@@ -77,21 +229,58 @@ enum LegacyWin64Import {
     VcompNoOp,
     GetSystemTimeAsFileTime,
     GetSystemInfo,
+    Beep,
+    VerifyVersionInfoA,
+    VerSetConditionMask,
+    GetVersion,
+    GetVersionExA,
+    GetSystemMetrics,
+    SetWindowsHookExA,
+    UnhookWindowsHookEx,
+    CallNextHookEx,
+    SetTimer,
+    KillTimer,
+    MessageBox(bool),
+    GetUserNameA,
+    GetUserNameW,
+    GetHostname,
     GetStartupInfoW,
     RtlCaptureContext,
     GetStdHandle,
     GetConsoleMode,
     GetFileType,
     CreateFileW,
+    CreateFileA,
+    WsPrintfA,
+    ReadFile,
+    GetFileSizeEx,
+    GetFileInformationByHandle,
+    SetFilePointerEx,
+    FindFirstFileA,
+    FindNextFileA,
+    FindClose,
     FindFirstFileExW,
     CreateThread,
+    CrtBeginThreadEx,
     NtWriteFile,
     WakeByAddressAll,
     WakeByAddressSingle,
     WaitOnAddress,
+    CreateSemaphoreA,
+    ReleaseSemaphore,
+    CreateMutexA,
+    ReleaseMutex,
+    CreateEventA,
+    CreateEventW,
+    OpenEventA,
+    OpenEventW,
+    SetEvent,
+    ResetEvent,
     WaitForSingleObject,
     WaitForSingleObjectEx,
     CloseHandle,
+    GetProcessAffinityMask,
+    GetCurrentProcess,
     GetCurrentThread,
     SetThreadStackGuarantee,
     SwitchToThread,
@@ -99,6 +288,7 @@ enum LegacyWin64Import {
     GetCommandLineA,
     GetCommandLineW,
     GetACP,
+    GetSystemDefaultLCID,
     GetCPInfo,
     IsDebuggerPresent,
     OutputDebugStringA,
@@ -116,9 +306,12 @@ enum LegacyWin64Import {
     LCMapStringW,
     GetLastError,
     SetLastError,
+    FormatMessageA,
     SetThreadErrorMode,
+    LoadLibraryExA,
     LoadLibraryA,
     LoadLibraryExW,
+    FreeLibrary,
     FlsAlloc,
     FlsGetValue,
     FlsSetValue,
@@ -134,16 +327,29 @@ enum LegacyWin64Import {
     CrtRegisterOnexitFunction,
     CrtExecuteOnexitTable,
     CrtSetTerminate,
+    CrtPutenv,
+    CrtPutenvS,
     CrtGetenv,
+    CrtWgetenv,
+    CrtWenviron,
     InitializeCriticalSection,
     InitializeCriticalSectionAndSpinCount,
     InitializeCriticalSectionEx,
     EnterCriticalSection,
     LeaveCriticalSection,
     DeleteCriticalSection,
+    SetSecurityDescriptorDacl,
+    InitializeSecurityDescriptor,
+    InitializeSrwLock,
     AcquireSrwLockExclusive,
     TryAcquireSrwLockExclusive,
     ReleaseSrwLockExclusive,
+    InitializeConditionVariable,
+    SleepConditionVariableSrw,
+    WakeConditionVariable,
+    WakeAllConditionVariable,
+    ExpandEnvironmentStringsA,
+    GetModuleHandleA,
     GetModuleHandleW,
     GetModuleHandleExA,
     GetModuleHandleExW,
@@ -342,25 +548,132 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         None => {}
     }
     let legacy = match (normalized_library.as_str(), symbol) {
-        ("kernel32.dll", "GetSystemTimeAsFileTime") => LegacyWin64Import::GetSystemTimeAsFileTime,
+        ("msvcp140.dll", "_Thrd_id") => LegacyWin64Import::GetCurrentThreadId,
+        (_, "_Thrd_id") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("msvcp140.dll", "??0_Lockit@std@@QEAA@H@Z") => LegacyWin64Import::MsvcpLockitCtor,
+        ("msvcp140.dll", "??1_Lockit@std@@QEAA@XZ") => LegacyWin64Import::MsvcpLockitDtor,
+        (
+            "msvcp140.dll",
+            "?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z",
+        ) => LegacyWin64Import::MsvcpCodecvtIn,
+        (
+            "msvcp140.dll",
+            "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z",
+        ) => LegacyWin64Import::MsvcpCodecvtOut,
+        ("advapi32.dll", "SetSecurityDescriptorDacl") => {
+            LegacyWin64Import::SetSecurityDescriptorDacl
+        }
+        (_, "SetSecurityDescriptorDacl") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "InitializeSecurityDescriptor") => {
+            LegacyWin64Import::InitializeSecurityDescriptor
+        }
+        (_, "InitializeSecurityDescriptor") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-sysinfo-l1-1-0.dll", "GetSystemTimeAsFileTime") => {
+            LegacyWin64Import::GetSystemTimeAsFileTime
+        }
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetStartupInfoW") => LegacyWin64Import::GetStartupInfoW,
+        ("kernel32.dll" | "kernelbase.dll", "Beep") => LegacyWin64Import::Beep,
+        (_, "Beep") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "VerifyVersionInfoA") => {
+            LegacyWin64Import::VerifyVersionInfoA
+        }
+        (_, "VerifyVersionInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "VerSetConditionMask") => {
+            LegacyWin64Import::VerSetConditionMask
+        }
+        (_, "VerSetConditionMask") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GetVersion") => LegacyWin64Import::GetVersion,
+        (_, "GetVersion") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GetVersionExA") => LegacyWin64Import::GetVersionExA,
+        (_, "GetVersionExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("user32.dll", "GetSystemMetrics") => LegacyWin64Import::GetSystemMetrics,
+        (_, "GetSystemMetrics") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("user32.dll", "SetWindowsHookExA") => LegacyWin64Import::SetWindowsHookExA,
+        ("user32.dll", "UnhookWindowsHookEx") => LegacyWin64Import::UnhookWindowsHookEx,
+        ("user32.dll", "CallNextHookEx") => LegacyWin64Import::CallNextHookEx,
+        (_, "SetWindowsHookExA" | "UnhookWindowsHookEx" | "CallNextHookEx") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("user32.dll", "SetTimer") => LegacyWin64Import::SetTimer,
+        ("user32.dll", "KillTimer") => LegacyWin64Import::KillTimer,
+        (_, "SetTimer" | "KillTimer") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("user32.dll", "MessageBoxA") => LegacyWin64Import::MessageBox(false),
+        ("user32.dll", "MessageBoxW") => LegacyWin64Import::MessageBox(true),
+        (_, "MessageBoxA" | "MessageBoxW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "GetUserNameA") => LegacyWin64Import::GetUserNameA,
+        (_, "GetUserNameA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "GetUserNameW") => LegacyWin64Import::GetUserNameW,
+        (_, "GetUserNameW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetStartupInfoW") => {
+            LegacyWin64Import::GetStartupInfoW
+        }
         (_, "GetStartupInfoW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "RtlCaptureContext") => LegacyWin64Import::RtlCaptureContext,
+        ("kernel32.dll" | "api-ms-win-core-rtlsupport-l1-1-0.dll", "RtlCaptureContext") => {
+            LegacyWin64Import::RtlCaptureContext
+        }
         (_, "RtlCaptureContext") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetStdHandle") => LegacyWin64Import::GetStdHandle,
+        ("kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll", "GetStdHandle") => {
+            LegacyWin64Import::GetStdHandle
+        }
         (_, "GetStdHandle") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetConsoleMode") => LegacyWin64Import::GetConsoleMode,
+        ("kernel32.dll" | "api-ms-win-core-console-l1-1-0.dll", "GetConsoleMode") => {
+            LegacyWin64Import::GetConsoleMode
+        }
         (_, "GetConsoleMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetFileType") => LegacyWin64Import::GetFileType,
+        ("kernel32.dll" | "api-ms-win-core-file-l1-1-0.dll", "GetFileType") => {
+            LegacyWin64Import::GetFileType
+        }
         (_, "GetFileType") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "CreateFileW") => LegacyWin64Import::CreateFileW,
+        ("kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-file-l1-1-0.dll", "CreateFileW") => {
+            LegacyWin64Import::CreateFileW
+        }
         (_, "CreateFileW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("user32.dll", "wsprintfA") => LegacyWin64Import::WsPrintfA,
+        (_, "wsprintfA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (
+            "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-file-l1-1-0.dll",
+            symbol @ ("CreateFileA"
+            | "ReadFile"
+            | "GetFileSizeEx"
+            | "GetFileInformationByHandle"
+            | "SetFilePointerEx"),
+        ) => match symbol {
+            "CreateFileA" => LegacyWin64Import::CreateFileA,
+            "ReadFile" => LegacyWin64Import::ReadFile,
+            "GetFileSizeEx" => LegacyWin64Import::GetFileSizeEx,
+            "GetFileInformationByHandle" => LegacyWin64Import::GetFileInformationByHandle,
+            _ => LegacyWin64Import::SetFilePointerEx,
+        },
+        (
+            _,
+            "CreateFileA"
+            | "ReadFile"
+            | "GetFileSizeEx"
+            | "GetFileInformationByHandle"
+            | "SetFilePointerEx",
+        ) => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+
         ("kernel32.dll", "FindFirstFileExW") => LegacyWin64Import::FindFirstFileExW,
+        ("kernel32.dll", "FindFirstFileA") => LegacyWin64Import::FindFirstFileA,
+        ("kernel32.dll", "FindNextFileA") => LegacyWin64Import::FindNextFileA,
+        ("kernel32.dll", "FindClose") => LegacyWin64Import::FindClose,
+        (_, "FindNextFileA" | "FindClose") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (_, "FindFirstFileA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "FindFirstFileExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "CreateThread") => LegacyWin64Import::CreateThread,
         (_, "CreateThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "_beginthreadex") => {
+            LegacyWin64Import::CrtBeginThreadEx
+        }
+        (_, "_beginthreadex") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (
+            "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-processthreads-l1-1-0.dll",
+            "ExitThread",
+        ) => LegacyWin64Import::ExitThread,
+        (_, "ExitThread") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ntdll.dll", "NtWriteFile") => LegacyWin64Import::NtWriteFile,
         (_, "NtWriteFile") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "api-ms-win-core-synch-l1-2-0.dll", "WakeByAddressAll") => {
@@ -375,12 +688,48 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::WaitOnAddress
         }
         (_, "WaitOnAddress") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "CreateSemaphoreA") => LegacyWin64Import::CreateSemaphoreA,
+        ("kernel32.dll", "ReleaseSemaphore") => LegacyWin64Import::ReleaseSemaphore,
+        (_, "CreateSemaphoreA" | "ReleaseSemaphore") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("kernel32.dll", "CreateMutexA") => LegacyWin64Import::CreateMutexA,
+        ("kernel32.dll", "ReleaseMutex") => LegacyWin64Import::ReleaseMutex,
+        (_, "CreateMutexA" | "ReleaseMutex") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("kernel32.dll", "CreateEventA") => LegacyWin64Import::CreateEventA,
+        ("kernel32.dll", "CreateEventW") => LegacyWin64Import::CreateEventW,
+        ("kernel32.dll", "OpenEventA") => LegacyWin64Import::OpenEventA,
+        ("kernel32.dll", "OpenEventW") => LegacyWin64Import::OpenEventW,
+        ("kernel32.dll", "SetEvent") => LegacyWin64Import::SetEvent,
+        ("kernel32.dll", "ResetEvent") => LegacyWin64Import::ResetEvent,
+        (
+            _,
+            "CreateEventA" | "CreateEventW" | "OpenEventA" | "OpenEventW" | "SetEvent"
+            | "ResetEvent",
+        ) => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("kernel32.dll", "WaitForSingleObject") => LegacyWin64Import::WaitForSingleObject,
         ("kernel32.dll", "WaitForSingleObjectEx") => LegacyWin64Import::WaitForSingleObjectEx,
-        ("kernel32.dll", "CloseHandle") => LegacyWin64Import::CloseHandle,
+        ("kernel32.dll" | "api-ms-win-core-handle-l1-1-0.dll", "CloseHandle") => {
+            LegacyWin64Import::CloseHandle
+        }
+        (
+            "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-processthreads-l1-1-0.dll",
+            "GetCurrentProcess",
+        ) => LegacyWin64Import::GetCurrentProcess,
+        (_, "GetCurrentProcess") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GetProcessAffinityMask") => {
+            LegacyWin64Import::GetProcessAffinityMask
+        }
+        (_, "GetProcessAffinityMask") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "GetCurrentThread") => LegacyWin64Import::GetCurrentThread,
         ("kernel32.dll", "SetThreadStackGuarantee") => LegacyWin64Import::SetThreadStackGuarantee,
-        ("kernel32.dll", "SwitchToThread") => LegacyWin64Import::SwitchToThread,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "SwitchToThread") => {
+            LegacyWin64Import::SwitchToThread
+        }
         ("kernel32.dll", "ResumeThread") => LegacyWin64Import::ResumeThread,
         (
             _,
@@ -392,70 +741,169 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             | "SwitchToThread"
             | "ResumeThread",
         ) => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetCommandLineA") => LegacyWin64Import::GetCommandLineA,
+        ("kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll", "GetCommandLineA") => {
+            LegacyWin64Import::GetCommandLineA
+        }
         (_, "GetCommandLineA") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetCommandLineW") => LegacyWin64Import::GetCommandLineW,
+        ("kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll", "GetCommandLineW") => {
+            LegacyWin64Import::GetCommandLineW
+        }
         (_, "GetCommandLineW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetACP") => LegacyWin64Import::GetACP,
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "GetACP") => {
+            LegacyWin64Import::GetACP
+        }
         (_, "GetACP") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetCPInfo") => LegacyWin64Import::GetCPInfo,
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "GetSystemDefaultLCID") => {
+            LegacyWin64Import::GetSystemDefaultLCID
+        }
+        (_, "GetSystemDefaultLCID") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "GetCPInfo") => {
+            LegacyWin64Import::GetCPInfo
+        }
         (_, "GetCPInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "IsDebuggerPresent") => LegacyWin64Import::IsDebuggerPresent,
+        ("kernel32.dll" | "api-ms-win-core-debug-l1-1-0.dll", "IsDebuggerPresent") => {
+            LegacyWin64Import::IsDebuggerPresent
+        }
         (_, "IsDebuggerPresent") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "OutputDebugStringA") => LegacyWin64Import::OutputDebugStringA,
         (_, "OutputDebugStringA") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetCurrentThreadId") => LegacyWin64Import::GetCurrentThreadId,
-        ("kernel32.dll", "GetCurrentProcessId") => LegacyWin64Import::GetCurrentProcessId,
-        ("kernel32.dll", "QueryPerformanceCounter") => LegacyWin64Import::QueryPerformanceCounter,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentThreadId") => {
+            LegacyWin64Import::GetCurrentThreadId
+        }
+        ("api-ms-win-crt-utility-l1-1-0.dll" | "ucrtbase.dll", "srand") => {
+            LegacyWin64Import::CrtSrand
+        }
+        ("api-ms-win-crt-utility-l1-1-0.dll" | "ucrtbase.dll", "rand") => {
+            LegacyWin64Import::CrtRand
+        }
+        (_, "srand" | "rand") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-multibyte-l1-1-0.dll" | "ucrtbase.dll", "_mbsupr_s") => {
+            LegacyWin64Import::MbsuprS
+        }
+        (_, "_mbsupr_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-environment-l1-1-0.dll" | "ucrtbase.dll", "_dupenv_s") => {
+            LegacyWin64Import::DupenvS
+        }
+        (_, "_dupenv_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "_getpid") => {
+            LegacyWin64Import::GetCurrentProcessId
+        }
+        (_, "_getpid") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "GetCurrentProcessId") => {
+            LegacyWin64Import::GetCurrentProcessId
+        }
+        ("kernel32.dll" | "api-ms-win-core-profile-l1-1-0.dll", "QueryPerformanceCounter") => {
+            LegacyWin64Import::QueryPerformanceCounter
+        }
         ("kernel32.dll", "QueryPerformanceFrequency") => {
             LegacyWin64Import::QueryPerformanceFrequency
         }
-        ("kernel32.dll", "GetEnvironmentVariableA") => LegacyWin64Import::GetEnvironmentVariableA,
+        (
+            "kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll",
+            "GetEnvironmentVariableA",
+        ) => LegacyWin64Import::GetEnvironmentVariableA,
         ("kernel32.dll", "GetEnvironmentVariableW") => LegacyWin64Import::GetEnvironmentVariableW,
         (_, "GetEnvironmentVariableW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetEnvironmentStringsW") => LegacyWin64Import::GetEnvironmentStringsW,
+        (
+            "kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll",
+            "GetEnvironmentStringsW",
+        ) => LegacyWin64Import::GetEnvironmentStringsW,
         (_, "GetEnvironmentStringsW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "FreeEnvironmentStringsW") => LegacyWin64Import::FreeEnvironmentStringsW,
+        (
+            "kernel32.dll" | "api-ms-win-core-processenvironment-l1-1-0.dll",
+            "FreeEnvironmentStringsW",
+        ) => LegacyWin64Import::FreeEnvironmentStringsW,
         (_, "FreeEnvironmentStringsW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "WideCharToMultiByte") => LegacyWin64Import::WideCharToMultiByte,
+        ("kernel32.dll" | "api-ms-win-core-string-l1-1-0.dll", "WideCharToMultiByte") => {
+            LegacyWin64Import::WideCharToMultiByte
+        }
         (_, "WideCharToMultiByte") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "MultiByteToWideChar") => LegacyWin64Import::MultiByteToWideChar,
+        ("kernel32.dll" | "api-ms-win-core-string-l1-1-0.dll", "MultiByteToWideChar") => {
+            LegacyWin64Import::MultiByteToWideChar
+        }
         (_, "MultiByteToWideChar") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetStringTypeW") => LegacyWin64Import::GetStringTypeW,
+        ("kernel32.dll" | "api-ms-win-core-string-l1-1-0.dll", "GetStringTypeW") => {
+            LegacyWin64Import::GetStringTypeW
+        }
         (_, "GetStringTypeW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "LCMapStringW") => LegacyWin64Import::LCMapStringW,
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "LCMapStringW") => {
+            LegacyWin64Import::LCMapStringW
+        }
         (_, "LCMapStringW") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetLastError") => LegacyWin64Import::GetLastError,
-        ("kernel32.dll", "SetLastError") => LegacyWin64Import::SetLastError,
+        ("kernel32.dll" | "api-ms-win-core-errorhandling-l1-1-0.dll", "GetLastError") => {
+            LegacyWin64Import::GetLastError
+        }
+        ("kernel32.dll" | "api-ms-win-core-errorhandling-l1-1-0.dll", "SetLastError") => {
+            LegacyWin64Import::SetLastError
+        }
+        ("kernel32.dll" | "api-ms-win-core-localization-l1-2-0.dll", "FormatMessageA") => {
+            LegacyWin64Import::FormatMessageA
+        }
+        (_, "FormatMessageA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "SetThreadErrorMode") => LegacyWin64Import::SetThreadErrorMode,
         (_, "SetThreadErrorMode") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "LoadLibraryA") => LegacyWin64Import::LoadLibraryA,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "LoadLibraryExA") => {
+            LegacyWin64Import::LoadLibraryExA
+        }
+        (_, "LoadLibraryExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "LoadLibraryA") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "LoadLibraryExW") => LegacyWin64Import::LoadLibraryExW,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "LoadLibraryExW") => {
+            LegacyWin64Import::LoadLibraryExW
+        }
         (_, "LoadLibraryExW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (
+            "kernel32.dll"
+            | "api-ms-win-core-libraryloader-l1-1-0.dll"
+            | "api-ms-win-core-libraryloader-l1-2-0.dll",
+            "FreeLibrary",
+        ) => LegacyWin64Import::FreeLibrary,
+        (_, "FreeLibrary") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll", "FlsAlloc") => LegacyWin64Import::FlsAlloc,
         ("kernel32.dll", "FlsGetValue") => LegacyWin64Import::FlsGetValue,
         ("kernel32.dll", "FlsSetValue") => LegacyWin64Import::FlsSetValue,
         ("kernel32.dll", "FlsFree") => LegacyWin64Import::FlsFree,
-        ("kernel32.dll", "TlsAlloc") => LegacyWin64Import::TlsAlloc,
-        ("kernel32.dll", "TlsGetValue") => LegacyWin64Import::TlsGetValue,
-        ("kernel32.dll", "TlsSetValue") => LegacyWin64Import::TlsSetValue,
-        ("kernel32.dll", "TlsFree") => LegacyWin64Import::TlsFree,
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "TlsAlloc") => {
+            LegacyWin64Import::TlsAlloc
+        }
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "TlsGetValue") => {
+            LegacyWin64Import::TlsGetValue
+        }
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "TlsSetValue") => {
+            LegacyWin64Import::TlsSetValue
+        }
+        ("kernel32.dll" | "api-ms-win-core-processthreads-l1-1-0.dll", "TlsFree") => {
+            LegacyWin64Import::TlsFree
+        }
         (_, "TlsAlloc" | "TlsGetValue" | "TlsSetValue" | "TlsFree") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        ("kernel32.dll", "InitializeSListHead") => LegacyWin64Import::InitializeSListHead,
+        ("kernel32.dll" | "api-ms-win-core-interlocked-l1-1-0.dll", "InitializeSListHead") => {
+            LegacyWin64Import::InitializeSListHead
+        }
         ("kernel32.dll", "DisableThreadLibraryCalls") => {
             LegacyWin64Import::DisableThreadLibraryCalls
         }
         ("bcryptprimitives.dll", "ProcessPrng") => LegacyWin64Import::ProcessPrng,
         (_, "ProcessPrng") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "GetProcessHeap") => LegacyWin64Import::GetProcessHeap,
-        ("kernel32.dll", "HeapAlloc") => LegacyWin64Import::HeapAlloc,
-        ("kernel32.dll", "HeapFree") => LegacyWin64Import::HeapFree,
-        ("kernel32.dll", "HeapReAlloc") => LegacyWin64Import::HeapReAlloc,
-        ("kernel32.dll", "HeapCreate") => LegacyWin64Import::HeapCreate,
-        ("kernel32.dll", "HeapDestroy") => LegacyWin64Import::HeapDestroy,
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "GetProcessHeap") => {
+            LegacyWin64Import::GetProcessHeap
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapAlloc") => {
+            LegacyWin64Import::HeapAlloc
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapFree") => {
+            LegacyWin64Import::HeapFree
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapReAlloc") => {
+            LegacyWin64Import::HeapReAlloc
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapCreate") => {
+            LegacyWin64Import::HeapCreate
+        }
+        ("kernel32.dll" | "api-ms-win-core-heap-l1-1-0.dll", "HeapDestroy") => {
+            LegacyWin64Import::HeapDestroy
+        }
         (
             _,
             "GetProcessHeap" | "HeapAlloc" | "HeapFree" | "HeapReAlloc" | "HeapCreate"
@@ -463,38 +911,116 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ) => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        ("ws2_32.dll", "WSAStartup" | "ORDINAL 115") => LegacyWin64Import::WsaStartup,
-        ("ws2_32.dll", "WSACleanup" | "ORDINAL 116") => LegacyWin64Import::WsaCleanup,
+        ("ucrtbase.dll" | "api-ms-win-crt-runtime-l1-1-0.dll", "_errno") => {
+            LegacyWin64Import::Errno
+        }
+        (_, "_errno") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ws2_32.dll" | "wsock32.dll", "gethostname" | "ORDINAL 57") => {
+            LegacyWin64Import::GetHostname
+        }
+        (_, "gethostname" | "ORDINAL 57") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ws2_32.dll" | "wsock32.dll", "gethostbyname" | "ORDINAL 52") => {
+            LegacyWin64Import::GetHostByName
+        }
+        (_, "gethostbyname" | "ORDINAL 52") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("iphlpapi.dll", "GetAdaptersAddresses") => LegacyWin64Import::GetAdaptersAddresses,
+        (_, "GetAdaptersAddresses") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ws2_32.dll" | "wsock32.dll", "WSAGetLastError" | "ORDINAL 111") => {
+            LegacyWin64Import::GetLastError
+        }
+        (_, "WSAGetLastError" | "ORDINAL 111") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("ws2_32.dll" | "wsock32.dll", "WSAStartup" | "ORDINAL 115") => {
+            LegacyWin64Import::WsaStartup
+        }
+        ("ws2_32.dll" | "wsock32.dll", "WSACleanup" | "ORDINAL 116") => {
+            LegacyWin64Import::WsaCleanup
+        }
         (_, "WSAStartup" | "ORDINAL 115" | "WSACleanup" | "ORDINAL 116") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         ("kernel32.dll", "RtlPcToFileHeader") => LegacyWin64Import::RtlPcToFileHeader,
         (_, "RtlPcToFileHeader") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "RaiseException") => LegacyWin64Import::RaiseException,
+        ("kernel32.dll" | "api-ms-win-core-errorhandling-l1-1-0.dll", "RaiseException") => {
+            LegacyWin64Import::RaiseException
+        }
         (_, "RaiseException") => return Win64ImportDispatch::UnsupportedLegacyImport,
-        ("kernel32.dll", "InitializeCriticalSection") => {
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "InitializeCriticalSection") => {
             LegacyWin64Import::InitializeCriticalSection
         }
-        ("kernel32.dll", "InitializeCriticalSectionAndSpinCount") => {
-            LegacyWin64Import::InitializeCriticalSectionAndSpinCount
-        }
+        (
+            "kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll",
+            "InitializeCriticalSectionAndSpinCount",
+        ) => LegacyWin64Import::InitializeCriticalSectionAndSpinCount,
         ("kernel32.dll", "InitializeCriticalSectionEx") => {
             LegacyWin64Import::InitializeCriticalSectionEx
         }
-        ("kernel32.dll", "EnterCriticalSection") => LegacyWin64Import::EnterCriticalSection,
-        ("kernel32.dll", "LeaveCriticalSection") => LegacyWin64Import::LeaveCriticalSection,
-        ("kernel32.dll", "DeleteCriticalSection") => LegacyWin64Import::DeleteCriticalSection,
-        ("kernel32.dll", "AcquireSRWLockExclusive") => LegacyWin64Import::AcquireSrwLockExclusive,
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "EnterCriticalSection") => {
+            LegacyWin64Import::EnterCriticalSection
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "LeaveCriticalSection") => {
+            LegacyWin64Import::LeaveCriticalSection
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "DeleteCriticalSection") => {
+            LegacyWin64Import::DeleteCriticalSection
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "InitializeSRWLock") => {
+            LegacyWin64Import::InitializeSrwLock
+        }
+        (_, "InitializeSRWLock") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "AcquireSRWLockExclusive") => {
+            LegacyWin64Import::AcquireSrwLockExclusive
+        }
         ("kernel32.dll", "TryAcquireSRWLockExclusive") => {
             LegacyWin64Import::TryAcquireSrwLockExclusive
         }
-        ("kernel32.dll", "ReleaseSRWLockExclusive") => LegacyWin64Import::ReleaseSrwLockExclusive,
-        ("kernel32.dll", "GetModuleHandleW") => LegacyWin64Import::GetModuleHandleW,
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "ReleaseSRWLockExclusive") => {
+            LegacyWin64Import::ReleaseSrwLockExclusive
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "InitializeConditionVariable") => {
+            LegacyWin64Import::InitializeConditionVariable
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "SleepConditionVariableSRW") => {
+            LegacyWin64Import::SleepConditionVariableSrw
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "WakeConditionVariable") => {
+            LegacyWin64Import::WakeConditionVariable
+        }
+        ("kernel32.dll" | "api-ms-win-core-synch-l1-1-0.dll", "WakeAllConditionVariable") => {
+            LegacyWin64Import::WakeAllConditionVariable
+        }
+        (
+            _,
+            "InitializeConditionVariable"
+            | "SleepConditionVariableSRW"
+            | "WakeConditionVariable"
+            | "WakeAllConditionVariable",
+        ) => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("kernel32.dll" | "kernelbase.dll", "ExpandEnvironmentStringsA") => {
+            LegacyWin64Import::ExpandEnvironmentStringsA
+        }
+        (_, "ExpandEnvironmentStringsA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleHandleA") => {
+            LegacyWin64Import::GetModuleHandleA
+        }
+        (_, "GetModuleHandleA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleHandleW") => {
+            LegacyWin64Import::GetModuleHandleW
+        }
         ("kernel32.dll", "GetModuleHandleExA") => LegacyWin64Import::GetModuleHandleExA,
-        ("kernel32.dll", "GetModuleHandleExW") => LegacyWin64Import::GetModuleHandleExW,
-        ("kernel32.dll", "GetModuleFileNameW") => LegacyWin64Import::GetModuleFileNameW,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleHandleExW") => {
+            LegacyWin64Import::GetModuleHandleExW
+        }
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetModuleFileNameW") => {
+            LegacyWin64Import::GetModuleFileNameW
+        }
         ("kernel32.dll", "LoadLibraryW") => LegacyWin64Import::LoadLibraryW,
-        ("kernel32.dll", "GetProcAddress") => LegacyWin64Import::GetProcAddress,
+        ("kernel32.dll" | "api-ms-win-core-libraryloader-l1-2-0.dll", "GetProcAddress") => {
+            LegacyWin64Import::GetProcAddress
+        }
         (
             _,
             "InitializeCriticalSection"
@@ -533,8 +1059,24 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtSetTerminate
         }
         (_, "set_terminate") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-environment-l1-1-0.dll", "_putenv") => LegacyWin64Import::CrtPutenv,
+        ("api-ms-win-crt-environment-l1-1-0.dll" | "ucrtbase.dll", "_putenv_s") => {
+            LegacyWin64Import::CrtPutenvS
+        }
+        (_, "_putenv_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-environment-l1-1-0.dll", "getenv") => LegacyWin64Import::CrtGetenv,
         (_, "getenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-environment-l1-1-0.dll", "_wgetenv") => {
+            LegacyWin64Import::CrtWgetenv
+        }
+        ("ucrtbase.dll" | "api-ms-win-crt-environment-l1-1-0.dll", "__p__wenviron") => {
+            LegacyWin64Import::CrtWenviron
+        }
+        (_, "_wgetenv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "_copysign" | "copysign") => {
+            LegacyWin64Import::CopySign
+        }
+        (_, "_copysign" | "copysign") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "cos") => LegacyWin64Import::Cos,
         (_, "cos") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "ceil") => LegacyWin64Import::Ceil,
@@ -545,12 +1087,20 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "floor") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll", "fmodf") => LegacyWin64Import::FmodF,
         (_, "fmodf") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "_fdclass") => {
+            LegacyWin64Import::FdClass
+        }
+        (_, "_fdclass") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "_dclass") => LegacyWin64Import::DClass,
+        (_, "_dclass") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lround") => LegacyWin64Import::LRound,
         (_, "lround") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "lroundf") => {
             LegacyWin64Import::LRoundF
         }
         (_, "lroundf") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "log") => LegacyWin64Import::Log,
+        (_, "log") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "round") => LegacyWin64Import::Round,
         (_, "round") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-math-l1-1-0.dll" | "ucrtbase.dll", "roundf") => LegacyWin64Import::RoundF,
@@ -568,6 +1118,155 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "_vcomp_set_num_threads") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_time64") => {
+            LegacyWin64Import::CrtTime64
+        }
+        (_, "_time64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "asctime") => {
+            LegacyWin64Import::CrtAsctime
+        }
+        (_, "asctime") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_ctime64") => {
+            LegacyWin64Import::CrtCtime64
+        }
+        (_, "_ctime64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_localtime64") => {
+            LegacyWin64Import::CrtLocaltime64
+        }
+        (_, "_localtime64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_ftime64") => {
+            LegacyWin64Import::CrtFtime64
+        }
+        (_, "_ftime64") => return Win64ImportDispatch::UnsupportedLegacyImport,
+
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcmp") => {
+            LegacyWin64Import::StrCmp
+        }
+        (_, "strcmp") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strncmp") => {
+            LegacyWin64Import::StrNCmp
+        }
+        (_, "strncmp") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strlen") => {
+            LegacyWin64Import::StrLen
+        }
+        (_, "strlen") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcpy") => {
+            LegacyWin64Import::StrCpy
+        }
+        (_, "strcpy") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strncat") => {
+            LegacyWin64Import::StrNCat
+        }
+        (_, "strncat") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcat") => {
+            LegacyWin64Import::StrCat
+        }
+        (_, "strcat") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("vcruntime140.dll" | "ucrtbase.dll" | "api-ms-win-crt-string-l1-1-0.dll", "strrchr") => {
+            LegacyWin64Import::StrRChr
+        }
+        (_, "strrchr") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("vcruntime140.dll" | "ucrtbase.dll" | "api-ms-win-crt-string-l1-1-0.dll", "strchr") => {
+            LegacyWin64Import::StrChr
+        }
+        (_, "strchr") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "atoi") => LegacyWin64Import::Atoi,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "strtol") => {
+            LegacyWin64Import::Strtol
+        }
+        (_, "strtol") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "strtoul") => {
+            LegacyWin64Import::Strtoul
+        }
+        (_, "strtoul") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "strtod") => {
+            LegacyWin64Import::Strtod
+        }
+        (_, "strtod") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "strtof") => {
+            LegacyWin64Import::Strtof
+        }
+        (_, "strtof") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ucrtbase.dll" | "api-ms-win-crt-convert-l1-1-0.dll", "wcstombs") => {
+            LegacyWin64Import::CrtWcstombs
+        }
+        (_, "wcstombs") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        (_, "atoi") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "SetNamedSecurityInfoA") => LegacyWin64Import::SetNamedSecurityInfoA,
+        (_, "SetNamedSecurityInfoA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "AddAccessAllowedAceEx") => LegacyWin64Import::AddAccessAllowedAceEx,
+        (_, "AddAccessAllowedAceEx") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_fullpath") => {
+            LegacyWin64Import::Fullpath
+        }
+        (_, "_fullpath") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("shell32.dll", "ShellExecuteA") => LegacyWin64Import::ShellExecuteA,
+        (_, "ShellExecuteA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll", "GetFileAttributesExA") => LegacyWin64Import::GetFileAttributesExA,
+        ("kernel32.dll", "GetFileAttributesExW") => LegacyWin64Import::GetFileAttributesExW,
+        (_, "GetFileAttributesExA" | "GetFileAttributesExW") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "rename") => {
+            LegacyWin64Import::Rename
+        }
+        (_, "rename") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_stat64i32") => {
+            LegacyWin64Import::Stat64i32
+        }
+        (_, "_stat64i32") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-filesystem-l1-1-0.dll" | "ucrtbase.dll", "_wstat64i32") => {
+            LegacyWin64Import::Wstat64i32
+        }
+        (_, "_wstat64i32") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ole32.dll" | "combase.dll", "CoInitializeEx") => LegacyWin64Import::CoInitializeEx,
+        ("ole32.dll" | "combase.dll", "CoUninitialize") => LegacyWin64Import::CoUninitialize,
+        ("ole32.dll" | "combase.dll", "CoInitializeSecurity") => {
+            LegacyWin64Import::CoInitializeSecurity
+        }
+        ("ole32.dll" | "combase.dll", "CoCreateInstance") => LegacyWin64Import::CoCreateInstance,
+        (_, "CoInitializeEx" | "CoUninitialize" | "CoInitializeSecurity" | "CoCreateInstance") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("kernel32.dll" | "kernelbase.dll", "GetVolumeInformationA") => {
+            LegacyWin64Import::GetVolumeInformationA
+        }
+        (_, "GetVolumeInformationA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "CreateDirectoryA") => {
+            LegacyWin64Import::CreateDirectoryA
+        }
+        (_, "CreateDirectoryA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "IsValidAcl") => LegacyWin64Import::IsValidAcl,
+        (_, "IsValidAcl") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "InitializeAcl") => LegacyWin64Import::InitializeAcl,
+        (_, "InitializeAcl") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "SetEntriesInAclA") => LegacyWin64Import::SetEntriesInAclA,
+        ("kernel32.dll", "LocalFree") => LegacyWin64Import::LocalFree,
+        (_, "SetEntriesInAclA" | "LocalFree") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("advapi32.dll", "AllocateAndInitializeSid") => LegacyWin64Import::AllocateAndInitializeSid,
+        ("advapi32.dll", "CreateWellKnownSid") => LegacyWin64Import::CreateWellKnownSid,
+        (_, "CreateWellKnownSid") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "FreeSid") => LegacyWin64Import::FreeSid,
+        (_, "AllocateAndInitializeSid" | "FreeSid") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("advapi32.dll", "RegSetValueExA") => LegacyWin64Import::RegSetValueExA,
+        ("advapi32.dll", "RegQueryValueExA") => LegacyWin64Import::RegQueryValueExA,
+        (_, "RegSetValueExA" | "RegQueryValueExA") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("advapi32.dll", "RegCreateKeyExA") => LegacyWin64Import::RegCreateKeyExA,
+        (_, "RegCreateKeyExA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("advapi32.dll", "RegOpenKeyExA") => LegacyWin64Import::RegOpenKeyExA,
+        ("advapi32.dll", "RegCloseKey") => LegacyWin64Import::RegCloseKey,
+        (_, "RegOpenKeyExA" | "RegCloseKey") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("vcruntime140.dll", "strstr") => LegacyWin64Import::StrStr,
+        (_, "strstr") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("vcruntime140.dll", "memchr") => LegacyWin64Import::MemChr,
         (_, "memchr") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
@@ -576,22 +1275,228 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "memcmp") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
-        ("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vsnprintf_s") => {
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsnprintf_s") => {
             LegacyWin64Import::StdioVsnprintfS
         }
         (_, "__stdio_common_vsnprintf_s") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsprintf_s") => {
+            LegacyWin64Import::StdioVsprintfS
+        }
+        (_, "__stdio_common_vsprintf_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsprintf") => {
             LegacyWin64Import::StdioVsprintf
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__stdio_common_vsscanf") => {
+            LegacyWin64Import::StdioVsscanf
+        }
+        (_, "__stdio_common_vsscanf") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, "__stdio_common_vsprintf") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "__acrt_iob_func") => {
+            LegacyWin64Import::AcRtIobFunc
+        }
+        (_, "__acrt_iob_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_get_stream_buffer_pointers") => {
+            LegacyWin64Import::StreamBufferPointers
+        }
+        (_, "_get_stream_buffer_pointers") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "EncodePointer") => LegacyWin64Import::EncodePointer,
+        ("kernel32.dll" | "kernelbase.dll", "DecodePointer") => LegacyWin64Import::DecodePointer,
+        (_, "EncodePointer" | "DecodePointer") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("kernel32.dll", "AreFileApisANSI") => LegacyWin64Import::AreFileApisAnsi,
+        (_, "AreFileApisANSI") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "GlobalMemoryStatusEx") => {
+            LegacyWin64Import::GlobalMemoryStatusEx
+        }
+        (_, "GlobalMemoryStatusEx") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "InitOnceBeginInitialize") => {
+            LegacyWin64Import::InitOnceBeginInitialize
+        }
+        ("kernel32.dll" | "kernelbase.dll", "InitOnceComplete") => {
+            LegacyWin64Import::InitOnceComplete
+        }
+        ("kernel32.dll" | "kernelbase.dll", "InitOnceInitialize") => {
+            LegacyWin64Import::InitOnceInitialize
+        }
+        (_, "InitOnceBeginInitialize" | "InitOnceComplete" | "InitOnceInitialize") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___lc_locale_name_func") => {
+            LegacyWin64Import::CrtLocaleNames
+        }
+        (_, "___lc_locale_name_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "localeconv") => {
+            LegacyWin64Import::CrtLocaleConv
+        }
+        (_, "localeconv") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_create_locale") => {
+            LegacyWin64Import::CrtCreateLocale
+        }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_free_locale") => {
+            LegacyWin64Import::CrtFreeLocale
+        }
+        (_, "_create_locale" | "_free_locale") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "__pctype_func") => {
+            LegacyWin64Import::CrtPctype
+        }
+        (_, "__pctype_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___mb_cur_max_func") => {
+            LegacyWin64Import::CrtMbCurMax
+        }
+        (_, "___mb_cur_max_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___lc_codepage_func") => {
+            LegacyWin64Import::CrtLocaleCodePage
+        }
+        (_, "___lc_codepage_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "___lc_collate_cp_func") => {
+            LegacyWin64Import::CrtLocaleCollateCodePage
+        }
+        (_, "___lc_collate_cp_func") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_wsetlocale") => {
+            LegacyWin64Import::CrtSetLocale(true)
+        }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "setlocale") => {
+            LegacyWin64Import::CrtSetLocale(false)
+        }
+        (_, "_wsetlocale" | "setlocale") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_lock_locales") => {
+            LegacyWin64Import::CrtLocaleLock
+        }
+        ("api-ms-win-crt-locale-l1-1-0.dll" | "ucrtbase.dll", "_unlock_locales") => {
+            LegacyWin64Import::CrtLocaleUnlock
+        }
+        (_, "_lock_locales" | "_unlock_locales") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_Getdays") => {
+            LegacyWin64Import::CrtTimeNames(false)
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_Getmonths") => {
+            LegacyWin64Import::CrtTimeNames(true)
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_Gettnames") => {
+            LegacyWin64Import::CrtTimeLocaleNames
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_W_Getdays") => {
+            LegacyWin64Import::CrtWideTimeNames(false)
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_W_Getmonths") => {
+            LegacyWin64Import::CrtWideTimeNames(true)
+        }
+        ("api-ms-win-crt-time-l1-1-0.dll" | "ucrtbase.dll", "_W_Gettnames") => {
+            LegacyWin64Import::CrtTimeLocaleNames
+        }
+        (
+            _,
+            "_Getdays" | "_Getmonths" | "_Gettnames" | "_W_Getdays" | "_W_Getmonths"
+            | "_W_Gettnames",
+        ) => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fflush") => LegacyWin64Import::Fflush,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_fseeki64") => {
+            LegacyWin64Import::Fseeki64
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_ftelli64") => {
+            LegacyWin64Import::Ftelli64
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fsetpos") => {
+            LegacyWin64Import::Fsetpos
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fgetpos") => {
+            LegacyWin64Import::Fgetpos
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "rewind") => LegacyWin64Import::Rewind,
+        (_, "_fseeki64" | "_ftelli64" | "fsetpos" | "fgetpos" | "rewind") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_open") => {
+            LegacyWin64Import::CrtOpen(false)
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_wopen") => {
+            LegacyWin64Import::CrtOpen(true)
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_read") => LegacyWin64Import::CrtRead,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_close") => {
+            LegacyWin64Import::CrtClose
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_lseeki64") => {
+            LegacyWin64Import::CrtLseek64
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_setmode") => {
+            LegacyWin64Import::CrtSetMode
+        }
+        (_, "_open" | "_wopen" | "_read" | "_close" | "_lseeki64" | "_setmode") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        (_, "fflush") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fwrite") => LegacyWin64Import::Fwrite,
+        (_, "fwrite") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fread") => LegacyWin64Import::Fread,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "feof") => LegacyWin64Import::Feof,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "ferror") => LegacyWin64Import::Ferror,
+        (
+            "api-ms-win-crt-stdio-l1-1-0.dll"
+            | "api-ms-win-crt-filesystem-l1-1-0.dll"
+            | "ucrtbase.dll",
+            "_lock_file",
+        ) => LegacyWin64Import::LockFile,
+        (
+            "api-ms-win-crt-stdio-l1-1-0.dll"
+            | "api-ms-win-crt-filesystem-l1-1-0.dll"
+            | "ucrtbase.dll",
+            "_unlock_file",
+        ) => LegacyWin64Import::UnlockFile,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fclose") => LegacyWin64Import::Fclose,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "getc" | "fgetc") => {
+            LegacyWin64Import::Fgetc
+        }
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "ungetc") => LegacyWin64Import::Ungetc,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fgets") => LegacyWin64Import::Fgets,
+        (
+            _,
+            "getc" | "fgetc" | "ungetc" | "fgets" | "fread" | "feof" | "ferror" | "fclose"
+            | "_lock_file" | "_unlock_file",
+        ) => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
+        ("api-ms-win-crt-runtime-l1-1-0.dll" | "ucrtbase.dll", "strerror") => {
+            LegacyWin64Import::Strerror
+        }
+        (_, "strerror") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_wfopen") => {
+            LegacyWin64Import::Wfopen
+        }
+        (_, "_wfopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_wfsopen") => {
+            LegacyWin64Import::Wfsopen
+        }
+        (_, "_wfsopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen") => LegacyWin64Import::Fopen,
+        (_, "fopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "_fsopen") => {
+            LegacyWin64Import::Fsopen
+        }
+        (_, "_fsopen") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-stdio-l1-1-0.dll" | "ucrtbase.dll", "fopen_s") => {
             LegacyWin64Import::FopenS
         }
         (_, "fopen_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcat_s") => {
+            LegacyWin64Import::StrcatS
+        }
+        (_, "strcat_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strcpy_s") => {
+            LegacyWin64Import::StrcpyS
+        }
+        (_, "strcpy_s") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "strncpy_s") => {
             LegacyWin64Import::StrncpyS
         }
@@ -604,9 +1509,51 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CrtStricmp
         }
         (_, "_stricmp") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "_strnicmp_l") => {
+            LegacyWin64Import::CrtStrnicmpLocale
+        }
+        (_, "_strnicmp_l") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "tolower") => {
             LegacyWin64Import::CrtToLower
         }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isspace") => {
+            LegacyWin64Import::CrtIsSpace
+        }
+        (_, "isspace") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isalnum") => {
+            LegacyWin64Import::CrtIsAlnum
+        }
+        (_, "isalnum") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isalpha") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Alpha)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isdigit") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Digit)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isgraph") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Graph)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "islower") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Lower)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isprint") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Print)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "ispunct") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Punct)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isupper") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Upper)
+        }
+        ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "isxdigit") => {
+            LegacyWin64Import::CrtAsciiClass(CrtAsciiClass::Xdigit)
+        }
+        (
+            _,
+            "isalpha" | "isdigit" | "isgraph" | "islower" | "isprint" | "ispunct" | "isupper"
+            | "isxdigit",
+        ) => return Win64ImportDispatch::UnsupportedLegacyImport,
+
         (_, "tolower") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("api-ms-win-crt-string-l1-1-0.dll" | "ucrtbase.dll", "toupper") => {
             LegacyWin64Import::CrtToUpper
@@ -630,6 +1577,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         }
         ("shell32.dll", "SHGetFolderPathA") => LegacyWin64Import::ShGetFolderPathA,
         (_, "SHGetFolderPathA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("shell32.dll", "SHGetSpecialFolderPathA") => LegacyWin64Import::ShGetSpecialFolderPathA,
+        (_, "SHGetSpecialFolderPathA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         (_, symbol)
             if matches!(
                 symbol,
@@ -663,15 +1612,25 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, symbol) if symbol.contains("__ExceptionPtr") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
+        ("vcruntime140.dll", "__uncaught_exception" | "__uncaught_exceptions") => {
+            LegacyWin64Import::UncaughtExceptions
+        }
+        (_, "__uncaught_exception" | "__uncaught_exceptions") => {
+            return Win64ImportDispatch::UnsupportedLegacyImport;
+        }
         ("vcruntime140.dll", "__std_exception_copy") => LegacyWin64Import::VcruntimeExceptionCopy,
         ("vcruntime140.dll", "__std_exception_destroy") => {
             LegacyWin64Import::VcruntimeExceptionDestroy
+        }
+        ("vcruntime140.dll" | "vcruntime140_1.dll", "__RTDynamicCast") => {
+            LegacyWin64Import::RtDynamicCast
         }
         (_, "__std_exception_copy" | "__std_exception_destroy") => {
             return Win64ImportDispatch::UnsupportedLegacyImport;
         }
         (_, symbol) => match symbol {
             "malloc" => LegacyWin64Import::Malloc,
+            "realloc" => LegacyWin64Import::Realloc,
             "calloc" => LegacyWin64Import::Calloc,
             "free" => LegacyWin64Import::Free,
             "_callnewh" => LegacyWin64Import::CallNewHandler,
@@ -718,349 +1677,974 @@ fn install_win64_import(
 ) -> Result<Win64ImportDispatch, GuestError> {
     let dispatch = dispatch_win64_import(library, symbol);
     match dispatch {
-        Win64ImportDispatch::LegacyImplemented(implementation) => match implementation {
-            LegacyWin64Import::Malloc => {
-                uc("write malloc return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install malloc import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_malloc(unicorn, false);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::Calloc => {
-                uc("write calloc return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install calloc import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_malloc(unicorn, true);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::Free => {
-                uc("write free return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install free import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_free(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CrtStrdup => {
-                uc("write _strdup return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install _strdup import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_strdup(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CrtStricmp => {
-                uc("write _stricmp return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install _stricmp import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_stricmp(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CrtToLower => {
-                uc("write tolower return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install tolower import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        let input = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
-                        let result = if (u32::from(b'A')..=u32::from(b'Z')).contains(&input) {
-                            input + u32::from(b'a' - b'A')
-                        } else {
-                            input
-                        };
-                        let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(result));
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CrtToUpper => {
-                uc("write toupper return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install toupper import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        let input = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
-                        let result = if (u32::from(b'a')..=u32::from(b'z')).contains(&input) {
-                            input - u32::from(b'a' - b'A')
-                        } else {
-                            input
-                        };
-                        let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(result));
-                    }),
-                )?;
-            }
-            LegacyWin64Import::AlignedMalloc => {
-                uc(
-                    "write _aligned_malloc return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install _aligned_malloc import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_aligned_malloc(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::AlignedFree => {
-                uc(
-                    "write _aligned_free return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install _aligned_free import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_aligned_free(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CallNewHandler => {
-                // No new-handler is installed by this bounded host. Returning
-                // zero tells the MSVC allocation path not to retry.
-            }
-            LegacyWin64Import::Strncpy => {
-                uc(
-                    "install strncpy import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_strncpy(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::Memset => {
-                uc(
-                    "install memset import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_memset(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MemoryCopy => {
-                uc(
-                    "write CRT memory-copy return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install CRT memory-copy import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_memory_copy(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MemChr => {
-                uc("write memchr return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install memchr import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_memchr(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MemCmp => {
-                uc("write memcmp return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install memcmp import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_memcmp(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::StdioVsnprintfS => {
-                uc(
-                    "write stdio formatter return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install stdio formatter import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_stdio_common_vsnprintf_s(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::StdioVsprintf => {
-                uc("write vsprintf return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install vsprintf import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_stdio_common_vsprintf(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MsvcpMutexInit => {
-                uc("write mutex init return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install mutex init import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_msvcp_mutex_init(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MsvcpMutexLock => {
-                uc("write mutex lock return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install mutex lock import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_msvcp_mutex_lock(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MsvcpMutexUnlock => {
-                uc(
-                    "write mutex unlock return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install mutex unlock import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_msvcp_mutex_unlock(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MsvcpMutexDestroy => {
-                uc(
-                    "write mutex destroy return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install mutex destroy import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_msvcp_mutex_destroy(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MsvcpHardwareConcurrency => {
-                uc(
-                    "install deterministic hardware concurrency import",
-                    unicorn.mem_write(stub, &deterministic_i32_stub(1)),
-                )?;
-            }
-            LegacyWin64Import::ShGetFolderPathA => {
-                uc(
-                    "write SHGetFolderPathA return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install bounded SHGetFolderPathA import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_sh_get_folder_path_a(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MsvcpExceptionPtrCreate
-            | LegacyWin64Import::MsvcpExceptionPtrCopy
-            | LegacyWin64Import::MsvcpExceptionPtrAssign
-            | LegacyWin64Import::MsvcpExceptionPtrDestroy
-            | LegacyWin64Import::MsvcpExceptionPtrCurrentException
-            | LegacyWin64Import::MsvcpExceptionPtrRethrow => {
-                uc(
-                    "write MSVC exception_ptr return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install MSVC exception_ptr import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_msvcp_exception_ptr(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::VcruntimeExceptionCopy => {
-                uc(
-                    "write exception copy return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install exception copy import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_vcruntime_exception_copy(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::VcruntimeExceptionDestroy => {
-                uc(
-                    "write exception destroy return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install exception destroy import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_vcruntime_exception_destroy(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CxxThrowException => {
-                uc("write C++ throw trap", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install C++ throw trap",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_cxx_throw_exception(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::Cos => {
-                install_double_import(unicorn, stub, "cos", f64::cos)?;
-            }
-            LegacyWin64Import::CosF => {
-                install_float_import(unicorn, stub, "cosf", f32::cos)?;
-            }
-            LegacyWin64Import::Ceil => {
-                install_double_import(unicorn, stub, "ceil", f64::ceil)?;
-            }
-            LegacyWin64Import::CeilF => {
-                install_float_import(unicorn, stub, "ceilf", f32::ceil)?;
-            }
-            LegacyWin64Import::ExpF => {
-                install_float_import(unicorn, stub, "expf", f32::exp)?;
-            }
-            LegacyWin64Import::Floor => {
-                install_double_import(unicorn, stub, "floor", f64::floor)?;
-            }
-            LegacyWin64Import::FloorF => {
-                install_float_import(unicorn, stub, "floorf", f32::floor)?;
-            }
-            LegacyWin64Import::FmodF => {
-                install_fmodf_import(unicorn, stub)?;
-            }
-            LegacyWin64Import::LRound => {
-                install_lround_import(unicorn, stub)?;
-            }
-            LegacyWin64Import::LRoundF => {
-                install_lroundf_import(unicorn, stub)?;
-            }
-            LegacyWin64Import::Round => {
-                install_double_import(unicorn, stub, "round", f64::round)?;
-            }
-            LegacyWin64Import::RoundF => {
-                install_float_import(unicorn, stub, "roundf", f32::round)?;
-            }
-            LegacyWin64Import::PowF => {
-                install_float_binary_import(unicorn, stub, "powf", f32::powf)?;
-            }
-            LegacyWin64Import::Pow => {
-                install_double_binary_import(unicorn, stub, "pow", f64::powf)?;
-            }
-            LegacyWin64Import::Sin => {
-                install_double_import(unicorn, stub, "sin", f64::sin)?;
-            }
-            LegacyWin64Import::SinF => {
-                install_float_import(unicorn, stub, "sinf", f32::sin)?;
-            }
-            LegacyWin64Import::OmpGetMaxThreads => {
-                let value = deterministic_import_i32("omp_get_max_threads")
-                    .expect("known deterministic import");
-                uc(
-                    "install omp_get_max_threads import",
-                    unicorn.mem_write(stub, &deterministic_i32_stub(value)),
-                )?;
-            }
-            LegacyWin64Import::OmpSetDynamic => {
-                uc(
-                    "write omp_set_dynamic return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
+        Win64ImportDispatch::LegacyImplemented(implementation) => {
+            match implementation {
+                LegacyWin64Import::Malloc => {
+                    uc("write malloc return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install malloc import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_malloc(unicorn, false);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Realloc => {
+                    uc("write realloc return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install realloc import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_realloc(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Calloc => {
+                    uc("write calloc return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install calloc import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_malloc(unicorn, true);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Free => {
+                    uc("write free return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install free import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_free(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtStrdup => {
+                    uc("write _strdup return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _strdup import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_strdup(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtStricmp => {
+                    uc("write _stricmp return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _stricmp import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_stricmp(unicorn, false);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtStrnicmpLocale => {
+                    uc("write _strnicmp_l return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _strnicmp_l import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_stricmp(unicorn, true);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtIsSpace => {
+                    uc("write isspace return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install isspace import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let input = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+                                if !(-1..=255).contains(&input) {
+                                    return Err(
+                                        "isspace input is neither unsigned char nor EOF".into()
+                                    );
+                                }
+                                // CRT starts in the C locale; locale mutation is unsupported.
+                                Ok(if matches!(input, 9..=13 | 32) { 8 } else { 0 })
+                            })();
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtIsAlnum => {
+                    uc("write isalnum return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install isalnum import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let input = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+                                if !(-1..=255).contains(&input) {
+                                    return Err(
+                                        "isalnum input is neither unsigned char nor EOF".into()
+                                    );
+                                }
+                                // CRT starts in the C locale; locale mutation is unsupported.
+                                Ok(u64::from(
+                                    input >= 0 && (input as u8).is_ascii_alphanumeric(),
+                                ))
+                            })();
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtAsciiClass(class) => {
+                    uc(
+                        "write CRT character classification return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT character classification import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let input = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+                                if !(-1..=255).contains(&input) {
+                                    return Err(format!(
+                                        "CRT {class:?} classification input is neither unsigned char nor EOF"
+                                    ));
+                                }
+                                Ok(u64::from(input >= 0 && class.contains(input as u8)))
+                            })();
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtToLower => {
+                    uc("write tolower return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install tolower import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let input =
+                                unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
+                            let result = if (u32::from(b'A')..=u32::from(b'Z')).contains(&input) {
+                                input + u32::from(b'a' - b'A')
+                            } else {
+                                input
+                            };
+                            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(result));
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtToUpper => {
+                    uc("write toupper return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install toupper import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let input =
+                                unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX) as u32;
+                            let result = if (u32::from(b'a')..=u32::from(b'z')).contains(&input) {
+                                input - u32::from(b'a' - b'A')
+                            } else {
+                                input
+                            };
+                            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(result));
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::AlignedMalloc => {
+                    uc(
+                        "write _aligned_malloc return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install _aligned_malloc import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_aligned_malloc(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::AlignedFree => {
+                    uc(
+                        "write _aligned_free return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install _aligned_free import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_aligned_free(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CallNewHandler => {
+                    // No new-handler is installed by this bounded host. Returning
+                    // zero tells the MSVC allocation path not to retry.
+                }
+                LegacyWin64Import::AreFileApisAnsi => {
+                    uc(
+                        "install ANSI file API mode query",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(1)),
+                    )?;
+                }
+                LegacyWin64Import::GlobalMemoryStatusEx => {
+                    uc(
+                        "write GlobalMemoryStatusEx return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GlobalMemoryStatusEx",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_global_memory_status_ex(unicorn);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::InitOnceBeginInitialize
+                | LegacyWin64Import::InitOnceComplete
+                | LegacyWin64Import::InitOnceInitialize) => {
+                    uc("write InitOnce return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install InitOnce API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_init_once(unicorn, operation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Strncpy => {
+                    uc(
+                        "install strncpy import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_strncpy(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Memset => {
+                    uc(
+                        "install memset import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_memset(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MemoryCopy => {
+                    uc(
+                        "write CRT memory-copy return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT memory-copy import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_memory_copy(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Fullpath => {
+                    uc("write _fullpath return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _fullpath",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_fullpath(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ShellExecuteA => {
+                    uc(
+                        "write ShellExecuteA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install shell execution diagnostic",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = describe_unavailable_shell_execute(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetFileAttributesExA
+                | LegacyWin64Import::GetFileAttributesExW => {
+                    uc(
+                        "write file attributes return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install file attributes",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = guest_file_attributes_ex(
+                                unicorn,
+                                implementation == LegacyWin64Import::GetFileAttributesExW,
+                            );
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Rename => {
+                    uc("write rename return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install rename",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_rename(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Stat64i32 | LegacyWin64Import::Wstat64i32 => {
+                    uc("write _wstat64i32 return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _wstat64i32",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = guest_stat64i32(
+                                unicorn,
+                                matches!(implementation, LegacyWin64Import::Wstat64i32),
+                            );
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CoCreateInstance => {
+                    uc(
+                        "write CoCreateInstance return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CoCreateInstance",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_com_create_instance(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CoInitializeSecurity => {
+                    uc(
+                        "write COM security return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install COM security",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_com_security(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CoInitializeEx | LegacyWin64Import::CoUninitialize => {
+                    uc(
+                        "write COM lifecycle return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    let initialize = implementation == LegacyWin64Import::CoInitializeEx;
+                    uc(
+                        "install COM lifecycle",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = guest_com_lifecycle(unicorn, initialize);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetVolumeInformationA => {
+                    uc(
+                        "write GetVolumeInformationA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetVolumeInformationA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_volume_information(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CreateDirectoryA => {
+                    uc(
+                        "write CreateDirectoryA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CreateDirectoryA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = create_guest_directory(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::IsValidAcl => {
+                    uc("write IsValidAcl return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install IsValidAcl",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            let valid = (|| -> Result<bool, String> {
+                                let acl = read_win64_import_argument(uc, 0)?;
+                                let header = acl_read(uc, acl, 8)?;
+                                let size = u16::from_le_bytes([header[2], header[3]]) as usize;
+                                if acl % 4 != 0
+                                    || !(2..=4).contains(&header[0])
+                                    || size < 8
+                                    || size % 4 != 0
+                                {
+                                    return Ok(false);
+                                }
+                                let bytes = acl_read(uc, acl, size as u64)?;
+                                let count = u16::from_le_bytes([header[4], header[5]]);
+                                let mut offset = 8;
+                                for _ in 0..count {
+                                    if offset + 4 > size {
+                                        return Ok(false);
+                                    }
+                                    let length =
+                                        u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]])
+                                            as usize;
+                                    if length < 4 || length % 4 != 0 || offset + length > size {
+                                        return Ok(false);
+                                    }
+                                    offset += length;
+                                }
+                                Ok(true)
+                            })()
+                            .unwrap_or(false);
+                            let _ = uc.reg_write(RegisterX86::RAX, u64::from(valid));
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::SetNamedSecurityInfoA
+                | LegacyWin64Import::SetEntriesInAclA
+                | LegacyWin64Import::InitializeAcl
+                | LegacyWin64Import::AddAccessAllowedAceEx
+                | LegacyWin64Import::LocalFree => {
+                    uc("write ACL return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install ACL import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_acl(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::AllocateAndInitializeSid
+                | LegacyWin64Import::FreeSid
+                | LegacyWin64Import::CreateWellKnownSid => {
+                    uc("write SID return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install SID import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_sid(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::RegSetValueExA | LegacyWin64Import::RegQueryValueExA => {
+                    uc(
+                        "write registry value return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install registry value import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_registry_value_a(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::RegCreateKeyExA => {
+                    uc(
+                        "write RegCreateKeyExA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install RegCreateKeyExA",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_reg_create_key_ex_a(uc)),
+                    )?;
+                }
+                LegacyWin64Import::RegOpenKeyExA => {
+                    uc(
+                        "write RegOpenKeyExA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install RegOpenKeyExA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_reg_open_key_ex_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::RegCloseKey => {
+                    uc("write RegCloseKey return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install RegCloseKey",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_reg_close_key(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Atoi => {
+                    uc("write atoi return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install atoi",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_atoi(uc)),
+                    )?;
+                }
+                LegacyWin64Import::Strtol => {
+                    uc("write strtol return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strtol",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strtol(uc)),
+                    )?;
+                }
+                LegacyWin64Import::Strtoul => {
+                    uc("write strtoul return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strtoul",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strtoul(uc)),
+                    )?;
+                }
+                LegacyWin64Import::Strtod => {
+                    uc("write strtod return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strtod",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strtod(uc)),
+                    )?;
+                }
+                LegacyWin64Import::Strtof => {
+                    uc("write strtof return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strtof",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strtof(uc)),
+                    )?;
+                }
+                LegacyWin64Import::CrtWcstombs => {
+                    uc("write wcstombs return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install wcstombs import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_wcstombs(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StrRChr => {
+                    uc("write strrchr return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strrchr",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strrchr(uc)),
+                    )?;
+                }
+                LegacyWin64Import::StrChr => {
+                    uc("write strchr return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strchr",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strchr(uc)),
+                    )?;
+                }
+                LegacyWin64Import::StrNCat => {
+                    uc("write strncat return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strncat",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strncat(uc)),
+                    )?;
+                }
+                LegacyWin64Import::StrCat => {
+                    uc("write strcat return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strcat",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_strcat(uc)),
+                    )?;
+                }
+                LegacyWin64Import::StrCpy => {
+                    uc("write strcpy return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strcpy import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_strcpy(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtFtime64 => {
+                    uc("write _ftime64 return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _ftime64",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_crt_ftime64(uc)),
+                    )?;
+                }
+                LegacyWin64Import::CrtLocaltime64
+                | LegacyWin64Import::CrtCtime64
+                | LegacyWin64Import::CrtAsctime => {
+                    uc(
+                        "write _localtime64 return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install _localtime64",
+                        unicorn.add_code_hook(stub, stub, move |uc, _, _| {
+                            emulate_crt_localtime64(
+                                uc,
+                                implementation != LegacyWin64Import::CrtLocaltime64,
+                                implementation == LegacyWin64Import::CrtAsctime,
+                            )
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtTime64 => {
+                    uc("write _time64 return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _time64",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_time64(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StrCmp => {
+                    uc("write strcmp return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strcmp",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_strcmp(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StrNCmp => {
+                    uc("write strncmp return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strncmp",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_strncmp(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StrLen => {
+                    uc("write strlen return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strlen import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_strlen(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StrStr => {
+                    uc("write strstr return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strstr import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_strstr(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MemChr => {
+                    uc("write memchr return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install memchr import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_memchr(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MemCmp => {
+                    uc("write memcmp return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install memcmp import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_memcmp(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StdioVsnprintfS => {
+                    uc(
+                        "write stdio formatter return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install stdio formatter import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_stdio_common_vsnprintf_s(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StdioVsscanf => {
+                    uc("write vsscanf return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install vsscanf",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_stdio_common_vsscanf(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StdioVsprintfS => {
+                    uc("write vsprintf_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install vsprintf_s",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_stdio_common_vsprintf_s(uc)
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StdioVsprintf => {
+                    uc("write vsprintf return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install vsprintf import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_stdio_common_vsprintf(unicorn);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::MsvcpLockitCtor
+                | LegacyWin64Import::MsvcpLockitDtor) => {
+                    let destroy = operation == LegacyWin64Import::MsvcpLockitDtor;
+                    uc("write Lockit return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install Lockit",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_msvcp_lockit(unicorn, destroy);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::MsvcpCodecvtIn
+                | LegacyWin64Import::MsvcpCodecvtOut) => {
+                    let wide_to_narrow = operation == LegacyWin64Import::MsvcpCodecvtOut;
+                    uc(
+                        "write MSVCP codecvt return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install MSVCP codecvt",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_msvcp_codecvt(unicorn, wide_to_narrow);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MsvcpMutexInit => {
+                    uc("write mutex init return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install mutex init import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_msvcp_mutex_init(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MsvcpMutexLock => {
+                    uc("write mutex lock return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install mutex lock import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_msvcp_mutex_lock(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MsvcpMutexUnlock => {
+                    uc(
+                        "write mutex unlock return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install mutex unlock import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_msvcp_mutex_unlock(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MsvcpMutexDestroy => {
+                    uc(
+                        "write mutex destroy return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install mutex destroy import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_msvcp_mutex_destroy(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MsvcpHardwareConcurrency => {
+                    uc(
+                        "install deterministic hardware concurrency import",
+                        unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                    )?;
+                }
+                LegacyWin64Import::ShGetSpecialFolderPathA => {
+                    uc(
+                        "write SHGetSpecialFolderPathA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install SHGetSpecialFolderPathA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_sh_get_special_folder_path_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ShGetFolderPathA => {
+                    uc(
+                        "write SHGetFolderPathA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install bounded SHGetFolderPathA import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_sh_get_folder_path_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MsvcpExceptionPtrCreate
+                | LegacyWin64Import::MsvcpExceptionPtrCopy
+                | LegacyWin64Import::MsvcpExceptionPtrAssign
+                | LegacyWin64Import::MsvcpExceptionPtrDestroy
+                | LegacyWin64Import::MsvcpExceptionPtrCurrentException
+                | LegacyWin64Import::MsvcpExceptionPtrRethrow => {
+                    uc(
+                        "write MSVC exception_ptr return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install MSVC exception_ptr import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_msvcp_exception_ptr(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VcruntimeExceptionCopy => {
+                    uc(
+                        "write exception copy return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install exception copy import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_vcruntime_exception_copy(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VcruntimeExceptionDestroy => {
+                    uc(
+                        "write exception destroy return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install exception destroy import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_vcruntime_exception_destroy(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::UncaughtExceptions => {
+                    // No guest execution occurs during C++ unwinding today:
+                    // throws stop emulation or transfer directly to selector
+                    // abort. Thus every reachable query has zero in-flight
+                    // exceptions. Update this with per-thread state when real
+                    // unwinding/catch dispatch is implemented.
+                    uc(
+                        "install uncaught exception count",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(0)),
+                    )?;
+                }
+                LegacyWin64Import::CxxThrowException => {
+                    uc("write C++ throw trap", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install C++ throw trap",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_cxx_throw_exception(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::RtDynamicCast => {
+                    uc(
+                        "write C++ dynamic cast return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install C++ dynamic cast",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_rt_dynamic_cast(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CopySign => {
+                    uc("write copysign return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install copysign",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = (|| -> Result<(), String> {
+                                let mut magnitude = unicorn
+                                    .reg_read_long(RegisterX86::XMM0)
+                                    .map_err(|e| e.to_string())?;
+                                let sign = unicorn
+                                    .reg_read_long(RegisterX86::XMM1)
+                                    .map_err(|e| e.to_string())?;
+                                // Copy only the IEEE binary64 sign bit, including NaNs,
+                                // signed zeros and subnormals, without FP arithmetic.
+                                magnitude[7] = (magnitude[7] & 0x7f) | (sign[7] & 0x80);
+                                unicorn
+                                    .reg_write_long(RegisterX86::XMM0, &magnitude)
+                                    .map_err(|e| e.to_string())
+                            })();
+                            if let Err(error) = result {
+                                if unicorn.get_data().callback_error.is_none() {
+                                    unicorn.get_data_mut().callback_error =
+                                        Some(format!("copysign registers: {error}"));
+                                }
+                                let _ = unicorn.emu_stop();
+                            }
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Cos => {
+                    install_double_import(unicorn, stub, "cos", f64::cos)?;
+                }
+                LegacyWin64Import::CosF => {
+                    install_float_import(unicorn, stub, "cosf", f32::cos)?;
+                }
+                LegacyWin64Import::Ceil => {
+                    install_double_import(unicorn, stub, "ceil", f64::ceil)?;
+                }
+                LegacyWin64Import::CeilF => {
+                    install_float_import(unicorn, stub, "ceilf", f32::ceil)?;
+                }
+                LegacyWin64Import::ExpF => {
+                    install_float_import(unicorn, stub, "expf", f32::exp)?;
+                }
+                LegacyWin64Import::Floor => {
+                    install_double_import(unicorn, stub, "floor", f64::floor)?;
+                }
+                LegacyWin64Import::FloorF => {
+                    install_float_import(unicorn, stub, "floorf", f32::floor)?;
+                }
+                LegacyWin64Import::FmodF => {
+                    install_fmodf_import(unicorn, stub)?;
+                }
+                LegacyWin64Import::FdClass => {
+                    uc("write _fdclass return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _fdclass",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_fdclass(unicorn, true);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::DClass => {
+                    uc("write _dclass return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _dclass",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_fdclass(unicorn, false);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::LRound => {
+                    install_lround_import(unicorn, stub)?;
+                }
+                LegacyWin64Import::LRoundF => {
+                    install_lroundf_import(unicorn, stub)?;
+                }
+                LegacyWin64Import::Log => {
+                    install_double_import(unicorn, stub, "log", f64::ln)?;
+                }
+                LegacyWin64Import::Round => {
+                    install_double_import(unicorn, stub, "round", f64::round)?;
+                }
+                LegacyWin64Import::RoundF => {
+                    install_float_import(unicorn, stub, "roundf", f32::round)?;
+                }
+                LegacyWin64Import::PowF => {
+                    install_float_binary_import(unicorn, stub, "powf", f32::powf)?;
+                }
+                LegacyWin64Import::Pow => {
+                    install_double_binary_import(unicorn, stub, "pow", f64::powf)?;
+                }
+                LegacyWin64Import::Sin => {
+                    install_double_import(unicorn, stub, "sin", f64::sin)?;
+                }
+                LegacyWin64Import::SinF => {
+                    install_float_import(unicorn, stub, "sinf", f32::sin)?;
+                }
+                LegacyWin64Import::OmpGetMaxThreads => {
+                    let value = deterministic_import_i32("omp_get_max_threads")
+                        .expect("known deterministic import");
+                    uc(
+                        "install omp_get_max_threads import",
+                        unicorn.mem_write(stub, &deterministic_i32_stub(value)),
+                    )?;
+                }
+                LegacyWin64Import::OmpSetDynamic => {
+                    uc(
+                        "write omp_set_dynamic return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
                     "install omp_set_dynamic import",
                     unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                         let enabled = unicorn.reg_read(RegisterX86::RCX).unwrap_or(u64::MAX);
@@ -1077,850 +2661,1569 @@ fn install_win64_import(
                         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
                     }),
                 )?;
-            }
-            LegacyWin64Import::VcompSetNumThreads => {
-                uc(
-                    "write _vcomp_set_num_threads return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install _vcomp_set_num_threads import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_vcomp_set_num_threads(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::VcompFork => {
-                // Marshal captured arguments, then tail-jump into the outlined
-                // worker so it returns directly to the caller.
-                uc(
-                    "write _vcomp_fork tail jump",
-                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
-                )?;
-                uc(
-                    "install _vcomp_fork import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_vcomp_fork(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::VcompForDynamicInit => {
-                uc(
-                    "write _vcomp_for_dynamic_init return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install _vcomp_for_dynamic_init import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_vcomp_for_dynamic_init(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::VcompForDynamicNext => {
-                uc(
-                    "write _vcomp_for_dynamic_next return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install _vcomp_for_dynamic_next import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_vcomp_for_dynamic_next(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::VcompForStaticSimpleInit => {
-                uc(
-                    "write _vcomp_for_static_simple_init return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install _vcomp_for_static_simple_init import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_vcomp_for_static_simple_init(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::VcompNoOp => {
-                // The worker is deliberately single-threaded, so these
-                // synchronization/end helpers are deterministic no-ops.
-            }
-            LegacyWin64Import::GetSystemTimeAsFileTime => {
-                uc(
-                    "write GetSystemTimeAsFileTime return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetSystemTimeAsFileTime import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_system_time_as_file_time(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetSystemInfo => {
-                uc(
-                    "write GetSystemInfo return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetSystemInfo import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_system_info(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetStartupInfoW => {
-                uc(
-                    "write GetStartupInfoW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetStartupInfoW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_startup_info_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::RtlCaptureContext => {
-                uc(
-                    "write RtlCaptureContext return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install RtlCaptureContext import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_rtl_capture_context(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetStdHandle => {
-                uc(
-                    "write GetStdHandle return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetStdHandle import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_std_handle(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetConsoleMode => {
-                uc(
-                    "write GetConsoleMode return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetConsoleMode import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_console_mode(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetFileType => {
-                uc("write GetFileType return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install GetFileType import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_file_type(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CreateFileW => {
-                uc("write CreateFileW return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install bounded CreateFileW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_create_file_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::FindFirstFileExW => {
-                uc(
-                    "write FindFirstFileExW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install bounded FindFirstFileExW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_find_first_file_ex_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CreateThread => {
-                uc(
-                    "write CreateThread callback tail jump",
-                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
-                )?;
-                uc(
-                    "install bounded CreateThread import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_create_thread(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::NtWriteFile => {
-                uc("write NtWriteFile return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install bounded NtWriteFile import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_nt_write_file(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::WakeByAddressAll => {
-                // WakeByAddressAll is a VOID function.  A plain RET preserves
-                // RAX while the hook updates only guest-owned waiter state.
-                uc(
-                    "write WakeByAddressAll return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install bounded WakeByAddressAll import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_wake_by_address_all(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::WakeByAddressSingle => {
-                uc(
-                    "write WakeByAddressSingle return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install bounded WakeByAddressSingle import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_wake_by_address(unicorn, false);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::WaitOnAddress => {
-                uc(
-                    "write WaitOnAddress return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install cooperative WaitOnAddress import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_wait_on_address(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::WaitForSingleObject
-            | LegacyWin64Import::WaitForSingleObjectEx
-            | LegacyWin64Import::CloseHandle
-            | LegacyWin64Import::SetThreadStackGuarantee => {
-                uc(
-                    "write Windows thread lifecycle return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install Windows thread lifecycle import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_windows_thread_lifecycle(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetCurrentThread => {
-                uc(
-                    "install current-thread pseudo handle",
-                    unicorn.mem_write(stub, &deterministic_u64_stub(u64::MAX - 1)),
-                )?;
-            }
-            LegacyWin64Import::SwitchToThread => {
-                uc(
-                    "write cooperative SwitchToThread return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install cooperative SwitchToThread",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_switch_to_thread(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::ResumeThread => {
-                uc(
-                    "write ResumeThread callback tail jump",
-                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
-                )?;
-                uc(
-                    "install bounded ResumeThread import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_resume_thread(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetCommandLineA => {
-                uc(
-                    "write GetCommandLineA return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetCommandLineA import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_command_line_a(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetCommandLineW => {
-                uc(
-                    "write GetCommandLineW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetCommandLineW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_command_line_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetACP => {
-                uc(
-                    "install deterministic GetACP import",
-                    unicorn.mem_write(stub, &deterministic_i32_stub(932)),
-                )?;
-            }
-            LegacyWin64Import::GetCPInfo => {
-                uc("write GetCPInfo return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install GetCPInfo import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_cp_info(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::IsDebuggerPresent => {
-                uc(
-                    "install deterministic IsDebuggerPresent import",
-                    unicorn.mem_write(stub, &deterministic_i32_stub(0)),
-                )?;
-            }
-            LegacyWin64Import::GetCurrentThreadId => {
-                uc(
-                    "write GetCurrentThreadId return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install deterministic guest thread identity",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        let id = unicorn.get_data().current_windows_thread_id;
-                        let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(id));
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetCurrentProcessId => {
-                uc(
-                    "install deterministic Windows identity import",
-                    unicorn.mem_write(stub, &deterministic_i32_stub(1)),
-                )?;
-            }
-            LegacyWin64Import::QueryPerformanceCounter => {
-                uc(
-                    "write QueryPerformanceCounter return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install QueryPerformanceCounter import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_query_performance_counter(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::QueryPerformanceFrequency => {
-                uc(
-                    "write QueryPerformanceFrequency return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install QueryPerformanceFrequency import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_query_performance_frequency(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetEnvironmentVariableA => {
-                uc(
-                    "write deterministic guest environment value",
-                    unicorn.mem_write(HOST_ENVIRONMENT_VALUE, b"1\0"),
-                )?;
-                uc(
-                    "write GetEnvironmentVariableA return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetEnvironmentVariableA import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_environment_variable_a(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetEnvironmentVariableW => {
-                uc(
-                    "write GetEnvironmentVariableW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetEnvironmentVariableW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_environment_variable_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetEnvironmentStringsW => {
-                uc(
-                    "write GetEnvironmentStringsW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetEnvironmentStringsW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_environment_strings_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::FreeEnvironmentStringsW => {
-                uc(
-                    "write FreeEnvironmentStringsW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install FreeEnvironmentStringsW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_free_environment_strings_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::WideCharToMultiByte => {
-                uc(
-                    "write WideCharToMultiByte return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install WideCharToMultiByte import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_wide_char_to_multi_byte(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::MultiByteToWideChar => {
-                uc(
-                    "write MultiByteToWideChar return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install MultiByteToWideChar import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_multi_byte_to_wide_char(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetStringTypeW => {
-                uc(
-                    "write GetStringTypeW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetStringTypeW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_string_type_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::LCMapStringW => {
-                uc(
-                    "write LCMapStringW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install LCMapStringW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_lc_map_string_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetLastError | LegacyWin64Import::SetLastError => {
-                uc(
-                    "write last-error import return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install last-error import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_windows_last_error(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::SetThreadErrorMode => {
-                uc(
-                    "write SetThreadErrorMode return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install SetThreadErrorMode import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_set_thread_error_mode(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::LoadLibraryExW => {
-                uc(
-                    "write LoadLibraryExW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install LoadLibraryExW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_load_library_ex_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::LoadLibraryA => {
-                uc(
-                    "write LoadLibraryA return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install LoadLibraryA import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_load_library_a(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::FlsAlloc
-            | LegacyWin64Import::FlsGetValue
-            | LegacyWin64Import::FlsSetValue => {
-                uc("write FLS import return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install FLS import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_fls(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::FlsFree => {
-                uc(
-                    "write FlsFree callback tail jump",
-                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
-                )?;
-                uc(
-                    "install FlsFree import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_fls_free(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::TlsAlloc
-            | LegacyWin64Import::TlsGetValue
-            | LegacyWin64Import::TlsSetValue
-            | LegacyWin64Import::TlsFree => {
-                uc("write TLS import return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install TLS import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_tls(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::ExplicitMsvcRuntimeZero => {
-                // This finite allowlist mirrors the prior deterministic-zero
-                // behavior for CRT startup/teardown only. Every other unknown
-                // import remains a typed trap.
-            }
-            LegacyWin64Import::CrtInitterm | LegacyWin64Import::CrtInittermE => {
-                uc(
-                    "write CRT initializer tail jump",
-                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
-                )?;
-                let stop_on_error = implementation == LegacyWin64Import::CrtInittermE;
-                uc(
-                    "install CRT initializer import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_crt_initterm(unicorn, stop_on_error);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CrtInitializeOnexitTable
-            | LegacyWin64Import::CrtRegisterOnexitFunction => {
-                uc("write CRT onexit return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install CRT onexit import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_crt_onexit(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CrtExecuteOnexitTable => {
-                uc(
-                    "write CRT onexit tail jump",
-                    unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
-                )?;
-                uc(
-                    "install CRT onexit execution import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_crt_onexit(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CrtGetenv => {
-                uc(
-                    "write deterministic guest environment value",
-                    unicorn.mem_write(HOST_ENVIRONMENT_VALUE, b"1\0"),
-                )?;
-                uc(
-                    "write deterministic getenv return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install deterministic getenv import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_getenv(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::CrtSetTerminate => {
-                uc(
-                    "write CRT set_terminate return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install CRT set_terminate import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_crt_set_terminate(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::InitializeCriticalSection
-            | LegacyWin64Import::InitializeCriticalSectionAndSpinCount
-            | LegacyWin64Import::InitializeCriticalSectionEx
-            | LegacyWin64Import::EnterCriticalSection
-            | LegacyWin64Import::LeaveCriticalSection
-            | LegacyWin64Import::DeleteCriticalSection => {
-                uc(
-                    "write critical-section return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install critical-section import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_windows_critical_section(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::AcquireSrwLockExclusive
-            | LegacyWin64Import::TryAcquireSrwLockExclusive
-            | LegacyWin64Import::ReleaseSrwLockExclusive => {
-                uc("write SRW return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install SRW import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_windows_srw_lock(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetModuleHandleW => {
-                uc(
-                    "write GetModuleHandleW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetModuleHandleW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_module_handle_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetModuleHandleExA => {
-                uc(
-                    "write GetModuleHandleExA return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetModuleHandleExA import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_module_handle_ex_a(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetModuleHandleExW => {
-                uc(
-                    "write GetModuleHandleExW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetModuleHandleExW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_module_handle_ex_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetModuleFileNameW => {
-                uc(
-                    "write GetModuleFileNameW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetModuleFileNameW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_module_file_name_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::LoadLibraryW => {
-                uc(
-                    "write LoadLibraryW return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install LoadLibraryW import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_load_library_w(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetProcAddress => {
-                uc(
-                    "write GetProcAddress return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install GetProcAddress import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_get_proc_address(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::InitializeSListHead => {
-                uc(
-                    "write InitializeSListHead return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install InitializeSListHead import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_initialize_slist_head(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::DisableThreadLibraryCalls => {
-                uc(
-                    "install deterministic DisableThreadLibraryCalls import",
-                    unicorn.mem_write(stub, &deterministic_i32_stub(1)),
-                )?;
-            }
-            LegacyWin64Import::ProcessPrng => {
-                uc("write ProcessPrng return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install ProcessPrng import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_process_prng(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::GetProcessHeap => {
-                uc(
-                    "install deterministic GetProcessHeap import",
-                    unicorn.mem_write(stub, &deterministic_u64_stub(PROCESS_HEAP_HANDLE)),
-                )?;
-            }
-            LegacyWin64Import::OutputDebugStringA => {
-                uc(
-                    "write OutputDebugStringA return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install OutputDebugStringA import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_output_debug_string_a(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::FopenS => {
-                uc("write fopen_s return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install fopen_s import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_fopen_s(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::StrncpyS => {
-                uc("write strncpy_s return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install strncpy_s import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_strncpy_s(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::HeapAlloc
-            | LegacyWin64Import::HeapFree
-            | LegacyWin64Import::HeapReAlloc => {
-                uc(
-                    "write process heap return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install process heap import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_process_heap(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::HeapCreate | LegacyWin64Import::HeapDestroy => {
-                uc(
-                    "write private heap return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install private heap import",
-                    unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
-                        emulate_private_heap_lifecycle(unicorn, implementation);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::WsaStartup => {
-                uc("write WSAStartup return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install WSAStartup import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_wsa_startup(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::WsaCleanup => {
-                uc("write WSACleanup return", unicorn.mem_write(stub, &[0xc3]))?;
-                uc(
-                    "install WSACleanup import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_wsa_cleanup(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::RtlPcToFileHeader => {
-                uc(
-                    "write RtlPcToFileHeader return",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install RtlPcToFileHeader import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_rtl_pc_to_file_header(unicorn);
-                    }),
-                )?;
-            }
-            LegacyWin64Import::RaiseException => {
-                uc(
-                    "write RaiseException trap",
-                    unicorn.mem_write(stub, &[0xc3]),
-                )?;
-                uc(
-                    "install RaiseException import",
-                    unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                        emulate_raise_exception(unicorn);
-                    }),
-                )?;
-            }
-        },
+                }
+                LegacyWin64Import::VcompSetNumThreads => {
+                    uc(
+                        "write _vcomp_set_num_threads return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install _vcomp_set_num_threads import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_vcomp_set_num_threads(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VcompFork => {
+                    // Marshal captured arguments, then tail-jump into the outlined
+                    // worker so it returns directly to the caller.
+                    uc(
+                        "write _vcomp_fork tail jump",
+                        unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                    )?;
+                    uc(
+                        "install _vcomp_fork import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_vcomp_fork(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VcompForDynamicInit => {
+                    uc(
+                        "write _vcomp_for_dynamic_init return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install _vcomp_for_dynamic_init import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_vcomp_for_dynamic_init(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VcompForDynamicNext => {
+                    uc(
+                        "write _vcomp_for_dynamic_next return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install _vcomp_for_dynamic_next import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_vcomp_for_dynamic_next(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VcompForStaticSimpleInit => {
+                    uc(
+                        "write _vcomp_for_static_simple_init return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install _vcomp_for_static_simple_init import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_vcomp_for_static_simple_init(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VcompNoOp => {
+                    // The worker is deliberately single-threaded, so these
+                    // synchronization/end helpers are deterministic no-ops.
+                }
+                LegacyWin64Import::GetSystemTimeAsFileTime => {
+                    uc(
+                        "write GetSystemTimeAsFileTime return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetSystemTimeAsFileTime import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_system_time_as_file_time(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetHostname => {
+                    uc("write gethostname return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install gethostname",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_gethostname(uc)),
+                    )?;
+                }
+                LegacyWin64Import::GetUserNameA => {
+                    uc(
+                        "write GetUserNameA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetUserNameA",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_get_user_name(uc, false)),
+                    )?;
+                }
+                LegacyWin64Import::GetUserNameW => {
+                    uc(
+                        "write GetUserNameW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetUserNameW",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_get_user_name(uc, true)),
+                    )?;
+                }
+                LegacyWin64Import::GetSystemMetrics => {
+                    uc(
+                        "write GetSystemMetrics return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetSystemMetrics",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_get_system_metrics(uc)),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::SetWindowsHookExA
+                | LegacyWin64Import::UnhookWindowsHookEx
+                | LegacyWin64Import::CallNextHookEx) => {
+                    uc(
+                        "write Windows hook return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install Windows hook API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_hook_api(unicorn, operation);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::SetTimer | LegacyWin64Import::KillTimer) => {
+                    uc(
+                        "write Windows timer return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install Windows timer API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_timer_api(unicorn, operation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MessageBox(wide) => {
+                    uc("write MessageBox return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install MessageBox",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_message_box(unicorn, wide);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Beep => {
+                    uc("write Beep return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install Beep",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let frequency = read_win64_import_argument(unicorn, 0)?;
+                                let duration = read_win64_import_argument(unicorn, 1)?;
+                                if !(37..=32_767).contains(&frequency) || duration > u32::MAX as u64
+                                {
+                                    unicorn.get_data_mut().windows_last_error = 87;
+                                    return Ok(0);
+                                }
+                                Ok(1)
+                            })();
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VerifyVersionInfoA => {
+                    uc(
+                        "write VerifyVersionInfoA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install VerifyVersionInfoA",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_verify_version_info_a(uc)
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::VerSetConditionMask => {
+                    uc(
+                        "write VerSetConditionMask return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install VerSetConditionMask",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let mask = read_win64_import_argument(uc, 0)?;
+                                let types = read_win64_import_argument(uc, 1)? as u32 & 0xff;
+                                let condition = read_win64_import_argument(uc, 2)? & 7;
+                                Ok(if types == 0 {
+                                    mask
+                                } else {
+                                    mask | (condition << ((31 - types.leading_zeros()) * 3))
+                                })
+                            })();
+                            finish_guest_stdio(uc, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetVersion => {
+                    uc("write GetVersion return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install GetVersion",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            // Match GetVersionExA's manifest-free NT 6.2 / build 9200 view.
+                            let _ = uc.reg_write(RegisterX86::RAX, (9200u64 << 16) | (2 << 8) | 6);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetVersionExA => {
+                    uc(
+                        "write GetVersionExA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetVersionExA",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_get_version_ex_a(uc)),
+                    )?;
+                }
+                LegacyWin64Import::GetSystemInfo => {
+                    uc(
+                        "write GetSystemInfo return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetSystemInfo import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_system_info(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetStartupInfoW => {
+                    uc(
+                        "write GetStartupInfoW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetStartupInfoW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_startup_info_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::RtlCaptureContext => {
+                    uc(
+                        "write RtlCaptureContext return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install RtlCaptureContext import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_rtl_capture_context(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetStdHandle => {
+                    uc(
+                        "write GetStdHandle return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetStdHandle import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_std_handle(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetConsoleMode => {
+                    uc(
+                        "write GetConsoleMode return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetConsoleMode import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_console_mode(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetFileType => {
+                    uc("write GetFileType return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install GetFileType import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_file_type(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WsPrintfA => {
+                    uc("write wsprintfA return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install wsprintfA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_wsprintf_a(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CreateFileA
+                | LegacyWin64Import::ReadFile
+                | LegacyWin64Import::GetFileSizeEx
+                | LegacyWin64Import::GetFileInformationByHandle
+                | LegacyWin64Import::SetFilePointerEx => {
+                    uc("write file API return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install file API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            let result = if implementation == LegacyWin64Import::CreateFileA {
+                                guest_create_file(unicorn, false)
+                            } else {
+                                guest_windows_file_io(unicorn, implementation)
+                            };
+                            finish_windows_file_api(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CreateFileW => {
+                    uc("write CreateFileW return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install bounded CreateFileW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_create_file_w(unicorn);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::FindFirstFileA
+                | LegacyWin64Import::FindNextFileA
+                | LegacyWin64Import::FindClose) => {
+                    uc("write file search return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install file search",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_guest_file_search(unicorn, operation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::FindFirstFileExW => {
+                    uc(
+                        "write FindFirstFileExW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install bounded FindFirstFileExW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_find_first_file_ex_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Errno => {
+                    uc("write _errno return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _errno",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_errno_pointer(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetHostByName => {
+                    uc(
+                        "write gethostbyname return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install gethostbyname",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_gethostbyname(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetAdaptersAddresses => {
+                    uc(
+                        "write GetAdaptersAddresses return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetAdaptersAddresses",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_get_adapters_addresses(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ExitThread => {
+                    uc(
+                        "write ExitThread tail jump",
+                        unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                    )?;
+                    uc(
+                        "install ExitThread",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            if let Err(error) = guest_exit_thread(unicorn) {
+                                fail_windows_thread_callback(unicorn, error);
+                            }
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CreateThread | LegacyWin64Import::CrtBeginThreadEx => {
+                    uc(
+                        "write CreateThread callback tail jump",
+                        unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                    )?;
+                    uc(
+                        "install bounded CreateThread import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_create_thread(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::NtWriteFile => {
+                    uc("write NtWriteFile return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install bounded NtWriteFile import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_nt_write_file(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WakeByAddressAll => {
+                    // WakeByAddressAll is a VOID function.  A plain RET preserves
+                    // RAX while the hook updates only guest-owned waiter state.
+                    uc(
+                        "write WakeByAddressAll return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install bounded WakeByAddressAll import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_wake_by_address_all(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WakeByAddressSingle => {
+                    uc(
+                        "write WakeByAddressSingle return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install bounded WakeByAddressSingle import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_wake_by_address(unicorn, false);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WaitOnAddress => {
+                    uc(
+                        "write WaitOnAddress return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install cooperative WaitOnAddress import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_wait_on_address(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CreateMutexA
+                | LegacyWin64Import::ReleaseMutex
+                | LegacyWin64Import::CreateSemaphoreA
+                | LegacyWin64Import::ReleaseSemaphore
+                | LegacyWin64Import::CreateEventA
+                | LegacyWin64Import::CreateEventW
+                | LegacyWin64Import::OpenEventA
+                | LegacyWin64Import::OpenEventW
+                | LegacyWin64Import::SetEvent
+                | LegacyWin64Import::ResetEvent => {
+                    uc("write mutex return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install mutex",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_kernel_object(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WaitForSingleObject
+                | LegacyWin64Import::WaitForSingleObjectEx
+                | LegacyWin64Import::CloseHandle
+                | LegacyWin64Import::SetThreadStackGuarantee => {
+                    uc(
+                        "write Windows thread lifecycle return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install Windows thread lifecycle import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_thread_lifecycle(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetProcessAffinityMask => {
+                    uc(
+                        "write process affinity return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install process affinity",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_get_process_affinity_mask(uc)
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetCurrentProcess => {
+                    // Win64 current-process pseudo handle is sign-extended -1.
+                    uc(
+                        "install current-process pseudo handle",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(u64::MAX)),
+                    )?;
+                }
+                LegacyWin64Import::GetCurrentThread => {
+                    uc(
+                        "install current-thread pseudo handle",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(u64::MAX - 1)),
+                    )?;
+                }
+                LegacyWin64Import::SwitchToThread => {
+                    uc(
+                        "write cooperative SwitchToThread return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install cooperative SwitchToThread",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_switch_to_thread(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ResumeThread => {
+                    uc(
+                        "write ResumeThread callback tail jump",
+                        unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                    )?;
+                    uc(
+                        "install bounded ResumeThread import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_resume_thread(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetCommandLineA => {
+                    uc(
+                        "write GetCommandLineA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetCommandLineA import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_command_line_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetCommandLineW => {
+                    uc(
+                        "write GetCommandLineW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetCommandLineW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_command_line_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetACP => {
+                    uc(
+                        "install deterministic GetACP import",
+                        unicorn.mem_write(stub, &deterministic_i32_stub(932)),
+                    )?;
+                }
+                LegacyWin64Import::GetSystemDefaultLCID => {
+                    // Match the deterministic Japanese CP932 locale exposed by
+                    // GetACP and admitted by the Unicode locale helpers.
+                    uc(
+                        "install deterministic GetSystemDefaultLCID import",
+                        unicorn.mem_write(stub, &deterministic_i32_stub(0x0411)),
+                    )?;
+                }
+                LegacyWin64Import::GetCPInfo => {
+                    uc("write GetCPInfo return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install GetCPInfo import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_cp_info(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::IsDebuggerPresent => {
+                    uc(
+                        "install deterministic IsDebuggerPresent import",
+                        unicorn.mem_write(stub, &deterministic_i32_stub(0)),
+                    )?;
+                }
+                LegacyWin64Import::GetCurrentThreadId => {
+                    uc(
+                        "write GetCurrentThreadId return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install deterministic guest thread identity",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let id = unicorn.get_data().current_windows_thread_id;
+                            let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(id));
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetCurrentProcessId => {
+                    uc(
+                        "install deterministic Windows identity import",
+                        unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                    )?;
+                }
+                LegacyWin64Import::QueryPerformanceCounter => {
+                    uc(
+                        "write QueryPerformanceCounter return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install QueryPerformanceCounter import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_query_performance_counter(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::QueryPerformanceFrequency => {
+                    uc(
+                        "write QueryPerformanceFrequency return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install QueryPerformanceFrequency import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_query_performance_frequency(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetEnvironmentVariableA => {
+                    uc(
+                        "write deterministic guest environment value",
+                        unicorn.mem_write(HOST_ENVIRONMENT_VALUE, b"1\0"),
+                    )?;
+                    uc(
+                        "write GetEnvironmentVariableA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetEnvironmentVariableA import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_environment_variable_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetEnvironmentVariableW => {
+                    uc(
+                        "write GetEnvironmentVariableW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetEnvironmentVariableW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_environment_variable_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetEnvironmentStringsW => {
+                    uc(
+                        "write GetEnvironmentStringsW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetEnvironmentStringsW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_environment_strings_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::FreeEnvironmentStringsW => {
+                    uc(
+                        "write FreeEnvironmentStringsW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install FreeEnvironmentStringsW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_free_environment_strings_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WideCharToMultiByte => {
+                    uc(
+                        "write WideCharToMultiByte return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install WideCharToMultiByte import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_wide_char_to_multi_byte(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MultiByteToWideChar => {
+                    uc(
+                        "write MultiByteToWideChar return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install MultiByteToWideChar import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_multi_byte_to_wide_char(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetStringTypeW => {
+                    uc(
+                        "write GetStringTypeW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetStringTypeW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_string_type_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::LCMapStringW => {
+                    uc(
+                        "write LCMapStringW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install LCMapStringW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_lc_map_string_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetLastError
+                | LegacyWin64Import::SetLastError
+                | LegacyWin64Import::FormatMessageA => {
+                    uc(
+                        "write last-error import return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install last-error import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_last_error(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::SetThreadErrorMode => {
+                    uc(
+                        "write SetThreadErrorMode return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install SetThreadErrorMode import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_set_thread_error_mode(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::LoadLibraryExW => {
+                    uc(
+                        "write LoadLibraryExW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install LoadLibraryExW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_load_library_ex_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::LoadLibraryExA => {
+                    uc(
+                        "write LoadLibraryExA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install LoadLibraryExA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_load_library_ex_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::LoadLibraryA => {
+                    uc(
+                        "write LoadLibraryA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install LoadLibraryA import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_load_library_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::FreeLibrary => {
+                    uc("write FreeLibrary return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install FreeLibrary import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_free_library(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::FlsAlloc
+                | LegacyWin64Import::FlsGetValue
+                | LegacyWin64Import::FlsSetValue => {
+                    uc("write FLS import return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install FLS import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_fls(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::FlsFree => {
+                    uc(
+                        "write FlsFree callback tail jump",
+                        unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                    )?;
+                    uc(
+                        "install FlsFree import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_fls_free(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::TlsAlloc
+                | LegacyWin64Import::TlsGetValue
+                | LegacyWin64Import::TlsSetValue
+                | LegacyWin64Import::TlsFree => {
+                    uc("write TLS import return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install TLS import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_tls(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ExplicitMsvcRuntimeZero => {
+                    // This finite allowlist mirrors the prior deterministic-zero
+                    // behavior for CRT startup/teardown only. Every other unknown
+                    // import remains a typed trap.
+                }
+                LegacyWin64Import::CrtInitterm | LegacyWin64Import::CrtInittermE => {
+                    uc(
+                        "write CRT initializer tail jump",
+                        unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                    )?;
+                    let stop_on_error = implementation == LegacyWin64Import::CrtInittermE;
+                    uc(
+                        "install CRT initializer import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_initterm(unicorn, stop_on_error);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtInitializeOnexitTable
+                | LegacyWin64Import::CrtRegisterOnexitFunction => {
+                    uc("write CRT onexit return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install CRT onexit import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_onexit(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtExecuteOnexitTable => {
+                    uc(
+                        "write CRT onexit tail jump",
+                        unicorn.mem_write(stub, &[0x41, 0xff, 0xe3]),
+                    )?;
+                    uc(
+                        "install CRT onexit execution import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_onexit(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtPutenv => {
+                    uc("write putenv return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install putenv",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_putenv(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtPutenvS => {
+                    uc("write _putenv_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _putenv_s",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_putenv_s(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtWgetenv => {
+                    uc(
+                        "write CRT _wgetenv return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT _wgetenv import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_wgetenv(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtWenviron => {
+                    uc(
+                        "write CRT __p__wenviron return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT __p__wenviron",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_wenviron(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtGetenv => {
+                    uc(
+                        "write deterministic guest environment value",
+                        unicorn.mem_write(HOST_ENVIRONMENT_VALUE, b"1\0"),
+                    )?;
+                    uc(
+                        "write deterministic getenv return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install deterministic getenv import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_getenv(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtSetTerminate => {
+                    uc(
+                        "write CRT set_terminate return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT set_terminate import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_set_terminate(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::InitializeCriticalSection
+                | LegacyWin64Import::InitializeCriticalSectionAndSpinCount
+                | LegacyWin64Import::InitializeCriticalSectionEx
+                | LegacyWin64Import::EnterCriticalSection
+                | LegacyWin64Import::LeaveCriticalSection
+                | LegacyWin64Import::DeleteCriticalSection => {
+                    uc(
+                        "write critical-section return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install critical-section import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_critical_section(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::SetSecurityDescriptorDacl => {
+                    uc(
+                        "write descriptor DACL setter return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install descriptor DACL setter",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_set_security_descriptor_dacl(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::InitializeSecurityDescriptor => {
+                    uc(
+                        "write security descriptor initializer return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install security descriptor initializer",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_initialize_security_descriptor(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::InitializeSrwLock
+                | LegacyWin64Import::AcquireSrwLockExclusive
+                | LegacyWin64Import::TryAcquireSrwLockExclusive
+                | LegacyWin64Import::ReleaseSrwLockExclusive => {
+                    uc("write SRW return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install SRW import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_srw_lock(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::InitializeConditionVariable
+                | LegacyWin64Import::SleepConditionVariableSrw
+                | LegacyWin64Import::WakeConditionVariable
+                | LegacyWin64Import::WakeAllConditionVariable) => {
+                    uc(
+                        "write condition variable return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install condition variable import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_condition_variable_srw(unicorn, operation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::ExpandEnvironmentStringsA => {
+                    uc(
+                        "write ExpandEnvironmentStringsA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install ExpandEnvironmentStringsA",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_expand_environment_strings_a(uc)
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetModuleHandleA => {
+                    uc(
+                        "write GetModuleHandleA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetModuleHandleA",
+                        unicorn
+                            .add_code_hook(stub, stub, |uc, _, _| emulate_get_module_handle_a(uc)),
+                    )?;
+                }
+                LegacyWin64Import::GetModuleHandleW => {
+                    uc(
+                        "write GetModuleHandleW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetModuleHandleW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_module_handle_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetModuleHandleExA => {
+                    uc(
+                        "write GetModuleHandleExA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetModuleHandleExA import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_module_handle_ex_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetModuleHandleExW => {
+                    uc(
+                        "write GetModuleHandleExW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetModuleHandleExW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_module_handle_ex_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetModuleFileNameW => {
+                    uc(
+                        "write GetModuleFileNameW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetModuleFileNameW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_module_file_name_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::LoadLibraryW => {
+                    uc(
+                        "write LoadLibraryW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install LoadLibraryW import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_load_library_w(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetProcAddress => {
+                    uc(
+                        "write GetProcAddress return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetProcAddress import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_proc_address(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::InitializeSListHead => {
+                    uc(
+                        "write InitializeSListHead return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install InitializeSListHead import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_initialize_slist_head(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::DisableThreadLibraryCalls => {
+                    uc(
+                        "install deterministic DisableThreadLibraryCalls import",
+                        unicorn.mem_write(stub, &deterministic_i32_stub(1)),
+                    )?;
+                }
+                LegacyWin64Import::ProcessPrng => {
+                    uc("write ProcessPrng return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install ProcessPrng import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_process_prng(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetProcessHeap => {
+                    uc(
+                        "install deterministic GetProcessHeap import",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(PROCESS_HEAP_HANDLE)),
+                    )?;
+                }
+                LegacyWin64Import::OutputDebugStringA => {
+                    uc(
+                        "write OutputDebugStringA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install OutputDebugStringA import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_output_debug_string_a(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtLocaleNames => {
+                    uc(
+                        "write CRT locale names return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT locale names",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_locale_names(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtLocaleConv => {
+                    uc("write localeconv return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install localeconv",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_localeconv(unicorn);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::CrtCreateLocale
+                | LegacyWin64Import::CrtFreeLocale) => {
+                    uc(
+                        "write CRT locale object return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT locale object API",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_locale_object(unicorn, operation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtPctype => {
+                    uc(
+                        "write __pctype_func return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install __pctype_func",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_pctype(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtMbCurMax => {
+                    // The supported C locale has single-byte characters.
+                    // Non-C locale mutations remain explicit failures.
+                    uc(
+                        "install C locale MB_CUR_MAX query",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(1)),
+                    )?;
+                }
+                LegacyWin64Import::CrtLocaleCodePage
+                | LegacyWin64Import::CrtLocaleCollateCodePage => {
+                    uc(
+                        "install CRT locale codepage query",
+                        unicorn.mem_write(stub, &deterministic_u64_stub(0)),
+                    )?;
+                }
+                LegacyWin64Import::CrtSetLocale(wide) => {
+                    uc("write _wsetlocale return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _wsetlocale",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_setlocale(unicorn, wide);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::CrtLocaleLock
+                | LegacyWin64Import::CrtLocaleUnlock) => {
+                    let release = operation == LegacyWin64Import::CrtLocaleUnlock;
+                    uc(
+                        "write CRT locale lock return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT locale lock",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_locale_lock(unicorn, release);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtTimeNames(months) => {
+                    uc(
+                        "write CRT time names return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT time names",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_time_names(unicorn, months);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtWideTimeNames(months) => {
+                    uc(
+                        "write wide CRT time names return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install wide CRT time names",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_wide_time_names(unicorn, months);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtTimeLocaleNames => {
+                    uc(
+                        "write CRT time locale return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT time locale",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_time_locale_names(unicorn);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::EncodePointer
+                | LegacyWin64Import::DecodePointer) => {
+                    let decode = operation == LegacyWin64Import::DecodePointer;
+                    uc(
+                        "write pointer encoding return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install pointer encoding",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_windows_pointer_encoding(unicorn, decode);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StreamBufferPointers => {
+                    uc(
+                        "write stream buffer pointers return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install stream buffer pointers",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_get_stream_buffer_pointers(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::AcRtIobFunc => {
+                    uc(
+                        "write standard FILE return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install standard FILE import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_acrt_iob_func(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Fgetc
+                | LegacyWin64Import::Ungetc
+                | LegacyWin64Import::Fgets
+                | LegacyWin64Import::Fread
+                | LegacyWin64Import::Feof
+                | LegacyWin64Import::Ferror
+                | LegacyWin64Import::LockFile
+                | LegacyWin64Import::UnlockFile
+                | LegacyWin64Import::Fflush
+                | LegacyWin64Import::Fwrite
+                | LegacyWin64Import::Fclose => {
+                    uc("write stdio return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install stdio",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_guest_stdio(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::Fseeki64
+                | LegacyWin64Import::Ftelli64
+                | LegacyWin64Import::Fsetpos
+                | LegacyWin64Import::Fgetpos
+                | LegacyWin64Import::Rewind) => {
+                    uc(
+                        "write CRT stream position return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT stream position",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_stream_position(unicorn, operation);
+                        }),
+                    )?;
+                }
+                operation @ (LegacyWin64Import::CrtOpen(_)
+                | LegacyWin64Import::CrtRead
+                | LegacyWin64Import::CrtClose
+                | LegacyWin64Import::CrtLseek64
+                | LegacyWin64Import::CrtSetMode) => {
+                    uc(
+                        "write CRT descriptor return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CRT descriptor import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_crt_descriptor(unicorn, operation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Strerror => {
+                    uc("write strerror return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strerror",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_crt_strerror(unicorn)
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Wfopen => {
+                    uc("write _wfopen return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _wfopen",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| emulate_wfopen(unicorn)),
+                    )?;
+                }
+                LegacyWin64Import::Wfsopen => {
+                    uc("write _wfsopen return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _wfsopen",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| emulate_wfsopen(unicorn)),
+                    )?;
+                }
+                LegacyWin64Import::Fopen => {
+                    uc("write fopen return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install fopen",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_fopen(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::Fsopen => {
+                    uc("write _fsopen return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _fsopen",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| emulate_fsopen(unicorn)),
+                    )?;
+                }
+                LegacyWin64Import::FopenS => {
+                    uc("write fopen_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install fopen_s import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_fopen_s(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CrtSrand | LegacyWin64Import::CrtRand => {
+                    uc("write CRT random return", unicorn.mem_write(stub, &[0xc3]))?;
+                    let seed = matches!(implementation, LegacyWin64Import::CrtSrand);
+                    uc(
+                        "install CRT random",
+                        unicorn.add_code_hook(stub, stub, move |uc, _, _| {
+                            let result = (|| -> Result<u64, String> {
+                                let input = if seed {
+                                    Some(read_win64_import_argument(uc, 0)? as u32)
+                                } else {
+                                    None
+                                };
+                                let thread = uc.get_data().current_windows_thread_id;
+                                let state = uc
+                                    .get_data_mut()
+                                    .crt_random_states
+                                    .entry(thread)
+                                    .or_insert(1);
+                                if let Some(input) = input {
+                                    *state = input;
+                                    Ok(0)
+                                } else {
+                                    *state = state.wrapping_mul(214013).wrapping_add(2531011);
+                                    Ok(u64::from((*state >> 16) & 0x7fff))
+                                }
+                            })();
+                            finish_guest_stdio(uc, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::MbsuprS => {
+                    uc("write _mbsupr_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _mbsupr_s",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_mbsupr_s(uc)),
+                    )?;
+                }
+                LegacyWin64Import::DupenvS => {
+                    uc("write _dupenv_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install _dupenv_s",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_dupenv_s(uc)),
+                    )?;
+                }
+                LegacyWin64Import::StrcatS => {
+                    uc("write strcat_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strcat_s",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| emulate_strcat_s(uc)),
+                    )?;
+                }
+                LegacyWin64Import::StrcpyS => {
+                    uc("write strcpy_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strcpy_s import",
+                        unicorn.add_code_hook(stub, stub, |uc, _, _| {
+                            emulate_secure_string_copy(uc, false);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::StrncpyS => {
+                    uc("write strncpy_s return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install strncpy_s import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_strncpy_s(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::HeapAlloc
+                | LegacyWin64Import::HeapFree
+                | LegacyWin64Import::HeapReAlloc => {
+                    uc(
+                        "write process heap return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install process heap import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_process_heap(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::HeapCreate | LegacyWin64Import::HeapDestroy => {
+                    uc(
+                        "write private heap return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install private heap import",
+                        unicorn.add_code_hook(stub, stub, move |unicorn, _, _| {
+                            emulate_private_heap_lifecycle(unicorn, implementation);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WsaStartup => {
+                    uc("write WSAStartup return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install WSAStartup import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_wsa_startup(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::WsaCleanup => {
+                    uc("write WSACleanup return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install WSACleanup import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_wsa_cleanup(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::RtlPcToFileHeader => {
+                    uc(
+                        "write RtlPcToFileHeader return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install RtlPcToFileHeader import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_rtl_pc_to_file_header(unicorn);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::RaiseException => {
+                    uc(
+                        "write RaiseException trap",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install RaiseException import",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            emulate_raise_exception(unicorn);
+                        }),
+                    )?;
+                }
+            }
+        }
         Win64ImportDispatch::OpenClBridge(symbol) => {
             install_opencl_import_bridge(unicorn, stub, symbol)?;
         }
@@ -2181,14 +4484,15 @@ fn emulate_crt_getenv(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<(), String> {
         let pointer = read_win64_import_argument(unicorn, 0)?;
         let name = read_windows_environment_name(unicorn, pointer, "CRT getenv")?;
-        let returned = if let Some(value) = deterministic_guest_environment_value(&name) {
+        let returned = if let Some(value) = guest_environment_value(unicorn.get_data(), &name) {
             let mut terminated = Vec::with_capacity(value.len() + 1);
-            terminated.extend_from_slice(value);
+            terminated.extend_from_slice(&value);
             terminated.push(0);
+            let buffer = guest_getenv_buffer(unicorn)?;
             unicorn
-                .mem_write(HOST_ENVIRONMENT_VALUE, &terminated)
+                .mem_write(buffer, &terminated)
                 .map_err(|error| format!("CRT getenv value write failed: {error}"))?;
-            HOST_ENVIRONMENT_VALUE
+            buffer
         } else {
             0
         };
@@ -2242,25 +4546,10 @@ fn deterministic_guest_environment_value(name: &[u8]) -> Option<&'static [u8]> {
 fn deterministic_guest_environment_entries() -> &'static [(&'static [u8], &'static [u8])] {
     // Keep this sorted case-insensitively, matching the ordering of a Windows
     // environment block and the allowlist used by GetEnvironmentVariableA/W.
-    &[(b"OPENCV_FOR_THREADS_NUM", b"1")]
-}
-
-fn deterministic_guest_environment_block_w() -> Vec<u8> {
-    let mut block = Vec::new();
-    for (name, value) in deterministic_guest_environment_entries() {
-        for byte in name
-            .iter()
-            .copied()
-            .chain(std::iter::once(b'='))
-            .chain(value.iter().copied())
-            .chain(std::iter::once(0))
-        {
-            block.extend_from_slice(&u16::from(byte).to_le_bytes());
-        }
-    }
-    // The final entry terminator plus this unit form the required double NUL.
-    block.extend_from_slice(&0u16.to_le_bytes());
-    block
+    &[
+        (b"OPENCV_FOR_THREADS_NUM", b"1"),
+        (b"OPENIMAGEIO_THREADS", b"1"),
+    ]
 }
 
 fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), String> {
@@ -2282,13 +4571,16 @@ fn environment_strings_range(state: &mut GuestState) -> Result<(u64, u64), Strin
         .checked_add(ENVIRONMENT_STRINGS_NAMESPACE_SIZE)
         .filter(|end| *end <= ENVIRONMENT_STRINGS_END)
         .ok_or_else(|| "GetEnvironmentStringsW namespace exhausted".to_string())?;
-    Ok((state.environment_strings_base, end))
+    Ok((
+        state.environment_strings_base,
+        end - GUEST_ENVIRONMENT_BORROWED_BYTES,
+    ))
 }
 
 fn emulate_get_environment_strings_w(unicorn: &mut Unicorn<'_, GuestState>) {
     const ERROR_NOT_ENOUGH_MEMORY: u32 = 8;
     let result = (|| -> Result<u64, String> {
-        let block = deterministic_guest_environment_block_w();
+        let block = guest_environment_block_w(unicorn.get_data());
         let allocation = unicorn
             .get_data()
             .crt_heap
@@ -3360,7 +5652,7 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
         let buffer = read_win64_import_argument(unicorn, 1)?;
         let size = read_win64_import_argument(unicorn, 2)? as u32;
         let name = read_windows_environment_name(unicorn, name_pointer, "GetEnvironmentVariableA")?;
-        let Some(value) = deterministic_guest_environment_value(&name) else {
+        let Some(value) = guest_environment_value(unicorn.get_data(), &name) else {
             unicorn.get_data_mut().windows_last_error = ERROR_ENVVAR_NOT_FOUND;
             return Ok(0);
         };
@@ -3373,8 +5665,13 @@ fn emulate_get_environment_variable_a(unicorn: &mut Unicorn<'_, GuestState>) {
             return Err("GetEnvironmentVariableA output pointer is null".into());
         }
         let mut terminated = Vec::with_capacity(value.len() + 1);
-        terminated.extend_from_slice(value);
+        terminated.extend_from_slice(&value);
         terminated.push(0);
+        if !guest_range_has_permission(unicorn, buffer, terminated.len() as u64, Prot::WRITE)? {
+            return Err(format!(
+                "environment variable output {buffer:#x} is not writable"
+            ));
+        }
         unicorn.mem_write(buffer, &terminated).map_err(|error| {
             format!("GetEnvironmentVariableA output {buffer:#x} is not writable: {error}")
         })?;
@@ -3423,7 +5720,7 @@ fn emulate_get_environment_variable_w(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         let name = String::from_utf16(&units)
             .map_err(|_| "GetEnvironmentVariableW name is invalid UTF-16".to_string())?;
-        let Some(value) = deterministic_guest_environment_value(name.as_bytes()) else {
+        let Some(value) = guest_environment_value(unicorn.get_data(), name.as_bytes()) else {
             unicorn.get_data_mut().windows_last_error = ERROR_ENVVAR_NOT_FOUND;
             return Ok(0);
         };
@@ -3439,6 +5736,11 @@ fn emulate_get_environment_variable_w(unicorn: &mut Unicorn<'_, GuestState>) {
         let mut terminated = Vec::with_capacity((value.len() + 1) * 2);
         for unit in value.iter().copied().chain(std::iter::once(0)) {
             terminated.extend_from_slice(&unit.to_le_bytes());
+        }
+        if !guest_range_has_permission(unicorn, buffer, terminated.len() as u64, Prot::WRITE)? {
+            return Err(format!(
+                "environment variable output {buffer:#x} is not writable"
+            ));
         }
         unicorn.mem_write(buffer, &terminated).map_err(|error| {
             format!("GetEnvironmentVariableW output {buffer:#x} is not writable: {error}")
@@ -3468,6 +5770,7 @@ fn emulate_windows_last_error(unicorn: &mut Unicorn<'_, GuestState>, operation: 
                     read_win64_import_argument(unicorn, 0)? as u32;
                 Ok(0)
             }
+            LegacyWin64Import::FormatMessageA => emulate_format_message_a(unicorn),
             _ => Err("invalid last-error operation".into()),
         }
     })();
@@ -3482,6 +5785,63 @@ fn emulate_windows_last_error(unicorn: &mut Unicorn<'_, GuestState>, operation: 
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn emulate_format_message_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    const FORMAT_MESSAGE_ALLOCATE_BUFFER: u32 = 0x0000_0100;
+    const FORMAT_MESSAGE_FROM_STRING: u32 = 0x0000_0400;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+    let flags = read_win64_import_argument(unicorn, 0)? as u32;
+    let source = read_win64_import_argument(unicorn, 1)?;
+    let message_id = read_win64_import_argument(unicorn, 2)? as u32;
+    let buffer = read_win64_import_argument(unicorn, 4)?;
+    let size = read_win64_import_argument(unicorn, 5)? as usize;
+
+    if buffer == 0 {
+        unicorn.get_data_mut().windows_last_error = ERROR_INSUFFICIENT_BUFFER;
+        return Ok(0);
+    }
+
+    let message = if flags & FORMAT_MESSAGE_FROM_STRING != 0 {
+        if source == 0 {
+            return Ok(0);
+        }
+        read_crt_stdio_c_string(unicorn, source, 32768, "FormatMessageA source")?
+    } else {
+        format!("Windows error {message_id}.\r\n").into_bytes()
+    };
+    let allocate = flags & FORMAT_MESSAGE_ALLOCATE_BUFFER != 0;
+    let capacity = if allocate { message.len() + 1 } else { size };
+    let written = message.len().min(capacity.saturating_sub(1));
+    if message.len() >= capacity {
+        unicorn.get_data_mut().windows_last_error = ERROR_INSUFFICIENT_BUFFER;
+        return Ok(0);
+    }
+    let output = if allocate {
+        if !guest_range_has_permission(unicorn, buffer, 8, Prot::WRITE)? {
+            return Err(format!(
+                "FormatMessageA output pointer {buffer:#x} is not writable"
+            ));
+        }
+        let pointer =
+            allocate_crt_region(unicorn, capacity as u64).map_err(|error| error.to_string())?;
+        unicorn
+            .mem_write(buffer, &pointer.to_le_bytes())
+            .map_err(|error| format!("FormatMessageA output pointer write failed: {error}"))?;
+        pointer
+    } else {
+        buffer
+    };
+    if !guest_range_has_permission(unicorn, output, (written + 1) as u64, Prot::WRITE)? {
+        return Err(format!("FormatMessageA output {output:#x} is not writable"));
+    }
+    let mut terminated = message;
+    terminated.push(0);
+    unicorn
+        .mem_write(output, &terminated[..=written])
+        .map_err(|error| format!("FormatMessageA output write failed: {error}"))?;
+    Ok(written as u64)
 }
 
 fn emulate_set_thread_error_mode(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -3518,6 +5878,24 @@ fn emulate_set_thread_error_mode(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn retain_windows_module_reference(unicorn: &mut Unicorn<'_, GuestState>, module: u64) -> bool {
+    let count = unicorn
+        .get_data()
+        .windows_module_refcounts
+        .get(&module)
+        .copied()
+        .unwrap_or_default();
+    if count >= MAX_WINDOWS_MODULE_REFERENCES {
+        unicorn.get_data_mut().windows_last_error = ERROR_NOT_ENOUGH_MEMORY;
+        return false;
+    }
+    unicorn
+        .get_data_mut()
+        .windows_module_refcounts
+        .insert(module, count + 1);
+    true
 }
 
 fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -3599,8 +5977,11 @@ fn emulate_load_library_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
         }
     })();
     match result {
-        Ok(module) => {
-            let _ = unicorn.reg_write(RegisterX86::RAX, module.unwrap_or_default());
+        Ok(Some(module)) if retain_windows_module_reference(unicorn, module) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, module);
+        }
+        Ok(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -3637,6 +6018,17 @@ fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
         if !terminated {
             return Err("LoadLibraryA path exceeds 259 bytes".into());
         }
+        if let Ok(requested) = std::str::from_utf8(&path) {
+            if let Some(library) = guest_library_by_name(unicorn.get_data(), requested) {
+                if !library.initialized {
+                    return Err(
+                        "LoadLibraryA requested a DLL while its initialization is incomplete"
+                            .into(),
+                    );
+                }
+                return Ok(Some(library.base));
+            }
+        }
         let Some(module) = path
             .rsplit(|byte| matches!(byte, b'\\' | b'/'))
             .next()
@@ -3659,8 +6051,11 @@ fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
         }
     })();
     match result {
-        Ok(module) => {
-            let _ = unicorn.reg_write(RegisterX86::RAX, module.unwrap_or_default());
+        Ok(Some(module)) if retain_windows_module_reference(unicorn, module) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, module);
+        }
+        Ok(_) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         }
         Err(error) => {
             if unicorn.get_data().callback_error.is_none() {
@@ -3670,6 +6065,36 @@ fn emulate_load_library_a(unicorn: &mut Unicorn<'_, GuestState>) {
             let _ = unicorn.emu_stop();
         }
     }
+}
+
+fn emulate_free_library(unicorn: &mut Unicorn<'_, GuestState>) {
+    let module = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let count = unicorn
+        .get_data()
+        .windows_module_refcounts
+        .get(&module)
+        .copied()
+        .unwrap_or_default();
+    let pinned = unicorn.get_data().windows_pinned_modules.contains(&module);
+    if count == 0 {
+        if !pinned {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+        }
+    } else if count == 1 {
+        unicorn
+            .get_data_mut()
+            .windows_module_refcounts
+            .remove(&module);
+    } else {
+        unicorn
+            .get_data_mut()
+            .windows_module_refcounts
+            .insert(module, count - 1);
+    }
+    // Manifest-backed dependency images and modeled system modules are pinned
+    // for the guest-engine lifetime. FreeLibrary consumes exactly one logical
+    // LoadLibrary reference while preserving the mapped module and exports.
+    let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(count != 0 || pinned));
 }
 
 fn read_msvcp_exception_ptr(
@@ -3819,8 +6244,22 @@ fn emulate_windows_critical_section(
                 if unicorn.get_data().windows_critical_sections.len()
                     >= MAX_WINDOWS_CRITICAL_SECTIONS
                 {
+                    // Capture bounded guest-only evidence before stopping. Reading
+                    // the return slot is best effort and cannot replace the error.
+                    let caller = unicorn
+                        .reg_read(RegisterX86::RSP)
+                        .ok()
+                        .and_then(|rsp| read_vcomp_u64(unicorn, rsp).ok());
+                    let mut held = unicorn
+                        .get_data()
+                        .windows_critical_sections
+                        .iter()
+                        .map(|(address, depth)| (*address, *depth))
+                        .collect::<Vec<_>>();
+                    held.sort_unstable();
+                    held.truncate(256);
                     return Err(format!(
-                        "Windows critical-section count exceeds {MAX_WINDOWS_CRITICAL_SECTIONS}"
+                        "Windows critical-section count exceeds {MAX_WINDOWS_CRITICAL_SECTIONS}; requested={address:#x}; caller={caller:x?}; live_sample={held:x?}"
                     ));
                 }
                 unicorn
@@ -3966,6 +6405,23 @@ fn emulate_windows_srw_lock(unicorn: &mut Unicorn<'_, GuestState>, operation: Le
             return Err(format!(
                 "SRW lock storage {address:#x} is not readable and writable"
             ));
+        }
+        if operation == LegacyWin64Import::InitializeSrwLock {
+            if unicorn
+                .get_data()
+                .windows_srw_locks
+                .get(&address)
+                .is_some_and(|lock| lock.owner.is_some() || !lock.waiters.is_empty())
+            {
+                return Err(format!("cannot initialize active SRW lock {address:#x}"));
+            }
+            unicorn
+                .mem_write(address, &[0; 8])
+                .map_err(|error| format!("initialize SRW storage failed: {error}"))?;
+            // A zero-initialized lock is registered lazily on first acquire,
+            // just like SRWLOCK_INIT; initialization needs no host allocation.
+            unicorn.get_data_mut().windows_srw_locks.remove(&address);
+            return Ok(());
         }
         if !unicorn.get_data().windows_srw_locks.contains_key(&address) {
             if unicorn.get_data().windows_srw_locks.len() >= MAX_WINDOWS_SRW_LOCKS {
@@ -4124,7 +6580,7 @@ fn emulate_get_module_handle_w(unicorn: &mut Unicorn<'_, GuestState>) {
                 }
                 // This API-set lookup is an optional capability probe. Keep
                 // it unavailable so the guest takes its modeled fallback.
-                _ => None,
+                _ => guest_library_by_name(unicorn.get_data(), &name).map(|library| library.base),
             }
         } else {
             None
@@ -4160,11 +6616,7 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 
     let module = if flags & FROM_ADDRESS != 0 {
-        unicorn
-            .get_data()
-            .image_region
-            .filter(|(start, end)| (*start..*end).contains(&name_or_address))
-            .map(|(start, _)| start)
+        guest_module_from_address(unicorn.get_data(), name_or_address)
     } else if name_or_address == 0 {
         unicorn.get_data().image_region.map(|(start, _)| start)
     } else {
@@ -4185,6 +6637,11 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         }
         if terminated && bytes.eq_ignore_ascii_case(b"kernel32.dll") {
             Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+        } else if terminated {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|name| guest_library_by_name(unicorn.get_data(), name))
+                .map(|library| library.base)
         } else {
             None
         }
@@ -4194,13 +6651,20 @@ fn emulate_get_module_handle_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     };
+    if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false) {
+        fail(unicorn, ERROR_INVALID_PARAMETER);
+        return;
+    }
+    if flags & PIN != 0 {
+        unicorn.get_data_mut().windows_pinned_modules.insert(module);
+    } else if flags & UNCHANGED_REFCOUNT == 0 && !retain_windows_module_reference(unicorn, module) {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
         fail(unicorn, ERROR_INVALID_PARAMETER);
         return;
     }
-    // Guest images and synthetic system modules live for the worker lifetime,
-    // so default, PIN, and UNCHANGED_REFCOUNT all preserve the same stable
-    // handle while retaining their documented lookup behavior.
     let _ = unicorn.reg_write(RegisterX86::RAX, 1);
 }
 
@@ -4231,11 +6695,7 @@ fn emulate_get_module_handle_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 
     let module = if flags & FROM_ADDRESS != 0 {
-        unicorn
-            .get_data()
-            .image_region
-            .filter(|(start, end)| (*start..*end).contains(&name_or_address))
-            .map(|(start, _)| start)
+        guest_module_from_address(unicorn.get_data(), name_or_address)
     } else if name_or_address == 0 {
         unicorn.get_data().image_region.map(|(start, _)| start)
     } else {
@@ -4265,7 +6725,10 @@ fn emulate_get_module_handle_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
         {
             Some(WINDOWS_KERNEL32_MODULE_TOKEN)
         } else {
-            None
+            String::from_utf16(&units)
+                .ok()
+                .and_then(|name| guest_library_by_name(unicorn.get_data(), &name))
+                .map(|library| library.base)
         }
     };
 
@@ -4273,13 +6736,16 @@ fn emulate_get_module_handle_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     };
+    if flags & PIN != 0 {
+        unicorn.get_data_mut().windows_pinned_modules.insert(module);
+    } else if flags & UNCHANGED_REFCOUNT == 0 && !retain_windows_module_reference(unicorn, module) {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        return;
+    }
     if unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
         fail(unicorn, ERROR_INVALID_PARAMETER);
         return;
     }
-    // Both modeled modules have worker-lifetime storage. The default lookup's
-    // increment, PIN, and UNCHANGED_REFCOUNT therefore differ only in lifetime
-    // policy, not in the stable handle observable by this guest.
     let _ = unicorn.reg_write(RegisterX86::RAX, 1);
 }
 
@@ -4288,6 +6754,12 @@ fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
     let output = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
     let capacity = unicorn.reg_read(RegisterX86::R8).unwrap_or_default() as u32;
     let image_base = unicorn.get_data().image_region.map(|region| region.0);
+    let real_path = unicorn
+        .get_data()
+        .loaded_libraries
+        .iter()
+        .find(|(_, library)| library.base == module)
+        .map(|(name, _)| name.replace('/', "\\"));
     let path = if (module == 0 && image_base.is_some()) || Some(module) == image_base {
         Some(r"C:\AEXCompat\guest-plugin.aex")
     } else if module == WINDOWS_KERNEL32_MODULE_TOKEN {
@@ -4295,7 +6767,7 @@ fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
     } else if module == WINDOWS_NTDLL_MODULE_TOKEN {
         Some(r"C:\Windows\System32\ntdll.dll")
     } else {
-        None
+        real_path.as_deref()
     };
     let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
         unicorn.get_data_mut().windows_last_error = error;
@@ -4322,7 +6794,10 @@ fn emulate_get_module_file_name_w(unicorn: &mut Unicorn<'_, GuestState>) {
         bytes.extend_from_slice(&unit.to_le_bytes());
     }
     bytes.extend_from_slice(&0u16.to_le_bytes());
-    if unicorn.mem_write(output, &bytes).is_err() {
+    if !guest_range_has_permission(unicorn, output, bytes.len() as u64, Prot::WRITE)
+        .unwrap_or(false)
+        || unicorn.mem_write(output, &bytes).is_err()
+    {
         fail(unicorn, ERROR_INVALID_PARAMETER);
         return;
     }
@@ -4397,21 +6872,11 @@ fn emulate_load_library_w(unicorn: &mut Unicorn<'_, GuestState>) {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     };
-    let count = unicorn
-        .get_data()
-        .windows_module_refcounts
-        .get(&module)
-        .copied()
-        .unwrap_or_default();
-    if count >= MAX_WINDOWS_MODULE_REFERENCES {
-        fail(unicorn, ERROR_NOT_ENOUGH_MEMORY);
-        return;
+    if retain_windows_module_reference(unicorn, module) {
+        let _ = unicorn.reg_write(RegisterX86::RAX, module);
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
     }
-    unicorn
-        .get_data_mut()
-        .windows_module_refcounts
-        .insert(module, count + 1);
-    let _ = unicorn.reg_write(RegisterX86::RAX, module);
 }
 
 fn install_windows_condition_variable_callbacks(
@@ -4491,15 +6956,30 @@ fn emulate_get_proc_address(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
     };
 
-    if module != WINDOWS_KERNEL32_MODULE_TOKEN && module != WINDOWS_NTDLL_MODULE_TOKEN {
+    let real_module = unicorn
+        .get_data()
+        .loaded_libraries
+        .values()
+        .find(|library| library.base == module);
+    if real_module.is_none()
+        && module != WINDOWS_KERNEL32_MODULE_TOKEN
+        && module != WINDOWS_NTDLL_MODULE_TOKEN
+    {
         fail(unicorn, ERROR_MOD_NOT_FOUND);
         return;
     }
-    // Win32 encodes an ordinal in the low 16 bits of the name pointer. This
-    // synthetic module exposes names only, so ordinals fail without probing
-    // guest memory at small integer addresses.
     if pointer <= u64::from(u16::MAX) {
-        fail(unicorn, ERROR_PROC_NOT_FOUND);
+        let address = real_module
+            .and_then(|library| library.ordinal_exports.get(&(pointer as u32)))
+            .filter(|address| {
+                real_module.is_some_and(|library| (library.base..library.end).contains(address))
+            })
+            .copied();
+        if let Some(address) = address {
+            let _ = unicorn.reg_write(RegisterX86::RAX, address);
+        } else {
+            fail(unicorn, ERROR_PROC_NOT_FOUND);
+        }
         return;
     }
 
@@ -4517,6 +6997,28 @@ fn emulate_get_proc_address(unicorn: &mut Unicorn<'_, GuestState>) {
             break;
         }
         bytes.push(value[0]);
+    }
+    if let Some(library) = unicorn
+        .get_data()
+        .loaded_libraries
+        .values()
+        .find(|library| library.base == module)
+    {
+        let address = if terminated {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|name| library.exports.get(name))
+                .filter(|address| (library.base..library.end).contains(address))
+                .copied()
+        } else {
+            None
+        };
+        if let Some(address) = address {
+            let _ = unicorn.reg_write(RegisterX86::RAX, address);
+        } else {
+            fail(unicorn, ERROR_PROC_NOT_FOUND);
+        }
+        return;
     }
     let dynamic = if module == WINDOWS_KERNEL32_MODULE_TOKEN && terminated {
         match bytes.as_slice() {
@@ -4832,16 +7334,133 @@ fn ensure_windows_condition_variable(
     Ok(())
 }
 
+fn emulate_windows_condition_variable_srw(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    operation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        let condition = read_win64_import_argument(unicorn, 0)?;
+        ensure_windows_condition_variable(unicorn, condition)?;
+        match operation {
+            LegacyWin64Import::InitializeConditionVariable => Ok(0),
+            LegacyWin64Import::WakeConditionVariable
+            | LegacyWin64Import::WakeAllConditionVariable => {
+                let wake_all = operation == LegacyWin64Import::WakeAllConditionVariable;
+                let waiters = unicorn
+                    .get_data_mut()
+                    .windows_condition_waiters
+                    .entry(condition)
+                    .or_default();
+                let selected = if wake_all {
+                    waiters.drain(..).collect::<Vec<_>>()
+                } else {
+                    waiters.pop_front().into_iter().collect()
+                };
+                for thread_id in selected {
+                    if !unicorn
+                        .get_data()
+                        .scheduler_woken_threads
+                        .contains(&thread_id)
+                    {
+                        unicorn
+                            .get_data_mut()
+                            .scheduler_woken_threads
+                            .push_back(thread_id);
+                    }
+                }
+                Ok(0)
+            }
+            LegacyWin64Import::SleepConditionVariableSrw => {
+                let lock_address = read_win64_import_argument(unicorn, 1)?;
+                let timeout = read_win64_import_argument(unicorn, 2)? as u32;
+                let flags = read_win64_import_argument(unicorn, 3)? as u32;
+                if flags != 0 {
+                    return Err("shared SleepConditionVariableSRW is unsupported".into());
+                }
+                let thread_id = unicorn.get_data().current_windows_thread_id;
+                let lock = unicorn
+                    .get_data_mut()
+                    .windows_srw_locks
+                    .get_mut(&lock_address)
+                    .ok_or_else(|| {
+                        format!("condition variable uses unknown SRW lock {lock_address:#x}")
+                    })?;
+                if lock.owner != Some(thread_id) {
+                    return Err(format!(
+                        "thread {thread_id} does not own condition-variable SRW lock"
+                    ));
+                }
+                let next = lock.waiters.pop_front();
+                lock.owner = next;
+                unicorn
+                    .mem_write(lock_address, &(u64::from(next.is_some())).to_le_bytes())
+                    .map_err(|error| format!("condition variable SRW release failed: {error}"))?;
+                if let Some(waiter) = next.filter(|waiter| *waiter != 1) {
+                    unicorn
+                        .get_data_mut()
+                        .scheduler_woken_threads
+                        .push_back(waiter);
+                }
+                if timeout == 0 {
+                    unicorn.get_data_mut().windows_last_error = 1460;
+                    return Ok(0);
+                }
+                if unicorn.get_data().pending_windows_thread.is_none() {
+                    return Err("main-thread SleepConditionVariableSRW is unsupported".into());
+                }
+                let waiters = unicorn
+                    .get_data_mut()
+                    .windows_condition_waiters
+                    .entry(condition)
+                    .or_default();
+                if waiters.len() >= 1024 || waiters.contains(&thread_id) {
+                    return Err("condition-variable waiter capacity or duplication".into());
+                }
+                waiters.push_back(thread_id);
+                unicorn
+                    .get_data_mut()
+                    .scheduler_condition_locks
+                    .insert(thread_id, lock_address);
+                let rsp = unicorn
+                    .reg_read(RegisterX86::RSP)
+                    .map_err(|e| e.to_string())?;
+                let return_address = read_vcomp_u64(unicorn, rsp)?;
+                unicorn
+                    .reg_write(RegisterX86::RSP, rsp + 8)
+                    .map_err(|e| e.to_string())?;
+                unicorn
+                    .reg_write(RegisterX86::RIP, return_address)
+                    .map_err(|e| e.to_string())?;
+                unicorn
+                    .reg_write(RegisterX86::RAX, 1)
+                    .map_err(|e| e.to_string())?;
+                unicorn.get_data_mut().scheduler_yield_reason =
+                    Some(SchedulerYieldReason::ConditionVariable);
+                unicorn.get_data_mut().scheduler_resume_rip = return_address;
+                unicorn.get_data_mut().scheduler_wait_deadline = (timeout != u32::MAX)
+                    .then(|| unicorn.get_data().scheduler_virtual_tick + u64::from(timeout));
+                unicorn.emu_stop().map_err(|e| e.to_string())?;
+                Ok(1)
+            }
+            _ => Err("invalid condition-variable operation".into()),
+        }
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
-    // A fixed, nonzero Windows FILETIME keeps compatibility deterministic and
-    // avoids exposing host wall-clock state to the emulated guest.
-    const FIXED_FILETIME: u64 = 132_223_104_000_000_000;
+    // Use the current wall clock. A fixed historical date would invalidate
+    // observations of expiration, licensing, and other time-dependent logic.
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
         if output == 0 {
             return Err("GetSystemTimeAsFileTime output pointer is null".to_string());
         }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err("GetSystemTimeAsFileTime output is not writable".into());
+        }
+        let filetime = windows_filetime(std::time::SystemTime::now())?;
         unicorn
-            .mem_write(output, &FIXED_FILETIME.to_le_bytes())
+            .mem_write(output, &filetime.to_le_bytes())
             .map_err(|error| {
                 format!("GetSystemTimeAsFileTime output {output:#x} is not writable: {error}")
             })
@@ -5218,9 +7837,12 @@ fn emulate_get_console_mode(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn emulate_get_file_type(unicorn: &mut Unicorn<'_, GuestState>) {
     const FILE_TYPE_UNKNOWN: u64 = 0;
+    const FILE_TYPE_CHAR: u64 = 2;
     const FILE_TYPE_PIPE: u64 = 3;
     let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
-    let returned = if matches!(
+    let returned = if let Some(file) = unicorn.get_data().guest_files.windows_files.get(&handle) {
+        if file.null_device { FILE_TYPE_CHAR } else { 1 }
+    } else if matches!(
         handle,
         WINDOWS_STANDARD_INPUT_TOKEN | WINDOWS_STANDARD_OUTPUT_TOKEN | WINDOWS_STANDARD_ERROR_TOKEN
     ) {
@@ -5294,7 +7916,6 @@ fn emulate_output_debug_string_a(unicorn: &mut Unicorn<'_, GuestState>) {
 
 fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
     const EINVAL: u32 = 22;
-    const ENOENT: u32 = 2;
 
     let result = (|| -> Result<u32, String> {
         let result_pointer = read_win64_import_argument(unicorn, 0)?;
@@ -5311,10 +7932,8 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
         }
 
         // UCRT's invalid-parameter path preserves a non-null result slot when
-        // either string pointer is NULL.  There is no guest-visible `_errno`
-        // import in this backend, so the ABI-observable contract here is the
-        // returned `errno_t`; the internal errno remains thread-logical and
-        // must not be exposed as process-global guest storage.
+        // either string pointer is NULL. Return errno_t and update the calling
+        // thread's errno through the same storage used by the _errno pointer.
         if filename_pointer == 0 || mode_pointer == 0 {
             return Ok(EINVAL);
         }
@@ -5327,23 +7946,19 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
         const MAX_FOPEN_MODE_BYTES: u64 = 64;
         let mode =
             read_crt_stdio_c_string(unicorn, mode_pointer, MAX_FOPEN_MODE_BYTES, "fopen_s mode")?;
-        let ordinary_result = if filename.is_empty() || !valid_fopen_mode(&mode) {
-            EINVAL
-        } else {
-            // Guest paths are never resolved against the host.  A secure open
-            // failure is truthful until a bounded guest-owned stream and its
-            // complete observed lifecycle are implemented.
-            ENOENT
-        };
+        let (stream, errno) = open_guest_stream(unicorn, &filename, &mode)?;
         unicorn
-            .mem_write(result_pointer, &0u64.to_le_bytes())
+            .mem_write(result_pointer, &stream.to_le_bytes())
             .map_err(|error| format!("fopen_s result write failed: {error}"))?;
-        Ok(ordinary_result)
+        Ok(errno)
     })();
 
     match result {
         Ok(errno) => {
-            unicorn.get_data_mut().crt_errno = errno;
+            if let Err(error) = set_guest_crt_errno(unicorn, errno) {
+                finish_guest_stdio(unicorn, Err(error));
+                return;
+            }
             let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(errno));
         }
         Err(error) => {
@@ -5355,7 +7970,62 @@ fn emulate_fopen_s(unicorn: &mut Unicorn<'_, GuestState>) {
     }
 }
 
+fn emulate_strcat_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let destination = read_win64_import_argument(unicorn, 0)?;
+        let capacity = read_win64_import_argument(unicorn, 1)?;
+        let source = read_win64_import_argument(unicorn, 2)?;
+        if destination == 0 || capacity == 0 || capacity > (u64::MAX >> 1) {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(22);
+        }
+        if capacity > MAX_CRT_STRING_BYTES {
+            return Err("strcat_s destination exceeds bounded string size".into());
+        }
+        if !guest_range_has_permission(unicorn, destination, capacity, Prot::WRITE)? {
+            return Err("strcat_s destination is not fully writable".into());
+        }
+        let existing = read_strncpy_s_source(unicorn, destination, capacity)?;
+        let prefix = existing.iter().position(|byte| *byte == 0);
+        let error = if source == 0 || prefix.is_none() {
+            22
+        } else {
+            let prefix = prefix.unwrap();
+            let remaining = capacity - prefix as u64;
+            let bytes = read_strncpy_s_source(unicorn, source, remaining)?;
+            let end = bytes.iter().position(|byte| *byte == 0);
+            let source_span = end.map_or(remaining, |n| n as u64 + 1);
+            let source_end = source
+                .checked_add(source_span)
+                .ok_or_else(|| "strcat_s source overflow".to_string())?;
+            let destination_end = destination
+                .checked_add(capacity)
+                .ok_or_else(|| "strcat_s destination overflow".to_string())?;
+            if destination < source_end && source < destination_end {
+                22
+            } else if let Some(end) = end {
+                unicorn
+                    .mem_write(destination + prefix as u64, &bytes[..=end])
+                    .map_err(|e| format!("strcat_s write: {e}"))?;
+                return Ok(0);
+            } else {
+                34
+            }
+        };
+        unicorn
+            .mem_write(destination, &[0])
+            .map_err(|e| e.to_string())?;
+        set_guest_crt_errno(unicorn, error)?;
+        Ok(error as u64)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
 fn emulate_strncpy_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    emulate_secure_string_copy(unicorn, true);
+}
+
+fn emulate_secure_string_copy(unicorn: &mut Unicorn<'_, GuestState>, counted: bool) {
     const EINVAL: u32 = 22;
     const ERANGE: u32 = 34;
     const STRUNCATE: u32 = 80;
@@ -5366,7 +8036,13 @@ fn emulate_strncpy_s(unicorn: &mut Unicorn<'_, GuestState>) {
         let destination = read_win64_import_argument(unicorn, 0)?;
         let destination_size = read_win64_import_argument(unicorn, 1)?;
         let source = read_win64_import_argument(unicorn, 2)?;
-        let count = read_win64_import_argument(unicorn, 3)?;
+        // strcpy_s must find a terminator within the destination capacity;
+        // it has no fourth argument and never permits truncation.
+        let count = if counted {
+            read_win64_import_argument(unicorn, 3)?
+        } else {
+            destination_size
+        };
 
         if destination == 0 || destination_size == 0 {
             return Ok((EINVAL, true));
@@ -5443,7 +8119,10 @@ fn emulate_strncpy_s(unicorn: &mut Unicorn<'_, GuestState>) {
     match result {
         Ok((errno, set_errno)) => {
             if set_errno {
-                unicorn.get_data_mut().crt_errno = errno;
+                if let Err(error) = set_guest_crt_errno(unicorn, errno) {
+                    finish_guest_stdio(unicorn, Err(error));
+                    return;
+                }
             }
             let _ = unicorn.reg_write(RegisterX86::RAX, u64::from(errno));
         }
@@ -5606,6 +8285,19 @@ fn guest_range_has_permission(
     let Some(end) = address.checked_add(length - 1) else {
         return Ok(false);
     };
+    if permission == Prot::READ && unicorn.get_data().sealed_image_reads {
+        let state = unicorn.get_data();
+        let in_primary = state
+            .image_region
+            .is_some_and(|(begin, image_end)| address >= begin && end < image_end);
+        let in_dependency = state
+            .loaded_libraries
+            .values()
+            .any(|library| address >= library.base && end < library.end);
+        if in_primary || in_dependency {
+            return Ok(true);
+        }
+    }
     let regions = unicorn
         .mem_regions()
         .map_err(|error| format!("guest memory-map query failed: {error}"))?;
@@ -5753,117 +8445,8 @@ fn emulate_nt_write_file(unicorn: &mut Unicorn<'_, GuestState>) {
 }
 
 fn emulate_create_file_w(unicorn: &mut Unicorn<'_, GuestState>) {
-    const INVALID_HANDLE_VALUE: u64 = u64::MAX;
-    const GENERIC_WRITE: u32 = 0x4000_0000;
-    const GENERIC_ALL: u32 = 0x1000_0000;
-    const DELETE: u32 = 0x0001_0000;
-    const WRITE_DAC: u32 = 0x0004_0000;
-    const WRITE_OWNER: u32 = 0x0008_0000;
-    const FILE_WRITE_DATA: u32 = 0x0000_0002;
-    const FILE_APPEND_DATA: u32 = 0x0000_0004;
-    const FILE_WRITE_EA: u32 = 0x0000_0010;
-    const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
-    const OPEN_EXISTING: u32 = 3;
-    const MAX_PATH_UNITS: usize = 32_767;
-
-    let fail = |unicorn: &mut Unicorn<'_, GuestState>, error: u32| {
-        unicorn.get_data_mut().windows_last_error = error;
-        let _ = unicorn.reg_write(RegisterX86::RAX, INVALID_HANDLE_VALUE);
-    };
-    let result = (|| {
-        let path_pointer = read_win64_import_argument(unicorn, 0)?;
-        if path_pointer == 0 {
-            // A missing filename is an ordinary API failure, not corruption
-            // of the guest execution environment. ERROR_PATH_NOT_FOUND keeps
-            // it in the same path-resolution family as an empty filename and
-            // avoids turning plugin input into a worker-level abort.
-            fail(unicorn, ERROR_PATH_NOT_FOUND);
-            return Ok(());
-        }
-        let mut units = Vec::new();
-        for index in 0..=MAX_PATH_UNITS {
-            let address = path_pointer
-                .checked_add((index as u64) * 2)
-                .ok_or_else(|| "CreateFileW path range overflows".to_string())?;
-            let bytes = unicorn.mem_read_as_vec(address, 2).map_err(|error| {
-                format!("CreateFileW path {path_pointer:#x} is not fully readable: {error}")
-            })?;
-            let unit = u16::from_le_bytes([bytes[0], bytes[1]]);
-            if unit == 0 {
-                break;
-            }
-            if index == MAX_PATH_UNITS {
-                // The mapped string is readable and terminated beyond the
-                // supported Win32 path bound. This is plugin-controlled API
-                // input, so report the ordinary filename-range error rather
-                // than escalating it to a worker execution failure.
-                fail(unicorn, ERROR_FILENAME_EXCED_RANGE);
-                return Ok(());
-            }
-            units.push(unit);
-        }
-        if char::decode_utf16(units.iter().copied()).any(|character| character.is_err()) {
-            fail(unicorn, ERROR_INVALID_PARAMETER);
-            return Ok(());
-        }
-        if units.is_empty() {
-            fail(unicorn, ERROR_PATH_NOT_FOUND);
-            return Ok(());
-        }
-        let desired_access = read_win64_import_argument(unicorn, 1)? as u32;
-        let share_mode = read_win64_import_argument(unicorn, 2)? as u32;
-        let security_attributes = read_win64_import_argument(unicorn, 3)?;
-        let creation_disposition = read_win64_import_argument(unicorn, 4)? as u32;
-        let _flags_and_attributes = read_win64_import_argument(unicorn, 5)? as u32;
-        let template_file = read_win64_import_argument(unicorn, 6)?;
-        if share_mode & !0x7 != 0 {
-            fail(unicorn, ERROR_INVALID_PARAMETER);
-            return Ok(());
-        }
-
-        let path = String::from_utf16(&units)
-            .map_err(|_| "CreateFileW path contains malformed UTF-16".to_string())?;
-        let normalized = path.replace('/', "\\");
-        let components = normalized.split('\\').collect::<Vec<_>>();
-        let is_host_escape = normalized.starts_with("\\\\")
-            || normalized.starts_with("\\?\\")
-            || normalized.starts_with("\\.\\")
-            || components.iter().any(|component| *component == "..");
-        let write_access = desired_access
-            & (GENERIC_WRITE
-                | GENERIC_ALL
-                | DELETE
-                | WRITE_DAC
-                | WRITE_OWNER
-                | FILE_WRITE_DATA
-                | FILE_APPEND_DATA
-                | FILE_WRITE_EA
-                | FILE_WRITE_ATTRIBUTES)
-            != 0;
-        if is_host_escape || write_access || creation_disposition != OPEN_EXISTING {
-            fail(unicorn, ERROR_ACCESS_DENIED);
-            return Ok(());
-        }
-
-        // The corpus bundle contains only the AEX image and no explicitly
-        // mounted plugin assets. A valid read-only open therefore observes the
-        // same missing-file result as a sandbox with an empty asset namespace.
-        // Crucially, the guest path is never translated to or opened on the host.
-        // lpSecurityAttributes is only relevant if a new object is created,
-        // and hTemplateFile is not consumed for OPEN_EXISTING. Since no object
-        // exists in this namespace, neither legal optional argument is
-        // dereferenced or treated as an invalid pointer/handle.
-        let _ = (security_attributes, template_file);
-        fail(unicorn, ERROR_FILE_NOT_FOUND);
-        Ok(())
-    })();
-    if let Err(error) = result {
-        if unicorn.get_data().callback_error.is_none() {
-            unicorn.get_data_mut().callback_error = Some(error);
-        }
-        let _ = unicorn.reg_write(RegisterX86::RAX, INVALID_HANDLE_VALUE);
-        let _ = unicorn.emu_stop();
-    }
+    let result = guest_create_file(unicorn, true);
+    finish_windows_file_api(unicorn, result);
 }
 
 fn emulate_find_first_file_ex_w(unicorn: &mut Unicorn<'_, GuestState>) {
@@ -6130,21 +8713,14 @@ fn emulate_private_heap_lifecycle(
                 );
             };
             for pointer in allocations {
-                let allocation = match unicorn.get_data_mut().crt_heap.remove_process_heap(pointer)
-                {
-                    Ok(allocation) => allocation,
+                match unicorn.get_data_mut().crt_heap.remove_process_heap(pointer) {
+                    Ok(_) => {}
                     Err(error) => {
                         return fail_process_heap(
                             unicorn,
                             format!("HeapDestroy allocation {pointer:#x} removal failed: {error}"),
                         );
                     }
-                };
-                if let Err(error) = unicorn.mem_unmap(pointer, allocation.backing_size) {
-                    return fail_process_heap(
-                        unicorn,
-                        format!("HeapDestroy allocation {pointer:#x} unmap failed: {error}"),
-                    );
                 }
             }
             let _ = unicorn.reg_write(RegisterX86::RAX, 1);
@@ -6189,6 +8765,7 @@ fn allocate_process_heap_region(
     handle: u64,
     size: u64,
 ) -> Result<u64, CrtHeapError> {
+    ensure_crt_heap_mapping(unicorn)?;
     let allocation = unicorn
         .get_data()
         .crt_heap
@@ -6198,12 +8775,9 @@ fn allocate_process_heap_region(
         .crt_heap
         .first_fit(CRT_HEAP_BASE, CRT_HEAP_END, allocation)?;
     unicorn
-        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
-        .map_err(|_| CrtHeapError::AddressSpaceExhausted)?;
-    if let Err(error) = unicorn.get_data_mut().crt_heap.insert(pointer, allocation) {
-        let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
-        return Err(error);
-    }
+        .get_data_mut()
+        .crt_heap
+        .insert(pointer, allocation)?;
     if handle != PROCESS_HEAP_HANDLE {
         let Some(allocations) = unicorn
             .get_data_mut()
@@ -6211,7 +8785,6 @@ fn allocate_process_heap_region(
             .get_mut(&handle)
         else {
             let _ = unicorn.get_data_mut().crt_heap.remove_process_heap(pointer);
-            let _ = unicorn.mem_unmap(pointer, allocation.backing_size);
             return Err(CrtHeapError::AllocatorMismatch);
         };
         allocations.insert(pointer);
@@ -6224,14 +8797,11 @@ fn free_process_heap_region(
     handle: u64,
     pointer: u64,
 ) -> Result<(), String> {
-    let allocation = unicorn
+    unicorn
         .get_data_mut()
         .crt_heap
         .remove_process_heap(pointer)
         .map_err(|error| error.to_string())?;
-    unicorn
-        .mem_unmap(pointer, allocation.backing_size)
-        .map_err(|error| format!("unmap process heap allocation {pointer:#x}: {error}"))?;
     if handle != PROCESS_HEAP_HANDLE {
         if let Some(allocations) = unicorn
             .get_data_mut()
@@ -6381,17 +8951,6 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
                 return;
             }
         };
-    if unicorn
-        .mem_map(
-            new_pointer,
-            replacement.backing_size,
-            Prot::READ | Prot::WRITE,
-        )
-        .is_err()
-    {
-        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
-        return;
-    }
     let copy_length = old.requested_size.min(replacement.requested_size) as usize;
     let move_result = (|| -> Result<(), String> {
         if copy_length > 0 {
@@ -6411,25 +8970,17 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
         Ok(())
     })();
     if let Err(error) = move_result {
-        let _ = unicorn.mem_unmap(new_pointer, replacement.backing_size);
         return fail_process_heap(unicorn, error);
     }
-    let removed = match unicorn
+    match unicorn
         .get_data_mut()
         .crt_heap
         .commit_process_heap_reallocation(pointer, new_pointer, replacement)
     {
-        Ok(allocation) => allocation,
+        Ok(_) => {}
         Err(error) => {
-            let _ = unicorn.mem_unmap(new_pointer, replacement.backing_size);
             return fail_process_heap(unicorn, format!("HeapReAlloc commit failed: {error}"));
         }
-    };
-    if let Err(error) = unicorn.mem_unmap(pointer, removed.backing_size) {
-        return fail_process_heap(
-            unicorn,
-            format!("HeapReAlloc unmap old block failed: {error}"),
-        );
     }
     if handle != PROCESS_HEAP_HANDLE {
         let Some(allocations) = unicorn
@@ -6448,6 +8999,9 @@ fn emulate_heap_realloc(unicorn: &mut Unicorn<'_, GuestState>) {
 fn fail_windows_thread_callback(unicorn: &mut Unicorn<'_, GuestState>, error: String) {
     unicorn.get_data_mut().scheduler_parent_context = None;
     if let Some(pending) = unicorn.get_data_mut().pending_windows_thread.take() {
+        let exiting_id = unicorn.get_data().current_windows_thread_id;
+        let _ = release_guest_hostent(unicorn, exiting_id);
+        let _ = release_guest_errno(unicorn, exiting_id);
         let stack = unicorn
             .get_data()
             .windows_threads
@@ -6574,6 +9128,10 @@ fn continue_windows_thread(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32
             pending.fls_processed.clear();
         }
         let exit_code = pending.exit_code.expect("thread entry completed");
+        let exiting_id = unicorn.get_data().current_windows_thread_id;
+        release_guest_hostent(unicorn, exiting_id)?;
+        release_guest_errno(unicorn, exiting_id)?;
+        unicorn.get_data_mut().windows_objects.abandon(exiting_id);
         let (stack_base, stack_size) = {
             let thread = unicorn
                 .get_data_mut()
@@ -6693,7 +9251,7 @@ fn dispatch_windows_thread(
         caller_tls_values,
         caller_fls_values,
         caller_last_error: unicorn.get_data().windows_last_error,
-        caller_crt_errno: unicorn.get_data().crt_errno,
+        caller_crt_errno: get_guest_crt_errno(unicorn)?,
         caller_thread_error_mode: unicorn.get_data().windows_thread_error_mode,
         caller_thread_id: unicorn.get_data().current_windows_thread_id,
         completion_return,
@@ -6987,6 +9545,40 @@ fn emulate_windows_thread_lifecycle(
     const WAIT_OBJECT_0: u64 = 0;
     const WAIT_TIMEOUT: u64 = 258;
     const WAIT_FAILED: u64 = u32::MAX as u64;
+    let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
+    if operation == LegacyWin64Import::CloseHandle
+        && unicorn
+            .get_data()
+            .guest_files
+            .windows_files
+            .contains_key(&handle)
+    {
+        let result = match unicorn
+            .get_data_mut()
+            .guest_files
+            .close_windows_asset(handle)
+        {
+            Ok(()) => Ok((1, 0)),
+            Err(error) => Ok((0, error)),
+        };
+        finish_windows_file_api(unicorn, result);
+        return;
+    }
+    if unicorn
+        .get_data()
+        .windows_objects
+        .handles
+        .contains_key(&handle)
+        && matches!(
+            operation,
+            LegacyWin64Import::WaitForSingleObject
+                | LegacyWin64Import::WaitForSingleObjectEx
+                | LegacyWin64Import::CloseHandle
+        )
+    {
+        emulate_windows_kernel_object(unicorn, operation);
+        return;
+    }
     let returned = match operation {
         LegacyWin64Import::WaitForSingleObject | LegacyWin64Import::WaitForSingleObjectEx => {
             let handle = read_win64_import_argument(unicorn, 0).unwrap_or_default();
@@ -7002,9 +9594,80 @@ fn emulate_windows_thread_lifecycle(
             {
                 Some(thread) if thread.completed => WAIT_OBJECT_0,
                 Some(_) if timeout == 0 => WAIT_TIMEOUT,
+                Some(_)
+                    if (unicorn.get_data().scheduler_ready_hint
+                        || !unicorn.get_data().scheduler_woken_threads.is_empty())
+                        && unicorn.get_data().pending_windows_thread.is_none() =>
+                {
+                    let parked = (|| -> Result<(), String> {
+                        let rsp = unicorn
+                            .reg_read(RegisterX86::RSP)
+                            .map_err(|error| format!("thread wait stack read failed: {error}"))?;
+                        let return_address = read_vcomp_u64(unicorn, rsp)?;
+                        unicorn
+                            .reg_write(RegisterX86::RSP, rsp + 8)
+                            .map_err(|error| {
+                                format!("thread wait stack advance failed: {error}")
+                            })?;
+                        unicorn
+                            .reg_write(RegisterX86::RIP, return_address)
+                            .map_err(|error| {
+                                format!("thread wait return advance failed: {error}")
+                            })?;
+                        unicorn.get_data_mut().scheduler_yield_reason =
+                            Some(SchedulerYieldReason::Voluntary);
+                        unicorn.get_data_mut().scheduler_resume_rip = return_address;
+                        unicorn
+                            .emu_stop()
+                            .map_err(|error| format!("thread wait scheduler stop failed: {error}"))
+                    })();
+                    if let Err(error) = parked {
+                        unicorn.get_data_mut().callback_error = Some(error);
+                        let _ = unicorn.emu_stop();
+                        WAIT_FAILED
+                    } else {
+                        WAIT_OBJECT_0
+                    }
+                }
                 Some(_) => {
+                    let event_waits = unicorn
+                        .get_data()
+                        .windows_objects
+                        .events
+                        .values()
+                        .filter(|event| !event.waiters.is_empty())
+                        .map(|event| {
+                            format!(
+                                "name={:?},manual_reset={},signaled={},waiters={:?}",
+                                event.name, event.manual_reset, event.signaled, event.waiters
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let address_waits = format!("{:?}", unicorn.get_data().windows_address_waiters);
+                    let srw_waits = unicorn
+                        .get_data()
+                        .windows_srw_locks
+                        .iter()
+                        .filter(|(_, lock)| !lock.waiters.is_empty())
+                        .map(|(address, lock)| format!("{address:#x}:{:?}", lock.waiters))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let thread_states = unicorn
+                        .get_data()
+                        .windows_threads
+                        .iter()
+                        .map(|(thread_handle, thread)| {
+                            format!(
+                                "{thread_handle:#x}:id={},suspended={},completed={},open={}",
+                                thread.id, thread.suspended, thread.completed, thread.handle_open
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ");
                     unicorn.get_data_mut().callback_error = Some(format!(
-                        "blocking wait on incomplete guest thread {handle:#x} is unsupported"
+                        "thread {} blocking wait on incomplete guest thread {handle:#x} has no runnable peer; threads: [{thread_states}]; event waits: [{event_waits}]; address waits: {address_waits}; SRW waits: [{srw_waits}]",
+                        unicorn.get_data().current_windows_thread_id
                     ));
                     let _ = unicorn.emu_stop();
                     WAIT_FAILED
@@ -7067,12 +9730,24 @@ fn emulate_windows_thread_lifecycle(
 }
 
 fn emulate_query_performance_counter(unicorn: &mut Unicorn<'_, GuestState>) {
-    emulate_query_performance_value(unicorn, "QueryPerformanceCounter", 1);
+    let origin = *unicorn
+        .get_data_mut()
+        .performance_counter_origin
+        .get_or_insert_with(std::time::Instant::now);
+    match i64::try_from(origin.elapsed().as_nanos() / 100) {
+        Ok(value) => {
+            emulate_query_performance_value(unicorn, "QueryPerformanceCounter", value as u64)
+        }
+        Err(_) => {
+            unicorn.get_data_mut().callback_error = Some("performance counter overflow".into());
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+    }
 }
 
 fn emulate_query_performance_frequency(unicorn: &mut Unicorn<'_, GuestState>) {
-    // This fixed 10 MHz clock domain matches the 100 ns unit used by Windows
-    // FILETIME while remaining independent of host time and hardware timers.
+    // Monotonic host elapsed time is expressed in 100 ns ticks. Its epoch is
+    // private to the guest engine and independent of wall-clock corrections.
     emulate_query_performance_value(unicorn, "QueryPerformanceFrequency", 10_000_000);
 }
 
@@ -7084,6 +9759,9 @@ fn emulate_query_performance_value(
     let result = read_win64_import_argument(unicorn, 0).and_then(|output| {
         if output == 0 {
             return Err(format!("{function} output pointer is null"));
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err(format!("{function} output {output:#x} is not writable"));
         }
         unicorn
             .mem_write(output, &value.to_le_bytes())
@@ -7374,9 +10052,9 @@ fn emulate_wsa_startup(unicorn: &mut Unicorn<'_, GuestState>) {
         data[0..2].copy_from_slice(&requested.to_le_bytes());
         data[2..4].copy_from_slice(&WINDOWS_WSA_VERSION_2_2.to_le_bytes());
         let description = b"AEXCompat deterministic Winsock 2.2 guest";
-        data[4..4 + description.len()].copy_from_slice(description);
+        data[16..16 + description.len()].copy_from_slice(description);
         let status = b"Running";
-        data[261..261 + status.len()].copy_from_slice(status);
+        data[273..273 + status.len()].copy_from_slice(status);
         unicorn
             .mem_write(output, &data)
             .map_err(|error| format!("write WSAStartup WSADATA: {error}"))?;
@@ -7417,11 +10095,7 @@ fn emulate_rtl_pc_to_file_header(unicorn: &mut Unicorn<'_, GuestState>) {
         let _ = unicorn.reg_write(RegisterX86::RAX, 0);
         return;
     }
-    let module = unicorn
-        .get_data()
-        .image_region
-        .filter(|(start, end)| (*start..*end).contains(&pc))
-        .map(|(start, _)| start)
+    let module = guest_module_from_address(unicorn.get_data(), pc)
         .or_else(|| (pc == WINDOWS_KERNEL32_MODULE_TOKEN).then_some(WINDOWS_KERNEL32_MODULE_TOKEN))
         .unwrap_or_default();
     if output != 0 && unicorn.mem_write(output, &module.to_le_bytes()).is_err() {
@@ -7518,4 +10192,1648 @@ fn read_win64_import_argument(
     Ok(u64::from_le_bytes(bytes.try_into().map_err(|_| {
         "Win64 import stack argument returned the wrong size".to_string()
     })?))
+}
+
+// The guest begins with an empty application registry. No host registry,
+// installation records or activation data are synthesized. Application-created
+// keys live only in this guest session; performance pseudo-keys are unsupported.
+fn guest_registry_predefined_key(key: u64) -> bool {
+    matches!(
+        key,
+        0xffff_ffff_8000_0000..=0xffff_ffff_8000_0003 | 0xffff_ffff_8000_0005
+    )
+}
+
+fn emulate_reg_open_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let key = read_win64_import_argument(unicorn, 0)?;
+        let subkey = read_win64_import_argument(unicorn, 1)?;
+        let options = read_win64_import_argument(unicorn, 2)? as u32;
+        let access = read_win64_import_argument(unicorn, 3)? as u32;
+        let output = read_win64_import_argument(unicorn, 4)?;
+        if unicorn
+            .get_data()
+            .registry
+            .resolve(key, access & 0x300)
+            .is_err()
+        {
+            return Ok(6);
+        }
+        if options != 0 {
+            return Err(format!("RegOpenKeyExA unsupported options {options:#x}"));
+        }
+        if access & 0x300 == 0x300 {
+            return Ok(87);
+        }
+        if output == 0 {
+            return Ok(87);
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err("RegOpenKeyExA result is not writable".into());
+        }
+        let name = if subkey == 0 {
+            Vec::new()
+        } else {
+            read_crt_stdio_c_string(unicorn, subkey, 32768, "RegOpenKeyExA subkey")?
+        };
+        let (status, handle) = if name.is_empty() && guest_registry_predefined_key(key) {
+            (0, key)
+        } else {
+            match unicorn
+                .get_data_mut()
+                .registry
+                .open(key, &name, access, false)
+            {
+                Ok((handle, _)) => (0, handle),
+                Err(status) => (status as u64, 0),
+            }
+        };
+        unicorn
+            .mem_write(output, &u64::to_le_bytes(handle))
+            .map_err(|error| format!("RegOpenKeyExA output: {error}"))?;
+        Ok(status)
+    })();
+    finish_registry_import(unicorn, result);
+}
+
+fn emulate_reg_close_key(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = read_win64_import_argument(unicorn, 0).and_then(|key| {
+        if guest_registry_predefined_key(key) {
+            Ok(0)
+        } else {
+            Ok(match unicorn.get_data_mut().registry.close(key) {
+                Ok(()) => 0,
+                Err(error) => error as u64,
+            })
+        }
+    });
+    finish_registry_import(unicorn, result);
+}
+
+fn finish_registry_import(unicorn: &mut Unicorn<'_, GuestState>, result: Result<u64, String>) {
+    match result {
+        Ok(status) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, status);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+// Win64 absolute SECURITY_DESCRIPTOR: four header bytes, four padding bytes,
+// followed by owner/group/SACL/DACL pointers. This initializes guest data only;
+// it does not change host permissions or grant access to a kernel object.
+fn emulate_initialize_security_descriptor(unicorn: &mut Unicorn<'_, GuestState>) {
+    let output = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let revision = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default() as u32;
+    let error = if revision != 1 {
+        Some(1305u32)
+    }
+    // ERROR_UNKNOWN_REVISION
+    else if output == 0
+        || !guest_range_has_permission(unicorn, output, 40, Prot::WRITE).unwrap_or(false)
+    {
+        Some(ERROR_INVALID_PARAMETER)
+    } else {
+        let mut descriptor = [0u8; 40];
+        descriptor[0] = 1;
+        unicorn
+            .mem_write(output, &descriptor)
+            .err()
+            .map(|_| ERROR_INVALID_PARAMETER)
+    };
+    if let Some(error) = error {
+        unicorn.get_data_mut().windows_last_error = error;
+        let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+    } else {
+        let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+    }
+}
+
+fn emulate_set_security_descriptor_dacl(unicorn: &mut Unicorn<'_, GuestState>) {
+    let output = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let present = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default() as u32 != 0;
+    let dacl = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let defaulted = unicorn.reg_read(RegisterX86::R9).unwrap_or_default() as u32 != 0;
+    let result = (|| -> Result<(), u32> {
+        if output == 0
+            || !guest_range_has_permission(unicorn, output, 40, Prot::READ | Prot::WRITE)
+                .unwrap_or(false)
+        {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        let mut descriptor = [0u8; 40];
+        unicorn
+            .mem_read(output, &mut descriptor)
+            .map_err(|_| ERROR_INVALID_PARAMETER)?;
+        if descriptor[0] != 1 {
+            return Err(1305);
+        }
+        let mut control = u16::from_le_bytes([descriptor[2], descriptor[3]]);
+        if control & 0x8000 != 0 {
+            return Err(1338);
+        } // self-relative descriptor is not accepted
+        if present {
+            control = (control | 0x4) & !0x8;
+            if defaulted {
+                control |= 0x8;
+            }
+            // Preserve a reference, including NULL; this setter neither copies
+            // ACL bytes nor makes an access decision for any object.
+            descriptor[32..40].copy_from_slice(&dacl.to_le_bytes());
+        } else {
+            control &= !0x4; // pointer and defaulted arguments are ignored
+        }
+        descriptor[2..4].copy_from_slice(&control.to_le_bytes());
+        unicorn
+            .mem_write(output, &descriptor)
+            .map_err(|_| ERROR_INVALID_PARAMETER)
+    })();
+    match result {
+        Ok(()) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, 1);
+        }
+        Err(error) => {
+            unicorn.get_data_mut().windows_last_error = error;
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+    }
+}
+
+fn windows_filetime(time: std::time::SystemTime) -> Result<u64, String> {
+    const UNIX_EPOCH_FILETIME: u128 = 116_444_736_000_000_000;
+    let ticks = match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => UNIX_EPOCH_FILETIME.checked_add(duration.as_nanos() / 100),
+        Err(error) => UNIX_EPOCH_FILETIME.checked_sub(error.duration().as_nanos().div_ceil(100)),
+    }
+    .ok_or("wall clock is outside FILETIME range")?;
+    u64::try_from(ticks).map_err(|_| "wall clock exceeds FILETIME range".into())
+}
+
+// UCRT __time64_t supports UTC dates from 1970 through the end of 3000.
+fn crt_time64_seconds(time: std::time::SystemTime) -> i64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+        .filter(|seconds| *seconds <= 32_535_215_999)
+        .map_or(-1, |seconds| seconds as i64)
+}
+
+fn emulate_crt_time64(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<i64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        if output != 0 && !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Err(format!("_time64 output {output:#x} is not writable"));
+        }
+        let seconds = crt_time64_seconds(std::time::SystemTime::now());
+        if output != 0 {
+            unicorn
+                .mem_write(output, &seconds.to_le_bytes())
+                .map_err(|error| format!("_time64 output write failed: {error}"))?;
+        }
+        Ok(seconds)
+    })();
+    match result {
+        Ok(seconds) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, seconds as u64);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+fn emulate_load_library_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let file = read_win64_import_argument(unicorn, 1)?;
+        let flags = read_win64_import_argument(unicorn, 2)? as u32;
+        if pointer == 0 || file != 0 {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_PARAMETER;
+            return Ok(0);
+        }
+        // Supported executable searches: default or System32 only. Other valid
+        // resource/search policies need their own semantics, not a false miss.
+        if flags != 0 && flags != 0x800 {
+            return Err(format!("unsupported LoadLibraryExA flags {flags:#x}"));
+        }
+        let path = read_crt_stdio_c_string(unicorn, pointer, 1025, "LoadLibraryExA path")?;
+        if !path.is_ascii() {
+            return Err("unsupported LoadLibraryExA path encoding".into());
+        }
+        let mut path = String::from_utf8(path)
+            .unwrap()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        if path.is_empty() {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+            return Ok(0);
+        }
+        let basename = path.rsplit('/').next().unwrap();
+        if !basename.contains('.') {
+            path.push_str(".dll");
+        } else if path.ends_with('.') {
+            path.pop();
+        }
+        // An existing basename wins before directory search policy is applied.
+        if let Some(library) = guest_library_by_name(unicorn.get_data(), &path) {
+            if !library.initialized {
+                return Err("LoadLibraryExA DLL initialization incomplete".into());
+            }
+            return Ok(library.base);
+        }
+        if flags == 0x800 && !path.contains('/') && !path.contains(':') {
+            path = format!("c:/windows/system32/{path}");
+        }
+        if let Some(library) = guest_library_by_name(unicorn.get_data(), &path) {
+            if !library.initialized {
+                return Err("LoadLibraryExA DLL initialization incomplete".into());
+            }
+            // Explicit dependency images are pinned for the engine lifetime.
+            return Ok(library.base);
+        }
+        if path == "kernel32.dll" || path == "c:/windows/system32/kernel32.dll" {
+            return Ok(WINDOWS_KERNEL32_MODULE_TOKEN);
+        }
+        unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+        Ok(0)
+    })()
+    .map(|module| {
+        if module == 0 || retain_windows_module_reference(unicorn, module) {
+            module
+        } else {
+            0
+        }
+    });
+    finish_guest_stdio(unicorn, result);
+}
+
+// Windows exposes only an opaque reversible representation, scoped to a process.
+// Keep the guest process key in host state; never dereference either value.
+fn emulate_windows_pointer_encoding(unicorn: &mut Unicorn<'_, GuestState>, decode: bool) {
+    use std::hash::BuildHasher;
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let key = *unicorn
+            .get_data_mut()
+            .pointer_encoding_key
+            .get_or_insert_with(|| {
+                // RandomState obtains a fresh keyed hasher from the host's random
+                // seed machinery. The odd key cannot be zero, including for NULL.
+                std::collections::hash_map::RandomState::new()
+                    .hash_one("AEXCompat guest pointer encoding")
+                    | 1
+            });
+        let rotation = (key & 63) as u32;
+        Ok(if decode {
+            pointer.rotate_left(rotation) ^ key
+        } else {
+            (pointer ^ key).rotate_right(rotation)
+        })
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_process_affinity_mask(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let process = read_win64_import_argument(unicorn, 0)?;
+        let process_output = read_win64_import_argument(unicorn, 1)?;
+        let system_output = read_win64_import_argument(unicorn, 2)?;
+        if process != u64::MAX {
+            unicorn.get_data_mut().windows_last_error = ERROR_INVALID_HANDLE;
+            return Ok(0);
+        }
+        for output in [process_output, system_output] {
+            if output == 0 || !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+                unicorn.get_data_mut().windows_last_error = 998; // ERROR_NOACCESS
+                return Ok(0);
+            }
+        }
+        // Same single logical CPU and active mask as GetSystemInfo.
+        for output in [process_output, system_output] {
+            unicorn
+                .mem_write(output, &1u64.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_localtime64(unicorn: &mut Unicorn<'_, GuestState>, ctime: bool, asctime: bool) {
+    let result = (|| -> Result<u64, String> {
+        let input = read_win64_import_argument(unicorn, 0)?;
+        let fields = if asctime {
+            let bytes = acl_read(unicorn, input, 36)?;
+            let mut fields = [0i32; 9];
+            for (field, bytes) in fields.iter_mut().zip(bytes.chunks_exact(4)) {
+                *field = i32::from_le_bytes(bytes.try_into().unwrap());
+            }
+            fields
+        } else {
+            if input == 0 || !guest_range_has_permission(unicorn, input, 8, Prot::READ)? {
+                return Err("_localtime64 source is not readable".into());
+            }
+            let mut bytes = [0; 8];
+            unicorn
+                .mem_read(input, &mut bytes)
+                .map_err(|e| e.to_string())?;
+            let seconds = i64::from_le_bytes(bytes);
+            // Windows _localtime64 documented UTC range through 3000-12-31.
+            if !(0..=32_535_215_999).contains(&seconds) {
+                set_guest_crt_errno(unicorn, 22)?;
+                return Ok(0);
+            }
+            if guest_environment_value(unicorn.get_data(), b"TZ").is_some() {
+                return Err("guest CRT TZ override conversion is not implemented".into());
+            }
+            aex_host_time::localtime_fields(seconds)?
+        };
+        let thread = unicorn.get_data().current_windows_thread_id;
+        let address = if let Some(address) = unicorn.get_data().crt_tm_buffers.get(&thread) {
+            *address
+        } else {
+            let count = unicorn.get_data().crt_tm_buffers.len() as u64;
+            if count >= 4096 {
+                return Err("CRT tm thread storage limit exceeded".into());
+            }
+            let address =
+                POPUP_CHOICES_BASE + MAX_POPUP_CHOICE_PAGES * PAGE_SIZE + count * PAGE_SIZE;
+            unicorn
+                .mem_map(address, PAGE_SIZE, Prot::READ | Prot::WRITE)
+                .map_err(|e| e.to_string())?;
+            unicorn
+                .get_data_mut()
+                .crt_tm_buffers
+                .insert(thread, address);
+            address
+        };
+        if ctime {
+            let text = format_crt_ctime(fields)?;
+            let address = address + 64; // Separate narrow static buffer in the thread's CRT page.
+            if !guest_range_has_permission(unicorn, address, text.len() as u64, Prot::WRITE)? {
+                return Err("CRT ctime result storage is not writable".into());
+            }
+            unicorn
+                .mem_write(address, text.as_bytes())
+                .map_err(|e| e.to_string())?;
+            return Ok(address);
+        }
+        if !guest_range_has_permission(unicorn, address, 36, Prot::WRITE)? {
+            return Err("CRT tm result storage is not writable".into());
+        }
+        let bytes: Vec<u8> = fields.into_iter().flat_map(i32::to_le_bytes).collect();
+        unicorn
+            .mem_write(address, &bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(address)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_crt_ftime64(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        // Only the fourteen field bytes are written; trailing ABI padding is untouched.
+        if output == 0 || !guest_range_has_permission(unicorn, output, 14, Prot::WRITE)? {
+            return Err(
+                "_ftime64 output is not writable (invalid parameter handler is not implemented)"
+                    .into(),
+            );
+        }
+        if guest_environment_value(unicorn.get_data(), b"TZ").is_some() {
+            return Err("guest CRT TZ override conversion is not implemented".into());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "_ftime64 host time is before the supported epoch")?;
+        let seconds = i64::try_from(now.as_secs()).map_err(|_| "_ftime64 time overflow")?;
+        if seconds > 32_535_215_999 {
+            return Err("_ftime64 time exceeds supported range".into());
+        }
+        let (timezone, dstflag) = aex_host_time::timeb_zone(seconds)?;
+        let mut bytes = [0; 14];
+        bytes[..8].copy_from_slice(&seconds.to_le_bytes());
+        bytes[8..10].copy_from_slice(&(now.subsec_millis() as u16).to_le_bytes());
+        bytes[10..12].copy_from_slice(&timezone.to_le_bytes());
+        bytes[12..14].copy_from_slice(&dstflag.to_le_bytes());
+        unicorn
+            .mem_write(output, &bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(0) // void function; no CRT errno change on success.
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_version_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        if output == 0 || !guest_range_has_permission(unicorn, output, 4, Prot::READ)? {
+            unicorn.get_data_mut().windows_last_error = 998; // ERROR_NOACCESS
+            return Ok(0);
+        }
+        let mut size = [0; 4];
+        unicorn
+            .mem_read(output, &mut size)
+            .map_err(|e| e.to_string())?;
+        let size = u32::from_le_bytes(size);
+        if size != 148 && size != 156 {
+            unicorn.get_data_mut().windows_last_error = 87; // ERROR_INVALID_PARAMETER
+            return Ok(0);
+        }
+        if !guest_range_has_permission(unicorn, output, u64::from(size), Prot::WRITE)? {
+            unicorn.get_data_mut().windows_last_error = 998;
+            return Ok(0);
+        }
+        // This guest process has no supportedOS activation-context manifest.
+        // GetVersionEx therefore exposes the documented Windows 8 compatibility
+        // view (6.2), not the macOS host version or a promise of API availability.
+        // Add manifest-aware version selection if activation contexts are supported.
+        let mut bytes = [0; 156];
+        for (index, value) in [size, 6, 2, 9200, 2].into_iter().enumerate() {
+            bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        // Empty CSD string, no service pack or server suites, NT workstation.
+        if size == 156 {
+            bytes[154] = 1;
+        }
+        unicorn
+            .mem_write(output, &bytes[..size as usize])
+            .map_err(|e| e.to_string())?;
+        Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_system_metrics(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let index = read_win64_import_argument(unicorn, 0)? as u32 as i32;
+        match index {
+            // SM_REMOTESESSION: this emulated process is not associated with a
+            // Windows Terminal Services client session. A host SSH connection
+            // does not create a guest RDP session. Revisit with guest WTS support.
+            0x1000 => Ok(0),
+            _ => Err(format!(
+                "unsupported GetSystemMetrics index: {index} ({:#x})",
+                index as u32
+            )),
+        }
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_user_name(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        let size_pointer = read_win64_import_argument(unicorn, 1)?;
+        if size_pointer == 0
+            || !guest_range_has_permission(unicorn, size_pointer, 4, Prot::READ | Prot::WRITE)?
+        {
+            unicorn.get_data_mut().windows_last_error = 998;
+            return Ok(0);
+        }
+        let mut size = [0; 4];
+        unicorn
+            .mem_read(size_pointer, &mut size)
+            .map_err(|e| e.to_string())?;
+        let capacity = u32::from_le_bytes(size);
+        // No guest impersonation support exists: map the executing host account,
+        // independently of mutable environment variables. Never invent an identity.
+        let mut name = aex_host_identity::current_username()?;
+        if name.is_empty() || name.len() > 256 || name.contains(&0) {
+            return Err("host user name is not representable by GetUserName".into());
+        }
+        name.push(0);
+        let (bytes, required) = if wide {
+            let required = name.len() as u32;
+            (
+                name.into_iter()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<u8>>(),
+                required,
+            )
+        } else {
+            let unicode = String::from_utf16(&name)
+                .map_err(|_| "host user name contains invalid UTF-16".to_string())?;
+            let (bytes, substituted) = encode_shift_jis_with_default(&unicode, b'?');
+            if substituted {
+                return Err(
+                    "host user name is not representable in the guest ANSI codepage".into(),
+                );
+            }
+            let required = bytes.len() as u32;
+            (bytes, required)
+        };
+        if capacity < required {
+            unicorn
+                .mem_write(size_pointer, &required.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+            unicorn.get_data_mut().windows_last_error = 122;
+            return Ok(0);
+        }
+        if output == 0
+            || !guest_range_has_permission(unicorn, output, bytes.len() as u64, Prot::WRITE)?
+        {
+            unicorn.get_data_mut().windows_last_error = 998;
+            return Ok(0);
+        }
+        unicorn
+            .mem_write(output, &bytes)
+            .map_err(|e| e.to_string())?;
+        unicorn
+            .mem_write(size_pointer, &required.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_gethostname(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        if unicorn.get_data().windows_socket_startups == 0 {
+            unicorn.get_data_mut().windows_last_error = WINDOWS_WSANOTINITIALISED;
+            return Ok(u32::MAX as u64);
+        }
+        let output = read_win64_import_argument(unicorn, 0)?;
+        let capacity = read_win64_import_argument(unicorn, 1)? as u32 as i32;
+        if output == 0 || capacity <= 0 {
+            unicorn.get_data_mut().windows_last_error = WINDOWS_WSAEFAULT;
+            return Ok(u32::MAX as u64);
+        }
+        let mut name = aex_host_identity::current_hostname()?;
+        if name.is_empty() || name.contains(&0) {
+            return Err("host name is not representable by gethostname".into());
+        }
+        name.push(0);
+        if name.len() > capacity as usize
+            || !guest_range_has_permission(unicorn, output, name.len() as u64, Prot::WRITE)?
+        {
+            unicorn.get_data_mut().windows_last_error = WINDOWS_WSAEFAULT;
+            return Ok(u32::MAX as u64);
+        }
+        unicorn
+            .mem_write(output, &name)
+            .map_err(|e| format!("gethostname output write: {e}"))?;
+        Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_sh_get_special_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 1)?;
+        let csidl = read_win64_import_argument(unicorn, 2)? as u32;
+        let create = read_win64_import_argument(unicorn, 3)? as u32 != 0;
+        // These are the same guest special-folder locations as SHGetFolderPathA.
+        // User-profile folders require a configured guest profile first.
+        let path: &[u8] = match csidl {
+            0x23 => b"C:\\ProgramData\0",
+            0x26 => b"C:\\Program Files\0",
+            _ => {
+                return Err(format!(
+                    "SHGetSpecialFolderPathA unsupported CSIDL {csidl:#x}"
+                ));
+            }
+        };
+        if output == 0
+            || !guest_range_has_permission(unicorn, output, WINDOWS_MAX_PATH_BYTES, Prot::WRITE)?
+        {
+            return Ok(0);
+        }
+        let name = guest_file_name(std::str::from_utf8(&path[..path.len() - 1]).unwrap())?;
+        let files = &mut unicorn.get_data_mut().guest_files;
+        if files.sources.contains_key(&name) {
+            return Ok(0);
+        }
+        if !files.directory_exists(&name) {
+            if !create {
+                return Ok(0);
+            }
+            // Only the two fixed special-folder names above can enter this set.
+            // Session-local directories never create or modify host files.
+            files.record_directory_creation(&name);
+            files.directories.insert(name);
+        }
+        unicorn.mem_write(output, path).map_err(|e| e.to_string())?;
+        Ok(1)
+    })();
+    match result {
+        Ok(value) => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, value);
+        }
+        Err(error) => {
+            if unicorn.get_data().callback_error.is_none() {
+                unicorn.get_data_mut().callback_error = Some(error);
+            }
+            let _ = unicorn.emu_stop();
+        }
+    }
+}
+
+// Guest apartment state only. COM activation, marshaling and RPC remain
+// unsupported until their interfaces are implemented; no host COM is invoked.
+fn guest_com_lifecycle(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    initialize: bool,
+) -> Result<u64, String> {
+    let thread = unicorn.get_data().current_windows_thread_id;
+    if !initialize {
+        let apartments = &mut unicorn.get_data_mut().com_apartments;
+        if let Some((_, count)) = apartments.get_mut(&thread) {
+            *count -= 1;
+            if *count == 0 {
+                apartments.remove(&thread);
+            }
+        }
+        return Ok(0); // void; an unmatched uninitialize has no effect
+    }
+    let reserved = read_win64_import_argument(unicorn, 0)?;
+    let flags = read_win64_import_argument(unicorn, 1)? as u32;
+    if reserved != 0 || flags & !0x0e != 0 {
+        return Ok(0x80070057);
+    }
+    let mode = flags & 2; // COINIT_APARTMENTTHREADED; zero is MTA
+    let apartments = &mut unicorn.get_data_mut().com_apartments;
+    if let Some((current, count)) = apartments.get_mut(&thread) {
+        if *current != mode {
+            return Ok(0x80010106);
+        } // RPC_E_CHANGED_MODE
+        if *count >= 1024 {
+            return Ok(0x8007000e);
+        }
+        *count += 1;
+        return Ok(1); // S_FALSE still requires balancing CoUninitialize
+    }
+    if apartments.len() >= 4096 {
+        return Ok(0x8007000e);
+    }
+    apartments.insert(thread, (mode, 1));
+    Ok(0)
+}
+
+// Store process defaults only: this does not authenticate, impersonate, register
+// an RPC endpoint or authorize a call. Activation/marshaling remain explicit
+// gaps, and any future transport must implement the recorded security policy.
+fn guest_com_security(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    if unicorn.get_data().com_security.is_some() {
+        return Ok(0x80010119); // RPC_E_TOO_LATE, process-wide, survives apartment teardown
+    }
+    let descriptor = read_win64_import_argument(unicorn, 0)?;
+    let services = read_win64_import_argument(unicorn, 1)? as u32 as i32;
+    let service_list = read_win64_import_argument(unicorn, 2)?;
+    let reserved1 = read_win64_import_argument(unicorn, 3)?;
+    let authentication = read_win64_import_argument(unicorn, 4)? as u32;
+    let impersonation = read_win64_import_argument(unicorn, 5)? as u32;
+    let auth_list = read_win64_import_argument(unicorn, 6)?;
+    let capabilities = read_win64_import_argument(unicorn, 7)? as u32;
+    let reserved3 = read_win64_import_argument(unicorn, 8)?;
+    if reserved1 != 0 || reserved3 != 0 {
+        return Ok(0x80070057);
+    }
+    // AppID and IAccessControl flags change interpretation/validation of the
+    // other arguments; reject unmodeled capabilities before normal validation.
+    if capabilities != 0 || descriptor != 0 || auth_list != 0 {
+        return Err("CoInitializeSecurity explicit security descriptors, credentials or capabilities unsupported".to_string());
+    }
+    if services < -1
+        || authentication > 6
+        || !(1..=4).contains(&impersonation)
+        || (services == -1 && service_list != 0)
+    {
+        return Ok(0x80070057);
+    }
+    if services > 0 || service_list != 0 {
+        return Err(
+            "CoInitializeSecurity explicit authentication service registration unsupported"
+                .to_string(),
+        );
+    }
+    unicorn.get_data_mut().com_security = Some((services, authentication, impersonation));
+    Ok(0)
+}
+
+// The guest application registry is empty and no COM factories or activation
+// contexts are installed. This implements local lookup failure, not a COM/WMI
+// provider. Registration APIs and remote activation remain explicit gaps.
+fn guest_com_create_instance(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let class = read_win64_import_argument(unicorn, 0)?;
+    let outer = read_win64_import_argument(unicorn, 1)?;
+    let context = read_win64_import_argument(unicorn, 2)? as u32;
+    let interface = read_win64_import_argument(unicorn, 3)?;
+    let output = read_win64_import_argument(unicorn, 4)?;
+    if output == 0 {
+        return Ok(0x80004003);
+    } // E_POINTER
+    if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+        return Err("CoCreateInstance output is not writable".into());
+    }
+    for (name, address) in [("CLSID", class), ("IID", interface)] {
+        if address == 0 || !guest_range_has_permission(unicorn, address, 16, Prot::READ)? {
+            return Err(format!("CoCreateInstance {name} is not readable"));
+        }
+    }
+    if outer != 0 || context == 0 || context & !7 != 0 {
+        return Err(
+            "CoCreateInstance aggregation or nonlocal/extended class context unsupported".into(),
+        );
+    }
+    let state = unicorn.get_data();
+    let initialized = state
+        .com_apartments
+        .contains_key(&state.current_windows_thread_id);
+    if !initialized && state.com_apartments.values().any(|(mode, _)| *mode == 0) {
+        return Err("CoCreateInstance implicit MTA association unsupported".into());
+    }
+    let result = if initialized { 0x80040154 } else { 0x800401f0 };
+    unicorn
+        .mem_write(output, &[0; 8])
+        .map_err(|error| format!("CoCreateInstance output: {error}"))?;
+    Ok(result)
+}
+
+// ExitThread skips the caller's stack frames and enters the same owned-thread
+// completion path as returning from the start routine. DLL thread notifications
+// are a pre-existing gap in that common path; this does not claim to add them.
+fn guest_exit_thread(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), String> {
+    let exit_code = read_win64_import_argument(unicorn, 0)? as u32;
+    let state = unicorn.get_data();
+    let pending = state.pending_windows_thread.as_ref().ok_or_else(|| {
+        format!(
+            "ExitThread on the host-dispatched root thread is unsupported (exit code {exit_code})"
+        )
+    })?;
+    let thread = state
+        .windows_threads
+        .get(&pending.handle)
+        .ok_or_else(|| "ExitThread pending thread handle is missing".to_string())?;
+    if thread.id != state.current_windows_thread_id || thread.completed || !thread.stack_mapped {
+        return Err("ExitThread does not own the active guest thread".into());
+    }
+    if pending.exit_code.is_some() {
+        return Err("ExitThread from a thread cleanup callback is unsupported".into());
+    }
+    let return_rsp = pending.callback_return_rsp;
+    unicorn
+        .reg_write(RegisterX86::RSP, return_rsp)
+        .map_err(|error| format!("ExitThread completion stack: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::RAX, u64::from(exit_code))
+        .map_err(|error| format!("ExitThread exit code: {error}"))?;
+    unicorn
+        .reg_write(RegisterX86::R11, HOST_CREATE_THREAD_CONTINUE)
+        .map_err(|error| format!("ExitThread completion target: {error}"))?;
+    Ok(())
+}
+
+const WINDOWS_HOSTENT_BASE: u64 = 0xa00000000;
+const WINDOWS_HOSTENT_SLOT_SIZE: u64 = 65536;
+const MAX_WINDOWS_HOSTENT_SLOTS: u64 = 1024;
+
+fn release_guest_hostent(unicorn: &mut Unicorn<'_, GuestState>, thread: u32) -> Result<(), String> {
+    if let Some(address) = unicorn
+        .get_data()
+        .windows_hostent_buffers
+        .get(&thread)
+        .copied()
+    {
+        unicorn
+            .mem_unmap(address, WINDOWS_HOSTENT_SLOT_SIZE)
+            .map_err(|e| format!("hostent release: {e}"))?;
+        unicorn
+            .get_data_mut()
+            .windows_hostent_buffers
+            .remove(&thread);
+    }
+    Ok(())
+}
+
+fn serialize_guest_hostent(
+    host: &aex_host_identity::resolver::Ipv4Host,
+    base: u64,
+) -> Result<Vec<u8>, String> {
+    if host.name.is_empty()
+        || host.addresses.is_empty()
+        || host.aliases.len() > 256
+        || host.addresses.len() > 256
+    {
+        return Err("gethostbyname invalid or excessive host record".into());
+    }
+    let strings = std::iter::once(&host.name).chain(host.aliases.iter());
+    let mut length = 32
+        + (host.aliases.len() + 1) * 8
+        + (host.addresses.len() + 1) * 8
+        + host.addresses.len() * 4;
+    for name in strings {
+        if name.len() >= 4096 || name.contains(&0) {
+            return Err("gethostbyname invalid host record name".into());
+        }
+        length += name.len() + 1;
+    }
+    if length > WINDOWS_HOSTENT_SLOT_SIZE as usize
+        || base.checked_add(WINDOWS_HOSTENT_SLOT_SIZE).is_none()
+    {
+        return Err("gethostbyname host record exceeds bounded storage".into());
+    }
+    let alias_table = 32;
+    let address_table = alias_table + (host.aliases.len() + 1) * 8;
+    let mut cursor = address_table + (host.addresses.len() + 1) * 8;
+    let mut bytes = vec![0; length];
+    bytes[8..16].copy_from_slice(&(base + alias_table as u64).to_le_bytes());
+    bytes[16..18].copy_from_slice(&2u16.to_le_bytes());
+    bytes[18..20].copy_from_slice(&4u16.to_le_bytes());
+    bytes[24..32].copy_from_slice(&(base + address_table as u64).to_le_bytes());
+    for (index, address) in host.addresses.iter().enumerate() {
+        let slot = address_table + index * 8;
+        bytes[slot..slot + 8].copy_from_slice(&(base + cursor as u64).to_le_bytes());
+        bytes[cursor..cursor + 4].copy_from_slice(address);
+        cursor += 4;
+    }
+    for (index, name) in std::iter::once(&host.name)
+        .chain(host.aliases.iter())
+        .enumerate()
+    {
+        let slot = if index == 0 {
+            0
+        } else {
+            alias_table + (index - 1) * 8
+        };
+        bytes[slot..slot + 8].copy_from_slice(&(base + cursor as u64).to_le_bytes());
+        bytes[cursor..cursor + name.len()].copy_from_slice(name);
+        cursor += name.len() + 1;
+    }
+    Ok(bytes)
+}
+
+fn store_guest_hostent(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    host: &aex_host_identity::resolver::Ipv4Host,
+) -> Result<u64, String> {
+    let thread = unicorn.get_data().current_windows_thread_id;
+    let previous = unicorn
+        .get_data()
+        .windows_hostent_buffers
+        .get(&thread)
+        .copied();
+    let address = match previous {
+        Some(address) => address,
+        None => (0..MAX_WINDOWS_HOSTENT_SLOTS)
+            .map(|slot| WINDOWS_HOSTENT_BASE + slot * WINDOWS_HOSTENT_SLOT_SIZE)
+            .find(|address| {
+                !unicorn
+                    .get_data()
+                    .windows_hostent_buffers
+                    .values()
+                    .any(|used| used == address)
+            })
+            .ok_or("gethostbyname thread storage exhausted")?,
+    };
+    let bytes = serialize_guest_hostent(host, address)?;
+    if previous.is_none() {
+        unicorn
+            .mem_map(address, WINDOWS_HOSTENT_SLOT_SIZE, Prot::READ)
+            .map_err(|e| format!("hostent allocation: {e}"))?;
+    } else if !guest_range_has_permission(unicorn, address, WINDOWS_HOSTENT_SLOT_SIZE, Prot::READ)?
+    {
+        return Err("gethostbyname borrowed storage is no longer readable".into());
+    }
+    // Host writes to its own borrowed read-only mapping. Guest writes and CRT
+    // free are prohibited; the mapping is outside all CRT allocation ranges.
+    if let Err(error) = unicorn.mem_write(address, &bytes) {
+        if previous.is_none() {
+            let _ = unicorn.mem_unmap(address, WINDOWS_HOSTENT_SLOT_SIZE);
+        }
+        return Err(format!("hostent record write: {error}"));
+    }
+    unicorn
+        .get_data_mut()
+        .windows_hostent_buffers
+        .insert(thread, address);
+    Ok(address)
+}
+
+fn guest_gethostbyname(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    if unicorn.get_data().windows_socket_startups == 0 {
+        unicorn.get_data_mut().windows_last_error = WINDOWS_WSANOTINITIALISED;
+        return Ok(0);
+    }
+    let pointer = read_win64_import_argument(unicorn, 0)?;
+    let mut name = if pointer == 0 {
+        Vec::new()
+    } else {
+        read_crt_stdio_c_string(unicorn, pointer, 4096, "gethostbyname input")?
+    };
+    if name.is_empty() {
+        name = aex_host_identity::current_hostname()?;
+    }
+    // Windows ANSI conversion beyond ASCII is not modeled by this resolver.
+    if !name.is_ascii() {
+        return Err("gethostbyname non-ASCII name conversion unsupported".into());
+    }
+    if std::str::from_utf8(&name)
+        .ok()
+        .and_then(|name| name.parse::<std::net::Ipv6Addr>().ok())
+        .is_some()
+    {
+        unicorn.get_data_mut().windows_last_error = 11004; // WSANO_DATA: IPv4-only API
+        return Ok(0);
+    }
+    match aex_host_identity::resolver::resolve_ipv4(&name) {
+        Ok(host) => store_guest_hostent(unicorn, &host),
+        Err(aex_host_identity::resolver::ResolveError::Winsock(error)) => {
+            unicorn.get_data_mut().windows_last_error = error;
+            Ok(0)
+        }
+        Err(aex_host_identity::resolver::ResolveError::Unsupported(error)) => Err(error),
+    }
+}
+
+const CRT_ERRNO_BASE: u64 = 0xb00000000;
+const MAX_CRT_ERRNO_SLOTS: u64 = 4096;
+
+fn get_guest_crt_errno(unicorn: &Unicorn<'_, GuestState>) -> Result<u32, String> {
+    let state = unicorn.get_data();
+    if let Some(address) = state
+        .crt_errno_buffers
+        .get(&state.current_windows_thread_id)
+    {
+        if !guest_range_has_permission(unicorn, *address, 4, Prot::READ)? {
+            return Err("errno storage is not readable".into());
+        }
+        let mut bytes = [0; 4];
+        unicorn
+            .mem_read(*address, &mut bytes)
+            .map_err(|e| format!("errno read: {e}"))?;
+        Ok(u32::from_le_bytes(bytes))
+    } else {
+        Ok(state.crt_errno)
+    }
+}
+
+fn set_guest_crt_errno(unicorn: &mut Unicorn<'_, GuestState>, value: u32) -> Result<(), String> {
+    let state = unicorn.get_data();
+    if let Some(address) = state
+        .crt_errno_buffers
+        .get(&state.current_windows_thread_id)
+        .copied()
+    {
+        if !guest_range_has_permission(unicorn, address, 4, Prot::WRITE)? {
+            return Err("errno storage is not writable".into());
+        }
+        unicorn
+            .mem_write(address, &value.to_le_bytes())
+            .map_err(|e| format!("errno write: {e}"))?;
+    }
+    unicorn.get_data_mut().crt_errno = value;
+    Ok(())
+}
+
+fn guest_errno_pointer(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let thread = unicorn.get_data().current_windows_thread_id;
+    if let Some(address) = unicorn.get_data().crt_errno_buffers.get(&thread).copied() {
+        if !guest_range_has_permission(unicorn, address, 4, Prot::READ | Prot::WRITE)? {
+            return Err("_errno borrowed storage permissions changed".into());
+        }
+        return Ok(address);
+    }
+    let value = unicorn.get_data().crt_errno;
+    let address = (0..MAX_CRT_ERRNO_SLOTS)
+        .map(|slot| CRT_ERRNO_BASE + slot * PAGE_SIZE)
+        .find(|address| {
+            !unicorn
+                .get_data()
+                .crt_errno_buffers
+                .values()
+                .any(|used| used == address)
+        })
+        .ok_or("_errno thread storage exhausted")?;
+    unicorn
+        .mem_map(address, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .map_err(|e| format!("_errno allocation: {e}"))?;
+    if let Err(error) = unicorn.mem_write(address, &value.to_le_bytes()) {
+        let _ = unicorn.mem_unmap(address, PAGE_SIZE);
+        return Err(format!("_errno initial value: {error}"));
+    }
+    unicorn
+        .get_data_mut()
+        .crt_errno_buffers
+        .insert(thread, address);
+    Ok(address)
+}
+
+fn release_guest_errno(unicorn: &mut Unicorn<'_, GuestState>, thread: u32) -> Result<(), String> {
+    if let Some(address) = unicorn.get_data().crt_errno_buffers.get(&thread).copied() {
+        unicorn
+            .mem_unmap(address, PAGE_SIZE)
+            .map_err(|e| format!("_errno release: {e}"))?;
+        unicorn.get_data_mut().crt_errno_buffers.remove(&thread);
+    }
+    unicorn.get_data_mut().crt_random_states.remove(&thread);
+    Ok(())
+}
+
+fn emulate_dupenv_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        let size_output = read_win64_import_argument(unicorn, 1)?;
+        let name_pointer = read_win64_import_argument(unicorn, 2)?;
+        if output == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(22);
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)?
+            || (size_output != 0
+                && !guest_range_has_permission(unicorn, size_output, 8, Prot::WRITE)?)
+        {
+            return Err("_dupenv_s output is not writable".into());
+        }
+        if size_output != 0 && output.abs_diff(size_output) < 8 {
+            return Err("_dupenv_s output pointers overlap".into());
+        }
+        let name = if name_pointer == 0 {
+            None
+        } else {
+            Some(read_windows_environment_name(
+                unicorn,
+                name_pointer,
+                "_dupenv_s",
+            )?)
+        };
+        unicorn
+            .mem_write(output, &0u64.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        if size_output != 0 {
+            unicorn
+                .mem_write(size_output, &0u64.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        let Some(name) = name else {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(22);
+        };
+        let Some(mut value) = guest_environment_value(unicorn.get_data(), &name) else {
+            return Ok(0);
+        };
+        value.push(0);
+        let size = value.len() as u64;
+        let pointer = match allocate_crt_region(unicorn, size) {
+            Ok(pointer) => pointer,
+            Err(_) => {
+                set_guest_crt_errno(unicorn, 12)?;
+                return Ok(12);
+            }
+        };
+        let written = (|| -> Result<(), String> {
+            unicorn
+                .mem_write(pointer, &value)
+                .map_err(|e| e.to_string())?;
+            unicorn
+                .mem_write(output, &pointer.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+            if size_output != 0 {
+                unicorn
+                    .mem_write(size_output, &size.to_le_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = written {
+            let _ = free_crt_region(unicorn, pointer);
+            return Err(error);
+        }
+        Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_mbsupr_s(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let capacity = read_win64_import_argument(unicorn, 1)?;
+        if pointer == 0 || capacity == 0 {
+            set_guest_crt_errno(unicorn, 22)?;
+            return Ok(22);
+        }
+        if capacity > MAX_CRT_STRING_BYTES {
+            return Err("_mbsupr_s buffer exceeds bound".into());
+        }
+        if !guest_range_has_permission(unicorn, pointer, capacity, Prot::READ | Prot::WRITE)? {
+            return Err("_mbsupr_s buffer is not readable and writable".into());
+        }
+        let bytes = read_strncpy_s_source(unicorn, pointer, capacity)?;
+        let Some(end) = bytes.iter().position(|b| *b == 0) else {
+            unicorn
+                .mem_write(pointer, &[0])
+                .map_err(|e| e.to_string())?;
+            set_guest_crt_errno(unicorn, 34)?;
+            return Ok(34);
+        };
+        let mut output = Vec::with_capacity(end + 1);
+        let mut i = 0;
+        while i < end {
+            let lead = bytes[i];
+            if matches!(lead, 0x81..=0x9f | 0xe0..=0xfc) {
+                if i + 1 >= end || !matches!(bytes[i + 1], 0x40..=0x7e | 0x80..=0xfc) {
+                    unicorn
+                        .mem_write(pointer, &[0])
+                        .map_err(|e| e.to_string())?;
+                    set_guest_crt_errno(unicorn, 42)?;
+                    return Ok(42);
+                }
+                let pair = &bytes[i..i + 2];
+                let (decoded, malformed) = encoding_rs::SHIFT_JIS.decode_without_bom_handling(pair);
+                if malformed {
+                    return Err("_mbsupr_s unmapped Shift-JIS character".into());
+                }
+                let upper = decoded.to_uppercase();
+                if upper == decoded {
+                    output.extend_from_slice(pair);
+                } else {
+                    let (encoded, substituted) = encode_shift_jis_with_default(&upper, b'?');
+                    if substituted || encoded.len() != 2 {
+                        return Err("_mbsupr_s unsupported case mapping".into());
+                    }
+                    output.extend_from_slice(&encoded);
+                }
+                i += 2;
+            } else {
+                output.push(lead.to_ascii_uppercase());
+                i += 1;
+            }
+        }
+        output.push(0);
+        unicorn
+            .mem_write(pointer, &output)
+            .map_err(|e| e.to_string())?;
+        Ok(0)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_verify_version_info_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let types = read_win64_import_argument(unicorn, 1)? as u32;
+        let mask = read_win64_import_argument(unicorn, 2)?;
+        if pointer == 0 || !guest_range_has_permission(unicorn, pointer, 156, Prot::READ)? {
+            unicorn.get_data_mut().windows_last_error = 998;
+            return Ok(0);
+        }
+        let bytes = unicorn
+            .mem_read_as_vec(pointer, 156)
+            .map_err(|e| e.to_string())?;
+        let dword = |offset| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let word =
+            |offset| u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap()) as u32;
+        if dword(0) != 156 || types == 0 || types & !0xff != 0 {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        let requested = [
+            dword(8),
+            dword(4),
+            dword(12),
+            dword(16),
+            word(150),
+            word(148),
+            word(152),
+            bytes[154] as u32,
+        ];
+        let current = [2, 6, 9200, 2, 0, 0, 0, 1];
+        let condition = |field: usize| ((mask >> (field * 3)) & 7) as u32;
+        for field in 0..8 {
+            if types & (1 << field) != 0
+                && !(if field == 6 { 6..=7 } else { 1..=5 }).contains(&condition(field))
+            {
+                unicorn.get_data_mut().windows_last_error = 87;
+                return Ok(0);
+            }
+        }
+        let compare = |a, b, op| match op {
+            1 => a == b,
+            2 => a > b,
+            3 => a >= b,
+            4 => a < b,
+            5 => a <= b,
+            _ => false,
+        };
+        let mut matches = true;
+        for field in [2, 3, 7] {
+            if types & (1 << field) != 0 {
+                matches &= compare(current[field], requested[field], condition(field));
+            }
+        }
+        if types & 0x40 != 0 {
+            matches &= if condition(6) == 6 {
+                requested[6] == 0
+            } else {
+                false
+            };
+        }
+        let mut op = 1;
+        for field in [1, 0, 5, 4] {
+            if types & (1 << field) == 0 {
+                continue;
+            }
+            if op == 1 {
+                op = condition(field);
+            }
+            if current[field] != requested[field] {
+                matches &= compare(current[field], requested[field], op);
+                break;
+            }
+            // Equal components defer strict inequalities to the next component.
+            let lower_selected = match field {
+                1 => types & 0x31,
+                0 => types & 0x30,
+                5 => types & 0x10,
+                _ => 0,
+            };
+            if lower_selected == 0 {
+                matches &= compare(current[field], requested[field], op);
+            }
+        }
+        if !matches {
+            unicorn.get_data_mut().windows_last_error = 1150;
+        }
+        Ok(u64::from(matches))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_get_module_handle_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let pointer = read_win64_import_argument(unicorn, 0)?;
+        let module = if pointer == 0 {
+            unicorn.get_data().image_region.map(|(start, _)| start)
+        } else {
+            let bytes = read_strncpy_s_source(unicorn, pointer, 128)?;
+            let Some(end) = bytes.iter().position(|b| *b == 0) else {
+                return Err("GetModuleHandleA name exceeds bound".into());
+            };
+            let (name, malformed) =
+                encoding_rs::SHIFT_JIS.decode_without_bom_handling(&bytes[..end]);
+            if malformed {
+                return Err("GetModuleHandleA name has invalid ANSI encoding".into());
+            }
+            let basename = name.rsplit(['\\', '/']).next().unwrap_or("");
+            if basename.eq_ignore_ascii_case("kernel32.dll") {
+                Some(WINDOWS_KERNEL32_MODULE_TOKEN)
+            } else if basename.eq_ignore_ascii_case("ntdll.dll") {
+                Some(WINDOWS_NTDLL_MODULE_TOKEN)
+            } else {
+                guest_library_by_name(unicorn.get_data(), &name).map(|library| library.base)
+            }
+        };
+        if module.is_none() {
+            unicorn.get_data_mut().windows_last_error = ERROR_MOD_NOT_FOUND;
+        }
+        Ok(module.unwrap_or(0))
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_expand_environment_strings_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let source = read_win64_import_argument(unicorn, 0)?;
+        let destination = read_win64_import_argument(unicorn, 1)?;
+        let capacity = read_win64_import_argument(unicorn, 2)? as u32 as u64;
+        if source == 0 {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        }
+        let input = read_bounded_crt_c_string(
+            unicorn,
+            source,
+            MAX_CRT_STRING_BYTES,
+            "ExpandEnvironmentStringsA",
+        )?;
+        let input = &input[..input.len() - 1];
+        let mut output = Vec::new();
+        let mut cursor = 0;
+        while cursor < input.len() {
+            if input[cursor] == b'%' {
+                if let Some(relative) = input[cursor + 1..].iter().position(|b| *b == b'%') {
+                    let end = cursor + 1 + relative;
+                    if let Some(value) =
+                        guest_environment_value(unicorn.get_data(), &input[cursor + 1..end])
+                    {
+                        output.extend_from_slice(&value);
+                    } else {
+                        output.extend_from_slice(&input[cursor..=end]);
+                    }
+                    cursor = end + 1;
+                } else {
+                    output.extend_from_slice(&input[cursor..]);
+                    cursor = input.len();
+                }
+            } else {
+                output.push(input[cursor]);
+                cursor += 1;
+            }
+            if output.len() as u64 >= MAX_CRT_STRING_BYTES {
+                return Err("environment expansion exceeds bound".into());
+            }
+        }
+        output.push(0);
+        let required = output.len() as u64;
+        if capacity < required {
+            return Ok(required);
+        }
+        if destination == 0
+            || !guest_range_has_permission(unicorn, destination, required, Prot::WRITE)?
+        {
+            unicorn.get_data_mut().windows_last_error = 998;
+            return Ok(0);
+        }
+        unicorn
+            .mem_write(destination, &output)
+            .map_err(|e| e.to_string())?;
+        Ok(required)
+    })();
+    finish_guest_stdio(unicorn, result);
+}
+
+fn emulate_reg_create_key_ex_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let key = read_win64_import_argument(unicorn, 0)?;
+        let name = read_win64_import_argument(unicorn, 1)?;
+        let reserved = read_win64_import_argument(unicorn, 2)? as u32;
+        let class = read_win64_import_argument(unicorn, 3)?;
+        let options = read_win64_import_argument(unicorn, 4)? as u32;
+        let access = read_win64_import_argument(unicorn, 5)? as u32;
+        let security = read_win64_import_argument(unicorn, 6)?;
+        let output = read_win64_import_argument(unicorn, 7)?;
+        let disposition = read_win64_import_argument(unicorn, 8)?;
+        if reserved != 0 || output == 0 || access & 0x300 == 0x300 {
+            return Ok(87);
+        }
+        if options != 0 || class != 0 {
+            return Err(format!(
+                "RegCreateKeyExA unsupported options={options:#x} class={class:#x} security={security:#x}"
+            ));
+        }
+        if !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)?
+            || (disposition != 0
+                && !guest_range_has_permission(unicorn, disposition, 4, Prot::WRITE)?)
+        {
+            return Err("RegCreateKeyExA outputs not writable".into());
+        }
+        if disposition != 0
+            && disposition < output.saturating_add(8)
+            && output < disposition.saturating_add(4)
+        {
+            return Err("RegCreateKeyExA outputs overlap".into());
+        }
+        let name = if name == 0 {
+            Vec::new()
+        } else {
+            read_crt_stdio_c_string(unicorn, name, 32768, "RegCreateKeyExA name")?
+        };
+        if !name.is_ascii() {
+            return Err("RegCreateKeyExA non-ASCII key names unsupported".into());
+        }
+        let attributes = read_guest_object_security(unicorn, security)?;
+        let policy = attributes
+            .as_ref()
+            .map(GuestObjectSecurity::registry_security)
+            .transpose()?
+            .flatten();
+        let inherit_handle = attributes
+            .as_ref()
+            .is_some_and(|attrs| attrs.inherit_handle);
+        let (handle, created) = match unicorn.get_data_mut().registry.open_with_security(
+            key,
+            &name,
+            access,
+            true,
+            policy,
+            inherit_handle,
+        ) {
+            Ok(value) => value,
+            Err(error) => return Ok(error as u64),
+        };
+        unicorn
+            .mem_write(output, &handle.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        if disposition != 0 {
+            unicorn
+                .mem_write(
+                    disposition,
+                    &(if created { 1u32 } else { 2u32 }).to_le_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(0)
+    })();
+    finish_registry_import(unicorn, result);
+}
+
+fn emulate_registry_value_a(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    implementation: LegacyWin64Import,
+) {
+    let result = (|| -> Result<u64, String> {
+        let key = read_win64_import_argument(unicorn, 0)?;
+        let name = read_win64_import_argument(unicorn, 1)?;
+        let reserved = read_win64_import_argument(unicorn, 2)?;
+        let fourth = read_win64_import_argument(unicorn, 3)?;
+        let data = read_win64_import_argument(unicorn, 4)?;
+        let sixth = read_win64_import_argument(unicorn, 5)?;
+        if reserved != 0 {
+            return Ok(87);
+        }
+        let name = if name == 0 {
+            Vec::new()
+        } else {
+            read_crt_stdio_c_string(unicorn, name, 16384, "registry value name")?
+        };
+        if !name.is_ascii() {
+            return Err("non-ASCII registry value names unsupported".into());
+        }
+        if matches!(implementation, LegacyWin64Import::RegSetValueExA) {
+            let size = sixth as u32 as u64;
+            if data == 0 && size != 0 {
+                return Ok(87);
+            }
+            if size > 1024 * 1024 {
+                return Ok(8);
+            }
+            let kind = fourth as u32;
+            if kind > 11 {
+                return Err(format!("registry value type {kind} unsupported"));
+            }
+            let mut bytes = if size == 0 {
+                Vec::new()
+            } else {
+                acl_read(unicorn, data, size)?
+            };
+            if matches!(kind, 1 | 2 | 7) {
+                let (text, _, invalid) = encoding_rs::SHIFT_JIS.decode(&bytes);
+                if invalid {
+                    return Err("invalid CP932 registry string".into());
+                }
+                bytes = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            }
+            return Ok(
+                match unicorn
+                    .get_data_mut()
+                    .registry
+                    .set_value(key, &name, kind, bytes)
+                {
+                    Ok(()) => 0,
+                    Err(error) => error as u64,
+                },
+            );
+        }
+        if data != 0 && sixth == 0 {
+            return Ok(87);
+        }
+        let (kind, mut bytes) = match unicorn.get_data().registry.query_value(key, &name) {
+            Ok(value) => value.clone(),
+            Err(error) => return Ok(error as u64),
+        };
+        if matches!(kind, 1 | 2 | 7) {
+            let units = bytes
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect::<Vec<_>>();
+            let text = String::from_utf16(&units).map_err(|_| "invalid UTF16 registry string")?;
+            let (encoded, _, invalid) = encoding_rs::SHIFT_JIS.encode(&text);
+            if invalid {
+                return Err("registry string cannot be encoded in CP932".into());
+            }
+            bytes = encoded.into_owned();
+        }
+        let capacity = if data != 0 {
+            let raw = acl_read(unicorn, sixth, 4)?;
+            u32::from_le_bytes(raw.try_into().unwrap()) as usize
+        } else {
+            0
+        };
+        let copy_data = data != 0 && capacity >= bytes.len();
+        let outputs = [
+            (fourth, 4u64),
+            (sixth, 4u64),
+            (if copy_data { data } else { 0 }, bytes.len() as u64),
+        ];
+        for (index, &(address, size)) in outputs.iter().enumerate() {
+            if address == 0 || size == 0 {
+                continue;
+            }
+            if !guest_range_has_permission(unicorn, address, size, Prot::WRITE)? {
+                return Err("registry query output is not writable".into());
+            }
+            for &(other, length) in &outputs[..index] {
+                if other != 0
+                    && length != 0
+                    && address < other.saturating_add(length)
+                    && other < address.saturating_add(size)
+                {
+                    return Err("registry query outputs overlap".into());
+                }
+            }
+        }
+        if fourth != 0 {
+            unicorn
+                .mem_write(fourth, &kind.to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        if sixth != 0 {
+            unicorn
+                .mem_write(sixth, &(bytes.len() as u32).to_le_bytes())
+                .map_err(|e| e.to_string())?;
+        }
+        if copy_data && !bytes.is_empty() {
+            unicorn.mem_write(data, &bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(if data != 0 && !copy_data { 234 } else { 0 })
+    })();
+    finish_registry_import(unicorn, result);
+}
+
+// The guest has no Windows shell/process-launch provider. Keep this a
+// diagnostic gap rather than reporting a process that was never launched.
+fn describe_unavailable_shell_execute(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<u64, String> {
+    let operation = read_win64_import_argument(unicorn, 1)?;
+    let target = read_win64_import_argument(unicorn, 2)?;
+    let parameters = read_win64_import_argument(unicorn, 3)?;
+    let read = |address, label| -> Result<Vec<u8>, String> {
+        if address == 0 {
+            Ok(Vec::new())
+        } else {
+            read_crt_stdio_c_string(unicorn, address, 4096, label)
+        }
+    };
+    let operation = read(operation, "ShellExecuteA operation")?;
+    let target = read(target, "ShellExecuteA target")?;
+    let parameters = read(parameters, "ShellExecuteA parameters")?;
+    // Only resolve the ordinary executable-open case. Existing executable
+    // targets, document associations, URLs and other verbs still need a shell.
+    if (operation.is_empty() || operation.eq_ignore_ascii_case(b"open"))
+        && target.is_ascii()
+        && target.to_ascii_lowercase().ends_with(b".exe")
+        && !target.contains(&b':')
+        && !target.contains(&b'/')
+        && !target.contains(&b'\\')
+        && !target.contains(&b'"')
+        && !target.contains(&b'*')
+        && !target.contains(&b'?')
+    {
+        let found = unicorn.get_data().guest_files.sources.keys().any(|name| {
+            name.rsplit('/')
+                .next()
+                .is_some_and(|leaf| leaf.as_bytes().eq_ignore_ascii_case(&target))
+        });
+        // Searching all mounted names is conservative: even a candidate outside
+        // PATH remains a diagnostic gap until shell search/launch is available.
+        if !found {
+            unicorn.get_data_mut().windows_last_error = 2;
+            return Ok(2); // SE_ERR_FNF, not an HINSTANCE success (>32).
+        }
+    }
+    let stack = unicorn
+        .reg_read(RegisterX86::RSP)
+        .map_err(|e| e.to_string())?;
+    let raw = acl_read(unicorn, stack, 8)?;
+    let caller = u64::from_le_bytes(raw.try_into().unwrap());
+    // Parameter contents may contain credentials. Only their length is recorded.
+    Err(format!(
+        "ShellExecuteA requires a Windows shell provider: operation={:?} target={:?} parameters_bytes={} return_address={caller:#x}",
+        String::from_utf8_lossy(&operation),
+        String::from_utf8_lossy(&target),
+        parameters.len()
+    ))
+}
+
+fn format_crt_ctime(fields: [i32; 9]) -> Result<String, String> {
+    let [second, minute, hour, day, month, year, weekday, _, _] = fields;
+    let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let months = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    if !(0..7).contains(&weekday)
+        || !(0..12).contains(&month)
+        || !(1..=31).contains(&day)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=60).contains(&second)
+        || !(0..=8099).contains(&year)
+    {
+        return Err("ctime calendar fields out of range".into());
+    }
+    Ok(format!(
+        "{} {} {day:2} {hour:02}:{minute:02}:{second:02} {:04}\n\0",
+        weekdays[weekday as usize],
+        months[month as usize],
+        year + 1900
+    ))
 }

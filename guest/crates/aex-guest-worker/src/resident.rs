@@ -14,6 +14,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_CONTROL_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_PARAMETER_PAYLOAD_BYTES: usize = 16 * 1024;
 
 #[derive(Deserialize)]
@@ -391,7 +392,7 @@ fn bound_session_close(
             setup,
             close: close.clone(),
         })
-        .map(|payload| payload.len() <= MAX_CONTROL_MESSAGE_BYTES)
+        .map(|payload| payload.len() <= MAX_CONTROL_RESPONSE_BYTES)
         .map_err(|error| SessionError::Protocol(format!("serialize close response: {error}")))
     };
     if fits(close)? {
@@ -966,7 +967,7 @@ fn read_message(reader: &mut impl Read) -> Result<Option<Vec<u8>>, SessionError>
 fn write_message(writer: &mut impl Write, value: &impl Serialize) -> Result<(), SessionError> {
     let payload = serde_json::to_vec(value)
         .map_err(|error| SessionError::Protocol(format!("serialize response: {error}")))?;
-    if payload.is_empty() || payload.len() > MAX_CONTROL_MESSAGE_BYTES {
+    if payload.is_empty() || payload.len() > MAX_CONTROL_RESPONSE_BYTES {
         return Err(SessionError::Protocol(
             "resident response exceeds the control bound".into(),
         ));
@@ -1096,7 +1097,7 @@ mod tests {
         .unwrap();
         let length = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;
         assert_eq!(length, framed.len() - 4);
-        assert!(length <= MAX_CONTROL_MESSAGE_BYTES);
+        assert!(length <= MAX_CONTROL_RESPONSE_BYTES);
         let value: Value = serde_json::from_slice(&framed[4..]).unwrap();
         assert_eq!(value["failure"]["stage"], "admission_probe");
         assert_eq!(value["failure"]["category"], "callback");
@@ -1144,7 +1145,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(framed.len() - 4 <= MAX_CONTROL_MESSAGE_BYTES);
+        assert!(framed.len() - 4 <= MAX_CONTROL_RESPONSE_BYTES);
     }
 
     #[test]
@@ -1209,7 +1210,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(framed.len() - 4 <= MAX_CONTROL_MESSAGE_BYTES);
+        assert!(framed.len() - 4 <= MAX_CONTROL_RESPONSE_BYTES);
     }
 
     #[test]
@@ -1401,6 +1402,22 @@ mod tests {
         assert!(
             read_message(&mut &((MAX_CONTROL_MESSAGE_BYTES + 1) as u32).to_le_bytes()[..]).is_err()
         );
+    }
+
+    #[test]
+    fn response_budget_is_larger_than_the_request_budget_but_still_bounded() {
+        let response = serde_json::json!({
+            "setup": "x".repeat(MAX_CONTROL_MESSAGE_BYTES),
+        });
+        let mut framed = Vec::new();
+        write_message(&mut framed, &response).unwrap();
+        assert!(framed.len() - 4 > MAX_CONTROL_MESSAGE_BYTES);
+        assert!(framed.len() - 4 <= MAX_CONTROL_RESPONSE_BYTES);
+
+        let oversized = serde_json::json!({
+            "setup": "x".repeat(MAX_CONTROL_RESPONSE_BYTES),
+        });
+        assert!(write_message(&mut Vec::new(), &oversized).is_err());
     }
 
     #[test]

@@ -37,6 +37,7 @@ const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
 const RESIDENT_CLOSE_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_RESPONSE_POLL: Duration = Duration::from_millis(10);
+const MAX_RESIDENT_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_RESIDENT_PROTOCOL_BYTES: usize = 1024 * 1024;
 
 struct RenderResult {
@@ -1303,7 +1304,7 @@ fn read_control_message_accounted(
         Err(error) => return Err(format!("read resident response prefix: {error}")),
     }
     let length = u32::from_le_bytes(prefix) as usize;
-    if length == 0 || length > 64 * 1024 {
+    if length == 0 || length > MAX_RESIDENT_RESPONSE_BYTES {
         return Err(format!("resident response length is invalid: {length}"));
     }
     *total = total
@@ -3424,6 +3425,50 @@ mod tests {
     #[test]
     fn resident_reader_treats_worker_eof_as_session_invalidation() {
         assert!(read_control_message(&mut &[][..]).unwrap().is_none());
+    }
+
+    #[test]
+    fn resident_reader_accepts_large_setup_but_enforces_per_message_and_session_bounds() {
+        let payload = serde_json::to_vec(&json!({"setup": "x".repeat(400 * 1024)})).unwrap();
+        assert!(payload.len() > 64 * 1024);
+        assert!(payload.len() <= MAX_RESIDENT_RESPONSE_BYTES);
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&payload);
+
+        let mut total = 0;
+        assert!(
+            read_control_message_accounted(&mut &framed[..], &mut total)
+                .unwrap()
+                .is_some()
+        );
+
+        let mut three_messages = framed.repeat(3);
+        let mut reader = &three_messages[..];
+        let mut total = 0;
+        assert!(
+            read_control_message_accounted(&mut reader, &mut total)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            read_control_message_accounted(&mut reader, &mut total)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            read_control_message_accounted(&mut reader, &mut total)
+                .unwrap_err()
+                .contains("resident responses exceeded")
+        );
+
+        three_messages[..4]
+            .copy_from_slice(&((MAX_RESIDENT_RESPONSE_BYTES + 1) as u32).to_le_bytes());
+        assert!(
+            read_control_message(&mut &three_messages[..])
+                .unwrap_err()
+                .contains("response length is invalid")
+        );
     }
 
     #[test]

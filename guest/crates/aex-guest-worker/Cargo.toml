@@ -19,6 +19,8 @@ aex-clspv = { path = "../aex-clspv", optional = true }
 aex-unicorn-buffer = { path = "../aex-unicorn-buffer" }
 aex-wgpu-compute = { path = "../aex-wgpu-compute", optional = true }
 encoding_rs = "0.8"
+aex-host-time = { path = "../aex-host-time" }
+aex-host-identity = { path = "../aex-host-identity" }
 icu_casemap = "=2.3.0"
 icu_collator = "=2.3.0"
 icu_locale_core = "=2.3.0"
@@ -33,9 +35,14 @@ iced-x86.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 unicorn-engine.workspace = true
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+sha2 = { workspace = true, features = ["asm"] }
+
+[target.'cfg(not(all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+sha2.workspace = true
 
 [lib]
 path = "src/lib.rs"

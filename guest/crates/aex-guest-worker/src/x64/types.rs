@@ -160,9 +160,29 @@ fn record_named_unsupported_suite_call(
     }
 }
 
+#[derive(Clone, Copy)]
+struct WindowsInitOnceState {
+    owner: Option<u32>,
+    context: u64,
+    complete: bool,
+}
+
 #[derive(Default)]
 struct GuestState {
+    pointer_encoding_key: Option<u64>,
+    crt_wlocale_buffer: Option<u64>,
+    crt_pctype_buffer: Option<u64>,
+    crt_locale_names_buffer: Option<u64>,
+    crt_lconv_buffer: Option<u64>,
+    crt_locales: BTreeSet<u64>,
+    next_crt_locale: u64,
+    crt_tm_buffers: BTreeMap<u32, u64>,
+    crt_strerror_buffers: BTreeMap<u32, u64>,
+    windows_hostent_buffers: BTreeMap<u32, u64>,
+    loaded_libraries: BTreeMap<String, GuestLibrary>,
+    sapphire_filebuf_fgetc_return: Option<u64>,
     params: Vec<GuestParam>,
+    popup_choice_pages: u64,
     custom_ui_registration: Option<CustomUiRegistration>,
     callback_error: Option<String>,
     unsupported_import: Option<(String, String)>,
@@ -194,6 +214,7 @@ struct GuestState {
     next_pf_handle_data: u64,
     image_region: Option<(u64, u64)>,
     image_executable_ranges: Vec<(u64, u64)>,
+    sealed_image_reads: bool,
     latest_runtime_target: Option<TraceRuntimeTarget>,
     handles: HashMap<u64, GuestHandle>,
     worlds: HashMap<u64, GuestWorld>,
@@ -212,24 +233,51 @@ struct GuestState {
     vcomp_dynamic_loop: Option<VcompDynamicLoop>,
     vcomp_requested_threads: Option<u32>,
     omp_dynamic_requested: Option<bool>,
+    imported_data: BTreeMap<&'static str, u64>,
     msvcp_mutexes: HashMap<u64, MsvcpMutex>,
+    msvcp_lockit_locks: [Option<(u32, u32)>; 8],
+    msvcp_lockit_objects: HashMap<u64, (i32, u32)>,
     pending_crt_initterm: Option<PendingCrtInitterm>,
     crt_onexit_tables: HashMap<u64, Vec<u64>>,
     crt_terminate_handler: u64,
     windows_critical_sections: HashMap<u64, u32>,
     windows_srw_locks: BTreeMap<u64, WindowsSrwLock>,
     windows_condition_variables: HashSet<u64>,
+    windows_condition_waiters: BTreeMap<u64, VecDeque<u32>>,
+    scheduler_condition_locks: BTreeMap<u32, u64>,
     windows_address_waiters: BTreeMap<u64, BTreeSet<u32>>,
     windows_fls_slots: BTreeMap<u32, WindowsFlsSlot>,
     windows_tls_slots: BTreeMap<u32, u64>,
     pending_fls_free: Option<PendingFlsFree>,
     windows_threads: BTreeMap<u64, WindowsThread>,
+    windows_hooks: BTreeMap<u64, (i32, u64, u64, u32)>,
+    next_windows_hook: u64,
+    windows_timers: BTreeMap<(u64, u64), (u32, u64)>,
+    windows_init_once: BTreeMap<u64, WindowsInitOnceState>,
+    next_windows_timer: u64,
+    windows_message_boxes: Vec<(String, String, u32)>,
+    windows_objects: WindowsKernelObjects,
+    windows_sids: BTreeSet<u64>,
+    windows_sid_issued: u64,
+    windows_acl_allocations: BTreeMap<u64, u64>,
+    windows_acl_issued: u64,
     next_windows_thread_id: u32,
     current_windows_thread_id: u32,
+    com_apartments: BTreeMap<u32, (u32, u32)>,
+    // Process defaults (service count, authentication level, impersonation level).
+    // No COM transport may operate without implementing these security settings.
+    com_security: Option<(i32, u32, u32)>,
     pending_windows_thread: Option<PendingWindowsThread>,
     windows_last_error: u32,
     crt_errno: u32,
+    last_crt_heap_failure: Option<(u64, String)>,
+    crt_errno_buffers: BTreeMap<u32, u64>,
+    crt_random_states: BTreeMap<u32, u32>,
+    registry: crate::guest_registry::GuestRegistry,
+    guest_files: GuestFiles,
+    performance_counter_origin: Option<std::time::Instant>,
     windows_module_refcounts: HashMap<u64, u32>,
+    windows_pinned_modules: HashSet<u64>,
     windows_thread_error_mode: u32,
     windows_socket_startups: u32,
     windows_private_heaps: BTreeMap<u64, BTreeSet<u64>>,
@@ -247,10 +295,15 @@ struct GuestState {
     windows_command_line_a: u64,
     windows_command_line_w: u64,
     environment_strings_base: u64,
+    environment_overrides: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    getenv_buffer: Option<u64>,
+    wgetenv_buffers: BTreeMap<Vec<u8>, u64>,
+    wenviron_cell: Option<u64>,
     process_prng_state: u64,
     plugin_data_registry: EffectRegistry,
     plugin_data_error: Option<String>,
     crt_heap: CrtHeap,
+    crt_heap_mapped: bool,
     extended_strings: HashMap<i32, u64>,
     extended_empty_string: u64,
     extended_string_table_valid: bool,
@@ -458,6 +511,7 @@ pub struct GuestEngine<'a> {
     scheduler_deferred_ready: VecDeque<u32>,
     parked_main_context: Option<Context>,
     next_data: u64,
+    next_import_stub: u64,
     image_base: u64,
     image_end: u64,
     census_hook: Option<UcHookId>,
@@ -466,9 +520,12 @@ pub struct GuestEngine<'a> {
     image_sha256: String,
     entry_export: String,
     trace_modules: Vec<TraceModule>,
+    primary_attached: bool,
+    primary_poisoned: bool,
 }
 
 struct ParkedWindowsThread {
+    crt_errno: u32,
     context: Context,
     pending: PendingWindowsThread,
     tls_values: BTreeMap<u32, u64>,
@@ -484,6 +541,8 @@ enum SchedulerYieldReason {
     Voluntary,
     AddressWait,
     SrwLock,
+    Event,
+    ConditionVariable,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -507,8 +566,12 @@ impl Drop for GuestEngine<'_> {
                 .get_data()
                 .crt_heap
                 .allocations()
+                .filter(|(pointer, _)| !(CRT_HEAP_BASE..CRT_HEAP_END).contains(pointer))
                 .map(|(pointer, allocation)| (pointer, allocation.backing_size)),
         );
+        if self.unicorn.get_data().crt_heap_mapped {
+            mappings.push((CRT_HEAP_BASE, MAX_CRT_HEAP_BYTES));
+        }
         mappings.extend(self.unicorn.get_data().gpu_suite.mapped_regions());
         {
             let state = self.unicorn.get_data_mut();
@@ -782,11 +845,17 @@ pub struct TraceCrashSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_rva: Option<u64>,
     pub instruction_bytes: String,
+    /// Readable 64-bit words starting at RSP, for recovering untracked native calls.
+    pub stack_words: Vec<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_target: Option<TraceRuntimeTarget>,
     pub handle_allocations: Vec<u64>,
     pub handle_allocation_failures: Vec<String>,
     pub live_handle_count: usize,
+    pub crt_heap_live_bytes: u64,
+    pub crt_heap_allocation_count: usize,
+    /// Highest-address live allocations as (pointer, requested bytes, backing bytes).
+    pub crt_heap_tail_allocations: Vec<(u64, u64, u64)>,
     pub next_pf_handle_data: u64,
     pub pf_handle_data_end: u64,
 }

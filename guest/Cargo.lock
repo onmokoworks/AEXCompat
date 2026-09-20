@@ -35,6 +35,8 @@ dependencies = [
  "aex-abi",
  "aex-apple-opencl",
  "aex-clspv",
+ "aex-host-identity",
+ "aex-host-time",
  "aex-unicorn-buffer",
  "aex-wgpu-compute",
  "encoding_rs",
@@ -55,6 +57,21 @@ dependencies = [
  "unicode-script",
  "unicode-width",
  "unicorn-engine",
+]
+
+[[package]]
+name = "aex-host-identity"
+version = "0.1.0"
+dependencies = [
+ "core-foundation 0.10.1",
+ "libc",
+]
+
+[[package]]
+name = "aex-host-time"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -282,6 +299,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-foundation"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -294,7 +321,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "45390e6114f68f718cc7a830514a96f903cccd70d02a8f6d9f643ac4ba45afaf"
 dependencies = [
  "bitflags 1.3.2",
- "core-foundation",
+ "core-foundation 0.9.4",
  "libc",
 ]
 
@@ -1355,6 +1382,16 @@ dependencies = [
  "cfg-if",
  "cpufeatures",
  "digest",
+ "sha2-asm",
+]
+
+[[package]]
+name = "sha2-asm"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b845214d6175804686b2bd482bcffe96651bb2d1200742b712003504a2dac1ab"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -1607,8 +1644,6 @@ dependencies = [
 [[package]]
 name = "unicorn-engine-sys"
 version = "2.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "685282714d35a6fbfed0ae14d81bb11c91838bc7a165cac778321679a7bb91d8"
 dependencies = [
  "bindgen",
  "cc",
