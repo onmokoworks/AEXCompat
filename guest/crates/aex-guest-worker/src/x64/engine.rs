@@ -221,6 +221,10 @@ impl GuestEngine<'static> {
             "create x86_64 engine",
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()),
         )?;
+        uc(
+            "disable unused memory-hook exit polling",
+            aex_unicorn_buffer::set_memory_exit_checks(&unicorn, false),
+        )?;
         unicorn.get_data_mut().guest_files = GuestFiles::from_environment()?;
         install_avx_fallback(&mut unicorn)?;
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
@@ -367,6 +371,10 @@ impl GuestEngine<'static> {
         uc(
             "write CreateThread continuation",
             unicorn.mem_write(HOST_CREATE_THREAD_CONTINUE, &[0x41, 0xff, 0xe3]),
+        )?;
+        uc(
+            "write iterate row trampoline",
+            unicorn.mem_write(HOST_ITERATE_ROW_TRAMPOLINE, ITERATE_ROW_TRAMPOLINE),
         )?;
         uc(
             "install CreateThread continuation",

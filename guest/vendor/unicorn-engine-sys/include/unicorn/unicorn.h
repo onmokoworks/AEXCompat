@@ -1094,6 +1094,13 @@ UNICORN_EXPORT
 uc_err uc_mem_range_has_prot(uc_engine *uc, uint64_t address, uint64_t size,
                              uint32_t prot, bool *allowed);
 
+/* AEXCompat extension: omit translated post-memory-access exit polling when
+ * disabled. Disabling is accepted only while no memory hooks are installed;
+ * adding a memory hook while disabled is rejected. Memory faults still leave
+ * the translation loop through the normal soft-MMU error path. */
+UNICORN_EXPORT
+uc_err uc_set_memory_exit_checks(uc_engine *uc, bool enabled);
+
 /* AEXCompat x86 extension: install sorted instruction addresses whose VEX.128
  * upper-lane semantics are emitted directly by the translator. `actions`
  * contains 1..16 for one destination register, 17 for VZEROUPPER, and 18 for

@@ -31,6 +31,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         },
     )
     .unwrap();
+    aex_unicorn_buffer::set_memory_exit_checks(&unicorn, false).unwrap();
     install_avx_fallback(&mut unicorn).unwrap();
     unicorn.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
     unicorn
@@ -111,6 +112,9 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
         .unwrap();
     unicorn
         .mem_write(HOST_CREATE_THREAD_CONTINUE, &[0x41, 0xff, 0xe3])
+        .unwrap();
+    unicorn
+        .mem_write(HOST_ITERATE_ROW_TRAMPOLINE, ITERATE_ROW_TRAMPOLINE)
         .unwrap();
     unicorn
         .add_code_hook(
@@ -15135,6 +15139,61 @@ fn iterate8_calls_guest_pixel_callback_for_each_argb8_pixel() {
     let mut output = [0u8; 8];
     engine.read(destination_pixels, &mut output).unwrap();
     assert_eq!(output, [1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn iterate8_row_batch_advances_coordinates_and_stops_on_callback_error() {
+    const CODE: u64 = 0x1000_0000;
+    // Increment the refcon counter, write x/y to the output pixel, and fail at
+    // x=2. This exercises pointer/coordinate updates and mid-row short circuit
+    // inside the guest row trampoline rather than only its final output.
+    let mut engine = test_engine(&[
+        0x48, 0x8b, 0x44, 0x24, 0x28, 0xff, 0x01, 0x88, 0x10, 0x44, 0x88, 0x40, 0x01, 0x83, 0xfa,
+        0x02, 0x75, 0x06, 0xb8, 0x11, 0x00, 0x00, 0x00, 0xc3, 0x31, 0xc0, 0xc3,
+    ]);
+    let destination_pixels = engine.allocate(16, 4).unwrap();
+    engine.write(destination_pixels, &[0xcc; 16]).unwrap();
+    let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let mut world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+    world[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+        .copy_from_slice(&destination_pixels.to_le_bytes());
+    world[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+        .copy_from_slice(&16i32.to_le_bytes());
+    world[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+        .copy_from_slice(&4i32.to_le_bytes());
+    world[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+        .copy_from_slice(&1i32.to_le_bytes());
+    engine.write(destination_world, &world).unwrap();
+    let callback_count = engine.allocate(4, 4).unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                HOST_ITERATE8,
+                &[
+                    0,
+                    0,
+                    1,
+                    0,
+                    0,
+                    callback_count,
+                    CODE,
+                    destination_world,
+                ],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        17
+    );
+    let mut count = [0u8; 4];
+    engine.read(callback_count, &mut count).unwrap();
+    assert_eq!(u32::from_le_bytes(count), 3);
+    let mut output = [0u8; 16];
+    engine.read(destination_pixels, &mut output).unwrap();
+    assert_eq!(
+        output,
+        [0, 0, 0xcc, 0xcc, 1, 0, 0xcc, 0xcc, 2, 0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc]
+    );
 }
 
 #[test]

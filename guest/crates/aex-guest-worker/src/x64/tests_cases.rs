@@ -346,6 +346,108 @@ fn iterate8_origin_walks_the_destination_and_zeros_outside_the_source() {
 }
 
 #[test]
+fn iterate8_origin_batches_inside_and_zero_segments_across_padded_rows() {
+    const CODE: u64 = 0x1000_0000;
+    // Store the low input-pointer byte, callback x/y, and first input byte in
+    // each output pixel. This distinguishes advancing source pixels from the
+    // shared zero pixel while also proving destination rowbytes are honored.
+    let mut engine = test_engine(&[
+        0x48, 0x8b, 0x44, 0x24, 0x28, 0x44, 0x88, 0x08, 0x88, 0x50, 0x01, 0x44, 0x88, 0x40, 0x02,
+        0x41, 0x8a, 0x09, 0x88, 0x48, 0x03, 0x31, 0xc0, 0xc3,
+    ]);
+    let source_pixels = engine.allocate(8, 4).unwrap();
+    engine
+        .write(source_pixels, &[1, 2, 3, 4, 5, 6, 7, 8])
+        .unwrap();
+    let destination_pixels = engine.allocate(40, 4).unwrap();
+    engine.write(destination_pixels, &[0xcc; 40]).unwrap();
+    let source_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    for (world, pixels, width, height, rowbytes) in [
+        (source_world, source_pixels, 2i32, 1i32, 8i32),
+        (destination_world, destination_pixels, 4i32, 2i32, 20i32),
+    ] {
+        let mut bytes = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        bytes[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&pixels.to_le_bytes());
+        bytes[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&rowbytes.to_le_bytes());
+        bytes[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&width.to_le_bytes());
+        bytes[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&height.to_le_bytes());
+        engine.write(world, &bytes).unwrap();
+    }
+    let origin = engine.allocate(8, 4).unwrap();
+    engine
+        .write(
+            origin,
+            &[7i32.to_le_bytes(), (-2i32).to_le_bytes()].concat(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                HOST_ITERATE8_ORIGIN,
+                &[0, 0, 1, source_world, 0, origin, 0, CODE, destination_world],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    let source_low = source_pixels as u8;
+    let zero_low = HOST_ZERO_PIXEL as u8;
+    let mut output = [0u8; 40];
+    engine.read(destination_pixels, &mut output).unwrap();
+    assert_eq!(
+        output,
+        [
+            source_low,
+            7,
+            254,
+            1,
+            source_low.wrapping_add(4),
+            8,
+            254,
+            5,
+            zero_low,
+            9,
+            254,
+            0,
+            zero_low,
+            10,
+            254,
+            0,
+            0xcc,
+            0xcc,
+            0xcc,
+            0xcc,
+            zero_low,
+            7,
+            255,
+            0,
+            zero_low,
+            8,
+            255,
+            0,
+            zero_low,
+            9,
+            255,
+            0,
+            zero_low,
+            10,
+            255,
+            0,
+            0xcc,
+            0xcc,
+            0xcc,
+            0xcc,
+        ]
+    );
+}
+
+#[test]
 fn fill8_writes_only_the_requested_argb8_area() {
     let mut engine = test_engine(&[]);
     let pixels = engine.allocate(24, 4).unwrap();

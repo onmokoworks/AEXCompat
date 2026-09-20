@@ -456,6 +456,7 @@ struct PendingIterate {
     continuation: u64,
     callback_name: &'static str,
     callback_phase: IterateCallbackPhase,
+    scheduled_pixels: i32,
     abort_function: u64,
     progress_function: u64,
     effect_ref: u64,

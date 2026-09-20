@@ -52,6 +52,16 @@ pub fn range_has_protection<D>(
     .and(Ok(allowed))
 }
 
+/// Enables or disables translated exit polling after every guest memory access.
+///
+/// Disabling is valid only for engines without memory hooks. Unicorn still
+/// reports unmapped/protected accesses, and code hooks retain their own exit
+/// checks. The vendored API rejects both disabling with existing memory hooks
+/// and adding a memory hook while disabled.
+pub fn set_memory_exit_checks<D>(unicorn: &Unicorn<'_, D>, enabled: bool) -> Result<(), uc_error> {
+    unsafe { unicorn_engine::uc_set_memory_exit_checks(unicorn.get_handle(), enabled) }.into()
+}
+
 #[must_use]
 pub fn x86_avx_defined_mask<D>(unicorn: &Unicorn<'_, D>) -> u32 {
     unsafe { unicorn_engine::unicorn_const::uc_x86_get_avx_defined_mask(unicorn.get_handle()) }
@@ -104,7 +114,7 @@ pub fn read_ymm<D>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use unicorn_engine::{Arch, Mode};
+    use unicorn_engine::{Arch, HookType, Mode, TlbEntry, TlbType};
 
     #[test]
     fn ymm_value_has_native_register_alignment() {
@@ -142,6 +152,88 @@ mod tests {
         assert!(!range_has_protection(&unicorn, u64::MAX, 2, Prot::READ).unwrap());
         assert!(range_has_protection(&unicorn, u64::MAX, 0, Prot::READ).unwrap());
     }
+
+    #[test]
+    fn memory_exit_fast_path_keeps_faults_and_code_hook_stops_fail_closed() {
+        const CODE: u64 = 0x1000;
+        const DATA: u64 = 0x2000;
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn.mem_map(CODE, 4096, Prot::ALL).unwrap();
+        unicorn
+            .mem_map(DATA, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        // inc byte [rax]; inc byte [rax]
+        unicorn.mem_write(CODE, &[0xfe, 0x00, 0xfe, 0x00]).unwrap();
+        set_memory_exit_checks(&unicorn, false).unwrap();
+        assert_eq!(
+            unicorn.add_mem_hook(HookType::MEM_WRITE, 1, 0, |_, _, _, _, _| true),
+            Err(uc_error::ARG),
+        );
+        assert_eq!(
+            unicorn.add_tlb_hook(1, 0, |_, address, _| Some(TlbEntry {
+                paddr: address,
+                perms: Prot::ALL,
+            })),
+            Err(uc_error::ARG),
+        );
+        unicorn
+            .add_code_hook(CODE + 2, CODE + 2, |unicorn, _, _| {
+                unicorn.emu_stop().unwrap();
+            })
+            .unwrap();
+        unicorn.reg_write(RegisterX86::RAX, DATA).unwrap();
+        unicorn.emu_start(CODE, CODE + 4, 0, 0).unwrap();
+        assert_eq!(unicorn.mem_read_as_vec(DATA, 1).unwrap(), [1]);
+
+        let mut faulting = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        faulting.mem_map(CODE, 4096, Prot::ALL).unwrap();
+        faulting.mem_write(CODE, &[0xc6, 0x00, 7]).unwrap();
+        set_memory_exit_checks(&faulting, false).unwrap();
+        faulting.reg_write(RegisterX86::RAX, DATA).unwrap();
+        assert_eq!(
+            faulting.emu_start(CODE, CODE + 3, 0, 0),
+            Err(uc_error::WRITE_UNMAPPED),
+        );
+    }
+
+    #[test]
+    fn memory_exit_fast_path_rejects_existing_memory_hooks() {
+        let mut unicorn = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        unicorn
+            .add_mem_hook(HookType::MEM_WRITE, 1, 0, |_, _, _, _, _| true)
+            .unwrap();
+        assert_eq!(set_memory_exit_checks(&unicorn, false), Err(uc_error::ARG));
+
+        let mut tlb = Unicorn::new(Arch::X86, Mode::MODE_64).unwrap();
+        tlb.ctl_set_tlb_type(TlbType::VIRTUAL).unwrap();
+        const CODE: u64 = 0x1000;
+        const PHYSICAL_DATA: u64 = 0x2000;
+        const VIRTUAL_DATA: u64 = 0x3000;
+        tlb.mem_map(CODE, 4096, Prot::ALL).unwrap();
+        tlb.mem_map(PHYSICAL_DATA, 4096, Prot::READ | Prot::WRITE)
+            .unwrap();
+        // inc byte [rax]; inc byte [rax]
+        tlb.mem_write(CODE, &[0xfe, 0x00, 0xfe, 0x00]).unwrap();
+        tlb.add_tlb_hook(1, 0, |unicorn, address, _| {
+            if address == VIRTUAL_DATA {
+                unicorn.emu_stop().unwrap();
+            }
+            Some(TlbEntry {
+                paddr: if address == VIRTUAL_DATA {
+                    PHYSICAL_DATA
+                } else {
+                    address
+                },
+                perms: Prot::ALL,
+            })
+        })
+        .unwrap();
+        assert_eq!(set_memory_exit_checks(&tlb, false), Err(uc_error::ARG));
+        tlb.reg_write(RegisterX86::RAX, VIRTUAL_DATA).unwrap();
+        tlb.emu_start(CODE, CODE + 4, 0, 0).unwrap();
+        assert_eq!(tlb.mem_read_as_vec(PHYSICAL_DATA, 1).unwrap(), [0]);
+    }
+
     #[test]
     fn fragmented_ram_remaps_preserve_contents_and_page_permissions() {
         use unicorn_engine::Prot;

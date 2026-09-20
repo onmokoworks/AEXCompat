@@ -442,6 +442,9 @@ struct uc_struct {
                    // uc_emu_start()?
     bool no_exit_request; // Disable check_exit_request temporarily. A
                           // workaround to treat the IT block as a whole block.
+    bool skip_memory_exit_checks; // Opt-in fast path for clients that install
+                                  // no memory hooks. Faults still exit in the
+                                  // soft-MMU helper; code-hook checks remain.
     bool init_done;       // Whether the initialization is done.
 
     sigjmp_buf jmp_bufs[UC_MAX_NESTED_LEVEL]; // To support nested uc_emu_start
