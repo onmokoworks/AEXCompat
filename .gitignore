@@ -1,4 +1,10 @@
 target/
+!guest/vendor/unicorn-engine-sys/qemu/target/
+guest/vendor/unicorn-engine-sys/qemu/target/*
+!guest/vendor/unicorn-engine-sys/qemu/target/*/
+guest/vendor/unicorn-engine-sys/qemu/target/*/*
+!guest/vendor/unicorn-engine-sys/qemu/target/*/unicorn.h
+!guest/vendor/unicorn-engine-sys/qemu/target/i386/**
 corpus/local-locator.json
 target/real-aex-corpus/
 build/
