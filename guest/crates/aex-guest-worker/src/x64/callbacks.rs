@@ -1476,6 +1476,43 @@ fn emulate_crt_strcpy(unicorn: &mut Unicorn<'_, GuestState>) {
 fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
     let result = (|| -> Result<u64, String> {
         let source = read_win64_import_argument(unicorn, 0)?;
+        // Tracked allocations occupy either the regular CRT heap or this
+        // session's GetEnvironmentStringsW namespace. Most strlen calls target
+        // static image strings, so avoid a BTree predecessor search for those
+        // overwhelmingly common misses.
+        let state = unicorn.get_data();
+        let environment_strings_end = state
+            .environment_strings_base
+            .checked_add(ENVIRONMENT_STRINGS_NAMESPACE_SIZE);
+        let may_be_tracked = (CRT_HEAP_BASE..CRT_HEAP_END).contains(&source)
+            || (state.environment_strings_base != 0
+                && environment_strings_end.is_some_and(|end| {
+                    (state.environment_strings_base..end).contains(&source)
+                }));
+        let live_allocation = may_be_tracked
+            .then(|| state.crt_heap.allocation_containing(source))
+            .flatten();
+        let error = if let Some((base, allocation)) = live_allocation {
+            let remaining = allocation.requested_size - (source - base);
+            match scan_crt_stdio_c_string(unicorn, source, remaining, "strlen", None) {
+                Ok(length) => return Ok(length),
+                Err(error) if error.contains(" exceeds ") => {
+                    "strlen live allocation has no terminator".to_string()
+                }
+                Err(error) => error,
+            }
+        } else {
+            match scan_crt_stdio_c_string(
+                unicorn,
+                source,
+                MAX_CRT_STRING_BYTES,
+                "strlen",
+                None,
+            ) {
+                Ok(length) => return Ok(length),
+                Err(error) => error,
+            }
+        };
         let caller = unicorn
             .reg_read(RegisterX86::RSP)
             .ok()
@@ -1483,27 +1520,6 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
             .and_then(|bytes| bytes.try_into().ok())
             .map(u64::from_le_bytes)
             .unwrap_or_default();
-        let live_allocation = unicorn.get_data().crt_heap.allocation_containing(source);
-        let error = if let Some((base, allocation)) = live_allocation {
-            let remaining = allocation.requested_size - (source - base);
-            let mut scanned = 0u64;
-            while scanned < remaining {
-                let count = (remaining - scanned).min(256 * 1024) as usize;
-                let bytes = unicorn
-                    .mem_read_as_vec(source + scanned, count)
-                    .map_err(|error| format!("strlen allocation read: {error}"))?;
-                if let Some(index) = bytes.iter().position(|byte| *byte == 0) {
-                    return Ok(scanned + index as u64);
-                }
-                scanned += count as u64;
-            }
-            "strlen live allocation has no terminator".to_string()
-        } else {
-            match read_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strlen") {
-                Ok(bytes) => return Ok(bytes.len() as u64),
-                Err(error) => error,
-            }
-        };
         let preview = unicorn
             .mem_read_as_vec(source, 64)
             .map(|bytes| {
@@ -1513,10 +1529,7 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
                     .collect::<String>()
             })
             .unwrap_or_default();
-        let allocation = unicorn
-            .get_data()
-            .crt_heap
-            .allocation_containing(source)
+        let allocation = live_allocation
             .map(|(base, allocation)| format!("{base:#x}+{:#x}", allocation.requested_size))
             .unwrap_or_default();
         let stack_code = unicorn
@@ -1767,32 +1780,53 @@ fn read_crt_stdio_c_string(
     limit: u64,
     label: &str,
 ) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    scan_crt_stdio_c_string(unicorn, address, limit, label, Some(&mut bytes))?;
+    Ok(bytes)
+}
+
+fn scan_crt_stdio_c_string(
+    unicorn: &Unicorn<'_, GuestState>,
+    address: u64,
+    limit: u64,
+    label: &str,
+    mut output: Option<&mut Vec<u8>>,
+) -> Result<u64, String> {
     if address == 0 {
         return Err(format!("stdio {label} pointer is null"));
     }
-    let mut bytes = Vec::new();
+    // Most CRT strings are short parameter names. Reading the rest of their
+    // 4 KiB guest page into a fresh Vec made every strlen copy and allocate
+    // thousands of bytes. A small caller-owned buffer preserves page-bounded,
+    // fail-closed reads while keeping the common path allocation-free.
+    let mut chunk = [0u8; 256];
     let mut offset = 0u64;
     while offset < limit {
         let current = address
             .checked_add(offset)
             .ok_or_else(|| format!("stdio {label} range overflow"))?;
         let page_remaining = PAGE_SIZE - current % PAGE_SIZE;
-        let chunk_len = page_remaining.min(limit - offset) as usize;
+        let chunk_len = page_remaining
+            .min(limit - offset)
+            .min(chunk.len() as u64) as usize;
         if !guest_range_has_permission(unicorn, current, chunk_len as u64, Prot::READ)? {
             return Err(format!(
                 "stdio {label} address {current:#x} is not readable"
             ));
         }
-        let chunk = unicorn
-            .mem_read_as_vec(current, chunk_len)
-            .map_err(|error| {
-                format!("stdio {label} address {current:#x} is not readable: {error}")
-            })?;
-        if let Some(end) = chunk.iter().position(|byte| *byte == 0) {
-            bytes.extend_from_slice(&chunk[..end]);
-            return Ok(bytes);
+        let current_chunk = &mut chunk[..chunk_len];
+        unicorn.mem_read(current, current_chunk).map_err(|error| {
+            format!("stdio {label} address {current:#x} is not readable: {error}")
+        })?;
+        if let Some(end) = current_chunk.iter().position(|byte| *byte == 0) {
+            if let Some(bytes) = output.as_deref_mut() {
+                bytes.extend_from_slice(&current_chunk[..end]);
+            }
+            return Ok(offset + end as u64);
         }
-        bytes.extend_from_slice(&chunk);
+        if let Some(bytes) = output.as_deref_mut() {
+            bytes.extend_from_slice(current_chunk);
+        }
         offset += chunk_len as u64;
     }
     Err(format!("stdio {label} exceeds {limit} bytes"))

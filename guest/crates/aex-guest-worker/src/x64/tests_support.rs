@@ -15615,6 +15615,42 @@ fn win64_strlen_scans_a_live_crt_allocation_beyond_the_generic_string_limit() {
 }
 
 #[test]
+fn win64_strlen_scans_a_live_environment_allocation_beyond_the_generic_string_limit() {
+    const STRLEN: u64 = STUB_BASE + 0x1e0;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, STRLEN, "ucrtbase.dll", "strlen").unwrap();
+    let length = MAX_CRT_STRING_BYTES + 17;
+    let allocation = engine
+        .unicorn
+        .get_data()
+        .crt_heap
+        .prepare_environment_strings_allocation(length + 1)
+        .unwrap();
+    let pointer = ENVIRONMENT_STRINGS_BASE;
+    engine.unicorn.get_data_mut().environment_strings_base = pointer;
+    engine
+        .unicorn
+        .mem_map(pointer, allocation.backing_size, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine
+        .unicorn
+        .get_data_mut()
+        .crt_heap
+        .insert(pointer, allocation)
+        .unwrap();
+    engine
+        .unicorn
+        .mem_write(pointer, &vec![b'x'; length as usize])
+        .unwrap();
+    engine.unicorn.mem_write(pointer + length, &[0]).unwrap();
+
+    assert_eq!(
+        engine.call_win64(STRLEN, [pointer, 0, 0, 0, 0, 0]).unwrap(),
+        length
+    );
+}
+
+#[test]
 fn registry_open_empty_roots_and_missing_application_keys() {
     const OPEN: u64 = STUB_BASE + 0x1f0;
     const CLOSE: u64 = STUB_BASE + 0x200;
