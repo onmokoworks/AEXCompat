@@ -1,4 +1,53 @@
 #[test]
+fn bounded_crt_string_search_matches_each_terminator_position_and_alignment() {
+    const PAGE: u64 = 0x30_0000_0000;
+    let mut unicorn = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()).unwrap();
+    unicorn.mem_map(PAGE, 8192, Prot::READ | Prot::WRITE).unwrap();
+    for alignment in 0..32_u64 {
+        for end in 0..=512_usize {
+            let mut input = vec![0xa5; 514];
+            input[end] = 0;
+            unicorn.mem_write(PAGE + alignment, &input).unwrap();
+            let mut output = vec![0x42];
+            for collect in [false, true] {
+                let target = collect.then_some(&mut output);
+                assert_eq!(
+                    scan_crt_stdio_c_string(&unicorn, PAGE + alignment, 514, "test", target).unwrap(),
+                    end as u64,
+                );
+            }
+            assert_eq!(output.len(), end + 1);
+            assert_eq!(output[0], 0x42);
+            assert!(output[1..].iter().all(|byte| *byte == 0xa5));
+        }
+    }
+}
+
+#[test]
+fn bounded_crt_string_search_preserves_limits_and_page_protection() {
+    const PAGE: u64 = 0x30_0000_0000;
+    let mut unicorn = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()).unwrap();
+    unicorn.mem_map(PAGE, 8192, Prot::READ | Prot::WRITE).unwrap();
+    unicorn.mem_write(PAGE + 4093, b"ab\0").unwrap();
+    unicorn.mem_protect(PAGE + 4096, 4096, Prot::WRITE).unwrap();
+    assert_eq!(scan_crt_stdio_c_string(&unicorn, PAGE + 4093, 512, "test", None).unwrap(), 2);
+    for limit in [0, 1, 2] {
+        assert!(scan_crt_stdio_c_string(&unicorn, PAGE + 4093, limit, "test", None)
+            .unwrap_err().contains("exceeds"));
+    }
+    assert!(scan_crt_stdio_c_string(&unicorn, 0, 10, "test", None)
+        .unwrap_err().contains("null"));
+    unicorn.mem_write(PAGE + 4095, b"c").unwrap();
+    let mut output = Vec::new();
+    assert!(scan_crt_stdio_c_string(&unicorn, PAGE + 4093, 512, "test", Some(&mut output))
+        .unwrap_err().contains("not readable"));
+    assert_eq!(output, b"abc");
+    unicorn.mem_unmap(PAGE + 4096, 4096).unwrap();
+    assert!(scan_crt_stdio_c_string(&unicorn, PAGE + 4093, 512, "test", None)
+        .unwrap_err().contains("not readable"));
+}
+
+#[test]
 fn iterate16_aliases_null_source_to_the_destination_pixel() {
     const CODE: u64 = 0x1000_0000;
     // mov rax,[rsp+0x28]; mov rdx,[r9]; mov [rax],rdx; xor eax,eax; ret
