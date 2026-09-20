@@ -747,6 +747,16 @@ strict expected failure limited to the known key-active/keep-inert signature in
 `test_bcc_obsolete_two_way_key_response.py`; it currently reports one xfailed
 case in 4.91 seconds. The unresolved input-equal `BCC Obsolete` count therefore
 remains 6, and this result must not be promoted to a rendered semantic success.
+Three same-worker render experiments were rejected: dispatching
+`PF_Cmd_USER_CHANGED_PARAM` for every requested supervised control before
+`FRAME_SETUP`, adding `SEQUENCE_RESETUP` after those notifications, and
+notifying only slot 11 before the resetup all retained the exact key-only
+signature. A Classic render control also retained that signature after decoding
+both output PNGs, so the boundary is not SmartFX-only parameter checkout or
+pre-render state. All experimental lifecycle changes were removed; the source
+and canonical Release worker were rebuilt from the clean tree. Further
+notification-order exploration is stopped for this effect, which remains the
+same strict expected failure while the next unresolved cohort is selected.
 
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
