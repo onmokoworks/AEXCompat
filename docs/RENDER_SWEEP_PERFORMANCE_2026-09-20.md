@@ -804,6 +804,21 @@ and canonical Release worker were rebuilt from the clean tree. Further
 notification-order exploration is stopped for this effect, which remains the
 same strict expected failure while the next unresolved cohort is selected.
 
+A fourth discriminating experiment tested the remaining stale-snapshot variant
+without broadening it into shipping behavior. An env-gated Release worker
+dispatched the requested supervised changes inside the active resident Smart
+session and, after each successful callback, copied only actually changed,
+non-layer `PF_ParamDef.u` payloads into the already-published checkout table
+before `FRAME_SETUP`. The report's suite timeline proved the callbacks ran and
+the render/decode remained valid, but the two Keep Color cases still produced
+the exact key-only signature; the focused test remained one strict xfail in
+4.70 seconds. The experiment code and logging were removed, and the canonical
+worker was restored byte-for-byte to SHA-256
+`b33cf0f1710301ffdc99fae7d2389da1236abf9a498460473270ca8d01e95548`.
+Post-callback checkout republishing is therefore rejected for this effect; the
+next attempt must test a materially different plug-in prerequisite rather than
+another notification-order or ParamDef-copy variant.
+
 Legacy `BCCDeInterlace.aex` requires inspected slot 6 `Host Layer`. A
 deterministic combed edge alternates its step between x=80 and x=120 on
 successive rows. With inspected slot 9 `Operation = Only Deinterlace`, upper
