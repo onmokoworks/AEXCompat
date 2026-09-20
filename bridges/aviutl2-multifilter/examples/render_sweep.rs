@@ -41,7 +41,12 @@
 //!                        own path; merging them is not something this does
 //!   --render-jobs <n>    render independent dependency closures concurrently
 //!                        after discovery (default 1). Members of the same
-//!                        closure remain serial; final report order is unchanged
+//!                        closure remain serial by default; final report order
+//!                        is unchanged
+//!   --same-closure-render-jobs <n>
+//!                        explicitly allow up to n isolated render workers for
+//!                        one resolved dependency closure (default 1). Must not
+//!                        exceed --render-jobs; unresolved closures stay serial
 //!   --filter <substr>    only plug-ins whose file name contains it (no case)
 //!   --exclude-path <substr>
 //!                        skip plug-ins whose full path contains it (repeatable,
@@ -321,6 +326,7 @@ struct Options {
     limit: Option<usize>,
     skip: usize,
     render_jobs: usize,
+    same_closure_render_jobs: usize,
     filter: Option<String>,
     exclude_paths: Vec<String>,
     blocked_paths: Vec<String>,
@@ -349,6 +355,7 @@ fn parse_options() -> Options {
         limit: None,
         skip: 0,
         render_jobs: 1,
+        same_closure_render_jobs: 1,
         filter: None,
         exclude_paths: Vec::new(),
         blocked_paths: Vec::new(),
@@ -382,6 +389,15 @@ fn parse_options() -> Options {
             "--render-jobs" => {
                 options.render_jobs = value().parse().expect("--render-jobs takes a count");
                 assert!(options.render_jobs >= 1, "--render-jobs takes at least 1");
+            }
+            "--same-closure-render-jobs" => {
+                options.same_closure_render_jobs = value()
+                    .parse()
+                    .expect("--same-closure-render-jobs takes a count");
+                assert!(
+                    options.same_closure_render_jobs >= 1,
+                    "--same-closure-render-jobs takes at least 1"
+                );
             }
             "--filter" => options.filter = Some(value().to_lowercase()),
             "--exclude-path" => options.exclude_paths.push(value().to_lowercase()),
@@ -450,6 +466,10 @@ fn parse_options() -> Options {
     assert!(
         !(options.discovery_only && options.inventory_only),
         "--discovery-only and --inventory-only are mutually exclusive",
+    );
+    assert!(
+        options.same_closure_render_jobs <= options.render_jobs,
+        "--same-closure-render-jobs must not exceed --render-jobs",
     );
     assert!(
         options.inventory_only || options.blocked_paths.is_empty(),
@@ -556,6 +576,94 @@ where
         lanes[lane].push(index);
     }
     lanes
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DependencyRenderShard {
+    indices: Vec<usize>,
+    same_closure_index: usize,
+    same_closure_count: usize,
+    closure_identity_resolved: bool,
+}
+
+/// Retains the established dependency lanes, then explicitly subdivides only
+/// lanes with a resolved closure identity. Each subdivision is contiguous and
+/// differs in length from its neighbours by at most one, so the default value
+/// of one is exactly the historical lane plan while an opt-in split remains
+/// stable and auditable. An unresolved identity is never assumed independent.
+fn dependency_render_shards<T, K, F>(
+    items: &[T],
+    render_jobs: usize,
+    same_closure_render_jobs: usize,
+    key_of: F,
+) -> Vec<DependencyRenderShard>
+where
+    K: Eq + std::hash::Hash,
+    F: Fn(&T) -> Option<K>,
+{
+    assert!(render_jobs >= 1, "render jobs must be at least one");
+    assert!(
+        (1..=render_jobs).contains(&same_closure_render_jobs),
+        "same-closure render jobs must be between one and the global render job cap"
+    );
+    let lanes = serial_lanes_by_key(items, render_jobs, |item| key_of(item));
+    let mut shards = Vec::new();
+    for lane in lanes {
+        let closure_identity_resolved = lane
+            .first()
+            .is_some_and(|&index| key_of(&items[index]).is_some());
+        let shard_count = if closure_identity_resolved {
+            same_closure_render_jobs.min(lane.len().max(1))
+        } else {
+            1
+        };
+        if shard_count == 1 {
+            shards.push(DependencyRenderShard {
+                indices: lane,
+                same_closure_index: 0,
+                same_closure_count: 1,
+                closure_identity_resolved,
+            });
+            continue;
+        }
+
+        let shorter = lane.len() / shard_count;
+        let longer_count = lane.len() % shard_count;
+        let mut start = 0;
+        for same_closure_index in 0..shard_count {
+            let length = shorter + usize::from(same_closure_index < longer_count);
+            let end = start + length;
+            shards.push(DependencyRenderShard {
+                indices: lane[start..end].to_vec(),
+                same_closure_index,
+                same_closure_count: shard_count,
+                closure_identity_resolved: true,
+            });
+            start = end;
+        }
+        debug_assert_eq!(start, lane.len());
+    }
+    shards
+}
+
+#[derive(Debug)]
+struct RenderPlan {
+    groups: Vec<Vec<usize>>,
+    same_closure_index: usize,
+    same_closure_count: usize,
+}
+
+fn attach_same_closure_shard_evidence(
+    record: &mut Value,
+    same_closure_index: usize,
+    same_closure_count: usize,
+) {
+    assert!(same_closure_count >= 1);
+    assert!(same_closure_index < same_closure_count);
+    record["same_closure_shard"] = json!({
+        "index": same_closure_index,
+        "count": same_closure_count,
+    });
 }
 
 fn restore_indexed_order<T>(length: usize, groups: Vec<Vec<(usize, T)>>) -> Vec<T> {
@@ -711,53 +819,80 @@ fn main() {
     let lanes = serial_lanes_by_key(&records, options.render_jobs, |record| {
         record.closure_identity_sha256.clone()
     });
-    let render_plans = lanes
+    let render_shards = dependency_render_shards(
+        &records,
+        options.render_jobs,
+        options.same_closure_render_jobs,
+        |record| record.closure_identity_sha256.clone(),
+    );
+    let effective_same_closure_render_jobs = render_shards
         .iter()
-        .map(|lane| cluster_candidate_groups(lane, &records, &options))
+        .filter(|shard| shard.closure_identity_resolved)
+        .map(|shard| shard.same_closure_count)
+        .max()
+        .unwrap_or(1);
+    let render_plans = render_shards
+        .iter()
+        .map(|shard| RenderPlan {
+            groups: cluster_candidate_groups(&shard.indices, &records, &options),
+            same_closure_index: shard.same_closure_index,
+            same_closure_count: shard.same_closure_count,
+        })
         .collect::<Vec<_>>();
-    let planned_sessions = render_plans.iter().map(Vec::len).sum::<usize>();
+    let planned_sessions = render_plans
+        .iter()
+        .map(|plan| plan.groups.len())
+        .sum::<usize>();
     let planned_clustered_plugins = render_plans
         .iter()
-        .flatten()
+        .flat_map(|plan| &plan.groups)
         .filter(|group| group.len() >= 2)
         .map(Vec::len)
         .sum::<usize>();
     eprintln!(
-        "rendering {} plug-in(s) in {} dependency lane(s) with {} job(s); {} planned session(s), {} clustered plug-in(s)...",
+        "rendering {} plug-in(s) in {} dependency lane(s), {} shard(s), with {} job(s); same-closure jobs {}/{}, {} planned session(s), {} clustered plug-in(s)...",
         records.len(),
         lanes.len(),
-        options.render_jobs.min(lanes.len()),
+        render_plans.len(),
+        options.render_jobs.min(render_plans.len()),
+        effective_same_closure_render_jobs,
+        options.same_closure_render_jobs,
         planned_sessions,
         planned_clustered_plugins,
     );
-    let finish_plugin =
-        |index: usize, record: &DiagnosticDiscovery, outcome: Outcome, elapsed_ms: u128| {
-            let name = plugin_name(&record.path, &scan.dirs);
-            // Numbered from the corpus, not from this slice: the number an
-            // operator reads off the log is the one they pass back as --skip.
-            eprintln!(
-                "[{}/{}] {}\t{}\t{elapsed_ms}ms",
-                options.skip + index + 1,
-                options.skip + records.len(),
-                name.relative,
-                outcome.bucket,
-            );
-            let record = plugin_record(record, &name, &build, outcome, elapsed_ms);
-            if let Some((path, write_lock)) = &sidecar {
-                let mut line = Vec::new();
-                if serde_json::to_writer(&mut line, &record).is_ok() {
-                    line.push(b'\n');
-                    let _guard = write_lock
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner());
-                    append_line(path, &line);
-                }
+    let finish_plugin = |index: usize,
+                         record: &DiagnosticDiscovery,
+                         outcome: Outcome,
+                         elapsed_ms: u128,
+                         same_closure_index: usize,
+                         same_closure_count: usize| {
+        let name = plugin_name(&record.path, &scan.dirs);
+        // Numbered from the corpus, not from this slice: the number an
+        // operator reads off the log is the one they pass back as --skip.
+        eprintln!(
+            "[{}/{}] {}\t{}\t{elapsed_ms}ms",
+            options.skip + index + 1,
+            options.skip + records.len(),
+            name.relative,
+            outcome.bucket,
+        );
+        let mut record = plugin_record(record, &name, &build, outcome, elapsed_ms);
+        attach_same_closure_shard_evidence(&mut record, same_closure_index, same_closure_count);
+        if let Some((path, write_lock)) = &sidecar {
+            let mut line = Vec::new();
+            if serde_json::to_writer(&mut line, &record).is_ok() {
+                line.push(b'\n');
+                let _guard = write_lock
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                append_line(path, &line);
             }
-            record
-        };
+        }
+        record
+    };
     let grouped = bounded_parallel_map_ordered(&render_plans, options.render_jobs, |_, plan| {
-        let mut finished = Vec::with_capacity(plan.iter().map(Vec::len).sum());
-        for run in plan {
+        let mut finished = Vec::with_capacity(plan.groups.iter().map(Vec::len).sum());
+        for run in &plan.groups {
             let clustered = sweep_cluster_candidates_salvaging(
                 &repository,
                 run,
@@ -815,7 +950,17 @@ fn main() {
                                 .unwrap_or_default()
                     })
                     .unwrap_or_else(|| plugin_started.elapsed().as_millis());
-                finished.push((index, finish_plugin(index, record, outcome, elapsed_ms)));
+                finished.push((
+                    index,
+                    finish_plugin(
+                        index,
+                        record,
+                        outcome,
+                        elapsed_ms,
+                        plan.same_closure_index,
+                        plan.same_closure_count,
+                    ),
+                ));
             }
         }
         finished
@@ -838,6 +983,8 @@ fn main() {
         buckets,
         plugins,
         Some(lanes.len()),
+        Some(render_plans.len()),
+        Some(effective_same_closure_render_jobs),
     );
     finish_report(&options, &report);
 }
@@ -1284,6 +1431,8 @@ fn discovery_only_report(
         elapsed,
         buckets,
         plugins,
+        None,
+        None,
         None,
     )
 }
@@ -2475,6 +2624,8 @@ fn report(
     buckets: BTreeMap<String, usize>,
     mut plugins: Vec<Value>,
     dependency_lane_count: Option<usize>,
+    render_shard_count: Option<usize>,
+    effective_same_closure_render_jobs: Option<usize>,
 ) -> Value {
     // Render partial rows are written as each plug-in completes and retain the
     // explicit pre-run candidate. Only the atomic final report can carry the
@@ -2505,8 +2656,11 @@ fn report(
             "effective_input_policy": effective_input_policy(options),
             "verify_pixel_determinism": options.verify_pixel_determinism,
             "render_jobs": options.render_jobs,
-            "effective_render_jobs": options.render_jobs.min(dependency_lane_count.unwrap_or(0)),
+            "effective_render_jobs": options.render_jobs.min(render_shard_count.unwrap_or(0)),
+            "requested_same_closure_render_jobs": options.same_closure_render_jobs,
+            "effective_same_closure_render_jobs": effective_same_closure_render_jobs,
             "dependency_lane_count": dependency_lane_count,
+            "render_shard_count": render_shard_count,
             "distinct_dependency_closure_count": distinct_dependency_closure_count,
             "frame_deadline_ms": FRAME_DEADLINE.as_millis(),
             "time_step": TIME_STEP,
@@ -2628,6 +2782,7 @@ mod tests {
             limit: None,
             skip: 0,
             render_jobs: 1,
+            same_closure_render_jobs: 1,
             filter: None,
             exclude_paths: Vec::new(),
             blocked_paths: Vec::new(),
@@ -2732,6 +2887,175 @@ mod tests {
             restore_indexed_order(5, completion_order),
             vec!["zero", "one", "two", "three", "four"]
         );
+    }
+
+    #[test]
+    fn same_closure_shards_balance_ten_without_duplicates_and_keep_default_lanes() {
+        let keys = [Some("shared"); 10];
+        let historical = serial_lanes_by_key(&keys, 2, |key| *key);
+        let default = dependency_render_shards(&keys, 2, 1, |key| *key);
+        assert_eq!(
+            default
+                .iter()
+                .map(|shard| shard.indices.clone())
+                .collect::<Vec<_>>(),
+            historical,
+            "the default must retain the exact historical lane membership"
+        );
+        assert_eq!(default[0].same_closure_index, 0);
+        assert_eq!(default[0].same_closure_count, 1);
+
+        let split = dependency_render_shards(&keys, 2, 2, |key| *key);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].indices, (0..5).collect::<Vec<_>>());
+        assert_eq!(split[1].indices, (5..10).collect::<Vec<_>>());
+        assert_eq!(split[0].same_closure_index, 0);
+        assert_eq!(split[1].same_closure_index, 1);
+        assert!(
+            split
+                .iter()
+                .all(|shard| { shard.same_closure_count == 2 && shard.closure_identity_resolved })
+        );
+
+        let scheduled = split
+            .iter()
+            .flat_map(|shard| shard.indices.iter().copied())
+            .collect::<Vec<_>>();
+        assert_eq!(scheduled, (0..10).collect::<Vec<_>>());
+        assert_eq!(
+            scheduled
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            scheduled.len(),
+            "no corpus index may be assigned to more than one shard"
+        );
+    }
+
+    #[test]
+    fn same_closure_shards_keep_multiple_keys_separate_and_none_serial() {
+        let keys = [
+            Some("a"),
+            None,
+            Some("a"),
+            Some("b"),
+            None,
+            Some("a"),
+            Some("b"),
+        ];
+        for render_jobs in [1, 3] {
+            let historical = serial_lanes_by_key(&keys, render_jobs, |key| *key);
+            let default = dependency_render_shards(&keys, render_jobs, 1, |key| *key)
+                .into_iter()
+                .map(|shard| shard.indices)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                default, historical,
+                "default sharding changed the historical {render_jobs}-job plan"
+            );
+        }
+        let shards = dependency_render_shards(&keys, 3, 2, |key| *key);
+        assert_eq!(
+            shards,
+            vec![
+                DependencyRenderShard {
+                    indices: vec![0, 2],
+                    same_closure_index: 0,
+                    same_closure_count: 2,
+                    closure_identity_resolved: true,
+                },
+                DependencyRenderShard {
+                    indices: vec![5],
+                    same_closure_index: 1,
+                    same_closure_count: 2,
+                    closure_identity_resolved: true,
+                },
+                DependencyRenderShard {
+                    indices: vec![1, 4],
+                    same_closure_index: 0,
+                    same_closure_count: 1,
+                    closure_identity_resolved: false,
+                },
+                DependencyRenderShard {
+                    indices: vec![3],
+                    same_closure_index: 0,
+                    same_closure_count: 2,
+                    closure_identity_resolved: true,
+                },
+                DependencyRenderShard {
+                    indices: vec![6],
+                    same_closure_index: 1,
+                    same_closure_count: 2,
+                    closure_identity_resolved: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn same_closure_shard_bounds_and_order_restoration_fail_closed() {
+        let keys = [Some("shared")];
+        assert!(
+            std::panic::catch_unwind(|| { dependency_render_shards(&keys, 2, 0, |key| *key) })
+                .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| { dependency_render_shards(&keys, 2, 3, |key| *key) })
+                .is_err()
+        );
+        assert!(
+            std::panic::catch_unwind(|| { restore_indexed_order(2, vec![vec![(0, 10), (0, 20)]]) })
+                .is_err(),
+            "a duplicate result must not be hidden"
+        );
+        assert!(
+            std::panic::catch_unwind(|| restore_indexed_order(2, vec![vec![(0, 10)]])).is_err(),
+            "a missing result must not be hidden"
+        );
+    }
+
+    #[test]
+    fn render_report_records_requested_effective_and_per_record_shard_evidence() {
+        let mut options = discovery_options(PathBuf::from("unused.json"));
+        options.discovery_only = false;
+        options.render_jobs = 2;
+        options.same_closure_render_jobs = 2;
+        let scan = DiagnosticScan {
+            dirs: vec![PathBuf::from("root")],
+            plugins: Vec::new(),
+            seen: 1,
+            dependency_dirs: Vec::new(),
+            incomplete_reason: None,
+        };
+        let build = capture_report_build_fingerprint(Path::new("missing"), Err(()));
+        let mut plugin = json!({
+            "discovery": { "closure_identity_sha256": "shared" },
+            "bucket": "rendered",
+            "build": Value::Null,
+        });
+        attach_same_closure_shard_evidence(&mut plugin, 1, 2);
+        let report = report(
+            &options,
+            &scan,
+            &build,
+            Duration::from_millis(3),
+            Duration::from_millis(5),
+            BTreeMap::from([("rendered".to_owned(), 1)]),
+            vec![plugin],
+            Some(1),
+            Some(2),
+            Some(2),
+        );
+
+        assert_eq!(report["render"]["render_jobs"], 2);
+        assert_eq!(report["render"]["effective_render_jobs"], 2);
+        assert_eq!(report["render"]["requested_same_closure_render_jobs"], 2);
+        assert_eq!(report["render"]["effective_same_closure_render_jobs"], 2);
+        assert_eq!(report["render"]["dependency_lane_count"], 1);
+        assert_eq!(report["render"]["render_shard_count"], 2);
+        assert_eq!(report["plugins"][0]["same_closure_shard"]["index"], 1);
+        assert_eq!(report["plugins"][0]["same_closure_shard"]["count"], 2);
     }
 
     #[test]
