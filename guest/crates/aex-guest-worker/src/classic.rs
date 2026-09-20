@@ -1150,6 +1150,11 @@ impl ClassicHost {
         }
     }
 
+    pub(crate) fn flush_guest_console_diagnostics(&mut self) -> Result<(), ClassicError> {
+        self.engine.flush_guest_console_diagnostics()?;
+        Ok(())
+    }
+
     pub fn apply_resident_parameter_values(
         &mut self,
         parameter_values: &[ParameterValue],

@@ -16431,13 +16431,14 @@ fn crt_64_bit_stream_seek_and_tell_track_mounted_file_position() {
         stream,
         GuestFileStream {
             name: Some("c:/fixture".into()),
-            bytes: Box::from(*b"abcdef"),
+            bytes: b"abcdef".to_vec(),
             position: 1,
             readable: true,
             share_read_access: true,
             eof: false,
             buffer_state: None,
             fast_buffer: None,
+            console_repeat: GuestConsoleRepeat::default(),
         },
     );
     install_win64_import(&mut engine.unicorn, seek, "ucrtbase.dll", "_fseeki64").unwrap();
@@ -17531,13 +17532,14 @@ fn getc_reads_unsigned_bytes_and_preserves_stream_position_at_eof() {
             token,
             GuestFileStream {
                 name: None,
-                bytes: vec![0, 127, 128, 255].into_boxed_slice(),
+                bytes: vec![0, 127, 128, 255],
                 position: 0,
                 readable: true,
                 share_read_access: true,
                 eof: false,
                 buffer_state: None,
                 fast_buffer: None,
+                console_repeat: GuestConsoleRepeat::default(),
             },
         );
         engine.unicorn.get_data_mut().crt_errno = 77;
@@ -17593,7 +17595,7 @@ fn sapphire_filebuf_fgetc_bulk_loads_large_stream_and_frees_buffer_on_close() {
     let filebuf = DATA_BASE + 0x100;
     let pointer_cell = DATA_BASE + 0x200;
     let count_cell = DATA_BASE + 0x208;
-    let bytes: Box<[u8]> = (0..PAGE_SIZE as usize + 17)
+    let bytes: Vec<u8> = (0..PAGE_SIZE as usize + 17)
         .map(|index| (index % 251) as u8)
         .collect();
     let byte_count = bytes.len();
@@ -17613,6 +17615,7 @@ fn sapphire_filebuf_fgetc_bulk_loads_large_stream_and_frees_buffer_on_close() {
             eof: false,
             buffer_state: None,
             fast_buffer: None,
+            console_repeat: GuestConsoleRepeat::default(),
         },
     );
     engine.unicorn.get_data_mut().sapphire_filebuf_fgetc_return = Some(RETURN_ADDRESS);
@@ -17673,13 +17676,14 @@ fn fgets_reads_bounded_lines_terminates_and_reports_eof() {
             token,
             GuestFileStream {
                 name: None,
-                bytes: Box::from(&b"ab\nlong"[..]),
+                bytes: b"ab\nlong".to_vec(),
                 position: 0,
                 readable: true,
                 share_read_access: true,
                 eof: false,
                 buffer_state: None,
                 fast_buffer: None,
+                console_repeat: GuestConsoleRepeat::default(),
             },
         );
         install_win64_import(&mut engine.unicorn, entry, dll, "fgets").unwrap();
@@ -18664,13 +18668,14 @@ fn exposed_file_cells_preserve_unbuffered_reads_and_reject_unknown_buffering() {
         token,
         GuestFileStream {
             name: None,
-            bytes: Box::from(&b"abc"[..]),
+            bytes: b"abc".to_vec(),
             position: 0,
             readable: true,
             share_read_access: true,
             eof: false,
             buffer_state: None,
             fast_buffer: None,
+            console_repeat: GuestConsoleRepeat::default(),
         },
     );
     let query = STUB_BASE + 0x100;
@@ -25058,6 +25063,37 @@ fn fwrite_captures_standard_stream_and_counts_elements() {
         dispatch_win64_import("foreign.dll", "fwrite"),
         Win64ImportDispatch::UnsupportedLegacyImport
     );
+}
+
+#[test]
+fn repeated_guest_console_writes_keep_first_message_and_report_counts() {
+    let mut repeat = GuestConsoleRepeat::default();
+    let mut output = Vec::new();
+
+    repeat.write(b"warning\r\n", &mut output).unwrap();
+    repeat.write(b"warning\r\n", &mut output).unwrap();
+    repeat.write(b"warning\r\n", &mut output).unwrap();
+    repeat.write(b"warning\r\n", &mut output).unwrap();
+    repeat.flush(&mut output).unwrap();
+    repeat.write(b"different\r\n", &mut output).unwrap();
+    repeat.write(b"different\r\n", &mut output).unwrap();
+
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        concat!(
+            "warning\r\n",
+            "aex_guest_stdio: previous message cumulative repeat count is 1\n",
+            "aex_guest_stdio: previous message cumulative repeat count is 2\n",
+            "aex_guest_stdio: previous message cumulative repeat count is 3\n",
+            "different\r\n",
+            "aex_guest_stdio: previous message cumulative repeat count is 1\n",
+        )
+    );
+
+    let mut independent = GuestConsoleRepeat::default();
+    let mut independent_output = Vec::new();
+    independent.write(b"warning\r\n", &mut independent_output).unwrap();
+    assert_eq!(independent_output, b"warning\r\n");
 }
 
 #[test]

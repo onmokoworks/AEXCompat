@@ -24,15 +24,61 @@ struct GuestFiles {
     windows_files: BTreeMap<u64, WindowsAssetFile>,
     next_windows_file: u64,
 }
+
+#[derive(Default)]
+struct GuestConsoleRepeat {
+    last_write: Vec<u8>,
+    suppressed: u64,
+    announced: u64,
+}
+
+impl GuestConsoleRepeat {
+    fn write(&mut self, bytes: &[u8], output: &mut impl std::io::Write) -> std::io::Result<()> {
+        if self.last_write == bytes {
+            self.suppressed = self.suppressed.saturating_add(1);
+            if self.suppressed.is_power_of_two() {
+                self.write_summary(output)?;
+            }
+            return Ok(());
+        }
+
+        self.flush(output)?;
+        output.write_all(bytes)?;
+        self.last_write.clear();
+        self.last_write.extend_from_slice(bytes);
+        self.suppressed = 0;
+        self.announced = 0;
+        Ok(())
+    }
+
+    fn flush(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        if self.suppressed != self.announced {
+            self.write_summary(output)?;
+        }
+        Ok(())
+    }
+
+    fn write_summary(&mut self, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        writeln!(
+            output,
+            "aex_guest_stdio: previous message cumulative repeat count is {}",
+            self.suppressed
+        )?;
+        self.announced = self.suppressed;
+        Ok(())
+    }
+}
+
 struct GuestFileStream {
     name: Option<String>,
-    bytes: Box<[u8]>,
+    bytes: Vec<u8>,
     position: usize,
     readable: bool,
     share_read_access: bool,
     eof: bool,
     buffer_state: Option<u64>,
     fast_buffer: Option<u64>,
+    console_repeat: GuestConsoleRepeat,
 }
 
 #[track_caller]
@@ -54,6 +100,28 @@ fn guest_file_name(name: &str) -> Result<String, String> {
 }
 
 impl GuestFiles {
+    fn flush_console_repeats(&mut self) -> Result<(), String> {
+        use std::io::Write;
+
+        let tokens = self.standard_streams[1..]
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let mut output = std::io::stderr().lock();
+        for token in tokens {
+            if let Some(stream) = self.streams.get_mut(&token) {
+                stream
+                    .console_repeat
+                    .flush(&mut output)
+                    .map_err(|error| format!("guest console repeat summary failed: {error}"))?;
+            }
+        }
+        output
+            .flush()
+            .map_err(|error| format!("guest console flush failed: {error}"))
+    }
+
     fn record_directory_creation(&mut self, name: &str) {
         let now = std::time::SystemTime::now();
         let mut directory = Some(name);
@@ -136,6 +204,16 @@ impl GuestFiles {
             Ok(files)
         };
         read().map_err(|e| GuestError::Callback(format!("guest asset manifest: {e}")))
+    }
+}
+
+impl GuestEngine<'static> {
+    pub fn flush_guest_console_diagnostics(&mut self) -> Result<(), GuestError> {
+        self.unicorn
+            .get_data_mut()
+            .guest_files
+            .flush_console_repeats()
+            .map_err(GuestError::Callback)
     }
 }
 
@@ -237,13 +315,14 @@ fn open_guest_stream_with_share(
         token,
         GuestFileStream {
             name: Some(name.clone()),
-            bytes: bytes.into_boxed_slice(),
+            bytes,
             position: 0,
             readable: true,
             share_read_access,
             eof: false,
             buffer_state: None,
             fast_buffer: None,
+            console_repeat: GuestConsoleRepeat::default(),
         },
     );
     files.reports.push(TraceModule {
@@ -533,13 +612,14 @@ fn emulate_acrt_iob_func(unicorn: &mut Unicorn<'_, GuestState>) {
             token,
             GuestFileStream {
                 name: None,
-                bytes: Box::default(),
+                bytes: Vec::new(),
                 position: 0,
                 readable: index == 0,
                 share_read_access: true,
                 eof: false,
                 buffer_state: None,
                 fast_buffer: None,
+                console_repeat: GuestConsoleRepeat::default(),
             },
         );
         Ok(token)
@@ -695,14 +775,14 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
             } else {
                 vec![token]
             };
-            for token in tokens {
+            for &token in &tokens {
                 if !unicorn.get_data().guest_files.streams.contains_key(&token) {
                     return Err("fflush received stale or foreign FILE".into());
                 }
                 require_unbuffered_guest_stream(unicorn, token)?;
             }
-            std::io::stderr()
-                .lock()
+            let mut output = std::io::stderr().lock();
+            output
                 .flush()
                 .map_err(|e| format!("guest console flush failed: {e}"))?;
             return Ok(0);
@@ -913,6 +993,22 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
             }
             if let Some(buffer) = unicorn.get_data().guest_files.streams[&token].fast_buffer {
                 free_crt_region(unicorn, buffer)?;
+            }
+            if unicorn
+                .get_data()
+                .guest_files
+                .standard_streams[1..]
+                .contains(&Some(token))
+            {
+                unicorn
+                    .get_data_mut()
+                    .guest_files
+                    .streams
+                    .get_mut(&token)
+                    .unwrap()
+                    .console_repeat
+                    .flush(&mut std::io::stderr().lock())
+                    .map_err(|error| format!("guest console repeat summary failed: {error}"))?;
             }
             let files = &mut unicorn.get_data_mut().guest_files;
             let stream = files.streams.remove(&token).unwrap();
@@ -1913,7 +2009,6 @@ fn guest_file_attributes_ex(
 }
 
 fn guest_fwrite(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
-    use std::io::Write;
     let input = read_win64_import_argument(unicorn, 0)?;
     let size = read_win64_import_argument(unicorn, 1)?;
     let count = read_win64_import_argument(unicorn, 2)?;
@@ -1952,16 +2047,19 @@ fn guest_fwrite(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
     }
     // The worker stdout carries its JSON protocol. Both guest console streams
     // are captured on the worker diagnostic pipe instead, never in that JSON.
-    std::io::stderr()
-        .lock()
-        .write_all(&translated)
+    unicorn
+        .get_data_mut()
+        .guest_files
+        .streams
+        .get_mut(&token)
+        .unwrap()
+        .console_repeat
+        .write(&translated, &mut std::io::stderr().lock())
         .map_err(|e| format!("guest console write failed: {e}"))?;
     let files = &mut unicorn.get_data_mut().guest_files;
     files.live_bytes += translated.len();
     let stream = files.streams.get_mut(&token).unwrap();
-    let mut contents = std::mem::take(&mut stream.bytes).into_vec();
-    contents.extend_from_slice(&translated);
-    stream.bytes = contents.into_boxed_slice();
+    stream.bytes.extend_from_slice(&translated);
     stream.position = stream.bytes.len();
     Ok(count)
 }
