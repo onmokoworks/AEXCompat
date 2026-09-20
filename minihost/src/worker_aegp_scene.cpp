@@ -2675,6 +2675,7 @@ std::array<void*, 20> g_aegp_stream_suite1{};
 std::array<void*, 22> g_aegp_stream_suite2{};
 std::array<void*, 22> g_aegp_stream_suite3{};
 std::array<void*, 22> g_aegp_stream_suite4{};
+std::array<void*, 22> g_aegp_stream_suite5{};
 std::array<void*, 23> g_aegp_stream_suite6{};
 std::array<void*, 2> g_aegp_iterate_suite1{};
 std::array<void*, 22> g_aegp_keyframe_suite5{};
@@ -2698,6 +2699,7 @@ static_assert(sizeof(g_aegp_stream_suite1) == 160);
 static_assert(sizeof(g_aegp_stream_suite2) == 176);
 static_assert(sizeof(g_aegp_stream_suite3) == 176);
 static_assert(sizeof(g_aegp_stream_suite4) == 176);
+static_assert(sizeof(g_aegp_stream_suite5) == 176);
 static_assert(sizeof(g_aegp_stream_suite6) == 184);
 static_assert(sizeof(g_aegp_iterate_suite1) == 16);
 static_assert(sizeof(g_aegp_keyframe_suite5) == 176);
@@ -3176,29 +3178,34 @@ SceneSuiteAcquireResult scene_acquire_suite(
     *suite = g_aegp_stream_suite6.data();
     return SceneSuiteAcquireResult::acquired;
   }
-  if (named("AEGP Stream Suite") && version == 9) {
-    // AEGP_StreamSuite4 (frozen in AE 9) retains the v8 22-slot layout.
-    // Its expression text ABI is the legacy A_char form, so those two slots
-    // use explicit fail-closed adapters rather than the current UTF-16 ABI.
-    g_aegp_stream_suite4 =
-        unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_9, 22>();
-    g_aegp_stream_suite4[3] = reinterpret_cast<void*>(&aegp_get_new_layer_stream);
-    g_aegp_stream_suite4[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v6);
-    g_aegp_stream_suite4[5] = factory.legacy_stream_callbacks[0];
-    g_aegp_stream_suite4[6] =
+  if (named("AEGP Stream Suite") && (version == 9 || version == 10)) {
+    // Both frozen tables have 22 slots and the same primitive value ABI.
+    // v10 changed marker ownership (unsupported here) and expression text
+    // to UTF-16; never pass the v9 ANSI expression adapters to that caller.
+    auto& stream_suite = version == 9
+        ? g_aegp_stream_suite4 : g_aegp_stream_suite5;
+    stream_suite = version == 9
+        ? unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_9, 22>()
+        : unsupported_suite_slots<UnsupportedSuiteId::aegp_stream_10, 22>();
+    stream_suite[3] = reinterpret_cast<void*>(&aegp_get_new_layer_stream);
+    stream_suite[4] = reinterpret_cast<void*>(&aegp_get_effect_num_param_streams_v6);
+    stream_suite[5] = factory.legacy_stream_callbacks[0];
+    stream_suite[6] =
         reinterpret_cast<void*>(&aexcompat::l2_detail::get_new_mask_stream);
-    g_aegp_stream_suite4[7] = factory.legacy_stream_callbacks[1];
-    g_aegp_stream_suite4[8] = reinterpret_cast<void*>(
+    stream_suite[7] = factory.legacy_stream_callbacks[1];
+    stream_suite[8] = reinterpret_cast<void*>(
         &aexcompat::l2_detail::aegp_get_stream_name_v4);
-    g_aegp_stream_suite4[12] = factory.legacy_stream_callbacks[3];
-    g_aegp_stream_suite4[13] = factory.legacy_stream_callbacks[4];
-    g_aegp_stream_suite4[14] = factory.legacy_stream_callbacks[5];
-    g_aegp_stream_suite4[15] = factory.legacy_stream_callbacks[6];
-    g_aegp_stream_suite4[19] =
-        reinterpret_cast<void*>(&aexcompat::l2_detail::reject_get_expression_ansi);
-    g_aegp_stream_suite4[20] =
-        reinterpret_cast<void*>(&aexcompat::l2_detail::reject_set_expression_ansi);
-    *suite = g_aegp_stream_suite4.data();
+    stream_suite[12] = factory.legacy_stream_callbacks[3];
+    stream_suite[13] = factory.legacy_stream_callbacks[4];
+    stream_suite[14] = factory.legacy_stream_callbacks[5];
+    stream_suite[15] = factory.legacy_stream_callbacks[6];
+    stream_suite[19] = version == 9
+        ? reinterpret_cast<void*>(&aexcompat::l2_detail::reject_get_expression_ansi)
+        : reinterpret_cast<void*>(&aexcompat::l2_detail::unsupported_get_expression);
+    stream_suite[20] = version == 9
+        ? reinterpret_cast<void*>(&aexcompat::l2_detail::reject_set_expression_ansi)
+        : reinterpret_cast<void*>(&aexcompat::l2_detail::unsupported_set_expression);
+    *suite = stream_suite.data();
     return SceneSuiteAcquireResult::acquired;
   }
   if (named("AEGP Stream Suite") && version == 8) {

@@ -54,6 +54,7 @@ enum class UnsupportedSuiteId : uint8_t {
   aegp_stream_7,
   aegp_stream_8,
   aegp_stream_9,
+  aegp_stream_10,
   aegp_stream_4,
   aegp_iterate_1,
   aegp_keyframe_5,

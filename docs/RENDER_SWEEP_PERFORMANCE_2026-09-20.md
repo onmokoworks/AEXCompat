@@ -1124,6 +1124,39 @@ the semantic render-success count. The evidence does not distinguish a plug-in
 external state from a host-compatibility defect, so that cause remains open.
 No After Effects process was used.
 
+### Fast Grain follow-up: Stream Suite v10 (2026-09-21)
+
+The worker now publishes numeric Stream Suite v10 (SDK `StreamSuite5`)
+through its configured scene provider. External-SDK
+compiled assertions verify the 22-slot, 176-byte x64 ABI and distinguish its
+UTF-16 expressions from v9 ANSI expressions. The existing loaded-effect
+behavioral self-test now exercises both v9 and v10 through suite acquisition,
+stream values, names, disposal and ownership rejection in all three worker
+modes. It failed on v10 acquisition before the change and passes afterward.
+Arbitrary/no-data value checkout remains rejected. Marker ownership differs
+between the old and new SDK value ABI and is deliberately excluded from the
+primitive-value equivalence and this new table's supported scene operations.
+
+This repairs a real missing-suite boundary, **not** Fast Grain rendering.
+The same two-source/two-intensity ARGB8 test still returns the exact card
+above after v10 acquisition succeeds. The four post-change reports have no
+missing or unsupported suite calls and bind worker SHA-256
+`ad19114fd566b182dd136216d18a784a4e927a2213a0b11cba74c1360b3d086b`
+to the same AEX identity. The separately measured harness file SHA-256 was
+`3dca949475845b7a845d32e898fc1fe00d95b96745fe58ebc7c953c572a3601f`.
+Five selected native self-tests passed. Broker
+integration reported 29 passing cases, of which three actually executed and
+26 internally skipped unavailable fixtures; this is not 29 real-AEX tests.
+
+One exploratory default-parameter CPU32/Auto32 pair produced the card on CPU
+and a visibly grain-like image on Auto. Direct PowerShell invocation did not
+capture process status or diagnostic JSON, so actual GPU dispatch and loaded
+identities cannot be established for that pair. The images alone are not
+semantic evidence and do not update the ledger. A subsequent bounded cycle
+must use captured subprocess reports and an input/intensity response oracle
+before claiming the Auto32 route works. No further vendor frames were run in
+this cycle, no full sweep was repeated, and no AE process was used.
+
 ## OLM cohort and visible-image classification
 
 The first OLM milestone reported 10/10 `rendered` in 2,631 ms, but that bucket

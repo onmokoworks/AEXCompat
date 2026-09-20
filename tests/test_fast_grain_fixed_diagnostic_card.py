@@ -100,11 +100,18 @@ def test_installed_fast_grain_returns_fixed_diagnostic_card(tmp_path):
         pytest.skip('set AEXCOMPAT_TEST_FAST_GRAIN to installed Fast Grain.aex')
     assert os.name == 'nt'
     harness = ROOT / 'broker/target/release/aexcompat-harness.exe'
+    invocation = 0
 
     def run(*args):
+        nonlocal invocation
+        invocation += 1
         result = subprocess.run([str(harness), '--headless', *map(str, args)],
                                 cwd=ROOT, capture_output=True,
                                 timeout=None if args[0] == '--inspect-experimental' else 90)
+        # Preserve the actual worker diagnostics even when an assertion fails.
+        # These captures are local test artifacts, not portable evidence bundles.
+        (tmp_path / f'process-{invocation:02}.stdout.json').write_bytes(result.stdout)
+        (tmp_path / f'process-{invocation:02}.stderr.txt').write_bytes(result.stderr)
         assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
         return json.loads(result.stdout)
 

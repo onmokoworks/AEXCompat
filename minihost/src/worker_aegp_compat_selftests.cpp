@@ -2257,7 +2257,10 @@ bool verify_aegp_scene_mutation_transactions() {
 // key alone answered a real plug-in out of a five-entry fixture table; the
 // instance carries a mark instead. Everything below is a property that broke
 // at some point while getting there.
-bool verify_aegp_loaded_plugin_effect_streams() {
+namespace {
+bool verify_aegp_loaded_plugin_effect_streams_for_suite_version(
+    const int32_t stream_suite_version) {
+  if (stream_suite_version != 9 && stream_suite_version != 10) return false;
   if (!g_hooks.get_new_effect_for_effect || !g_hooks.dispose_effect ||
       !g_hooks.get_effect_num_param_streams_v2 || !g_hooks.get_new_effect_stream_v2 ||
       !g_hooks.get_stream_name_v2 || !g_hooks.get_stream_type_v2 ||
@@ -2276,13 +2279,27 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   const bool saved_comp_idle_mode = g_aegp_comp_idle_roundtrip_mode;
   g_aegp_comp_idle_roundtrip_mode = false;
   // Every stream and value this test opens has to be handed back. The suite
-  // lease balance says nothing about that - this test acquires no suite - so
+  // lease balance cannot detect leaked stream/value handles, so
   // the counters the stream paths keep are what closes the loop, the way the
   // Levels projector test beside it does it.
   const uint32_t streams_before = g_aegp_stream_acquires;
   const uint32_t stream_disposes_before = g_aegp_stream_disposes;
   const uint32_t values_before = g_aegp_stream_value_acquires;
   const uint32_t value_disposes_before = g_aegp_stream_value_disposes;
+
+  const void* stream_suite4_raw = nullptr;
+  const int32_t stream_suite_error = acquire_suite(
+      "AEGP Stream Suite", stream_suite_version, &stream_suite4_raw);
+  if (stream_suite_error != 0 || !stream_suite4_raw ||
+      (stream_suite_version == 9 &&
+       stream_suite4_raw != g_aegp_stream_suite4.data()) ||
+      (stream_suite_version == 10 &&
+       stream_suite4_raw != g_aegp_stream_suite5.data())) {
+    if (stream_suite_error == 0)
+      (void)release_suite("AEGP Stream Suite", stream_suite_version);
+    g_aegp_comp_idle_roundtrip_mode = saved_comp_idle_mode;
+    return false;
+  }
 
   records.clear();
   ParamRecord slider{};
@@ -2358,9 +2375,6 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   bool ok = g_hooks.get_new_effect_for_effect(0, g_hooks.effect, &effect) == 0 &&
       effect == &scene_runtime_state().effect;
 
-  const void* stream_suite4_raw = nullptr;
-  ok = ok && acquire_suite("AEGP Stream Suite", 9, &stream_suite4_raw) == 0 &&
-      stream_suite4_raw == g_aegp_stream_suite4.data();
   const auto* stream_suite4_slots =
       static_cast<void* const*>(const_cast<void*>(stream_suite4_raw));
   using GetEffectStreamCount = int32_t (__cdecl*)(void*, int32_t*);
@@ -2372,6 +2386,9 @@ bool verify_aegp_loaded_plugin_effect_streams() {
       int32_t, void*, int32_t, const suite_abi::AegpTime*, uint8_t,
       scene_runtime::AegpStreamValue*);
   using DisposeStreamValue = int32_t (__cdecl*)(scene_runtime::AegpStreamValue*);
+  using GetExpressionUnicode = int32_t (__cdecl*)(int32_t, void*, void**);
+  using SetExpressionUnicode = int32_t (__cdecl*)(
+      int32_t, void*, const uint16_t*);
   const auto get_v9_stream_count = stream_suite4_slots
       ? reinterpret_cast<GetEffectStreamCount>(stream_suite4_slots[4]) : nullptr;
   const auto get_v9_effect_stream = stream_suite4_slots
@@ -2386,6 +2403,35 @@ bool verify_aegp_loaded_plugin_effect_streams() {
       ? reinterpret_cast<GetStreamValue>(stream_suite4_slots[13]) : nullptr;
   const auto dispose_v9_stream_value = stream_suite4_slots
       ? reinterpret_cast<DisposeStreamValue>(stream_suite4_slots[14]) : nullptr;
+
+  // Stream Suite v10 changed expression text from the v9 ANSI ABI to UTF-16.
+  // Pin both the table wiring and a safe foreign-handle failure so reusing the
+  // v9 adapters cannot pass merely because no loaded effect asks for an
+  // expression during this fixture.
+  if (stream_suite_version == 10) {
+    const auto get_expression = reinterpret_cast<GetExpressionUnicode>(
+        stream_suite4_slots[19]);
+    const auto set_expression = reinterpret_cast<SetExpressionUnicode>(
+        stream_suite4_slots[20]);
+    void* rejected_expression = reinterpret_cast<void*>(
+        static_cast<uintptr_t>(0x1234));
+    const std::array<uint16_t, 2> expression{static_cast<uint16_t>('x'), 0};
+    void* const foreign_stream = effect ? effect : &scene_runtime_state().effect;
+    const bool expression_callbacks_ok =
+        stream_suite4_slots[19] == reinterpret_cast<void*>(
+            &aexcompat::l2_detail::unsupported_get_expression) &&
+        stream_suite4_slots[20] == reinterpret_cast<void*>(
+            &aexcompat::l2_detail::unsupported_set_expression) &&
+        stream_suite4_slots[19] != reinterpret_cast<void*>(
+            &aexcompat::l2_detail::reject_get_expression_ansi) &&
+        stream_suite4_slots[20] != reinterpret_cast<void*>(
+            &aexcompat::l2_detail::reject_set_expression_ansi) &&
+        get_expression && set_expression &&
+        get_expression(1, foreign_stream, &rejected_expression) == 4 &&
+        rejected_expression == nullptr &&
+        set_expression(1, foreign_stream, expression.data()) == 4;
+    ok = expression_callbacks_ok && ok;
+  }
 
   // Counted the way AE counts: the input layer plus one per declared
   // parameter. Keyed on the fixture instead, this answered 5.
@@ -2444,6 +2490,10 @@ bool verify_aegp_loaded_plugin_effect_streams() {
   const int32_t v9_type_error = get_v9_stream_type(v9_amount, &v9_type);
   const int32_t v9_value_error =
       get_v9_stream_value(0, v9_amount, 1, &v9_time, 1, &v9_value);
+  std::array<double, 4> published_value{-1.0, -1.0, -1.0, -1.0};
+  if (v9_value_error == 0)
+    std::memcpy(published_value.data(), v9_value.value.data(),
+                sizeof(published_value));
   ok = ok && v9_name_error == 0 &&
       v9_name_handle &&
       v9_lock_error == 0 &&
@@ -2452,11 +2502,29 @@ bool verify_aegp_loaded_plugin_effect_streams() {
           static_cast<const char16_t*>(v9_name_data), u"量", 2) == 0 &&
       aexcompat::worker_runtime::handles::unlock_aegp_mem_handle(
           v9_name_handle) == 0 &&
-      v9_type_error == 0 && v9_type == 5 && v9_value_error == 0;
+      v9_type_error == 0 && v9_type == 5 && v9_value_error == 0 &&
+      published_value == std::array<double, 4>{37.25, 0.0, 0.0, 0.0};
+  scene_runtime::AegpStreamValue rejected_value{};
+  rejected_value.value.fill(std::byte{0x5a});
+  const auto rejected_value_before = rejected_value;
   ok = dispose_v9_stream_value(&v9_value) == 0 && ok;
+  const auto disposed_value = v9_value;
+  ok = dispose_v9_stream_value(&v9_value) == 4 &&
+      std::memcmp(&v9_value, &disposed_value, sizeof(v9_value)) == 0 && ok;
+  // No value is checked out now: this rejection must come from the foreign
+  // owner, not from the independent one-live-value-per-stream guard.
+  ok = get_v9_stream_value(99, v9_amount, 1, &v9_time, 1,
+                          &rejected_value) == 4 &&
+      std::memcmp(&rejected_value, &rejected_value_before,
+                  sizeof(rejected_value)) == 0 && ok;
   ok = aexcompat::worker_runtime::handles::free_aegp_mem_handle(
            v9_name_handle) == 0 && ok;
   ok = dispose_v9_stream(v9_amount) == 0 && ok;
+  ok = dispose_v9_stream(v9_amount) == 4 && ok;
+  ok = get_v9_stream_value(0, v9_amount, 1, &v9_time, 1,
+                          &rejected_value) == 4 &&
+      std::memcmp(&rejected_value, &rejected_value_before,
+                  sizeof(rejected_value)) == 0 && ok;
   ok = release_suite("AEGP Keyframe Suite", 4) == 0 && ok;
   records[0].name.assign("\xc0\xaf", 2);
   void* invalid_name_stream = nullptr;
@@ -2677,7 +2745,7 @@ bool verify_aegp_loaded_plugin_effect_streams() {
 
   ok = g_hooks.dispose_stream_v2(amount) == 0 && ok;
   ok = g_hooks.dispose_stream_v2(input) == 0 && ok;
-  ok = release_suite("AEGP Stream Suite", 9) == 0 && ok;
+  ok = release_suite("AEGP Stream Suite", stream_suite_version) == 0 && ok;
 
   // Restored whether or not the checks passed: a failed run must not leave the
   // scene holding this test's streams and leases, the way the mutation
@@ -2694,6 +2762,15 @@ bool verify_aegp_loaded_plugin_effect_streams() {
           g_aegp_stream_disposes - stream_disposes_before &&
       g_aegp_stream_value_acquires - values_before ==
           g_aegp_stream_value_disposes - value_disposes_before;
+}
+}  // namespace
+
+bool verify_aegp_loaded_plugin_effect_streams() {
+  const bool stream_suite9_ok =
+      verify_aegp_loaded_plugin_effect_streams_for_suite_version(9);
+  const bool stream_suite10_ok =
+      verify_aegp_loaded_plugin_effect_streams_for_suite_version(10);
+  return stream_suite9_ok && stream_suite10_ok;
 }
 
 bool verify_aegp_installed_effect_catalog_suite4() {

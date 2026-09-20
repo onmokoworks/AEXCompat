@@ -195,6 +195,7 @@ extern std::array<void*, 20> g_aegp_stream_suite1;
 extern std::array<void*, 22> g_aegp_stream_suite2;
 extern std::array<void*, 22> g_aegp_stream_suite3;
 extern std::array<void*, 22> g_aegp_stream_suite4;
+extern std::array<void*, 22> g_aegp_stream_suite5;
 extern std::array<void*, 23> g_aegp_stream_suite6;
 extern std::array<void*, 2> g_aegp_iterate_suite1;
 int32_t __cdecl aegp_get_num_threads(int32_t* count);

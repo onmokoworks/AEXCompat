@@ -124,6 +124,7 @@ UnsupportedSuiteDescriptor unsupported_suite_descriptor(
     case UnsupportedSuiteId::aegp_stream_7: return {"AEGP Stream Suite", 7};
     case UnsupportedSuiteId::aegp_stream_8: return {"AEGP Stream Suite", 8};
     case UnsupportedSuiteId::aegp_stream_9: return {"AEGP Stream Suite", 9};
+    case UnsupportedSuiteId::aegp_stream_10: return {"AEGP Stream Suite", 10};
     case UnsupportedSuiteId::aegp_stream_4: return {"AEGP Stream Suite", 4};
     case UnsupportedSuiteId::aegp_iterate_1: return {"AEGP Iterate Suite", 1};
     case UnsupportedSuiteId::aegp_keyframe_5: return {"AEGP Keyframe Suite", 5};
