@@ -1597,10 +1597,10 @@ fn discover_avx_state_sync_points_with_limit(
     // false positives only install a hook at an address that is never executed.
     let mut points = Vec::new();
     let mut info_factory = InstructionInfoFactory::new();
-    for (offset, prefix) in bytes.iter().copied().enumerate() {
-        if !matches!(prefix, 0xc4 | 0xc5) {
-            continue;
-        }
+    // Executable images are overwhelmingly non-VEX bytes. Use memchr's
+    // vectorized two-byte search to find the exact same C4/C5 candidate set
+    // without visiting every byte in Rust before the independent decodes.
+    for offset in memchr::memchr2_iter(0xc4, 0xc5, bytes) {
         let mut start = offset;
         loop {
             let Some(instruction_address) = address.checked_add(start as u64) else {
