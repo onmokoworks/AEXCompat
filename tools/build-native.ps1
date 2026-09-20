@@ -65,6 +65,8 @@ $sourceDir = Join-Path $repository $Source
 if (-not (Test-Path -LiteralPath (Join-Path $sourceDir 'CMakeLists.txt') -PathType Leaf)) {
     throw "no CMakeLists.txt under $sourceDir"
 }
+$sourceDir = (Resolve-Path -LiteralPath $sourceDir).ProviderPath
+$isMinihost = $sourceDir -eq (Join-Path $repository 'minihost')
 if (-not $BuildDir) { $BuildDir = "target\$Source-build" }
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
     $BuildDir = Join-Path $repository $BuildDir
@@ -125,7 +127,15 @@ if ($Target) {
     $steps += "cmake --build `"$BuildDir`""
 }
 
-$script = @("call `"$vcvars`" || exit /b 1") + ($steps | ForEach-Object { "$_ || exit /b 1" })
+# PowerShell can set only the output codepage, leaving the input codepage at
+# CP932 while cl writes UTF-8. CMake's AUTO decoding then corrupts the localized
+# /showIncludes prefix and Ninja silently records zero header dependencies.
+# chcp sets BOTH pages; run it after vcvars and keep configure/build in this cmd.
+# VSLANG alone cannot fix this (English resources need not be installed).
+$script = @(
+    "call `"$vcvars`" || exit /b 1"
+    'chcp 65001 >nul || exit /b 1'
+) + ($steps | ForEach-Object { "$_ || exit /b 1" })
 $batch = Join-Path ([System.IO.Path]::GetTempPath()) ("aexcompat-build-native-$PID.cmd")
 try {
     Set-Content -LiteralPath $batch -Value (@('@echo off') + $script) -Encoding ascii
@@ -135,13 +145,28 @@ try {
     Remove-Item -LiteralPath $batch -ErrorAction SilentlyContinue
 }
 
-# A whole-tree minihost build must have produced the worker. Naming it here
+# A whole-tree or explicit worker build must have produced the worker. Naming it here
 # means a build that reports success while linking nothing is caught at the
 # entry point rather than by whatever runs next.
-if ($Source -eq 'minihost' -and -not $Target) {
+if ($isMinihost -and (-not $Target -or $Target -contains 'all' -or $Target -contains 'aex_worker')) {
     $worker = Join-Path $BuildDir 'aex_worker.exe'
     if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) {
         throw "the build reported success but $worker is missing"
+    }
+    # vcvars may have supplied Ninja only inside cmd. Use the executable CMake
+    # actually configured, not whichever Ninja the outer PowerShell can find.
+    $ninjaEntry = @(Select-String -LiteralPath $cmakeCache `
+        -Pattern '^CMAKE_MAKE_PROGRAM:[^=]*=(.+)$')
+    if ($ninjaEntry.Count -ne 1) {
+        throw "CMAKE_MAKE_PROGRAM is missing or ambiguous in $cmakeCache"
+    }
+    $configuredNinja = $ninjaEntry[0].Matches[0].Groups[1].Value
+    try {
+        & (Join-Path $PSScriptRoot 'verify-minihost-build-deps.ps1') `
+            -BuildDir $BuildDir -Ninja $configuredNinja
+    } catch {
+        throw ("Native header dependency validation failed. Use an unused -BuildDir for a fresh build; " +
+            "-Configure alone cannot repair previously stale objects. Existing directories were not removed. " + $_)
     }
     $file = Get-Item -LiteralPath $worker
     Write-Host "worker=$($file.FullName) size=$($file.Length) mtime=$($file.LastWriteTimeUtc.ToString('o'))"

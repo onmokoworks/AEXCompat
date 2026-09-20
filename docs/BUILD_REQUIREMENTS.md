@@ -153,9 +153,8 @@ harness からの AEX inspect / render は `target\minihost-build\` 直下の wo
 After Effects SDK は不要 (include は Windows SDK と C++ 標準ライブラリのみ)。
 
 ```powershell
-# Visual Studio developer 環境 (vcvars64) で。Ninja / CMake は VS 付属のもので可。
-cmake -S minihost -B target\minihost-build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build target\minihost-build
+# 通常の PowerShell から。vcvars64 と configure/build のコードページを統一する。
+pwsh -File tools\build-native.ps1
 ```
 
 生成物の確認:
@@ -168,7 +167,8 @@ Get-ChildItem target\minihost-build\aex_worker.exe
 
 ### ヘッダ依存追跡の検証 (issue #657)
 
-ビルド後にこれを実行する:
+`build-native.ps1` は minihost 全体または `-Target aex_worker` のビルド後に
+依存追跡を検証する。既存ディレクトリだけを調べる場合はこれを実行する:
 
 ```powershell
 pwsh -File tools\verify-minihost-build-deps.ps1
@@ -184,9 +184,21 @@ Ninja + MSVC では、ヘッダ依存は cl の `/showIncludes` 出力を config
 
 実際にこれが起き、全 AEX が GLOBAL_SETUP で access violation を起こす worker が
 できて AviUtl2 のフィルタ登録が 0 件になった (#651)。`minihost/CMakeLists.txt` は
-configure と build の双方に `VSLANG` を固定してこの食い違いを防ぐが、
-**それ以前に作られたビルドディレクトリは壊れたまま**なので、上の検証で落ちたら
-ディレクトリごと削除して configure し直すこと。増分ビルドは復旧しない。
+configure と build の双方に `VSLANG` を固定する。英語リソースが未導入だと
+日本語へ fallback するため、言語指定だけでは不十分である。`build-native.ps1` は
+さらに vcvars64 の後でコンソールの入力・出力コードページを両方 UTF-8 にし、
+同じ cmd 内で configure/build を行う。PowerShell が出力側だけ UTF-8 に変え、
+入力側が CP932 のままになった状態も、この入口で解消する。
+**以前に依存追跡を失ったディレクトリは壊れたまま**なので、検証で落ちた場合は
+未使用の `-BuildDir` を指定して新規ビルドする。再 configure だけでは既存の古い
+オブジェクトは復旧しない。スクリプトが既存ディレクトリを削除することはない。
+
+```powershell
+pwsh -File tools\build-native.ps1 -BuildDir target\minihost-fresh-build
+```
+
+別の BuildDir は検証用であり、harness が自動的にその worker へ切り替わるわけではない。
+検証済み worker を通常の配置先へ反映してから broker integration tests を実行する。
 
 broker / harness と gate スクリプト (`tools/refresh-sdk-grabba-evidence.ps1` 等)
 はこのパス直下の exe を前提にしているため、multi-config generator
