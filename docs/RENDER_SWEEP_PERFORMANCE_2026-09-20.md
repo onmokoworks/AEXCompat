@@ -983,6 +983,29 @@ and Release harness
 This resolves this one default-input identity ambiguity without reclassifying
 the other MediaCore-root rows. No After Effects process was used.
 
+`Fast Grain.aex` is now classified `fixed_diagnostic_card` with its cause still
+unresolved, not as a successful grain render.
+The baseline's non-input SHA was therefore not semantic evidence. A focused
+shipping Smart test crossed two visibly different 256x144 opaque inputs with
+inspected `Intensity` values 0 and 100 while fixing `Blend Mode = Normal`.
+All four requests had matching parameter receipts, clean worker/session
+transport, and valid decoded buffers, but returned the same bytes with SHA-256
+`b15318f0673ca5cbd7b8365f81cc8391c1eb472865d263114cd1c24cf1347c10`.
+The image is a fixed blue/cyan diagonal-stripe card with a central text glyph
+region, mixed zero/255 alpha, and no dependence on either source image or the
+grain intensity. The classification does not depend on interpreting the tiny
+message text. Five negative cases reject passthrough, source-dependent output,
+card corruption, forced opacity, and truncation; the installed AEX plus those
+cases passed 6/6 in 2.92 seconds in
+`test_fast_grain_fixed_diagnostic_card.py`. The
+installed AEX SHA-256 is
+`13de85b4a300be6df2c40152259269442b4983924f86ad5ec093c04a2be39643`;
+the Release worker and harness remain `d9e5b0f4...` and `93b02981...` as above.
+This is an evidence-backed fixed-output classification and does not increase
+the semantic render-success count. The evidence does not distinguish a plug-in
+external state from a host-compatibility defect, so that cause remains open.
+No After Effects process was used.
+
 ## OLM cohort and visible-image classification
 
 The first OLM milestone reported 10/10 `rendered` in 2,631 ms, but that bucket
