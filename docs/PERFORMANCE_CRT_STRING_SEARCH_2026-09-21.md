@@ -87,3 +87,33 @@ zero regression for every workload. Proceed to full regression/sweep validation
 as a generic bounded-string-search improvement, not an all-effects speedup.
 Evidence: `resident-abba-confirmation.jsonl` / `.stderr` beside the first run.
 The original one-third render-time goal remains unmet.
+
+## Workspace regression
+
+The Release workspace suite completed with 737 passed, zero failed and five
+existing ignored tests. Its bounded command exited zero in 238.29 seconds and
+verified its process group empty. Minimum sampled free space was
+37,072,781,312 bytes; peak sampled aggregate process-group RSS was 1,057,856 KiB.
+The tested resident worker file still had the same SHA-256 after this build.
+Evidence is `workspace-tests.log`.
+
+## Full Sapphire sweep
+
+The jobs=1 candidate sweep completed 292/292 plugins successfully. The strict
+comparator against the merged #19 worker's sweep reported zero mismatches in
+plugin identity, PNG bytes, raw pixels, extents/formats, status, guards and
+cleanup. The actual candidate identity matches both resident runs. Known RLM
+license diagnostics remain on both sides; this is corpus parity, not licensed
+After Effects equivalence.
+
+The bounded command exited zero in 514.51 seconds, verified its process group
+empty, and observed at least 36,178,755,584 free bytes. Sum of plugin durations
+was 501.6685 seconds versus 500.9427 seconds for #19. This non-interleaved
+cold-start comparison does not establish a sweep speedup.
+
+Evidence: `runs/issue20-string-j1-20260921/report.json` and its PNGs compared
+against `runs/issue19-inline-j1-20260921/report.json`; `sweep.log` and
+`sweep-comparison.json` are in #20's private evidence directory.
+The validated benefit is the repeated approximately 4% resident PrismLens
+improvement from a generic protected-string-search change. It does not complete
+the broader one-third-render-time or faster-whole-sweep objectives.
