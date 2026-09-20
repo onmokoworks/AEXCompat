@@ -610,6 +610,11 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
 #define FPU_DIV(size, a, b) float ## size ## _div(a, b, &env->sse_status)
 #define FPU_SQRT(size, a, b) float ## size ## _sqrt(b, &env->sse_status)
 
+typedef union X86HostFloat32 {
+    uint32_t bits;
+    float host;
+} X86HostFloat32;
+
 /* Note that the choice of comparison op here is important to get the
  * special cases right: for min and max Intel specifies that (-0,0),
  * (NaN, anything) and (anything, NaN) return the second argument.
@@ -742,6 +747,31 @@ WRAP_FLOATCONV(int64_t, float32_to_int64_round_to_zero, float32, INT64_MIN)
 WRAP_FLOATCONV(int64_t, float64_to_int64, float64, INT64_MIN)
 WRAP_FLOATCONV(int64_t, float64_to_int64_round_to_zero, float64, INT64_MIN)
 
+static inline int32_t x86_float32_to_int32_trunc_fast(float32 value,
+                                                       float_status *status)
+{
+#ifndef __FAST_MATH__
+    uint32_t bits = float32_val(value);
+    uint32_t exponent = bits & 0x7f800000;
+
+    if (likely(exponent != 0 && exponent != 0x7f800000)) {
+        X86HostFloat32 input = { .bits = bits };
+
+        if (likely(input.host >= -0x1p31f && input.host < 0x1p31f)) {
+            int32_t result = (int32_t)input.host;
+
+            if ((float)result != input.host) {
+                status->float_exception_flags |= float_flag_inexact;
+            }
+            return result;
+        }
+    } else if ((bits << 1) == 0) {
+        return 0;
+    }
+#endif
+    return x86_float32_to_int32_round_to_zero(value, status);
+}
+
 void helper_cvtps2dq(CPUX86State *env, ZMMReg *d, ZMMReg *s)
 {
     d->ZMM_L(0) = x86_float32_to_int32(s->ZMM_S(0), &env->sse_status);
@@ -821,7 +851,7 @@ void helper_cvttpd2pi(CPUX86State *env, MMXReg *d, ZMMReg *s)
 
 int32_t helper_cvttss2si(CPUX86State *env, ZMMReg *s)
 {
-    return x86_float32_to_int32_round_to_zero(s->ZMM_S(0), &env->sse_status);
+    return x86_float32_to_int32_trunc_fast(s->ZMM_S(0), &env->sse_status);
 }
 
 int32_t helper_cvttsd2si(CPUX86State *env, ZMMReg *s)
