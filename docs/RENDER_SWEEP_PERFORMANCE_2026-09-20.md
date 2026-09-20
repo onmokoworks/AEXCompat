@@ -1590,3 +1590,32 @@ and Release harness SHA-256
 Exact thresholds, unequal per-channel counts, other controls, bit depths, and
 exact After Effects parity remain outside this result. No After Effects process
 or PSOFT path was used.
+
+## BCC Broadcast Safe semantic follow-up
+
+`BCCBroadcastSafe.aex` is now verified for a bounded SmartFX ARGB8 Custom RGB
+hard-clip response. A non-uniform fixture covers every 8-bit value independently
+in all three RGB channels. With RGB high knee and high clip both at 25%, zero
+low knee/clip, full range, and final-output view, each component from 0 through
+64 is preserved and every higher value maps to 64. At 50%, the same mapping
+preserves 0 through 128 and caps every higher value at 128. The mappings are
+single-valued and monotonic in each channel, remain opaque, and produce distinct
+outputs. Selecting `Broadcast Standards = Neutral` returns the source
+byte-for-byte. This establishes input-dependent limiting and direct numeric
+parameter response without making a claim about untested broadcast presets.
+
+`test_bcc_broadcast_safe_response.py` adds an opt-in installed-AEX test plus ten
+behavioral mutations covering passthrough, fixed output, wrong cap, low-range
+damage, cross-channel leakage, nonmonotonic output, limit insensitivity, a
+damaged neutral endpoint, alpha damage, and truncation. The installed AEX and
+mutations passed 11/11; the ordinary non-corpus run passed 10 tests with the
+real-AEX case explicitly skipped. The identity-bound ledger is
+`target/all-aex-with-bcc-broadcast-safe-followup.json`. Evidence used plug-in
+SHA-256 `6a8b82481e81d9364fce2a42e3fca9f4a5d6f2471c087e6907e35e93942f8386`,
+worker SHA-256
+`b4bcb4671f40a384e84e04d77ce32c1f02720dc3cbc23b7a3b6f6a532e5e066a`,
+and Release harness SHA-256
+`62778b0ca7b7f2af4bc8ed1fe09aada6f82d365ac875606e86fc4c6fa5e2bc82`.
+Preset standards, YRGB/composite/chroma modes, other controls, bit depths, and
+exact After Effects parity remain outside this result. No After Effects process
+or PSOFT path was used.
