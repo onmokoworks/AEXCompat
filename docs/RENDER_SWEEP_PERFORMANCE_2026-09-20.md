@@ -1506,3 +1506,30 @@ and Release harness SHA-256
 Other channel modes, PixelChooser/Matte controls, bit depths, and exact After
 Effects parity remain outside this bounded result. No After Effects process or
 PSOFT path was used.
+
+## BCC Median semantic follow-up
+
+`BCCMedian.aex` is now verified for a bounded SmartFX ARGB8 median response. An
+opaque two-region fixture contains four isolated black/white impulses away from
+its hard vertical boundary. With inspected `Mode = A R G B Separately`, a
+locked 3x3 neighborhood, median level 50, preserve alpha, no compositing, no
+PixelChooser, and mix zero, the output removes exactly those four impulses and
+matches the known clean two-region image byte-for-byte. Both flat regions and
+the boundary remain exact. With otherwise identical controls,
+`Mix with Original = 100` returns the corrupted source byte-for-byte. Alpha is
+preserved in both cases.
+
+`test_bcc_median_response.py` adds an opt-in installed-AEX test plus eight
+behavioral mutations covering bypass, flat-region or boundary damage, retained
+impulse, wrong neutral endpoint, alpha damage, fixed output, and truncation.
+The installed AEX and mutations passed 9/9; the ordinary non-corpus run passed
+8 tests with the real-AEX case explicitly skipped. The identity-bound ledger
+is `target/all-aex-with-bcc-median-followup.json`. Evidence used plug-in
+SHA-256 `49268e59abff87a92fc6d4a880f8449f7dddf3c2ec87a56fff2dcacad77c028a`,
+worker SHA-256
+`b4bcb4671f40a384e84e04d77ce32c1f02720dc3cbc23b7a3b6f6a532e5e066a`,
+and Release harness SHA-256
+`62778b0ca7b7f2af4bc8ed1fe09aada6f82d365ac875606e86fc4c6fa5e2bc82`.
+Other median modes, geometry, PixelChooser, bit depths, and exact After Effects
+parity remain outside this result. No After Effects process or PSOFT path was
+used.
