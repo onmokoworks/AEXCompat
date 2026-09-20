@@ -176,12 +176,15 @@ WorkerMode classify_worker_mode(
     // the GPU backend selection in the command word, mirroring the one-shot
     // --smart-image32[-cpu|-opencl|-directx] family.
     const bool session_cpu = equals(command, L"--smart-session32-cpu-v1");
+    const bool session8_cpu = equals(command, L"--smart-session8-cpu-v1");
+    const bool session8_auto = equals(command, L"--smart-session8-auto-v1");
     const bool session_opencl = equals(command, L"--smart-session32-opencl-v1");
     const bool session_directx = equals(command, L"--smart-session32-directx-v1");
     const bool session16 = equals(command, L"--smart-session16-v1");
     const bool session32 = equals(command, L"--smart-session32-v1") ||
         session_cpu || session_opencl || session_directx;
-    if (equals(command, L"--smart-session-v1") || session16 || session32) {
+    if (equals(command, L"--smart-session-v1") || session16 || session32 ||
+        session8_cpu || session8_auto) {
       // Smart sessions carry the same optional trailers as the classic session
       // commands: the static context trailers in the one-shot order
       // [mask v2|][spatial:v*][render:v1|] (issue #331), then the
@@ -207,7 +210,8 @@ WorkerMode classify_worker_mode(
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {
         mode.external_pixel_bytes = session32 ? 16 : (session16 ? 8 : 4);
-        mode.force_cpu = session_cpu;
+        mode.force_cpu = session_cpu || session8_cpu;
+        mode.auto_gpu8 = session8_auto;
         mode.opencl = session_opencl;
         mode.directx = session_directx;
         mode.request_mode = true;

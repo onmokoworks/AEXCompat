@@ -1115,7 +1115,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
        g_pixel_aspect_ratio.numerator, g_pixel_aspect_ratio.denominator},
       {&command_output, &case_id, external_rgba != nullptr, external_width,
        external_height, external_current_time, external_time_scale,
-       external_pixel_bytes});
+       external_pixel_bytes, session && session->auto_gpu8_eligible});
   if (!plan.valid) return result;
   // The smart path serves parameter checkouts from the hosted ledger, not from a
   // classic dispatch context, and that ledger kept its default current_time 0 /

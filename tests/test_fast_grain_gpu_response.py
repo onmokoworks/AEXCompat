@@ -53,6 +53,17 @@ def argb_float_bytes(rgba):
                     for i in range(0, len(rgba), 16))
 
 
+def argb8_bytes(rgba):
+    assert len(rgba) == PIXELS * 4
+    return b"".join(rgba[i + 3:i + 4] + rgba[i:i + 3]
+                    for i in range(0, len(rgba), 4))
+
+
+def assert_sha256(value):
+    assert isinstance(value, str) and len(value) == 64
+    assert all(character in "0123456789abcdef" for character in value)
+
+
 def float_preview(raw):
     require_assertions()
     assert len(raw) == PIXELS * 16
@@ -102,11 +113,14 @@ def assert_response(outputs):
     return metrics
 
 
-def assert_report(report, source, raw, intensity, identities):
+def assert_report(report, source, output, intensity, identities, *, pixel_format="argb32f"):
     require_assertions()
+    assert pixel_format in ("argb32f", "argb8")
     assert type(report["schema_version"]) is int and report["schema_version"] == 1
     assert report["stage"] == "interactive_image_render"
-    assert report["output_transport"] == "native_raw+rgba8_png_preview"
+    expected_transport = ("native_raw+rgba8_png_preview"
+                          if pixel_format == "argb32f" else "rgba8_png")
+    assert report["output_transport"] == expected_transport
     for key in ("passed", "output_pixels_valid", "gpu_render_possible", "gpu_render_dispatched",
                 "cuda_context_used", "guard_bytes_intact", "suite_leases_balanced",
                 "handle_lifetimes_balanced", "world_lifetimes_balanced",
@@ -114,9 +128,10 @@ def assert_report(report, source, raw, intensity, identities):
                 "smart_render_selector_dispatched"):
         assert report[key] is True, key
     assert report["gpu_fallback_used"] is False
+    assert report["gpu_fallback_reason"] is None
     assert report["worker_classification"] == "ok"
     assert report["render_path"] == "smartfx"
-    assert report["pixel_format"] == "argb32f"
+    assert report["pixel_format"] == pixel_format
     assert report["cuda_upload_bytes"] == report["cuda_download_bytes"] == PIXELS * 16
     for key in ("gpu_device_setup_error", "gpu_device_setdown_error",
                 "gpu_device_setdown_exception_code", "cuda_sync_failures",
@@ -126,8 +141,25 @@ def assert_report(report, source, raw, intensity, identities):
     assert (report["width"], report["height"]) == (WIDTH, HEIGHT)
     assert (report["current_time"], report["time_step"], report["total_time"],
             report["time_scale"]) == (0, 1, 300, 30)
-    assert report["output_sha256"] == sha(argb_float_bytes(raw))
-    assert report["input_sha256"] == sha(argb_float_bytes(float_bytes(source)))
+    if pixel_format == "argb32f":
+        assert report["gpu_attempt"] is None
+        assert report["output_sha256"] == sha(argb_float_bytes(output))
+        assert report["input_sha256"] == sha(argb_float_bytes(float_bytes(source)))
+    else:
+        assert report["output_sha256"] == sha(argb8_bytes(output))
+        assert report["input_sha256"] == sha(argb8_bytes(source))
+        attempt = report["gpu_attempt"]
+        assert attempt["setup_dispatched"] is True
+        assert attempt["render_dispatched"] is True
+        assert attempt["fallback_used"] is False
+        assert attempt["fallback_reason"] == ""
+        assert attempt["internal_pixel_format"] == "argb32f"
+        for key in ("setup_error", "pre_error", "render_error", "setdown_error",
+                    "cleanup_error", "lifecycle_error"):
+            assert type(attempt[key]) is int and attempt[key] == 0, key
+        assert attempt["internal_float_input_sha256"] == sha(
+            argb_float_bytes(float_bytes(source)))
+        assert_sha256(attempt["internal_float_output_sha256"])
     gpu = report["gpu_memory"]
     assert gpu["lifetimes_balanced"] is True
     assert gpu["allocations_created"] == gpu["allocations_freed"]
@@ -184,6 +216,9 @@ def validate_evidence(directory, *, verify_metrics=True):
     require_assertions()
     metadata = read_json(directory / "capture.json")
     assert type(metadata["schema_version"]) is int and metadata["schema_version"] == 1
+    # Cycle 26 evidence predates this discriminator and is necessarily 32-bit.
+    pixel_format = metadata.get("pixel_format", "argb32f")
+    assert pixel_format in ("argb32f", "argb8")
     assert metadata["identities_before"] == metadata["identities_after"]
     identities = metadata["identities_before"]
     assert set(identities) == {"plugin", "worker", "harness"}
@@ -204,7 +239,8 @@ def validate_evidence(directory, *, verify_metrics=True):
         command = case["command"]
         assert isinstance(command, list) and len(command) == 13
         assert command[1:3] == ["--headless", "--render-experimental-session-param"]
-        assert command[6:] == ["argb32f", "smart", "0", "300", "30", "1", str(intensity)]
+        assert command[6:] == [pixel_format, "smart", "0", "300", "30", "1",
+                               str(intensity)]
         for index, name in ((0, "aexcompat-harness.exe"), (3, "Fast Grain.aex"),
                             (4, f"{label}-source.png"), (5, f"{label}.png")):
             assert PureWindowsPath(command[index]).name == name
@@ -215,16 +251,27 @@ def validate_evidence(directory, *, verify_metrics=True):
         with Image.open(directory / f"{label}.png") as image:
             assert image.size == (WIDTH, HEIGHT)
             outputs[label] = image.convert("RGBA").tobytes()
-        raw = (directory / f"{label}.rgba32f-le").read_bytes()
-        assert outputs[label] == float_preview(raw)
-        if intensity == 0:
-            samples = struct.unpack(f"<{PIXELS * 4}f", raw)
-            assert max(abs(v - b / 255.0) for v, b in zip(samples, source)) <= 1 / 255 + 1e-6
+        raw_path = directory / f"{label}.rgba32f-le"
+        if pixel_format == "argb32f":
+            rendered = raw_path.read_bytes()
+            assert outputs[label] == float_preview(rendered)
+            if intensity == 0:
+                samples = struct.unpack(f"<{PIXELS * 4}f", rendered)
+                assert max(abs(v - b / 255.0)
+                           for v, b in zip(samples, source)) <= 1 / 255 + 1e-6
+        else:
+            assert not raw_path.exists()
+            rendered = outputs[label]
         report = read_json(directory / f"{label}.stdout.json")
         assert (directory / f"{label}.stderr.txt").read_bytes() == b""
         assert report["output_png"] == command[5]
-        assert PureWindowsPath(report["output_raw"]) == PureWindowsPath(command[5]).with_suffix(".rgba32f-le")
-        assert_report(report, source, raw, intensity, identities)
+        if pixel_format == "argb32f":
+            assert (PureWindowsPath(report["output_raw"])
+                    == PureWindowsPath(command[5]).with_suffix(".rgba32f-le"))
+        else:
+            assert report["output_raw"] is None
+        assert_report(report, source, rendered, intensity, identities,
+                      pixel_format=pixel_format)
     metrics = assert_response(outputs)
     if verify_metrics:
         assert read_json(directory / "verification.json") == metrics
@@ -330,8 +377,56 @@ def test_installed_fast_grain_gpu_response(tmp_path):
     validate_evidence(tmp_path)
 
 
+def test_installed_fast_grain_gpu_response_auto8(tmp_path):
+    plugin_env = os.environ.get("AEXCOMPAT_TEST_FAST_GRAIN_AUTO8")
+    if not plugin_env:
+        pytest.skip("set AEXCOMPAT_TEST_FAST_GRAIN_AUTO8 to installed Fast Grain.aex")
+    require_assertions()
+    assert os.name == "nt"
+    plugin = Path(plugin_env).resolve()
+    harness = ROOT / "broker/target/release/aexcompat-harness.exe"
+    worker = ROOT / "target/minihost-build/aex_worker.exe"
+
+    def identities():
+        return {name: {"sha256": sha(path.read_bytes()), "size_bytes": path.stat().st_size}
+                for name, path in (("plugin", plugin), ("harness", harness), ("worker", worker))}
+
+    metadata = {"schema_version": 1, "pixel_format": "argb8",
+                "identities_before": identities(), "cases": {}}
+    for label, alternate, intensity in CASES:
+        source = tmp_path / f"{label}-source.png"
+        Image.frombytes("RGBA", (WIDTH, HEIGHT), source_pixels(alternate)).save(source)
+        command = [str(harness), "--headless", "--render-experimental-session-param",
+                   str(plugin), str(source), str(tmp_path / f"{label}.png"),
+                   "argb8", "smart", "0", "300", "30", "1", str(intensity)]
+        started = time.perf_counter()
+        # Discovery remains unbounded; the interactive frame owns its broker deadline.
+        result = subprocess.run(command, cwd=ROOT, capture_output=True)
+        (tmp_path / f"{label}.stdout.json").write_bytes(result.stdout)
+        (tmp_path / f"{label}.stderr.txt").write_bytes(result.stderr)
+        metadata["cases"][label] = {
+            "command": command,
+            "intensity": intensity,
+            "returncode": result.returncode,
+            "elapsed_seconds": time.perf_counter() - started,
+        }
+        (tmp_path / "capture.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    metadata["identities_after"] = identities()
+    (tmp_path / "capture.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    metrics = validate_evidence(tmp_path, verify_metrics=False)
+    (tmp_path / "verification.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    validate_evidence(tmp_path)
+
+
 def test_recorded_fast_grain_gpu_response():
     directory = os.environ.get("AEXCOMPAT_FAST_GRAIN_GPU_EVIDENCE")
     if not directory:
         pytest.skip("set AEXCOMPAT_FAST_GRAIN_GPU_EVIDENCE for offline evidence validation")
+    validate_evidence(Path(directory))
+
+
+def test_recorded_fast_grain_gpu_response_auto8():
+    directory = os.environ.get("AEXCOMPAT_FAST_GRAIN_AUTO8_EVIDENCE")
+    if not directory:
+        pytest.skip("set AEXCOMPAT_FAST_GRAIN_AUTO8_EVIDENCE for offline evidence validation")
     validate_evidence(Path(directory))

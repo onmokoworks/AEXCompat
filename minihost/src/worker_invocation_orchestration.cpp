@@ -192,6 +192,7 @@ void apply_smart(const request_parser::WorkerInvocation& source,
   apply_common(source, target);
   const auto& mode = source.mode;
   target.smart_force_cpu = mode.force_cpu;
+  target.smart_auto_gpu8 = mode.auto_gpu8;
   target.smart_opencl = mode.opencl;
   target.smart_directx = mode.directx;
   target.smart_image_render_environment = mode.image_render_environment;
@@ -276,7 +277,8 @@ SmartRenderSessionOutcome run_smart_render_session(
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
     int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers,
-    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr);
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr,
+    uint32_t advertised_out_flags2 = 0);
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -572,9 +574,10 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
   std::string& case_id = result.case_id;
   SmartResult& smart = result.smart;
   bool& lifetime_fault_observed = result.lifetime_fault_observed;
-  case_id = invocation.request_mode ? (invocation.smart_force_cpu ? "request_cpu" :
+  case_id = invocation.request_mode ? (invocation.smart_auto_gpu8 ? "request_auto8" :
+      (invocation.smart_force_cpu ? "request_cpu" :
       (invocation.smart_opencl ? "gpu_opencl_float32" :
-       (invocation.smart_directx ? "gpu_directx_float32" : "request"))) : "";
+       (invocation.smart_directx ? "gpu_directx_float32" : "request")))) : "";
   if (!invocation.request_mode)
     for (const wchar_t* p = argv[4]; *p; ++p) {
       if (*p > 0x7f) { result.case_id_rejected = true; return result; }
@@ -594,7 +597,7 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
           invocation.external_time_step, invocation.external_total_time,
           invocation.external_time_scale, invocation.external_pixel_bytes,
           invocation.external_layers.empty() ? nullptr : &invocation.external_layers,
-          request.cluster_swap);
+          request.cluster_swap, request.advertised_out_flags2);
       smart = outcome.last;
       // The report's guard verdict is the session-level one: a per-frame
       // guard violation invalidated the session (exit 24), and an empty

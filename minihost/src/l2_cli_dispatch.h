@@ -74,6 +74,7 @@ struct WorkerMode {
   bool image_spatial_context{};
   bool image_mask_context{};
   bool force_cpu{};
+  bool auto_gpu8{};
   bool opencl{};
   bool directx{};
   bool mask_request_mode{};

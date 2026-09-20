@@ -83,9 +83,11 @@ Plan prepare(const Context& context, const Request& request) {
   plan.force_cpu_image = case_id == "request_cpu";
   const bool advertised_gpu_support =
       (read<uint32_t>(output, 400) & (1u << 25)) != 0;
+  plan.auto_gpu8 = case_id == "request_auto8" && request.has_external_rgba &&
+      request.external_pixel_bytes == 4 && request.auto_gpu8_eligible;
   plan.gpu_negotiation = plan.fixture_gpu_negotiation ||
       plan.opencl_gpu_negotiation || plan.directx_gpu_negotiation ||
-      plan.explicit_gpu_device ||
+      plan.explicit_gpu_device || plan.auto_gpu8 ||
       (request.has_external_rgba && request.external_pixel_bytes == 16 &&
        advertised_gpu_support && !plan.force_cpu_image);
   // GPU-required fallback (issue #1072): the frame loop sets force_gpu_retry
@@ -110,7 +112,8 @@ Plan prepare(const Context& context, const Request& request) {
       plan.height > 4096) return plan;
   plan.pixel_bytes = plan.float32 ? 16 : (plan.deep16 ? 8 : 4);
   plan.rowbytes = case_id == "padded_stride" ? 64 : plan.width * plan.pixel_bytes;
-  if (!render::is_fixed_image_case(case_id) && case_id != "request" && !plan.deep16 &&
+  if (!render::is_fixed_image_case(case_id) && case_id != "request" &&
+      case_id != "request_cpu" && case_id != "request_auto8" && !plan.deep16 &&
       !plan.float32 && !plan.missing_input && !plan.crash_null_output &&
       !plan.temporal_context && !plan.partial_output_request &&
       !plan.connected_map) return plan;

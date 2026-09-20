@@ -55,6 +55,7 @@ struct InvocationState {
     int32_t audio_session_max_samples{};
     int32_t audio_session_channels{1};
     bool smart_force_cpu{};
+    bool smart_auto_gpu8{};
     bool smart_opencl{};
     bool smart_directx{};
     int32_t external_pixel_bytes{4};
@@ -197,6 +198,7 @@ struct FinalDispatchRequest {
   // for render_once so the thread/context contract can be tested without a
   // loaded AEX or the process-global selector diagnostics it would require.
   void (*concurrent_thread_context_probe)(){};
+  uint32_t advertised_out_flags2{};
 };
 
 struct ClassicFinalDispatchResult {

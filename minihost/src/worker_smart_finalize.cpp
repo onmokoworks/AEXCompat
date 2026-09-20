@@ -1,6 +1,7 @@
 #include "worker_smart_finalize.hpp"
 #include "render_subsystem.h"
 #include "worker_handle_runtime.hpp"
+#include "worker_param_checkout_runtime.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_smart_runtime.hpp"
 #include "worker_world_registry.hpp"
@@ -32,7 +33,7 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
       !h.ui_active) return false;
   void* pre_render_data = read<void*>(*r.pre_output, 40);
   if (auto cleanup = read<void(__cdecl*)(void*)>(*r.pre_output, 48)) {
-    invoke_smart_pre_render_cleanup_seh(cleanup, pre_render_data);
+    result.pre_cleanup_error = invoke_smart_pre_render_cleanup_seh(cleanup, pre_render_data);
   } else if (pre_render_data && handles::host_handle_is_live(pre_render_data)) {
     handles::dispose_handle(reinterpret_cast<void**>(pre_render_data));
     handles::record_automatic_pre_render_disposal();
@@ -40,9 +41,12 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
   if (h.ui_active() &&
       !h.close_ui(r.entry, *r.input, *r.output, r.parameters->definitions) &&
       result.render_error == 0) result.render_error = -5;
-  result.render_error = h.end_lifecycle(r.entry, *r.input, *r.output,
+  result.lifecycle_error = h.end_lifecycle(r.entry, *r.input, *r.output,
       r.parameters->params.data(), r.output_world->data(), *r.lifecycle,
-      result.render_error);
+      0);
+  if (result.render_error == 0) result.render_error = result.lifecycle_error;
+  if (result.render_error == 0) result.render_error = result.pre_cleanup_error;
+  result.parameter_checkouts_balanced = aexcompat::l2_detail::param_checkouts_balanced();
   auto& state = smart::state();
   state.input_world = nullptr; state.output_world = nullptr;
   state.map_world = nullptr; state.hosted_layers.clear();

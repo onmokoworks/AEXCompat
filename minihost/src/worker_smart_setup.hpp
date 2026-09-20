@@ -29,6 +29,7 @@ struct Request {
   int32_t external_current_time{};
   uint32_t external_time_scale{1};
   int32_t external_pixel_bytes{4};
+  bool auto_gpu8_eligible{};
 };
 
 struct Plan {
@@ -36,6 +37,7 @@ struct Plan {
   bool deep16{};
   bool float32{};
   bool gpu_negotiation{};
+  bool auto_gpu8{};
   bool fixture_gpu_negotiation{};
   bool opencl_gpu_negotiation{};
   bool directx_gpu_negotiation{};

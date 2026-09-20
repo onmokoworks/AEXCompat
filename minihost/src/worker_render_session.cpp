@@ -7,6 +7,7 @@
 #include "strict_json.hpp"
 #include "worker_classic_render_entry.hpp"
 #include "worker_invocation_orchestration.hpp"
+#include "worker_param_checkout_runtime.hpp"
 #include "worker_pf_ae_channel_runtime.hpp"
 #include "worker_request_parser.hpp"
 #include "worker_selector_dispatch.hpp"
@@ -1344,8 +1345,12 @@ SmartRenderSessionOutcome run_smart_render_session(
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
     int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers,
-    const aexcompat::worker_render_session::SwapPluginHook* swap_hook) {
+    const aexcompat::worker_render_session::SwapPluginHook* swap_hook,
+    uint32_t advertised_out_flags2) {
   SmartRenderSessionOutcome outcome;
+  constexpr uint32_t kAutoGpu8Flags = (1u << 10) | (1u << 25);
+  const bool auto_gpu8_eligible =
+      !swap_hook && (advertised_out_flags2 & kAutoGpu8Flags) == kAutoGpu8Flags;
   run_session_frame_loop(
       outcome.session, entry, input, output, max_width, max_height,
       // Smart sessions (v1.1) render at fixed dimensions; no output expansion.
@@ -1365,32 +1370,69 @@ SmartRenderSessionOutcome run_smart_render_session(
         // read at the end is the one from the pass whose pixels are reported.
         worker_runtime::smart_execution::SessionFrame retry_frame{&captured};
         const worker_runtime::smart_execution::SessionFrame* verdict = &session_frame;
-        const auto render_attempt = [&](worker_runtime::smart_execution::SessionFrame* attempt_frame) {
+        const auto render_attempt = [&](worker_runtime::smart_execution::SessionFrame* attempt_frame,
+                                        const std::string& attempt_case) {
+          attempt_frame->auto_gpu8_eligible = auto_gpu8_eligible;
           return worker_runtime::smart_setup::run_pr_gpu_pf_first_session_attempt(
               [&] {
                 return smart_render_once(
-                    current_entry, input, output, case_id,
+                    current_entry, input, output, attempt_case,
                     frame_override ? frame_override : requested, &frame_rgba,
                     max_width, max_height, frame_layers, current_time, time_step,
                     total_time, time_scale, pixel_bytes, attempt_frame);
               });
         };
+        const auto substitutions_before =
+            worker_runtime::selector_dispatch_telemetry().substituted_selector_failures;
         worker_runtime::smart_execution::Result frame_result =
-            render_attempt(&session_frame);
+            render_attempt(&session_frame, case_id);
+        const bool first_auto_gpu = frame_result.auto_gpu8;
+        if (first_auto_gpu) {
+          auto attempt = worker_runtime::smart_execution::Result::AutoGpuAttempt{
+              true, frame_result.gpu_setup_dispatched, frame_result.gpu_render_dispatched,
+              false, frame_result.gpu_setup_error, frame_result.pre_error,
+              frame_result.render_error, frame_result.gpu_setdown_error,
+              frame_result.pre_cleanup_error, frame_result.lifecycle_error, {},
+              frame_result.input_hash, frame_result.output_hash};
+          const bool clean_decline = frame_result.auto_gpu_declined != 0 &&
+              !frame_result.selector_dispatched && !frame_result.gpu_render_dispatched &&
+              frame_result.gpu_setdown_error == 0 &&
+              frame_result.gpu_setdown_exception_code == 0 &&
+              frame_result.pre_cleanup_error == 0 && frame_result.lifecycle_error == 0 &&
+              frame_result.parameter_checkouts_balanced &&
+              param_checkouts_balanced() && session_frame.guards_intact &&
+              frame_result.runtime->pixel_checkouts_balanced &&
+              frame_result.guards_intact && !frame_result.output_allocation_failed &&
+              frame_result.malformed_checkout_requests == 0 &&
+              frame_result.empty_checkout_pixel_denials == 0 &&
+              worker_runtime::selector_dispatch_telemetry().substituted_selector_failures ==
+                  substitutions_before;
+          if (clean_decline) {
+            attempt.fallback_used = true;
+            attempt.fallback_reason = frame_result.auto_gpu_declined == 1
+                ? "backend-unavailable-before-setup" : "pre-render-declined-gpu";
+            captured.clear();
+            retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
+            verdict = &retry_frame;
+            frame_result = render_attempt(&retry_frame, "request_cpu");
+          }
+          frame_result.auto_gpu_attempt = std::move(attempt);
+        }
         // GPU-required fallback (#1072): an effect advertising GPU F32 render
         // (out_flags2 bit25) that answers PF_Err 14 at the start of CPU
         // SMART_RENDER only implements the GPU path (the color family). out_flags2
         // does not separate those from CPU-capable effects, so the runtime 14 is
         // the only signal. The 14 arrives before the plug-in touches suites,
         // worlds, or checkouts, so re-run the frame once through the GPU transport.
-        if (frame_result.render_error == 14 &&
+        if (!first_auto_gpu && case_id != "request_cpu" && case_id != "request_auto8" &&
+            frame_result.render_error == 14 &&
             (read<uint32_t>(output, 400) & (1u << 25)) != 0 &&
             !worker_runtime::smart_setup::force_gpu_retry_requested()) {
           const worker_runtime::smart_setup::ForceGpuRetryScope force_gpu;
           captured.clear();
           retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
           verdict = &retry_frame;
-          frame_result = render_attempt(&retry_frame);
+          frame_result = render_attempt(&retry_frame, case_id);
         }
         // Premiere GPU-filter fallback (#1271): an effect exporting
         // xGPUFilterEntry whose SMART_RENDER selector refused the frame only
@@ -1421,7 +1463,8 @@ SmartRenderSessionOutcome run_smart_render_session(
         // their own. Which of the two codes a GPU-only effect reaches the end
         // of its CPU path with is incidental; that it could not serve the
         // frame is the property this retry is for.
-        if (frame_result.selector_dispatched &&
+        if (!first_auto_gpu && case_id != "request_cpu" &&
+            frame_result.selector_dispatched &&
             (frame_result.selector_error == 512 ||
              frame_result.selector_error == 516) &&
             !frame_result.selector_failure_substituted &&
@@ -1433,14 +1476,15 @@ SmartRenderSessionOutcome run_smart_render_session(
           captured.clear();
           retry_frame = worker_runtime::smart_execution::SessionFrame{&captured};
           verdict = &retry_frame;
-          frame_result = render_attempt(&retry_frame);
+          frame_result = render_attempt(&retry_frame, case_id);
         }
-        outcome.last = frame_result;
         // The GPU transport captures float32 ARGB; when the session output is
         // 8-bit (pixel_bytes == 4) narrow it to 8-bit ARGB the way an 8-bit comp
         // in AE would receive it (#1072).
         bool downconverted_8bit = false;
-        if (pixel_bytes == 4 && frame_result.output_width > 0 &&
+        if (pixel_bytes == 4 && frame_result.render_error == 0 &&
+            frame_result.output_pixels_valid && frame_result.guards_intact &&
+            frame_result.output_width > 0 &&
             frame_result.output_height > 0) {
           const std::size_t px = static_cast<std::size_t>(frame_result.output_width) *
                                  static_cast<std::size_t>(frame_result.output_height);
@@ -1454,9 +1498,23 @@ SmartRenderSessionOutcome run_smart_render_session(
             }
             captured.swap(narrowed);
             downconverted_8bit = true;
+            if (first_auto_gpu && !frame_result.auto_gpu_attempt.fallback_used) {
+              // The canonical session report describes the bytes transported
+              // to the broker; retain the actual internal float hashes in the
+              // attempt record instead of relabelling those bytes as ARGB8.
+              std::vector<unsigned char> input_argb(frame_rgba.size());
+              for (std::size_t i = 0; i < frame_rgba.size(); i += 4)
+                render_pixel_transport::rgba8_to_argb(
+                    input_argb.data() + i, frame_rgba.data() + i, 4);
+              frame_result.input_hash = sha256_bytes(input_argb.data(), input_argb.size());
+              frame_result.output_hash = sha256_bytes(captured.data(), captured.size());
+              frame_result.output_rowbytes = frame_result.output_width * 4;
+              frame_result.session_narrowed8 = true;
+            }
           }
         }
         frame.width = frame_result.output_width;
+        outcome.last = frame_result;
         frame.height = frame_result.output_height;
         frame.rowbytes = downconverted_8bit ? frame_result.output_width * 4
                                             : frame_result.output_rowbytes;

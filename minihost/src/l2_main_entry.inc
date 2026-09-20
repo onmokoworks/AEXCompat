@@ -3247,7 +3247,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
         {entry, &input, &output, &invocation, argv, params_error,
          image_render_supported, depth_supported, smart_render_supported,
-         cluster_session_active ? &cluster_swap_hook : nullptr, audio_effect_only});
+         cluster_session_active ? &cluster_swap_hook : nullptr, audio_effect_only,
+         nullptr, advertised_out_flags2});
     if (dispatch.case_id_rejected) {
       dispose_arbitrary_defaults(entry, input, output);
       if (global_error == 0)

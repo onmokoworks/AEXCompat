@@ -29,9 +29,36 @@ struct SessionFrame {
   std::vector<unsigned char>* captured_argb{};
   bool output_buffer_allocated{};
   bool guards_intact{true};
+  bool auto_gpu8_eligible{};
 };
 
 struct Result {
+  // Auto8 records the initial negotiated attempt even when a clean refusal
+  // is followed by CPU8. These facts are never substituted for final errors.
+  struct AutoGpuAttempt {
+    bool attempted{};
+    bool setup_dispatched{};
+    bool render_dispatched{};
+    bool fallback_used{};
+    int32_t setup_error{};
+    int32_t pre_error{};
+    int32_t render_error{};
+    int32_t setdown_error{};
+    int32_t cleanup_error{};
+    int32_t lifecycle_error{};
+    std::string fallback_reason;
+    std::string internal_float_input_sha256;
+    std::string internal_float_output_sha256;
+  } auto_gpu_attempt;
+  bool session_narrowed8{};
+  bool auto_gpu8{};
+  bool gpu_setup_dispatched{};
+  // 0: no safe refusal; 1: backend unavailable before plug-in setup;
+  // 2: successful valid nonempty PreRender declined GPU rendering.
+  int32_t auto_gpu_declined{};
+  int32_t pre_cleanup_error{};
+  int32_t lifecycle_error{};
+  bool parameter_checkouts_balanced{};
   std::shared_ptr<const smart::Snapshot> runtime{
       std::make_shared<smart::Snapshot>()};
   int32_t gpu_setup_error{};

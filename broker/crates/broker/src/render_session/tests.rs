@@ -910,7 +910,11 @@ fn smart_session_commands_carry_the_gpu_backend() {
     }
     assert_eq!(
         session_command(RenderPixelFormat::Argb8, true, RenderGpuBackend::Auto).unwrap(),
-        "--smart-session-v1"
+        "--smart-session8-auto-v1"
+    );
+    assert_eq!(
+        session_command(RenderPixelFormat::Argb8, true, RenderGpuBackend::Cpu).unwrap(),
+        "--smart-session8-cpu-v1"
     );
     assert_eq!(
         session_command(RenderPixelFormat::Argb16, true, RenderGpuBackend::Cpu).unwrap(),

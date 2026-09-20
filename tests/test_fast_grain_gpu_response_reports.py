@@ -14,6 +14,7 @@ from test_fast_grain_gpu_response import (
     PIXELS,
     CASES,
     PLUGIN_SHA,
+    argb8_bytes,
     argb_float_bytes,
     assert_report,
     assert_response,
@@ -57,6 +58,8 @@ def _valid_case():
         "param_checkouts_balanced": True,
         "parameter_count_contract_ok": True,
         "gpu_fallback_used": False,
+        "gpu_fallback_reason": None,
+        "gpu_attempt": None,
         "worker_classification": "ok",
         "render_path": "smartfx",
         "pixel_format": "argb32f",
@@ -144,6 +147,33 @@ def _valid_case():
     return report, source, raw, copy.deepcopy(IDENTITIES)
 
 
+def _valid_auto8_case(*, alternate=False, intensity=0):
+    report, source, _, identities = _valid_case()
+    source = source_pixels(alternate)
+    output = synthetic_outputs()[f"{'b' if alternate else 'a'}-{intensity}"]
+    report["output_transport"] = "rgba8_png"
+    report["pixel_format"] = "argb8"
+    report["output_sha256"] = sha(argb8_bytes(output))
+    report["input_sha256"] = sha(argb8_bytes(source))
+    report["gpu_attempt"] = {
+        "setup_dispatched": True,
+        "setup_error": 0,
+        "pre_error": 0,
+        "render_dispatched": True,
+        "render_error": 0,
+        "setdown_error": 0,
+        "cleanup_error": 0,
+        "lifecycle_error": 0,
+        "fallback_used": False,
+        "fallback_reason": "",
+        "internal_pixel_format": "argb32f",
+        "internal_float_input_sha256": sha(argb_float_bytes(float_bytes(source))),
+        "internal_float_output_sha256": sha(argb_float_bytes(float_bytes(output))),
+    }
+    _parameter_by_slot(report, 1)["value"] = intensity
+    return report, source, output, identities
+
+
 def _parameter_by_slot(report, slot):
     return next(item for item in report["requested_parameters"]
                 if item["slot"] == slot)
@@ -159,6 +189,10 @@ def _corrupt(case, fault):
         report["cuda_context_used"] = False
     elif fault == "gpu_fallback":
         report["gpu_fallback_used"] = True
+    elif fault == "gpu_fallback_reason":
+        report["gpu_fallback_reason"] = "unexpected-fallback"
+    elif fault == "gpu_attempt":
+        report["gpu_attempt"] = {"unexpected": True}
     elif fault == "cuda_bytes":
         report["cuda_download_bytes"] -= 16
     elif fault == "raw_bytes":
@@ -262,11 +296,50 @@ def _corrupt(case, fault):
     return report, source, raw, identities
 
 
+def _corrupt_auto8(case, fault):
+    report, source, output, identities = case
+    attempt = report.get("gpu_attempt")
+    if fault == "pixel_format":
+        report["pixel_format"] = "argb32f"
+    elif fault == "transport":
+        report["output_transport"] = "native_raw+rgba8_png_preview"
+    elif fault == "output_hash":
+        report["output_sha256"] = "0" * 64
+    elif fault == "input_hash":
+        report["input_sha256"] = "0" * 64
+    elif fault == "missing_attempt":
+        del report["gpu_attempt"]
+    elif fault == "setup_not_dispatched":
+        attempt["setup_dispatched"] = False
+    elif fault == "render_not_dispatched":
+        attempt["render_dispatched"] = False
+    elif fault == "fallback":
+        attempt["fallback_used"] = True
+    elif fault == "fallback_reason":
+        attempt["fallback_reason"] = "pre-render-declined-gpu"
+    elif fault == "top_fallback_reason":
+        report["gpu_fallback_reason"] = "unexpected-fallback"
+    elif fault == "internal_format":
+        attempt["internal_pixel_format"] = "argb8"
+    elif fault == "internal_input_hash":
+        attempt["internal_float_input_sha256"] = "0" * 64
+    elif fault == "internal_output_hash":
+        attempt["internal_float_output_sha256"] = "not-a-sha256"
+    elif fault in ("setup_error", "pre_error", "render_error", "setdown_error",
+                   "cleanup_error", "lifecycle_error"):
+        attempt[fault] = 1
+    else:
+        raise AssertionError(f"unknown Auto8 mutation: {fault}")
+    return report, source, output, identities
+
+
 @pytest.mark.parametrize("fault", [
     "gpu_possible_false",
     "gpu_dispatch_false",
     "cuda_context_false",
     "gpu_fallback",
+    "gpu_fallback_reason",
+    "gpu_attempt",
     "cuda_bytes",
     "raw_bytes",
     "short_raw",
@@ -313,6 +386,36 @@ def test_report_oracle_rejects_false_success(fault):
     corrupted = _corrupt(copy.deepcopy(valid), fault)
     with pytest.raises(AssertionError):
         assert_report(corrupted[0], corrupted[1], corrupted[2], 0, corrupted[3])
+
+
+@pytest.mark.parametrize("fault", [
+    "pixel_format",
+    "transport",
+    "output_hash",
+    "input_hash",
+    "missing_attempt",
+    "setup_not_dispatched",
+    "render_not_dispatched",
+    "fallback",
+    "fallback_reason",
+    "top_fallback_reason",
+    "internal_format",
+    "internal_input_hash",
+    "internal_output_hash",
+    "setup_error",
+    "pre_error",
+    "render_error",
+    "setdown_error",
+    "cleanup_error",
+    "lifecycle_error",
+])
+def test_auto8_report_oracle_rejects_false_success(fault):
+    valid = _valid_auto8_case()
+    assert_report(valid[0], valid[1], valid[2], 0, valid[3], pixel_format="argb8")
+    corrupted = _corrupt_auto8(copy.deepcopy(valid), fault)
+    with pytest.raises((AssertionError, KeyError)):
+        assert_report(corrupted[0], corrupted[1], corrupted[2], 0, corrupted[3],
+                      pixel_format="argb8")
 
 
 def test_unique_object_rejects_duplicate_json_keys():
@@ -396,6 +499,58 @@ def synthetic_capture(tmp_path_factory):
     (directory / "verification.json").write_text(json.dumps(assert_response(outputs)), encoding="utf-8")
     validate_evidence(directory)
     return directory
+
+
+@pytest.fixture(scope="module")
+def synthetic_auto8_capture(tmp_path_factory):
+    directory = tmp_path_factory.mktemp("synthetic-grain-auto8-capture")
+    outputs = synthetic_outputs()
+    metadata = {"schema_version": 1, "pixel_format": "argb8", "identities_before": {
+        "plugin": {"sha256": PLUGIN_SHA, "size_bytes": 1_568_256},
+        "worker": IDENTITIES["worker"],
+        "harness": {"sha256": "c" * 64, "size_bytes": 12345}}, "cases": {}}
+    metadata["identities_after"] = copy.deepcopy(metadata["identities_before"])
+    for label, alternate, intensity in CASES:
+        source = source_pixels(alternate)
+        Image.frombytes("RGBA", (WIDTH, HEIGHT), source).save(directory / f"{label}-source.png")
+        Image.frombytes("RGBA", (WIDTH, HEIGHT), outputs[label]).save(directory / f"{label}.png")
+        report, _, _, _ = _valid_auto8_case(alternate=alternate, intensity=intensity)
+        report["worker_diagnostics"]["execution_identity"]["plugin_images"][0][
+            "sha256"] = PLUGIN_SHA
+        report["output_png"] = str(PureWindowsPath("C:/capture") / f"{label}.png")
+        report["output_raw"] = None
+        (directory / f"{label}.stdout.json").write_text(json.dumps(report), encoding="utf-8")
+        (directory / f"{label}.stderr.txt").write_bytes(b"")
+        metadata["cases"][label] = {
+            "returncode": 0,
+            "intensity": intensity,
+            "elapsed_seconds": 0.5,
+            "command": [
+                "C:/app/aexcompat-harness.exe",
+                "--headless",
+                "--render-experimental-session-param",
+                "C:/plugins/Fast Grain.aex",
+                f"C:/capture/{label}-source.png",
+                report["output_png"],
+                "argb8",
+                "smart",
+                "0",
+                "300",
+                "30",
+                "1",
+                str(intensity),
+            ],
+        }
+    (directory / "capture.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (directory / "verification.json").write_text(
+        json.dumps(assert_response(outputs)), encoding="utf-8")
+    return directory
+
+
+def test_auto8_synthetic_capture_roundtrip(synthetic_auto8_capture):
+    metrics = validate_evidence(synthetic_auto8_capture)
+    assert metrics == read_json(synthetic_auto8_capture / "verification.json")
+    assert not list(synthetic_auto8_capture.glob("*.rgba32f-le"))
 
 
 @pytest.mark.parametrize("fault", ["capture_schema", "harness_identity", "argv", "source_label", "elapsed_nan",

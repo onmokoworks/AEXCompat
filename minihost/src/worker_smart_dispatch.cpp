@@ -2153,6 +2153,7 @@ bool dispatch(const Request& request, const Hooks& hooks,
   const auto& plan = *request.plan;
   auto& runtime = smart::state();
   // Snapshot before GPU_DEVICE_SETUP can change output capability flags.
+  result.auto_gpu8 = plan.auto_gpu8;
   const bool cpu_float_supported =
       (read<uint32_t>(*request.output, 400) & (1u << 12)) != 0;
   auto& params = request.parameters->params;
@@ -2213,6 +2214,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
       transport::begin_backend_context(
           gpu_framework, plan.gpu_device_index,
           gpu_framework == 3 ? video_frame_worlds.cuda_context() : nullptr);
+  if (plan.auto_gpu8 && !gpu_context_started)
+    result.auto_gpu_declined = 1;
   if (plan.gpu_negotiation) {
     write<int32_t>(gpu_setup_input, 0, gpu_framework);
     write<uint32_t>(gpu_setup_input, 4, plan.gpu_device_index);
@@ -2222,6 +2225,7 @@ bool dispatch(const Request& request, const Hooks& hooks,
     {
       ModuleDirectoryScope gpu_module_directory(
           GetModuleHandleW(L"GPUFoundation.dll"));
+      result.gpu_setup_dispatched = gpu_context_started;
       result.gpu_setup_error = gpu_context_started
           ? hooks.guarded_call(request.entry, kGpuDeviceSetup,
                                request.input->data(), request.output->data(),
@@ -2526,17 +2530,25 @@ bool dispatch(const Request& request, const Hooks& hooks,
 
   const int32_t render_selector = plan.gpu_negotiation && result.gpu_render_possible
       ? kSmartRenderGpu : kSmartRender;
+  // An Auto8 GPU refusal is not permission to hand GPU-labelled float worlds
+  // to the CPU selector. Finalize this attempt, then the session may start a
+  // fresh CPU8 frame only after checking cleanup and host invariants.
+  if (plan.auto_gpu8 && result.gpu_setup_error == 0 &&
+      result.pre_error == 0 && result.rects_valid &&
+      !result.empty_result_rect && !result.gpu_render_possible) {
+    result.auto_gpu_declined = 2;
+  }
   // GPU-only F32 effects may enter negotiation without FLOAT_COLOR_AWARE.
   // A declined GPU pre-render must never send their float worlds to CPU.
   if (plan.float32 && !cpu_float_supported &&
       render_selector != kSmartRenderGpu &&
-      result.pre_error == 0)
+      result.pre_error == 0 && result.auto_gpu_declined == 0)
     result.pre_error = -6;
   // One predicate drives the selector call, the GPU transport, and the
   // dispatch reporting, so a skipped render (empty result or rejected
   // geometry) never prepares device transport or claims a GPU dispatch.
   const bool will_dispatch = result.pre_error == 0 && result.rects_valid &&
-      !result.empty_result_rect;
+      !result.empty_result_rect && result.auto_gpu_declined == 0;
   result.gpu_render_dispatched = render_selector == kSmartRenderGpu && will_dispatch;
   transport::RenderTransport render_transport;
   bool transport_ready = !result.gpu_render_dispatched || !use_transport;
@@ -2734,7 +2746,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
     void* pre_render_data = read<void*>(dispatch_state.pre_output, 40);
     if (auto cleanup =
             read<void(__cdecl*)(void*)>(dispatch_state.pre_output, 48)) {
-      invoke_smart_pre_render_cleanup_seh(cleanup, pre_render_data);
+      result.pre_cleanup_error =
+          invoke_smart_pre_render_cleanup_seh(cleanup, pre_render_data);
       write<void*>(dispatch_state.pre_output, 40, nullptr);
       write<void(__cdecl*)(void*)>(dispatch_state.pre_output, 48, nullptr);
     }

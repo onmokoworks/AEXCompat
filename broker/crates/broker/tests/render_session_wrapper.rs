@@ -52,6 +52,51 @@ mod windows_e2e {
             .expect("repository root")
     }
 
+    const GPU_DEPTH_PROBE_WIDTH: u32 = 32;
+    const GPU_DEPTH_PROBE_HEIGHT: u32 = 24;
+
+    fn open_auto8_gpu_depth_probe_session(
+        root: &Path,
+        aex: &Path,
+        sha: &str,
+        mode: &str,
+        total_time: i32,
+    ) -> std::io::Result<RenderSession> {
+        RenderSession::open(SessionOpenRequest {
+            repository: root,
+            plugin_path: aex,
+            plugin_sha256: sha,
+            parameters: None,
+            payload_override: None,
+            parameter_animation: None,
+            aux_manifest: None,
+            world_dump_dir: None,
+            output_checksum_detail: false,
+            mask_trailer: None,
+            spatial_trailer: None,
+            render_environment_trailer: None,
+            audio_trailer: None,
+            layers: &[],
+            alpha_as_coverage_params: &[],
+            conformance_render_settings: None,
+            dependencies: Vec::new(),
+            companions: Vec::new(),
+            dependency_search_dirs: vec![aex.parent().unwrap().to_path_buf()],
+            width: GPU_DEPTH_PROBE_WIDTH,
+            height: GPU_DEPTH_PROBE_HEIGHT,
+            pixel_format: RenderPixelFormat::Argb8,
+            time_step: 1,
+            total_time,
+            time_scale: 1,
+            frame_deadline: Duration::from_secs(30),
+            smart: true,
+            gpu_backend: RenderGpuBackend::Auto,
+            gpu_runtime_policy: None,
+            launch_environment: LaunchEnvironment::default()
+                .with_child_var("AEXCOMPAT_GPU_DEPTH_PROBE", mode),
+        })
+    }
+
     // Every test here asserts on deltas of RENDER_SESSION_WRAPPER_RENDERS, and
     // the two fail-closed diagnostics toggle the process-global
     // FORCE_SESSION_FALLBACK_ENV. cargo runs a binary's tests concurrently, so
@@ -467,6 +512,544 @@ mod windows_e2e {
             "the Auto fold PNG differs from the explicit-CPU PNG"
         );
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// An explicit CPU request is a routing decision, not permission to probe
+    /// the GPU and fall back.  The fixture advertises float GPU support, but
+    /// paints CPU8 red only when GPU_DEVICE_SETUP was never called (and blue
+    /// after any setup), so the pixels make that distinction observable.  Its
+    /// default GPU-only mode rejects CPU SMART_RENDER with SDK error 516, and
+    /// a second mode returns literal 14 to exercise the former GPU-retry
+    /// trigger. Both must remain errors rather than select a hidden GPU route.
+    #[test]
+    fn explicit_argb8_cpu_never_attempts_or_retries_gpu() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = std::env::var_os("AEXCOMPAT_TEST_GPU_DEPTH_PROBE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                root.join(
+                    "target/pf-smart-gpu-depth-probe-build/Release/\
+                     pf_smart_gpu_depth_probe.aex",
+                )
+            });
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping explicit Argb8 CPU routing: build aex_worker.exe and {}",
+                aex.display()
+            );
+            return;
+        }
+
+        struct EnvVarGuard {
+            name: &'static str,
+            previous: Option<std::ffi::OsString>,
+        }
+        impl EnvVarGuard {
+            fn replace(name: &'static str, value: Option<&str>) -> Self {
+                let previous = std::env::var_os(name);
+                match value {
+                    Some(value) => unsafe { std::env::set_var(name, value) },
+                    None => unsafe { std::env::remove_var(name) },
+                }
+                Self { name, previous }
+            }
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(value) => unsafe { std::env::set_var(self.name, value) },
+                    None => unsafe { std::env::remove_var(self.name) },
+                }
+            }
+        }
+
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-explicit-cpu8-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let input = scratch.join("input.png");
+        image::RgbaImage::from_fn(32, 24, |x, y| {
+            image::Rgba([(x * 7) as u8, (y * 9) as u8, (x + y * 2) as u8, 255])
+        })
+        .save(&input)
+        .unwrap();
+        let timing = RenderTiming {
+            current_time: 0,
+            time_step: 1,
+            total_time: 300,
+            time_scale: 30,
+        };
+        let render = |output: &Path| {
+            render_experimental_image_at_time_with_format_context_ui_action_and_gpu_backend(
+                &root,
+                &aex,
+                &sha,
+                &input,
+                output,
+                &[],
+                timing,
+                true,
+                RenderPixelFormat::Argb8,
+                None,
+                None,
+                RenderGpuBackend::Cpu,
+            )
+        };
+        {
+            let _probe_mode =
+                EnvVarGuard::replace("AEXCOMPAT_GPU_DEPTH_PROBE", Some("dual8-capable"));
+            let before = RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst);
+            let output = scratch.join("cpu-red.png");
+            let report = render(&output).expect("explicit Argb8 CPU render");
+            assert!(
+                RENDER_SESSION_WRAPPER_RENDERS.load(Ordering::SeqCst) > before,
+                "the explicit Argb8 CPU render must be carried by the session"
+            );
+            assert_session_render_is_healthy(&report, "explicit Argb8 CPU");
+            assert_eq!(
+                report.get("render_path"),
+                Some(&serde_json::json!("smartfx"))
+            );
+            assert_eq!(
+                report.get("pixel_format"),
+                Some(&serde_json::json!("argb8"))
+            );
+            assert_eq!(
+                report.get("gpu_render_possible"),
+                Some(&serde_json::json!(true)),
+                "the fixture must advertise the competing GPU route: {report}"
+            );
+            assert_eq!(report.get("gpu_attempt"), Some(&serde_json::Value::Null));
+            assert_eq!(
+                report.get("gpu_fallback_used"),
+                Some(&serde_json::json!(false))
+            );
+            assert_eq!(
+                report.get("gpu_fallback_reason"),
+                Some(&serde_json::Value::Null)
+            );
+            assert_eq!(
+                report.get("gpu_render_dispatched"),
+                Some(&serde_json::json!(false))
+            );
+            assert_eq!(
+                report.get("cuda_context_used"),
+                Some(&serde_json::json!(false))
+            );
+            assert_eq!(report.get("cuda_upload_bytes"), Some(&serde_json::json!(0)));
+            assert_eq!(
+                report.get("cuda_download_bytes"),
+                Some(&serde_json::json!(0))
+            );
+
+            let decoded = image::open(&output)
+                .expect("decode explicit CPU output")
+                .to_rgba8();
+            assert_eq!(decoded.dimensions(), (32, 24));
+            assert!(
+                decoded.pixels().all(|pixel| pixel.0 == [231, 17, 29, 255]),
+                "the CPU fixture turns blue after any GPU setup; output was not the no-GPU red marker"
+            );
+        }
+
+        {
+            // With no probe mode, the fixture is deliberately GPU-only: its
+            // CPU SMART_RENDER returns the SDK's BAD_CALLBACK_PARAM (516).
+            // Preserve that plug-in error and the absence of a GPU attempt.
+            let _probe_mode = EnvVarGuard::replace("AEXCOMPAT_GPU_DEPTH_PROBE", None);
+            let output = scratch.join("cpu-error516.png");
+            let error = render(&output).expect_err("CPU error 516 must remain an error");
+            assert!(!output.exists(), "a rejected CPU frame committed an output");
+            let message = error.to_string();
+            let (_, worker_json) = message
+                .split_once(", report=")
+                .unwrap_or_else(|| panic!("missing worker report in CPU error: {message}"));
+            let worker_report: serde_json::Value = serde_json::from_str(worker_json)
+                .unwrap_or_else(|error| {
+                    panic!("invalid worker report in CPU error: {error}: {message}")
+                });
+            assert_eq!(
+                worker_report.get("smart_render_selector_error"),
+                Some(&serde_json::json!(516)),
+                "the plug-in's CPU selector refusal must remain visible: {worker_report}"
+            );
+            assert_eq!(
+                worker_report.get("smart_render_error"),
+                Some(&serde_json::json!(516))
+            );
+            assert_eq!(
+                worker_report.get("gpu_device_setup_error"),
+                Some(&serde_json::json!(0))
+            );
+            assert_eq!(
+                worker_report.get("gpu_render_dispatched"),
+                Some(&serde_json::json!(false))
+            );
+            assert_eq!(
+                worker_report.get("cuda_context_used"),
+                Some(&serde_json::json!(false))
+            );
+            let return_message = &worker_report["return_message"];
+            assert_eq!(
+                return_message["text"],
+                "GPU-only probe unexpectedly reached CPU"
+            );
+            assert_eq!(return_message["selector"], "SMART_RENDER");
+            assert_eq!(return_message["error"], 516);
+            assert_eq!(return_message["display_requested"], false);
+            assert_eq!(
+                worker_report.get("gpu_auto8_attempt"),
+                Some(&serde_json::Value::Null)
+            );
+        }
+
+        {
+            // This mode returns the literal 14 that used to activate the
+            // GPU-required retry.  It also advertises GPU F32, so an explicit
+            // CPU request that accidentally retained that retry would produce
+            // a successful gradient instead of this frame-local error.
+            let _probe_mode =
+                EnvVarGuard::replace("AEXCOMPAT_GPU_DEPTH_PROBE", Some("dual8-cpu14"));
+            let output = scratch.join("cpu-error14.png");
+            let error = render(&output).expect_err("explicit CPU error 14 must not retry on GPU");
+            assert!(!output.exists(), "CPU error 14 committed an output");
+            let message = error.to_string();
+            let (_, worker_json) = message
+                .split_once(", report=")
+                .unwrap_or_else(|| panic!("missing worker report in CPU error 14: {message}"));
+            let worker_report: serde_json::Value = serde_json::from_str(worker_json)
+                .unwrap_or_else(|error| {
+                    panic!("invalid worker report in CPU error 14: {error}: {message}")
+                });
+            assert_eq!(
+                worker_report.get("smart_render_selector_error"),
+                Some(&serde_json::json!(14)),
+                "the literal CPU selector error must remain visible: {worker_report}"
+            );
+            assert_eq!(
+                worker_report.get("smart_render_error"),
+                Some(&serde_json::json!(14))
+            );
+            assert_eq!(
+                worker_report.get("gpu_render_possible"),
+                Some(&serde_json::json!(true)),
+                "the negative fixture must advertise the competing GPU route: {worker_report}"
+            );
+            assert_eq!(
+                worker_report.get("gpu_device_setup_error"),
+                Some(&serde_json::json!(0))
+            );
+            assert_eq!(
+                worker_report.get("gpu_render_dispatched"),
+                Some(&serde_json::json!(false))
+            );
+            assert_eq!(
+                worker_report.get("cuda_context_used"),
+                Some(&serde_json::json!(false))
+            );
+            assert_eq!(
+                worker_report.get("gpu_auto8_attempt"),
+                Some(&serde_json::Value::Null)
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// QUERY_DYNAMIC_FLAGS may narrow per-frame behavior, but it cannot erase
+    /// the immutable GPU capability admitted at GLOBAL_SETUP.  This resident
+    /// Auto8 session has the probe clear GPU_F32 on every dynamic query; both
+    /// frames must still take the GPU route.  The GPU's spatial ramp is
+    /// intentionally distinct from the fixture's valid red CPU8 marker, so a
+    /// route that consults the mutable out_flags2 buffer is caught by pixels.
+    #[test]
+    fn resident_auto8_keeps_bootstrap_gpu_capability_across_dynamic_queries() {
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let Some(aex) = std::env::var_os("AEXCOMPAT_TEST_GPU_DEPTH_PROBE").map(PathBuf::from)
+        else {
+            eprintln!("skipping resident Auto8 dynamic flags: set AEXCOMPAT_TEST_GPU_DEPTH_PROBE");
+            return;
+        };
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping resident Auto8 dynamic flags: build aex_worker.exe and {}",
+                aex.display()
+            );
+            return;
+        }
+
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let (width, height) = (GPU_DEPTH_PROBE_WIDTH, GPU_DEPTH_PROBE_HEIGHT);
+        let mut session =
+            open_auto8_gpu_depth_probe_session(&root, &aex, &sha, "dual8-dynamic-toggle", 2)
+                .expect("open resident Auto8 dynamic-flags session");
+        let input = (0..width * height)
+            .flat_map(|index| {
+                [
+                    index.wrapping_mul(17) as u8,
+                    index.wrapping_mul(29) as u8,
+                    index.wrapping_mul(43) as u8,
+                    255,
+                ]
+            })
+            .collect::<Vec<_>>();
+        let assert_gpu_ramp = |outcome: aexcompat_broker::render_session::FrameOutcome,
+                               expected_frame: u32| {
+            assert_eq!(outcome.frame_index, expected_frame);
+            let pixels = match outcome.status {
+                FrameStatus::Rendered {
+                    pixels,
+                    width: rendered_width,
+                    height: rendered_height,
+                    origin_x,
+                    origin_y,
+                } => {
+                    assert_eq!((rendered_width, rendered_height), (width, height));
+                    assert_eq!((origin_x, origin_y), (0, 0));
+                    pixels
+                }
+                other => panic!("Auto8 frame {expected_frame} did not render: {other:?}"),
+            };
+            assert_eq!(pixels.len(), (width * height * 4) as usize);
+            for y in 0..height {
+                for x in 0..width {
+                    let offset = ((y * width + x) * 4) as usize;
+                    let expected_r = (x * 255 / width) as u8;
+                    let expected_g = (y * 255 / height) as u8;
+                    assert!(
+                        pixels[offset].abs_diff(expected_r) <= 1
+                            && pixels[offset + 1].abs_diff(expected_g) <= 1
+                            && pixels[offset + 2].abs_diff(63) <= 1
+                            && pixels[offset + 3] == 255,
+                        "Auto8 frame {expected_frame} pixel ({x},{y}) was {:?}, expected the GPU ramp near [{expected_r},{expected_g},63,255]",
+                        &pixels[offset..offset + 4]
+                    );
+                }
+            }
+            pixels
+        };
+
+        let first = assert_gpu_ramp(
+            session
+                .render_frame(0, 0, &input)
+                .expect("render first resident Auto8 frame"),
+            0,
+        );
+        let second = assert_gpu_ramp(
+            session
+                .render_frame(1, 1, &input)
+                .expect("render second resident Auto8 frame"),
+            1,
+        );
+        assert_eq!(
+            first, second,
+            "dynamic flag queries changed the admitted GPU route between resident frames"
+        );
+
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["frames_ok"], 2, "close: {close}");
+        assert_eq!(close["frames_errored"], 0, "close: {close}");
+        let final_report = &close["final_report"];
+        assert_eq!(
+            final_report["gpu_render_dispatched"], true,
+            "close: {close}"
+        );
+        assert_eq!(final_report["gpu_device_setup_error"], 0, "close: {close}");
+        assert_eq!(
+            final_report["gpu_auto8_attempt"]["setup_dispatched"], true,
+            "close: {close}"
+        );
+        assert_eq!(
+            final_report["gpu_auto8_attempt"]["render_dispatched"], true,
+            "close: {close}"
+        );
+        assert_eq!(
+            final_report["gpu_auto8_attempt"]["fallback_used"], false,
+            "close: {close}"
+        );
+        assert_eq!(
+            final_report["gpu_auto8_attempt"]["fallback_reason"], "",
+            "close: {close}"
+        );
+    }
+
+    /// An unbalanced host callback during GPU PreRender is not a clean GPU
+    /// decline and therefore must not fall through to the valid CPU8 route.
+    /// Use the raw resident-session boundary: the high-level image wrapper
+    /// intentionally rejects this final report and cannot expose the exact
+    /// callback-balance and dispatch facts needed by the oracle.
+    #[test]
+    fn resident_auto8_pre_render_imbalance_stops_before_any_render_selector() {
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let Some(aex) = std::env::var_os("AEXCOMPAT_TEST_GPU_DEPTH_PROBE").map(PathBuf::from)
+        else {
+            eprintln!("skipping resident Auto8 imbalance: set AEXCOMPAT_TEST_GPU_DEPTH_PROBE");
+            return;
+        };
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping resident Auto8 imbalance: build aex_worker.exe and {}",
+                aex.display()
+            );
+            return;
+        }
+
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let mut session =
+            open_auto8_gpu_depth_probe_session(&root, &aex, &sha, "dual8-pre-unbalanced", 1)
+                .expect("open resident Auto8 imbalance session");
+        let input = vec![0x7fu8; (GPU_DEPTH_PROBE_WIDTH * GPU_DEPTH_PROBE_HEIGHT * 4) as usize];
+        let outcome = session
+            .render_frame(0, 0, &input)
+            .expect("the imbalance is a typed frame-local failure");
+        assert_eq!(outcome.frame_index, 0);
+        match outcome.status {
+            FrameStatus::FrameError { render_error, .. } => assert_ne!(
+                render_error, 0,
+                "the callback imbalance was reported as a zero-error frame"
+            ),
+            other => panic!("the callback imbalance reached a render output: {other:?}"),
+        }
+
+        let close = session.close();
+        assert_eq!(
+            close["worker"]["classification"], "nonzero_exit",
+            "close: {close}"
+        );
+        assert_eq!(close["worker"]["exit_code"], 22, "close: {close}");
+        assert_eq!(close["invalidated"], false, "close: {close}");
+        assert_eq!(close["frames_ok"], 0, "close: {close}");
+        assert_eq!(close["frames_errored"], 1, "close: {close}");
+        assert_eq!(close["session_clean"], false, "close: {close}");
+        let final_report = &close["final_report"];
+        assert_eq!(
+            final_report["param_checkouts_balanced"], false,
+            "close: {close}"
+        );
+        assert_eq!(final_report["invalid_param_checkins"], 1, "close: {close}");
+        // selector_invocations is an L2-only diagnostic. The resident SmartFX
+        // report exposes the same behavioral boundary through these typed
+        // dispatch fields: neither CPU SMART_RENDER nor SMART_RENDER_GPU ran.
+        assert_eq!(
+            final_report["smart_render_selector_dispatched"], false,
+            "close: {close}"
+        );
+        assert_eq!(
+            final_report["gpu_render_dispatched"], false,
+            "close: {close}"
+        );
+        assert_eq!(
+            final_report["gpu_auto8_attempt"]["render_dispatched"], false,
+            "close: {close}"
+        );
+        assert_eq!(
+            final_report["gpu_auto8_attempt"]["fallback_used"], false,
+            "close: {close}"
+        );
+    }
+
+    /// A FRAME_SETUP error happens before Auto8 marks the frame as a GPU
+    /// attempt. Literal 14 used to fall into the legacy GPU-required retry and
+    /// enter FRAME_SETUP twice. The fixture returns its invocation count in the
+    /// typed selector message, providing the exact behavioral count even though
+    /// resident SmartFX reports do not carry the L2 selector-invocation array.
+    #[test]
+    fn resident_auto8_frame_setup_error14_is_not_retried() {
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let Some(aex) = std::env::var_os("AEXCOMPAT_TEST_GPU_DEPTH_PROBE").map(PathBuf::from)
+        else {
+            eprintln!("skipping resident Auto8 FRAME_SETUP 14: set AEXCOMPAT_TEST_GPU_DEPTH_PROBE");
+            return;
+        };
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!(
+                "skipping resident Auto8 FRAME_SETUP 14: build aex_worker.exe and {}",
+                aex.display()
+            );
+            return;
+        }
+
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let mut session =
+            open_auto8_gpu_depth_probe_session(&root, &aex, &sha, "dual8-frame-setup14", 1)
+                .expect("open resident Auto8 FRAME_SETUP 14 session");
+        let input = vec![0x53u8; (GPU_DEPTH_PROBE_WIDTH * GPU_DEPTH_PROBE_HEIGHT * 4) as usize];
+        let outcome = session
+            .render_frame(0, 0, &input)
+            .expect("FRAME_SETUP 14 is a typed frame-local failure");
+        assert_eq!(outcome.frame_index, 0);
+        match outcome.status {
+            FrameStatus::FrameError {
+                render_error,
+                missing_dependency,
+                return_message: Some(message),
+            } => {
+                assert_eq!(render_error, 14);
+                assert_eq!(missing_dependency, None);
+                assert_eq!(message.selector, "FRAME_SETUP");
+                assert_eq!(message.text, "frame_setup_calls=1");
+                assert_eq!(message.error, 14);
+                assert!(!message.display_requested);
+            }
+            other => panic!("FRAME_SETUP 14 did not remain one frame error: {other:?}"),
+        }
+
+        let close = session.close();
+        assert_eq!(close["worker"]["classification"], "ok", "close: {close}");
+        assert_eq!(close["invalidated"], false, "close: {close}");
+        assert_eq!(close["frames_ok"], 0, "close: {close}");
+        assert_eq!(close["frames_errored"], 1, "close: {close}");
+        let final_report = &close["final_report"];
+        assert_eq!(
+            final_report["smart_render_selector_dispatched"], false,
+            "close: {close}"
+        );
+        assert_eq!(
+            final_report["gpu_render_dispatched"], false,
+            "close: {close}"
+        );
+        assert_eq!(
+            final_report["gpu_auto8_attempt"],
+            serde_json::Value::Null,
+            "close: {close}"
+        );
+        assert_eq!(
+            close["worker"]["diagnostics"]["first_failure_stage"], "frame_setup",
+            "close: {close}"
+        );
+        let stage_events = close["worker"]["diagnostics"]["stage_events"]
+            .as_array()
+            .expect("FRAME_SETUP diagnostic stage events");
+        let stage_count = |stage: &str| {
+            stage_events
+                .iter()
+                .filter(|event| event["stage"] == stage)
+                .count()
+        };
+        assert_eq!(stage_count("frame_setup"), 2, "close: {close}");
+        for forbidden in [
+            "gpu_device_setup",
+            "smart_pre_render",
+            "smart_render_cpu",
+            "smart_render_gpu",
+        ] {
+            assert_eq!(
+                stage_count(forbidden),
+                0,
+                "FRAME_SETUP 14 reached {forbidden}: {close}"
+            );
+        }
     }
 
     #[test]

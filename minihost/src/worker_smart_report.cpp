@@ -101,6 +101,8 @@ bool emit_smart_completion_report(const SmartCompletionInputs& in) {
       : smart.pre_error == 0 && smart.render_error == 0 && smart.rects_valid &&
                 smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
                 host_state_clean;
+  const std::string report_pixel_format = smart.session_narrowed8
+      ? "argb8" : smart.runtime->pixel_format;
   report::begin_smart(report_snapshot, {
       smart_completed,
       {in.global_error, in.params_error, in.advertised_out_flags, in.advertised_out_flags2},
@@ -130,16 +132,36 @@ bool emit_smart_completion_report(const SmartCompletionInputs& in) {
       smart.empty_checkout_pixel_denials, smart.returns_extra_pixels,
       smart.result_within_request, smart.extra_pixels_contract_violation,
       smart.empty_result_rect, smart.output_extent_hint,
-      in.setdown_error, in.case_id, smart.runtime->pixel_format,
+      in.setdown_error, in.case_id, report_pixel_format,
       {smart.output_width, smart.output_height, smart.output_rowbytes},
       {in.external_size[0], in.external_size[1]},
-      smart.runtime->pixel_format == "argb32f" ? 16 :
-          (smart.runtime->pixel_format == "argb16" ? 8 : 4),
+      report_pixel_format == "argb32f" ? 16 :
+          (report_pixel_format == "argb16" ? 8 : 4),
       smart.input_hash,
       smart.output_hash, smart.rects_valid, world_debug_report_json(),
       smart.empty_layer_param_checkouts,
       smart.empty_layer_param_pixel_checkouts,
       smart.empty_result_passthrough});
+  const auto& attempt = smart.auto_gpu_attempt;
+  report_snapshot.stream() << ",\"gpu_auto8_attempt\":";
+  if (!attempt.attempted) {
+    report_snapshot.stream() << "null";
+  } else {
+    report_snapshot.stream()
+        << "{\"setup_dispatched\":" << (attempt.setup_dispatched ? "true" : "false")
+        << ",\"render_dispatched\":" << (attempt.render_dispatched ? "true" : "false")
+        << ",\"fallback_used\":" << (attempt.fallback_used ? "true" : "false")
+        << ",\"setup_error\":" << attempt.setup_error
+        << ",\"pre_error\":" << attempt.pre_error
+        << ",\"render_error\":" << attempt.render_error
+        << ",\"setdown_error\":" << attempt.setdown_error
+        << ",\"cleanup_error\":" << attempt.cleanup_error
+        << ",\"lifecycle_error\":" << attempt.lifecycle_error
+        << ",\"fallback_reason\":\"" << attempt.fallback_reason << "\""
+        << ",\"internal_pixel_format\":\"argb32f\""
+        << ",\"internal_float_input_sha256\":\"" << attempt.internal_float_input_sha256 << "\""
+        << ",\"internal_float_output_sha256\":\"" << attempt.internal_float_output_sha256 << "\"}";
+  }
   const auto& audio = audio_telemetry();
   report::append_audio(report_snapshot, {
       audio.usage_advertised, audio.checkout_allowed, audio.source_available,

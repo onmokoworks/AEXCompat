@@ -194,8 +194,8 @@ fn depth_code(pixel_format: RenderPixelFormat) -> u32 {
 
 /// Maps the session flavor to the worker command word (protocol §3, v1.1).
 /// SmartFX ARGB32f carries the GPU backend in the command word, mirroring the
-/// deleted one-shot `--smart-image32[-cpu|-opencl|-directx]` family; every other
-/// depth is CPU-only, and classic sessions reject explicit GPU backends.
+/// deleted one-shot `--smart-image32[-cpu|-opencl|-directx]` family. ARGB8 Auto
+/// may negotiate advertised GPU F32 rendering; explicit CPU stays CPU-only.
 fn session_command(
     pixel_format: RenderPixelFormat,
     smart: bool,
@@ -220,9 +220,8 @@ fn session_command(
             Ok("--smart-session32-directx-v1")
         }
         (RenderPixelFormat::Argb32f, RenderGpuBackend::Cpu) => Ok("--smart-session32-cpu-v1"),
-        (RenderPixelFormat::Argb8, RenderGpuBackend::Auto | RenderGpuBackend::Cpu) => {
-            Ok("--smart-session-v1")
-        }
+        (RenderPixelFormat::Argb8, RenderGpuBackend::Auto) => Ok("--smart-session8-auto-v1"),
+        (RenderPixelFormat::Argb8, RenderGpuBackend::Cpu) => Ok("--smart-session8-cpu-v1"),
         (RenderPixelFormat::Argb16, RenderGpuBackend::Auto | RenderGpuBackend::Cpu) => {
             Ok("--smart-session16-v1")
         }
@@ -1142,7 +1141,15 @@ impl RenderSession {
         // GPU selection follows the requested backend, not possession of a
         // legacy module-policy receipt. The ordinary isolated session records
         // loaded modules and keeps the same Job Object and output invariants.
-        let gpu_capable = request.smart && request.pixel_format == RenderPixelFormat::Argb32f;
+        // Cluster routing remains at its legacy ARGB8 behavior in this revision.
+        // Auto8's ordinary isolated route needs no runtime-policy receipt; if a
+        // caller supplies one, carry it through the existing CUDA policy path.
+        let auto8 = request.smart
+            && request.pixel_format == RenderPixelFormat::Argb8
+            && request.gpu_backend == RenderGpuBackend::Auto
+            && cluster.is_none();
+        let gpu_capable =
+            request.smart && (request.pixel_format == RenderPixelFormat::Argb32f || auto8);
         let effective_backend = request.gpu_backend;
         let gpu_attempt = gpu_capable && runtime_backend(effective_backend).is_some();
         // Issue #816: resident render is in-place only. A non-empty search
@@ -1166,7 +1173,15 @@ impl RenderSession {
                 "cluster sessions do not carry a GPU runtime module policy",
             ));
         }
-        let command = session_command(request.pixel_format, request.smart, effective_backend)?;
+        let command = if cluster.is_some()
+            && request.smart
+            && request.pixel_format == RenderPixelFormat::Argb8
+            && effective_backend == RenderGpuBackend::Auto
+        {
+            "--smart-session-v1"
+        } else {
+            session_command(request.pixel_format, request.smart, effective_backend)?
+        };
         // A pre-encoded payload is bounded here the way the default encoder
         // bounds the one it builds, so no caller can widen the launch argv past
         // the limit the worker's parser is written against.

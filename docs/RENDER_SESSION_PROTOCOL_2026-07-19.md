@@ -258,6 +258,20 @@ one-shot との差分:
   固定する: `--smart-session32-cpu-v1` / `--smart-session32-opencl-v1` /
   `--smart-session32-directx-v1` (無印は CUDA/自動交渉)。backend は launch で
   確定し、セッション中に変わらない。
+- 単体SmartFX ARGB8のAutoは `--smart-session8-auto-v1`、明示CPUは
+  `--smart-session8-cpu-v1` で区別する。AutoはGLOBAL_SETUPの不変な
+  SmartFX/GPU-F32広告に基づいてfloat GPU交渉を行い、成功した画像をARGB8へ
+  狭めて返す。QUERY_DYNAMIC_FLAGSが書き換えた広告を次フレームの初期能力とは
+  みなさず、各フレームのGPU可否はPreRenderで確認する。
+  明示CPUはGPU再試行を行わない。既存 `--smart-session-v1` とclusterのAuto8は
+  従来の経路を維持するため、clusterへのGPU優先選択はこの変更の対象外。
+- Auto8のCPUフォールバックは、plug-inのGPU setupを呼ぶ前のbackend利用不可、
+  または正常・有効・非空のPreRenderがGPUを辞退した場合に限り、一度だけ行う。
+  cleanup、frame/GPU setdown、所有権、出力ガードが正常であることも必要。
+  plug-inエラー、fault、不正geometry、GPU render実行後の失敗は再試行しない。
+  `gpu_auto8_attempt`（broker画像レポートでは `gpu_attempt`）は初回試行の
+  selector/errorと内部float画像hashを保持する。正規の画像format、rowbytes、
+  input/output hashは実際に転送したARGB8に対応し、GPU内部画像と混同しない。
 
 ## 4. 制御チャネル: メッセージ仕様
 

@@ -1205,6 +1205,69 @@ noise overlay could meet this bounded oracle. Historical ARGB8 sweep buckets
 are retained, and only this exact AEX identity receives the GPU follow-up.
 No AE, excluded vendor, or full installed-AEX sweep was executed.
 
+### Fast Grain follow-up: default ARGB8 Auto GPU route (2026-09-21)
+
+Non-cluster SmartFX ARGB8 Auto now negotiates the existing F32 GPU path when
+the plug-in's immutable startup flags advertise SmartFX and GPU-F32. This is
+a capability-based route, not a Fast Grain name or output-image exception.
+The broker uses distinct Auto/CPU session commands. Explicit CPU stays CPU,
+including errors 14 and 516; cluster Auto8 deliberately retains its legacy
+route. The UI's Auto live-session request and the headless image wrapper share
+this broker route; the real capture below exercises the headless wrapper,
+not an interactive GUI click test.
+
+A single fresh CPU8 attempt is permitted only if the backend is unavailable
+before plug-in GPU setup, or successful valid nonempty PreRender declines GPU.
+It additionally requires clean cleanup/setdown/lifecycle, intact guards and
+balanced parameter/pixel ownership. Arbitrary setup/render/teardown errors do
+not become CPU success. The initial GPU attempt is retained in reports. After
+successful F32-to-8 narrowing, the canonical checksum, pixel format and row
+stride describe the actual transported ARGB8 bytes; internal float hashes
+remain separately recorded.
+
+The pre-change synthetic dual-path probe returned its red CPU image under
+Auto. The changed shipping CLI passes all 11 GPU-success, no-capability,
+safe-decline and unsafe-failure cases. Broker tests additionally verify explicit
+CPU, two resident GPU frames despite mutable dynamic flags, refusal of CPU
+re-entry after parameter imbalance, and exactly one FRAME_SETUP call on error
+14. The full wrapper reports 33 passes (existing missing-fixture cases may
+return early); all four new boundary tests actually ran. Broker unit tests
+pass 329 with one ignored. Five native selftests and the worker's output-safety
+selftest pass. Fast Grain response/report mutations and offline validation of
+both Auto32 and Auto8 evidence pass 118 tests in 23.67 seconds, with the two
+vendor-execution opt-ins skipped (no additional vendor renders).
+
+Exactly four installed Fast Grain frames use the prior gray/checker fixtures
+and Intensity 0/100, now with `argb8 smart 0 300 30 1 VALUE`. All four dispatch
+CUDA without fallback, decode to opaque ARGB8 images, preserve both zero-
+intensity sources within one level, and pass the same bounded grain/source
+response checks. Their decoded RGBA bytes are identical to the saved Auto32
+previews for these conditions. CLI process elapsed time sums to 2.487 seconds;
+the real test, including evidence checks, takes 3.89 seconds. These are
+correctness measurements, not a controlled speed comparison or a full sweep.
+
+Pre/post binary identities match: Fast Grain SHA-256
+`13de85b4a300be6df2c40152259269442b4983924f86ad5ec093c04a2be39643`,
+Release worker
+`1b86cb69d0dc2f734f6c0bb57459db6ee9b3a7315bb6e8a5a08401bf29a420f0`,
+and Release UI/headless harness
+`c228bd8b55d7fc75dd3ada262c4623fb9244961b09c3c0c79defa8c05faa01a9`.
+The 18 captured files plus a generated manifest are kept under
+`target/fast-grain-auto8-response-evidence-20260921`; it contains original
+process paths and is not a portable/public bundle. Offline validation checks
+the ARGB8 checksums, internal-float input checksum, GPU attempt/lifecycle,
+parameter receipts, identities and source response. The internal-float output
+hash is recorded, not reconstructed from a lossy 8-bit PNG.
+
+The derivative ledger adds an `argb8_auto_followup` to this identity while
+preserving its old Auto32 follow-up and all historical ARGB8 buckets:
+984 = 567 decoded/semantics-unverified + 414 external-blocked/not-executed +
+3 non-image. This is one bounded default-route improvement, not 984 verified
+effects or Adobe equivalence. Explicit CPU still has the prior card behavior;
+cluster Auto8, other GPU backends, spectral/seed/temporal behavior, intermediate
+intensities and exact vendor/AE parity remain unverified. No AE, excluded
+vendor, or full installed-AEX sweep was executed.
+
 ## OLM cohort and visible-image classification
 
 The first OLM milestone reported 10/10 `rendered` in 2,631 ms, but that bucket

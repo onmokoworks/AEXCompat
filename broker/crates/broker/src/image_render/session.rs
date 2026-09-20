@@ -979,9 +979,17 @@ fn render_classic_via_length_one_session(
         timing: request.timing,
         worker_classification: classification,
         diagnostics,
-        gpu_fallback_used: false,
-        gpu_fallback_reason: None,
-        gpu_attempt: None,
+        gpu_fallback_used: final_report["gpu_auto8_attempt"]["fallback_used"]
+            .as_bool()
+            .unwrap_or(false),
+        gpu_fallback_reason: final_report["gpu_auto8_attempt"]["fallback_reason"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        gpu_attempt: final_report
+            .get("gpu_auto8_attempt")
+            .filter(|value| !value.is_null())
+            .cloned(),
         // Same shape as the one-shot path so a layered session render reports
         // its layers instead of falsely claiming none (issue #98 W1-4). The
         // one-shot `secondary_layers` field lists only the static secondaries;
