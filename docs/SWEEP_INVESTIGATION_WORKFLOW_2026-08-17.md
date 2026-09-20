@@ -6,7 +6,7 @@
 
 ## 1. 母集団の定義と計測の必須記載事項
 
-`render_sweep` (`bridges/aviutl2-multifilter/examples/render_sweep.rs`) は
+`aexcompat-render-sweep` (`bridges/aviutl2-multifilter/src/render_sweep_cli.rs`) は
 引数にフォルダを渡すとそのフォルダだけを、渡さないと configured/default scan
 folders (AviUtl2 の登録が見るのと同じ集合) を掃く。この 2 つは別母集団:
 
@@ -35,20 +35,20 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
 
 ## 2. sweep と trace の取り方
 
-- `AEXCOMPAT_MULTIFILTER_REPOSITORY=<repo>` は worker 実行ファイル
-  (`aex_worker.exe`、discovery/classic/smart を `--kind` で切替) を
-  `<repo>\target\minihost-build\` から解決するための変数。sweep はこの値を
-  そのまま使い (AviUtl2 DLL 側にあるプラグイン隣接への降格は sweep には無い)、
-  その hash を報告の build fingerprint に入れる。fingerprint は
+- supported CLI は worker実行ファイル (`aex_worker.exe`、discovery/classic/smart を
+  `--kind` で切替) を `--repository`、環境変数、config、exe隣接package、source
+  checkoutの順に解決し、そのhashを報告のbuild fingerprintへ入れる。packageは
+  `tools\build-render-sweep.ps1` で作り、通常は手動指定を要しない。fingerprint は
   `l2_worker` / `classic_worker` / `smart_worker` の 3 フィールドを持つが
   (issue #1495 前の 3 exe 構成の名残)、いずれも同じ `aex_worker.exe` を指すため
-  常に同一の値になる。指した先に exe が無ければ fingerprint に `open_failed`
-  が記録され worker 起動が失敗する。sweep 前に指した先の exe を確認する。
-- 実行例:
+  常に同一の値になる。初期解決時に exe が無ければ `worker_root_unavailable` で
+  nonzero 終了し、report は作られない。`open_failed` は、解決後から fingerprint
+  取得までに exe が消えるなどの race に限られる。sweep 前に指した先の exe を確認する。
+- build / 実行例:
   ```powershell
-  $env:AEXCOMPAT_MULTIFILTER_REPOSITORY = "<worktree>"
-  cargo run --release --manifest-path bridges\aviutl2-multifilter\Cargo.toml `
-    --example render_sweep -- --json sweep.json "<AE>\Support Files\Plug-ins\Effects"
+  pwsh -File tools\build-render-sweep.ps1
+  target\aexcompat-render-sweep-package\aexcompat-render-sweep.exe `
+    --json sweep.json "<AE>\Support Files\Plug-ins\Effects"
   ```
 - `--filter <substr>`: ファイル名部分一致で絞る。修正後の対象数本の再計測はこれで、
   full-corpus は回帰確認用に別途 1 回。
@@ -167,11 +167,11 @@ folder を引数に渡せば再現した (PR #1211 / #1255)。#980 の close 判
 
 複数セッションがそれぞれの worktree で同時に sweep を回すことがある
 (2026-08-18 に #1271 (VR) と #1274-#1276 (非VR) が同時に走った)。自分の
-sweep を止めるときに `Get-Process render_sweep | Stop-Process` を使うと
+sweep を止めるときに名前だけで `Stop-Process` を使うと
 **他セッションの sweep も落ちる**。実際に 2 回巻き込んだ。path で絞ること:
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "Name='render_sweep.exe'" |
+Get-CimInstance Win32_Process -Filter "Name='aexcompat-render-sweep.exe'" |
   Where-Object { $_.ExecutablePath -like '*<自分の CARGO_TARGET_DIR>*' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 ```

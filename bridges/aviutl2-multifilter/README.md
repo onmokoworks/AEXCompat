@@ -48,6 +48,39 @@ Copy-Item bridges\aviutl2-multifilter\target\release\aexcompat_aviutl2_multifilt
 `.aux2` で置くこと (`.auf2` は不可)。AviUtl2 起動中はロック。設計経緯は
 `docs/AVIUTL2_BRIDGE_2026-07-21.md` の段階5。
 
+### 全件batch render CLI
+
+対話ホストの常駐sessionとは別に、shipping discoveryで列挙したAEXを一括検査・renderする
+`aexcompat-render-sweep.exe` を提供する。既存の `cargo run --example render_sweep` は互換wrapperで、
+両方とも `src/render_sweep_cli.rs` の同じ実装を実行する。Release worker込みのローカルpackageは:
+
+```powershell
+pwsh -File tools\build-render-sweep.ps1
+target\aexcompat-render-sweep-package\aexcompat-render-sweep.exe `
+  --json target\render-sweep.json `
+  --render-jobs 3 --same-closure-render-jobs 3 `
+  --dynamic-same-closure-groups
+```
+
+packageは次の配置になり、`--repository` や手動runtime-folder選択なしでworkerを解決する。
+
+```text
+target/aexcompat-render-sweep-package/
+  aexcompat-render-sweep.exe
+  target/minihost-build/aex_worker.exe
+```
+
+`--repository <root>` は開発時に別buildを明示する場合だけ使う。指定先にworkerが無い場合は
+別rootへ黙ってfallbackせず、structured errorと非zero exitで停止する。未指定時は環境変数、
+config、exe隣接package、source checkoutの順に有効なworkerを探す。AEX依存DLLはAEX隣接、
+config/default runtime roots、registered runtime lookupという既存経路で解決し、packageへvendor
+DLLやAdobe runtimeを複製しない。
+
+引数エラーはexit 64、worker/input/output等の実行環境エラーはexit 1、成功はexit 0。
+最終stderr行のerrorはschema version付きJSONで、0件選択も成功扱いの完全report
+(`plugins=[]`, `buckets={}`, 各effective count=0)を出す。`--dynamic-same-closure-groups` は
+batch専用の明示opt-inであり、AviUtl2/YMM4/Harnessの単体frame pathやsession所有規則は変えない。
+
 ### worker の置き場所 (issue #650)
 
 AEX は別プロセスの worker (`aex_worker.exe`。discovery/classic/smart の3経路を

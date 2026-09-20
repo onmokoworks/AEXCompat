@@ -290,6 +290,10 @@ jobs:
       - name: Test ${{ matrix.name }}
         run: cargo test ${{ matrix.args }}
 
+      - name: Build supported render-sweep CLI (Release)
+        if: matrix.name == 'aviutl2-multifilter'
+        run: cargo build --manifest-path bridges/aviutl2-multifilter/Cargo.toml --locked --release --bin aexcompat-render-sweep
+
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats

@@ -1608,9 +1608,16 @@ pub struct DiagnosticScan {
 #[doc(hidden)]
 pub fn scan_for_diagnostics(dirs: Option<Vec<PathBuf>>) -> DiagnosticScan {
     let config = load_config();
+    scan_for_diagnostics_with_config(dirs, &config)
+}
+
+fn scan_for_diagnostics_with_config(
+    dirs: Option<Vec<PathBuf>>,
+    config: &Config,
+) -> DiagnosticScan {
     let (resolved, complete) = match dirs {
         Some(dirs) => (dirs, true),
-        None => resolve_scan_dirs(&config),
+        None => resolve_scan_dirs(config),
     };
     let scan = collect_aex(&resolved, &config.ignore);
     let mut limits = scan.limits;
@@ -1619,9 +1626,31 @@ pub fn scan_for_diagnostics(dirs: Option<Vec<PathBuf>>) -> DiagnosticScan {
         dirs: resolved,
         plugins: scan.plugins,
         seen: scan.seen.len(),
-        dependency_dirs: resolve_dependency_config(&config).dirs,
+        dependency_dirs: resolve_dependency_config(config).dirs,
         incomplete_reason: limits.describe(),
     }
+}
+
+/// Resolves the supported sweep's worker and scan/dependency roots from one
+/// config snapshot. A config rewrite can therefore affect the next run, but it
+/// cannot mix one revision's worker with another revision's dependency roots
+/// inside a single report.
+#[doc(hidden)]
+pub fn scan_for_diagnostics_with_worker_root(
+    dirs: Option<Vec<PathBuf>>,
+    explicit_repository: Option<PathBuf>,
+    executable: Option<PathBuf>,
+) -> Result<(DiagnosticScan, PathBuf), String> {
+    let config = load_config();
+    let repository = resolve_diagnostic_worker_root(
+        explicit_repository,
+        config.repository.clone(),
+        executable,
+    )?;
+    Ok((
+        scan_for_diagnostics_with_config(dirs, &config),
+        repository,
+    ))
 }
 
 /// How a sweep names one plug-in in its report (issue #957).
@@ -2686,6 +2715,82 @@ fn resolve_worker_root(
         .into_iter()
         .next()
         .map(|root| (root, WorkerRootSource::NamedWithoutWorker))
+}
+
+/// Resolves the worker root for the supported batch sweep without requiring a
+/// checkout-specific environment variable. The interactive plug-in keeps its
+/// narrower [`resolve_worker_root`] contract; this entry point additionally
+/// recognizes a packaged CLI and a CLI launched from a source checkout.
+///
+/// An explicit `--repository` is authoritative and therefore fails instead of
+/// silently selecting a different build. Without one, the normal environment /
+/// config order wins when usable, followed by the executable's package layout
+/// and finally a source ancestor carrying both repository markers.
+#[doc(hidden)]
+fn resolve_diagnostic_worker_root(
+    explicit: Option<PathBuf>,
+    configured: Option<PathBuf>,
+    executable: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    let has_worker = |root: &Path| root.join(L2_WORKER_RELATIVE_PATH).is_file();
+    let normalize = |root: PathBuf| std::fs::canonicalize(&root).unwrap_or(root);
+
+    if let Some(root) = explicit {
+        if has_worker(&root) {
+            return Ok(normalize(root));
+        }
+        return Err(format!(
+            "the explicit repository does not contain {}: {}",
+            L2_WORKER_RELATIVE_PATH.replace('/', "\\"),
+            root.display()
+        ));
+    }
+    let mut candidates = Vec::<PathBuf>::new();
+    candidates.extend(std::env::var_os(ENV_REPOSITORY).map(PathBuf::from));
+    candidates.extend(configured);
+    let executable_dir = executable.as_deref().and_then(Path::parent);
+    if let Some(dir) = executable_dir {
+        candidates.push(dir.to_path_buf());
+        candidates.push(dir.join("aexcompat"));
+        for ancestor in dir.ancestors() {
+            if ancestor.join("broker/Cargo.toml").is_file()
+                && ancestor
+                    .join("bridges/aviutl2-multifilter/Cargo.toml")
+                    .is_file()
+            {
+                candidates.push(ancestor.to_path_buf());
+                break;
+            }
+        }
+    }
+
+    let mut unique = Vec::<PathBuf>::new();
+    for candidate in candidates {
+        let key = candidate.to_string_lossy().to_ascii_lowercase();
+        if unique
+            .iter()
+            .any(|seen| seen.to_string_lossy().to_ascii_lowercase() == key)
+        {
+            continue;
+        }
+        unique.push(candidate);
+    }
+    if let Some(root) = unique.iter().find(|root| has_worker(root)) {
+        return Ok(normalize(root.clone()));
+    }
+
+    let searched = unique
+        .iter()
+        .map(|root| root.join(L2_WORKER_RELATIVE_PATH).display().to_string())
+        .collect::<Vec<_>>();
+    Err(if searched.is_empty() {
+        format!(
+            "no worker root could be derived; expected {} below --repository, configuration, or the executable package",
+            L2_WORKER_RELATIVE_PATH.replace('/', "\\")
+        )
+    } else {
+        format!("no compat host worker found; searched {}", searched.join("; "))
+    })
 }
 
 /// The line for a launch that found no worker anywhere.

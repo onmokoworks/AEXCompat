@@ -12,6 +12,15 @@ description = "AviUtl2 generic (.aux2) plugin registering each AEX in a folder a
 name = "aexcompat_aviutl2_multifilter"
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "aexcompat-render-sweep"
+path = "src/bin/aexcompat-render-sweep.rs"
+
+[[example]]
+name = "render_sweep"
+path = "examples/render_sweep.rs"
+test = false
+
 [dependencies]
 aviutl2-sys = "0.40"
 libffi = "5.1.1"
@@ -32,10 +41,10 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
 ] }
 toml_edit = "0.25.13"
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 aexcompat-broker = { path = "../../broker/crates/broker", features = ["test-pe-fixtures"] }
 
-# Diagnostic examples use only the crate's own dependencies plus the broker's
-# public in-place API.
+# The supported sweep CLI and diagnostic examples use only the crate's own
+# dependencies plus the broker's public in-place API.

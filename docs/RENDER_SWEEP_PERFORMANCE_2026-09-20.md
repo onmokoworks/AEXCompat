@@ -8,7 +8,11 @@ and aerender were not started.
 ## Fixed conditions
 
 - Source HEAD before this note: `e9010d005` (`Accelerate SmartFX corpus rendering`).
-- Shipping path: `bridges/aviutl2-multifilter/examples/render_sweep.rs`.
+- Batch implementation at the time of the measurements:
+  `bridges/aviutl2-multifilter/examples/render_sweep.rs`. It was promoted without
+  a logic fork to the supported `aexcompat-render-sweep` binary in Experiment 21;
+  the canonical source is now `src/render_sweep_cli.rs` and the example is a
+  compatibility wrapper.
 - Image: 256x144 ARGB8, time 0, one frame, generated secondary layer where
   declared, one render job.
 - PSOFT corpus: 19 installed AEX files below the shipping scan root.

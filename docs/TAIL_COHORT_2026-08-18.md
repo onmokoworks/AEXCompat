@@ -251,7 +251,7 @@ extent 注記と同じ話)。単色入力なので「effect が何か描いた�
   同じ message の merge commit が 2 つあるので SHA で書く。
 - sweep CLI は **どちらの run もこの branch で build した同じバイナリ**
   (下表の `cli` が一致しているのがその証拠)。この PR は
-  `render_sweep.rs` にも record key を 1 つ足しているので、baseline を
+  sweep CLI実装にも record key を 1 つ足しているので、baseline を
   `6ad36c04` の CLI で回すと CLI 差分が混ざる。それを避けるためにこうした。
 
 | bucket | baseline (`6ad36c04`) | 変更後 |
