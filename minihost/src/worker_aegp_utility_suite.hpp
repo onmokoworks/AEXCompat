@@ -7,20 +7,41 @@ namespace aexcompat::l2_detail {
 
 int32_t __cdecl register_with_aegp(void*, const char*, int32_t* plugin_id);
 int32_t __cdecl get_main_hwnd(void* main_hwnd);
+int32_t __cdecl start_undo_group(const char* name);
+int32_t __cdecl end_undo_group();
+
+struct UtilityUndoGroupStats {
+  uint32_t starts{};
+  uint32_t ends{};
+  uint32_t invalid_operations{};
+  uint32_t depth{};
+};
+UtilityUndoGroupStats utility_undo_group_stats();
+bool utility_undo_groups_balanced();
+bool utility_undo_group_operations_valid();
+bool utility_undo_group_state_clean();
+int32_t utility_undo_group_guarded_exit_code(int32_t candidate,
+                                             int32_t failure_exit);
+void reset_utility_undo_group_statistics();
 
 struct UtilitySuite {
   // Function pointer positions mirror the reviewed Adobe suite versions.
   // AEGP_UtilitySuite6 (acquisition version 13) publishes 33 slots; only
-  // RegisterWithAEGP (slot 9) and GetMainHWND (slot 10) are supported. The
-  // other ABI slots receive fail-closed diagnostic callbacks, so a plugin
+  // StartUndoGroup/EndUndoGroup (slots 7/8), RegisterWithAEGP (slot 9), and
+  // GetMainHWND (slot 10) are supported. The other ABI slots receive
+  // fail-closed diagnostic callbacks, so a plugin
   // that reaches one cannot jump through a null pointer without leaving a
   // version/slot record in the worker report.
-  void* unsupported[9]{};
+  void* unsupported[7]{};
+  decltype(&start_undo_group) start_undo_group;
+  decltype(&end_undo_group) end_undo_group;
   decltype(&register_with_aegp) register_with_aegp;
   decltype(&get_main_hwnd) get_main_hwnd;
   void* unsupported_tail[22]{};
 };
 static_assert(sizeof(UtilitySuite) == 33 * sizeof(void*));
+static_assert(offsetof(UtilitySuite, start_undo_group) == 7 * sizeof(void*));
+static_assert(offsetof(UtilitySuite, end_undo_group) == 8 * sizeof(void*));
 static_assert(offsetof(UtilitySuite, register_with_aegp) == 9 * sizeof(void*));
 static_assert(offsetof(UtilitySuite, get_main_hwnd) == 10 * sizeof(void*));
 struct UtilitySuite3 {

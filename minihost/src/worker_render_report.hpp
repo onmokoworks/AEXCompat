@@ -48,6 +48,19 @@ struct CustomUiSnapshot {
 
 void append_custom_ui(ReportSnapshot& report, const CustomUiSnapshot& snapshot);
 
+struct UtilityUndoGroupSnapshot {
+  uint32_t starts{};
+  uint32_t ends{};
+  uint32_t invalid_operations{};
+  uint32_t depth{};
+  bool balanced{};
+  bool operations_valid{};
+};
+
+UtilityUndoGroupSnapshot capture_utility_undo_groups();
+void append_utility_undo_groups(
+    ReportSnapshot& report, const UtilityUndoGroupSnapshot& snapshot);
+
 struct RequestedParametersSnapshot {
   std::string parameters_json;
   int32_t amount{};
@@ -340,6 +353,7 @@ struct ClassicEmission {
   bool selector_dispatched{};
   bool depth_supported{};
   int32_t render_error{};
+  UtilityUndoGroupSnapshot utility_undo_groups;
 };
 
 void emit_classic_complete(ReportSnapshot& output, const ClassicEmission& emission);

@@ -27,6 +27,18 @@ struct ParameterSnapshot {
   int32_t layer_default{};
 };
 
+struct MaskCurveVertexSnapshot {
+  double x{}, y{};
+  double tangent_in_x{}, tangent_in_y{};
+  double tangent_out_x{}, tangent_out_y{};
+};
+
+struct MaskCurveSnapshot {
+  int32_t id{};
+  bool open{};
+  std::vector<MaskCurveVertexSnapshot> vertices;
+};
+
 struct L2ReportContext {
   std::string status;
   int32_t global_error{}, params_error{}, setdown_error{}, reported_num_params{};
@@ -36,7 +48,19 @@ struct L2ReportContext {
   bool update_params_ui_advertised{}, query_dynamic_flags_advertised{}, conditional_ui_selectors_dispatched{};
   int32_t update_params_ui_error{}, query_dynamic_flags_error{};
   uint32_t update_param_ui_calls{}, pf_get_current_state_calls{}, pf_are_states_identical_calls{};
-  bool suite_leases_balanced{}, user_changed_param_requested{};
+  bool suite_leases_balanced{}, user_changed_param_requested{}, user_changed_param_forced{};
+  uint32_t utility_undo_group_starts{}, utility_undo_group_ends{},
+      utility_undo_group_invalid_operations{}, utility_undo_group_depth{};
+  bool utility_undo_groups_balanced{}, utility_undo_group_operations_valid{};
+  bool mask_scene_observed{}, mask_scene_changed{};
+  std::string mask_scene_id;
+  uint64_t mask_scene_fingerprint_before{}, mask_scene_fingerprint_after{};
+  uint32_t mask_scene_active_masks{}, mask_scene_mask_mutations{},
+      mask_scene_invalid_mask_operations{}, mask_scene_outline_mutations{},
+      mask_scene_invalid_outline_operations{}, mask_scene_keyframe_mutations{},
+      mask_scene_invalid_keyframe_operations{}, mask_scene_dynamic_stream_mutations{},
+      mask_scene_invalid_dynamic_stream_operations{};
+  std::vector<MaskCurveSnapshot> mask_scene_curves;
   int32_t user_changed_param_slot{}, user_changed_param_error{};
   std::string user_changed_parameters_json, unsupported_suite_calls_json;
   std::string suite_call_slot_probe_json;

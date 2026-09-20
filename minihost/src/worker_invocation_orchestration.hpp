@@ -89,6 +89,11 @@ struct InvocationState {
     bool outline_mutation_mode{};
     bool mask_attribute_mode{};
     bool user_changed_mode{};
+    bool force_user_changed_diagnostic{};
+    // Explicit Effect Controls lifecycle probe. Unlike the headless
+    // render/discovery walk, this mode owns a real UI-context dispatch of
+    // PF_Cmd_UPDATE_PARAMS_UI for effects that advertise it.
+    bool update_params_ui_mode{};
     bool params_only_mode{};
     // Broker-authorized, one-shot recovery for an inspection whose ordinary
     // lifecycle was already proven to crash only in GLOBAL_SETDOWN. It emits
@@ -124,6 +129,7 @@ struct InvocationState {
     int32_t user_changed_param_slot{-1};
     std::array<float, 4> picker_color{1.0f, 0.25f, 0.75f, 0.5f};
     RequestedAssignments user_changed_parameters;
+    RequestedAssignments update_params_ui_parameters;
     RequestedAssignments requested_parameters;
     RequestedAssignments ui_event_assignments;
 

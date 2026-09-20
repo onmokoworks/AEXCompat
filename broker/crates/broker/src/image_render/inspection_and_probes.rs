@@ -5,7 +5,7 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
     dependencies: Vec<ApprovedImageArtifact>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
 ) -> io::Result<(Vec<InteractiveParameter>, Value)> {
-    inspect_experimental_impl(
+    let (mut parameters, mut diagnostics, observed_sha256) = inspect_experimental_impl(
         repository,
         plugin_path,
         approved_sha256,
@@ -14,7 +14,106 @@ fn inspect_experimental_with_diagnostics_and_runtime_policy(
         runtime_policy,
         "--l2-params-only",
         None,
-    )
+        None,
+    )?;
+    record_identity_compatibility_actions(
+        &observed_sha256,
+        &mut parameters,
+        &mut diagnostics,
+    );
+    Ok((parameters, diagnostics))
+}
+
+// The installed MaskTransform 1.0 image implements its "Apply Transform"
+// control in USER_CHANGED_PARAM but publishes the checkbox without
+// PF_ParamFlag_SUPERVISE. The identity and complete descriptor shape keep the
+// compatibility action fail-closed: a rebuilt or merely similarly named AEX
+// remains an ordinary checkbox until it is independently verified.
+const MASK_TRANSFORM_1_SHA256: &str =
+    "3872435d95910220c5964967c84bae189897bd58b383db752341f7d318e1d1d6";
+const COMPATIBILITY_ACTION_KIND: &str = "compatibility_action";
+
+fn is_mask_transform_apply_descriptor(parameter: &InteractiveParameter) -> bool {
+    parameter.slot == 5
+        && parameter.name == "Apply Transform"
+        && parameter.kind == "integer"
+        && parameter.minimum == 0.0
+        && parameter.maximum == 1.0
+        && !parameter.supervised
+}
+
+fn apply_identity_compatibility_actions(
+    approved_sha256: &str,
+    parameters: &mut [InteractiveParameter],
+) -> Vec<u32> {
+    if !approved_sha256.eq_ignore_ascii_case(MASK_TRANSFORM_1_SHA256) {
+        return Vec::new();
+    }
+    parameters
+        .iter_mut()
+        .filter_map(|parameter| {
+            is_mask_transform_apply_descriptor(parameter).then(|| {
+                parameter.kind = COMPATIBILITY_ACTION_KIND.to_owned();
+                parameter.slot
+            })
+        })
+        .collect()
+}
+
+fn record_identity_compatibility_actions(
+    approved_sha256: &str,
+    parameters: &mut [InteractiveParameter],
+    diagnostics: &mut Value,
+) {
+    let slots = apply_identity_compatibility_actions(approved_sha256, parameters);
+    if !slots.is_empty() {
+        diagnostics["compatibility_actions"] = json!(slots
+            .into_iter()
+            .map(|slot| json!({
+                "slot": slot,
+                "dispatch": "forced_user_changed_param",
+                "reason": "identity_and_descriptor_verified_unsupervised_action"
+            }))
+            .collect::<Vec<_>>());
+    }
+}
+
+fn is_promoted_compatibility_action(
+    approved_sha256: &str,
+    slot: u32,
+    parameters: &[InteractiveParameter],
+) -> bool {
+    approved_sha256.eq_ignore_ascii_case(MASK_TRANSFORM_1_SHA256)
+        && parameters.iter().any(|parameter| {
+            parameter.slot == slot
+                && parameter.name == "Apply Transform"
+                && parameter.kind == COMPATIBILITY_ACTION_KIND
+                && parameter.minimum == 0.0
+                && parameter.maximum == 1.0
+                && !parameter.supervised
+        })
+}
+
+fn prepare_user_changed_parameters(
+    approved_sha256: &str,
+    slot: u32,
+    parameters: &[InteractiveParameter],
+) -> (bool, Vec<InteractiveParameter>) {
+    let compatibility_action =
+        is_promoted_compatibility_action(approved_sha256, slot, parameters);
+    let mut effective_parameters = parameters.to_vec();
+    if compatibility_action {
+        // PF button parameters carry no value, but this malformed action is a
+        // checkbox. Model a momentary press by sending its active value only
+        // for the USER_CHANGED_PARAM transaction; the GUI model remains 0.
+        if let Some(action) = effective_parameters
+            .iter_mut()
+            .find(|parameter| parameter.slot == slot)
+        {
+            action.value = 1.0;
+        }
+    }
+    (compatibility_action, effective_parameters)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -26,8 +125,9 @@ fn inspect_experimental_impl(
     dependency_search_dirs: Vec<std::path::PathBuf>,
     runtime_policy: Option<(&RuntimeModulePolicy, RuntimeBackend)>,
     inspection_mode: &'static str,
+    parameter_payload: Option<String>,
     plugin_data_selector: Option<&crate::render_session::PluginDataEffectSelector>,
-) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+) -> io::Result<(Vec<InteractiveParameter>, Value, String)> {
     // In-place inspection (issue #751): the loader resolves the closure, so
     // staged dependencies and resources cannot ride the same launch. Runtime
     // policy inspection remains outside #815's GPU render-session migration.
@@ -40,6 +140,9 @@ fn inspect_experimental_impl(
     let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
     let args_before_plugin = vec![inspection_mode.into()];
     let mut args_after_plugin = vec![actual.to_ascii_lowercase()];
+    if let Some(payload) = parameter_payload {
+        args_after_plugin.push(payload);
+    }
     let authorization = runtime_policy
         .map(|(policy, backend)| {
             prepare_runtime_authorization_transport(repository, policy, backend)
@@ -142,7 +245,87 @@ fn inspect_experimental_impl(
     if let Some(summary) = report.get("module_audit").and_then(module_audit_summary) {
         diagnostics["module_audit"] = summary;
     }
-    inspection_result_from_report(report, diagnostics, runtime_policy.is_some())
+    let (parameters, diagnostics) =
+        inspection_result_from_report(report, diagnostics, runtime_policy.is_some())?;
+    Ok((parameters, diagnostics, actual))
+}
+
+/// Runs the Effect Controls-only PF_Cmd_UPDATE_PARAMS_UI lifecycle. This is a
+/// separate path from ordinary inspection and rendering: AE's headless
+/// renderer does not issue the selector, while an open Effect Controls panel
+/// does. The returned parameter model contains only host-accepted UI-field
+/// mutations made through PF_UpdateParamUI.
+pub fn refresh_experimental_parameter_ui(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    parameters: &[InteractiveParameter],
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    refresh_experimental_parameter_ui_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        Vec::new(),
+        parameters,
+    )
+}
+
+/// In-place variant used by the shipping GUI after its dependency roots have
+/// been approved. The AEX remains in its installed tree and receives the same
+/// bounded search roots as parameter discovery.
+pub fn refresh_experimental_parameter_ui_in_place(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+    parameters: &[InteractiveParameter],
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    if dependency_search_dirs.is_empty() {
+        return Err(invalid(
+            "in-place parameter UI refresh requires at least one dependency search directory",
+        ));
+    }
+    refresh_experimental_parameter_ui_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        dependency_search_dirs,
+        parameters,
+    )
+}
+
+fn refresh_experimental_parameter_ui_impl(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    dependency_search_dirs: Vec<std::path::PathBuf>,
+    parameters: &[InteractiveParameter],
+) -> io::Result<(Vec<InteractiveParameter>, Value)> {
+    let payload = encode_interactive_payload(parameters)?;
+    let (mut parameters, mut diagnostics, observed_sha256) = inspect_experimental_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        Vec::new(),
+        dependency_search_dirs,
+        None,
+        "--l2-update-params-ui",
+        Some(payload),
+        None,
+    )?;
+    if diagnostics.get("update_params_ui_advertised") != Some(&json!(true))
+        || diagnostics.get("update_params_ui_error") != Some(&json!(0))
+    {
+        return Err(invalid(format!(
+            "AEX rejected PF_Cmd_UPDATE_PARAMS_UI: {diagnostics}"
+        )));
+    }
+    record_identity_compatibility_actions(
+        &observed_sha256,
+        &mut parameters,
+        &mut diagnostics,
+    );
+    Ok((parameters, diagnostics))
 }
 
 fn inspection_result_from_report(
@@ -165,6 +348,16 @@ fn inspection_result_from_report(
     diagnostics["audio_effect_only"] = json!(audio_effect_only);
     diagnostics["image_render_supported"] = json!(!audio_effect_only);
     diagnostics["runtime_module_policy_applied"] = json!(runtime_module_policy_applied);
+    for field in [
+        "update_params_ui_advertised",
+        "update_params_ui_error",
+        "update_param_ui_calls",
+        "conditional_ui_selectors_dispatched",
+    ] {
+        if let Some(value) = report.get(field) {
+            diagnostics[field] = value.clone();
+        }
+    }
     if report.get("params_setup_error") != Some(&json!(0)) {
         return Err(invalid("AEX rejected PF_PARAMS_SETUP"));
     }
@@ -191,6 +384,7 @@ fn inspection_result_from_report(
             .ok_or_else(|| invalid("inspection parameter has no bounded index"))?;
         let default = row.get("default").and_then(Value::as_f64).unwrap_or(0.0);
         let ui_flags = row.get("ui_flags").and_then(Value::as_u64).unwrap_or(0);
+        let flags = row.get("flags").and_then(Value::as_u64).unwrap_or(0);
         let default_color = row.get("default_color");
         let channel = |name: &str| {
             default_color
@@ -305,6 +499,8 @@ fn inspection_result_from_report(
             "index": observed_index,
             "type": metadata_kind,
             "initial_value": initial_value,
+            "ui_flags": ui_flags,
+            "flags": flags,
             "host_range": observed_host_range.map(|(minimum, maximum)| json!({"minimum": minimum, "maximum": maximum})),
             "user_range": observed_user_range.map(|(minimum, maximum)| json!({"minimum": minimum, "maximum": maximum}))
         }));
@@ -349,7 +545,7 @@ fn inspection_result_from_report(
             layer_path: None,
             enabled: ui_flags & (1 << 5) == 0,
             visible: ui_flags & (1 << 9) == 0,
-            supervised: row.get("flags").and_then(Value::as_u64).unwrap_or(0) & (1 << 6) != 0,
+            supervised: flags & (1 << 6) != 0,
             debug_summary: row
                 .get("arbitrary_summary")
                 .and_then(Value::as_str)
@@ -742,18 +938,72 @@ pub fn trigger_experimental_button(
     slot: u32,
     parameters: &[InteractiveParameter],
 ) -> io::Result<Value> {
+    trigger_experimental_user_changed_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        slot,
+        parameters,
+        false,
+    )
+}
+
+/// Diagnostic-only selector dispatch for a malformed effect that implements a
+/// USER_CHANGED_PARAM handler but omitted PF_ParamFlag_SUPERVISE. Normal GUI
+/// actions and `trigger_experimental_button` remain strict; callers must name
+/// this compatibility investigation explicitly, and the worker reports the
+/// forced boundary in `user_changed_param_forced`.
+pub fn diagnose_experimental_forced_user_changed(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    slot: u32,
+    parameters: &[InteractiveParameter],
+) -> io::Result<Value> {
+    trigger_experimental_user_changed_impl(
+        repository,
+        plugin_path,
+        approved_sha256,
+        slot,
+        parameters,
+        true,
+    )
+}
+
+fn trigger_experimental_user_changed_impl(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    slot: u32,
+    parameters: &[InteractiveParameter],
+    force_diagnostic: bool,
+) -> io::Result<Value> {
     if slot == 0 || slot > MAX_PARAMETERS {
         return Err(invalid("button parameter slot is invalid"));
     }
     let actual = observe_selected_plugin(plugin_path, approved_sha256)?;
-    if !parameters
+    // The selected identity is intentionally allowed to go stale while the
+    // application is open. Identity-bound compatibility behavior, however,
+    // must be authorized by the bytes that are about to execute, never by the
+    // cached selection SHA or its previously promoted descriptor.
+    let compatibility_action =
+        is_promoted_compatibility_action(&actual, slot, parameters);
+    let force_unsupervised = force_diagnostic || compatibility_action;
+    if !force_unsupervised
+        && !parameters
         .iter()
         .any(|parameter| parameter.slot == slot && parameter.supervised)
     {
         return Err(invalid("parameter is not supervised by the AEX"));
     }
-    let payload = encode_interactive_payload(parameters)?;
-    let args_before_plugin = vec!["--user-changed".into()];
+    let (_, effective_parameters) =
+        prepare_user_changed_parameters(&actual, slot, parameters);
+    let payload = encode_interactive_payload(&effective_parameters)?;
+    let args_before_plugin = vec![if force_unsupervised {
+        "--force-user-changed-diagnostic".into()
+    } else {
+        "--user-changed".into()
+    }];
     let args_after_plugin = vec![actual.to_ascii_lowercase(), slot.to_string(), payload];
     let isolated = dispatch_approved_image(
         repository,
@@ -773,6 +1023,7 @@ pub fn trigger_experimental_button(
     let report: Value = serde_json::from_str(isolated.stdout.trim())
         .map_err(|_| invalid("button worker report is invalid"))?;
     if report.get("user_changed_param_requested") != Some(&json!(true))
+        || report.get("user_changed_param_forced") != Some(&json!(force_unsupervised))
         || report.get("user_changed_param_slot") != Some(&json!(slot))
         || report.get("user_changed_param_error") != Some(&json!(0))
     {
@@ -1507,7 +1758,8 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
         }
         let id = format!("param_{}", item.slot);
         match item.kind.as_str() {
-            "integer" | "path" if item.value.fract() == 0.0 => {
+            "integer" | "path" | COMPATIBILITY_ACTION_KIND
+                if item.value.fract() == 0.0 => {
                 payload.push_str(&format!("{id}@{}:i32={}", item.slot, item.value as i64))
             }
             "float" => payload.push_str(&format!("{id}@{}:f64={}", item.slot, item.value)),
@@ -1584,14 +1836,20 @@ pub fn normalize_default_interactive_parameters(
         .filter(|item| !(item.kind == "arbitrary_data" && item.debug_summary.is_none()))
         .cloned()
         .map(|mut item| {
-            if matches!(item.kind.as_str(), "integer" | "float" | "path")
+            if matches!(
+                item.kind.as_str(),
+                "integer" | "float" | "path" | COMPATIBILITY_ACTION_KIND
+            )
                 && item.value.is_finite()
                 && item.minimum.is_finite()
                 && item.maximum.is_finite()
                 && item.minimum <= item.maximum
             {
                 item.value = item.value.clamp(item.minimum, item.maximum);
-            } else if !matches!(item.kind.as_str(), "integer" | "float" | "path") {
+            } else if !matches!(
+                item.kind.as_str(),
+                "integer" | "float" | "path" | COMPATIBILITY_ACTION_KIND
+            ) {
                 // These fields share descriptor storage with the typed value
                 // and are not part of color/component/arbitrary transport.
                 item.minimum = 0.0;

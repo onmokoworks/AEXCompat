@@ -76,6 +76,7 @@ bool emit_smart_completion_report(const SmartCompletionInputs& in) {
   const auto& arbitrary = worker_runtime::parameters::state().arbitrary;
   const auto& checkout = worker_runtime::parameters::state().checkout;
   const auto mask_report = aexcompat::mask_runtime::snapshot();
+  const auto utility_undo_groups = report::capture_utility_undo_groups();
   std::ostringstream protocol;
   report::ReportSnapshot report_snapshot(protocol);
   const auto& host_telemetry = aexcompat::worker_runtime::smart::host_telemetry();
@@ -87,6 +88,7 @@ bool emit_smart_completion_report(const SmartCompletionInputs& in) {
                 aexcompat::world_registry::lifetimes_balanced() &&
                 gpu_transport::gpu_memory_lifetimes_balanced() &&
                 audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
+                utility_undo_groups.balanced && utility_undo_groups.operations_valid &&
                 param_checkouts_balanced() &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed);
@@ -238,6 +240,7 @@ bool emit_smart_completion_report(const SmartCompletionInputs& in) {
        0, 0, 0},
       {static_cast<int64_t>(aegp_memory_stats.created), static_cast<int64_t>(aegp_memory_stats.freed), static_cast<int64_t>(aegp_memory_stats.live_count),
        static_cast<int64_t>(aegp_memory_stats.live_bytes), static_cast<int64_t>(aegp_memory_stats.invalid_operations)}});
+  report::append_utility_undo_groups(report_snapshot, utility_undo_groups);
   report::finish_requested_parameters(report_snapshot, {
       requested_parameters_json(*in.requested_parameters),
       static_cast<int32_t>(requested_value(*in.requested_parameters, L"amount")),

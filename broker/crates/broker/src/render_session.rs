@@ -3003,6 +3003,7 @@ pub(crate) enum CloseReportInvariant {
     Status,
     GlobalSetdownError,
     GuardBytes,
+    UtilityUndoGroups,
     SuiteLeaseWarningMetadata,
     MissingSuiteFaultEvidence,
     SuiteFaultObserved,
@@ -3030,6 +3031,7 @@ impl CloseReportInvariant {
             Self::Status => "status",
             Self::GlobalSetdownError => "global_setdown_error",
             Self::GuardBytes => "guard_bytes_intact",
+            Self::UtilityUndoGroups => "utility_undo_groups",
             Self::SuiteLeaseWarningMetadata => "suite_lease_warning_metadata",
             Self::MissingSuiteFaultEvidence => "missing_suite_fault_evidence",
             Self::SuiteFaultObserved => "suite_fault_observed",
@@ -3081,6 +3083,7 @@ fn validate_final_report_mode(
     if report.get("guard_bytes_intact") != Some(&Value::Bool(true)) {
         return Err(CloseReportInvariant::GuardBytes);
     }
+    validate_utility_undo_groups(report)?;
     let lease_validation = validate_suite_lease_state(report)?;
     if report.get("handle_lifetimes_balanced") != Some(&Value::Bool(true)) {
         return Err(CloseReportInvariant::HandleLifetimes);
@@ -3130,6 +3133,28 @@ fn validate_final_report_mode(
         }
     }
     Ok(lease_validation)
+}
+
+fn validate_utility_undo_groups(report: &Value) -> Result<(), CloseReportInvariant> {
+    let Some(undo) = report.get("utility_undo_groups").and_then(Value::as_object) else {
+        return Err(CloseReportInvariant::UtilityUndoGroups);
+    };
+    let (Some(starts), Some(ends)) = (
+        undo.get("starts").and_then(Value::as_u64),
+        undo.get("ends").and_then(Value::as_u64),
+    ) else {
+        return Err(CloseReportInvariant::UtilityUndoGroups);
+    };
+    if undo.len() != 6
+        || starts != ends
+        || undo.get("invalid_operations").and_then(Value::as_u64) != Some(0)
+        || undo.get("depth").and_then(Value::as_u64) != Some(0)
+        || undo.get("balanced") != Some(&Value::Bool(true))
+        || undo.get("operations_valid") != Some(&Value::Bool(true))
+    {
+        return Err(CloseReportInvariant::UtilityUndoGroups);
+    }
+    Ok(())
 }
 
 fn validate_suite_lease_state(

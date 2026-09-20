@@ -131,7 +131,10 @@ fn parameters_for_native_action(
             }
             if parameter.kind != "arbitrary_data" {
                 let native_outside_ui_range =
-                    matches!(parameter.kind.as_str(), "integer" | "float" | "path")
+                    matches!(
+                        parameter.kind.as_str(),
+                        "integer" | "float" | "path" | "compatibility_action"
+                    )
                         && parameter.value.is_finite()
                         && parameter.minimum.is_finite()
                         && parameter.maximum.is_finite()

@@ -551,7 +551,7 @@ fn apply_typed_assignments(
             ));
         }
         match parameter.kind.as_str() {
-            "integer" | "float" | "path" => {
+            "integer" | "float" | "path" | "compatibility_action" => {
                 let value = object
                     .get("value")
                     .and_then(serde_json::Value::as_f64)
@@ -559,7 +559,10 @@ fn apply_typed_assignments(
                     .ok_or_else(|| format!("parameter slot {slot} requires a finite value"))?;
                 if value < parameter.minimum
                     || value > parameter.maximum
-                    || (matches!(parameter.kind.as_str(), "integer" | "path")
+                    || (matches!(
+                        parameter.kind.as_str(),
+                        "integer" | "path" | "compatibility_action"
+                    )
                         && value.fract() != 0.0)
                 {
                     return Err(format!("parameter slot {slot} value is out of range"));

@@ -49,8 +49,17 @@ int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
     target.cluster_manifest_path = argv[3];
     return 0;
   }
+  target.force_user_changed_diagnostic = (argc == 5 || argc == 6) &&
+      std::wstring(argv[1]) == L"--force-user-changed-diagnostic";
   target.user_changed_mode = (argc == 5 || argc == 6) &&
-      std::wstring(argv[1]) == L"--user-changed";
+      (std::wstring(argv[1]) == L"--user-changed" ||
+       target.force_user_changed_diagnostic);
+  target.update_params_ui_mode = (argc == 4 || argc == 5) &&
+      std::wstring(argv[1]) == L"--l2-update-params-ui";
+  if (target.update_params_ui_mode && argc == 5 &&
+      (!hooks.parse_parameter_payload ||
+       !hooks.parse_parameter_payload(argv[4], target.update_params_ui_parameters)))
+    return 3;
   target.aegp_update_menu_mode = argc == 4 &&
       std::wstring(argv[1]) == L"--aegp-update-menu";
   target.aegp_idle_mode = argc == 4 && std::wstring(argv[1]) == L"--aegp-idle";
@@ -135,7 +144,8 @@ int parse_l2_modes(int argc, wchar_t** argv, InvocationState& target,
       target.cleanup_contained_params_only_mode ||
       target.auto_dialog_mode || target.adjust_cursor_mode || target.draw_event_mode ||
       target.click_event_mode || target.drag_event_mode || target.ui_lifecycle_mode ||
-      target.ui_idle_mode || target.ui_keydown_mode || target.ui_mouse_exited_mode;
+      target.ui_idle_mode || target.ui_keydown_mode || target.ui_mouse_exited_mode ||
+      target.update_params_ui_mode;
   if (!target.user_changed_mode && !target.aegp_init_mode && !target.skip_about_mode &&
       (argc != 4 || std::wstring(argv[1]) != L"--l2")) return 2;
   if (target.params_only_mode && argc == 6 && !target.runtime_module_authorization_mode) return 2;

@@ -5,6 +5,7 @@
 #include "gpu_memory_world_transport.hpp"
 #include "gpu_opencl_backend.hpp"
 #include "worker_aegp_async_layer_runtime.hpp"
+#include "worker_aegp_utility_suite.hpp"
 #include "worker_handle_runtime.hpp"
 #include "worker_parameter_runtime.hpp"
 #include "worker_pf_path_runtime.hpp"
@@ -97,6 +98,25 @@ void append_custom_ui(ReportSnapshot& report, const CustomUiSnapshot& value) {
       << value.picker_color[3] << ']';
 }
 
+UtilityUndoGroupSnapshot capture_utility_undo_groups() {
+  const auto stats = aexcompat::l2_detail::utility_undo_group_stats();
+  return {stats.starts, stats.ends, stats.invalid_operations, stats.depth,
+          aexcompat::l2_detail::utility_undo_groups_balanced(),
+          aexcompat::l2_detail::utility_undo_group_operations_valid()};
+}
+
+void append_utility_undo_groups(
+    ReportSnapshot& report, const UtilityUndoGroupSnapshot& value) {
+  report.stream()
+      << ",\"utility_undo_groups\":{\"starts\":" << value.starts
+      << ",\"ends\":" << value.ends
+      << ",\"invalid_operations\":" << value.invalid_operations
+      << ",\"depth\":" << value.depth
+      << ",\"balanced\":" << (value.balanced ? "true" : "false")
+      << ",\"operations_valid\":"
+      << (value.operations_valid ? "true" : "false") << '}';
+}
+
 void finish_requested_parameters(
     ReportSnapshot& report, const RequestedParametersSnapshot& value) {
   report.stream()
@@ -127,6 +147,7 @@ void emit_classic_complete(ReportSnapshot& output, const ClassicEmission& value)
   append_classic_callbacks(output, value.report.callbacks);
   append_classic_threads(output, value.report.threads);
   append_classic_context(output, value.report.context);
+  append_utility_undo_groups(output, value.utility_undo_groups);
   finish_requested_parameters(output, value.requested);
 }
 

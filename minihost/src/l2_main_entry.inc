@@ -142,7 +142,10 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
     int32_t global_error, int32_t params_error,
     std::array<int32_t, 5>& lifecycle_errors, bool& lifecycle_data_null,
     bool& user_changed_ok, bool& conditional_ui_ok,
-    int32_t layer_width, int32_t layer_height) {
+    int32_t layer_width, int32_t layer_height,
+    bool force_user_changed_diagnostic = false,
+    bool update_params_ui_requested = false,
+    const RequestedAssignments& update_params_ui_parameters = {}) {
   std::vector<std::array<std::byte, kParamSize>> lifecycle_definitions(g_params.size() + 1);
   std::array<unsigned char, 4> lifecycle_pixel{255, 0, 0, 0};
   aexcompat::world_safety::EffectWorldStorage lifecycle_world{};
@@ -169,6 +172,16 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
           layer_width, layer_height)) {
     if (global_error == 0)
       invoke_global_setdown(entry, input.data(), output.data());
+    finish_l2_host_mutation_observation();
+    return 3;
+  }
+  if (update_params_ui_requested &&
+      !apply_requested_assignments(
+          lifecycle_definitions, update_params_ui_parameters,
+          layer_width, layer_height)) {
+    if (global_error == 0)
+      invoke_global_setdown(entry, input.data(), output.data());
+    finish_l2_host_mutation_observation();
     return 3;
   }
   std::vector<void*> lifecycle_params(lifecycle_definitions.size());
@@ -198,7 +211,9 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
   write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
   if (lifecycle_errors[0] == 0 && g_user_changed_param_requested) {
     const auto offset = static_cast<std::size_t>(g_user_changed_param_slot - 1);
-    if (offset >= g_params.size() || (g_params[offset].flags & (1u << 6)) == 0) {
+    if (offset >= g_params.size() ||
+        (!force_user_changed_diagnostic &&
+         (g_params[offset].flags & (1u << 6)) == 0)) {
       g_user_changed_param_error = 4;
     } else {
       std::array<std::byte, 4> changed_extra{};
@@ -217,6 +232,10 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
       (!g_user_changed_param_requested || g_user_changed_param_error == 0);
   conditional_ui_ok = user_changed_ok && dispatch_conditional_ui_selectors(
       entry, input, output, lifecycle_params.data());
+  if (conditional_ui_ok && update_params_ui_requested) {
+    conditional_ui_ok = dispatch_effect_controls_update_params_ui(
+        entry, input, output, lifecycle_params.data(), lifecycle_params.size());
+  }
   if (conditional_ui_ok && conditional_ui_definitions_usable()) {
     for (std::size_t i = 0; i < g_params.size(); ++i)
       g_params[i].raw = lifecycle_definitions[i + 1];
@@ -241,6 +260,7 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
   if (lifecycle_errors[4] == 0) write<void*>(output, kOutSequenceData, nullptr);
   lifecycle_data_null = read<void*>(output, kOutSequenceData) == nullptr &&
       read<void*>(output, kOutFrameData) == nullptr;
+  finish_l2_host_mutation_observation();
   return std::nullopt;
 }
 
@@ -303,6 +323,7 @@ bool verify_l2_point_default_units() {
   bool user_changed_ok = false;
   bool conditional_ui_ok = false;
   g_l2_point_default_probe = {};
+  begin_l2_host_mutation_observation();
   const auto lifecycle_exit = run_l2_parameter_lifecycle(
       &l2_point_default_probe_entry, input, output, 0, 0,
       lifecycle_errors, lifecycle_data_null, user_changed_ok,
@@ -318,6 +339,87 @@ bool verify_l2_point_default_units() {
 
   parameter_state.records = saved_records;
   parameter_state.timelines = saved_timelines;
+  g_user_changed_param_requested = saved_user_changed_requested;
+  g_user_changed_parameters = saved_user_changed_parameters;
+  return passed;
+}
+
+struct L2UpdateParamsUiProbe {
+  bool selector_seen{};
+  bool callback_accepted{};
+};
+L2UpdateParamsUiProbe g_l2_update_params_ui_probe;
+
+int32_t __cdecl l2_update_params_ui_probe_entry(
+    int32_t selector, void*, void*, void** params, void*, void*) {
+  if (selector != kUpdateParamsUi) return 0;
+  g_l2_update_params_ui_probe.selector_seen = true;
+  if (!params || !params[1]) return 4;
+  std::array<std::byte, kParamSize> updated{};
+  std::memcpy(updated.data(), params[1], updated.size());
+  uint32_t ui_flags = read<uint32_t>(updated, kParamUiFlags) | (1u << 5);
+  write<uint32_t>(updated, kParamUiFlags, ui_flags);
+  std::memset(updated.data() + kParamName, 0, kParamNameSize);
+  std::memcpy(updated.data() + kParamName, "Updated by UI", 13);
+  const int32_t error = update_param_ui(&g_effect, 1, updated.data());
+  g_l2_update_params_ui_probe.callback_accepted = error == 0;
+  return error;
+}
+
+bool verify_l2_update_params_ui_lifecycle() {
+  auto& parameter_state = aexcompat::worker_runtime::parameters::state();
+  const auto saved_records = parameter_state.records;
+  const auto saved_timelines = parameter_state.timelines;
+  const auto saved_ui = parameter_state.ui;
+  const bool saved_user_changed_requested = g_user_changed_param_requested;
+  const auto saved_user_changed_parameters = g_user_changed_parameters;
+
+  parameter_state.records.clear();
+  parameter_state.timelines.clear();
+  parameter_state.ui = {};
+  g_user_changed_param_requested = false;
+  g_user_changed_parameters.clear();
+  g_update_params_ui_advertised = true;
+  g_query_dynamic_flags_advertised = false;
+
+  aexcompat::worker_runtime::parameters::ParamRecord checkbox{};
+  checkbox.index = 1;
+  checkbox.type = 4;
+  checkbox.default_value = 0;
+  write<int32_t>(checkbox.raw, kParamType, checkbox.type);
+  std::memcpy(checkbox.raw.data() + kParamName, "Before UI", 9);
+  parameter_state.records.push_back(checkbox);
+
+  std::array<std::byte, kInSize> input{};
+  std::array<std::byte, kOutSize> output{};
+  std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
+  bool lifecycle_data_null = false;
+  bool user_changed_ok = false;
+  bool conditional_ui_ok = false;
+  g_l2_update_params_ui_probe = {};
+  begin_l2_host_mutation_observation();
+  const RequestedAssignments no_assignments;
+  const auto lifecycle_exit = run_l2_parameter_lifecycle(
+      &l2_update_params_ui_probe_entry, input, output, 0, 0,
+      lifecycle_errors, lifecycle_data_null, user_changed_ok,
+      conditional_ui_ok, 256, 144, false, true, no_assignments);
+  const auto* updated_name = reinterpret_cast<const char*>(
+      parameter_state.records[0].raw.data() + kParamName);
+  const bool passed = !lifecycle_exit &&
+      g_l2_update_params_ui_probe.selector_seen &&
+      g_l2_update_params_ui_probe.callback_accepted &&
+      g_update_params_ui_error == 0 && g_update_param_ui_calls == 1 &&
+      (read<uint32_t>(parameter_state.records[0].raw, kParamUiFlags) &
+       (1u << 5)) != 0 &&
+      std::string(updated_name, strnlen_s(updated_name, kParamNameSize)) ==
+          "Updated by UI" &&
+      std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(),
+                  [](int32_t error) { return error == 0; }) &&
+      lifecycle_data_null && user_changed_ok && conditional_ui_ok;
+
+  parameter_state.records = saved_records;
+  parameter_state.timelines = saved_timelines;
+  parameter_state.ui = saved_ui;
   g_user_changed_param_requested = saved_user_changed_requested;
   g_user_changed_parameters = saved_user_changed_parameters;
   return passed;
@@ -1811,6 +1913,11 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
     result.hard_failure = true;
     return result;
   }
+  if (!utility_undo_group_state_clean()) {
+    result.hard_failure = true;
+    return result;
+  }
+  reset_utility_undo_group_statistics();
   // Steps 2-4: per-swap quiescence (the session-global BIB teardown hook is
   // NOT consumed here; it runs once at the terminal teardown), epoch
   // pre_unload, FreeLibrary of the plug-in only (the cookie and pinned
@@ -2172,16 +2279,18 @@ int run_discovery_session(const std::wstring& manifest_argument,
                                   effect_state.output.data())
           : -1;
       current_setdown_pending = false;
+      const bool undo_ok = utility_undo_group_state_clean();
       const bool ok = current_global_error == 0 &&
           bootstrap.params_error == 0 &&
           bootstrap.parameter_count_contract_valid && defaults_disposed &&
-          setdown_error == 0;
+          setdown_error == 0 && undo_ok;
       report_json = build_l2_report_json(
           ok ? "parameters_inspected" : "selector_error",
           current_global_error, bootstrap.params_error, setdown_error,
           effect_state.output, bootstrap.about_message, {-1, -1, -1, -1, -1},
           true, /*include_module_audit=*/false);
       if (!ok) error_kind = "selector_error";
+      reset_utility_undo_group_statistics();
       if (!checkpoint_written) protocol_violation = true;
     };
     if (plugin_index != current_index ||
@@ -2353,6 +2462,15 @@ int worker_main_impl(int argc, wchar_t **argv) {
                  "\"point\":[64,72],\"point3d\":[64,72,108]}\n";
     return passed ? 0 : 74;
   }
+  if (argc == 2 &&
+      std::wstring(argv[1]) == L"--self-test-l2-update-params-ui") {
+    const bool passed = verify_l2_update_params_ui_lifecycle();
+    std::cout << "{\"l2_update_params_ui\":\""
+              << (passed ? "passed" : "failed")
+              << "\",\"selector_dispatched\":true,"
+                 "\"pf_update_param_ui_applied\":true}\n";
+    return passed ? 0 : 75;
+  }
   RuntimeHostHooks runtime_hooks{&sha256, &redirect_native_stdout,
                                   &restore_native_stdout};
   // GPU module-audit preflight (#290): authorize the AEXRMA1-listed GPU runtime
@@ -2522,11 +2640,20 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     g_app_picker_color = invocation.picker_color;
     g_user_changed_param_slot = invocation.user_changed_param_slot;
     g_user_changed_param_requested = invocation.user_changed_param_requested;
+    g_user_changed_param_forced = invocation.force_user_changed_diagnostic;
     g_user_changed_parameters = std::move(invocation.user_changed_parameters);
   }
   if (g_aegp_comp_idle_roundtrip_mode) {
     aexcompat::mask_runtime::set_model_enabled(true);
     if (!configure_mask_scene("rectangle")) return 4;
+  }
+  // A real Effect Controls panel belongs to an effect layer. Give its explicit
+  // UPDATE_PARAMS_UI and USER_CHANGED_PARAM routes the same bounded mask model
+  // as an image render so a utility effect can inspect or edit layer masks
+  // without launching AE.
+  if (invocation.update_params_ui_mode || invocation.user_changed_mode) {
+    aexcompat::mask_runtime::set_model_enabled(true);
+    if (!configure_mask_scene("translated_rectangle")) return 4;
   }
   if (!g_cluster_manifest_path.empty())
     invocation.cluster_manifest_path = g_cluster_manifest_path;
@@ -2541,6 +2668,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   }
   // Every rendered effect instance belongs to a layer, even when that layer has no masks.
   if (is_rendering_worker()) aexcompat::mask_runtime::set_model_enabled(true);
+  if (!is_rendering_worker()) begin_l2_host_mutation_observation();
   RuntimeAdmissionRequest runtime_request;
   // A GPU render carries the AEXRMA1 manifest as a `--runtime-module-authorization-v1`
   // trailer (captured above during request parsing); the render/smart worker must
@@ -3005,7 +3133,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     if (const auto lifecycle_exit = run_l2_parameter_lifecycle(
             entry, input, output, global_error, params_error, lifecycle_errors,
             lifecycle_data_null, user_changed_ok, conditional_ui_ok,
-            invocation.external_width, invocation.external_height))
+            invocation.external_width, invocation.external_height,
+            invocation.force_user_changed_diagnostic,
+            invocation.update_params_ui_mode,
+            invocation.update_params_ui_parameters))
       return session.finish(*lifecycle_exit);
   }
   std::string case_id;
@@ -3324,7 +3455,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     // invariant failures (24), and cluster swap failures (25, closure-session
     // design §7: quiescence/setdown/unload/audit; a contamination-suspect
     // abort, not a crash) from ordinary render failures (21).
-    const int session_exit = session_swap_failure ? 25
+    const int session_exit_candidate = session_swap_failure ? 25
         : session_protocol_violation ? 23
         : session_invariant_failure ? 24
         : global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
@@ -3340,6 +3471,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
               ((!g_render_click_enabled && !g_render_draw_enabled) ||
                g_render_ui_context_closed)
           ? 0 : 21;
+    const int session_exit = utility_undo_group_guarded_exit_code(
+        session_exit_candidate, 21);
     if (invocation.render_session_mode && protocol_report_ready)
       session.terminate_after_protocol_report(session_exit);
     if (session_swap_failure) return session.finish_integrated_report(session_exit);
@@ -3358,7 +3491,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       // Frame-local selector errors were reported through frame_done and the
       // broker owned the continue decision; only session mechanics and host
       // state cleanliness decide the exit.
-      const int session_exit = session_protocol_violation ? 23
+      const int session_exit_candidate = session_protocol_violation ? 23
           : session_invariant_failure ? 24
           : global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
         image_render_supported && depth_supported && smart_render_supported &&
@@ -3369,11 +3502,13 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         param_checkouts_balanced() &&
         ((!g_render_click_enabled && !g_render_draw_enabled) ||
          g_render_ui_context_closed) ? 0 : 22;
+      const int session_exit = utility_undo_group_guarded_exit_code(
+          session_exit_candidate, 22);
       session.terminate_after_protocol_report(session_exit);
     }
     if (session_protocol_violation) return session.finish(23);
     if (session_invariant_failure) return session.finish(24);
-    return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+    const int smart_exit_candidate = global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       image_render_supported && depth_supported && smart.pre_error == 0 && smart.render_error == 0 &&
       smart.gpu_setup_error == 0 && smart.gpu_setdown_error == 0 &&
       smart.rects_valid && smart.guards_intact &&
@@ -3382,11 +3517,15 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
       audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
       param_checkouts_balanced() &&
       ((!g_render_click_enabled && !g_render_draw_enabled) ||
-       g_render_ui_context_closed) ? 0 : 22);
+       g_render_ui_context_closed) ? 0 : 22;
+    return session.finish(utility_undo_group_guarded_exit_code(
+        smart_exit_candidate, 22));
   }
-  return session.finish(global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
+  const int l2_exit_candidate = global_error == 0 && params_error == 0 && parameter_count_contract_valid &&
       user_changed_ok && conditional_ui_ok && about_error == 0 && lifecycle_data_null &&
-      std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(), [](auto error) { return error == 0; }) ? 0 : 20);
+      std::all_of(lifecycle_errors.begin(), lifecycle_errors.end(), [](auto error) { return error == 0; }) ? 0 : 20;
+  return session.finish(utility_undo_group_guarded_exit_code(
+      l2_exit_candidate, 20));
 }
 
 int aexcompat::worker_target::run(Kind kind, int argc, wchar_t** argv) {

@@ -89,6 +89,7 @@ struct UiState {
   bool user_changed_active{};
   uint32_t update_calls{};
   bool user_changed_requested{};
+  bool user_changed_forced{};
   int32_t user_changed_slot{-1};
   int32_t user_changed_error{-1};
 };

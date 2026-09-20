@@ -328,19 +328,33 @@ bool verify_parameter_registry_capacity() {
   wchar_t dependency_root[] = L"dependencies";
   wchar_t accepted_slot[] = L"1265";
   wchar_t rejected_slot[] = L"4097";
+  wchar_t update_mode[] = L"--l2-update-params-ui";
+  wchar_t force_mode[] = L"--force-user-changed-diagnostic";
   wchar_t* accepted_argv[]{executable, mode, plugin, dependency_root,
                            accepted_slot};
   wchar_t* rejected_argv[]{executable, mode, plugin, dependency_root,
                            rejected_slot};
+  wchar_t* update_argv[]{executable, update_mode, plugin, dependency_root};
+  wchar_t* force_argv[]{executable, force_mode, plugin, dependency_root,
+                       accepted_slot};
   worker_runtime::invocation::InvocationState accepted{};
   worker_runtime::invocation::InvocationState rejected{};
+  worker_runtime::invocation::InvocationState update{};
+  worker_runtime::invocation::InvocationState forced{};
   const worker_runtime::invocation::L2ModeHooks mode_hooks{
       nullptr, worker_runtime::parameters::kMaxParameterCount};
   ok = ok && worker_runtime::invocation::parse_l2_modes(
                  5, accepted_argv, accepted, mode_hooks) == 0 &&
        accepted.user_changed_param_slot == 1265 &&
        worker_runtime::invocation::parse_l2_modes(
-           5, rejected_argv, rejected, mode_hooks) == 3;
+           5, rejected_argv, rejected, mode_hooks) == 3 &&
+       worker_runtime::invocation::parse_l2_modes(
+           4, update_argv, update, mode_hooks) == 0 &&
+       update.update_params_ui_mode && update.skip_about_mode &&
+       worker_runtime::invocation::parse_l2_modes(
+           5, force_argv, forced, mode_hooks) == 0 &&
+       forced.user_changed_mode && forced.force_user_changed_diagnostic &&
+       forced.user_changed_param_requested;
 
   // Popup defaults are 1-based (issue #1253): a declared dephault of 0
   // (Reshape's Elasticity / Interpolation Method) registers as the first

@@ -789,6 +789,7 @@ pub fn execute(repository: &Path, request_path: &Path, output_path: &Path) -> io
         json!({
         "classification":item.0.as_str(),"render_error":item.1.get("render_error"),
         "output_sha256":item.1.get("output_sha256"),"guard_bytes_intact":item.1.get("guard_bytes_intact"),
+        "utility_undo_groups":item.1.get("utility_undo_groups"),
         "request_mode":item.1.get("request_mode"),
         "requested_parameters":item.1.get("requested_parameters")})
     };
@@ -1099,6 +1100,7 @@ pub fn execute_smart(
         "stream_handles_disposed":item.1.get("stream_handles_disposed"),
         "stream_values_acquired":item.1.get("stream_values_acquired"),
         "stream_values_disposed":item.1.get("stream_values_disposed"),
+        "utility_undo_groups":item.1.get("utility_undo_groups"),
         "suite_leases_balanced":item.1.get("suite_leases_balanced"),
         "suite_acquires":item.1.get("suite_acquires"),
         "suite_releases":item.1.get("suite_releases"),
@@ -1559,6 +1561,11 @@ pub fn execute_smart_suite_fault(
             "mask_mutations":item.1.get("mask_mutations"),
             "invalid_mask_operations":item.1.get("invalid_mask_operations")
         });
+        summary["utility_undo_groups"] = item
+            .1
+            .get("utility_undo_groups")
+            .cloned()
+            .unwrap_or(Value::Null);
         let object = summary.as_object_mut().expect("summary is an object");
         for field in [
             "stream_metadata_fault_observed",
@@ -1727,6 +1734,7 @@ pub fn execute_smart_mask_scene(
             "smart_render_error":item.1.get("smart_render_error"),
             "output_sha256":item.1.get("output_sha256"),
             "guard_bytes_intact":item.1.get("guard_bytes_intact"),
+            "utility_undo_groups":item.1.get("utility_undo_groups"),
             "mask_scene_id":item.1.get("mask_scene_id"),
             "mask_count":item.1.get("mask_count")
         })

@@ -113,6 +113,14 @@ mod tests {
                 "persistent_sequence_setup_error": 0,
                 "persistent_sequence_setdown_error": 0,
                 "guard_bytes_intact": true,
+                "utility_undo_groups": {
+                    "starts": 0,
+                    "ends": 0,
+                    "invalid_operations": 0,
+                    "depth": 0,
+                    "balanced": true,
+                    "operations_valid": true,
+                },
                 "suite_leases_balanced": false,
                 "suite_lease_warning": true,
                 "suite_fault_observed": false,
@@ -146,6 +154,14 @@ mod tests {
                 "persistent_sequence_setup_error": 0,
                 "persistent_sequence_setdown_error": 0,
                 "guard_bytes_intact": true,
+                "utility_undo_groups": {
+                    "starts": 0,
+                    "ends": 0,
+                    "invalid_operations": 0,
+                    "depth": 0,
+                    "balanced": true,
+                    "operations_valid": true,
+                },
                 "suite_leases_balanced": true,
                 "suite_lease_warning": false,
                 "suite_fault_observed": false,
@@ -3226,10 +3242,123 @@ mod tests {
         assert_eq!(diagnostics["advertised_out_flags2"], 1 << 10);
         assert_eq!(diagnostics["smart_render_advertised"], true);
         assert_eq!(diagnostics["parameter_metadata"][0]["type"], "float_slider");
+        assert_eq!(diagnostics["parameter_metadata"][0]["ui_flags"], 0);
+        assert_eq!(diagnostics["parameter_metadata"][0]["flags"], 0);
         assert_eq!(
             diagnostics["parameter_metadata"][0]["user_range"],
             json!({"minimum": 5.0, "maximum": 75.0})
         );
+    }
+
+    #[test]
+    fn verified_unsupervised_action_is_promoted_and_dispatched_as_a_momentary_press() {
+        let descriptor = InteractiveParameter {
+            slot: 5,
+            name: "Apply Transform".into(),
+            kind: "integer".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 0.0,
+            choices: Vec::new(),
+            color: [255, 0, 0, 0],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0; 2],
+        };
+        let mut parameters = vec![descriptor.clone()];
+        let mut diagnostics = json!({});
+        record_identity_compatibility_actions(
+            MASK_TRANSFORM_1_SHA256,
+            &mut parameters,
+            &mut diagnostics,
+        );
+        assert_eq!(parameters[0].kind, COMPATIBILITY_ACTION_KIND);
+        assert_eq!(parameters[0].value, 0.0);
+        assert_eq!(diagnostics["compatibility_actions"][0]["slot"], 5);
+
+        let (forced, dispatched) = prepare_user_changed_parameters(
+            MASK_TRANSFORM_1_SHA256,
+            5,
+            &parameters,
+        );
+        assert!(forced);
+        assert_eq!(dispatched[0].value, 1.0);
+        assert!(encode_interactive_payload(&dispatched)
+            .expect("compatibility action remains a typed checkbox assignment")
+            .contains("param_5@5:i32=1"));
+
+        let mut wrong_identity = vec![descriptor.clone()];
+        assert!(apply_identity_compatibility_actions(
+            &"00".repeat(32),
+            &mut wrong_identity,
+        )
+        .is_empty());
+        assert_eq!(wrong_identity[0].kind, "integer");
+
+        let mut wrong_descriptor = vec![InteractiveParameter {
+            name: "Enable Transform".into(),
+            ..descriptor
+        }];
+        assert!(apply_identity_compatibility_actions(
+            MASK_TRANSFORM_1_SHA256,
+            &mut wrong_descriptor,
+        )
+        .is_empty());
+        assert_eq!(wrong_descriptor[0].kind, "integer");
+    }
+
+    #[test]
+    fn stale_selected_identity_cannot_authorize_a_compatibility_action() {
+        // Model the on-disk AEX changing after the verified descriptor was
+        // selected. The cached model is still promoted, but dispatch must use
+        // the newly observed identity and therefore remain fail-closed.
+        let descriptor = InteractiveParameter {
+            slot: 5,
+            name: "Apply Transform".into(),
+            kind: "integer".into(),
+            minimum: 0.0,
+            maximum: 1.0,
+            value: 0.0,
+            choices: Vec::new(),
+            color: [255, 0, 0, 0],
+            components: [0.0; 3],
+            component_count: 0,
+            layer_path: None,
+            enabled: true,
+            visible: true,
+            supervised: false,
+            debug_summary: None,
+            custom_ui_events: 0,
+            control_size: [0; 2],
+        };
+        let mut promoted = vec![descriptor];
+        let mut diagnostics = json!({});
+        record_identity_compatibility_actions(
+            MASK_TRANSFORM_1_SHA256,
+            &mut promoted,
+            &mut diagnostics,
+        );
+        assert_eq!(promoted[0].kind, COMPATIBILITY_ACTION_KIND);
+
+        let observed_sha256 = "00".repeat(32);
+        assert!(!is_promoted_compatibility_action(
+            &observed_sha256,
+            5,
+            &promoted,
+        ));
+        let (forced, dispatched) = prepare_user_changed_parameters(
+            &observed_sha256,
+            5,
+            &promoted,
+        );
+        assert!(!forced);
+        assert_eq!(dispatched[0].value, 0.0);
     }
 
     #[test]

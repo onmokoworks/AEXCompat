@@ -142,7 +142,7 @@ pub(crate) fn show_effect_controls(
                     widgets.push((parameter.slot, EffectControlRole::GroupEnd, _response));
                     continue;
                 }
-                if parameter.kind == "button" {
+                if matches!(parameter.kind.as_str(), "button" | "compatibility_action") {
                     let response = ui
                         .add_enabled(
                             parameter.enabled && !busy && capabilities.trigger_button,
@@ -870,6 +870,11 @@ mod tests {
             ),
             (
                 "button",
+                EffectControlRole::Button,
+                EffectControlIntent::TriggerButton { slot: 7 },
+            ),
+            (
+                "compatibility_action",
                 EffectControlRole::Button,
                 EffectControlIntent::TriggerButton { slot: 7 },
             ),

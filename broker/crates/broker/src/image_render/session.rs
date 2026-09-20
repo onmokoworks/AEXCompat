@@ -1707,6 +1707,7 @@ pub(crate) fn build_interactive_image_report(
         "total_time": facts.timing.total_time, "time_scale": facts.timing.time_scale,
         "worker_classification": facts.worker_classification,
         "worker_diagnostics": facts.diagnostics,
+        "utility_undo_groups": worker_report.get("utility_undo_groups"),
         "suite_leases_balanced": worker_report.get("suite_leases_balanced"),
         "suite_lease_warning": worker_report.get("suite_lease_warning"),
         "suite_acquires": worker_report.get("suite_acquires"),

@@ -69,6 +69,7 @@ bool emit_classic_completion_report(const ClassicCompletionInputs& in) {
   const auto& arbitrary = worker_runtime::parameters::state().arbitrary;
   const auto& parameter_ui = worker_runtime::parameters::state().ui;
   const auto classic_diagnostics = aexcompat::worker_runtime::classic::diagnostics();
+  const auto utility_undo_groups = report::capture_utility_undo_groups();
   std::ostringstream protocol;
   report::ReportSnapshot report_snapshot(protocol);
   report::ClassicReport classic_report;
@@ -82,6 +83,7 @@ bool emit_classic_completion_report(const ClassicCompletionInputs& in) {
                 aexcompat::render_receipts::lifetimes_balanced() &&
                 aexcompat::aegp_async_layer::balanced() &&
                 audio_handle_lifetimes_balanced() && audio_telemetry().invalid_operations == 0 &&
+                utility_undo_groups.balanced && utility_undo_groups.operations_valid &&
                 classic_diagnostics.balanced &&
                 ((!g_render_click_enabled && !g_render_draw_enabled) ||
                  g_render_ui_context_closed),
@@ -165,7 +167,7 @@ bool emit_classic_completion_report(const ClassicCompletionInputs& in) {
       classic_report, classic_custom_ui, report::capture_classic_subsystems(),
       report::capture_gpu_diagnostics(), report::capture_seh_diagnostics(), classic_requested,
       aexcompat::worker_runtime::classic::last_selector_dispatched(),
-      in.depth_supported, in.render_error});
+      in.depth_supported, in.render_error, utility_undo_groups});
   report::emit(report_snapshot, protocol);
   if (!protocol.good()) return false;
   return worker_runtime::emit_protocol_stdout(protocol.str());

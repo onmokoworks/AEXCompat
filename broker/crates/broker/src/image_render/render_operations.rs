@@ -1636,6 +1636,11 @@ pub fn inspect_experimental_via_discovery_in_place(
             "in-place discovery inspection requires dependency search directories",
         ));
     }
+    let approved_sha256 = plugin
+        .expected_sha256
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
         repository,
         plugins: vec![plugin],
@@ -1646,9 +1651,16 @@ pub fn inspect_experimental_via_discovery_in_place(
     })?;
     let outcome = session.inspect_plugin(0, 0)?;
     let close = session.close();
-    finish_discovery_inspection(outcome, repository, close, |authorization, repository| {
+    let (mut parameters, mut diagnostics) = finish_discovery_inspection(
+        outcome, repository, close, |authorization, repository| {
         inspect_experimental_cleanup_contained_in_place(authorization, repository)
-    })
+    })?;
+    record_identity_compatibility_actions(
+        &approved_sha256,
+        &mut parameters,
+        &mut diagnostics,
+    );
+    Ok((parameters, diagnostics))
 }
 
 fn finish_discovery_inspection<F>(
@@ -1738,7 +1750,7 @@ pub fn inspect_experimental_in_place(
             "in-place inspection requires at least one dependency search directory",
         ));
     }
-    inspect_experimental_impl(
+    let (mut parameters, mut diagnostics, observed_sha256) = inspect_experimental_impl(
         repository,
         plugin_path,
         approved_sha256,
@@ -1747,7 +1759,14 @@ pub fn inspect_experimental_in_place(
         None,
         "--l2-params-only",
         None,
-    )
+        None,
+    )?;
+    record_identity_compatibility_actions(
+        &observed_sha256,
+        &mut parameters,
+        &mut diagnostics,
+    );
+    Ok((parameters, diagnostics))
 }
 
 pub fn inspect_experimental_in_place_plugin_data_effect(
@@ -1762,7 +1781,7 @@ pub fn inspect_experimental_in_place_plugin_data_effect(
             "in-place inspection requires at least one dependency search directory",
         ));
     }
-    inspect_experimental_impl(
+    let (mut parameters, mut diagnostics, observed_sha256) = inspect_experimental_impl(
         repository,
         plugin_path,
         approved_sha256,
@@ -1770,8 +1789,15 @@ pub fn inspect_experimental_in_place_plugin_data_effect(
         dependency_search_dirs,
         None,
         "--l2-params-only",
+        None,
         Some(selector),
-    )
+    )?;
+    record_identity_compatibility_actions(
+        &observed_sha256,
+        &mut parameters,
+        &mut diagnostics,
+    );
+    Ok((parameters, diagnostics))
 }
 
 /// Performs the single cleanup-contained retry authorized by an authenticated
@@ -1794,7 +1820,7 @@ pub fn inspect_experimental_cleanup_contained_in_place(
             "cleanup-contained authorized plugin size changed before retry",
         ));
     }
-    let inspected = inspect_experimental_impl(
+    let (mut parameters, mut diagnostics, observed_sha256) = inspect_experimental_impl(
         repository,
         &plugin_path,
         &approved_sha256,
@@ -1803,14 +1829,19 @@ pub fn inspect_experimental_cleanup_contained_in_place(
         None,
         "--l2-params-inspect-cleanup-contained-v1",
         None,
+        None,
     )?;
-    let diagnostics = &inspected.1;
-    if !cleanup_contained_report_is_valid(diagnostics) {
+    if !cleanup_contained_report_is_valid(&diagnostics) {
         return Err(invalid(
             "cleanup-contained inspection report failed its mode-specific contract",
         ));
     }
-    Ok(inspected)
+    record_identity_compatibility_actions(
+        &observed_sha256,
+        &mut parameters,
+        &mut diagnostics,
+    );
+    Ok((parameters, diagnostics))
 }
 
 fn cleanup_contained_report_is_valid(diagnostics: &Value) -> bool {

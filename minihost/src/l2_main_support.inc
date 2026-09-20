@@ -2531,6 +2531,7 @@ auto& g_update_params_ui_active = g_parameter_runtime.ui.update_active;
 auto& g_user_changed_param_active = g_parameter_runtime.ui.user_changed_active;
 auto& g_update_param_ui_calls = g_parameter_runtime.ui.update_calls;
 auto& g_user_changed_param_requested = g_parameter_runtime.ui.user_changed_requested;
+auto& g_user_changed_param_forced = g_parameter_runtime.ui.user_changed_forced;
 auto& g_user_changed_param_slot = g_parameter_runtime.ui.user_changed_slot;
 auto& g_user_changed_param_error = g_parameter_runtime.ui.user_changed_error;
 auto& g_aegp_init_runtime = aexcompat::worker_runtime::aegp_init::state();
@@ -2666,6 +2667,22 @@ bool mask_lifetimes_balanced();
 bool configure_mask_scene(const std::string& scene_id);
 std::size_t mask_open_count();
 std::size_t mask_tangent_vertex_count();
+
+bool g_l2_mask_scene_observed{};
+uint64_t g_l2_mask_scene_fingerprint_before{};
+uint64_t g_l2_mask_scene_fingerprint_after{};
+
+void begin_l2_host_mutation_observation() {
+  g_l2_mask_scene_observed = aexcompat::mask_runtime::model_enabled();
+  g_l2_mask_scene_fingerprint_before = g_l2_mask_scene_observed
+      ? mask_scene_fingerprint() : 0;
+  g_l2_mask_scene_fingerprint_after = g_l2_mask_scene_fingerprint_before;
+}
+
+void finish_l2_host_mutation_observation() {
+  if (g_l2_mask_scene_observed)
+    g_l2_mask_scene_fingerprint_after = mask_scene_fingerprint();
+}
 constexpr int32_t kPfBadCallbackParam = 516;
 constexpr int32_t kPfSuiteToolNone = 0;
 using aexcompat::pf_helper::reset;
@@ -3310,6 +3327,31 @@ bool dispatch_conditional_ui_selectors(EffectEntry entry,
   return !g_query_dynamic_flags_advertised || g_query_dynamic_flags_error == 0;
 }
 
+// Effect Controls owns UPDATE_PARAMS_UI; the headless discovery/render walk
+// above intentionally does not. This explicit UI-context entry point lets the
+// shipping GUI refresh an advertised effect without changing aerender-like
+// render semantics (#1156). The active parameter array is exposed only for the
+// duration of the selector so PF_UpdateParamUI can safely copy the documented
+// mutable fields into host-owned definitions.
+bool dispatch_effect_controls_update_params_ui(
+    EffectEntry entry, std::array<std::byte, kInSize>& input,
+    std::array<std::byte, kOutSize>& output, void** params,
+    std::size_t param_count) {
+  g_update_params_ui_error = -1;
+  if (!g_update_params_ui_advertised || !params || param_count == 0)
+    return false;
+  g_update_params_ui_active = true;
+  g_active_ui_params = params;
+  g_active_ui_param_count = param_count;
+  g_update_params_ui_error =
+      entry(kUpdateParamsUi, input.data(), output.data(), params, nullptr, nullptr);
+  g_active_ui_params = nullptr;
+  g_active_ui_param_count = 0;
+  g_update_params_ui_active = false;
+  g_conditional_ui_selectors_dispatched = true;
+  return g_update_params_ui_error == 0;
+}
+
 // Whether the parameter definitions the conditional-UI selectors left behind
 // may replace the host's own. A selector that reported an error stopped
 // somewhere it chose not to say, so what it wrote is partial by definition;
@@ -3394,6 +3436,48 @@ std::string build_l2_report_json(
   c.pf_get_current_state_calls = pf_state_stats.get_current_state_calls;
   c.pf_are_states_identical_calls = pf_state_stats.are_states_identical_calls;
   c.suite_leases_balanced = suite_leases_balanced(); c.user_changed_param_requested = g_user_changed_param_requested;
+  const auto undo_stats = utility_undo_group_stats();
+  c.utility_undo_group_starts = undo_stats.starts;
+  c.utility_undo_group_ends = undo_stats.ends;
+  c.utility_undo_group_invalid_operations = undo_stats.invalid_operations;
+  c.utility_undo_group_depth = undo_stats.depth;
+  c.utility_undo_groups_balanced = utility_undo_groups_balanced();
+  c.utility_undo_group_operations_valid = utility_undo_group_operations_valid();
+  c.mask_scene_observed = g_l2_mask_scene_observed;
+  c.mask_scene_id = g_l2_mask_scene_observed
+      ? aexcompat::mask_runtime::mask_scene_id() : "none";
+  c.mask_scene_fingerprint_before = g_l2_mask_scene_fingerprint_before;
+  c.mask_scene_fingerprint_after = g_l2_mask_scene_fingerprint_after;
+  c.mask_scene_changed = g_l2_mask_scene_observed &&
+      g_l2_mask_scene_fingerprint_before != g_l2_mask_scene_fingerprint_after;
+  if (g_l2_mask_scene_observed) {
+    const auto mask_stats = mask_runtime_snapshot();
+    c.mask_scene_active_masks = mask_stats.active_masks;
+    c.mask_scene_mask_mutations = mask_stats.mask_mutations;
+    c.mask_scene_invalid_mask_operations = mask_stats.invalid_mask_operations;
+    c.mask_scene_outline_mutations = mask_stats.outline_mutations;
+    c.mask_scene_invalid_outline_operations = mask_stats.invalid_outline_operations;
+    c.mask_scene_keyframe_mutations = mask_stats.keyframe_mutations;
+    c.mask_scene_invalid_keyframe_operations = mask_stats.invalid_keyframe_operations;
+    c.mask_scene_dynamic_stream_mutations = mask_stats.dynamic_stream_mutations;
+    c.mask_scene_invalid_dynamic_stream_operations =
+        mask_stats.invalid_dynamic_stream_operations;
+    for (auto* mask : ordered_active_masks()) {
+      aexcompat::mask_runtime::CurveSnapshot curve;
+      if (!snapshot_mask_curve(&mask->mask, curve)) continue;
+      aexcompat::worker_report::MaskCurveSnapshot report_curve;
+      report_curve.id = curve.id;
+      report_curve.open = curve.open;
+      report_curve.vertices.reserve(curve.vertices.size());
+      for (const auto& vertex : curve.vertices) {
+        report_curve.vertices.push_back(
+            {vertex.x, vertex.y, vertex.tangent_in_x, vertex.tangent_in_y,
+             vertex.tangent_out_x, vertex.tangent_out_y});
+      }
+      c.mask_scene_curves.push_back(std::move(report_curve));
+    }
+  }
+  c.user_changed_param_forced = g_user_changed_param_forced;
   c.user_changed_param_slot = g_user_changed_param_slot; c.user_changed_param_error = g_user_changed_param_error;
   c.user_changed_parameters_json = requested_parameters_json(g_user_changed_parameters);
   c.missing_suites_json = missing_suites_report_json();

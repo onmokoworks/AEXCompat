@@ -17,6 +17,13 @@ void color(std::ostringstream& o, const std::array<unsigned char, 4>& v) {
     << static_cast<unsigned>(v[1]) << ",\"green\":" << static_cast<unsigned>(v[2])
     << ",\"blue\":" << static_cast<unsigned>(v[3]) << '}';
 }
+void fingerprint(std::ostringstream& o, uint64_t value) {
+  const auto flags = o.flags();
+  const auto fill = o.fill();
+  o << '"' << std::hex << std::setw(16) << std::setfill('0') << value << '"';
+  o.flags(flags);
+  o.fill(fill);
+}
 }
 
 std::string bounded_diagnostic_text(const std::string& value, std::size_t cap) {
@@ -45,6 +52,54 @@ std::string serialize_l2_report(const L2ReportContext& c) {
   o << ",\"update_params_ui_error\":" << c.update_params_ui_error << ",\"query_dynamic_flags_error\":" << c.query_dynamic_flags_error
     << ",\"update_param_ui_calls\":" << c.update_param_ui_calls << ",\"pf_get_current_state_calls\":" << c.pf_get_current_state_calls
     << ",\"pf_are_states_identical_calls\":" << c.pf_are_states_identical_calls << ",\"suite_leases_balanced\":"; boolean(o, c.suite_leases_balanced);
+  o << ",\"utility_undo_groups\":{\"starts\":" << c.utility_undo_group_starts
+    << ",\"ends\":" << c.utility_undo_group_ends
+    << ",\"invalid_operations\":" << c.utility_undo_group_invalid_operations
+    << ",\"depth\":" << c.utility_undo_group_depth << ",\"balanced\":";
+  boolean(o, c.utility_undo_groups_balanced);
+  o << ",\"operations_valid\":";
+  boolean(o, c.utility_undo_group_operations_valid);
+  o << "},\"mask_scene\":{\"observed\":";
+  boolean(o, c.mask_scene_observed);
+  o << ",\"id\":\"" << bounded_diagnostic_text(c.mask_scene_id, 96)
+    << "\",\"fingerprint_before\":";
+  fingerprint(o, c.mask_scene_fingerprint_before);
+  o << ",\"fingerprint_after\":";
+  fingerprint(o, c.mask_scene_fingerprint_after);
+  o << ",\"changed\":";
+  boolean(o, c.mask_scene_changed);
+  o << ",\"statistics\":{\"active_masks\":" << c.mask_scene_active_masks
+    << ",\"mask_mutations\":" << c.mask_scene_mask_mutations
+    << ",\"invalid_mask_operations\":" << c.mask_scene_invalid_mask_operations
+    << ",\"outline_mutations\":" << c.mask_scene_outline_mutations
+    << ",\"invalid_outline_operations\":" << c.mask_scene_invalid_outline_operations
+    << ",\"keyframe_mutations\":" << c.mask_scene_keyframe_mutations
+    << ",\"invalid_keyframe_operations\":" << c.mask_scene_invalid_keyframe_operations
+    << ",\"dynamic_stream_mutations\":" << c.mask_scene_dynamic_stream_mutations
+    << ",\"invalid_dynamic_stream_operations\":" << c.mask_scene_invalid_dynamic_stream_operations
+    << "},\"curves\":[";
+  for (std::size_t curve_index = 0;
+       curve_index < c.mask_scene_curves.size(); ++curve_index) {
+    if (curve_index) o << ',';
+    const auto& curve = c.mask_scene_curves[curve_index];
+    o << "{\"id\":" << curve.id << ",\"open\":";
+    boolean(o, curve.open);
+    o << ",\"vertices\":[";
+    for (std::size_t vertex_index = 0;
+         vertex_index < curve.vertices.size(); ++vertex_index) {
+      if (vertex_index) o << ',';
+      const auto& vertex = curve.vertices[vertex_index];
+      o << "{\"x\":"; number(o, vertex.x);
+      o << ",\"y\":"; number(o, vertex.y);
+      o << ",\"tangent_in_x\":"; number(o, vertex.tangent_in_x);
+      o << ",\"tangent_in_y\":"; number(o, vertex.tangent_in_y);
+      o << ",\"tangent_out_x\":"; number(o, vertex.tangent_out_x);
+      o << ",\"tangent_out_y\":"; number(o, vertex.tangent_out_y);
+      o << '}';
+    }
+    o << "]}";
+  }
+  o << "]}";
   o << c.unsupported_suite_calls_json << c.suite_call_slot_probe_json
     << c.compute_cache_timeline_json
     << c.selector_invocations_json << c.plugin_data_json;
@@ -52,6 +107,7 @@ std::string serialize_l2_report(const L2ReportContext& c) {
     o << ",\"module_audit_failure\":" << c.module_audit_failure_json;
   o << c.missing_suites_json << c.suite_timeline_json
     << ",\"user_changed_param_requested\":"; boolean(o, c.user_changed_param_requested);
+  o << ",\"user_changed_param_forced\":"; boolean(o, c.user_changed_param_forced);
   o << ",\"user_changed_param_slot\":" << c.user_changed_param_slot << ",\"user_changed_param_error\":" << c.user_changed_param_error
     << ",\"user_changed_parameters\":" << c.user_changed_parameters_json << ",\"return_message\":\"" << bounded_diagnostic_text(c.return_message, 256)
     << "\",\"about_message\":\"" << bounded_diagnostic_text(c.about_message, 256) << "\",\"about_selector_dispatched\":"; boolean(o, c.about_selector_dispatched);

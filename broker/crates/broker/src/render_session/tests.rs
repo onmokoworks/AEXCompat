@@ -267,6 +267,14 @@ fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
         "persistent_sequence_setup_error": 0,
         "persistent_sequence_setdown_error": 0,
         "guard_bytes_intact": true,
+        "utility_undo_groups": {
+            "starts": 0,
+            "ends": 0,
+            "invalid_operations": 0,
+            "depth": 0,
+            "balanced": true,
+            "operations_valid": true,
+        },
         "suite_leases_balanced": true,
         "suite_lease_warning": false,
         "suite_fault_observed": false,
@@ -292,6 +300,7 @@ fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
         ("persistent_sequence_setup_error", serde_json::json!(25)),
         ("persistent_sequence_setdown_error", serde_json::json!(-1)),
         ("guard_bytes_intact", serde_json::json!(false)),
+        ("utility_undo_groups", serde_json::json!({})),
         ("suite_leases_balanced", serde_json::json!(false)),
         ("handle_lifetimes_balanced", serde_json::json!(false)),
         ("world_lifetimes_balanced", serde_json::json!(false)),
@@ -310,6 +319,41 @@ fn final_report_clean_fails_closed_on_missing_or_dirty_fields() {
             "missing {key} must fail closed"
         );
     }
+    for (field, dirty) in [
+        ("starts", serde_json::json!(1)),
+        ("invalid_operations", serde_json::json!(1)),
+        ("depth", serde_json::json!(1)),
+        ("balanced", serde_json::json!(false)),
+        ("operations_valid", serde_json::json!(false)),
+    ] {
+        let mut report = clean.clone();
+        report["utility_undo_groups"][field] = dirty;
+        assert_eq!(
+            validate_final_report(&report, false),
+            Err(CloseReportInvariant::UtilityUndoGroups),
+            "dirty utility undo field {field} must fail closed"
+        );
+    }
+    for dirty_counter in [
+        serde_json::json!(null),
+        serde_json::json!("0"),
+        serde_json::json!(-1),
+    ] {
+        let mut report = clean.clone();
+        report["utility_undo_groups"]["starts"] = dirty_counter.clone();
+        report["utility_undo_groups"]["ends"] = dirty_counter.clone();
+        assert_eq!(
+            validate_final_report(&report, false),
+            Err(CloseReportInvariant::UtilityUndoGroups),
+            "matching non-u64 undo counters must fail closed: {dirty_counter}"
+        );
+    }
+    let mut extra_undo_field = clean.clone();
+    extra_undo_field["utility_undo_groups"]["unexpected"] = serde_json::json!(0);
+    assert_eq!(
+        validate_final_report(&extra_undo_field, false),
+        Err(CloseReportInvariant::UtilityUndoGroups)
+    );
     // A parseable but unrelated report (an older worker) is not clean.
     assert!(!final_report_clean(
         &serde_json::json!({"status": "ok"}),
@@ -323,6 +367,14 @@ fn smart_final_report_clean_requires_the_session_fields() {
         "status": "render_completed",
         "global_setdown_error": 0,
         "guard_bytes_intact": true,
+        "utility_undo_groups": {
+            "starts": 0,
+            "ends": 0,
+            "invalid_operations": 0,
+            "depth": 0,
+            "balanced": true,
+            "operations_valid": true,
+        },
         "suite_leases_balanced": true,
         "suite_lease_warning": false,
         "suite_fault_observed": false,
@@ -372,6 +424,14 @@ fn final_report_accepts_only_explicit_nonfaulting_suite_lease_warning() {
         "status": "render_completed",
         "global_setdown_error": 0,
         "guard_bytes_intact": true,
+        "utility_undo_groups": {
+            "starts": 0,
+            "ends": 0,
+            "invalid_operations": 0,
+            "depth": 0,
+            "balanced": true,
+            "operations_valid": true,
+        },
         "suite_leases_balanced": false,
         "suite_lease_warning": true,
         "suite_fault_observed": false,
@@ -453,6 +513,14 @@ fn classic_suite_warning_requires_canonical_lease_summary_and_exact_counters() {
         "persistent_sequence_setup_error": 0,
         "persistent_sequence_setdown_error": 0,
         "guard_bytes_intact": true,
+        "utility_undo_groups": {
+            "starts": 0,
+            "ends": 0,
+            "invalid_operations": 0,
+            "depth": 0,
+            "balanced": true,
+            "operations_valid": true,
+        },
         "suite_leases_balanced": false,
         "suite_lease_warning": true,
         "suite_fault_observed": false,
@@ -556,6 +624,14 @@ fn close_report_validation_is_typed_and_rejects_unexpected_or_incomplete_leases(
         "persistent_sequence_setup_error": 0,
         "persistent_sequence_setdown_error": 0,
         "guard_bytes_intact": true,
+        "utility_undo_groups": {
+            "starts": 0,
+            "ends": 0,
+            "invalid_operations": 0,
+            "depth": 0,
+            "balanced": true,
+            "operations_valid": true,
+        },
         "suite_leases_balanced": false,
         "suite_lease_warning": true,
         "suite_fault_observed": false,

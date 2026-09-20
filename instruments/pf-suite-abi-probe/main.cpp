@@ -3,6 +3,7 @@
 #include "AE_EffectCBSuites.h"
 #include "AE_EffectSuites.h"
 #include "AE_GeneralPlug.h"
+#include "../../minihost/src/worker_aegp_utility_suite.hpp"
 
 #include <cstddef>
 #include <iostream>
@@ -38,6 +39,33 @@ static_assert(std::is_standard_layout_v<AEGP_RenderOptionsSuite1>);
 static_assert(std::is_standard_layout_v<AEGP_WorldSuite3>);
 static_assert(std::is_standard_layout_v<AEGP_RenderSuite4>);
 static_assert(std::is_standard_layout_v<AEGP_RenderAsyncManagerSuite1>);
+static_assert(std::is_standard_layout_v<AEGP_UtilitySuite6>);
+
+using LocalUtilitySuite6 = aexcompat::l2_detail::UtilitySuite;
+static_assert(sizeof(AEGP_UtilitySuite6) == 33 * sizeof(void*));
+static_assert(sizeof(LocalUtilitySuite6) == sizeof(AEGP_UtilitySuite6));
+static_assert(kAEGPUtilitySuiteVersion6 == 13);
+static_assert(offsetof(LocalUtilitySuite6, start_undo_group) ==
+              offsetof(AEGP_UtilitySuite6, AEGP_StartUndoGroup));
+static_assert(offsetof(LocalUtilitySuite6, end_undo_group) ==
+              offsetof(AEGP_UtilitySuite6, AEGP_EndUndoGroup));
+static_assert(offsetof(LocalUtilitySuite6, register_with_aegp) ==
+              offsetof(AEGP_UtilitySuite6, AEGP_RegisterWithAEGP));
+static_assert(offsetof(LocalUtilitySuite6, get_main_hwnd) ==
+              offsetof(AEGP_UtilitySuite6, AEGP_GetMainHWND));
+static_assert(std::is_same_v<
+              decltype(LocalUtilitySuite6::start_undo_group),
+              decltype(AEGP_UtilitySuite6::AEGP_StartUndoGroup)>);
+static_assert(std::is_same_v<decltype(LocalUtilitySuite6::end_undo_group),
+                             decltype(AEGP_UtilitySuite6::AEGP_EndUndoGroup)>);
+// The SDK intentionally gives AEGP_GlobalRefcon an opaque pointer type while
+// the host boundary stores it as void*. Verify that the local callback accepts
+// the official argument types instead of requiring nominal pointer equality.
+static_assert(std::is_invocable_r_v<
+              A_Err, decltype(LocalUtilitySuite6::register_with_aegp),
+              AEGP_GlobalRefcon, const A_char*, AEGP_PluginID*>);
+static_assert(std::is_same_v<decltype(LocalUtilitySuite6::get_main_hwnd),
+                             decltype(AEGP_UtilitySuite6::AEGP_GetMainHWND)>);
 
 ASSERT_SLOT(PF_WorldTransformSuite1, composite_rect, 0);
 ASSERT_SLOT(PF_WorldTransformSuite1, transform_world, 6);
@@ -85,6 +113,8 @@ int main() {
             << kAEGPRenderSuiteVersion4
             << ",\"kAEGPRenderAsyncManagerSuiteVersion1\":"
             << kAEGPRenderAsyncManagerSuiteVersion1
+            << ",\"kAEGPUtilitySuiteVersion6\":"
+            << kAEGPUtilitySuiteVersion6
             << "},\n  \"suites\":{\n";
 
   bool first = true;
