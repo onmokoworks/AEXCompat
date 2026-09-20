@@ -796,6 +796,47 @@ input-equal `BCC Obsolete` set from 5 to 4. This establishes edge-aware detail
 smoothing with PixelChooser disabled, not every Beauty Studio subgroup or
 exact After Effects pixel parity.
 
+`BCCMotionKey.aex` remains semantically unresolved and is not counted as a
+rendered success. A deterministic 11-frame 256x144 clip places a small opaque
+foreground block over a textured static background and moves it four pixels per
+frame. The installed effect successfully opens a SmartFX session, decodes valid
+RGBA8 output, checks out the primary layer at the requested temporal keys, and
+returns zero from both Smart selectors. Mix 100 returns the current frame
+byte-for-byte as expected, but both `Mode = Remove` with Mix 0 and `Mode = Show
+Mask` return the same current frame byte-for-byte. This contradicts the Boris
+Motion Key contract: Show Mask should display the replacement mask, and Remove
+should replace a moving foreground region from neighboring frames.
+
+The bounded investigation rejected frame-slot/time normalization, large or
+fast motion, the default region scale, and direct parameter assignment as the
+sole cause. Extended diagnostics recorded no checkout denial, unsupported suite
+call, or selector error. `VDS App Suite` version 1 acquisition failed, but the
+semantically verified `BCCBeautyStudio.aex` has the same failure while producing
+a nonidentity smoothing result. The shared failure alone therefore does not
+identify the Motion Key cause; whether this suite is mandatory specifically for
+Motion Key remains unverified. A temporary same-resident
+`PF_Cmd_USER_CHANGED_PARAM` dispatch for supervised slot 9 (`Mode`) completed
+successfully after sequence setup and before frame setup, but Show Mask remained
+byte-identical to the input. It was removed, and the canonical Release worker
+was rebuilt from the clean product source. A synthetic `SEQUENCE_RESETUP` was
+not retained: observed AE parameter animation does not emit it, and invoking it
+on an unflattened live sequence handle would not be a valid host-equivalence
+experiment.
+
+`test_bcc_obsolete_motion_key_response.py` preserves the exact known signature
+as a strict, signature-bounded expected failure: transport and parameter
+receipts must succeed, the neutral frame must remain exact, and both Remove and
+Show Mask must remain exact only for the expected-failure branch. Any output
+change leaves that branch and fails until it is semantically validated and
+promoted. The installed AEX reports one xfailed case in 7.92 seconds. The
+unresolved input-equal `BCC Obsolete` set therefore remains 4; this result is
+not promoted to a rendered semantic success. The focused evidence used AEX
+SHA-256 `e7a84a326f12d59fe4f0b1c2cdac14b2d1c3188d746ef5c0ed1a6e27e7ea80d1`,
+Release worker
+`d9e5b0f4269f82f34a1bd5a3f7b1bcf72a314303b034b6c1b346a048aa6e39a5`,
+and Release harness
+`c424f9269dcc3502a791d2d3e1ec2dba00f827de710a2fc9fe46fccbbd8ebd6a`.
+
 The first attempt to extend clustering to effects with a secondary layer used
 equal first-layer slots as the boundary. A 39-row interrupted milestone exposed
 two transient `PF_Err_INTERNAL_STRUCT_DAMAGED` results on the second member of
