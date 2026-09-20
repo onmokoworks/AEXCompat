@@ -1533,3 +1533,31 @@ and Release harness SHA-256
 Other median modes, geometry, PixelChooser, bit depths, and exact After Effects
 parity remain outside this result. No After Effects process or PSOFT path was
 used.
+
+## BCC VR Blur semantic follow-up
+
+`BCCBlur4.aex` is now verified for bounded SmartFX ARGB8 mono strength and axis
+response. Its inspected controls differ from the older `BCCBlur.aex`: slot 12
+is `Master Blur`, with slot 13 `Blur X` and slot 14 `Blur Y` as percentages.
+On an opaque white rectangle over black, Master zero is byte-exact identity.
+Master 2 produces eight intermediate transition pixels on each center axis;
+Master 20 produces 80, with monotonic rise/fall around the four rectangle
+edges. At Master 20, X=100/Y=0 changes only the horizontal profile and preserves
+the center column exactly; X=0/Y=100 changes only the vertical profile and
+preserves the center row exactly. All five outputs remain opaque grayscale.
+
+`test_bcc_blur4_response.py` adds an opt-in installed-AEX test plus eleven
+behavioral mutations covering a damaged neutral endpoint, copied or reversed
+strength, alpha/color corruption, cross-axis leakage, missing horizontal or
+vertical response, a center-cross-only fake, fixed output, and truncation. The
+installed AEX and mutations passed 12/12; the ordinary non-corpus run passed
+11 tests with the real-AEX case explicitly skipped. The identity-bound ledger is
+`target/all-aex-with-bcc-blur4-followup.json`. Evidence used plug-in SHA-256
+`b882ca46766c6d8f6079a220ebeb40b0a5c0091bfccd8cf35c1f89a69fa889d6`,
+worker SHA-256
+`b4bcb4671f40a384e84e04d77ce32c1f02720dc3cbc23b7a3b6f6a532e5e066a`,
+and Release harness SHA-256
+`62778b0ca7b7f2af4bc8ed1fe09aada6f82d365ac875606e86fc4c6fa5e2bc82`.
+Stereo formats, other radii, exact kernel shape, bit depths, and exact After
+Effects parity remain outside this result. No After Effects process or PSOFT
+path was used.
