@@ -15,8 +15,6 @@ struct LifecycleHooks {
   // (issue #725).
   int32_t (*setup_error)(void* lifecycle);
   bool (*click)(void* host);
-  bool (*interpolate)(void* host);
-  bool (*roundtrip)(void* host);
   bool (*conditional_ui)(void* host);
   bool (*draw)(void* host);
   int32_t (*end)(void* host, void* lifecycle, int32_t error);

@@ -391,10 +391,6 @@ struct ClassicLifecycleOwner {
         +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
           return dispatch_render_click(h.entry, h.input, h.output, h.definitions); },
         +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          return interpolate_arbitrary_values(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
-          return roundtrip_arbitrary_values(h.entry, h.input, h.output, h.definitions); },
-        +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
           return dispatch_conditional_ui_selectors(h.entry, h.input, h.output, h.params.data()); },
         +[](void* opaque) { auto& h = *static_cast<ClassicLifecycleOwner*>(opaque);
           return dispatch_render_draw(h.entry, h.input, h.output, h.definitions); },
@@ -764,7 +760,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (!initialize_arbitrary_values(entry, input, command_output, definitions)) return -5;
   ArbitraryValuesScope arbitrary_scope{entry, &input, &command_output, &definitions};
   if (requested && !apply_arbitrary_text_assignments(entry, input, command_output, definitions, *requested)) return -5;
-  probe_arbitrary_scan(entry, input, command_output, definitions);
   for (std::size_t slot = 1; slot < definitions.size(); ++slot)
     if (g_params[slot - 1].type == 0 && g_params[slot - 1].layer_default == -1) {
       copy_world_into_param_def(definitions[slot], input_world);
@@ -1207,28 +1202,10 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       external_total_time, external_time_scale, g_full_resolution_width,
       g_full_resolution_height, dispatch_pixel_format, &input_world,
       &dispatch_worlds, &source};
-  // Interpolate and roundtrip the arbitrary values BEFORE prepare_parameters
-  // snapshots the definitions into `params`. In the smart path the plug-in
-  // renders from that `params` snapshot, so churning definitions[u+16] after
-  // the snapshot (each of these disposes the old value handle and swaps in a
-  // freshly allocated one) strands the handle `params` still points at; the
-  // plug-in's render-time lock of it then fails closed with
-  // PF_Err_INTERNAL_STRUCT_DAMAGED (issue #993). ARB callbacks do not require
-  // an active SEQUENCE here: initialize_arbitrary_values just above already
-  // exercises ARB_COPY before begin_lifecycle. The classic path keeps these
-  // after render_click because its dispatch_render_draw reads `definitions`
-  // directly, so there is no earlier snapshot to go stale there.
-  // interpolate reads the frame's current/total time from the input buffer,
-  // which prepare_parameters no longer populates first, so publish the times
-  // here (prepare_parameters re-publishes the same values, idempotently).
-  aexcompat::worker_runtime::smart_setup::publish_frame_times(parameter_request);
-  if (!interpolate_arbitrary_values(entry, input, command_output, definitions) ||
-      !roundtrip_arbitrary_values(entry, input, command_output, definitions)) {
-    // Same failure code as before the move; the lifecycle has not begun yet,
-    // so unlike the old call site there is nothing to tear down.
-    result.pre_error = -5;
-    return result;
-  }
+  // Default-value self-interpolation and flatten/unflatten roundtrips are
+  // conformance diagnostics, not value construction. Shipping frames keep
+  // COPY/DISPOSE ownership plus explicit text/timeline operations below and
+  // avoid those extra selector boundaries and their module-audit snapshots.
   if (!aexcompat::worker_runtime::smart_setup::prepare_parameters(
           parameter_request, parameter_state,
           {&apply_parameter_animation, &dump_world_snapshot}))

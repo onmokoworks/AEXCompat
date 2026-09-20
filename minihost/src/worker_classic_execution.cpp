@@ -27,8 +27,6 @@ LifecycleResult begin_lifecycle(void* host, const LifecycleHooks& h) {
     if (result.error == 0 && operation && !operation(host)) result.error = -5;
   };
   apply(h.click);
-  apply(h.interpolate);
-  apply(h.roundtrip);
   apply(h.conditional_ui);
   return result;
 }

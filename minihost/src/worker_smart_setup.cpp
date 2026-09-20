@@ -248,11 +248,14 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
   auto& runtime = parameters::state();
   auto& definitions = prepared.definitions;
   if (definitions.size() != runtime.records.size() + 1) return false;
+  // Arbitrary text SCAN and keyed UNFLATTEN/INTERP callbacks below are real
+  // frame-value construction. Publish their time context before the first of
+  // them; the old late write was sufficient only while diagnostic callbacks
+  // happened to publish the same fields ahead of this function.
+  publish_frame_times(request);
   if (request.requested && !parameter_execution::apply_arbitrary_text_assignments(
           request.entry, *request.input, *request.output, definitions,
           *request.requested)) return false;
-  parameter_execution::probe_arbitrary_scan(
-      request.entry, *request.input, *request.output, definitions);
   smart::state().default_self_layers.clear();
   for (std::size_t slot = 1; slot < definitions.size(); ++slot) {
     if (runtime.records[slot - 1].type == 0 &&
@@ -349,7 +352,6 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
   prepared.params.resize(definitions.size());
   for (std::size_t i = 0; i < definitions.size(); ++i)
     prepared.params[i] = definitions[i].data();
-  publish_frame_times(request);
   auto write_input = [&](std::size_t offset, const auto& value) {
     std::memcpy(request.input->data() + offset, &value, sizeof(value));
   };

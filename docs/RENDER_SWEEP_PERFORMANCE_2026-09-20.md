@@ -126,6 +126,53 @@ predecessor worker `38cd6e5edc89474d3c46180c3d19241a99c5f8355985a297da131ba6c30a
 before a move-only return cleanup. These tests did not start After Effects and
 did not execute Maxon, Sapphire, or either PSOFT tree.
 
+## Accepted removal of per-frame arbitrary-data conformance probes
+
+Default arbitrary values already have a shipping ownership path: COPY creates
+the frame value and DISPOSE releases it. Self-INTERP, flatten/unflatten of that
+same value, and printed-summary SCAN/COMPARE were diagnostic probes rather than
+value construction, but each plug-in callback also incurred a module-audit
+boundary. They are no longer dispatched on ordinary Classic or Smart frames.
+Explicit ArbitraryText still uses SCAN, keyed arbitrary animation still uses
+UNFLATTEN/NEW/INTERP as required, and the complete non-null conformance helpers
+remain directly exercised by the native behavioral self-test.
+
+A fresh Release candidate worker has SHA-256
+`6a17bf06f5261f369ec29834bd99781d8141e849002e7973f94bfc63778e447a`.
+Against baseline worker
+`6d360e4e07f544118de491d76dc0222f04f5bcff6209fb8bde3291c6fe33f3ca`
+and the same CLI
+`98e5fb8a9b851434296abfd906b255fb844b0eaf0425f418773f555803f4937e`,
+five measured three-member `Channel Blur` runs after one warm-up changed total
+median from 5,352 ms to 5,214 ms (2.58%) and the shared-session follower median
+from 618 ms to 567 ms (8.25%). All 15 measured rows retained their exact
+bucket, decoded pixel SHA-256, clean session, and zero worker exit.
+
+The unclustered `Channel Blur YUV` close report reduced module-audit phases
+from 31 to 19. Roundtrip calls fell 2 to 0 and failed default interpolation
+probes fell 2 to 0; COPY remained 2, while DISPOSE fell from 6 to 4 because the
+two temporary roundtrip handles no longer exist. Handle accounting remained
+balanced (8/8 before, 6/6 after), with zero invalid arbitrary operations. The
+observed module sets were identical in every audit category. Reports are
+`%TEMP%/aexcompat-channel-blur-arb-baseline-{0..5}.json`,
+`%TEMP%/aexcompat-channel-blur-arb-candidate-{0..5}.json`, and their respective
+`*-close.json` drill-downs.
+
+The single permitted 34-member `blur` regression sweep completed in 62,103 ms
+with the same 33 rendered plus one rendered-transparent buckets, exact pixel
+hashes, clean sessions, and zero worker exits as the earlier 62,777 ms cache
+milestone. That earlier report uses a predecessor worker and is therefore a
+regression reference, not the isolated A/B speed claim above. The candidate
+report is `%TEMP%/aexcompat-blur-arb-candidate-20260920.json`.
+
+Release native Classic execution/runtime self-tests passed, including Classic
+and Smart default ownership, explicit text, midpoint/endpoint timeline values,
+failure cleanup, time propagation, and retained direct conformance behavior.
+Both worker parameter-animation routes passed; the built-artifact Python suite
+passed 5/5 and the Release `render_sweep` Rust example suite passed 30/30. No
+After Effects process was started, and no Maxon, Sapphire, or PSOFT path was
+executed.
+
 ## Full shipping-scan inventory
 
 The shipping `scan_for_diagnostics` path found 984 AEX files after configured

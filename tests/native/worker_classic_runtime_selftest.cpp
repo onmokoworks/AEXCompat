@@ -5,12 +5,19 @@
 #include "worker_invocation_orchestration.hpp"
 #include "worker_selector_dispatch.hpp"
 #include "worker_request_parser.hpp"
+#include "worker_smart_execution.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -32,10 +39,25 @@ std::mutex g_thread_ids_mutex;
 std::vector<std::thread::id> g_thread_ids;
 int g_arbitrary_copy_calls{};
 int g_arbitrary_dispose_calls{};
-int g_arbitrary_source_token{};
-int g_arbitrary_destination_token{};
+int32_t g_arbitrary_source_token{17};
 int g_arbitrary_refcon_token{};
 constexpr int16_t kArbitraryId = 73;
+struct SyntheticArbitraryHandle {
+  int32_t value{};
+  bool live{true};
+};
+std::vector<std::unique_ptr<SyntheticArbitraryHandle>> g_arbitrary_handles;
+std::array<int, 11> g_arbitrary_opcode_calls{};
+std::array<bool, 11> g_arbitrary_time_checked{};
+int32_t g_arbitrary_expected_current_time{};
+int32_t g_arbitrary_expected_time_step{1};
+int32_t g_arbitrary_expected_total_time{1};
+uint32_t g_arbitrary_expected_time_scale{1};
+int g_arbitrary_time_observations{};
+int g_arbitrary_time_mismatches{};
+int g_arbitrary_fail_opcode{-1};
+int g_arbitrary_snapshot_observations{};
+int32_t g_arbitrary_snapshot_value{};
 int32_t g_expected_frame_time{};
 int32_t g_previous_frame_time{};
 int g_frame_setup_time_observations{};
@@ -70,30 +92,250 @@ void observe_concurrent_render_context() {
 int32_t __cdecl fail_synthetic_render(
     int32_t, void*, void*, void**, void*, void*) { return 4; }
 
+template <typename T>
+T read_synthetic_field(const void* bytes, std::size_t offset) {
+  T value{};
+  std::memcpy(&value, static_cast<const std::byte*>(bytes) + offset,
+              sizeof(value));
+  return value;
+}
+
+SyntheticArbitraryHandle* synthetic_handle(const void* value) {
+  const auto found = std::find_if(
+      g_arbitrary_handles.begin(), g_arbitrary_handles.end(),
+      [value](const auto& candidate) { return candidate.get() == value; });
+  return found == g_arbitrary_handles.end() ? nullptr : found->get();
+}
+
+void* create_synthetic_handle(int32_t value) {
+  auto handle = std::make_unique<SyntheticArbitraryHandle>();
+  handle->value = value;
+  void* result = handle.get();
+  g_arbitrary_handles.push_back(std::move(handle));
+  return result;
+}
+
+bool synthetic_value(const void* value, int32_t* result) {
+  if (!result) return false;
+  if (value == &g_arbitrary_source_token) {
+    *result = g_arbitrary_source_token;
+    return true;
+  }
+  const auto* handle = synthetic_handle(value);
+  if (!handle || !handle->live) return false;
+  *result = handle->value;
+  return true;
+}
+
+std::size_t live_synthetic_handle_count() {
+  return static_cast<std::size_t>(std::count_if(
+      g_arbitrary_handles.begin(), g_arbitrary_handles.end(),
+      [](const auto& handle) { return handle->live; }));
+}
+
+void reset_synthetic_arbitrary(int32_t source_value = 17) {
+  g_arbitrary_handles.clear();
+  g_arbitrary_opcode_calls.fill(0);
+  g_arbitrary_time_checked.fill(false);
+  g_arbitrary_source_token = source_value;
+  g_arbitrary_copy_calls = 0;
+  g_arbitrary_dispose_calls = 0;
+  g_arbitrary_expected_current_time = 0;
+  g_arbitrary_expected_time_step = 1;
+  g_arbitrary_expected_total_time = 1;
+  g_arbitrary_expected_time_scale = 1;
+  g_arbitrary_time_observations = 0;
+  g_arbitrary_time_mismatches = 0;
+  g_arbitrary_fail_opcode = -1;
+  g_arbitrary_snapshot_observations = 0;
+  g_arbitrary_snapshot_value = 0;
+}
+
+void expect_synthetic_time(int32_t current_time, int32_t time_step,
+                           int32_t total_time, uint32_t time_scale,
+                           std::initializer_list<int> opcodes) {
+  g_arbitrary_expected_current_time = current_time;
+  g_arbitrary_expected_time_step = time_step;
+  g_arbitrary_expected_total_time = total_time;
+  g_arbitrary_expected_time_scale = time_scale;
+  for (const int opcode : opcodes)
+    if (opcode >= 0 && opcode < static_cast<int>(g_arbitrary_time_checked.size()))
+      g_arbitrary_time_checked[static_cast<std::size_t>(opcode)] = true;
+}
+
+void observe_synthetic_time(int opcode, const void* input) {
+  if (opcode < 0 || opcode >= static_cast<int>(g_arbitrary_time_checked.size()) ||
+      !g_arbitrary_time_checked[static_cast<std::size_t>(opcode)])
+    return;
+  ++g_arbitrary_time_observations;
+  namespace contract = aexcompat::abi::x86_64_windows;
+  if (!input ||
+      read_synthetic_field<int32_t>(input, contract::IN_CURRENT_TIME_OFFSET) !=
+          g_arbitrary_expected_current_time ||
+      read_synthetic_field<int32_t>(input, contract::IN_TIME_STEP_OFFSET) !=
+          g_arbitrary_expected_time_step ||
+      read_synthetic_field<int32_t>(input, contract::IN_TOTAL_TIME_OFFSET) !=
+          g_arbitrary_expected_total_time ||
+      read_synthetic_field<uint32_t>(input, contract::IN_TIME_SCALE_OFFSET) !=
+          g_arbitrary_expected_time_scale)
+    ++g_arbitrary_time_mismatches;
+}
+
+bool parse_synthetic_integer(const char* text, uint32_t length, int32_t* value) {
+  if (!text || !value || length == 0) return false;
+  bool negative = false;
+  std::size_t offset = 0;
+  if (text[0] == '-') {
+    negative = true;
+    offset = 1;
+  }
+  if (offset == length) return false;
+  int64_t parsed = 0;
+  for (; offset < length; ++offset) {
+    if (text[offset] < '0' || text[offset] > '9') return false;
+    parsed = parsed * 10 + (text[offset] - '0');
+    if (parsed > 0x7fffffffLL + static_cast<int64_t>(negative)) return false;
+  }
+  *value = static_cast<int32_t>(negative ? -parsed : parsed);
+  return true;
+}
+
 int32_t __cdecl copy_synthetic_arbitrary(
-    int32_t command, void*, void*, void**, void*, void* extra) {
-  if (command != 22 || !extra) return 4;
-  auto* bytes = static_cast<std::byte*>(extra);
-  int32_t which{};
-  void* source{};
-  void** destination{};
-  int16_t id{};
-  void* refcon{};
-  std::memcpy(&which, bytes, sizeof(which));
-  std::memcpy(&id, bytes + 4, sizeof(id));
-  std::memcpy(&refcon, bytes + 8, sizeof(refcon));
-  std::memcpy(&source, bytes + 16, sizeof(source));
-  if (id != kArbitraryId || refcon != &g_arbitrary_refcon_token) return 4;
-  if (which == 1) {
-    if (source != &g_arbitrary_destination_token) return 4;
-    ++g_arbitrary_dispose_calls;
+    int32_t command, void* input, void*, void** params, void*, void* extra) {
+  namespace contract = aexcompat::abi::x86_64_windows;
+  if (command != 22) {
+    if (command == contract::PF_CMD_FRAME_SETUP && params && params[1]) {
+      void* value = read_synthetic_field<void*>(params[1], 72);
+      int32_t decoded{};
+      if (synthetic_value(value, &decoded)) {
+        ++g_arbitrary_snapshot_observations;
+        g_arbitrary_snapshot_value = decoded;
+      }
+    }
     return 0;
   }
-  std::memcpy(&destination, bytes + 24, sizeof(destination));
-  if (which != 2 || source != &g_arbitrary_source_token || !destination) return 4;
-  *destination = &g_arbitrary_destination_token;
-  ++g_arbitrary_copy_calls;
-  return 0;
+  if (!extra) return 4;
+  auto* bytes = static_cast<std::byte*>(extra);
+  const int32_t which = read_synthetic_field<int32_t>(bytes, 0);
+  const int16_t id = read_synthetic_field<int16_t>(bytes, 4);
+  void* refcon = read_synthetic_field<void*>(bytes, 8);
+  if (id != kArbitraryId || refcon != &g_arbitrary_refcon_token) return 4;
+  if (which < 0 || which >= static_cast<int32_t>(g_arbitrary_opcode_calls.size()))
+    return 4;
+  ++g_arbitrary_opcode_calls[static_cast<std::size_t>(which)];
+  observe_synthetic_time(which, input);
+  if (which == g_arbitrary_fail_opcode) return 4;
+
+  switch (which) {
+    case 0: {  // NEW
+      auto** destination = read_synthetic_field<void**>(bytes, 16);
+      if (!destination) return 4;
+      *destination = create_synthetic_handle(0);
+      return 0;
+    }
+    case 1: {  // DISPOSE
+      void* source = read_synthetic_field<void*>(bytes, 16);
+      auto* handle = synthetic_handle(source);
+      if (!handle || !handle->live) return 4;
+      handle->live = false;
+      ++g_arbitrary_dispose_calls;
+      return 0;
+    }
+    case 2: {  // COPY
+      void* source = read_synthetic_field<void*>(bytes, 16);
+      auto** destination = read_synthetic_field<void**>(bytes, 24);
+      int32_t value{};
+      if (!destination || !synthetic_value(source, &value)) return 4;
+      *destination = create_synthetic_handle(value);
+      ++g_arbitrary_copy_calls;
+      return 0;
+    }
+    case 3: {  // FLAT_SIZE
+      void* source = read_synthetic_field<void*>(bytes, 16);
+      auto* flat_size = read_synthetic_field<uint32_t*>(bytes, 24);
+      int32_t value{};
+      if (!flat_size || !synthetic_value(source, &value)) return 4;
+      *flat_size = sizeof(value);
+      return 0;
+    }
+    case 4: {  // FLATTEN
+      void* source = read_synthetic_field<void*>(bytes, 16);
+      const uint32_t flat_size = read_synthetic_field<uint32_t>(bytes, 24);
+      auto* destination = read_synthetic_field<void*>(bytes, 32);
+      int32_t value{};
+      if (!destination || flat_size != sizeof(value) ||
+          !synthetic_value(source, &value))
+        return 4;
+      std::memcpy(destination, &value, sizeof(value));
+      return 0;
+    }
+    case 5: {  // UNFLATTEN
+      const uint32_t flat_size = read_synthetic_field<uint32_t>(bytes, 16);
+      const auto* source = read_synthetic_field<const void*>(bytes, 24);
+      auto** destination = read_synthetic_field<void**>(bytes, 32);
+      int32_t value{};
+      if (!source || !destination || flat_size != sizeof(value)) return 4;
+      std::memcpy(&value, source, sizeof(value));
+      *destination = create_synthetic_handle(value);
+      return 0;
+    }
+    case 6: {  // INTERP
+      void* left_handle = read_synthetic_field<void*>(bytes, 16);
+      void* right_handle = read_synthetic_field<void*>(bytes, 24);
+      const double amount = read_synthetic_field<double>(bytes, 32);
+      auto** destination = read_synthetic_field<void**>(bytes, 40);
+      int32_t left{}, right{};
+      if (!destination || !synthetic_value(left_handle, &left) ||
+          !synthetic_value(right_handle, &right))
+        return 4;
+      auto* output_handle = synthetic_handle(*destination);
+      if (!output_handle || !output_handle->live) return 4;
+      output_handle->value = static_cast<int32_t>(
+          std::lround(left + (right - left) * amount));
+      return 0;
+    }
+    case 7: {  // COMPARE
+      void* left_handle = read_synthetic_field<void*>(bytes, 16);
+      void* right_handle = read_synthetic_field<void*>(bytes, 24);
+      auto* comparison = read_synthetic_field<int32_t*>(bytes, 32);
+      int32_t left{}, right{};
+      if (!comparison || !synthetic_value(left_handle, &left) ||
+          !synthetic_value(right_handle, &right))
+        return 4;
+      *comparison = left == right ? 0 : (left < right ? -1 : 1);
+      return 0;
+    }
+    case 8: {  // PRINT_SIZE
+      void* source = read_synthetic_field<void*>(bytes, 16);
+      auto* print_size = read_synthetic_field<uint32_t*>(bytes, 24);
+      int32_t value{};
+      if (!print_size || !synthetic_value(source, &value)) return 4;
+      *print_size = static_cast<uint32_t>(std::to_string(value).size() + 1);
+      return 0;
+    }
+    case 9: {  // PRINT
+      void* source = read_synthetic_field<void*>(bytes, 24);
+      const uint32_t print_size = read_synthetic_field<uint32_t>(bytes, 32);
+      auto* destination = read_synthetic_field<char*>(bytes, 40);
+      int32_t value{};
+      if (!destination || !synthetic_value(source, &value)) return 4;
+      const std::string text = std::to_string(value);
+      if (print_size <= text.size()) return 4;
+      std::memcpy(destination, text.c_str(), text.size() + 1);
+      return 0;
+    }
+    case 10: {  // SCAN
+      const auto* source = read_synthetic_field<const char*>(bytes, 16);
+      const uint32_t length = read_synthetic_field<uint32_t>(bytes, 24);
+      auto** destination = read_synthetic_field<void**>(bytes, 32);
+      int32_t value{};
+      if (!destination || !parse_synthetic_integer(source, length, &value)) return 4;
+      *destination = create_synthetic_handle(value);
+      return 0;
+    }
+    default:
+      return 4;
+  }
 }
 int32_t invoke_synthetic_arbitrary(
     aexcompat::worker_runtime::parameter_execution::EffectEntry entry,
@@ -103,11 +345,314 @@ int32_t invoke_synthetic_arbitrary(
   if (exception_code) *exception_code = 0;
   return entry(command, input, output, params, world, extra);
 }
-bool synthetic_handle_is_live(const void* value) { return value != nullptr; }
+bool synthetic_handle_is_live(const void* value) {
+  if (value == &g_arbitrary_source_token) return true;
+  const auto* handle = synthetic_handle(value);
+  return handle && handle->live;
+}
 std::size_t no_active_masks() { return 0; }
 bool no_active_mask_id(std::size_t, int32_t*) { return false; }
 void capture_clean_audit() {}
 bool audit_stays_clean() { return true; }
+
+aexcompat::worker_runtime::parameters::ParamRecord make_synthetic_arbitrary_record(
+    const std::string& summary = {}) {
+  using aexcompat::worker_runtime::parameters::ParamRecord;
+  ParamRecord record{};
+  record.index = 1;
+  record.disk_id = 7001;
+  record.type = 11;
+  record.name = "Synthetic Arbitrary";
+  record.arbitrary_summary = summary;
+  const int32_t raw_type = 11;
+  void* default_value = &g_arbitrary_source_token;
+  void* refcon = &g_arbitrary_refcon_token;
+  std::memcpy(record.raw.data() + 12, &raw_type, sizeof(raw_type));
+  std::memcpy(record.raw.data() + 56, &kArbitraryId, sizeof(kArbitraryId));
+  std::memcpy(record.raw.data() + 64, &default_value, sizeof(default_value));
+  std::memcpy(record.raw.data() + 80, &refcon, sizeof(refcon));
+  return record;
+}
+
+std::vector<unsigned char> synthetic_arbitrary_bytes(int32_t value) {
+  std::vector<unsigned char> bytes(sizeof(value));
+  std::memcpy(bytes.data(), &value, sizeof(value));
+  return bytes;
+}
+
+struct ArbitraryObservation {
+  bool rendered{};
+  int32_t pre_error{};
+  int32_t render_error{};
+  std::array<int, 11> opcodes{};
+  std::size_t live_handles{};
+  int time_observations{};
+  int time_mismatches{};
+  int snapshot_observations{};
+  int32_t snapshot_value{};
+};
+
+ArbitraryObservation run_smart_arbitrary_case(
+    const aexcompat::worker_runtime::parameters::RequestedAssignments* requested,
+    const std::vector<aexcompat::parameter_animation::ParameterTimeline>& timelines,
+    int32_t current_time, int32_t time_step, int32_t total_time,
+    uint32_t time_scale, std::initializer_list<int> time_checked_opcodes,
+    const std::string& arbitrary_summary = {}, int fail_opcode = -1) {
+  using namespace aexcompat::worker_runtime;
+  reset_synthetic_arbitrary();
+  parameter_execution::configure_hooks({&invoke_synthetic_arbitrary,
+      &synthetic_handle_is_live, &no_active_masks, &no_active_mask_id});
+  auto& runtime = parameters::state();
+  runtime.records = {make_synthetic_arbitrary_record(arbitrary_summary)};
+  runtime.timelines = timelines;
+  expect_synthetic_time(current_time, time_step, total_time, time_scale,
+                        time_checked_opcodes);
+  g_arbitrary_fail_opcode = fail_opcode;
+
+  parameter_execution::BufferIn input{};
+  parameter_execution::BufferOut output{};
+  constexpr uint32_t kNopRender = 1u << 18;
+  std::memcpy(output.data() +
+                  aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET,
+              &kNopRender, sizeof(kNopRender));
+  constexpr int32_t kWidth = 16;
+  constexpr int32_t kHeight = 12;
+  std::vector<unsigned char> rgba(
+      static_cast<std::size_t>(kWidth) * kHeight * 4, 0x40);
+  const auto result = smart_execution::render_once(
+      &copy_synthetic_arbitrary, input, output, "request", requested, &rgba,
+      kWidth, kHeight, nullptr, current_time, time_step, total_time, time_scale,
+      4, nullptr);
+
+  ArbitraryObservation observation;
+  observation.rendered = result.pre_error == 0 && result.render_error == 0 &&
+      result.guards_intact;
+  observation.pre_error = result.pre_error;
+  observation.render_error = result.render_error;
+  observation.opcodes = g_arbitrary_opcode_calls;
+  observation.live_handles = live_synthetic_handle_count();
+  observation.time_observations = g_arbitrary_time_observations;
+  observation.time_mismatches = g_arbitrary_time_mismatches;
+  observation.snapshot_observations = g_arbitrary_snapshot_observations;
+  observation.snapshot_value = g_arbitrary_snapshot_value;
+  runtime.records.clear();
+  runtime.timelines.clear();
+  g_arbitrary_fail_opcode = -1;
+  g_arbitrary_time_checked.fill(false);
+  return observation;
+}
+
+ArbitraryObservation run_classic_arbitrary_default_case(
+    int32_t current_time, int32_t time_step, int32_t total_time,
+    uint32_t time_scale) {
+  using namespace aexcompat::worker_runtime;
+  reset_synthetic_arbitrary();
+  parameter_execution::configure_hooks({&invoke_synthetic_arbitrary,
+      &synthetic_handle_is_live, &no_active_masks, &no_active_mask_id});
+  auto& runtime = parameters::state();
+  runtime.records = {make_synthetic_arbitrary_record("17")};
+  runtime.timelines.clear();
+
+  aexcompat::l2_detail::BufferIn input{};
+  aexcompat::l2_detail::BufferOut output{};
+  constexpr uint32_t kNopRender = 1u << 18;
+  std::memcpy(output.data() +
+                  aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET,
+              &kNopRender, sizeof(kNopRender));
+  int32_t width{}, height{}, rowbytes{};
+  std::string input_hash, output_hash;
+  bool guards_intact{};
+  const int32_t error = aexcompat::l2_detail::render_once(
+      &copy_synthetic_arbitrary, input, output, "default", width, height,
+      rowbytes, input_hash, output_hash, guards_intact, nullptr, nullptr, 0, 0,
+      nullptr, current_time, time_step, total_time, time_scale);
+
+  ArbitraryObservation observation;
+  observation.rendered = error == 0 && guards_intact;
+  observation.pre_error = error;
+  observation.render_error = error;
+  observation.opcodes = g_arbitrary_opcode_calls;
+  observation.live_handles = live_synthetic_handle_count();
+  observation.time_observations = g_arbitrary_time_observations;
+  observation.time_mismatches = g_arbitrary_time_mismatches;
+  observation.snapshot_observations = g_arbitrary_snapshot_observations;
+  observation.snapshot_value = g_arbitrary_snapshot_value;
+  runtime.records.clear();
+  return observation;
+}
+
+bool verify_arbitrary_hot_path_contract() {
+  using namespace aexcompat::worker_runtime;
+  auto& runtime = parameters::state();
+  const auto saved_records = runtime.records;
+  const auto saved_timelines = runtime.timelines;
+  parameter_execution::configure_hooks({&invoke_synthetic_arbitrary,
+      &synthetic_handle_is_live, &no_active_masks, &no_active_mask_id});
+
+  // The diagnostic helpers remain callable explicitly and still exercise the
+  // complete non-null value contract. This is deliberately separate from the
+  // shipping frame cases below: a source-text grep could not prove either
+  // ownership or selector behavior.
+  reset_synthetic_arbitrary(19);
+  runtime.records = {make_synthetic_arbitrary_record()};
+  runtime.timelines.clear();
+  parameter_execution::Definitions conformance_definitions(2);
+  parameter_execution::initialize_parameter_definitions(
+      conformance_definitions, 16, 12);
+  parameter_execution::BufferIn conformance_input{};
+  parameter_execution::BufferOut conformance_output{};
+  constexpr int32_t kConformanceTime = 10;
+  constexpr int32_t kConformanceStep = 2;
+  constexpr int32_t kConformanceTotal = 20;
+  constexpr uint32_t kConformanceScale = 24;
+  std::memcpy(conformance_input.data() +
+                  aexcompat::abi::x86_64_windows::IN_CURRENT_TIME_OFFSET,
+              &kConformanceTime, sizeof(kConformanceTime));
+  std::memcpy(conformance_input.data() +
+                  aexcompat::abi::x86_64_windows::IN_TIME_STEP_OFFSET,
+              &kConformanceStep, sizeof(kConformanceStep));
+  std::memcpy(conformance_input.data() +
+                  aexcompat::abi::x86_64_windows::IN_TOTAL_TIME_OFFSET,
+              &kConformanceTotal, sizeof(kConformanceTotal));
+  std::memcpy(conformance_input.data() +
+                  aexcompat::abi::x86_64_windows::IN_TIME_SCALE_OFFSET,
+              &kConformanceScale, sizeof(kConformanceScale));
+  expect_synthetic_time(kConformanceTime, kConformanceStep,
+                        kConformanceTotal, kConformanceScale,
+                        {0, 3, 4, 5, 6, 7, 8, 9, 10});
+  parameter_execution::observe_arbitrary_defaults(
+      &copy_synthetic_arbitrary, conformance_input, conformance_output);
+  bool conformance_ok = parameter_execution::initialize_arbitrary_values(
+      &copy_synthetic_arbitrary, conformance_input, conformance_output,
+      conformance_definitions);
+  conformance_ok = conformance_ok &&
+      parameter_execution::interpolate_arbitrary_values(
+          &copy_synthetic_arbitrary, conformance_input, conformance_output,
+          conformance_definitions) &&
+      parameter_execution::roundtrip_arbitrary_values(
+          &copy_synthetic_arbitrary, conformance_input, conformance_output,
+          conformance_definitions);
+  parameter_execution::probe_arbitrary_scan(
+      &copy_synthetic_arbitrary, conformance_input, conformance_output,
+      conformance_definitions);
+  void* conformance_value_handle{};
+  std::memcpy(&conformance_value_handle,
+              conformance_definitions[1].data() + 72,
+              sizeof(conformance_value_handle));
+  int32_t conformance_value{};
+  conformance_ok = conformance_ok &&
+      synthetic_value(conformance_value_handle, &conformance_value) &&
+      conformance_value == 19 &&
+      runtime.records[0].arbitrary_summary == "19" &&
+      parameter_execution::dispose_arbitrary_values(
+          &copy_synthetic_arbitrary, conformance_input, conformance_output,
+          conformance_definitions) &&
+      live_synthetic_handle_count() == 0 &&
+      g_arbitrary_time_mismatches == 0 &&
+      g_arbitrary_opcode_calls[0] == 1 &&
+      g_arbitrary_opcode_calls[1] == 4 &&
+      g_arbitrary_opcode_calls[2] == 1 &&
+      g_arbitrary_opcode_calls[3] == 1 &&
+      g_arbitrary_opcode_calls[4] == 2 &&
+      g_arbitrary_opcode_calls[5] == 1 &&
+      g_arbitrary_opcode_calls[6] == 1 &&
+      g_arbitrary_opcode_calls[7] == 1 &&
+      g_arbitrary_opcode_calls[8] == 1 &&
+      g_arbitrary_opcode_calls[9] == 1 &&
+      g_arbitrary_opcode_calls[10] == 1;
+
+  const auto default_frame = run_smart_arbitrary_case(
+      nullptr, {}, 7, 2, 24, 24, {}, "17");
+  bool default_ok = default_frame.rendered &&
+      default_frame.opcodes[1] == 1 && default_frame.opcodes[2] == 1 &&
+      default_frame.live_handles == 0 &&
+      default_frame.snapshot_observations == 1 &&
+      default_frame.snapshot_value == 17;
+  for (const int diagnostic : {0, 3, 4, 5, 6, 7, 10})
+    default_ok = default_ok && default_frame.opcodes[diagnostic] == 0;
+
+  const auto classic_default_frame = run_classic_arbitrary_default_case(
+      7, 2, 24, 24);
+  bool classic_default_ok = classic_default_frame.rendered &&
+      classic_default_frame.opcodes[1] == 1 &&
+      classic_default_frame.opcodes[2] == 1 &&
+      classic_default_frame.live_handles == 0 &&
+      classic_default_frame.snapshot_observations == 1 &&
+      classic_default_frame.snapshot_value == 17;
+  for (const int diagnostic : {0, 3, 4, 5, 6, 7, 10})
+    classic_default_ok =
+        classic_default_ok && classic_default_frame.opcodes[diagnostic] == 0;
+
+  parameters::RequestedAssignment text_assignment{};
+  text_assignment.id = L"1";
+  text_assignment.index = 1;
+  text_assignment.kind = parameters::RequestedKind::ArbitraryText;
+  text_assignment.text = "27";
+  const parameters::RequestedAssignments text_assignments{text_assignment};
+  const auto text_frame = run_smart_arbitrary_case(
+      &text_assignments, {}, 9, 3, 30, 30, {10});
+  const bool text_ok = text_frame.rendered &&
+      text_frame.opcodes[1] == 2 && text_frame.opcodes[2] == 1 &&
+      text_frame.opcodes[10] == 1 && text_frame.time_observations == 1 &&
+      text_frame.time_mismatches == 0 && text_frame.live_handles == 0 &&
+      text_frame.snapshot_observations == 1 && text_frame.snapshot_value == 27;
+
+  aexcompat::parameter_animation::ParameterTimeline timeline{};
+  timeline.slot = 1;
+  aexcompat::parameter_animation::AnimationKey left{};
+  left.time = 0;
+  left.scale = 24;
+  left.kind = aexcompat::parameter_animation::AnimationValueKind::Arbitrary;
+  left.arbitrary = synthetic_arbitrary_bytes(10);
+  auto right = left;
+  right.time = 24;
+  right.arbitrary = synthetic_arbitrary_bytes(30);
+  timeline.keys = {left, right};
+
+  const auto midpoint_frame = run_smart_arbitrary_case(
+      nullptr, {timeline}, 12, 1, 24, 24, {0, 5, 6});
+  const bool midpoint_ok = midpoint_frame.rendered &&
+      midpoint_frame.opcodes[0] == 1 && midpoint_frame.opcodes[1] == 4 &&
+      midpoint_frame.opcodes[2] == 1 && midpoint_frame.opcodes[5] == 2 &&
+      midpoint_frame.opcodes[6] == 1 && midpoint_frame.time_observations == 4 &&
+      midpoint_frame.time_mismatches == 0 &&
+      midpoint_frame.live_handles == 0 &&
+      midpoint_frame.snapshot_observations == 1 &&
+      midpoint_frame.snapshot_value == 20;
+
+  const auto endpoint_frame = run_smart_arbitrary_case(
+      nullptr, {timeline}, 0, 1, 24, 24, {5});
+  const bool endpoint_ok = endpoint_frame.rendered &&
+      endpoint_frame.opcodes[0] == 0 && endpoint_frame.opcodes[1] == 3 &&
+      endpoint_frame.opcodes[2] == 1 && endpoint_frame.opcodes[5] == 2 &&
+      endpoint_frame.opcodes[6] == 0 && endpoint_frame.time_observations == 2 &&
+      endpoint_frame.time_mismatches == 0 && endpoint_frame.live_handles == 0 &&
+      endpoint_frame.snapshot_observations == 1 &&
+      endpoint_frame.snapshot_value == 10;
+
+  const auto failed_frame = run_smart_arbitrary_case(
+      nullptr, {timeline}, 12, 1, 24, 24, {0, 5, 6}, {}, 6);
+  const bool failure_cleanup_ok = !failed_frame.rendered &&
+      failed_frame.opcodes[0] == 1 && failed_frame.opcodes[1] == 4 &&
+      failed_frame.opcodes[2] == 1 && failed_frame.opcodes[5] == 2 &&
+      failed_frame.opcodes[6] == 1 && failed_frame.time_observations == 4 &&
+      failed_frame.time_mismatches == 0 && failed_frame.live_handles == 0 &&
+      failed_frame.snapshot_observations == 0;
+
+  runtime.records = saved_records;
+  runtime.timelines = saved_timelines;
+  const bool passed = conformance_ok && default_ok && classic_default_ok &&
+      text_ok && midpoint_ok && endpoint_ok && failure_cleanup_ok;
+  if (!passed) {
+    std::cerr << "arbitrary hot-path contract failed: conformance="
+              << conformance_ok << " default=" << default_ok
+              << " classic_default=" << classic_default_ok
+              << " text=" << text_ok << " midpoint=" << midpoint_ok
+              << " endpoint=" << endpoint_ok
+              << " failure_cleanup=" << failure_cleanup_ok << "\n";
+  }
+  return passed;
+}
 
 int render_with_parameter_checkout(void*) {
   auto* context = active_context();
@@ -122,21 +667,39 @@ int cleanup_after_parameter_checkout(void*) { return g_cleanup_result; }
 bool dependencies_are_ready(void*) { return true; }
 
 int32_t __cdecl observe_frame_setup_checkout_time(
-    int32_t command, void*, void* output, void**, void*, void*) {
+    int32_t command, void*, void* output, void**, void* world, void*) {
   if (command == 18 && g_advertise_dynamic_wide_time) {
     constexpr uint32_t kWideTimeInput = 1u << 1;
-    std::memcpy(static_cast<std::byte*>(output) + 96, &kWideTimeInput,
-                sizeof(kWideTimeInput));
+    uint32_t out_flags{};
+    std::memcpy(&out_flags, static_cast<std::byte*>(output) + 96,
+                sizeof(out_flags));
+    out_flags |= kWideTimeInput;
+    std::memcpy(static_cast<std::byte*>(output) + 96, &out_flags,
+                sizeof(out_flags));
     return 0;
   }
-  if (command == 11 && g_advertise_dynamic_wide_time) {
-    auto* context = active_context();
-    if (!context || !context->checkout_time_allowed(g_expected_frame_time + 1, 24))
-      return 4;
-    ++g_render_wide_time_observations;
+  if (command == aexcompat::abi::x86_64_windows::PF_CMD_RENDER) {
+    void* pixels{};
+    if (!world) return 4;
+    std::memcpy(&pixels,
+                static_cast<std::byte*>(world) +
+                    aexcompat::abi::x86_64_windows::LAYER_DATA_OFFSET,
+                sizeof(pixels));
+    if (!pixels) return 4;
+    // This time-propagation fixture must still satisfy the shipping output
+    // contract. Flip one real output byte so success never depends on an
+    // unrelated diagnostic hook touching the frame allocation.
+    *static_cast<unsigned char*>(pixels) ^= 1u;
+    if (g_advertise_dynamic_wide_time) {
+      auto* context = active_context();
+      if (!context ||
+          !context->checkout_time_allowed(g_expected_frame_time + 1, 24))
+        return 4;
+      ++g_render_wide_time_observations;
+    }
     return 0;
   }
-  if (command != 10) return 0;
+  if (command != aexcompat::abi::x86_64_windows::PF_CMD_FRAME_SETUP) return 0;
   auto* context = active_context();
   if (!context || !context->checkout_time_allowed(g_expected_frame_time, 24))
     return 4;
@@ -195,6 +758,11 @@ int32_t __cdecl mutate_out_data_after_frame_setup(
       read_i32(world, LAYER_WIDTH_OFFSET) != kOutputWidth ||
       read_i32(world, LAYER_HEIGHT_OFFSET) != kOutputHeight)
     return 4;
+  void* pixels{};
+  std::memcpy(&pixels, static_cast<std::byte*>(world) + LAYER_DATA_OFFSET,
+              sizeof(pixels));
+  if (!pixels) return 4;
+  *static_cast<unsigned char*>(pixels) ^= 1u;
   ++g_frame_setup_geometry_render_observations;
   return 0;
 }
@@ -436,14 +1004,18 @@ int main() {
   g_expect_frame_wide_time = false;
   g_advertise_dynamic_wide_time = true;
   aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = true;
-  if (aexcompat::l2_detail::render_once(
-          &observe_frame_setup_checkout_time, frame_input, frame_output, "default",
-          frame_width, frame_height, frame_rowbytes, frame_input_hash,
-          frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr,
-          g_expected_frame_time, 1, 100, 24) != 0 ||
-      g_frame_setup_time_observations != 4 ||
-      g_render_wide_time_observations != 1)
+  const int32_t dynamic_time_result = aexcompat::l2_detail::render_once(
+      &observe_frame_setup_checkout_time, frame_input, frame_output, "default",
+      frame_width, frame_height, frame_rowbytes, frame_input_hash,
+      frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr,
+      g_expected_frame_time, 1, 100, 24);
+  if (dynamic_time_result != 0 || g_frame_setup_time_observations != 4 ||
+      g_render_wide_time_observations != 1) {
+    std::cerr << "dynamic time fixture failed: result=" << dynamic_time_result
+              << " frame_setup=" << g_frame_setup_time_observations
+              << " frame_setdown=" << g_render_wide_time_observations << "\n";
     return 33;
+  }
   aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = false;
 
   // `begin_lifecycle` dispatches QUERY_DYNAMIC_FLAGS after FRAME_SETUP and
@@ -500,6 +1072,7 @@ int main() {
   // without dispatching COPY, while a non-null default is still copied into a
   // distinct caller-owned handle.
   auto& parameter_state = parameters::state();
+  reset_synthetic_arbitrary();
   parameter_state.records.assign(2, {});
   parameter_state.records[0].type = 11;
   parameter_state.records[1].type = 11;
@@ -526,12 +1099,16 @@ int main() {
               sizeof(null_value));
   std::memcpy(&copied_value, arbitrary_definitions[2].data() + 72,
               sizeof(copied_value));
-  if (null_value != nullptr || copied_value != &g_arbitrary_destination_token)
-    return 5;
+  int32_t copied_arbitrary_value{};
+  if (null_value != nullptr || copied_value == source_value ||
+      !synthetic_value(copied_value, &copied_arbitrary_value) ||
+      copied_arbitrary_value != g_arbitrary_source_token ||
+      live_synthetic_handle_count() != 1) return 5;
   if (!parameter_execution::dispose_arbitrary_values(
-          &copy_synthetic_arbitrary, arbitrary_input, arbitrary_output,
+      &copy_synthetic_arbitrary, arbitrary_input, arbitrary_output,
           arbitrary_definitions) ||
-      g_arbitrary_dispose_calls != 1) return 6;
+      g_arbitrary_dispose_calls != 1 || live_synthetic_handle_count() != 0)
+    return 6;
   std::memcpy(&copied_value, arbitrary_definitions[2].data() + 72,
               sizeof(copied_value));
   if (copied_value != nullptr) return 7;
@@ -587,6 +1164,7 @@ int main() {
       two_distinct_render_threads &&
       active_plugin::string_table == g_expected_table &&
       active_plugin::effect_module == g_expected_module;
+  const bool arbitrary_hot_path_passed = verify_arbitrary_hot_path_contract();
   parameter_state.records.assign(1, {});
   parameter_state.records[0].type = 11;
   parameter_execution::Definitions null_arbitrary_definitions(2);
@@ -605,7 +1183,9 @@ int main() {
           interpolation_failures_before &&
       parameter_state.arbitrary.roundtrip_failures == roundtrip_failures_before;
   parameter_state.records.clear();
-  if (concurrent_context_passed && null_arbitrary_passed)
+  if (concurrent_context_passed && null_arbitrary_passed &&
+      arbitrary_hot_path_passed)
     std::cout << "{\"classic_runtime_selftest\":\"passed\"}\n";
-  return concurrent_context_passed && null_arbitrary_passed ? 0 : 8;
+  return concurrent_context_passed && null_arbitrary_passed &&
+      arbitrary_hot_path_passed ? 0 : 8;
 }

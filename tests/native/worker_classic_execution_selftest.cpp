@@ -41,8 +41,6 @@ struct Host {
   bool begin_returns_null{};
 
   int click_calls{};
-  int interpolate_calls{};
-  int roundtrip_calls{};
   int conditional_ui_calls{};
   int draw_calls{};
   int prepare_output_calls{};
@@ -71,8 +69,6 @@ const LifecycleHooks& lifecycle_hooks() {
       },
       +[](void* lifecycle) { return static_cast<FakeLifecycle*>(lifecycle)->setup_error; },
       +[](void* opaque) { auto& h = host_of(opaque); ++h.click_calls; return h.click_result; },
-      +[](void* opaque) { ++host_of(opaque).interpolate_calls; return true; },
-      +[](void* opaque) { ++host_of(opaque).roundtrip_calls; return true; },
       +[](void* opaque) { ++host_of(opaque).conditional_ui_calls; return true; },
       +[](void* opaque) { ++host_of(opaque).draw_calls; return true; },
       +[](void* opaque, void*, int32_t error) {
@@ -260,8 +256,7 @@ void a_refused_setup_reaches_the_caller() {
   auto state = begin_lifecycle(&host, lifecycle_hooks());
   check(state.error == 512, "begin_lifecycle propagates the setup error");
   check(state.lifecycle != nullptr, "the lifecycle is still handed back for teardown");
-  check(host.click_calls == 0 && host.interpolate_calls == 0 &&
-            host.roundtrip_calls == 0 && host.conditional_ui_calls == 0,
+  check(host.click_calls == 0 && host.conditional_ui_calls == 0,
         "no further selector runs after a failed setup");
 
   // The teardown still has to run, carrying the error, and the lifecycle the
@@ -279,11 +274,29 @@ void a_clean_setup_still_runs_every_step() {
   Host host;
   auto state = begin_lifecycle(&host, lifecycle_hooks());
   check(state.error == 0, "a clean setup reports no error");
-  check(host.click_calls == 1 && host.interpolate_calls == 1 &&
-            host.roundtrip_calls == 1 && host.conditional_ui_calls == 1,
-        "a clean setup runs all four pre-render steps");
+  check(host.click_calls == 1 && host.conditional_ui_calls == 1,
+        "a clean setup runs only the two shipping pre-render steps");
   finish_lifecycle(&host, state, lifecycle_hooks(), false);
   check(host.lifecycle.disposed, "a clean lifecycle is disposed too");
+}
+
+// The hook table is aggregate-initialized and its remaining bool hooks share a
+// signature. Exercise the draw side of finish as well as begin's conditional
+// hook so deleting the two arbitrary conformance hooks cannot silently shift a
+// lambda into the wrong field.
+void a_clean_finish_with_draw_runs_draw_and_teardown_once() {
+  Host host;
+  auto state = begin_lifecycle(&host, lifecycle_hooks());
+  const int32_t finished = finish_lifecycle(
+      &host, state, lifecycle_hooks(), true);
+  check(finished == 0, "a clean drawn lifecycle returns success");
+  check(host.click_calls == 1 && host.conditional_ui_calls == 1,
+        "begin retains click then conditional UI");
+  check(host.draw_calls == 1, "finish dispatches draw exactly once");
+  check(host.end_calls == 1 && host.end_saw_error == 0,
+        "finish tears the clean lifecycle down exactly once");
+  check(host.lifecycle.disposed && state.lifecycle == nullptr,
+        "finish disposes and clears the drawn lifecycle");
 }
 
 // The pre-render hooks dispatch into the plug-in too, but they report failure
@@ -297,8 +310,7 @@ void a_failing_pre_render_hook_is_still_minus_five() {
   const auto state = begin_lifecycle(&host, lifecycle_hooks());
   check(state.error == -5, "a failing click hook is -5");
   check(host.click_calls == 1, "the failing hook ran");
-  check(host.interpolate_calls == 0 && host.roundtrip_calls == 0 &&
-            host.conditional_ui_calls == 0,
+  check(host.conditional_ui_calls == 0,
         "the steps after the failing hook are skipped");
 }
 
@@ -429,6 +441,7 @@ int main() {
   a_host_copied_payload_equal_to_the_canary_still_succeeds();
   a_refused_setup_reaches_the_caller();
   a_clean_setup_still_runs_every_step();
+  a_clean_finish_with_draw_runs_draw_and_teardown_once();
   a_failing_pre_render_hook_is_still_minus_five();
   a_missing_accessor_fails_closed();
   a_null_lifecycle_still_fails_closed();
