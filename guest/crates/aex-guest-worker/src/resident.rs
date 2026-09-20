@@ -7,7 +7,6 @@ use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -598,7 +597,7 @@ fn parse_render_frame(
                 write_fixture_world_dumps(input_slot, &report)?;
             }
             let checksum_started = report_timings.then(Instant::now);
-            let checksum_value = format!("{:x}", Sha256::digest(&report.raw_pixels));
+            let checksum_value = report.raw_pixel_sha256.clone();
             let checksum_time = checksum_started.map(|started| started.elapsed());
             *generation += 1;
             write_message(
