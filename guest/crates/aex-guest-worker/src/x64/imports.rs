@@ -2581,7 +2581,7 @@ fn install_win64_import(
                     install_double_import(unicorn, stub, "floor", f64::floor)?;
                 }
                 LegacyWin64Import::FloorF => {
-                    install_float_import(unicorn, stub, "floorf", f32::floor)?;
+                    install_floorf_import(unicorn, stub)?;
                 }
                 LegacyWin64Import::FmodF => {
                     install_fmodf_import(unicorn, stub)?;
