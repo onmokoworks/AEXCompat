@@ -639,6 +639,51 @@ fn iterate8_unsupported_slots_fail_closed_with_suite_diagnostics() {
 }
 
 #[test]
+fn effect_ui_suite_v1_acquires_one_callable_slot_and_keeps_name_per_engine() {
+    let mut engine = test_engine(&[0xc3]);
+    let suite_name = DATA_BASE + 0x100;
+    let output = DATA_BASE + 0x200;
+    let button_name = DATA_BASE + 0x300;
+    engine.write(suite_name, b"PF Effect UI Suite\0").unwrap();
+    engine.write(button_name, b"Signal Options\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(HOST_ACQUIRE_SUITE, [suite_name, 1, output, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut pointer = [0u8; 8];
+    engine.read(output, &mut pointer).unwrap();
+    assert_eq!(u64::from_le_bytes(pointer), HOST_EFFECT_UI_SUITE_V1);
+    engine.read(HOST_EFFECT_UI_SUITE_V1, &mut pointer).unwrap();
+    let callback = u64::from_le_bytes(pointer);
+    assert_eq!(callback, HOST_SET_OPTIONS_BUTTON_NAME);
+    assert_eq!(engine.call_win64(callback, [1, button_name, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().options_button_name.as_deref(), Some(&b"Signal Options"[..]));
+    assert_eq!(test_engine(&[0xc3]).unicorn.get_data().options_button_name, None);
+}
+
+#[test]
+fn effect_ui_button_name_rejects_bad_ref_pointer_and_unterminated_text() {
+    let mut engine = test_engine(&[0xc3]);
+    let name = DATA_BASE + 0x400;
+    engine.write(name, b"Options\0").unwrap();
+    for (effect_ref, pointer) in [(0, name), (2, name), (1, 0), (1, DATA_BASE + DATA_SIZE - 1)] {
+        assert_eq!(
+            engine.call_win64(HOST_SET_OPTIONS_BUTTON_NAME, [effect_ref, pointer, 0, 0, 0, 0]).unwrap(),
+            4
+        );
+        assert_eq!(engine.unicorn.get_data().options_button_name, None);
+    }
+    engine.write(name, &[b'A'; 256]).unwrap();
+    assert_eq!(
+        engine.call_win64(HOST_SET_OPTIONS_BUTTON_NAME, [1, name, 0, 0, 0, 0]).unwrap(),
+        4
+    );
+    assert_eq!(engine.unicorn.get_data().options_button_name, None);
+}
+
+#[test]
 fn pf_ansi_suite_v2_matches_the_windows_slot_layout() {
     let mut engine = test_engine(&[0xc3]);
     let name = DATA_BASE + 0x100;

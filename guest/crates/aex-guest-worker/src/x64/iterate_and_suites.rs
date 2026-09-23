@@ -837,6 +837,58 @@ fn emulate_ansi_numeric_callback(unicorn: &mut Unicorn<'_, GuestState>, address:
     };
 }
 
+fn install_effect_ui_suite_v1(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+    uc(
+        "write PF Effect UI Suite v1",
+        unicorn.mem_write(
+            HOST_EFFECT_UI_SUITE_V1,
+            &HOST_SET_OPTIONS_BUTTON_NAME.to_le_bytes(),
+        ),
+    )?;
+    uc(
+        "write PF SetOptionsButtonName callback",
+        unicorn.mem_write(HOST_SET_OPTIONS_BUTTON_NAME, &[0xc3]),
+    )?;
+    uc(
+        "install PF SetOptionsButtonName callback",
+        unicorn.add_code_hook(
+            HOST_SET_OPTIONS_BUTTON_NAME,
+            HOST_SET_OPTIONS_BUTTON_NAME,
+            emulate_set_options_button_name,
+        ),
+    )?;
+    Ok(())
+}
+
+fn emulate_set_options_button_name(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
+    const PF_ERR_BAD_CALLBACK_PARAM: u64 = 4;
+    let effect_ref = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let name = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    if effect_ref != 1 || name == 0 {
+        let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+        return;
+    }
+    let mut bytes = Vec::new();
+    for offset in 0..256u64 {
+        let Some(address) = name.checked_add(offset) else {
+            let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+            return;
+        };
+        let mut byte = [0u8; 1];
+        if unicorn.mem_read(address, &mut byte).is_err() {
+            let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+            return;
+        }
+        if byte[0] == 0 {
+            unicorn.get_data_mut().options_button_name = Some(bytes);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+            return;
+        }
+        bytes.push(byte[0]);
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+}
+
 fn install_pf_ansi_suite_v2(unicorn: &mut Unicorn<'static, GuestState>) -> Result<(), GuestError> {
     for address in [
         HOST_PF_ANSI_ATAN,
@@ -1435,6 +1487,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         && output != 0
         && unicorn
             .mem_write(output, &HOST_HANDLE_SUITE.to_le_bytes())
+            .is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if name == "PF Effect UI Suite"
+        && version == 1
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_EFFECT_UI_SUITE_V1.to_le_bytes())
             .is_ok()
     {
         finish_acquire_suite_success(unicorn);

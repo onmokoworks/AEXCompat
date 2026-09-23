@@ -361,6 +361,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     install_iterate8_suites(&mut unicorn).unwrap();
     install_typed_iterate_suites(&mut unicorn).unwrap();
     install_pf_ansi_suite_v2(&mut unicorn).unwrap();
+    install_effect_ui_suite_v1(&mut unicorn).unwrap();
     install_gpu_device_suite(&mut unicorn).unwrap();
     install_windows_condition_variable_callbacks(&mut unicorn).unwrap();
     install_dynamic_windows_import_callbacks(&mut unicorn).unwrap();
