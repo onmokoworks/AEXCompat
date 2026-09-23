@@ -677,7 +677,10 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
                               "opaque": mismatched_by_alpha[2]},
         "mismatches_spare_opaque_pixels": association_signature,
     }
-    if association_signature and compared_in == "as_provided" and over_tolerance > 0:
+    # Keyed on the declaration, not on `compared_in`: a run that declared both
+    # sides alike also compares "as_provided", and telling it to declare is
+    # advice it has already taken.
+    if association_signature and raw_alpha is None and over_tolerance > 0:
         alpha_report["diagnostic"] = (
             "pixels differ but no fully opaque pixel does: the two buffers may "
             "hold the same picture under different alpha associations, which "

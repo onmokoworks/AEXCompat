@@ -788,6 +788,29 @@ class ComparePixelOraclesTests(unittest.TestCase):
                                     render_alpha="premultiplied")
         self.assertFalse(report["alpha_association"]["association_is_lossless"])
 
+    def test_a_run_that_declared_alike_is_not_told_to_declare(self):
+        # Both sides declared the same association compare as provided, and
+        # the signature still holds (the opaque pixel matches), but the advice
+        # to declare has already been taken.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "expected.rgba"
+            png = root / "actual.png"
+            raw.write_bytes(bytes((10, 20, 30, 128, 40, 50, 60, 255)))
+            Image.frombytes("RGBA", (2, 1),
+                            bytes((99, 88, 77, 128, 40, 50, 60, 255))).save(png)
+            for association in MODULE.ALPHA_ASSOCIATIONS:
+                report = MODULE.compare(raw, png, 2, 1, raw_alpha=association,
+                                        render_alpha=association)
+                alpha = report["alpha_association"]
+                self.assertEqual(alpha["compared_in"], "as_provided")
+                self.assertTrue(alpha["mismatches_spare_opaque_pixels"])
+                self.assertNotIn("diagnostic", alpha)
+            # The same buffers undeclared do get it, so the absence above is
+            # the declaration's doing.
+            report = MODULE.compare(raw, png, 2, 1)
+        self.assertIn("diagnostic", report["alpha_association"])
+
     def test_raw_u32_refuses_the_alpha_flags_instead_of_ignoring_them(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
