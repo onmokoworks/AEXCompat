@@ -994,12 +994,7 @@ fn emulate_guest_stdio(unicorn: &mut Unicorn<'_, GuestState>, import: LegacyWin6
             if let Some(buffer) = unicorn.get_data().guest_files.streams[&token].fast_buffer {
                 free_crt_region(unicorn, buffer)?;
             }
-            if unicorn
-                .get_data()
-                .guest_files
-                .standard_streams[1..]
-                .contains(&Some(token))
-            {
+            if unicorn.get_data().guest_files.standard_streams[1..].contains(&Some(token)) {
                 unicorn
                     .get_data_mut()
                     .guest_files

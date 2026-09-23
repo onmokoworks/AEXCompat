@@ -257,6 +257,7 @@ RenderSessionOutcome run_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
+    uint32_t advertised_out_flags, uint32_t advertised_out_flags2,
     const std::vector<ExternalLayerInput>* external_layers,
     const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr,
     bool audio_passthrough = false);
@@ -265,7 +266,9 @@ SmartRenderSessionOutcome run_smart_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
-    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers);
+    int32_t pixel_bytes, uint32_t advertised_out_flags,
+    uint32_t advertised_out_flags2,
+    const std::vector<ExternalLayerInput>* external_layers);
 
 template <typename T, std::size_t N>
 T read(const std::array<std::byte, N>& bytes, std::size_t offset) {
@@ -295,7 +298,9 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
   const int32_t params_error = request.params_error;
   const bool image_render_supported = request.image_render_supported;
   const bool depth_supported = request.depth_supported;
+  const bool session_depth_ok = request.depth_dispatchable;
   const bool audio_effect_only = request.audio_effect_only;
+  result.dispatch_pixel_bytes = invocation.external_pixel_bytes;
   std::string& case_id = result.case_id;
   std::string& input_hash = result.input_hash;
   std::string& output_hash = result.output_hash;
@@ -498,7 +503,11 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
         widths[0] == widths[1] && heights[0] == heights[1] && rowbytes[0] == rowbytes[1] &&
         input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
   } else if (params_error == 0 &&
-             ((image_render_supported && depth_supported) ||
+             // A session hands the plug-in worlds at a depth it advertises
+             // and converts the frame back into the slot, so an
+             // effect that does not advertise the caller's depth renders
+             // here instead of being refused (AE's own behaviour).
+             ((image_render_supported && session_depth_ok) ||
               audio_effect_only) &&
              invocation.render_session_mode) {
     // An AUDIO_EFFECT_ONLY plug-in has no video selector to dispatch and no
@@ -512,6 +521,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
         invocation.external_height, invocation.external_time_step,
         invocation.external_total_time,
         invocation.external_time_scale, invocation.external_pixel_bytes,
+        request.advertised_out_flags, request.advertised_out_flags2,
         invocation.external_layers.empty() ? nullptr : &invocation.external_layers,
         request.cluster_swap, audio_effect_only);
     persistent_sequence_setup_error = session_outcome.setup_error;
@@ -526,6 +536,7 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     session_invariant_failure = session_outcome.invariant_failure;
     session_swap_failure = session_outcome.swap_failure;
     render_error = session_outcome.render_error;
+    result.dispatch_pixel_bytes = session_outcome.dispatch_pixel_bytes;
   } else if (params_error == 0 && image_render_supported && depth_supported) {
     render_error = render_once(entry, input, output, case_id, render_width, render_height,
                                render_rowbytes, input_hash, output_hash, guards_intact,
@@ -557,7 +568,9 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
   const int32_t params_error = request.params_error;
   const bool image_render_supported = request.image_render_supported;
   const bool depth_supported = request.depth_supported;
+  const bool session_depth_ok = request.depth_dispatchable;
   const bool smart_render_supported = request.smart_render_supported;
+  result.dispatch_pixel_bytes = invocation.external_pixel_bytes;
   std::string& case_id = result.case_id;
   SmartResult& smart = result.smart;
   bool& lifetime_fault_observed = result.lifetime_fault_observed;
@@ -575,13 +588,14 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
     // (bad params, unsupported depth, no SmartFX support) the loop is never
     // entered; the broker observes the nonzero process exit instead of a
     // hanging session, exactly like the classic session branch.
-    if (params_error == 0 && image_render_supported && depth_supported &&
+    if (params_error == 0 && image_render_supported && session_depth_ok &&
         smart_render_supported) {
       const auto outcome = run_smart_render_session(
           entry, input, output, &invocation.requested_parameters, case_id,
           invocation.external_width, invocation.external_height,
           invocation.external_time_step, invocation.external_total_time,
           invocation.external_time_scale, invocation.external_pixel_bytes,
+          request.advertised_out_flags, request.advertised_out_flags2,
           invocation.external_layers.empty() ? nullptr : &invocation.external_layers);
       smart = outcome.last;
       // The report's guard verdict is the session-level one: a per-frame
@@ -594,6 +608,7 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
       result.session_sequence_setup_error = outcome.session.setup_error;
       result.session_sequence_setdown_error = outcome.session.setdown_error;
       result.session_render_error = outcome.session.render_error;
+      result.dispatch_pixel_bytes = outcome.session.dispatch_pixel_bytes;
     }
   } else {
   smart = params_error == 0 && image_render_supported && depth_supported &&

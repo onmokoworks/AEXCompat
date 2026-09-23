@@ -1486,9 +1486,8 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
             .checked_add(ENVIRONMENT_STRINGS_NAMESPACE_SIZE);
         let may_be_tracked = (CRT_HEAP_BASE..CRT_HEAP_END).contains(&source)
             || (state.environment_strings_base != 0
-                && environment_strings_end.is_some_and(|end| {
-                    (state.environment_strings_base..end).contains(&source)
-                }));
+                && environment_strings_end
+                    .is_some_and(|end| (state.environment_strings_base..end).contains(&source)));
         let live_allocation = may_be_tracked
             .then(|| state.crt_heap.allocation_containing(source))
             .flatten();
@@ -1502,13 +1501,7 @@ fn emulate_crt_strlen(unicorn: &mut Unicorn<'_, GuestState>) {
                 Err(error) => error,
             }
         } else {
-            match scan_crt_stdio_c_string(
-                unicorn,
-                source,
-                MAX_CRT_STRING_BYTES,
-                "strlen",
-                None,
-            ) {
+            match scan_crt_stdio_c_string(unicorn, source, MAX_CRT_STRING_BYTES, "strlen", None) {
                 Ok(length) => return Ok(length),
                 Err(error) => error,
             }
@@ -1806,9 +1799,7 @@ fn scan_crt_stdio_c_string(
             .checked_add(offset)
             .ok_or_else(|| format!("stdio {label} range overflow"))?;
         let page_remaining = PAGE_SIZE - current % PAGE_SIZE;
-        let chunk_len = page_remaining
-            .min(limit - offset)
-            .min(chunk.len() as u64) as usize;
+        let chunk_len = page_remaining.min(limit - offset).min(chunk.len() as u64) as usize;
         let current_chunk = &mut chunk[..chunk_len];
         aex_unicorn_buffer::read_protected(unicorn, current, current_chunk).map_err(|error| {
             format!("stdio {label} address {current:#x} is not readable: {error}")

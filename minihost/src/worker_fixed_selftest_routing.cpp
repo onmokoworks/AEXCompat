@@ -257,7 +257,7 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       !request.render_worker)
     return {};
 
-  const std::array<selftest::SimpleCommand, 43> simple_commands{{
+  const std::array<selftest::SimpleCommand, 45> simple_commands{{
       {L"--self-test-aegp-installed-effect-catalog", "aegp_installed_effect_catalog",
        hooks.simple.aegp_installed_effect_catalog},
       {L"--self-test-aegp-layer-suite1", "aegp_layer_suite1_slots",
@@ -402,6 +402,14 @@ Result dispatch(const Request& request, const Hooks& hooks) {
       // both integer depths, bounded narrowing, float32 pass-through.
       {L"--self-test-argb32f-depth-conversion", "argb32f_depth_conversion",
        hooks.simple.argb32f_depth_conversion, 1, ",\"depths\":[8,16,32]"},
+      // Conforming a captured frame to the session slot's depth: the step a
+      // session runs after dispatching a plug-in at a depth it advertises
+      // rather than at the session's own.
+      {L"--self-test-pixel-depth-conform", "pixel_depth_conform",
+       hooks.simple.pixel_depth_conform, 1, ",\"depths\":[8,16,32]"},
+      // Which depth a session dispatches at, from the two advertised bits.
+      {L"--self-test-dispatch-pixel-depth-rule", "dispatch_pixel_depth_rule",
+       hooks.simple.dispatch_pixel_depth_rule, 1, ",\"depths\":[8,16,32]"},
   }};
   if (const auto exit = selftest::dispatch_simple(
           request.argc, request.argv, simple_commands.data(), simple_commands.size()))

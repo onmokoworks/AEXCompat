@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 namespace aexcompat::render_pixel_transport {
 
@@ -192,6 +193,106 @@ bool verify_argb32f_depth_conversion() {
       if (channel != 9.0f) return false;
   }
   return true;
+}
+
+int32_t conform_pixel_depth(std::vector<unsigned char>& captured,
+                            std::size_t pixels, int32_t pixel_bytes,
+                            int32_t dispatched_pixel_bytes) {
+  if (pixel_bytes != 4 && pixel_bytes != 8 && pixel_bytes != 16) return 0;
+  if (dispatched_pixel_bytes != 4 && dispatched_pixel_bytes != 8 &&
+      dispatched_pixel_bytes != 16) return 0;
+  // No pixels means nothing to convert, and only an empty buffer is a whole
+  // number of them. Answering `pixel_bytes` keeps "nothing happened" distinct
+  // from the 0 that means "this buffer is not frames of pixels".
+  if (pixels == 0) return captured.empty() ? pixel_bytes : 0;
+  if (captured.size() % pixels != 0) return 0;
+  const std::size_t stride = captured.size() / pixels;
+  // Only the depth this frame was dispatched at, or the float32 the GPU
+  // negotiation transport hands the plug-in whatever was dispatched when it is
+  // entered by a gpu_*_float32 case_id or by force_gpu_retry (#1072). Any
+  // other stride is malformed output.
+  if (stride != static_cast<std::size_t>(dispatched_pixel_bytes) && stride != 16)
+    return 0;
+  const auto captured_pixel_bytes = static_cast<int32_t>(stride);
+  if (captured_pixel_bytes == pixel_bytes) return captured_pixel_bytes;
+  std::vector<unsigned char> conformed(pixels * static_cast<std::size_t>(pixel_bytes));
+  for (std::size_t pixel = 0; pixel < pixels; ++pixel) {
+    float wide[4]{};
+    argb_to_argb32f(wide, captured.data() + pixel * stride, captured_pixel_bytes);
+    argb32f_to_argb(conformed.data() + pixel * static_cast<std::size_t>(pixel_bytes),
+                    wide, pixel_bytes);
+  }
+  captured.swap(conformed);
+  return captured_pixel_bytes;
+}
+
+bool verify_pixel_depth_conform() {
+  const std::vector<int32_t> depths{4, 8, 16};
+  for (const int32_t from : depths) {
+    for (const int32_t to : depths) {
+      // Two pixels of known channels, converted as a frame and per pixel; the
+      // frame conversion has to be the per-pixel pair applied twice and
+      // nothing else. The 16-bit fixture carries a channel above AE's 0x8000
+      // maximum so that a same-depth frame put through the float round trip
+      // (which clamps it) is distinguishable from one left alone.
+      std::vector<unsigned char> frame(2 * static_cast<std::size_t>(from));
+      for (std::size_t index = 0; index < frame.size(); ++index)
+        frame[index] = static_cast<unsigned char>(index * 7 + 1);
+      if (from == 8) {
+        const uint16_t above_maximum = 40000;
+        std::memcpy(frame.data(), &above_maximum, sizeof(above_maximum));
+      }
+      std::vector<unsigned char> expected(2 * static_cast<std::size_t>(to));
+      for (std::size_t pixel = 0; pixel < 2; ++pixel) {
+        float wide[4]{};
+        argb_to_argb32f(wide, frame.data() + pixel * from, from);
+        argb32f_to_argb(expected.data() + pixel * to, wide, to);
+      }
+      std::vector<unsigned char> conformed = frame;
+      if (conform_pixel_depth(conformed, 2, to, from) != from) return false;
+      if (from == to) {
+        if (conformed != frame) return false;  // untouched, not round-tripped
+      } else if (conformed != expected) {
+        return false;
+      }
+      // The float32 the GPU negotiation transport captures is admitted
+      // whatever was dispatched, because its case_id and retry entries hand
+      // the plug-in float32 worlds without looking at the dispatched depth
+      // (#1072).
+      if (from == 16) {
+        std::vector<unsigned char> gpu = frame;
+        if (conform_pixel_depth(gpu, 2, to, to) != 16) return false;
+      }
+    }
+  }
+  // Refusals: a stride that is not a whole pixel, a stride that is whole but
+  // that nobody dispatched, a target that is not a depth, and a dispatched
+  // depth that is not one either.
+  std::vector<unsigned char> ragged(9);
+  if (conform_pixel_depth(ragged, 2, 4, 4) != 0) return false;
+  std::vector<unsigned char> unknown_stride(2 * 12);
+  if (conform_pixel_depth(unknown_stride, 2, 4, 4) != 0) return false;
+  std::vector<unsigned char> undispatched(2 * 4);
+  if (conform_pixel_depth(undispatched, 2, 16, 8) != 0) return false;
+  // The case the admission rule exists for, and the only one the caller's
+  // size check cannot stand in for: a stride that matches the slot's depth
+  // while matching nothing that was dispatched. Admitting any recognised
+  // stride would let this through untouched and it would be packed into the
+  // slot and reported as a good frame.
+  std::vector<unsigned char> slot_sized_but_undispatched(2 * 8);
+  if (conform_pixel_depth(slot_sized_but_undispatched, 2, 8, 4) != 0) return false;
+  std::vector<unsigned char> fine(2 * 4);
+  if (conform_pixel_depth(fine, 2, 5, 4) != 0) return false;
+  if (conform_pixel_depth(fine, 2, 4, 5) != 0) return false;
+  // A zero-pixel frame is only consistent with an empty buffer.
+  std::vector<unsigned char> empty;
+  if (conform_pixel_depth(empty, 0, 8, 8) != 8) return false;
+  std::vector<unsigned char> not_empty(4);
+  if (conform_pixel_depth(not_empty, 0, 8, 8) != 0) return false;
+  // The refused buffers must come back untouched.
+  return ragged.size() == 9 && unknown_stride.size() == 24 &&
+      undispatched.size() == 8 && slot_sized_but_undispatched.size() == 16 &&
+      not_empty.size() == 4;
 }
 
 }  // namespace aexcompat::render_pixel_transport

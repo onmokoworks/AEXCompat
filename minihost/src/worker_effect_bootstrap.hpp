@@ -96,13 +96,63 @@ struct Result {
   bool input_write_advertised{};
   bool expand_buffer_advertised{};
   bool shrink_buffer_advertised{};
+  /// The plug-in advertises the session's own pixel depth, as of GLOBAL_SETUP.
+  /// Kept as the raw advertised fact for the diagnostic. It is a snapshot: a
+  /// plug-in that rewrites `out_flags` in a later selector moves what the
+  /// session dispatches at without moving this, so the depth a frame actually
+  /// ran at is recorded per run (`RenderSessionOutcome::dispatch_pixel_bytes`)
+  /// rather than inferred from this pair.
   bool depth_supported{};
+  /// A session can render at the requested depth, dispatching the plug-in at
+  /// another depth it advertises when it has to. False only for a depth the
+  /// transport itself does not carry, which is a caller contract violation
+  /// rather than a plug-in
+  /// property - so in every configuration a caller can currently ask for, it
+  /// is true, and the session exit gates no longer refuse on depth at all.
+  /// The one-shot routes keep gating on `depth_supported`, which for them is
+  /// also always true: what remained of them after #365 runs at 8 bits only.
+  /// Both gates are kept because the depth each side would refuse on is a
+  /// different question, not because either can fire today.
+  bool depth_dispatchable{};
   bool smart_render_supported{};
   bool update_params_ui_advertised{};
   bool query_dynamic_flags_advertised{};
   bool parameter_count_contract_valid{};
   std::string about_message;
 };
+
+/// The pixel depth a session dispatches this plug-in at: the session's own
+/// depth when the plug-in advertises it, otherwise the nearest depth it
+/// advertises *above* the session's, and failing that the deepest one below.
+/// A FLOAT_COLOR_AWARE-only plug-in in a 16-bpc session therefore dispatches
+/// at float32 and the frame is narrowed back into the 16-bit slot. 8-bit is
+/// the floor every effect supports, so this always answers one of 4, 8 or 16
+/// bytes per pixel for a session depth in that set.
+///
+/// After Effects does not refuse an effect that lacks
+/// `PF_OutFlag_DEEP_COLOR_AWARE` in a 16-bpc project; it renders it. Measured
+/// on AE 26.3x87 with a SmartFX effect advertising `FLOAT_COLOR_AWARE` and not
+/// `DEEP_COLOR_AWARE`: AE's 16-bpc render holds 2-3x as many distinct values
+/// per channel as its 8-bpc render, so it did not run the effect at 8 bits,
+/// and this host's float32 render of the same effect narrowed to 16 bits sits
+/// within 2-3/65535 of it (depending on how 0..32768 is mapped onto AE's
+/// 16-bit PNG). That is also the only combination in which a deeper
+/// advertisement exists at all. Falling back to the deepest depth below (a
+/// DEEP-only plug-in at 32 bpc, or one advertising neither at 16 bpc) is this
+/// rule's choice and is not measured against AE
+/// (`docs/DEPTH_FALLBACK_OBSERVATION_2026-09-17.md`).
+///
+/// `session_pixel_bytes` outside {4, 8, 16} is returned unchanged: the caller
+/// owns that contract and a silent substitution would hide the violation.
+int32_t dispatch_pixel_bytes(int32_t session_pixel_bytes, uint32_t out_flags,
+                             uint32_t out_flags2);
+
+// Self-test: the rule above over every combination of the two advertised bits
+// and every session depth the transport carries - an advertised depth is never
+// narrowed, an unadvertised one lands on the nearest advertised depth above it
+// or else the deepest below it,
+// 8-bit is the floor, and an out-of-contract session depth passes through.
+bool verify_dispatch_pixel_depth_rule();
 
 // Installs the input/utility/color callback tables into the ABI buffers and
 // links in_data->utils to the utility block. Extracted from run() so behavioral

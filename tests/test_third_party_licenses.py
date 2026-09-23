@@ -106,7 +106,12 @@ def test_license_snapshot_excludes_local_crates_and_preserves_notices() -> None:
     assert "project license" not in rendered
     assert "Copyright holder" in rendered_text
     assert "NOTICE <keep>" in rendered_text
+    # The lockfile as text: a core.autocrlf=true checkout (the GitHub Windows
+    # runner default) holds it with CRLF, and d41ca02e made the generator hash
+    # it with normalized line endings for exactly that reason.
     assert (
         snapshot["cargo_lock_sha256"]
-        == hashlib.sha256(generator.LOCKFILE.read_bytes()).hexdigest()
+        == hashlib.sha256(
+            generator.LOCKFILE.read_bytes().replace(b"\r\n", b"\n")
+        ).hexdigest()
     )
