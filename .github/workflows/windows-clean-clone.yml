@@ -571,9 +571,15 @@ jobs:
           Write-Host "building $($probes.Count) probes with throttle $throttle"
           $results = $probes | ForEach-Object -Parallel {
             $script = Join-Path $using:repository "tools\$_.ps1"
+            $started = [System.Diagnostics.Stopwatch]::GetTimestamp()
             $output = & powershell -NoProfile -ExecutionPolicy Bypass -File $script 2>&1 | Out-String
-            [pscustomobject]@{ Probe = $_; ExitCode = $LASTEXITCODE; Output = $output }
+            $elapsed = [System.Diagnostics.Stopwatch]::GetElapsedTime($started)
+            [pscustomobject]@{ Probe = $_; ExitCode = $LASTEXITCODE; Output = $output; Elapsed = $elapsed }
           } -ThrottleLimit $throttle
+          $results | Sort-Object Elapsed -Descending | ForEach-Object {
+            Write-Host ('probe_build_elapsed_ms={0} probe={1} exit={2}' -f
+              [int][Math]::Round($_.Elapsed.TotalMilliseconds), $_.Probe, $_.ExitCode)
+          }
           $failed = @($results | Where-Object { $_.ExitCode -ne 0 })
           foreach ($failure in $failed) {
             Write-Host "::group::probe build failed: $($failure.Probe) (exit $($failure.ExitCode))"
