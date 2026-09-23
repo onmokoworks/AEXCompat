@@ -702,6 +702,86 @@ fn effect_ui_button_name_rejects_bad_ref_pointer_and_unterminated_text() {
 }
 
 #[test]
+fn pf_app_suite_v6_exposes_bounded_legacy_slots() {
+    let mut engine = test_engine(&[0xc3]);
+    let name = DATA_BASE + 0x100;
+    let output = DATA_BASE + 0x200;
+    engine.write(name, b"PF AE App Suite\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(HOST_ACQUIRE_SUITE, [name, 6, output, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut pointer = [0u8; 8];
+    engine.read(output, &mut pointer).unwrap();
+    assert_eq!(u64::from_le_bytes(pointer), HOST_PF_APP_SUITE_V6);
+    let mut table = [0u8; 11 * 8];
+    engine.read(HOST_PF_APP_SUITE_V6, &mut table).unwrap();
+    let callbacks = table
+        .chunks_exact(8)
+        .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(callbacks, HOST_PF_APP_CALLBACKS_V6);
+
+    let color = DATA_BASE + 0x300;
+    assert_eq!(
+        engine
+            .call_win64(callbacks[0], [color, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut channels = [0u8; 6];
+    engine.read(color, &mut channels).unwrap();
+    assert_eq!(channels, [0x30, 0x30, 0x30, 0x30, 0x30, 0x30]);
+    assert_eq!(
+        engine
+            .call_win64(callbacks[1], [7, color, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine.read(color, &mut channels).unwrap();
+    assert_eq!(channels, [0x58, 0x58, 0x58, 0x58, 0x58, 0x58]);
+    assert_eq!(
+        engine
+            .call_win64(callbacks[5], [color, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut render_engine = [0u8; 1];
+    engine.read(color, &mut render_engine).unwrap();
+    assert_eq!(render_engine, [1]);
+}
+
+#[test]
+fn pf_app_suite_v6_rejects_bad_outputs_and_reports_unsupported_slots() {
+    let mut engine = test_engine(&[0xc3]);
+    for (slot, args) in [
+        (0, [0, 0, 0, 0, 0, 0]),
+        (0, [DATA_BASE + PAGE_SIZE - 5, 0, 0, 0, 0, 0]),
+        (1, [u64::MAX, DATA_BASE + 0x200, 0, 0, 0, 0]),
+        (5, [0, 0, 0, 0, 0, 0]),
+    ] {
+        assert_eq!(
+            engine
+                .call_win64(HOST_PF_APP_CALLBACKS_V6[slot], args)
+                .unwrap(),
+            4
+        );
+    }
+    assert_eq!(
+        engine
+            .call_win64(HOST_PF_APP_CALLBACKS_V6[2], [0; 6])
+            .unwrap(),
+        4
+    );
+    assert_eq!(engine.unsupported_suite_calls()[0].name, "PF AE App Suite");
+    assert_eq!(engine.unsupported_suite_calls()[0].version, 6);
+    assert_eq!(engine.unsupported_suite_calls()[0].slot, 2);
+    assert!(test_engine(&[0xc3]).unsupported_suite_calls().is_empty());
+}
+
+#[test]
 fn pf_ansi_suite_v2_matches_the_windows_slot_layout() {
     let mut engine = test_engine(&[0xc3]);
     let name = DATA_BASE + 0x100;

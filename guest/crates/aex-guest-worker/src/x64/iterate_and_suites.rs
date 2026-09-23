@@ -837,6 +837,80 @@ fn emulate_ansi_numeric_callback(unicorn: &mut Unicorn<'_, GuestState>, address:
     };
 }
 
+fn install_pf_app_suite_v6(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
+    let mut table = [0u8; 11 * 8];
+    for (slot, address) in HOST_PF_APP_CALLBACKS_V6.into_iter().enumerate() {
+        table[slot * 8..slot * 8 + 8].copy_from_slice(&address.to_le_bytes());
+        uc(
+            "write PF AE App Suite v6 callback",
+            unicorn.mem_write(address, &[0xc3]),
+        )?;
+        uc(
+            "install PF AE App Suite v6 callback",
+            unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+                emulate_pf_app_callback_v6(unicorn, slot);
+            }),
+        )?;
+    }
+    uc(
+        "write PF AE App Suite v6 table",
+        unicorn.mem_write(HOST_PF_APP_SUITE_V6, &table),
+    )?;
+    Ok(())
+}
+
+fn emulate_pf_app_callback_v6(unicorn: &mut Unicorn<'_, GuestState>, slot: usize) {
+    const PF_ERR_BAD_CALLBACK_PARAM: u64 = 4;
+    let output = match slot {
+        0 | 5 => unicorn.reg_read(RegisterX86::RCX).unwrap_or_default(),
+        1 => unicorn.reg_read(RegisterX86::RDX).unwrap_or_default(),
+        _ => {
+            let state = unicorn.get_data_mut();
+            record_named_unsupported_suite_call(
+                &mut state.unsupported_suite_calls,
+                &mut state.dropped_unsupported_suite_calls,
+                "PF AE App Suite",
+                6,
+                slot,
+            );
+            let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+            return;
+        }
+    };
+    let value: Vec<u8> = match slot {
+        0 => [0x3030u16; 3]
+            .into_iter()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+        1 => {
+            let color_type = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default() as i16;
+            if color_type < 0 || (color_type > 127 && !(1000..=1004).contains(&color_type)) {
+                let _ = unicorn.reg_write(RegisterX86::RAX, PF_ERR_BAD_CALLBACK_PARAM);
+                return;
+            }
+            let channel = 0x2020u16 + (color_type as u16 & 7) * 0x0808;
+            [channel; 3]
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        }
+        5 => vec![1],
+        _ => unreachable!("unsupported slots return above"),
+    };
+    let writable = output != 0
+        && guest_range_has_permission(unicorn, output, value.len() as u64, Prot::WRITE)
+            .unwrap_or(false);
+    let result = if writable {
+        unicorn.mem_write(output, &value).is_ok()
+    } else {
+        false
+    };
+    let _ = unicorn.reg_write(
+        RegisterX86::RAX,
+        if result { 0 } else { PF_ERR_BAD_CALLBACK_PARAM },
+    );
+}
+
 fn install_effect_ui_suite_v1(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
     uc(
         "write PF Effect UI Suite v1",
@@ -1497,6 +1571,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         && output != 0
         && unicorn
             .mem_write(output, &HOST_EFFECT_UI_SUITE_V1.to_le_bytes())
+            .is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if name == "PF AE App Suite"
+        && version == 6
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_PF_APP_SUITE_V6.to_le_bytes())
             .is_ok()
     {
         finish_acquire_suite_success(unicorn);
