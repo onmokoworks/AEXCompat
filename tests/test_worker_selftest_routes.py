@@ -387,10 +387,11 @@ def test_argb32f_depth_conversion_round_trips_on_all_workers() -> None:
 
 def test_dispatch_pixel_depth_rule_on_all_workers() -> None:
     """Which depth a session hands the plug-in its worlds at, from the two
-    advertised bits. After Effects runs an effect that does not advertise the
-    session's depth at the deepest depth it does advertise below it, rather
-    than refusing it, so a 16-bpc project renders a non-DEEP_COLOR_AWARE
-    effect at 8 bits. The route checks the rule over every combination of the
+    advertised bits. After Effects renders an effect that does not advertise
+    the session's depth rather than refusing it: a FLOAT_COLOR_AWARE-only
+    effect in a 16-bpc project was measured to run above 8 bits, so it gets
+    float32 here, and with nothing advertised above the session the rule falls
+    back to the deepest depth below. The route checks the rule over every combination of the
     two bits and every session depth the transport carries, that unrelated
     flags do not move the answer, and that a session depth outside the
     contract passes through instead of being substituted.

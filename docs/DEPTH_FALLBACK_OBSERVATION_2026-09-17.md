@@ -45,7 +45,8 @@ AE16 (→8bit) vs AE8 : 差のある画素 254 / 36864、maxdiff [1 0 1 0]
 ```
 
 1 段以内。つまり AE は 16 bpc project でもこの effect を 8 bit 精度で回して
-いて、差は depth 変換の丸めだけ。**観察できるのはここまで**で、AE が内部で
+いて、差は depth 変換の丸めだけ。(§4 で否定: AE の 16 bpc 出力は 8 bit の格子に
+乗っていない)**観察できるのはここまで**で、AE が内部で
 何を 8 bit に落としているか (world 全体か、effect の入出力だけか) はこの計測
 では区別できない。
 
@@ -69,6 +70,8 @@ AE の 16 bpc 結果との距離は **AE 自身の 8 bpc 結果と AE の 16 bpc
 3 行目は独立した証拠ではない。host は 8 bit で回して広げているので、
 一致するのは実装の同義反復。書いてあるのは「広げる経路に余計な丸めが
 入っていない」ことの確認までで、AE との一致の根拠は 2 行目のみ。
+(§4 で訂正: 2 行目も独立した証拠ではない。host8 == AE8 かつ host16→8 == host8
+なので、2 行目は「AE8 vs AE16→8」の言い換えになっている)
 
 ## 2. 実装
 
@@ -77,7 +80,8 @@ AE の 16 bpc 結果との距離は **AE 自身の 8 bpc 結果と AE の 16 bpc
   していなければ **session depth より浅い側で** advertise している中の一番深い
   depth。FLOAT_COLOR_AWARE だけ持つ plug-in を 16 bpc session に流すと float32
   ではなく **8 bit** になる (深い側の advertise は session の上なので関係ない)。
-  これが §1 で計測した KO_Foil のケースそのもの。8 bit が床。session depth が
+  これが §1 で計測した KO_Foil のケースそのもの。(§4 で変更: この組み合わせは
+  float32 で dispatch する)8 bit が床。session depth が
   {4,8,16} の外なら**そのまま返す** (caller の契約違反を握り潰さない)。
   self-test `--self-test-dispatch-pixel-depth-rule`。
 - `render_pixel_transport::conform_pixel_depth(captured, pixels, pixel_bytes,
@@ -316,3 +320,69 @@ AE の 16 bpc 結果との距離は **AE 自身の 8 bpc 結果と AE の 16 bpc
   `params_error != 0` かつ advertise していない depth だと、report に
   `depth_supported: true` と `render_error: -6` が並ぶ。両 consumer とも他の
   field を先に見るので分類は狂わないが、記録としては矛盾している。
+
+## 4. レビューでの訂正と規則の変更 (2026-09-23)
+
+PR 前のローカルレビューで、§1.2 の「AE は 8 bit 精度で回している」が計測から
+言えていないと指摘された。上の記述は消さず、ここで訂正する。
+
+### 4.1 観察
+
+2026-09-17 のセッションが撮った AE の出力 (8 bpc と 16 bpc の PNG、256x144、
+KO_Foil、default parameter、単色 RGBA(32,64,128,255) 入力) をそのまま使って
+再解析した。AE は再実行していない。
+
+- AE 16 bpc 出力の R/G/B の distinct 値は 340 / 396 / 246。AE 8 bpc 出力は
+  142 / 131 / 102。
+- 画素ごとに見ると、AE 8 bpc で同じ値を持つ画素が AE 16 bpc では 2〜3 通りの値に
+  分かれる (8 bit 値 211 種のうち 179 種)。
+- 8 bit → AE 内部 0..32768 → 16 bit PNG → 8 bit の往復は、戻しが丸め
+  (`(y*255+32767)//65535`) なら全 256 値で元に戻る (机上計算。書き出し側は
+  round / floor / x2 のいずれを仮定しても同じ)。§1.2 の 254 px の差が何の丸めで
+  出たかは記録が無く、特定していない。
+- 2026-09-17 の host 32 bpc dump (float32) を `round(v*65535)` で 16 bit にした
+  ものと AE 16 bpc 出力の差は最大 2/65535。AE 8 bpc を `v*257` で広げたものとの
+  差は最大 129/65535。
+- 規則変更後の host (16 bpc session で float32 dispatch) の 16 bpc 出力を
+  `(v*65535)//32768` で PNG 領域に写すと、AE 16 bpc 出力との差は最大 2/65535、
+  差のある画素 13494 / 36864。`(v*65535+16384)//32768` だと最大 3/65535、
+  25059 px。変更前の host (8 bit dispatch) は全 36864 px で最大 128/65535。
+  host の R/G/B distinct 値は 338 / 395 / 245。
+- host 8 bpc と AE 8 bpc は変更後もバイト一致 (差 0 px)。
+
+### 4.2 訂正と解釈
+
+- **否定 (§1.2)**: 「AE は 16 bpc project でもこの effect を 8 bit 精度で回している」。
+  8 bit で描いて広げたなら 8 bit 値から 16 bit 値への対応は一意になるはずで、
+  4.1 の観察と合わない。
+- **訂正 (§1.3)**: 2 行目 (host16→8 vs AE16→8) は AE との一致の独立した根拠では
+  なかった。3 行目と合わせて、AE8 vs AE16→8 の言い換えになっている。
+- 仮説: AE はこの effect (FLOAT_COLOR_AWARE のみ) を 16 bpc project で float か
+  それに近い精度で dispatch している可能性が高い。host の float32 dispatch が
+  最大 2/65535 まで寄ることがその傍証。16 bit で渡しているのか float で渡して
+  いるのかは、この計測では区別していない。
+- 残差 (最大 2〜3/65535) が float→16 bit の丸め、AE の 0..32768 → PNG 16 bit の
+  書き出し、effect 内部の精度差のどれに由来するかは未確認。byte-exact の主張は
+  しない。
+
+### 4.3 規則の変更
+
+`dispatch_pixel_bytes` を「session の depth を advertise していなければ、それより
+**上**で一番近い advertise 済み depth、上に無ければ下で一番深いもの」に変えた。
+{8, 16, 32} の中で上に advertise があるのは「16 bpc session で FLOAT のみ」だけで、
+計測したのもこの組み合わせだけ。下に落とす側 (32 bpc で DEEP のみ、16 bpc で
+どちらも無し) は AE と照合していない。
+
+probe に `-floatonly` variant (FLOAT を出し DEEP を出さない) を足し、classic と
+smart の 16 bpc session で `dispatch_pixel_bytes == 16` を確かめるテストを足した。
+規則を旧版に戻すと、この 2 本と self-test route が落ちることを確認済み。
+
+### 4.4 同じレビューで直したもの / 起票したもの
+
+- probe の variant 判定が `GetModuleFileNameA` のフルパスに `strstr` していた。
+  checkout や worktree のディレクトリ名に `-shallow` などが入ると素の probe が
+  variant になる。ファイル名部分だけを見るように直した。
+- 範囲外として issue にした: 下流 (matrix 分類、到達不能分岐とそのテスト、
+  protocol doc、report の depth provenance、`conform_pixel_depth` の float32 無条件
+  受理) は #1538、`advertised_gpu_support` の live `out_data` 読みは #1539。§3 の
+  「broker 側の追従は別途」は #1538 を指す。

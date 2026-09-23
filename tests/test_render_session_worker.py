@@ -312,7 +312,8 @@ def probe_variant(marker, probe=None):
     """A copy of a probe whose file name carries a depth-advertisement marker.
 
     The probes read their own module path and change what they advertise when
-    they see ``-shallow`` or ``-rewrite`` in it, so the variant is a property
+    they see ``-shallow``, ``-floatonly`` or ``-rewrite`` in their file name,
+    so the variant is a property
     of the plug-in the run loaded. The earlier spelling of this was an
     environment variable, which every other test that spawns the same probe
     inherited - and after a session report began describing the slot rather
@@ -398,6 +399,44 @@ def test_classic_session_narrows_a_plug_in_that_does_not_advertise_the_depth():
         assert report["advertised_depth_supported"] is False
         assert report["depth_supported"] is True
         assert report["dispatch_pixel_bytes"] == 4
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_classic_session_dispatches_a_float_only_plug_in_at_float32():
+    """A plug-in that advertises FLOAT_COLOR_AWARE and not DEEP_COLOR_AWARE is
+    handed float32 worlds in a 16-bpc session and its frame is narrowed into
+    the 16-bit slot. After Effects was measured to render such an effect above
+    8-bit precision in a 16-bpc project
+    (docs/DEPTH_FALLBACK_OBSERVATION_2026-09-17.md), so dropping it to 8 bits
+    would be the wrong answer, not merely a coarser one.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=16, output_pixel_bytes=8)
+    process = _spawn(transport, command="--render-session16-v1",
+                     variant="floatonly")
+    try:
+        transport.write_input(11, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        output = done["output"]
+        assert output["pixel_format"] == "argb16"
+        assert output["rowbytes"] == WIDTH * 8
+        assert output["packed_bytes"] == WIDTH * HEIGHT * 8
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-800:])
+        report = json.loads(stdout.strip())
+        assert report["pixel_format"] == "argb16"
+        assert report["rowbytes"] == WIDTH * 8
+        assert report["undefined_tail_bytes_per_row"] == 0
+        assert report["advertised_depth_supported"] is False
+        assert report["depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 16
     finally:
         if process.poll() is None:
             process.kill()

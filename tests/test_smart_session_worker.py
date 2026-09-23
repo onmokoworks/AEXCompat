@@ -174,9 +174,10 @@ def test_smart_session_deep32_cpu_command_renders_a_float_frame():
 
 def test_smart_session_narrows_a_plug_in_that_does_not_advertise_the_depth():
     """After Effects does not refuse an effect that lacks DEEP_COLOR_AWARE in a
-    deep project: it hands the effect worlds at the deepest depth it does
-    advertise and converts the result back, so the effect renders at 8-bit
-    precision inside a 32-bpc session rather than not at all. The session slot,
+    deep project. A plug-in advertising neither deep depth has only 8 bits to
+    be handed, so it renders at 8-bit precision inside a 32-bpc session rather
+    than not at all (this host's rule; AE is measured only on the float-above-
+    16 case, docs/DEPTH_FALLBACK_OBSERVATION_2026-09-17.md). The session slot,
     the frame message and the final report all describe the frame at the
     session's depth - the narrowing is between the host and the plug-in, and a
     caller reading the slot must not have to know it happened.
@@ -211,6 +212,44 @@ def test_smart_session_narrows_a_plug_in_that_does_not_advertise_the_depth():
         assert report["advertised_depth_supported"] is False
         assert report["depth_supported"] is True
         assert report["dispatch_pixel_bytes"] == 4
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=30)
+
+
+def test_smart_session_dispatches_a_float_only_plug_in_at_float32():
+    """The smart twin of the classic float-only case, and the configuration
+    measured against After Effects: a SmartFX effect with FLOAT_COLOR_AWARE and
+    without DEEP_COLOR_AWARE in a 16-bpc project. It is handed float32 worlds
+    and the frame is narrowed into the 16-bit slot.
+    """
+    _require_artifacts()
+    transport = SessionTransport(depth_code=16, output_pixel_bytes=8)
+    process = _spawn(transport, command="--smart-session16-v1",
+                     variant="floatonly")
+    try:
+        transport.write_input(57, 1)
+        transport.send(render_frame_message(0, 0))
+        done = transport.receive()
+        assert done is not None, "worker closed the response pipe early"
+        assert done["status"] == "ok", json.dumps(done)
+        output = done["output"]
+        assert output["pixel_format"] == "argb16"
+        assert output["rowbytes"] == WIDTH * 8
+        slot = transport.output_bytes(WIDTH * HEIGHT * 8)
+        assert output["packed_bytes"] == len(slot)
+        transport.send({"v": 1, "type": "close"})
+        code, stdout, stderr = _finish(process)
+        assert code == 0, (code, stderr[-500:])
+        report = json.loads(stdout.strip())
+        assert report["status"] == "render_completed"
+        assert report["pixel_format"] == "argb16"
+        assert report["rowbytes"] == WIDTH * 8
+        assert report["undefined_tail_bytes_per_row"] == 0
+        assert report["advertised_depth_supported"] is False
+        assert report["depth_supported"] is True
+        assert report["dispatch_pixel_bytes"] == 16
     finally:
         if process.poll() is None:
             process.kill()

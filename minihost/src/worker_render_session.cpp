@@ -1277,9 +1277,9 @@ void run_session_frame_loop(
     const std::size_t expected_pixels =
         static_cast<std::size_t>(frame.width) * frame.height;
     // A session whose depth the plug-in does not advertise dispatches it at
-    // the deepest depth it does (`effect_bootstrap::dispatch_pixel_bytes`), so
-    // the frame comes back narrower than the slot and is widened here - what
-    // AE does around the same call rather than refusing the effect. The source
+    // another depth it does (`effect_bootstrap::dispatch_pixel_bytes`), so the
+    // frame comes back narrower or wider than the slot and is converted here -
+    // what AE does around the same call rather than refusing the effect. The source
     // depth is read off the captured buffer rather than recomputed so a route
     // that captures at a depth of its own (the GPU negotiation transport,
     // whose float32 worlds are planned from the session's depth) conforms

@@ -29,6 +29,8 @@ namespace {
 // its own and the host's narrowing path never runs under test.
 //
 //   ...-shallow.aex   advertise neither depth at GLOBAL_SETUP.
+//   ...-floatonly.aex advertise FLOAT and not DEEP at GLOBAL_SETUP, the
+//                     combination a 16-bpc session dispatches at float32.
 //   ...-rewrite.aex   advertise both at GLOBAL_SETUP and then ASSIGN them away
 //                     in PARAMS_SETUP, the way a plug-in that assigns rather
 //                     than ORs does. A host that decides its dispatch depth
@@ -63,11 +65,22 @@ const char* ModuleFileName() {
   return path.data();
 }
 
+// The file name alone, not the full path: a checkout or worktree directory
+// whose name carries a marker would otherwise turn the plain probe into a
+// variant, and a narrowed run reports the slot and stays green.
 bool ModuleNameHas(const char* marker) {
-  return std::strstr(ModuleFileName(), marker) != nullptr;
+  const char* path = ModuleFileName();
+  const char* name = path;
+  for (const char* cursor = path; *cursor != '\0'; ++cursor)
+    if (*cursor == '\\' || *cursor == '/') name = cursor + 1;
+  return std::strstr(name, marker) != nullptr;
 }
 
-bool AdvertisesDeepColor() { return !ModuleNameHas("-shallow"); }
+bool AdvertisesDeepColor() {
+  return !ModuleNameHas("-shallow") && !ModuleNameHas("-floatonly");
+}
+
+bool AdvertisesFloatColor() { return !ModuleNameHas("-shallow"); }
 
 bool RewritesFlagsInParamsSetup() { return ModuleNameHas("-rewrite"); }
 
@@ -294,7 +307,7 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT |
           (AdvertisesDeepColor() ? PF_OutFlag_DEEP_COLOR_AWARE : 0);
       out_data->out_flags2 =
-          AdvertisesDeepColor() ? PF_OutFlag2_FLOAT_COLOR_AWARE : 0;
+          AdvertisesFloatColor() ? PF_OutFlag2_FLOAT_COLOR_AWARE : 0;
       return PF_Err_NONE;
     case PF_Cmd_PARAMS_SETUP:
       out_data->num_params = 1;

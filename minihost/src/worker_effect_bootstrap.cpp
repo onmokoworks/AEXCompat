@@ -29,7 +29,7 @@ int32_t dispatch_pixel_bytes(int32_t session_pixel_bytes, uint32_t out_flags,
   const bool deep = (out_flags & (1u << 25)) != 0;
   const bool floating = (out_flags2 & (1u << 12)) != 0;
   if (session_pixel_bytes == 16) return floating ? 16 : (deep ? 8 : 4);
-  if (session_pixel_bytes == 8) return deep ? 8 : 4;
+  if (session_pixel_bytes == 8) return deep ? 8 : (floating ? 16 : 4);
   return session_pixel_bytes;
 }
 
@@ -42,7 +42,7 @@ bool verify_dispatch_pixel_depth_rule() {
   // pass against any edit to it.
   constexpr Case cases[] = {
       {4, 0, 0, 4}, {4, kDeep, 0, 4}, {4, 0, kFloat, 4}, {4, kDeep, kFloat, 4},
-      {8, 0, 0, 4}, {8, kDeep, 0, 8}, {8, 0, kFloat, 4}, {8, kDeep, kFloat, 8},
+      {8, 0, 0, 4}, {8, kDeep, 0, 8}, {8, 0, kFloat, 16}, {8, kDeep, kFloat, 8},
       {16, 0, 0, 4}, {16, kDeep, 0, 8}, {16, 0, kFloat, 16},
       {16, kDeep, kFloat, 16},
   };
