@@ -1597,6 +1597,7 @@ fn discover_avx_state_sync_points_with_limit(
     // false positives only install a hook at an address that is never executed.
     let mut points = Vec::new();
     let mut info_factory = InstructionInfoFactory::new();
+    let mut decoder = Decoder::with_ip(64, bytes, address, DecoderOptions::NONE);
     // Executable images are overwhelmingly non-VEX bytes. Use memchr's
     // vectorized two-byte search to find the exact same C4/C5 candidate set
     // without visiting every byte in Rust before the independent decodes.
@@ -1606,12 +1607,12 @@ fn discover_avx_state_sync_points_with_limit(
             let Some(instruction_address) = address.checked_add(start as u64) else {
                 break;
             };
-            let mut decoder = Decoder::with_ip(
-                64,
-                &bytes[start..],
-                instruction_address,
-                DecoderOptions::NONE,
-            );
+            // The candidate is always inside `bytes`; reset one decoder instead
+            // of rebuilding its tables for every possible VEX prefix.
+            decoder
+                .set_position(start)
+                .expect("candidate offset came from these bytes");
+            decoder.set_ip(instruction_address);
             let instruction = decoder.decode();
             if !instruction.is_invalid()
                 && instruction.encoding() == EncodingKind::VEX
