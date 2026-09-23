@@ -701,11 +701,15 @@ jobs:
         run: |
           set "PSModulePath=%ProgramFiles%\WindowsPowerShell\Modules;%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules;%PSModulePath%"
           uv run python tools/run-python-ci-tests.py early --output pytest-early-output.txt
-      - name: Fail if early tests silently skipped missing SDK or artifacts
+      - name: Fail if early tests skip anything other than platform-only cases
         shell: pwsh
         run: |
-          $leaks = Select-String -Path pytest-early-output.txt -Pattern 'SKIPPED' |
-            Where-Object { $_.Line -match 'set AFTER_EFFECTS_SDK_ROOT|is not built|are not present' }
+          # Early has no SDK, worker, or probe artifacts. Only Windows-vs-POSIX/
+          # macOS skips are expected; all other skips need a dependency mark.
+          $leaks = Select-String -Path pytest-early-output.txt -Pattern 'SKIPPED \[\d+\]' |
+            Where-Object {
+              $_.Line -notmatch ':\d+: (?:POSIX dirfd race regression|POSIX process-group contract is macOS-only|the package (?:verifier|builder) requires macOS shell semantics|macOS behavior)$'
+            }
           if ($leaks) {
             $leaks | ForEach-Object { $_.Line }
             throw 'an artifact-dependent Python test is missing its dependency marker'
