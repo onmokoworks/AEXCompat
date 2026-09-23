@@ -687,7 +687,10 @@ std::optional<int> dispatch_worker_selftests(int argc, wchar_t** argv) {
         &aexcompat::worker_runtime::selftest_native_stdout_routing,
         &aexcompat::worker_runtime::persistent_data::selftest4,
         &aexcompat::worker_runtime::system_sound_suppression::selftest,
-        &aexcompat::render_pixel_transport::verify_argb32f_depth_conversion}});
+        &aexcompat::render_pixel_transport::verify_argb32f_depth_conversion,
+        &aexcompat::render_pixel_transport::verify_pixel_depth_conform,
+        &aexcompat::worker_runtime::effect_bootstrap::
+            verify_dispatch_pixel_depth_rule}});
   // Compatibility anchors for selftests whose command catalog now lives in
   // worker_fixed_selftest_routing.cpp.
   // --self-test-world-transform-affine

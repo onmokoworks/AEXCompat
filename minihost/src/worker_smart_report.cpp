@@ -77,6 +77,24 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   const auto mask_report = aexcompat::mask_runtime::snapshot();
   report::ReportSnapshot report_snapshot(std::cout);
   const auto& host_telemetry = aexcompat::worker_runtime::smart::host_telemetry();
+  // In a session the caller receives the slot, not the plug-in's own world: a
+  // plug-in dispatched at another depth than the session renders into a world
+  // that the frame loop converts into the slot before anyone sees it. The final
+  // report has to describe the same frame the per-frame message described.
+  const int32_t world_pixel_bytes = smart.runtime->pixel_format == "argb32f" ? 16 :
+      (smart.runtime->pixel_format == "argb16" ? 8 : 4);
+  const int32_t frame_pixel_bytes =
+      in.session_pixel_bytes != 0 ? in.session_pixel_bytes : world_pixel_bytes;
+  // A run that never built a world leaves the format empty, and it stays
+  // empty: naming a depth for a frame that does not exist would be a
+  // fabricated fact in a diagnostic.
+  const std::string frame_pixel_format = smart.runtime->pixel_format.empty()
+      ? smart.runtime->pixel_format
+      : (frame_pixel_bytes == 16 ? "argb32f"
+                                 : (frame_pixel_bytes == 8 ? "argb16" : "argb8"));
+  const int32_t frame_rowbytes = frame_pixel_bytes == world_pixel_bytes
+      ? smart.output_rowbytes
+      : smart.output_width * frame_pixel_bytes;
   const bool host_state_clean =
                 in.parameter_count_contract_valid &&
                 in.arbitrary_defaults_disposed && arbitrary.invalid_operations == 0 &&
@@ -115,7 +133,8 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
        host_telemetry.guid_mix_in_last_size.load(std::memory_order_relaxed),
        host_telemetry.guid_mix_in_max_size.load(std::memory_order_relaxed), kMaxGuidMixInBytes,
        host_telemetry.guid_mix_in_last_result.load(std::memory_order_relaxed)},
-      in.depth_supported,
+      in.depth_supported, in.advertised_depth_supported,
+      in.dispatch_pixel_bytes,
       {smart.pre_error, smart.render_error, smart.selector_error, smart.gpu_setup_error,
        smart.gpu_setdown_error, smart.gpu_setdown_exception_code},
       {smart.gpu_render_possible, smart.gpu_render_dispatched},
@@ -126,11 +145,10 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       smart.empty_checkout_pixel_denials, smart.returns_extra_pixels,
       smart.result_within_request, smart.extra_pixels_contract_violation,
       smart.empty_result_rect, smart.output_extent_hint,
-      in.setdown_error, in.case_id, smart.runtime->pixel_format,
-      {smart.output_width, smart.output_height, smart.output_rowbytes},
+      in.setdown_error, in.case_id, frame_pixel_format,
+      {smart.output_width, smart.output_height, frame_rowbytes},
       {in.external_size[0], in.external_size[1]},
-      smart.runtime->pixel_format == "argb32f" ? 16 :
-          (smart.runtime->pixel_format == "argb16" ? 8 : 4),
+      frame_pixel_bytes,
       smart.input_hash,
       smart.output_hash, smart.rects_valid, world_debug_report_json(),
       smart.empty_layer_param_checkouts,

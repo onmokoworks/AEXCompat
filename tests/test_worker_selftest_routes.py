@@ -383,3 +383,38 @@ def test_argb32f_depth_conversion_round_trips_on_all_workers() -> None:
         "--self-test-argb32f-depth-conversion", "argb32f_depth_conversion"
     ):
         pass
+
+
+def test_dispatch_pixel_depth_rule_on_all_workers() -> None:
+    """Which depth a session hands the plug-in its worlds at, from the two
+    advertised bits. After Effects renders an effect that does not advertise
+    the session's depth rather than refusing it: a FLOAT_COLOR_AWARE-only
+    effect in a 16-bpc project was measured to run above 8 bits, so it gets
+    float32 here, and with nothing advertised above the session the rule falls
+    back to the deepest depth below. The route checks the rule over every combination of the
+    two bits and every session depth the transport carries, that unrelated
+    flags do not move the answer, and that a session depth outside the
+    contract passes through instead of being substituted.
+    """
+    for _ in _all_workers(
+        "--self-test-dispatch-pixel-depth-rule", "dispatch_pixel_depth_rule"
+    ):
+        pass
+
+
+def test_pixel_depth_conform_on_all_workers() -> None:
+    """Bringing a captured frame to the session slot's depth: the step a
+    session runs after dispatching the plug-in at another depth than the slot,
+    and the one that narrows the GPU negotiation transport's float32 capture
+    (its gpu_*_float32 case_id and retry entries hand the plug-in float32
+    worlds whatever depth was dispatched, so the frame can arrive wide). The route checks that a frame
+    already at the slot's depth is left untouched
+    rather than round-tripped through float (which would clamp a 16-bit
+    channel above 32768), that every other conversion agrees with the
+    per-pixel pair, and that a stride nobody dispatched is refused instead of
+    widened into a frame that would report as good.
+    """
+    for _ in _all_workers(
+        "--self-test-pixel-depth-conform", "pixel_depth_conform"
+    ):
+        pass

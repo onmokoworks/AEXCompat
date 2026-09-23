@@ -1,6 +1,7 @@
 #include "worker_render_session.hpp"
 
 #include "worker_bee_scene_facade.hpp"
+#include "worker_effect_bootstrap.hpp"
 
 #include <windows.h>
 
@@ -513,6 +514,7 @@ void run_session_frame_loop(
     int32_t max_width, int32_t max_height, int32_t output_capacity_width,
     int32_t output_capacity_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
+    uint32_t advertised_out_flags, uint32_t advertised_out_flags2,
     const std::vector<ExternalLayerInput>* external_layers, FrameFn&& render_frame,
     const aexcompat::worker_render_session::SwapPluginHook* swap_hook = nullptr,
     bool audio_passthrough = false) {
@@ -539,6 +541,18 @@ void run_session_frame_loop(
   // swallowing it silently would hide the gap. Frame-local; the session
   // continues.
   constexpr int32_t kSessionUiActionUnsupported = -48;
+
+  // The depth this session dispatches at, from the advertisement the bootstrap
+  // snapshotted right after the plug-in's GLOBAL_SETUP - never read back out of
+  // the live `out_data`. That buffer is written by PARAMS_SETUP and by every
+  // frame selector after it, and nothing restores it between frames (#843), so
+  // reading it there lets a plug-in that assigns rather than ORs its flags move
+  // the depth under the session with no diagnostic. What a selector may change
+  // about the effect is not what the host hands it its worlds in. Re-read only
+  // where the plug-in identity itself changes: a cluster swap.
+  int32_t dispatch_bytes = worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
+      pixel_bytes, advertised_out_flags, advertised_out_flags2);
+  outcome.dispatch_pixel_bytes = dispatch_bytes;
 
   const int32_t layer_slot_count =
       external_layers ? static_cast<int32_t>(external_layers->size()) : 0;
@@ -809,6 +823,16 @@ void run_session_frame_loop(
       current_audio_passthrough = swap.audio_effect_only;
       swapped_plugin_setup_failed =
           swap.global_setup_error != 0 || swap.params_setup_error != 0;
+      // The incoming plug-in advertises its own depths; its bootstrap
+      // snapshotted them for exactly this, so no live buffer is consulted.
+      // A member whose setup failed advertises nothing worth recording: every
+      // later frame answers -47 and no dispatch happens, so the session keeps
+      // the depth it had rather than publishing one that never ran.
+      if (!swapped_plugin_setup_failed) {
+        dispatch_bytes = worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
+            pixel_bytes, swap.advertised_out_flags, swap.advertised_out_flags2);
+        outcome.dispatch_pixel_bytes = dispatch_bytes;
+      }
       // Re-apply the session-static in_data fields the re-bootstrap cleared.
       write_session_static_fields();
       std::string reply;
@@ -1171,14 +1195,21 @@ void run_session_frame_loop(
     }
     const SessionFrameOutput frame =
         render_frame(entry, current_time, frame_rgba, captured, frame_layers,
-                     frame_override, frame_ui);
+                     frame_override, frame_ui, dispatch_bytes);
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
     aexcompat::pf_ae_channel::reclaim_layer_channels();
     outcome.width = frame.width;
     outcome.height = frame.height;
-    outcome.rowbytes = frame.rowbytes;
+    // The slot's geometry, not the plug-in's. A frame that does not reach the
+    // slot has no stride of its own to report, and the depth the plug-in
+    // rendered at is not necessarily `dispatch_bytes` either - the GPU
+    // negotiation transport (#1072) renders float32 whatever the session
+    // dispatched - so deriving one from the other would be a guess. The
+    // successful transfer below replaces this with the stride actually packed,
+    // which keeps a plug-in's own padding when nothing was converted.
+    outcome.rowbytes = frame.width * pixel_bytes;
     outcome.input_hash = frame.input_hash;
     outcome.output_hash = frame.output_hash;
     // Corruption evidence outranks the render error: a plug-in that wrote
@@ -1245,11 +1276,47 @@ void run_session_frame_loop(
     }
     const std::size_t expected_pixels =
         static_cast<std::size_t>(frame.width) * frame.height;
+    // A session whose depth the plug-in does not advertise dispatches it at
+    // another depth it does (`effect_bootstrap::dispatch_pixel_bytes`), so the
+    // frame comes back narrower or wider than the slot and is converted here -
+    // what AE does around the same call rather than refusing the effect. The source
+    // depth is read off the captured buffer rather than recomputed so a route
+    // that captures at a depth of its own (the GPU negotiation transport,
+    // whose case_id and retry entries hand out float32 worlds whatever was
+    // dispatched) conforms through the same step.
+    const int32_t captured_pixel_bytes =
+        aexcompat::render_pixel_transport::conform_pixel_depth(
+            captured, expected_pixels, pixel_bytes, dispatch_bytes);
+    // 0 means the frame did not arrive at a depth anything dispatched it at.
+    // The size check below cannot stand in for this: a refused stride that
+    // happens to equal the session depth passes it, and the un-narrowed buffer
+    // would be packed into the slot and reported as a good frame.
+    if (captured_pixel_bytes == 0) {
+      respond_error(kSessionOutputCaptureError);
+      outcome.invariant_failure = true;
+      break;
+    }
+    // A conversion repacks every row at the slot's stride, so whatever padding
+    // the narrow buffer carried is gone and the reported rowbytes follows it.
+    // Without one the plug-in's own stride is the truth and is reported as-is.
+    const int32_t reported_rowbytes = captured_pixel_bytes != pixel_bytes
+        ? frame.width * pixel_bytes
+        : frame.rowbytes;
     if (captured.size() != expected_pixels * pixel_bytes) {
       respond_error(kSessionOutputCaptureError);
       outcome.invariant_failure = true;
       break;
     }
+    // The final report reads this; leaving it at the dispatch depth's stride
+    // would have the report and the per-frame message describe the same frame
+    // differently.
+    outcome.rowbytes = reported_rowbytes;
+    // What the plug-in actually rendered at, read off the frame it produced
+    // rather than from the session's decision: the GPU negotiation transport
+    // (#1072) can hand it float32 worlds whatever was dispatched, and this
+    // field is provenance - it says what
+    // ran, not what was planned.
+    outcome.dispatch_pixel_bytes = captured_pixel_bytes;
     // Shrink, or an expand that still fits the launch output slot, is written
     // below at its actual dimensions. An expand that overruns the slot needs a
     // larger slot: the render already ran exactly once into the private buffer
@@ -1289,7 +1356,7 @@ void run_session_frame_loop(
     // layout disagreement the hash existed to catch, at no per-frame cost
     // (issue #690). The final report's output_hash keeps the one-shot
     // internal-ARGB definition (protocol §4.3).
-    if (!respond_ok(frame.width, frame.height, frame.rowbytes, captured.size(),
+    if (!respond_ok(frame.width, frame.height, reported_rowbytes, captured.size(),
                     frame.origin_x, frame.origin_y)) {
       outcome.protocol_violation = true;
       break;
@@ -1328,6 +1395,7 @@ RenderSessionOutcome run_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     int32_t max_width, int32_t max_height, int32_t time_step, int32_t total_time,
     uint32_t time_scale, int32_t pixel_bytes,
+    uint32_t advertised_out_flags, uint32_t advertised_out_flags2,
     const std::vector<ExternalLayerInput>* external_layers,
     const aexcompat::worker_render_session::SwapPluginHook* swap_hook,
     bool audio_passthrough) {
@@ -1337,13 +1405,14 @@ RenderSessionOutcome run_render_session(
   run_session_frame_loop(
       outcome, entry, input, output, max_width, max_height, max_width,
       max_height, time_step, total_time,
-      time_scale, pixel_bytes, external_layers,
+      time_scale, pixel_bytes, advertised_out_flags, advertised_out_flags2,
+      external_layers,
       [&](EffectEntry current_entry, int32_t current_time,
           const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
-          const SessionUiAction* frame_ui) {
+          const SessionUiAction* frame_ui, int32_t dispatch_bytes) {
         apply_session_ui_action(frame_ui);
         SessionFrameOutput frame;
         // Initialized true so it means "finalize observed corruption" when
@@ -1356,7 +1425,7 @@ RenderSessionOutcome run_render_session(
             frame.rowbytes, frame.input_hash, frame.output_hash, frame_guards,
             frame_override ? frame_override : requested, &frame_rgba,
             max_width, max_height, frame_layers,
-            current_time, time_step, total_time, time_scale, pixel_bytes, false,
+            current_time, time_step, total_time, time_scale, dispatch_bytes, false,
             &captured, &classic_output);
         frame.guard_violation = !frame_guards;
         frame.output_validation_failed = classic_output.validation_failed;
@@ -1388,19 +1457,22 @@ SmartRenderSessionOutcome run_smart_render_session(
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
     const std::string& case_id, int32_t max_width, int32_t max_height,
     int32_t time_step, int32_t total_time, uint32_t time_scale,
-    int32_t pixel_bytes, const std::vector<ExternalLayerInput>* external_layers) {
+    int32_t pixel_bytes, uint32_t advertised_out_flags,
+    uint32_t advertised_out_flags2,
+    const std::vector<ExternalLayerInput>* external_layers) {
   SmartRenderSessionOutcome outcome;
   run_session_frame_loop(
       outcome.session, entry, input, output, max_width, max_height,
       // Smart sessions (v1.1) render at fixed dimensions; no output expansion.
       max_width, max_height, time_step, total_time,
-      time_scale, pixel_bytes, external_layers,
+      time_scale, pixel_bytes, advertised_out_flags, advertised_out_flags2,
+      external_layers,
       [&](EffectEntry current_entry, int32_t current_time,
           const std::vector<unsigned char>& frame_rgba,
           std::vector<unsigned char>& captured,
           const std::vector<ExternalLayerInput>* frame_layers,
           const RequestedAssignments* frame_override,
-          const SessionUiAction* frame_ui) {
+          const SessionUiAction* frame_ui, int32_t dispatch_bytes) {
         apply_session_ui_action(frame_ui);
         SessionFrameOutput frame;
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
@@ -1421,7 +1493,7 @@ SmartRenderSessionOutcome run_smart_render_session(
                     current_entry, input, output, case_id,
                     frame_override ? frame_override : requested, &frame_rgba,
                     max_width, max_height, frame_layers, current_time, time_step,
-                    total_time, time_scale, pixel_bytes, attempt_frame);
+                    total_time, time_scale, dispatch_bytes, attempt_frame);
               });
         };
         worker_runtime::smart_execution::Result frame_result =
@@ -1485,30 +1557,17 @@ SmartRenderSessionOutcome run_smart_render_session(
           frame_result = render_attempt(&retry_frame);
         }
         outcome.last = frame_result;
-        // The GPU transport captures float32 ARGB; when the session output is
-        // 8-bit (pixel_bytes == 4) narrow it to 8-bit ARGB the way an 8-bit comp
-        // in AE would receive it (#1072).
-        bool downconverted_8bit = false;
-        if (pixel_bytes == 4 && frame_result.output_width > 0 &&
-            frame_result.output_height > 0) {
-          const std::size_t px = static_cast<std::size_t>(frame_result.output_width) *
-                                 static_cast<std::size_t>(frame_result.output_height);
-          if (captured.size() == px * 16) {
-            std::vector<unsigned char> narrowed(px * 4);
-            const float* src = reinterpret_cast<const float*>(captured.data());
-            for (std::size_t i = 0; i < px * 4; ++i) {
-              float v = src[i];
-              v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
-              narrowed[i] = static_cast<unsigned char>(v * 255.0f + 0.5f);
-            }
-            captured.swap(narrowed);
-            downconverted_8bit = true;
-          }
-        }
         frame.width = frame_result.output_width;
         frame.height = frame_result.output_height;
-        frame.rowbytes = downconverted_8bit ? frame_result.output_width * 4
-                                            : frame_result.output_rowbytes;
+        // The GPU transport captures float32 ARGB whatever the session asked
+        // for, and an 8-bit comp in AE receives it narrowed (#1072). The frame
+        // loop's `conform_pixel_depth` is that narrowing now, for every session
+        // depth rather than only for 8-bit, and it corrects the reported
+        // rowbytes with it. This used to be a second clamp-and-round written
+        // out here; one rule means the float32 a 16-bpc session narrows and the
+        // float32 an 8-bpc session narrows cannot round or handle NaN
+        // differently.
+        frame.rowbytes = frame_result.output_rowbytes;
         // result_rect's top-left is where these pixels sit relative to the
         // layer origin; a grown output starts at a negative coordinate. Only
         // once the rects passed validation: `result_rect` is copied out of the

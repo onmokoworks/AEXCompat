@@ -52,6 +52,13 @@ struct SwapPluginResult {
   // The frame loop replaces its current-plugin passthrough state only after a
   // complete authenticated swap result reaches it.
   bool audio_effect_only{};
+  /// The incoming member's advertised out-flags, snapshotted by its bootstrap
+  /// right after GLOBAL_SETUP. Carried rather than read back out of the shared
+  /// `out_data`, which PARAMS_SETUP and every later selector write into: a
+  /// plug-in that assigns instead of ORs would otherwise move the session's
+  /// dispatch depth with no diagnostic (the #843 shape, one selector earlier).
+  uint32_t advertised_out_flags{};
+  uint32_t advertised_out_flags2{};
   bool hard_failure{};
 };
 struct SwapPluginHook {
