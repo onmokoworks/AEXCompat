@@ -404,10 +404,10 @@ def test_dispatch_pixel_depth_rule_on_all_workers() -> None:
 
 def test_pixel_depth_conform_on_all_workers() -> None:
     """Bringing a captured frame to the session slot's depth: the step a
-    session runs after dispatching the plug-in shallower than the slot, and
-    the one that narrows the GPU negotiation transport's float32 capture (that
-    transport plans its worlds from the session's depth, so it arrives wide
-    whatever the plug-in was dispatched at). The route checks that a frame
+    session runs after dispatching the plug-in at another depth than the slot,
+    and the one that narrows the GPU negotiation transport's float32 capture
+    (its gpu_*_float32 case_id and retry entries hand the plug-in float32
+    worlds whatever depth was dispatched, so the frame can arrive wide). The route checks that a frame
     already at the slot's depth is left untouched
     rather than round-tripped through float (which would clamp a 16-bit
     channel above 32768), that every other conversion agrees with the

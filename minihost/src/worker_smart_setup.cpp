@@ -112,9 +112,9 @@ Plan prepare(const Context& context, const Request& request) {
   plan.rowbytes = case_id == "padded_stride" ? 64 : plan.width * plan.pixel_bytes;
   // `request_cpu` is a session case like `request`, and is admitted the same
   // way. It used to be admitted only incidentally, through `deep16`/`float32`
-  // being true whenever the session was deep; narrowing an unadvertised depth
-  // makes those false for a deep session (the plug-in gets 8-bit worlds) and
-  // would turn the whole plan invalid. Named rather than widened to "any
+  // being true whenever the session was deep; dispatching a plug-in that
+  // advertises neither deep depth at 8 bits makes those false for a deep
+  // session and would turn the whole plan invalid. Named rather than widened to "any
   // external image", which would have admitted an unrecognised case_id too
   // wherever the classic route's `prepare_image_request` still answers -2 for
   // one. (The terms below can still admit an unrecognised case_id on their

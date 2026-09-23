@@ -100,6 +100,7 @@ AE の 16 bpc 結果との距離は **AE 自身の 8 bpc 結果と AE の 16 bpc
   `--self-test-pixel-depth-conform`。
 - frame loop が session 単位で `dispatch_bytes` を持ち、frame callback に渡す。
   callback はその depth で world を組み、loop は capture を slot の depth へ広げる。
+  (§4 以降: float で dispatch した場合は狭める)
   変換が走った frame では報告する rowbytes も slot の stride に直す。world を
   一度も作っていない run では `pixel_format` は空のままにする (存在しない frame の
   depth を名乗るのは診断への捏造)。transport の
@@ -414,7 +415,7 @@ smart の 16 bpc session で `dispatch_pixel_bytes == 16` を確かめるテス�
   追従は #1538 に追記した。
 - 「narrow して広げる」前提で書かれていた worker 側のコメント
   (`l2_main_entry.inc`、`worker_invocation_orchestration.*`、report の
-  `session_pixel_bytes`、`depth_dispatchable`) を「別の depth で dispatch して
-  変換する」に直した。
+  `session_pixel_bytes`、`depth_dispatchable`)、self-test route の docstring、
+  §2 の該当箇所を「別の depth で dispatch して変換する」に直した / 注記した。
 - §3 の variant 一覧 (2 つ) と baseline (79 passed) は 2026-09-17 時点のもの。
   今は `-floatonly` を含めて 3 つで、同じ baseline は 81 passed, 3 skipped。
