@@ -4,7 +4,6 @@ import struct
 import subprocess
 import sys
 import threading
-import time
 from argparse import Namespace
 from pathlib import Path
 
@@ -553,6 +552,7 @@ def test_sweep_runs_isolated_backends_concurrently_and_keeps_sha_order(
     active = 0
     maximum_active = 0
     lock = threading.Lock()
+    rendezvous = threading.Barrier(3, timeout=10)
 
     def fake_run_backend(*_args):
         nonlocal active, maximum_active
@@ -560,9 +560,13 @@ def test_sweep_runs_isolated_backends_concurrently_and_keeps_sha_order(
         with lock:
             active += 1
             maximum_active = max(maximum_active, active)
-        time.sleep(0.03)
-        with lock:
-            active -= 1
+        try:
+            # Prove three calls overlap without assuming a 30 ms scheduler
+            # window remains long enough on a loaded CI runner.
+            rendezvous.wait()
+        finally:
+            with lock:
+                active -= 1
         return {
             "status": "rendered",
             "output_sha256": "a" * 64,

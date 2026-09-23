@@ -1,5 +1,8 @@
 import importlib.util
+import os
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +17,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 def test_trusted_python_ci_partitions_classic_evidence_exactly_once():
+    early = RUNNER.pytest_arguments("early", sdk_ready=False)
     main = RUNNER.pytest_arguments("main", sdk_ready=True)
     evidence = RUNNER.pytest_arguments("classic-evidence", sdk_ready=True)
 
@@ -41,6 +45,9 @@ def test_trusted_python_ci_partitions_classic_evidence_exactly_once():
     assert "--run-sdk-tests" in main
     assert "--run-built-artifact-tests" in main
     assert "--validate-local-artifact-manifest" in main
+    assert "--run-sdk-tests" not in early
+    assert "--run-built-artifact-tests" not in early
+    assert "--validate-local-artifact-manifest" in early
 
 
 def test_fork_python_ci_keeps_evidence_in_main_policy_run():
@@ -59,7 +66,48 @@ def test_fork_python_ci_keeps_evidence_in_main_policy_run():
         RUNNER.pytest_arguments("classic-evidence", sdk_ready=False)
 
 
-@pytest.mark.parametrize("partition", ("main", "classic-evidence"))
+def _collect_nodes(arguments):
+    # Collection is a real pytest invocation: the conftest manifests add marks
+    # dynamically, so comparing command strings alone cannot prove coverage.
+    arguments = list(arguments)
+    for flag in ("-n", "--dist"):
+        index = arguments.index(flag)
+        del arguments[index:index + 2]
+    arguments = [value for value in arguments if not value.startswith("--durations=")]
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", *arguments],
+        cwd=ROOT,
+        env={**os.environ, "PYTHONUTF8": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return {
+        line for line in result.stdout.splitlines()
+        if line.startswith("tests/") and "::" in line
+    }
+
+
+def test_early_and_main_collect_every_previous_ci_node_exactly_once():
+    early = RUNNER.pytest_arguments("early", sdk_ready=False)
+    main = RUNNER.pytest_arguments("main", sdk_ready=True)
+    unsplit = list(main)
+    marker_index = unsplit.index("-m")
+    del unsplit[marker_index:marker_index + 2]
+
+    before = _collect_nodes(unsplit)
+    early_nodes = _collect_nodes(early)
+    main_nodes = _collect_nodes(main)
+
+    assert before
+    assert early_nodes
+    assert main_nodes
+    assert early_nodes.isdisjoint(main_nodes)
+    assert early_nodes | main_nodes == before
+
+
+@pytest.mark.parametrize("partition", ("early", "main", "classic-evidence"))
 def test_runner_preserves_pytest_output_and_failure(partition, tmp_path, capsys):
     calls = []
 
