@@ -688,22 +688,18 @@ jobs:
       # あれば cargo build --release を skip する (#1537)。4 本が同じ target
       # dir の cargo ロックで直列化するのを防ぐ。
       AEXCOMPAT_HOST_CORE_FFI_DLL: ${{ github.workspace }}\broker\target\release\aexcompat_host_core_ffi.dll
-      RUSTC_WRAPPER: sccache
       VSLANG: "1033"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      # broker binary 自体は rust-build の artifact を使う。gate 系テストの
-      # release FFI DLL は rust-release-ffi の artifact を使う (#1537)。
-      # この job のテストはもう cargo を叩かない (gate 4 本が唯一の consumer
-      # だった) が、rust toolchain / rust-cache / RUSTC_WRAPPER の削除は
-      # consumer の洗い出しを別 issue で行ってからにする。
+      # broker binary は rust-build、gate 系テストの release FFI DLL は
+      # rust-release-ffi の artifact を使う。Windows で収集される Python
+      # tests は cargo を呼ばないので Rust toolchain/cache は復元しない
+      # (#1556)。C++ probe の sccache は引き続き必要。
       - uses: ./.github/actions/ci-setup
         with:
-          rust-workspaces: broker
-          cache-key: python-tests
-          save-cache: 'false'
+          rust: 'false'
           compile-cache: 'true'
 
       - name: Export MSVC environment for Ninja probe builds
