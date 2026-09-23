@@ -16410,7 +16410,8 @@ fn guest_clocks_convert_epochs_and_counter_tracks_elapsed_time() {
     );
     // One FILETIME tick before the epoch. Windows keeps SystemTime in 100 ns
     // ticks, so a sub-tick offset before the epoch is not representable there
-    // and rounds back onto the epoch itself; it is only checked elsewhere.
+    // and rounds back onto the epoch itself; it is only checked on non-Windows
+    // hosts.
     assert_eq!(
         windows_filetime(UNIX_EPOCH - Duration::from_nanos(100)).unwrap(),
         116_444_736_000_000_000 - 1

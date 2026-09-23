@@ -119,9 +119,10 @@ mod tests {
             return;
         }
         // Isolated processes avoid mutating the test runner's global timezone.
-        // The Microsoft CRT reads TZ as `tzn[+|-]hh[:mm[:ss]][dzn]` and applies
-        // US daylight-saving rules to any `dzn`; it ignores POSIX `,M...`
-        // transition rules and falls back to UTC, so the southern-hemisphere
+        // The Microsoft CRT reads TZ as `tzn[+|-]hh[:mm[:ss]][dzn]` with
+        // three-letter zone names and applies US daylight-saving rules to any
+        // `dzn`. It rejects a TZ carrying POSIX `,M...` transition rules and
+        // falls back to the host's system zone, so the southern-hemisphere
         // zone is only meaningful where TZ is POSIX. IST-5:30 keeps a
         // non-hour offset covered on every host.
         let mut zones = vec!["UTC0", "PST8PDT", "JST-9", "IST-5:30"];
