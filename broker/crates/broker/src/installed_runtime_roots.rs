@@ -308,6 +308,11 @@ impl LaunchRuntimeIndex {
         unresolved_basenames: &[String],
         build: impl FnOnce() -> RegisteredRuntimeIndex,
     ) -> RegisteredRuntimeLookup {
+        // With no missing imports, no runtime root can be admitted. Avoid a
+        // first-use walk of every registered install tree on this common path.
+        if unresolved_basenames.is_empty() {
+            return RegisteredRuntimeLookup::Found(BTreeMap::new());
+        }
         let index = self.get_or_init_with(build);
         index.matching_roots_by_basename(unresolved_basenames, &index.install_roots)
     }
@@ -780,6 +785,28 @@ mod tests {
             RegisteredRuntimeLookup::IndexTruncated
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn empty_runtime_lookup_does_not_initialize_the_registered_tree() {
+        let facade = LaunchRuntimeIndex::default();
+        let builds = std::sync::atomic::AtomicUsize::new(0);
+        let lookup = facade.matching_with(&[], || {
+            builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            RegisteredRuntimeIndex::from_install_roots(Vec::<PathBuf>::new())
+        });
+        assert_eq!(lookup, RegisteredRuntimeLookup::Found(BTreeMap::new()));
+        assert_eq!(builds.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let lookup = facade.matching_with(&["needed.dll".into()], || {
+            builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            RegisteredRuntimeIndex::from_install_roots(Vec::<PathBuf>::new())
+        });
+        assert_eq!(
+            lookup,
+            RegisteredRuntimeLookup::Found(BTreeMap::from([("needed.dll".into(), Vec::new())]))
+        );
+        assert_eq!(builds.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
