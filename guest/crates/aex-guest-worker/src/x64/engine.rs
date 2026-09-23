@@ -850,6 +850,7 @@ impl GuestEngine<'static> {
         install_pf_ansi_suite_v2(&mut unicorn)?;
         install_effect_ui_suite_v1(&mut unicorn)?;
         install_pf_app_suite_v6(&mut unicorn)?;
+        install_persistent_data_suite_v3(&mut unicorn)?;
         install_gpu_device_suite(&mut unicorn).map_err(|error| GuestError::Unicorn {
             operation: "install PF GPU Device Suite",
             detail: error.to_string(),

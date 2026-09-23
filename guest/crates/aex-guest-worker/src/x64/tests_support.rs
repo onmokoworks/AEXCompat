@@ -363,6 +363,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     install_pf_ansi_suite_v2(&mut unicorn).unwrap();
     install_effect_ui_suite_v1(&mut unicorn).unwrap();
     install_pf_app_suite_v6(&mut unicorn).unwrap();
+    install_persistent_data_suite_v3(&mut unicorn).unwrap();
     install_gpu_device_suite(&mut unicorn).unwrap();
     install_windows_condition_variable_callbacks(&mut unicorn).unwrap();
     install_dynamic_windows_import_callbacks(&mut unicorn).unwrap();
@@ -3259,6 +3260,29 @@ fn sh_get_folder_path_a_returns_deterministic_observed_guest_paths() {
         b"C:\\ProgramData\0"
     );
     assert_eq!(engine.unicorn.get_data().windows_last_error, 0x1234);
+
+    assert_eq!(
+        engine
+            .call_win64(SH_GET_FOLDER_PATH_A, [0, 0x1a, 0, 0, output, 0])
+            .unwrap(),
+        0
+    );
+    let appdata = b"C:\\Users\\AEXCompat\\AppData\\Roaming\0";
+    assert_eq!(
+        engine
+            .unicorn
+            .mem_read_as_vec(output, appdata.len())
+            .unwrap(),
+        appdata
+    );
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .guest_files
+            .directories
+            .contains("c:/users/aexcompat/appdata/roaming")
+    );
 
     engine.unicorn.mem_write(output, &[0xcc; 32]).unwrap();
     assert_eq!(
@@ -21498,6 +21522,142 @@ fn create_directory_tracks_parents_duplicates_and_acl_snapshot() {
 }
 
 #[test]
+fn create_directory_w_resolves_guest_root_and_rejects_mounted_parent() {
+    const CREATE: u64 = STUB_BASE + 0x418;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CREATE,
+        "kernel32.dll",
+        "CreateDirectoryW",
+    )
+    .unwrap();
+    let path = DATA_BASE + 0x900;
+    let write_path = |engine: &mut GuestEngine<'static>, text: &str| {
+        let encoded = text
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        engine.write(path, &encoded).unwrap();
+    };
+    write_path(&mut engine, "\\");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
+    write_path(&mut engine, "\\aescripts\\");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .guest_files
+            .directories
+            .contains("c:/aescripts")
+    );
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
+    write_path(&mut engine, "\\aescripts\\child");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 1);
+    write_path(&mut engine, "\\missing\\child");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 3);
+    engine.unicorn.get_data_mut().guest_files.sources.insert(
+        "c:/mounted/asset.bin".into(),
+        std::path::PathBuf::from("/tmp/guest-mounted-asset"),
+    );
+    write_path(&mut engine, "C:\\mounted\\child");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 5);
+    write_path(&mut engine, "\\aescripts\\bad\u{15}");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 123);
+}
+
+#[test]
+fn set_file_attributes_a_updates_only_session_directories() {
+    const SET: u64 = STUB_BASE + 0x448;
+    const GET: u64 = STUB_BASE + 0x458;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        SET,
+        "kernel32.dll",
+        "SetFileAttributesA",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut engine.unicorn,
+        GET,
+        "kernel32.dll",
+        "GetFileAttributesExA",
+    )
+    .unwrap();
+    let path = DATA_BASE + 0x400;
+    let output = DATA_BASE + 0x600;
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .directories
+        .insert("c:/session".into());
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .record_directory_creation("c:/session");
+    engine.write(path, b"C:\\session\0").unwrap();
+    assert_eq!(engine.call_win64(SET, [path, 2, 0, 0, 0, 0]).unwrap(), 1);
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .guest_files
+            .directory_attributes
+            .get("c:/session"),
+        Some(&2)
+    );
+    assert_eq!(
+        engine.call_win64(GET, [path, 0, output, 0, 0, 0]).unwrap(),
+        1
+    );
+    let mut flags = [0u8; 4];
+    engine.read(output, &mut flags).unwrap();
+    assert_eq!(u32::from_le_bytes(flags), 0x12);
+    engine.write(path, b"C:\\session\\absent.plist\0").unwrap();
+    assert_eq!(engine.call_win64(SET, [path, 2, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 2);
+    engine.unicorn.get_data_mut().guest_files.sources.insert(
+        "c:/session/mounted.plist".into(),
+        std::path::PathBuf::from("/tmp/mounted-plist"),
+    );
+    engine.write(path, b"C:\\session\\mounted.plist\0").unwrap();
+    assert_eq!(engine.call_win64(SET, [path, 2, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 5);
+    let files = &mut engine.unicorn.get_data_mut().guest_files;
+    files.sources.remove("c:/session/mounted.plist");
+    files.directories.insert("c:".into());
+    assert_eq!(
+        files.rename_directory("c:/session", "c:/renamed").unwrap(),
+        0
+    );
+    assert!(!files.directory_attributes.contains_key("c:/session"));
+    assert_eq!(files.directory_attributes.get("c:/renamed"), Some(&2));
+    let records = guest_find_records(files, "C:/*").unwrap();
+    let renamed = records
+        .iter()
+        .find(|record| record[44..].starts_with(b"renamed\0"))
+        .unwrap();
+    assert_eq!(u32::from_le_bytes(renamed[..4].try_into().unwrap()), 0x12);
+    engine.write(path, b"C:\\renamed\0").unwrap();
+    assert_eq!(
+        engine.call_win64(GET, [path, 0, output, 0, 0, 0]).unwrap(),
+        1
+    );
+    engine.read(output, &mut flags).unwrap();
+    assert_eq!(u32::from_le_bytes(flags), 0x12);
+}
+
+#[test]
 fn create_directory_failures_do_not_publish_objects() {
     const CREATE: u64 = STUB_BASE + 0x410;
     for case in 0..4 {
@@ -23014,6 +23174,184 @@ fn adapter_import_size_query_short_buffer_and_metadata_output() {
         dispatch_win64_import("foreign.dll", "GetAdaptersAddresses"),
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn adapter_info_import_reports_real_ipv4_metadata_with_win64_layout() {
+    const CALL: u64 = STUB_BASE + 0x418;
+    let adapters = native_windows_adapters().unwrap();
+    let ipv4 = adapters
+        .iter()
+        .filter(|adapter| adapter.ipv4)
+        .collect::<Vec<_>>();
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, CALL, "iphlpapi.dll", "GetAdaptersInfo").unwrap();
+    let size_pointer = DATA_BASE + 0x100;
+    engine.write(size_pointer, &0u32.to_le_bytes()).unwrap();
+    let first = engine
+        .call_win64(CALL, [0, size_pointer, 0, 0, 0, 0])
+        .unwrap();
+    if ipv4.is_empty() {
+        assert_eq!(first, 232);
+        return;
+    }
+    assert_eq!(first, 111);
+    let mut size = [0u8; 4];
+    engine.read(size_pointer, &mut size).unwrap();
+    let required = u32::from_le_bytes(size);
+    assert_eq!(required as usize, ipv4.len() * 664);
+    let output = allocate_crt_region(&mut engine.unicorn, required as u64).unwrap();
+    engine.write(output, &[0x55; 8]).unwrap();
+    engine
+        .write(size_pointer, &(required - 1).to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CALL, [output, size_pointer, 0, 0, 0, 0])
+            .unwrap(),
+        111
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0x55; 8]
+    );
+    engine.write(size_pointer, &required.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CALL, [output, size_pointer, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let first_row = engine.unicorn.mem_read_as_vec(output, 664).unwrap();
+    assert_eq!(
+        &first_row[12..12 + ipv4[0].name.len()],
+        ipv4[0].name.as_bytes()
+    );
+    assert_eq!(
+        u32::from_le_bytes(first_row[404..408].try_into().unwrap()) as usize,
+        ipv4[0].physical_address.len()
+    );
+    assert_eq!(
+        &first_row[408..408 + ipv4[0].physical_address.len()],
+        ipv4[0].physical_address
+    );
+    assert_eq!(
+        u32::from_le_bytes(first_row[416..420].try_into().unwrap()),
+        ipv4[0].index
+    );
+    assert_eq!(
+        u32::from_le_bytes(first_row[424..428].try_into().unwrap()),
+        u32::from(ipv4[0].flags & 4 != 0)
+    );
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "GetAdaptersInfo"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn local_getaddrinfo_and_inet_ntop_round_trip_and_free() {
+    const LOOKUP: u64 = STUB_BASE + 0x418;
+    const FORMAT: u64 = STUB_BASE + 0x428;
+    const FREE: u64 = STUB_BASE + 0x438;
+    let mut engine = test_engine(&[0xc3]);
+    for (stub, name) in [
+        (LOOKUP, "getaddrinfo"),
+        (FORMAT, "inet_ntop"),
+        (FREE, "freeaddrinfo"),
+    ] {
+        install_win64_import(&mut engine.unicorn, stub, "ws2_32.dll", name).unwrap();
+    }
+    let node = DATA_BASE + 0x300;
+    let hints = DATA_BASE + 0x500;
+    let output = DATA_BASE + 0x600;
+    let formatted = DATA_BASE + 0x700;
+    let mut hostname = aex_host_identity::current_hostname().unwrap();
+    hostname.push(0);
+    engine.write(node, &hostname).unwrap();
+    let mut hint_bytes = [0u8; 48];
+    hint_bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
+    hint_bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+    engine.write(hints, &hint_bytes).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(LOOKUP, [node, 0, hints, output, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut pointer = [0u8; 8];
+    engine.read(output, &mut pointer).unwrap();
+    let base = u64::from_le_bytes(pointer);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .addrinfo_allocations
+            .contains(&base)
+    );
+    let mut info = [0u8; 64];
+    engine.read(base, &mut info).unwrap();
+    assert_eq!(u32::from_le_bytes(info[4..8].try_into().unwrap()), 2);
+    assert_eq!(u32::from_le_bytes(info[8..12].try_into().unwrap()), 1);
+    assert_eq!(u64::from_le_bytes(info[16..24].try_into().unwrap()), 16);
+    let sockaddr = u64::from_le_bytes(info[32..40].try_into().unwrap());
+    assert_eq!(sockaddr, base + 48);
+    assert_eq!(&info[48..50], &2u16.to_le_bytes());
+    assert_eq!(
+        engine
+            .call_win64(FORMAT, [2, sockaddr + 4, formatted, 16, 0, 0])
+            .unwrap(),
+        formatted
+    );
+    let expected = std::net::Ipv4Addr::new(info[52], info[53], info[54], info[55]).to_string();
+    let mut text = [0u8; 16];
+    engine.read(formatted, &mut text).unwrap();
+    assert_eq!(&text[..expected.len()], expected.as_bytes());
+    assert_eq!(text[expected.len()], 0);
+    assert_eq!(engine.call_win64(FREE, [base, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert!(
+        !engine
+            .unicorn
+            .get_data()
+            .addrinfo_allocations
+            .contains(&base)
+    );
+    assert!(engine.call_win64(FREE, [base, 0, 0, 0, 0, 0]).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn local_ipv4_selection_falls_back_to_actual_loopback() {
+    use aex_host_identity::adapters::{Interface, InterfaceAddress};
+    let make = |name: &[u8], address: [u8; 4]| Interface {
+        name: name.to_vec(),
+        index: 1,
+        native_flags: 1,
+        native_type: 0,
+        mtu: 1500,
+        physical_address: Vec::new(),
+        addresses: vec![InterfaceAddress {
+            family: 2,
+            sockaddr: [vec![16, 2, 0, 0], address.to_vec()].concat(),
+            netmask: None,
+        }],
+    };
+    let loopback = make(b"lo0", [127, 0, 0, 1]);
+    assert_eq!(
+        local_ipv4_addresses(&[loopback.clone()])
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![vec![127, 0, 0, 1]]
+    );
+    let ethernet = make(b"en0", [192, 0, 2, 4]);
+    assert_eq!(
+        local_ipv4_addresses(&[loopback, ethernet])
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec![vec![192, 0, 2, 4]]
+    );
 }
 
 #[cfg(target_os = "macos")]

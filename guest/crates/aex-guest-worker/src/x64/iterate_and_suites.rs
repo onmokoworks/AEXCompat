@@ -837,6 +837,161 @@ fn emulate_ansi_numeric_callback(unicorn: &mut Unicorn<'_, GuestState>, address:
     };
 }
 
+fn install_persistent_data_suite_v3(
+    unicorn: &mut Unicorn<'_, GuestState>,
+) -> Result<(), GuestError> {
+    let mut table = [0u8; 18 * 8];
+    for (slot, address) in HOST_PERSISTENT_DATA_CALLBACKS_V3.into_iter().enumerate() {
+        table[slot * 8..slot * 8 + 8].copy_from_slice(&address.to_le_bytes());
+        uc(
+            "write AEGP Persistent Data v3 callback",
+            unicorn.mem_write(address, &[0xc3]),
+        )?;
+        uc(
+            "install AEGP Persistent Data v3 callback",
+            unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+                if slot == 0 {
+                    emulate_get_application_blob(unicorn);
+                    return;
+                }
+                if slot == 3 {
+                    emulate_persistent_does_key_exist(unicorn);
+                    return;
+                }
+                if slot == 13 {
+                    emulate_persistent_set_string(unicorn);
+                    return;
+                }
+                if slot == 14 {
+                    emulate_persistent_set_long(unicorn);
+                    return;
+                }
+                let state = unicorn.get_data_mut();
+                record_named_unsupported_suite_call(
+                    &mut state.unsupported_suite_calls,
+                    &mut state.dropped_unsupported_suite_calls,
+                    "AEGP Persistent Data Suite",
+                    3,
+                    slot,
+                );
+                let _ = unicorn.reg_write(RegisterX86::RAX, 3);
+            }),
+        )?;
+    }
+    uc(
+        "write AEGP Persistent Data Suite v3 table",
+        unicorn.mem_write(HOST_PERSISTENT_DATA_SUITE_V3, &table),
+    )?;
+    Ok(())
+}
+
+fn emulate_get_application_blob(unicorn: &mut Unicorn<'_, GuestState>) {
+    const A_ERR_PARAMETER: u64 = 3;
+    let output = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let writable =
+        output != 0 && guest_range_has_permission(unicorn, output, 8, Prot::WRITE).unwrap_or(false);
+    if !writable
+        || unicorn
+            .mem_write(output, &HOST_PERSISTENT_BLOB_TOKEN.to_le_bytes())
+            .is_err()
+    {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    unicorn.get_data_mut().persistent_blob_active = true;
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_persistent_does_key_exist(unicorn: &mut Unicorn<'_, GuestState>) {
+    const A_ERR_PARAMETER: u64 = 3;
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let section = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let key = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let output = unicorn.reg_read(RegisterX86::R9).unwrap_or_default();
+    let section = read_crt_stdio_c_string(unicorn, section, 4096, "persistent section");
+    let key = read_crt_stdio_c_string(unicorn, key, 4096, "persistent key");
+    let valid = unicorn.get_data().persistent_blob_active
+        && handle == HOST_PERSISTENT_BLOB_TOKEN
+        && section.is_ok()
+        && key.is_ok()
+        && output != 0
+        && guest_range_has_permission(unicorn, output, 1, Prot::WRITE).unwrap_or(false);
+    if !valid {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let identity = (section.unwrap(), key.unwrap());
+    let present = unicorn
+        .get_data()
+        .persistent_strings
+        .contains_key(&identity)
+        || unicorn.get_data().persistent_longs.contains_key(&identity);
+    if unicorn.mem_write(output, &[u8::from(present)]).is_err() {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+}
+
+fn emulate_persistent_set_string(unicorn: &mut Unicorn<'_, GuestState>) {
+    const A_ERR_PARAMETER: u64 = 3;
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let section = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let key = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let value = unicorn.reg_read(RegisterX86::R9).unwrap_or_default();
+    if !unicorn.get_data().persistent_blob_active || handle != HOST_PERSISTENT_BLOB_TOKEN {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let fields = (
+        read_crt_stdio_c_string(unicorn, section, 4096, "persistent section"),
+        read_crt_stdio_c_string(unicorn, key, 4096, "persistent key"),
+        read_crt_stdio_c_string(unicorn, value, 65536, "persistent value"),
+    );
+    match fields {
+        (Ok(section), Ok(key), Ok(value)) => {
+            let state = unicorn.get_data_mut();
+            state
+                .persistent_longs
+                .remove(&(section.clone(), key.clone()));
+            state.persistent_strings.insert((section, key), value);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        _ => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        }
+    }
+}
+
+fn emulate_persistent_set_long(unicorn: &mut Unicorn<'_, GuestState>) {
+    const A_ERR_PARAMETER: u64 = 3;
+    let handle = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
+    let section = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
+    let key = unicorn.reg_read(RegisterX86::R8).unwrap_or_default();
+    let value = unicorn.reg_read(RegisterX86::R9).unwrap_or_default() as u32 as i32;
+    if !unicorn.get_data().persistent_blob_active || handle != HOST_PERSISTENT_BLOB_TOKEN {
+        let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        return;
+    }
+    let fields = (
+        read_crt_stdio_c_string(unicorn, section, 4096, "persistent section"),
+        read_crt_stdio_c_string(unicorn, key, 4096, "persistent key"),
+    );
+    match fields {
+        (Ok(section), Ok(key)) => {
+            let state = unicorn.get_data_mut();
+            state
+                .persistent_strings
+                .remove(&(section.clone(), key.clone()));
+            state.persistent_longs.insert((section, key), value);
+            let _ = unicorn.reg_write(RegisterX86::RAX, 0);
+        }
+        _ => {
+            let _ = unicorn.reg_write(RegisterX86::RAX, A_ERR_PARAMETER);
+        }
+    }
+}
+
 fn install_pf_app_suite_v6(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), GuestError> {
     let mut table = [0u8; 11 * 8];
     for (slot, address) in HOST_PF_APP_CALLBACKS_V6.into_iter().enumerate() {
@@ -1581,6 +1736,16 @@ fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) 
         && output != 0
         && unicorn
             .mem_write(output, &HOST_PF_APP_SUITE_V6.to_le_bytes())
+            .is_ok()
+    {
+        finish_acquire_suite_success(unicorn);
+        return;
+    }
+    if name == "AEGP Persistent Data Suite"
+        && version == 3
+        && output != 0
+        && unicorn
+            .mem_write(output, &HOST_PERSISTENT_DATA_SUITE_V3.to_le_bytes())
             .is_ok()
     {
         finish_acquire_suite_success(unicorn);

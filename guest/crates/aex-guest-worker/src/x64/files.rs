@@ -11,6 +11,7 @@ struct GuestFiles {
     directories: BTreeSet<String>,
     directory_dacls: BTreeMap<String, Vec<u8>>,
     directory_times: BTreeMap<String, [std::time::SystemTime; 3]>,
+    directory_attributes: BTreeMap<String, u32>,
     streams: BTreeMap<u64, GuestFileStream>,
     descriptors: BTreeMap<i32, GuestFileStream>,
     descriptor_modes: BTreeMap<i32, i32>,
@@ -1187,7 +1188,12 @@ fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>,
             record[28..32].copy_from_slice(&((metadata.len() >> 32) as u32).to_le_bytes());
             record[32..36].copy_from_slice(&(metadata.len() as u32).to_le_bytes());
         } else {
-            record[..4].copy_from_slice(&0x10u32.to_le_bytes()); // virtual containing directory
+            let attributes = files
+                .directory_attributes
+                .get(&format!("{prefix}{name}"))
+                .copied()
+                .unwrap_or_default();
+            record[..4].copy_from_slice(&(0x10u32 | (attributes & !128)).to_le_bytes());
         }
         record[44..44 + name.len()].copy_from_slice(name.as_bytes());
         records.push(record);
@@ -1284,7 +1290,10 @@ fn emulate_guest_file_search(unicorn: &mut Unicorn<'_, GuestState>, operation: L
 
 const MAX_GUEST_DIRECTORIES: usize = 4096;
 
-fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+fn create_guest_directory(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    wide: bool,
+) -> Result<u64, String> {
     let pointer = read_win64_import_argument(unicorn, 0)?;
     let attributes = read_win64_import_argument(unicorn, 1)?;
     let fail = |unicorn: &mut Unicorn<'_, GuestState>, error| {
@@ -1294,9 +1303,32 @@ fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, 
     if pointer == 0 {
         return fail(unicorn, 87);
     }
-    let bytes = read_crt_stdio_c_string(unicorn, pointer, 260, "CreateDirectoryA path")?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| "unsupported directory path encoding")?;
-    let name = guest_file_name(text)?;
+    let bytes;
+    let wide_text;
+    let text = if wide {
+        wide_text = read_guest_wide_file_string(unicorn, pointer, 260, "CreateDirectoryW path")?;
+        wide_text.as_str()
+    } else {
+        bytes = read_crt_stdio_c_string(unicorn, pointer, 260, "CreateDirectoryA path")?;
+        std::str::from_utf8(&bytes).map_err(|_| "unsupported directory path encoding")?
+    };
+    if text == "\\" || text == "/" {
+        return fail(unicorn, 183);
+    }
+    if text.chars().any(|character| character <= '\u{1f}') {
+        return fail(unicorn, 123); // ERROR_INVALID_NAME
+    }
+    // A leading separator is rooted on the guest's C: drive. Keep this in
+    // the session-only namespace; never resolve it against the host filesystem.
+    let rooted;
+    let path =
+        if text.starts_with(['\\', '/']) && !text.starts_with("\\\\") && !text.starts_with("//") {
+            rooted = format!("C:{text}");
+            rooted.trim_end_matches(['\\', '/'])
+        } else {
+            text.trim_end_matches(['\\', '/'])
+        };
+    let name = guest_file_name(path)?;
     if name.len() < 4
         || name.as_bytes()[1..3] != *b":/"
         || !name.as_bytes()[0].is_ascii_alphabetic()
@@ -1310,12 +1342,12 @@ fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, 
     if files.directory_exists(&name) || files.sources.contains_key(&name) {
         return fail(unicorn, 183);
     }
-    if !files.directory_exists(parent) {
+    if parent != "c:" && !files.directory_exists(parent) {
         return fail(unicorn, 3);
     }
     // Only session-created directories accept children. Mounted assets remain
     // read-only, including their implicit parent directories.
-    if !files.directories.contains(parent) {
+    if parent != "c:" && !files.directories.contains(parent) {
         return fail(unicorn, 5);
     }
     if files.directories.len() >= MAX_GUEST_DIRECTORIES {
@@ -1393,6 +1425,49 @@ fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, 
     }
     files.record_directory_creation(&name);
     files.directories.insert(name);
+    Ok(1)
+}
+
+fn set_guest_file_attributes_a(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let path = read_win64_import_argument(unicorn, 0)?;
+    let attributes = read_win64_import_argument(unicorn, 1)? as u32;
+    if path == 0 {
+        unicorn.get_data_mut().windows_last_error = 87;
+        return Ok(0);
+    }
+    let bytes = read_crt_stdio_c_string(unicorn, path, 260, "SetFileAttributesA path")?;
+    let absolute = canonical_guest_fullpath(&bytes)?;
+    let text = std::str::from_utf8(&absolute[..absolute.len() - 1])
+        .map_err(|_| "SetFileAttributesA path encoding is unsupported")?;
+    let name = guest_file_name(text.trim_end_matches(['/', '\\']))?;
+    const SUPPORTED: u32 = 1 | 2 | 4 | 32 | 128 | 4096 | 8192;
+    if attributes == 0 || attributes & !SUPPORTED != 0 || attributes & 128 != 0 && attributes != 128
+    {
+        return Err("SetFileAttributesA requested unsupported attributes".into());
+    }
+    let files = &unicorn.get_data().guest_files;
+    if files.sources.contains_key(&name) {
+        unicorn.get_data_mut().windows_last_error = 5;
+        return Ok(0);
+    }
+    if !files.directory_exists(&name) {
+        let parent = name
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        unicorn.get_data_mut().windows_last_error =
+            if files.directory_exists(parent) { 2 } else { 3 };
+        return Ok(0);
+    }
+    if !files.directories.contains(&name) {
+        unicorn.get_data_mut().windows_last_error = 5;
+        return Ok(0);
+    }
+    unicorn
+        .get_data_mut()
+        .guest_files
+        .directory_attributes
+        .insert(name, attributes);
     Ok(1)
 }
 
@@ -1903,6 +1978,17 @@ impl GuestFiles {
             self.directory_dacls
                 .insert(format!("{new}{}", &path[old.len()..]), acl);
         }
+        let affected = self
+            .directory_attributes
+            .keys()
+            .filter(|path| path.as_str() == old || path.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in affected {
+            let attributes = self.directory_attributes.remove(&path).unwrap();
+            self.directory_attributes
+                .insert(format!("{new}{}", &path[old.len()..]), attributes);
+        }
         if let Some(times) = self.directory_times.get_mut(parent) {
             times[1] = std::time::SystemTime::now();
         }
@@ -1981,7 +2067,12 @@ fn guest_file_attributes_ex(
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("file attributes time: {e}"))?;
     } else if files.directory_exists(&name) {
-        record[..4].copy_from_slice(&0x10u32.to_le_bytes());
+        let attributes = files
+            .directory_attributes
+            .get(&name)
+            .copied()
+            .unwrap_or_default();
+        record[..4].copy_from_slice(&(0x10u32 | (attributes & !128)).to_le_bytes());
         let stored = files
             .directory_times
             .get(&name)
