@@ -165,7 +165,12 @@ void HELPER(exit_atomic)(CPUArchState *env)
     cpu_loop_exit_atomic(env_cpu(env), GETPC());
 }
 
+/* MSVC has no cold attribute; QEMU_NOINLINE maps to __declspec(noinline). */
+#ifdef _MSC_VER
+static void QEMU_NOINLINE
+#else
 static void __attribute__((noinline, cold))
+#endif
 check_exit_request_slow(uc_engine *uc, uintptr_t return_address) {
         // There are still some things we have to do before exiting to be
         // compatible with previous behaviors.

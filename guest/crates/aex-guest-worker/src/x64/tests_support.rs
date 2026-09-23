@@ -16408,6 +16408,14 @@ fn guest_clocks_convert_epochs_and_counter_tracks_elapsed_time() {
         windows_filetime(UNIX_EPOCH + Duration::from_nanos(199)).unwrap(),
         116_444_736_000_000_001
     );
+    // One FILETIME tick before the epoch. Windows keeps SystemTime in 100 ns
+    // ticks, so a sub-tick offset before the epoch is not representable there
+    // and rounds back onto the epoch itself; it is only checked elsewhere.
+    assert_eq!(
+        windows_filetime(UNIX_EPOCH - Duration::from_nanos(100)).unwrap(),
+        116_444_736_000_000_000 - 1
+    );
+    #[cfg(not(windows))]
     assert_eq!(
         windows_filetime(UNIX_EPOCH - Duration::from_nanos(1)).unwrap(),
         116_444_736_000_000_000 - 1
@@ -16547,6 +16555,13 @@ fn crt_time64_returns_current_seconds_and_checks_optional_output() {
         crt_time64_seconds(UNIX_EPOCH + Duration::from_millis(1999)),
         1
     );
+    // 100 ns rather than 1 ns: Windows SystemTime cannot hold a sub-tick
+    // offset before the epoch (see guest_clocks_convert_epochs_...).
+    assert_eq!(
+        crt_time64_seconds(UNIX_EPOCH - Duration::from_nanos(100)),
+        -1
+    );
+    #[cfg(not(windows))]
     assert_eq!(crt_time64_seconds(UNIX_EPOCH - Duration::from_nanos(1)), -1);
     assert_eq!(
         crt_time64_seconds(UNIX_EPOCH + Duration::from_secs(32_535_215_999)),
