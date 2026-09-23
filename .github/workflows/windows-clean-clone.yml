@@ -168,6 +168,7 @@ jobs:
         with:
           rust-workspaces: broker
           cache-key: broker-nextest-archive
+          python-environment: 'false'
           # PRs only restore; trusted main pushes seed this job's isolated target cache.
           # Do not reuse the nextest archive itself across revisions: broker/build.rs
           # embeds the current Git revision in the test binaries.
@@ -181,7 +182,7 @@ jobs:
         run: cargo nextest archive --workspace --locked --archive-file target/nextest-archive.tar.zst
 
       - name: Validate shared archive partition coverage
-        run: uv run python tools/run-broker-rust-tests.py validate
+        run: python tools/run-broker-rust-tests.py validate
 
       - name: Publish the shared Rust test archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
