@@ -752,6 +752,42 @@ class ComparePixelOraclesTests(unittest.TestCase):
         # that already declared is not told to declare.
         self.assertNotIn("diagnostic", association)
 
+    def test_the_new_floors_follow_the_converted_side(self):
+        # The raw is converted; the render's alpha plane differs from it, as it
+        # does when an effect writes alpha. Reading the render's plane would
+        # answer differently in each case.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "expected.rgba"
+            png = root / "actual.png"
+            raw.write_bytes(bytes((10, 20, 30, 0, 10, 20, 30, 128)))
+            Image.frombytes("RGBA", (2, 1), bytes((10, 20, 30, 255,
+                                                   10, 20, 30, 255))).save(png)
+            report = MODULE.compare(raw, png, 2, 1, tolerance=1.0,
+                                    raw_alpha="straight",
+                                    render_alpha="premultiplied")
+            self.assertEqual(report["alpha_association"]
+                             ["worst_case_hidden_straight_step_where_visible"], 1)
+            raw.write_bytes(struct.pack("<4f", 0.5, 0.25, 0.125, 1.0))
+            Image.frombytes("RGBA", (1, 1), bytes((128, 64, 32, 128))).save(png)
+            report = MODULE.compare(raw, png, 1, 1, "rgba32f-le", tolerance=1.0,
+                                    raw_alpha="straight",
+                                    render_alpha="premultiplied")
+            self.assertTrue(report["alpha_association"]["association_is_lossless"])
+
+    def test_a_float_alpha_above_one_is_not_lossless(self):
+        # A float32 multiply by 1.5 rounds just as one by 0.3 does.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "expected.rgba"
+            png = root / "actual.png"
+            raw.write_bytes(struct.pack("<4f", 0.5, 0.25, 0.125, 1.5))
+            Image.frombytes("RGBA", (1, 1), bytes((128, 64, 32, 255))).save(png)
+            report = MODULE.compare(raw, png, 1, 1, "rgba32f-le", tolerance=1.0,
+                                    raw_alpha="straight",
+                                    render_alpha="premultiplied")
+        self.assertFalse(report["alpha_association"]["association_is_lossless"])
+
     def test_raw_u32_refuses_the_alpha_flags_instead_of_ignoring_them(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

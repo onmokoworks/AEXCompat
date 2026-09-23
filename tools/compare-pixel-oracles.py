@@ -518,9 +518,10 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
         resolved = sum(
             1 for differed, a, b in zip(before, expected, actual)
             if differed and a == b)
-        # The other direction: channels the conversion pulled apart. Only a
-        # wrong declaration does that, and the report should say so rather
-        # than leave it folded into the mismatch count.
+        # The other direction: channels the conversion pulled apart. Usually a
+        # wrong declaration, though a real difference that happens to equal
+        # the unconverted value counts here too; either way the report says
+        # so rather than folding it into the mismatch count.
         introduced = sum(
             1 for differed, a, b in zip(before, expected, actual)
             if not differed and a != b)

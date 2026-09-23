@@ -150,7 +150,8 @@ host 出力 vs AE 出力 : maxdiff [0 0 0 0] / 差のある画素 0 / 783831
 - `worst_case_hidden_straight_step_where_visible`: 同じ段差を alpha>0 の画素の
   最小 alpha で測ったもの。alpha 0 の画素が 1 つでもあると上の欄は常に領域全体
   (8bit なら 255) になり情報を持たないので、色が見える画素で何段潰れるかを別に出す。
-  変換側に alpha>0 の画素が無ければ `null`。
+  変換していない、float 領域で変換した、変換側に non-finite の alpha がある、
+  変換側に alpha>0 の画素が無い、のどれかなら `null`。
 - `association_is_lossless`: この変換が何かを隠しうるか。`null` は変換していない。
   `worst_case_hidden_straight_step` が `null` になるケースでもこの欄は必ず答える。
   変換側の alpha に **non-finite が 1 画素でもあれば false**: NaN は全 straight 値を
@@ -235,3 +236,6 @@ PR 前のローカルレビューで出た指摘。上の記述は消さず、�
   `differences_introduced_by_association` を追加した (§4)。KO_Foil のフレームでの
   値は、入力がローカルの私物画像で再実行していないため記録していない。
 - §4 の JSON 例は 2026-09-17 の実行出力なので、上の 2 欄を含まない。
+- §4 の `association_is_lossless` の float 領域の説明は、旧記述「alpha>0 なら乗算が
+  厳密なので true」を上の変更に合わせて置き換えた。§4 は観察ではなくツールの
+  現行仕様の説明なので、旧仕様はこの節に残して本文は現行に合わせる。
