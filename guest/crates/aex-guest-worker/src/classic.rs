@@ -972,6 +972,37 @@ impl ClassicHost {
             true,
             &[],
             None,
+            false,
+        )
+    }
+
+    /// Render a protocol frame without collecting diagnostic input worlds or a preview.
+    /// The resident response uses only the raw output, its digest, and guard state.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_resident_frame_pixels(
+        &mut self,
+        width: u32,
+        height: u32,
+        current_time: i32,
+        time_scale: u32,
+        format: FramePixelFormat,
+        input_pixels: &[u8],
+        parameter_values: &[ParameterValue],
+    ) -> Result<RenderReport, ClassicError> {
+        self.render_resident_pixels_mode(
+            width,
+            height,
+            current_time,
+            1,
+            0,
+            time_scale,
+            format,
+            input_pixels,
+            parameter_values,
+            true,
+            &[],
+            None,
+            true,
         )
     }
 
@@ -1003,6 +1034,7 @@ impl ClassicHost {
             true,
             secondary_layers,
             Some(smart),
+            false,
         )
     }
 
@@ -1030,6 +1062,7 @@ impl ClassicHost {
             false,
             secondary_layers,
             Some(smart),
+            false,
         )
     }
 
@@ -1071,6 +1104,7 @@ impl ClassicHost {
             false,
             &[],
             None,
+            false,
         )
     }
 
@@ -1089,6 +1123,7 @@ impl ClassicHost {
         count_frame: bool,
         secondary_layers: &[ResidentLayer<'_>],
         smart_override: Option<bool>,
+        compact_report: bool,
     ) -> Result<RenderReport, ClassicError> {
         if !self.sequence_active {
             return Err(ClassicError::Input(
@@ -1117,6 +1152,7 @@ impl ClassicHost {
                 RenderBackendRequest::Cpu,
                 secondary_layers,
                 smart_override,
+                compact_report,
             )?
             .0;
         if count_frame {
@@ -1759,6 +1795,7 @@ impl ClassicHost {
             backend,
             &[],
             None,
+            false,
         )
     }
 
@@ -1777,6 +1814,7 @@ impl ClassicHost {
         backend: RenderBackendRequest,
         secondary_layers: &[ResidentLayer<'_>],
         smart_override: Option<bool>,
+        compact_report: bool,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         let result = self.render_pixels_with_request_mode_body(
             width,
@@ -1791,6 +1829,7 @@ impl ClassicHost {
             backend,
             secondary_layers,
             smart_override,
+            compact_report,
         );
         // The arbitrary value copies live exactly as long as this render, the
         // minihost ArbitraryValuesScope: dispose them on every exit path. A
@@ -1817,6 +1856,7 @@ impl ClassicHost {
         backend: RenderBackendRequest,
         secondary_layers: &[ResidentLayer<'_>],
         smart_override: Option<bool>,
+        compact_report: bool,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         self.last_gpu_diagnostic = GpuRenderDiagnostic::pending(backend);
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
@@ -2286,11 +2326,25 @@ impl ClassicHost {
         }
         let mut raw_pixels = vec![0u8; pixel_bytes];
         self.engine.read(output_pixels, &mut raw_pixels)?;
-        let mut raw_input_pixels = vec![0u8; pixel_bytes];
-        self.engine
-            .read(guest_input_pixels, &mut raw_input_pixels)?;
-        let mut raw_secondary_layers = Vec::with_capacity(resources.secondary_layers.len());
-        for layer in &resources.secondary_layers {
+        let mut raw_input_pixels = if compact_report {
+            Vec::new()
+        } else {
+            vec![0u8; pixel_bytes]
+        };
+        if !compact_report {
+            self.engine
+                .read(guest_input_pixels, &mut raw_input_pixels)?;
+        }
+        let mut raw_secondary_layers = Vec::with_capacity(if compact_report {
+            0
+        } else {
+            resources.secondary_layers.len()
+        });
+        for layer in resources
+            .secondary_layers
+            .iter()
+            .filter(|_| !compact_report)
+        {
             let layer_bytes = format
                 .byte_count(layer.width, layer.height)
                 .map_err(|error| ClassicError::Input(error.to_string()))?;
@@ -2303,9 +2357,13 @@ impl ClassicHost {
                 raw_pixels: pixels,
             });
         }
-        let argb8 = format
-            .to_argb8_preview(&raw_pixels)
-            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        let argb8 = if compact_report {
+            Vec::new()
+        } else {
+            format
+                .to_argb8_preview(&raw_pixels)
+                .map_err(|error| ClassicError::Input(error.to_string()))?
+        };
         let raw_pixel_sha256 = format!("{:x}", Sha256::digest(&raw_pixels));
         Ok((
             RenderReport {

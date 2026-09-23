@@ -575,7 +575,7 @@ fn parse_render_frame(
             &borrowed_layers,
             smart,
         ),
-        None => host.render_resident_pixels(
+        None => host.render_resident_frame_pixels(
             width,
             height,
             current_value,
