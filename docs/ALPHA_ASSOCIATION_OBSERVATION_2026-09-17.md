@@ -150,8 +150,9 @@ host 出力 vs AE 出力 : maxdiff [0 0 0 0] / 差のある画素 0 / 783831
 - `worst_case_hidden_straight_step_where_visible`: 同じ段差を alpha>0 の画素の
   最小 alpha で測ったもの。alpha 0 の画素が 1 つでもあると上の欄は常に領域全体
   (8bit なら 255) になり情報を持たないので、色が見える画素で何段潰れるかを別に出す。
-  変換していない、float 領域で変換した、変換側に non-finite の alpha がある、
-  変換側に alpha>0 の画素が無い、のどれかなら `null`。
+  変換していない、float 領域で変換した、変換側に alpha>0 の画素が無い、の
+  どれかなら `null`。整数領域で non-finite の値があるときは `null` ではなく
+  `premultiply` が拒否して report 自体が出ない。
 - `association_is_lossless`: この変換が何かを隠しうるか。`null` は変換していない。
   `worst_case_hidden_straight_step` が `null` になるケースでもこの欄は必ず答える。
   変換側の alpha に **non-finite が 1 画素でもあれば false**: NaN は全 straight 値を
