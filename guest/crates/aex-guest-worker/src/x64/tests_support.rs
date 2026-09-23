@@ -15170,16 +15170,7 @@ fn iterate8_row_batch_advances_coordinates_and_stops_on_callback_error() {
         engine
             .call_win64_with_timeout(
                 HOST_ITERATE8,
-                &[
-                    0,
-                    0,
-                    1,
-                    0,
-                    0,
-                    callback_count,
-                    CODE,
-                    destination_world,
-                ],
+                &[0, 0, 1, 0, 0, callback_count, CODE, destination_world,],
                 TIMEOUT_MICROSECONDS,
             )
             .unwrap(),
@@ -15192,7 +15183,9 @@ fn iterate8_row_batch_advances_coordinates_and_stops_on_callback_error() {
     engine.read(destination_pixels, &mut output).unwrap();
     assert_eq!(
         output,
-        [0, 0, 0xcc, 0xcc, 1, 0, 0xcc, 0xcc, 2, 0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc]
+        [
+            0, 0, 0xcc, 0xcc, 1, 0, 0xcc, 0xcc, 2, 0, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
+        ]
     );
 }
 
@@ -16415,6 +16408,15 @@ fn guest_clocks_convert_epochs_and_counter_tracks_elapsed_time() {
         windows_filetime(UNIX_EPOCH + Duration::from_nanos(199)).unwrap(),
         116_444_736_000_000_001
     );
+    // One FILETIME tick before the epoch. Windows keeps SystemTime in 100 ns
+    // ticks, so a sub-tick offset before the epoch is not representable there
+    // and rounds back onto the epoch itself; it is only checked on non-Windows
+    // hosts.
+    assert_eq!(
+        windows_filetime(UNIX_EPOCH - Duration::from_nanos(100)).unwrap(),
+        116_444_736_000_000_000 - 1
+    );
+    #[cfg(not(windows))]
     assert_eq!(
         windows_filetime(UNIX_EPOCH - Duration::from_nanos(1)).unwrap(),
         116_444_736_000_000_000 - 1
@@ -16554,6 +16556,13 @@ fn crt_time64_returns_current_seconds_and_checks_optional_output() {
         crt_time64_seconds(UNIX_EPOCH + Duration::from_millis(1999)),
         1
     );
+    // 100 ns rather than 1 ns: Windows SystemTime cannot hold a sub-tick
+    // offset before the epoch (see guest_clocks_convert_epochs_...).
+    assert_eq!(
+        crt_time64_seconds(UNIX_EPOCH - Duration::from_nanos(100)),
+        -1
+    );
+    #[cfg(not(windows))]
     assert_eq!(crt_time64_seconds(UNIX_EPOCH - Duration::from_nanos(1)), -1);
     assert_eq!(
         crt_time64_seconds(UNIX_EPOCH + Duration::from_secs(32_535_215_999)),
@@ -23942,8 +23951,7 @@ fn multiple_code_hooks_stop_before_executing_the_hooked_instruction() {
 fn multiple_code_hooks_honor_program_counter_changes() {
     let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_64, Vec::<u8>::new()).unwrap();
     uc.mem_map(TEST_CODE, PAGE_SIZE, Prot::ALL).unwrap();
-    uc.mem_write(TEST_CODE, &[0x48, 0xff, 0xc0, 0x90])
-        .unwrap();
+    uc.mem_write(TEST_CODE, &[0x48, 0xff, 0xc0, 0x90]).unwrap();
     uc.add_code_hook(TEST_CODE, TEST_CODE, |uc, _, _| uc.get_data_mut().push(1))
         .unwrap();
     uc.add_code_hook(TEST_CODE, TEST_CODE, |uc, _, _| {
@@ -25128,7 +25136,9 @@ fn repeated_guest_console_writes_keep_first_message_and_report_counts() {
 
     let mut independent = GuestConsoleRepeat::default();
     let mut independent_output = Vec::new();
-    independent.write(b"warning\r\n", &mut independent_output).unwrap();
+    independent
+        .write(b"warning\r\n", &mut independent_output)
+        .unwrap();
     assert_eq!(independent_output, b"warning\r\n");
 }
 

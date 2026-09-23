@@ -74,8 +74,7 @@ fn schedule_iterate_pixel(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(), S
     callback_frame[..8].copy_from_slice(&pending.continuation.to_le_bytes());
     callback_frame[0x28..0x30].copy_from_slice(&output.to_le_bytes());
     callback_frame[0x30..0x38].copy_from_slice(&pending.pixel_function.to_le_bytes());
-    callback_frame[0x38..0x40]
-        .copy_from_slice(&(scheduled_pixels as u64).to_le_bytes());
+    callback_frame[0x38..0x40].copy_from_slice(&(scheduled_pixels as u64).to_le_bytes());
     callback_frame[0x40..0x48].copy_from_slice(
         &(if input == HOST_ZERO_PIXEL {
             0
