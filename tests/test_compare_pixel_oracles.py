@@ -450,7 +450,8 @@ class ComparePixelOraclesTests(unittest.TestCase):
 
     def test_collapse_width_matches_the_map_it_describes(self):
         # Brute force against the premultiply this tool actually applies, over
-        # every alpha at three domains. (m - 1) // a passes none of this.
+        # a stride of alphas at two domains (255 and AE's 32768).
+        # (m - 1) // a passes none of this.
         for maximum in (255, 32768):
             for alpha in range(0, maximum + 1, max(1, maximum // 37)):
                 outputs = [(v * alpha + maximum // 2) // maximum
@@ -664,9 +665,9 @@ class ComparePixelOraclesTests(unittest.TestCase):
         self.assertIsNone(association["worst_case_hidden_straight_step"])
         self.assertFalse(association["association_is_lossless"])
 
-    def test_a_float_association_is_lossless_above_zero_alpha(self):
-        # No integer domain to round in, so the multiply is exact and there is
-        # no step to report - but the run did convert, and says so.
+    def test_a_float_association_is_lossless_only_at_unit_alpha(self):
+        # Multiplying by 1 is exact, so nothing is hidden and there is no step
+        # to report - but the run did convert, and says so.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             raw = root / "expected.rgba"
@@ -681,6 +682,75 @@ class ComparePixelOraclesTests(unittest.TestCase):
         self.assertIsNone(association["association_domain"])
         self.assertIsNone(association["worst_case_hidden_straight_step"])
         self.assertTrue(association["association_is_lossless"])
+
+    def test_a_float_premultiply_rounds_to_float32(self):
+        # 0.1f * 0.3f held in float64 is a value no float32 artifact can hold,
+        # so a partially transparent float comparison could never agree.
+        colour = struct.unpack("<f", struct.pack("<f", 0.1))[0]
+        alpha = struct.unpack("<f", struct.pack("<f", 0.3))[0]
+        product = MODULE.premultiply([colour, colour, colour, alpha], None)[0]
+        self.assertNotEqual(product, colour * alpha)
+        self.assertEqual(product,
+                         struct.unpack("<f", struct.pack("<f", colour * alpha))[0])
+        # Past float32's range the product overflows to an infinity rather
+        # than raising out of struct.
+        huge = MODULE.premultiply([-3e38, 0.0, 0.0, 3e38], None)[0]
+        self.assertEqual(huge, float("-inf"))
+
+    def test_a_partial_float_association_is_not_lossless(self):
+        # A float32 multiply by 0.5 is exact but by 0.3 it rounds: two straight
+        # values can land on one premultiplied value.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "expected.rgba"
+            png = root / "actual.png"
+            raw.write_bytes(struct.pack("<4f", 0.5, 0.25, 0.125, 0.3))
+            Image.frombytes("RGBA", (1, 1), bytes((38, 19, 10, 77))).save(png)
+            report = MODULE.compare(raw, png, 1, 1, "rgba32f-le", tolerance=1.0,
+                                    raw_alpha="straight",
+                                    render_alpha="premultiplied")
+        self.assertFalse(report["alpha_association"]["association_is_lossless"])
+
+    def test_the_visible_blind_spot_skips_transparent_pixels(self):
+        # A transparent pixel reports the whole domain as hidden; the visible
+        # floor is the alpha-128 pixel's step.
+        straight = bytes((10, 20, 30, 0, 10, 20, 30, 128))
+        premultiplied = b"".join(
+            bytes(_premultiplied_rgba8(straight[index:index + 4]))
+            for index in range(0, len(straight), 4))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "expected.rgba"
+            png = root / "actual.png"
+            raw.write_bytes(straight)
+            Image.frombytes("RGBA", (2, 1), premultiplied).save(png)
+            report = MODULE.compare(raw, png, 2, 1, raw_alpha="straight",
+                                    render_alpha="premultiplied")
+        association = report["alpha_association"]
+        self.assertEqual(association["worst_case_hidden_straight_step"], 255)
+        self.assertEqual(
+            association["worst_case_hidden_straight_step_where_visible"], 1)
+
+    def test_a_wrong_declaration_reports_the_differences_it_introduced(self):
+        # Both sides are straight and identical; declaring the raw straight and
+        # the render premultiplied pulls the partial pixel apart.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = root / "expected.rgba"
+            png = root / "actual.png"
+            pixels = bytes((10, 20, 30, 128, 40, 50, 60, 255))
+            raw.write_bytes(pixels)
+            Image.frombytes("RGBA", (2, 1), pixels).save(png)
+            report = MODULE.compare(raw, png, 2, 1, raw_alpha="straight",
+                                    render_alpha="premultiplied")
+        association = report["alpha_association"]
+        self.assertFalse(report["match"])
+        self.assertTrue(association["mismatches_spare_opaque_pixels"])
+        self.assertEqual(association["differences_resolved_by_association"], 0)
+        self.assertEqual(association["differences_introduced_by_association"], 3)
+        # The opaque pixel still matches, so the signature holds, but a run
+        # that already declared is not told to declare.
+        self.assertNotIn("diagnostic", association)
 
     def test_raw_u32_refuses_the_alpha_flags_instead_of_ignoring_them(self):
         with tempfile.TemporaryDirectory() as directory:

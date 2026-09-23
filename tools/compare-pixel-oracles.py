@@ -295,6 +295,13 @@ def premultiply(values: Sequence[float], maximum: int | None) -> list[float]:
     arithmetic at 16 bits, but AE's 16-bit export was NOT measured to agree
     with it -- that path also crosses AE's 0..32768 internal domain -- so a
     16-bit comparison wants a tolerance rather than an exactness claim.
+
+    Without an integer domain the product is rounded to float32, which is the
+    result of an IEEE float32 multiply (the float64 product of two float32
+    values is exact, so rounding it once is the correctly rounded float32
+    product). Left in float64 it is a value no float32 artifact can hold, so a
+    partially transparent float comparison could never agree. Whether After
+    Effects multiplies in float32 is not measured.
     """
     associated = list(values)
     # No format this tool reads puts a non-finite sample in an integer domain,
@@ -317,7 +324,8 @@ def premultiply(values: Sequence[float], maximum: int | None) -> list[float]:
         alpha = associated[pixel + 3]
         if maximum is None:
             for channel in range(3):
-                associated[pixel + channel] *= alpha
+                associated[pixel + channel] = _float32(
+                    associated[pixel + channel] * alpha)
             continue
         alpha_integer = round(alpha * maximum)
         for channel in range(3):
@@ -325,6 +333,14 @@ def premultiply(values: Sequence[float], maximum: int | None) -> list[float]:
             associated[pixel + channel] = (
                 (straight * alpha_integer + maximum // 2) // maximum) / maximum
     return associated
+
+
+def _float32(value: float) -> float:
+    """Round to the nearest float32, overflowing to a signed infinity."""
+    try:
+        return struct.unpack("<f", struct.pack("<f", value))[0]
+    except OverflowError:
+        return math.copysign(math.inf, value)
 
 
 def validate_alpha_associations(raw_alpha: str | None,
@@ -487,6 +503,7 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
     # what the conversion could hide.
     converted_side: str | None = None
     resolved = 0
+    introduced = 0
     if raw_alpha is not None and raw_alpha != render_alpha:
         compared_in = "premultiplied"
         before = [a != b for a, b in zip(expected, actual)]
@@ -501,6 +518,12 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
         resolved = sum(
             1 for differed, a, b in zip(before, expected, actual)
             if differed and a == b)
+        # The other direction: channels the conversion pulled apart. Only a
+        # wrong declaration does that, and the report should say so rather
+        # than leave it folded into the mismatch count.
+        introduced = sum(
+            1 for differed, a, b in zip(before, expected, actual)
+            if not differed and a != b)
 
     sums = [0.0] * 4
     maxima = [0.0] * 4
@@ -518,6 +541,14 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
     # conversion runs on one of them and an effect that writes alpha leaves the
     # two with different alpha planes.
     lowest_alpha: dict[str, float | None] = {"raw": None, "render": None}
+    # The same floor over the pixels that are not fully transparent. Alpha 0
+    # flattens every colour to 0, so a frame with one transparent pixel
+    # reports the whole domain above; this one says what is hidden where the
+    # colour can be seen at all.
+    lowest_visible_alpha: dict[str, float | None] = {"raw": None, "render": None}
+    # Whether every alpha on a side is exactly 1. A float32 multiply by any
+    # other alpha rounds, so it is many-to-one too; alpha 1 alone is exact.
+    all_unit_alpha = {"raw": True, "render": True}
     # A single non-finite alpha unbounds the whole side. NaN sends every
     # straight value to NaN, and an infinity sends every non-zero one to an
     # infinity too (of the product's sign, which a negative colour channel
@@ -542,9 +573,15 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
                 if not math.isfinite(value):
                     unbounded_alpha[side] = True
                     continue
+                if value != 1.0:
+                    all_unit_alpha[side] = False
                 bounded = min(max(value, 0.0), 1.0)
                 seen = lowest_alpha[side]
                 lowest_alpha[side] = bounded if seen is None else min(seen, bounded)
+                if bounded > 0.0:
+                    seen = lowest_visible_alpha[side]
+                    lowest_visible_alpha[side] = (
+                        bounded if seen is None else min(seen, bounded))
             if pixel_mismatched:
                 mismatched_by_alpha[klass] += 1
             pixel_mismatched = False
@@ -575,7 +612,7 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
         claim_level = "export_exact" if exact_mismatches == 0 else "export_tolerance"
     # An agreement reached after associating alpha is an agreement between the
     # converted buffers, not between the bytes as given: the conversion is
-    # many-to-one and erased `erased` differing channels on the way. Suffix the
+    # many-to-one and erased `resolved` differing channels on the way. Suffix the
     # level so no reader takes it for byte-exactness of what was handed in.
     if compared_in != "as_provided":
         claim_level += "_after_alpha_association"
@@ -592,12 +629,13 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
                              and mismatched_by_alpha[2] == 0)
     # What the conversion could hide, at the converted side's least opaque
     # pixel. `null` when there is nothing to measure: no conversion ran, the
-    # conversion had no integer domain to round in (a float buffer, where the
-    # multiply is exact or a non-finite alpha put the pixel outside the domain
-    # entirely). `association_is_lossless` answers the question a reader
-    # actually has - can this run's agreement hide a difference - in every one
-    # of those cases, so `null` never has to be read as "nothing is hidden".
+    # conversion had no integer domain to round in (a float buffer), or a
+    # non-finite alpha put a pixel outside any domain entirely.
+    # `association_is_lossless` answers the question a reader actually has -
+    # can this run's agreement hide a difference - in every one of those
+    # cases, so `null` never has to be read as "nothing is hidden".
     hidden_step: int | None = None
+    visible_hidden_step: int | None = None
     lossless: bool | None = None
     if converted_side is not None:
         floor_alpha = lowest_alpha[converted_side]
@@ -608,12 +646,17 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
             # domain before a report is built.
             lossless = False
         elif association_domain is None:
-            # A finite float multiply is injective for any alpha above zero,
-            # and there is no integer domain to measure a step in either way.
-            lossless = floor_alpha > 0.0
+            # The float32 multiply rounds for every alpha but 1, so it can map
+            # two straight values onto one; there is no integer domain to name
+            # a step in.
+            lossless = all_unit_alpha[converted_side]
         else:
             hidden_step = collapse_width(association_domain,
                                          round(floor_alpha * association_domain))
+            visible_floor = lowest_visible_alpha[converted_side]
+            if visible_floor is not None:
+                visible_hidden_step = collapse_width(
+                    association_domain, round(visible_floor * association_domain))
             lossless = hidden_step == 0
     alpha_report: dict[str, object] = {
         "raw": raw_alpha or "unspecified",
@@ -621,8 +664,10 @@ def compare(raw_path: Path, render_path: Path, width: int, height: int,
         "compared_in": compared_in,
         "association_domain": association_domain,
         "differences_resolved_by_association": resolved,
+        "differences_introduced_by_association": introduced,
         "association_is_lossless": lossless,
         "worst_case_hidden_straight_step": hidden_step,
+        "worst_case_hidden_straight_step_where_visible": visible_hidden_step,
         "pixels": {"transparent": pixels_by_alpha[0],
                    "partial": pixels_by_alpha[1],
                    "opaque": pixels_by_alpha[2]},

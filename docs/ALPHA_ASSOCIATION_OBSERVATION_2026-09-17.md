@@ -52,7 +52,7 @@ out_c = (src_c * a + 127) // 255      (c = R,G,B)、a はそのまま
 ```
 
 つまり AE は PNG を straight alpha として取り込み、**PNG 書き出しの時点で
-premultiply している**。
+premultiply している**。(§5 で訂正: これは推論で、§3 の通り観察からは区別できない)
 
 ### 1.4 エフェクトを挟んだ再比較
 
@@ -79,10 +79,11 @@ host 出力 vs AE 出力 : maxdiff [0 0 0 0] / 差のある画素 0 / 783831
 ## 2. 結論と訂正
 
 - **訂正**: 1.1 の「半透明画素の扱いが host と AE で違う」は否定される。
-  エフェクトのディスパッチは straight 表現で完全に一致していた。差に見えていたのは
+  エフェクトのディスパッチは straight 表現で完全に一致していた (§5 で訂正)。差に見えていたのは
   host の dump (straight) と AE の PNG (premultiplied) を直接引き算していたため。
 - AE の PNG 書き出しは premultiplied。host の raw dump / `--dump-frames` の出力は
   呼び出し側が渡した association のまま (host は association を変換しない)。
+  (§5 で訂正: KO_Foil 1 本での観察からの一般化)
 - したがって AE オラクル比較で半透明画素を含む入力を使うときは、**必ず
   どちらかの association に揃えてから**比較する。揃える向きは premultiplied 側。
   逆向き (unpremultiply) は alpha 0 で定義されず、低 alpha で丸め誤差が増幅する。
@@ -138,19 +139,27 @@ host 出力 vs AE 出力 : maxdiff [0 0 0 0] / 差のある画素 0 / 783831
   無いフレームでは「免れた不透明画素」が存在しないので flag は立てない。
 - `differences_resolved_by_association`: 変換前に差があって変換後に一致した
   チャンネル数。表現の違いがどれだけあったかを示す。
+- `differences_introduced_by_association`: 逆向き。変換前は一致していて変換後に
+  差が出たチャンネル数。0 でなければ宣言が間違っている可能性が高い。
 - `worst_case_hidden_straight_step`: **変換した側**の最も alpha の低い画素に
   おいて、premultiply で潰れてしまう straight 領域の最大段差。
   `f(v) = (v*a + m//2) // m` の連続する v の最長ランから直接数えている
   (`collapse_width`)。`(m-1)//a` という近似は a=1 で 2 倍に外すので使わない
   (m=255, a=1 の真値は 127、近似は 254)。`null` は「その段差を測る整数領域が
   無い」で、変換していないか、float 領域で変換したか、のどちらか。
+- `worst_case_hidden_straight_step_where_visible`: 同じ段差を alpha>0 の画素の
+  最小 alpha で測ったもの。alpha 0 の画素が 1 つでもあると上の欄は常に領域全体
+  (8bit なら 255) になり情報を持たないので、色が見える画素で何段潰れるかを別に出す。
+  変換側に alpha>0 の画素が無ければ `null`。
 - `association_is_lossless`: この変換が何かを隠しうるか。`null` は変換していない。
   `worst_case_hidden_straight_step` が `null` になるケースでもこの欄は必ず答える。
   変換側の alpha に **non-finite が 1 画素でもあれば false**: NaN は全 straight 値を
   NaN に、±inf は 0 以外を inf に潰す (符号は積の符号なので負の色成分では反転する)
   ので、その画素は丸ごと消える。[0,1] に clamp して floor を取ると
   「最も潰す入力に最も潰さない答え」を返してしまう。
-  それ以外の float 領域の変換は alpha>0 なら乗算が厳密なので true。
+  float 領域の変換は、変換側の alpha が全画素ちょうど 1 のときだけ true。
+  float 領域の premultiply は積を float32 に丸める (IEEE float32 乗算の結果と同じ)。
+  float32 の乗算は alpha 1 以外で丸めが入り多対一になりうるので、それ以外は false。
 - claim level: 変換して比較した場合は `export_exact_after_alpha_association` の
   ように接尾辞が付き、渡されたバイトそのものの一致とは読めないようにする。
 
@@ -191,7 +200,7 @@ uv run python tools/compare-pixel-oracles.py \
 ```
 
 (この 3 クラスの画素数は、このフレームでは 1.2 のソース側の表と一致する。
-エフェクトが alpha を変えていない — 1.1 の「alpha は全画素一致」— ためで、
+エフェクトが alpha を変えていない (1.1 の「alpha は全画素一致」) ためで、
 一般には一致しない。)
 
 宣言して走らせると `match: true` /
@@ -202,3 +211,27 @@ uv run python tools/compare-pixel-oracles.py \
 ので、そこでは straight 領域の全部が潰れる) が付く。この 2 つの数字は
 このセッションの実行から取ったもので、リポジトリ内の artifact からは再現できない
 (入力がローカルの私物画像のため)。
+
+## 5. レビューでの訂正と変更 (2026-09-23)
+
+PR 前のローカルレビューで出た指摘。上の記述は消さず、ここで訂正する。
+
+- **訂正 (1.3)**: 「AE は PNG を straight として取り込み、書き出し時に premultiply
+  している」は観察ではなく推論。観察できたのは「AE のパススルー出力 = 元 PNG を
+  1.3 の式で premultiply したもの」までで、AE 内部のどこで何をしたかは §3 の通り
+  区別できない。
+- **訂正 (§2 第 1 項)**: 「straight 表現で完全に一致していた」は §2 第 4 項
+  (「straight 表現同士がバイト一致したという主張ではない」) と矛盾する。言えるのは
+  「host 出力を premultiply したものが AE 出力と全画素バイト一致した」まで。
+  premultiply は多対一なので、低 alpha の画素では straight 表現の差が隠れうる。
+- **訂正 (§2 第 2 項)**: 「host は association を変換しない」は KO_Foil 1 本での
+  観察からの一般化で、コード上の根拠を示していない。仮説として扱う。
+- **変更 (ツール)**: float 領域の premultiply を float64 の積から float32 に丸めた積に
+  変えた。float64 のまま残すと float32 の artifact が持てない値になり、半透明画素を
+  含む float 比較は一致しえなかった。AE が float32 で乗算しているかは測っていない
+  (仮説)。これに伴い、float 領域の `association_is_lossless` は「alpha>0 なら true」
+  から「変換側の alpha が全画素 1 のときだけ true」に変えた。
+- **変更 (ツール)**: `worst_case_hidden_straight_step_where_visible` と
+  `differences_introduced_by_association` を追加した (§4)。KO_Foil のフレームでの
+  値は、入力がローカルの私物画像で再実行していないため記録していない。
+- §4 の JSON 例は 2026-09-17 の実行出力なので、上の 2 欄を含まない。
