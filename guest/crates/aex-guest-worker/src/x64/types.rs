@@ -195,6 +195,7 @@ struct GuestState {
     smart_current_time: i32,
     smart_current_time_scale: u32,
     suite_requests: Vec<String>,
+    options_button_name: Option<Vec<u8>>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
     smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
