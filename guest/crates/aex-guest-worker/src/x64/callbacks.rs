@@ -435,6 +435,25 @@ fn install_float_import(
     .map(|_| ())
 }
 
+fn install_roundf_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    // Keep the original IAT address while moving this hot CRT primitive into
+    // translated guest code. No host callback is needed for each invocation.
+    let displacement = i32::try_from(GUEST_ROUNDF as i64 - address as i64 - 5)
+        .map_err(|_| GuestError::StubCapacity)?;
+    let mut jump = [0u8; 5];
+    jump[0] = 0xe9;
+    jump[1..].copy_from_slice(&displacement.to_le_bytes());
+    uc(
+        "write translated roundf routine",
+        unicorn.mem_write(GUEST_ROUNDF, GUEST_ROUNDF_CODE),
+    )?;
+    uc("branch to translated roundf", unicorn.mem_write(address, &jump))?;
+    Ok(())
+}
+
 fn deterministic_import_i32(name: &str) -> Option<i32> {
     match name {
         // The emulator is deliberately single-threaded. Returning one keeps

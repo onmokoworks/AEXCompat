@@ -2617,7 +2617,7 @@ fn install_win64_import(
                     install_double_import(unicorn, stub, "round", f64::round)?;
                 }
                 LegacyWin64Import::RoundF => {
-                    install_float_import(unicorn, stub, "roundf", f32::round)?;
+                    install_roundf_import(unicorn, stub)?;
                 }
                 LegacyWin64Import::PowF => {
                     install_float_binary_import(unicorn, stub, "powf", f32::powf)?;

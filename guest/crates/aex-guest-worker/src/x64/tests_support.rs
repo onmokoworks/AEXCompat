@@ -12934,6 +12934,87 @@ fn win64_crt_round_floor_ceil_family_uses_xmm0_and_preserves_edges() {
 }
 
 #[test]
+fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lanes() {
+    const ROUNDF: u64 = STUB_BASE + 0x1d0;
+    let mut engine = test_engine(&[0xc3]);
+    engine.unicorn.mem_write(ROUNDF, &[0xc3]).unwrap();
+    assert_eq!(
+        install_win64_import(
+            &mut engine.unicorn,
+            ROUNDF,
+            "api-ms-win-crt-math-l1-1-0.dll",
+            "roundf",
+        )
+        .unwrap(),
+        Win64ImportDispatch::LegacyImplemented(LegacyWin64Import::RoundF)
+    );
+
+    let mut inputs = vec![
+        0.0f32, -0.0, 0.25, -0.25, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5,
+        8_388_607.0, -8_388_607.0, f32::MIN_POSITIVE, -f32::MIN_POSITIVE,
+        f32::from_bits(1), f32::from_bits(0x8000_0001),
+        f32::MAX, f32::MIN, f32::INFINITY, f32::NEG_INFINITY,
+    ];
+    for integer in [0.0f32, 1.0, 2.0, 3.0, 7.0, 127.0, 1023.0, 8_388_606.0] {
+        let half = integer + 0.5;
+        for value in [
+            f32::from_bits(half.to_bits() - 1),
+            half,
+            f32::from_bits(half.to_bits() + 1),
+        ] {
+            inputs.extend([value, -value]);
+        }
+    }
+    let mut seed = 0x9e37_79b9u32;
+    for _ in 0..512 {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let value = f32::from_bits(seed);
+        if value.is_finite() {
+            inputs.push(value);
+        }
+    }
+    for mode in [0u64, 0x2000, 0x4000, 0x6000] {
+        let mxcsr = 0x1fa0 | mode;
+        for &value in &inputs {
+            let mut xmm0 = [0x5a; 16];
+            xmm0[..4].copy_from_slice(&value.to_le_bytes());
+            engine
+                .unicorn
+                .reg_write_long(RegisterX86::XMM0, &xmm0)
+                .unwrap();
+            engine.unicorn.reg_write(RegisterX86::MXCSR, mxcsr).unwrap();
+            engine.call_win64(ROUNDF, [0; 6]).unwrap();
+            let result = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            assert_eq!(
+                u32::from_le_bytes(result[..4].try_into().unwrap()),
+                value.round().to_bits(),
+                "roundf({value:?}), MXCSR={mxcsr:#x}"
+            );
+            assert_eq!(&result[4..], &xmm0[4..], "roundf changed upper XMM0 lanes");
+            assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap(), mxcsr);
+        }
+    }
+    // The guest may unmask inexact; the translated routine must not leak its
+    // intermediate add's exception or alter the caller's control word.
+    engine.unicorn.reg_write(RegisterX86::MXCSR, 0x0f80).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::XMM0, 0.5f32.to_bits() as u64)
+        .unwrap();
+    engine.call_win64(ROUNDF, [0; 6]).unwrap();
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::XMM0).unwrap() as u32, 1.0f32.to_bits());
+    assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap(), 0x0f80);
+    for value in [f32::NAN, f32::from_bits(0xffc0_1234)] {
+        engine
+            .unicorn
+            .reg_write(RegisterX86::XMM0, value.to_bits() as u64)
+            .unwrap();
+        engine.call_win64(ROUNDF, [0; 6]).unwrap();
+        assert!(f32::from_bits(engine.unicorn.reg_read(RegisterX86::XMM0).unwrap() as u32).is_nan());
+    }
+}
+
+#[test]
 fn win64_crt_ceilf_uses_xmm0_f32_abi_and_preserves_special_values() {
     const CEILF_IMPORT: u64 = STUB_BASE + 0x1a0;
 
