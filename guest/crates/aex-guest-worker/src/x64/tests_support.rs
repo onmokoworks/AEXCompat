@@ -12950,10 +12950,26 @@ fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lan
     );
 
     let mut inputs = vec![
-        0.0f32, -0.0, 0.25, -0.25, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5,
-        8_388_607.0, -8_388_607.0, f32::MIN_POSITIVE, -f32::MIN_POSITIVE,
-        f32::from_bits(1), f32::from_bits(0x8000_0001),
-        f32::MAX, f32::MIN, f32::INFINITY, f32::NEG_INFINITY,
+        0.0f32,
+        -0.0,
+        0.25,
+        -0.25,
+        0.5,
+        -0.5,
+        1.5,
+        -1.5,
+        2.5,
+        -2.5,
+        8_388_607.0,
+        -8_388_607.0,
+        f32::MIN_POSITIVE,
+        -f32::MIN_POSITIVE,
+        f32::from_bits(1),
+        f32::from_bits(0x8000_0001),
+        f32::MAX,
+        f32::MIN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
     ];
     for integer in [0.0f32, 1.0, 2.0, 3.0, 7.0, 127.0, 1023.0, 8_388_606.0] {
         let half = integer + 0.5;
@@ -12996,13 +13012,19 @@ fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lan
     }
     // The guest may unmask inexact; the translated routine must not leak its
     // intermediate add's exception or alter the caller's control word.
-    engine.unicorn.reg_write(RegisterX86::MXCSR, 0x0f80).unwrap();
+    engine
+        .unicorn
+        .reg_write(RegisterX86::MXCSR, 0x0f80)
+        .unwrap();
     engine
         .unicorn
         .reg_write(RegisterX86::XMM0, 0.5f32.to_bits() as u64)
         .unwrap();
     engine.call_win64(ROUNDF, [0; 6]).unwrap();
-    assert_eq!(engine.unicorn.reg_read(RegisterX86::XMM0).unwrap() as u32, 1.0f32.to_bits());
+    assert_eq!(
+        engine.unicorn.reg_read(RegisterX86::XMM0).unwrap() as u32,
+        1.0f32.to_bits()
+    );
     assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap(), 0x0f80);
     for value in [f32::NAN, f32::from_bits(0xffc0_1234)] {
         engine
@@ -13010,7 +13032,9 @@ fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lan
             .reg_write(RegisterX86::XMM0, value.to_bits() as u64)
             .unwrap();
         engine.call_win64(ROUNDF, [0; 6]).unwrap();
-        assert!(f32::from_bits(engine.unicorn.reg_read(RegisterX86::XMM0).unwrap() as u32).is_nan());
+        assert!(
+            f32::from_bits(engine.unicorn.reg_read(RegisterX86::XMM0).unwrap() as u32).is_nan()
+        );
     }
 }
 

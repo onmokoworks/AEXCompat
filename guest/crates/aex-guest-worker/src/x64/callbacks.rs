@@ -450,7 +450,10 @@ fn install_roundf_import(
         "write translated roundf routine",
         unicorn.mem_write(GUEST_ROUNDF, GUEST_ROUNDF_CODE),
     )?;
-    uc("branch to translated roundf", unicorn.mem_write(address, &jump))?;
+    uc(
+        "branch to translated roundf",
+        unicorn.mem_write(address, &jump),
+    )?;
     Ok(())
 }
 
