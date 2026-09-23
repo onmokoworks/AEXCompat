@@ -184,8 +184,8 @@ struct FinalDispatchRequest {
   bool image_render_supported{};
   bool depth_supported{};
   /// The session routes render at the caller's depth whether or not the
-  /// plug-in advertises it, narrowing its worlds and widening the frame
-  /// back (`effect_bootstrap::dispatch_pixel_bytes`). The one-shot routes in
+  /// plug-in advertises it, dispatching at a depth it does and converting the
+  /// frame back (`effect_bootstrap::dispatch_pixel_bytes`). The one-shot routes in
   /// the same dispatch keep gating on `depth_supported`, which after #365 they
   /// can only ever reach at 8 bits.
   bool depth_dispatchable{};

@@ -2803,8 +2803,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   const bool expand_buffer_advertised = bootstrap.expand_buffer_advertised;
   const bool shrink_buffer_advertised = bootstrap.shrink_buffer_advertised;
   const bool depth_supported = bootstrap.depth_supported;
-  // A resident session narrows the plug-in's worlds to the depth it
-  // advertises and widens the frame back into the slot, so the session exits
+  // A resident session hands the plug-in worlds at a depth it advertises and
+  // converts the frame back into the slot, so the session exits
   // are gated on the session being able to run at all rather than on the
   // plug-in advertising the caller's depth. The one-shot routes below keep the
   // advertised gate; after #365 deleted the argv transport that carried a deep

@@ -503,8 +503,8 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
         widths[0] == widths[1] && heights[0] == heights[1] && rowbytes[0] == rowbytes[1] &&
         input_hashes[0] == input_hashes[1] && thread_hashes[0] == thread_hashes[1] ? 0 : -1;
   } else if (params_error == 0 &&
-             // A session narrows the plug-in's worlds to the depth it
-             // advertises and widens the frame back into the slot, so an
+             // A session hands the plug-in worlds at a depth it advertises
+             // and converts the frame back into the slot, so an
              // effect that does not advertise the caller's depth renders
              // here instead of being refused (AE's own behaviour).
              ((image_render_supported && session_depth_ok) ||

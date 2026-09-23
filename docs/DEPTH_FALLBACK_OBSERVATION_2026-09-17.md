@@ -93,6 +93,8 @@ AE の 16 bpc 結果との距離は **AE 自身の 8 bpc 結果と AE の 16 bpc
   認めるのは **GPU negotiation transport** (#1072) のため: この経路は world を
   session の depth から plan するので、plug-in を 8 bit に narrow しても
   float32 のまま capture が返る (32bpc の OpenCL session + shallow plug-in)。
+  (§4.5 で訂正: 「session の depth から plan」は case_id / retry 経路の話で、
+  自動判定は dispatch 後の depth を見る)
   Premiere GPU-filter route (#1271) の方は download を自分で plan の depth に
   narrow してから publish するので、広いまま届くことはない。self-test
   `--self-test-pixel-depth-conform`。
@@ -239,7 +241,7 @@ AE の 16 bpc 結果との距離は **AE 自身の 8 bpc 結果と AE の 16 bpc
     `width * pixel_bytes` を報告する)。
   - `conform_pixel_depth` が 0 を返したときの capture 拒否。後段のサイズ検査が
     ほぼ全部を捕まえるので、残るのは「slot の depth とは一致するが dispatch した
-    depth とは一致しない stride」— まさにこの拒否が存在する理由のケース —
+    depth とは一致しない stride」(まさにこの拒否が存在する理由のケース)
     だけで、それを作る fixture が無い。ブロックを削除しても suite は緑のまま。
   - `-rewrite` の PARAMS_SETUP ブロックが**常に off でも常に on でも**検出できない。
     host は snapshot を使うので、probe が rewrite してもしなくても
@@ -303,8 +305,11 @@ AE の 16 bpc 結果との距離は **AE 自身の 8 bpc 結果と AE の 16 bpc
 - AE が 16 bpc project で内部的にどこを 8 bit に落としているかは未確認 (§1.2)。
   host の実装は「world を落として dispatch し、結果を広げる」で、observable な
   結果が AE と 1 段以内で一致することまでしか主張しない。
+  (§4 で訂正: 8 bit に落としているという前提自体が否定された)
 - `output_hash` / `input_hash` は dispatch 時の narrow buffer のハッシュなので、
-  narrow した 16 bpc run と同じ plug-in の 8 bpc run は同じ値になる。Direction 4
+  narrow した 16 bpc run と同じ plug-in の 8 bpc run は同じ値になる
+  (§4 以降: float で dispatch する float-only plug-in では、16 bpc run と同じに
+  なるのは 32 bpc run の方)。Direction 4
   の corpus で depth 回帰をハッシュ比較で見る場合はこれでは捕まらない。
   report の `dispatch_pixel_bytes` で条件を付けて読むこと。一方
   `output_checksum_detail` (opt-in) は conform 後の slot から取るので session
@@ -386,3 +391,26 @@ smart の 16 bpc session で `dispatch_pixel_bytes == 16` を確かめるテス�
   protocol doc、report の depth provenance、`conform_pixel_depth` の float32 無条件
   受理) は #1538、`advertised_gpu_support` の live `out_data` 読みは #1539。§3 の
   「broker 側の追従は別途」は #1538 を指す。
+
+### 4.5 2 回目のレビューで直したもの (2026-09-23)
+
+- 新しい e2e テスト 2 本を `tests/built_artifact_tests.txt` に登録した。
+- **訂正 (§2)**: GPU negotiation transport が「world を session の depth から
+  plan する」は不正確だった。case_id (`-opencl` / `-directx`) と frame loop の
+  `force_gpu_retry` で入る経路は dispatch depth と無関係に float32 world を渡す。
+  自動判定 (`worker_smart_setup.cpp` の `external_pixel_bytes == 16 &&
+  advertised_gpu_support`) は dispatch 後の depth を見る。§3 の GPU の項の方が正しい。
+- **挙動の変化 (未観測)**: 上の自動判定が dispatch depth を見るため、FLOAT のみを
+  advertise し `SUPPORTS_GPU_RENDER_F32` も advertise する SmartFX は、16 bpc
+  session でも 1 回目の attempt から GPU negotiation に入る。DEEP も advertise する
+  plug-in は 16 bpc では 8 bytes で dispatch されるので CPU のまま。GPU context が
+  立たない機械では frame が落ちる。32 bpc session での扱いと同じなので main に
+  対する regression ではないが、AE がこの組み合わせで GPU を使うかは確認していない。
+  KO_Foil は GPU F32 を advertise していないので §4.1 の計測には影響しない。
+  追従は #1538 に追記した。
+- 「narrow して広げる」前提で書かれていた worker 側のコメント
+  (`l2_main_entry.inc`、`worker_invocation_orchestration.*`、report の
+  `session_pixel_bytes`、`depth_dispatchable`) を「別の depth で dispatch して
+  変換する」に直した。
+- §3 の variant 一覧 (2 つ) と baseline (79 passed) は 2026-09-17 時点のもの。
+  今は `-floatonly` を含めて 3 つで、同じ baseline は 81 passed, 3 skipped。

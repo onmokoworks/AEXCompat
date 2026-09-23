@@ -103,8 +103,8 @@ struct Result {
   /// ran at is recorded per run (`RenderSessionOutcome::dispatch_pixel_bytes`)
   /// rather than inferred from this pair.
   bool depth_supported{};
-  /// A session can render at the requested depth, narrowing the plug-in's
-  /// worlds when it has to. False only for a depth the transport itself does
+  /// A session can render at the requested depth, dispatching the plug-in at
+  /// another depth it advertises when it has to. False only for a depth the transport itself does
   /// not carry, which is a caller contract violation rather than a plug-in
   /// property - so in every configuration a caller can currently ask for, it
   /// is true, and the session exit gates no longer refuse on depth at all.
@@ -134,7 +134,8 @@ struct Result {
 /// `DEEP_COLOR_AWARE`: AE's 16-bpc render holds 2-3x as many distinct values
 /// per channel as its 8-bpc render, so it did not run the effect at 8 bits,
 /// and this host's float32 render of the same effect narrowed to 16 bits sits
-/// within 2/65535 of it. That is also the only combination in which a deeper
+/// within 2-3/65535 of it (depending on how 0..32768 is mapped onto AE's
+/// 16-bit PNG). That is also the only combination in which a deeper
 /// advertisement exists at all. Falling back to the deepest depth below (a
 /// DEEP-only plug-in at 32 bpc, or one advertising neither at 16 bpc) is this
 /// rule's choice and is not measured against AE

@@ -42,9 +42,12 @@ bool verify_argb32f_depth_conversion();
 /// The admissible arrival depths are exactly two, and nothing else converts:
 /// `dispatched_pixel_bytes`, the depth the plug-in was handed its worlds at
 /// (`effect_bootstrap::dispatch_pixel_bytes`), and 16, because the GPU
-/// negotiation transport (#1072) plans float32 worlds from the *session's*
-/// depth and keeps them whatever the plug-in was dispatched at - a 32-bpc
-/// OpenCL session against a plug-in narrowed to 8 bits captures at 16.
+/// negotiation transport (#1072) hands the plug-in float32 worlds whatever
+/// depth was dispatched when it is entered by a case_id (`-opencl`,
+/// `-directx`) or by the frame loop's `force_gpu_retry` - a 32-bpc OpenCL
+/// session against a plug-in narrowed to 8 bits captures at 16. (Its automatic
+/// entry looks at the dispatched depth, so that one only arrives at 16 when 16
+/// was dispatched.)
 /// (The Premiere GPU-filter route, #1271, narrows its own download to the
 /// plan's depth before publishing, so it never arrives wide.) Admitting any
 /// recognised stride instead would swallow the case this check exists for: a

@@ -28,8 +28,8 @@ struct ClassicCompletionInputs {
   int32_t dispatch_pixel_bytes{4};
   /// Pixel depth of the session's output slot, or 0 outside a session. The
   /// frame block below describes what the caller receives, and in a session
-  /// that is the slot: the plug-in may have been dispatched shallower and
-  /// the frame widened into it, so its own world depth would describe a
+  /// that is the slot: the plug-in may have been dispatched at another depth
+  /// and the frame converted into it, so its own world depth would describe a
   /// buffer the caller never sees - and a row length taken from one with a
   /// pixel size taken from the other reports written bytes as undefined
   /// padding.
