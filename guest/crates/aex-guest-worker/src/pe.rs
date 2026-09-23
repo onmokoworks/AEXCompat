@@ -5,12 +5,17 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod pipl;
+mod relocation;
+
 const AMD64_MACHINE: u16 = 0x8664;
 const MAX_FILE_SIZE: usize = 128 * 1024 * 1024;
 const MAX_IMAGE_SIZE: usize = 256 * 1024 * 1024;
 const MAX_SECTIONS: usize = 96;
 const MAX_IMPORTS: usize = 4096;
-const MAX_EXPORTS: usize = 4096;
+// Vector math runtimes ship roughly 15,000 named entry points. Keep a finite
+// parser budget large enough for these real dependency tables.
+const MAX_EXPORTS: usize = 16_384;
 const MAX_TLS_CALLBACKS: usize = 64;
 const MAX_STATIC_TLS_BYTES: usize = 1024 * 1024;
 const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
@@ -47,6 +52,10 @@ pub enum PeError {
         "effect discovery export was not found (tried EffectMain, entryPointFunc, entry_point, PluginDataEntryFunction2, PluginDataEntryFunction)"
     )]
     MissingEntryExport,
+    #[error("invalid Effect PiPL resource: {0}")]
+    InvalidPipl(String),
+    #[error("invalid PE base relocation: {0}")]
+    Relocation(String),
     #[error("duplicate named export {0}")]
     DuplicateExport(String),
     #[error("export {0} does not point into an executable image section")]
@@ -70,6 +79,7 @@ pub enum PeError {
 #[derive(Clone, Debug, Serialize)]
 pub struct ImportSymbol {
     pub name: String,
+    pub ordinal: Option<u16>,
     pub iat_rva: usize,
 }
 
@@ -99,12 +109,15 @@ pub struct PeReport {
 #[derive(Debug)]
 pub struct PeImage {
     bytes: Vec<u8>,
+    base_relocations: Option<(usize, usize)>,
+    static_tls_raw_range: Option<(usize, usize)>,
     sha256: String,
     image_base: u64,
     entry_export: String,
     entry_rva: usize,
     direct_entry: Option<String>,
     exports: BTreeMap<String, usize>,
+    ordinal_exports: BTreeMap<u32, usize>,
     dll_entry_rva: usize,
     section_count: usize,
     imports: Vec<ImportLibrary>,
@@ -133,6 +146,15 @@ pub struct StaticTlsImage {
 
 impl PeImage {
     pub fn parse_and_map(file: &[u8]) -> Result<Self, PeError> {
+        Self::parse_image(file, true)
+    }
+
+    /// Parse a dependency DLL without claiming that it implements the Effect ABI.
+    pub fn parse_library(file: &[u8]) -> Result<Self, PeError> {
+        Self::parse_image(file, false)
+    }
+
+    fn parse_image(file: &[u8], require_effect: bool) -> Result<Self, PeError> {
         if file.is_empty() || file.len() > MAX_FILE_SIZE {
             return Err(PeError::FileSize(file.len()));
         }
@@ -210,14 +232,29 @@ impl PeImage {
                 return Err(PeError::DuplicateExport(name.to_string()));
             }
         }
+        let mut ordinal_exports = BTreeMap::new();
+        if let Some(export_data) = &pe.export_data {
+            let base = export_data.export_directory_table.ordinal_base;
+            for (index, entry) in export_data.export_address_table.iter().enumerate() {
+                if let goblin::pe::export::ExportAddressTableEntry::ExportRVA(rva) = entry
+                    && *rva != 0
+                {
+                    let ordinal = base
+                        .checked_add(index as u32)
+                        .ok_or(PeError::ExportCount(pe.exports.len()))?;
+                    ordinal_exports.insert(ordinal, *rva as usize);
+                }
+            }
+        }
         let executable_export = |name: &str, rva: usize| {
             rva_is_executable(&section_protections, rva).then_some((name.to_string(), rva))
         };
         for (name, rva) in &exports {
-            if ["EffectMain", "entryPointFunc", "entry_point"]
-                .into_iter()
-                .chain(["PluginDataEntryFunction2", "PluginDataEntryFunction"])
-                .any(|candidate| candidate == name)
+            if require_effect
+                && ["EffectMain", "entryPointFunc", "entry_point"]
+                    .into_iter()
+                    .chain(["PluginDataEntryFunction2", "PluginDataEntryFunction"])
+                    .any(|candidate| candidate == name)
                 && executable_export(name, *rva).is_none()
             {
                 return Err(PeError::NonExecutableExport(name.clone()));
@@ -240,18 +277,44 @@ impl PeImage {
             .transpose()?;
 
         let direct_candidates = ["EffectMain", "entryPointFunc", "entry_point"];
-        let direct_entry = direct_candidates
+        let mut direct_entry = direct_candidates
             .iter()
             .find(|candidate| exports.contains_key(**candidate))
             .map(|candidate| (*candidate).to_string());
-        let discovery_entry = direct_entry.clone().or_else(|| {
+        let mut discovery_entry = direct_entry.clone().or_else(|| {
             ["PluginDataEntryFunction2", "PluginDataEntryFunction"]
                 .into_iter()
                 .find(|candidate| exports.contains_key(*candidate))
                 .map(str::to_string)
         });
-        let entry_export = discovery_entry.ok_or(PeError::MissingEntryExport)?;
-        let entry_rva = exports[&entry_export];
+        // Preserve the established export paths. PiPL supplies an additional,
+        // declared Effect entry only when no existing discovery export resolves.
+        if require_effect && discovery_entry.is_none() {
+            if let Some(directory) = optional.data_directories.get_resource_table() {
+                direct_entry = pipl::effect_entry(
+                    &mapped,
+                    directory.virtual_address as usize,
+                    directory.size as usize,
+                )?;
+            }
+            if let Some(name) = &direct_entry {
+                let rva = exports.get(name).ok_or_else(|| {
+                    PeError::InvalidPipl(format!("declared export {name} is absent"))
+                })?;
+                if executable_export(name, *rva).is_none() {
+                    return Err(PeError::NonExecutableExport(name.clone()));
+                }
+            }
+            discovery_entry = direct_entry.clone();
+        }
+        let (entry_export, entry_rva) = if require_effect {
+            let name = discovery_entry.ok_or(PeError::MissingEntryExport)?;
+            let rva = exports[&name];
+            (name, rva)
+        } else {
+            direct_entry = None;
+            (String::new(), 0)
+        };
 
         let mut grouped: BTreeMap<String, Vec<ImportSymbol>> = BTreeMap::new();
         for import in &pe.imports {
@@ -260,6 +323,11 @@ impl PeImage {
                 .or_default()
                 .push(ImportSymbol {
                     name: import.name.to_string(),
+                    // Goblin exposes the hint from an IMAGE_IMPORT_BY_NAME in
+                    // `ordinal` too. Only a zero name-table RVA denotes a real
+                    // ordinal import; treating a nonzero hint as an ordinal can
+                    // silently bind a different C++ overload.
+                    ordinal: (import.rva == 0).then_some(import.ordinal),
                     iat_rva: import.offset,
                 });
         }
@@ -274,12 +342,27 @@ impl PeImage {
 
         Ok(Self {
             bytes: mapped,
+            base_relocations: optional
+                .data_directories
+                .get_base_relocation_table()
+                .map(|table| (table.virtual_address as usize, table.size as usize)),
+            static_tls_raw_range: pe.tls_data.as_ref().and_then(|tls| {
+                let directory = &tls.image_tls_directory;
+                let length = directory
+                    .end_address_of_raw_data
+                    .checked_sub(directory.start_address_of_raw_data)?;
+                let start = directory
+                    .start_address_of_raw_data
+                    .checked_sub(pe.image_base)?;
+                Some((usize::try_from(start).ok()?, usize::try_from(length).ok()?))
+            }),
             sha256: format!("{:x}", Sha256::digest(file)),
             image_base: pe.image_base,
             entry_export,
             entry_rva,
             direct_entry,
             exports,
+            ordinal_exports,
             dll_entry_rva,
             section_count: pe.sections.len(),
             imports,
@@ -291,6 +374,48 @@ impl PeImage {
             section_protections,
             string_table,
         })
+    }
+
+    /// Move a mapped DLL to a non-overlapping guest address using its own
+    /// relocation records. No source file bytes or provenance hashes are changed.
+    pub fn rebase(mut self, base: u64) -> Result<Self, PeError> {
+        if base == self.image_base {
+            return Ok(self);
+        }
+        if base % 65536 != 0 || base.checked_add(self.bytes.len() as u64).is_none() {
+            return Err(PeError::Relocation(
+                "unaligned or overflowing image base".into(),
+            ));
+        }
+        relocation::apply(
+            &mut self.bytes,
+            self.base_relocations,
+            self.image_base,
+            base,
+        )?;
+        let delta = base.wrapping_sub(self.image_base);
+        for callback in &mut self.tls_callbacks {
+            *callback = callback.wrapping_add(delta);
+        }
+        if let Some(tls) = &mut self.static_tls {
+            tls.index_address = tls.index_address.wrapping_add(delta);
+            if let Some((start, length)) = self.static_tls_raw_range {
+                let end = start
+                    .checked_add(length)
+                    .ok_or_else(|| PeError::Relocation("TLS range overflow".into()))?;
+                let raw = self
+                    .bytes
+                    .get(start..end)
+                    .ok_or_else(|| PeError::Relocation("TLS template outside image".into()))?;
+                let target = tls
+                    .bytes
+                    .get_mut(..length)
+                    .ok_or_else(|| PeError::Relocation("TLS template length mismatch".into()))?;
+                target.copy_from_slice(raw);
+            }
+        }
+        self.image_base = base;
+        Ok(self)
     }
 
     pub fn mapped_bytes(&self) -> &[u8] {
@@ -309,6 +434,9 @@ impl PeImage {
 
     pub fn export_address(&self, name: &str) -> Option<u64> {
         let rva = *self.exports.get(name)?;
+        if rva >= self.bytes.len() {
+            return None;
+        }
         self.section_protections
             .iter()
             .any(|section| {
@@ -318,6 +446,46 @@ impl PeImage {
             })
             .then(|| self.image_base.checked_add(rva as u64))
             .flatten()
+    }
+
+    /// Resolve named code or data exports. Forwarders require a loader and are
+    /// deliberately absent from this image-local lookup.
+    pub fn symbol_address(&self, name: &str) -> Option<u64> {
+        let rva = *self.exports.get(name)?;
+        if rva >= self.bytes.len() {
+            return None;
+        }
+        self.section_protections
+            .iter()
+            .any(|section| {
+                rva >= section.virtual_address
+                    && rva < section.virtual_address.saturating_add(section.virtual_size)
+            })
+            .then(|| self.image_base.checked_add(rva as u64))
+            .flatten()
+    }
+
+    pub fn ordinal_address(&self, ordinal: u32) -> Option<u64> {
+        let rva = *self.ordinal_exports.get(&ordinal)?;
+        if rva >= self.bytes.len() {
+            return None;
+        }
+        self.section_protections
+            .iter()
+            .any(|section| {
+                rva >= section.virtual_address
+                    && rva < section.virtual_address.saturating_add(section.virtual_size)
+            })
+            .then(|| self.image_base.checked_add(rva as u64))
+            .flatten()
+    }
+
+    pub fn ordinal_exports(&self) -> &BTreeMap<u32, usize> {
+        &self.ordinal_exports
+    }
+
+    pub fn exports(&self) -> &BTreeMap<String, usize> {
+        &self.exports
     }
 
     pub fn dll_entry_address(&self) -> Option<u64> {
@@ -706,5 +874,97 @@ mod tests {
             StringCandidate::Lstr { .. } => panic!("expected ordinal candidate"),
         }
         assert!(parse_string_candidate(b"$$$/AE/Test/LStr/x=no", 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod export_capacity_tests {
+    use super::*;
+    fn many_exports(count: usize) -> Vec<u8> {
+        fn p16(b: &mut [u8], at: usize, v: u16) {
+            b[at..at + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        fn p32(b: &mut [u8], at: usize, v: usize) {
+            b[at..at + 4].copy_from_slice(&(v as u32).to_le_bytes());
+        }
+        let functions = 0x200;
+        let names = functions + count * 4;
+        let ordinals = names + count * 4;
+        let strings = ordinals + count * 2;
+        let raw_size = (strings + count * 16 + 511) & !511;
+        let mut file = vec![0u8; 0x200 + raw_size];
+        file[..2].copy_from_slice(b"MZ");
+        p32(&mut file, 60, 0x80);
+        file[0x80..0x84].copy_from_slice(b"PE\0\0");
+        p16(&mut file, 0x84, 0x8664);
+        p16(&mut file, 0x86, 1);
+        p16(&mut file, 0x94, 240);
+        p16(&mut file, 0x96, 0x2022);
+        let op = 0x98;
+        p16(&mut file, op, 0x20b);
+        file[op + 24..op + 32].copy_from_slice(&0x180000000u64.to_le_bytes());
+        for (offset, value) in [
+            (32, 4096),
+            (36, 512),
+            (56, (0x1000 + raw_size + 4095) & !4095),
+            (60, 0x200),
+            (108, 16),
+            (112, 0x1100),
+            (116, raw_size - 0x100),
+        ] {
+            p32(&mut file, op + offset, value);
+        }
+        let section = op + 240;
+        file[section..section + 5].copy_from_slice(b".text");
+        for (offset, value) in [
+            (8, raw_size),
+            (12, 0x1000),
+            (16, raw_size),
+            (20, 0x200),
+            (36, 0x60000020),
+        ] {
+            p32(&mut file, section + offset, value);
+        }
+        file[0x200] = 0xc3;
+        for (offset, value) in [
+            (12, 0x1180),
+            (16, 1),
+            (20, count),
+            (24, count),
+            (28, 0x1000 + functions),
+            (32, 0x1000 + names),
+            (36, 0x1000 + ordinals),
+        ] {
+            p32(&mut file, 0x300 + offset, value);
+        }
+        file[0x380..0x389].copy_from_slice(b"math.dll\0");
+        for index in 0..count {
+            p32(&mut file, 0x200 + functions + index * 4, 0x1000);
+            p32(
+                &mut file,
+                0x200 + names + index * 4,
+                0x1000 + strings + index * 16,
+            );
+            p16(&mut file, 0x200 + ordinals + index * 2, index as u16);
+            let name = format!("entry{index:05}\0");
+            let at = 0x200 + strings + index * 16;
+            file[at..at + name.len()].copy_from_slice(name.as_bytes());
+        }
+        file
+    }
+    #[test]
+    fn large_runtime_export_tables_resolve_at_capacity_and_reject_overflow() {
+        let image = PeImage::parse_library(&many_exports(MAX_EXPORTS)).unwrap();
+        assert_eq!(image.exports().len(), MAX_EXPORTS);
+        for index in [0, 4096, 14924, MAX_EXPORTS - 1] {
+            assert_eq!(
+                image.export_address(&format!("entry{index:05}")),
+                Some(0x180001000)
+            );
+            assert_eq!(image.ordinal_address((index + 1) as u32), Some(0x180001000));
+        }
+        assert!(
+            matches!(PeImage::parse_library(&many_exports(MAX_EXPORTS+1)),Err(PeError::ExportCount(count)) if count==MAX_EXPORTS+1)
+        );
     }
 }

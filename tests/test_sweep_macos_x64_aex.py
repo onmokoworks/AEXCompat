@@ -1,7 +1,10 @@
 import importlib.util
 import json
+import struct
 import subprocess
 import sys
+import threading
+import time
 from argparse import Namespace
 from pathlib import Path
 
@@ -15,6 +18,32 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC and SPEC.loader
 SWEEP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SWEEP)
+
+
+def test_control_protocol_has_separate_bounded_request_and_response_budgets(
+    tmp_path, monkeypatch
+):
+    oversized_request = {"payload": "x" * SWEEP.MAX_REQUEST_MESSAGE_BYTES}
+    with (tmp_path / "request.bin").open("wb") as stream:
+        with pytest.raises(SWEEP.SweepError, match="request exceeds"):
+            SWEEP.write_message(stream, oversized_request)
+
+    payload = json.dumps(
+        {"payload": "x" * SWEEP.MAX_REQUEST_MESSAGE_BYTES}, separators=(",", ":")
+    ).encode("ascii")
+    chunks = [struct.pack("<I", len(payload)), payload]
+
+    def read_exact(_stream, size, _deadline):
+        chunk = chunks.pop(0)
+        assert len(chunk) == size
+        return chunk
+
+    monkeypatch.setattr(SWEEP, "_read_exact_timeout", read_exact)
+    assert SWEEP.read_message(None, 1.0)["payload"].startswith("x")
+
+    chunks[:] = [struct.pack("<I", SWEEP.MAX_RESPONSE_MESSAGE_BYTES + 1)]
+    with pytest.raises(SWEEP.SweepError, match="invalid control response length"):
+        SWEEP.read_message(None, 1.0)
 
 
 def test_load_json_strict_rejects_duplicate_keys(tmp_path):
@@ -138,6 +167,33 @@ def test_validate_ready_rejects_nonzero_setup_error():
     }
 
     with pytest.raises(SWEEP.SweepError, match="invalid session setup"):
+        SWEEP.validate_ready(message, 42)
+
+
+def test_validate_ready_accepts_exact_optional_custom_ui_contract():
+    setup = _setup_message()
+    setup["custom_ui"] = {
+        "events": 4,
+        "comp_width": 640,
+        "comp_height": 360,
+        "comp_alignment": 0,
+        "layer_width": 320,
+        "layer_height": 180,
+        "layer_alignment": 0,
+        "preview_width": 160,
+        "preview_height": 90,
+        "preview_alignment": 0,
+    }
+    message = {
+        "v": 1,
+        "type": "session_ready",
+        "worker_pid": 42,
+        "setup": setup,
+    }
+
+    SWEEP.validate_ready(message, 42)
+    setup["custom_ui"]["events"] = True
+    with pytest.raises(SWEEP.SweepError, match="invalid session custom_ui"):
         SWEEP.validate_ready(message, 42)
 
 
@@ -325,6 +381,16 @@ def test_validate_close_accepts_complete_clean_contract():
     SWEEP.validate_close(_close_message(), 42, 1)
 
 
+def test_validate_close_rejects_global_setdown_diagnostic_on_claimed_clean_close():
+    message = _close_message()
+    message["close"]["global_setdown_diagnostic"] = {
+        "message": "cleanup failed"
+    }
+
+    with pytest.raises(SWEEP.SweepError, match="cleanup was not clean"):
+        SWEEP.validate_close(message, 42, 1)
+
+
 def test_validate_close_rejects_unknown_nested_field():
     message = _close_message()
     message["close"]["unexpected"] = True
@@ -346,16 +412,32 @@ def test_validate_frame_binds_report_to_output_checksum():
             "height": 1,
             "rowbytes": 4,
             "pixel_format": "argb8",
+            "render_path": "smartfx",
             "checksum": checksum,
             "guards_intact": True,
         },
         "render_error": 0,
         "generation": 1,
+        "timings_us": {
+            "request_prepare": 11,
+            "input_read": 12,
+            "effect_render": 13,
+            "output_write": 14,
+            "checksum": 15,
+        },
     }
 
     SWEEP.validate_frame(message, 1, 1, checksum)
     with pytest.raises(SWEEP.SweepError, match="frame invariants failed"):
         SWEEP.validate_frame(message, 1, 1, "0" * 64)
+
+    without_timings = dict(message)
+    without_timings.pop("timings_us")
+    SWEEP.validate_frame(without_timings, 1, 1, checksum)
+
+    message["timings_us"]["effect_render"] = -1
+    with pytest.raises(SWEEP.SweepError, match="frame timings are invalid"):
+        SWEEP.validate_frame(message, 1, 1, checksum)
 
 
 def test_report_json_has_no_duplicate_keys(tmp_path):
@@ -407,6 +489,122 @@ def test_default_mode_is_unicorn_only_and_does_not_require_native_worker(tmp_pat
     assert args.backend is None
     assert SWEEP.requested_backends(args) == ["unicorn"]
     assert args.native_worker is None
+
+
+def test_default_jobs_is_six_and_cli_accepts_explicit_parallelism(tmp_path):
+    unicorn = tmp_path / "unicorn-worker"
+
+    default = SWEEP.parse_args(
+        _required_cli_args(tmp_path) + ["--unicorn-worker", str(unicorn)]
+    )
+    parallel = SWEEP.parse_args(
+        _required_cli_args(tmp_path)
+        + ["--unicorn-worker", str(unicorn), "--jobs", "12"]
+    )
+
+    assert default.jobs == 6
+    assert parallel.jobs == 12
+
+
+def test_sweep_runs_isolated_backends_concurrently_and_keeps_sha_order(
+    tmp_path, monkeypatch
+):
+    inventory = tmp_path / "inventory.json"
+    summary = tmp_path / "summary.json"
+    corpus = tmp_path / "corpus"
+    input_png = tmp_path / "input.png"
+    worker = tmp_path / "worker"
+    output = tmp_path / "report.json"
+    corpus.mkdir()
+    inventory.write_text('{"schema_version":1,"entries":[{}]}', encoding="utf-8")
+    inventory_sha = SWEEP.sha256_file(inventory)
+    summary.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "corpus": {
+                    "inventory_sha256": inventory_sha,
+                    "canonical_count": 1,
+                    "processed": 1,
+                    "remaining": 0,
+                    "ordered_path_sha_identity_exact": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    SWEEP.Image.new("RGBA", (1, 1)).save(input_png)
+    worker.write_bytes(b"worker")
+    mapped = []
+    for index in range(6):
+        plugin = corpus / f"{index}.aex"
+        plugin.write_bytes(bytes([index]))
+        mapped.append(
+            {
+                "path": plugin,
+                "name": plugin.name,
+                "sha256": f"{index + 1:064x}",
+                "windows_match_count": 1,
+                "windows_root_categories": [],
+                "windows_source_categories": [],
+            }
+        )
+    monkeypatch.setattr(SWEEP, "map_corpus", lambda *_: mapped)
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+
+    def fake_run_backend(*_args):
+        nonlocal active, maximum_active
+        redactions = _args[-1]
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return {
+            "status": "rendered",
+            "output_sha256": "a" * 64,
+            "worker_stderr": SWEEP.sanitize_error_text(
+                f"warning for {corpus}/private.aex", redactions
+            ),
+            "milestones": {
+                "admission_success": True,
+                "render_success": True,
+                "cleanup_success": True,
+            },
+        }
+
+    monkeypatch.setattr(SWEEP, "run_backend", fake_run_backend)
+    args = Namespace(
+        inventory=inventory,
+        windows_summary=summary,
+        corpus_root=[corpus],
+        input_png=input_png,
+        native_worker=None,
+        unicorn_worker=worker,
+        backend=None,
+        output=output,
+        baseline_report=None,
+        expected_inventory_sha256=inventory_sha,
+        expected_summary_sha256=SWEEP.sha256_file(summary),
+        native_run_dllmain=False,
+        jobs=3,
+    )
+
+    report = SWEEP.run_sweep(args)
+
+    assert maximum_active == 3
+    assert report["source"]["jobs"] == 3
+    assert report["source"]["execution_model"] == SWEEP.EXECUTION_MODEL
+    assert [entry["sha256"] for entry in report["entries"]] == [
+        item["sha256"] for item in mapped
+    ]
+    assert report["summary"]["counts"] == {"unicorn:rendered": 6}
+    assert report["entries"][0]["backends"]["unicorn"]["worker_stderr"] == (
+        "warning for <corpus-root:0>/private.aex"
+    )
 
 
 def test_explicit_native_mode_still_requires_native_worker(tmp_path, capsys):
@@ -515,6 +713,118 @@ def test_spawn_worker_applies_explicit_environment_without_mutating_parent(
     assert process is sentinel
     assert captured["options"]["env"]["AEXCOMPAT_NATIVE_RUN_DLLMAIN"] == "1"
     assert SWEEP.os.environ["AEXCOMPAT_NATIVE_RUN_DLLMAIN"] == "ambient"
+
+
+def test_close_worker_preserves_bounded_stderr_when_structured_close_is_clean(
+    monkeypatch,
+):
+    process = Namespace(
+        pid=42,
+        stdin=Namespace(close=lambda: None),
+        stdout=object(),
+        wait=lambda timeout: 0,
+    )
+    response = _close_message()
+    monkeypatch.setattr(SWEEP, "write_message", lambda *_: None)
+    monkeypatch.setattr(SWEEP, "read_message", lambda *_: response)
+    monkeypatch.setattr(
+        SWEEP,
+        "read_stderr_bounded",
+        lambda _: f"warning from {Path.home()}/private/plugin.aex",
+    )
+
+    result = SWEEP.close_worker(process, 1)
+
+    assert result["worker_stderr"] == "warning from <home>/private/plugin.aex"
+
+
+def test_close_worker_redacts_external_path_before_durable_truncation(monkeypatch):
+    process = Namespace(
+        pid=42,
+        stdin=Namespace(close=lambda: None),
+        stdout=object(),
+        wait=lambda timeout: 0,
+    )
+    response = _close_message()
+    private_root = "/Volumes/AEX Corpus"
+    monkeypatch.setattr(SWEEP, "write_message", lambda *_: None)
+    monkeypatch.setattr(SWEEP, "read_message", lambda *_: response)
+    monkeypatch.setattr(
+        SWEEP,
+        "read_stderr_bounded",
+        lambda _: "x" * 1000 + f" {private_root}/private/plugin.aex",
+    )
+
+    result = SWEEP.close_worker(process, 1, {private_root: "<corpus-root:0>"})
+
+    assert "/Volumes" not in result["worker_stderr"]
+    assert len(result["worker_stderr"].encode("utf-8")) <= SWEEP.MAX_DURABLE_ERROR_BYTES
+
+
+def test_run_backend_reuses_one_isolated_worker_for_probe_and_render(tmp_path, monkeypatch):
+    process = Namespace(pid=42, stdin=object(), stdout=object())
+    ready = {
+        "worker_pid": 42,
+        "setup": {"execution_backend": "unicorn-x86_64"},
+    }
+    launches = []
+    closed = []
+    timings = {
+        "request_prepare": 11,
+        "input_read": 12,
+        "effect_render": 13,
+        "output_write": 14,
+        "checksum": 15,
+    }
+    responses = [{"probe": True}, {"frame": True, "timings_us": timings}]
+
+    def fake_launch(*args):
+        launches.append(args)
+        return process, ready
+
+    monkeypatch.setattr(SWEEP, "launch_ready", fake_launch)
+    monkeypatch.setattr(SWEEP, "write_message", lambda *_: None)
+    monkeypatch.setattr(SWEEP, "read_message", lambda *_: responses.pop(0))
+    monkeypatch.setattr(SWEEP, "validate_probe", lambda *_: None)
+    monkeypatch.setattr(SWEEP, "validate_frame", lambda *_: None)
+
+    def fake_close(candidate, expected_frames, redactions):
+        closed.append((candidate, expected_frames, redactions))
+        return {
+            "close": {
+                "suite_requests": [],
+                "unsupported_suite_calls": [],
+            },
+            "worker_stderr": "bounded warning",
+        }
+
+    monkeypatch.setattr(SWEEP, "close_worker", fake_close)
+    plugin = tmp_path / "plugin.aex"
+    plugin.write_bytes(b"fixture")
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+
+    result = SWEEP.run_backend(
+        tmp_path / "worker",
+        "unicorn-x86_64",
+        {},
+        plugin,
+        b"\x00\x01\x02\x03",
+        1,
+        1,
+        run_directory,
+    )
+
+    assert len(launches) == 1
+    assert closed == [(process, 1, None)]
+    assert result["fresh_after_probe"] is False
+    assert result["worker_stderr"] == "bounded warning"
+    assert result["frame_timings_us"] == timings
+    assert result["milestones"] == {
+        "admission_success": True,
+        "render_success": True,
+        "cleanup_success": True,
+    }
 
 
 def test_cleanup_failure_is_not_misclassified_as_suite_gap():
@@ -627,6 +937,8 @@ def _report(entries, worker_sha="f" * 64):
             "input_png_sha256": "c" * 64,
             "input_dimensions": [64, 64],
             "backends": ["unicorn"],
+            "jobs": 4,
+            "execution_model": SWEEP.EXECUTION_MODEL,
             "unicorn_worker_sha256": worker_sha,
         },
         "entries": entries,
@@ -691,6 +1003,53 @@ def test_baseline_comparison_allows_worker_change_and_records_both_identities():
     assert comparison["baseline_workers"] == {"unicorn_worker_sha256": "a" * 64}
     assert comparison["current_workers"] == {"unicorn_worker_sha256": "b" * 64}
     assert comparison["regression"] is False
+
+
+def test_baseline_comparison_rejects_parallelism_drift():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    current["source"]["jobs"] = 8
+
+    with pytest.raises(SWEEP.SweepError, match="execution conditions differ"):
+        SWEEP.compare_baseline(current, baseline)
+
+
+def test_baseline_comparison_rejects_execution_model_drift():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    baseline["source"]["execution_model"] = "fresh-worker-after-probe-v1"
+
+    with pytest.raises(SWEEP.SweepError, match="execution conditions differ"):
+        SWEEP.compare_baseline(current, baseline)
+
+
+def test_baseline_comparison_rejects_missing_execution_model():
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    del baseline["source"]["execution_model"]
+    del current["source"]["execution_model"]
+
+    with pytest.raises(SWEEP.SweepError, match="execution_model is invalid"):
+        SWEEP.compare_baseline(current, baseline)
+
+
+@pytest.mark.parametrize("value", [None, True, 0, 33, "4"])
+def test_baseline_comparison_rejects_missing_or_invalid_jobs(value):
+    identity = "1" * 64
+    baseline = _report([_metric_entry(identity, _rendered())])
+    current = _report([_metric_entry(identity, _rendered())])
+    if value is None:
+        del baseline["source"]["jobs"]
+        del current["source"]["jobs"]
+    else:
+        baseline["source"]["jobs"] = value
+        current["source"]["jobs"] = value
+
+    with pytest.raises(SWEEP.SweepError, match="report jobs is invalid"):
+        SWEEP.compare_baseline(current, baseline)
 
 
 def test_baseline_comparison_rejects_missing_worker_identity():

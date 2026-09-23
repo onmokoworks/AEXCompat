@@ -26,7 +26,9 @@ fn render_fixture_argv_dispatch_rejects_noncanonical_fixture_without_output() {
     assert!(!output.exists(), "invalid CLI fixture published output");
     assert!(
         String::from_utf8_lossy(&result.stderr).contains("fixture parameters must be an array"),
-        "fixture argv did not reach strict JSON dispatch: {}",
+        "fixture argv did not reach strict JSON dispatch: status={:?}, stdout={:?}, stderr={:?}",
+        result.status,
+        String::from_utf8_lossy(&result.stdout),
         String::from_utf8_lossy(&result.stderr)
     );
     let _ = std::fs::remove_dir_all(scratch);

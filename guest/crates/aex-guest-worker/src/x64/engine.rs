@@ -107,6 +107,12 @@ fn initialize_static_tls_image(
     Ok(next_data)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrimaryImportHooks {
+    Eager,
+    Deferred,
+}
+
 impl GuestEngine<'static> {
     fn run_process_attach_addresses(
         &mut self,
@@ -114,22 +120,56 @@ impl GuestEngine<'static> {
         tls_callbacks: &[u64],
         dll_entry: Option<u64>,
     ) -> Result<(), GuestError> {
+        let report_timings = std::env::var_os("AEXCOMPAT_LOAD_TIMINGS").is_some();
+        let attach_started = Instant::now();
         // The Windows loader invokes TLS callbacks in image order before
         // DllMain for DLL_PROCESS_ATTACH.  Several MSVC runtimes use this
         // phase to make later C++ static initialization safe.
         for (index, address) in tls_callbacks.iter().copied().enumerate() {
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=begin stage=tls_callback image_base={image_base:#x} index={} address={address:#x}",
+                    index + 1
+                );
+            }
+            let callback_started = Instant::now();
             self.call_win64(address, [image_base, 1, 0, 0, 0, 0])
                 .map_err(|error| GuestError::TlsProcessAttach {
                     index: index + 1,
                     address,
                     detail: error.to_string(),
                 })?;
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=end stage=tls_callback image_base={image_base:#x} index={} elapsed_ms={}",
+                    index + 1,
+                    callback_started.elapsed().as_millis()
+                );
+            }
         }
         if let Some(entry) = dll_entry {
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=begin stage=dll_main image_base={image_base:#x} address={entry:#x}"
+                );
+            }
+            let dll_started = Instant::now();
             let attached = self.call_win64(entry, [image_base, 1, 0, 0, 0, 0])?;
+            if report_timings {
+                eprintln!(
+                    "aex_guest_load_timing: event=end stage=dll_main image_base={image_base:#x} elapsed_ms={}",
+                    dll_started.elapsed().as_millis()
+                );
+            }
             if attached == 0 {
                 return Err(GuestError::DllProcessAttach);
             }
+        }
+        if report_timings {
+            eprintln!(
+                "aex_guest_load_timing: event=end stage=process_attach image_base={image_base:#x} elapsed_ms={}",
+                attach_started.elapsed().as_millis()
+            );
         }
         Ok(())
     }
@@ -139,6 +179,22 @@ impl GuestEngine<'static> {
     }
 
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
+        let mut engine = match std::env::var_os("AEXCOMPAT_GUEST_LIBRARIES") {
+            Some(path) => Self::load_with_library_manifest(image, std::path::Path::new(&path)),
+            None => Self::load_primary(image, true, PrimaryImportHooks::Eager),
+        }?;
+        // All primary and dependency PE pages have now passed
+        // `seal_unicorn_image`, which always grants read access and never
+        // exposes an image unmap/protection capability to the guest.
+        engine.unicorn.get_data_mut().seal_image_reads();
+        Ok(engine)
+    }
+
+    fn load_primary(
+        image: &PeImage,
+        attach: bool,
+        import_hooks: PrimaryImportHooks,
+    ) -> Result<Self, GuestError> {
         let trace_points = discover_trace_points(image);
         let image_report = image.report();
         let mut trace_modules = vec![TraceModule {
@@ -165,6 +221,11 @@ impl GuestEngine<'static> {
             "create x86_64 engine",
             Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()),
         )?;
+        uc(
+            "disable unused memory-hook exit polling",
+            aex_unicorn_buffer::set_memory_exit_checks(&unicorn, false),
+        )?;
+        unicorn.get_data_mut().guest_files = GuestFiles::from_environment()?;
         install_avx_fallback(&mut unicorn)?;
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
         unicorn.get_data_mut().next_aegp_memory_handle = AEGP_MEMORY_HANDLE_BASE;
@@ -203,7 +264,16 @@ impl GuestEngine<'static> {
             "write PE image",
             unicorn.mem_write(image.image_base(), image.mapped_bytes()),
         )?;
-        install_avx_state_sync_points(&mut unicorn, discover_image_avx_state_sync_points(image)?)?;
+        let primary_avx_sync_points = discover_image_avx_state_sync_points(image)?;
+        if import_hooks == PrimaryImportHooks::Deferred {
+            // Library-backed loads install one translator-side table for both
+            // the primary and dependencies. This preserves exact AVX repair
+            // semantics without adding thousands of Rust code hooks before
+            // dependency initialization begins.
+            install_runtime_avx_state_sync(&mut unicorn, primary_avx_sync_points)?;
+        } else {
+            install_avx_state_sync_points(&mut unicorn, primary_avx_sync_points)?;
+        }
         uc(
             "map import stubs",
             unicorn.mem_map(STUB_BASE, STUB_SIZE, Prot::ALL),
@@ -246,14 +316,16 @@ impl GuestEngine<'static> {
                     "write import stub",
                     unicorn.mem_write(stub, &[0x31, 0xc0, 0xc3]),
                 )?;
-                install_win64_import(&mut unicorn, stub, &library.name, &symbol.name)?;
-                unicorn.get_data_mut().trace_labels.insert(
-                    stub,
-                    TraceLabel {
-                        kind: TraceLabelKind::Import,
-                        name: canonical_import_trace_label(&library.name, &symbol.name),
-                    },
-                );
+                if import_hooks == PrimaryImportHooks::Eager {
+                    install_win64_import(&mut unicorn, stub, &library.name, &symbol.name)?;
+                    unicorn.get_data_mut().trace_labels.insert(
+                        stub,
+                        TraceLabel {
+                            kind: TraceLabelKind::Import,
+                            name: canonical_import_trace_label(&library.name, &symbol.name),
+                        },
+                    );
+                }
                 let iat_rva = u64::try_from(symbol.iat_rva).map_err(|_| GuestError::IatRange)?;
                 let iat = image
                     .image_base()
@@ -299,6 +371,10 @@ impl GuestEngine<'static> {
         uc(
             "write CreateThread continuation",
             unicorn.mem_write(HOST_CREATE_THREAD_CONTINUE, &[0x41, 0xff, 0xe3]),
+        )?;
+        uc(
+            "write iterate row trampoline",
+            unicorn.mem_write(HOST_ITERATE_ROW_TRAMPOLINE, ITERATE_ROW_TRAMPOLINE),
         )?;
         uc(
             "install CreateThread continuation",
@@ -914,6 +990,7 @@ impl GuestEngine<'static> {
             scheduler_deferred_ready: VecDeque::new(),
             parked_main_context: None,
             next_data,
+            next_import_stub: stub_index,
             image_base: image.image_base(),
             image_end: image.image_base() + image_size,
             census_hook: None,
@@ -922,7 +999,10 @@ impl GuestEngine<'static> {
             image_sha256: image_report.sha256,
             entry_export: image_report.entry_export,
             trace_modules,
+            primary_attached: attach,
+            primary_poisoned: false,
         };
+        engine.link_emulated_import_data(image)?;
         initialize_windows_command_line_a(&mut engine)?;
         initialize_windows_command_line_w(&mut engine)?;
         if let Some(table) = image.string_table() {
@@ -940,11 +1020,13 @@ impl GuestEngine<'static> {
             state.extended_empty_string = empty;
             state.extended_string_table_valid = true;
         }
-        engine.run_process_attach_addresses(
-            image.image_base(),
-            image.tls_callbacks(),
-            image.dll_entry_address(),
-        )?;
+        if attach {
+            engine.run_process_attach_addresses(
+                image.image_base(),
+                image.tls_callbacks(),
+                image.dll_entry_address(),
+            )?;
+        }
         Ok(engine)
     }
 
@@ -1419,7 +1501,12 @@ impl GuestEngine<'static> {
                 std::env::consts::OS,
                 std::env::consts::ARCH
             ),
-            modules: self.trace_modules.clone(),
+            modules: self
+                .trace_modules
+                .iter()
+                .chain(self.unicorn.get_data().guest_files.reports.iter())
+                .cloned()
+                .collect(),
             trace_configuration,
             selector: capture.selector,
             entry_rva: capture.entry_rva,
@@ -1700,6 +1787,10 @@ impl GuestEngine<'static> {
         self.unicorn.get_data_mut().scheduler_ready_hint = !self.scheduler_ready.is_empty();
         self.unicorn.get_data_mut().avx_fallback_instructions = 0;
         self.unicorn.get_data_mut().avx_defined_ymm = [false; 16];
+        uc(
+            "reset translated AVX defined mask",
+            aex_unicorn_buffer::reset_x86_avx_defined_mask(&self.unicorn),
+        )?;
         self.unicorn.get_data_mut().latest_runtime_target = None;
         self.unicorn.get_data_mut().unsupported_import = None;
         let stack_top = STACK_BASE + STACK_SIZE;
@@ -1774,6 +1865,40 @@ impl GuestEngine<'static> {
                     return Err(GuestError::Callback(format!(
                         "address wake selected non-parked guest thread {thread_id}"
                     )));
+                }
+                if let Some(lock_address) = self
+                    .unicorn
+                    .get_data_mut()
+                    .scheduler_condition_locks
+                    .remove(&thread_id)
+                {
+                    let lock = self
+                        .unicorn
+                        .get_data_mut()
+                        .windows_srw_locks
+                        .get_mut(&lock_address)
+                        .ok_or_else(|| {
+                            GuestError::Callback(format!(
+                                "condition-variable SRW lock {lock_address:#x} disappeared"
+                            ))
+                        })?;
+                    if lock.owner.is_some() {
+                        return Err(GuestError::Callback(format!(
+                            "condition-variable wake cannot reacquire owned SRW lock {lock_address:#x}"
+                        )));
+                    }
+                    lock.owner = Some(thread_id);
+                    uc(
+                        "restore condition-variable SRW ownership",
+                        self.unicorn.mem_write(lock_address, &1u64.to_le_bytes()),
+                    )?;
+                    self.unicorn
+                        .get_data_mut()
+                        .windows_condition_waiters
+                        .retain(|_, waiters| {
+                            waiters.retain(|waiter| *waiter != thread_id);
+                            !waiters.is_empty()
+                        });
                 }
                 if !self.scheduler_ready.contains(&thread_id) {
                     self.scheduler_ready.push_back(thread_id);
@@ -1999,6 +2124,8 @@ impl GuestEngine<'static> {
                         .map(|(index, slot)| (*index, slot.value))
                         .collect();
                     let last_error = self.unicorn.get_data().windows_last_error;
+                    let crt_errno =
+                        get_guest_crt_errno(&self.unicorn).map_err(GuestError::Callback)?;
                     let thread_error_mode = self.unicorn.get_data().windows_thread_error_mode;
                     let mut teb_stack = [0u8; 16];
                     uc(
@@ -2043,6 +2170,7 @@ impl GuestEngine<'static> {
                         .insert(
                             thread_id,
                             ParkedWindowsThread {
+                                crt_errno,
                                 context,
                                 pending,
                                 tls_values,
@@ -2106,6 +2234,8 @@ impl GuestEngine<'static> {
                         .map(|(index, slot)| (*index, slot.value))
                         .collect();
                     child.pending.caller_last_error = self.unicorn.get_data().windows_last_error;
+                    child.pending.caller_crt_errno =
+                        get_guest_crt_errno(&self.unicorn).map_err(GuestError::Callback)?;
                     child.pending.caller_thread_error_mode =
                         self.unicorn.get_data().windows_thread_error_mode;
                     child.pending.caller_thread_id =
@@ -2122,6 +2252,7 @@ impl GuestEngine<'static> {
                         slot.value = child.fls_values.get(index).copied().unwrap_or(0);
                     }
                     self.unicorn.get_data_mut().windows_last_error = child.last_error;
+                    self.unicorn.get_data_mut().crt_errno = child.crt_errno;
                     self.unicorn.get_data_mut().windows_thread_error_mode = child.thread_error_mode;
                     self.unicorn.get_data_mut().current_windows_thread_id = self
                         .unicorn
@@ -2194,6 +2325,14 @@ impl GuestEngine<'static> {
                     return Err(GuestError::Callback(
                         "SRW lock deadlock: no runnable guest thread can release the exclusive owner"
                             .into(),
+                    ));
+                } else if yield_reason == SchedulerYieldReason::Event {
+                    return Err(GuestError::Callback(
+                        "event deadlock: no runnable guest thread can signal the event".into(),
+                    ));
+                } else if yield_reason == SchedulerYieldReason::ConditionVariable {
+                    return Err(GuestError::Callback(
+                        "condition-variable deadlock: no runnable guest thread can wake it".into(),
                     ));
                 } else {
                     // Windows permits SwitchToThread to find no runnable peer.
@@ -2320,6 +2459,16 @@ impl GuestEngine<'static> {
         } else {
             String::new()
         };
+        let rsp = *registers.get("rsp").unwrap_or(&0);
+        let stack_words = (0..96u64)
+            .map_while(|index| {
+                let bytes = self
+                    .unicorn
+                    .mem_read_as_vec(rsp.checked_add(index * 8)?, 8)
+                    .ok()?;
+                Some(u64::from_le_bytes(bytes.try_into().ok()?))
+            })
+            .collect();
         let runtime_target = self
             .unicorn
             .get_data()
@@ -2327,6 +2476,18 @@ impl GuestEngine<'static> {
             .as_ref()
             .filter(|target| target.source_address == rip || target.effective_target == Some(rip))
             .cloned();
+        let crt_heap_allocation_count = self.unicorn.get_data().crt_heap.allocations().count();
+        let crt_heap_tail_allocations = self
+            .unicorn
+            .get_data()
+            .crt_heap
+            .allocations()
+            .rev()
+            .take(16)
+            .map(|(pointer, allocation)| {
+                (pointer, allocation.requested_size, allocation.backing_size)
+            })
+            .collect();
         let snapshot = TraceCrashSnapshot {
             reason: reason.clone(),
             registers,
@@ -2337,10 +2498,14 @@ impl GuestEngine<'static> {
                 .contains(&rip)
                 .then(|| rip - self.image_base),
             instruction_bytes,
+            stack_words,
             runtime_target,
             handle_allocations: self.unicorn.get_data().handle_allocations.clone(),
             handle_allocation_failures: self.unicorn.get_data().handle_allocation_failures.clone(),
             live_handle_count: self.unicorn.get_data().handles.len(),
+            crt_heap_live_bytes: self.unicorn.get_data().crt_heap.live_bytes(),
+            crt_heap_allocation_count,
+            crt_heap_tail_allocations,
             next_pf_handle_data: self.unicorn.get_data().next_pf_handle_data,
             pf_handle_data_end: PF_HANDLE_DATA_END,
         };
@@ -2374,7 +2539,12 @@ impl GuestEngine<'static> {
     }
 
     pub fn read(&self, address: u64, bytes: &mut [u8]) -> Result<(), GuestError> {
-        uc("read guest data", self.unicorn.mem_read(address, bytes))
+        self.unicorn
+            .mem_read(address, bytes)
+            .map_err(|error| GuestError::Unicorn {
+                operation: "read guest data",
+                detail: format!("address={address:#x}, length={}: {error}", bytes.len()),
+            })
     }
 
     pub fn write_u64(&mut self, address: u64, value: u64) -> Result<(), GuestError> {

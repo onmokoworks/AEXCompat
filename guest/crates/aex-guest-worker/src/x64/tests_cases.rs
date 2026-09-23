@@ -1,4 +1,75 @@
 #[test]
+fn bounded_crt_string_search_matches_each_terminator_position_and_alignment() {
+    const PAGE: u64 = 0x30_0000_0000;
+    let mut unicorn =
+        Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()).unwrap();
+    unicorn
+        .mem_map(PAGE, 8192, Prot::READ | Prot::WRITE)
+        .unwrap();
+    for alignment in 0..32_u64 {
+        for end in 0..=512_usize {
+            let mut input = vec![0xa5; 514];
+            input[end] = 0;
+            unicorn.mem_write(PAGE + alignment, &input).unwrap();
+            let mut output = vec![0x42];
+            for collect in [false, true] {
+                let target = collect.then_some(&mut output);
+                assert_eq!(
+                    scan_crt_stdio_c_string(&unicorn, PAGE + alignment, 514, "test", target)
+                        .unwrap(),
+                    end as u64,
+                );
+            }
+            assert_eq!(output.len(), end + 1);
+            assert_eq!(output[0], 0x42);
+            assert!(output[1..].iter().all(|byte| *byte == 0xa5));
+        }
+    }
+}
+
+#[test]
+fn bounded_crt_string_search_preserves_limits_and_page_protection() {
+    const PAGE: u64 = 0x30_0000_0000;
+    let mut unicorn =
+        Unicorn::new_with_data(Arch::X86, Mode::MODE_64, GuestState::default()).unwrap();
+    unicorn
+        .mem_map(PAGE, 8192, Prot::READ | Prot::WRITE)
+        .unwrap();
+    unicorn.mem_write(PAGE + 4093, b"ab\0").unwrap();
+    unicorn.mem_protect(PAGE + 4096, 4096, Prot::WRITE).unwrap();
+    assert_eq!(
+        scan_crt_stdio_c_string(&unicorn, PAGE + 4093, 512, "test", None).unwrap(),
+        2
+    );
+    for limit in [0, 1, 2] {
+        assert!(
+            scan_crt_stdio_c_string(&unicorn, PAGE + 4093, limit, "test", None)
+                .unwrap_err()
+                .contains("exceeds")
+        );
+    }
+    assert!(
+        scan_crt_stdio_c_string(&unicorn, 0, 10, "test", None)
+            .unwrap_err()
+            .contains("null")
+    );
+    unicorn.mem_write(PAGE + 4095, b"c").unwrap();
+    let mut output = Vec::new();
+    assert!(
+        scan_crt_stdio_c_string(&unicorn, PAGE + 4093, 512, "test", Some(&mut output))
+            .unwrap_err()
+            .contains("not readable")
+    );
+    assert_eq!(output, b"abc");
+    unicorn.mem_unmap(PAGE + 4096, 4096).unwrap();
+    assert!(
+        scan_crt_stdio_c_string(&unicorn, PAGE + 4093, 512, "test", None)
+            .unwrap_err()
+            .contains("not readable")
+    );
+}
+
+#[test]
 fn iterate16_aliases_null_source_to_the_destination_pixel() {
     const CODE: u64 = 0x1000_0000;
     // mov rax,[rsp+0x28]; mov rdx,[r9]; mov [rax],rdx; xor eax,eax; ret
@@ -343,6 +414,108 @@ fn iterate8_origin_walks_the_destination_and_zeros_outside_the_source() {
     let mut output = [0u8; 16];
     engine.read(destination_pixels, &mut output).unwrap();
     assert_eq!(output, [1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn iterate8_origin_batches_inside_and_zero_segments_across_padded_rows() {
+    const CODE: u64 = 0x1000_0000;
+    // Store the low input-pointer byte, callback x/y, and first input byte in
+    // each output pixel. This distinguishes advancing source pixels from the
+    // shared zero pixel while also proving destination rowbytes are honored.
+    let mut engine = test_engine(&[
+        0x48, 0x8b, 0x44, 0x24, 0x28, 0x44, 0x88, 0x08, 0x88, 0x50, 0x01, 0x44, 0x88, 0x40, 0x02,
+        0x41, 0x8a, 0x09, 0x88, 0x48, 0x03, 0x31, 0xc0, 0xc3,
+    ]);
+    let source_pixels = engine.allocate(8, 4).unwrap();
+    engine
+        .write(source_pixels, &[1, 2, 3, 4, 5, 6, 7, 8])
+        .unwrap();
+    let destination_pixels = engine.allocate(40, 4).unwrap();
+    engine.write(destination_pixels, &[0xcc; 40]).unwrap();
+    let source_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let destination_world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    for (world, pixels, width, height, rowbytes) in [
+        (source_world, source_pixels, 2i32, 1i32, 8i32),
+        (destination_world, destination_pixels, 4i32, 2i32, 20i32),
+    ] {
+        let mut bytes = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        bytes[abi::LAYER_DATA_OFFSET..abi::LAYER_DATA_OFFSET + 8]
+            .copy_from_slice(&pixels.to_le_bytes());
+        bytes[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+            .copy_from_slice(&rowbytes.to_le_bytes());
+        bytes[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+            .copy_from_slice(&width.to_le_bytes());
+        bytes[abi::LAYER_HEIGHT_OFFSET..abi::LAYER_HEIGHT_OFFSET + 4]
+            .copy_from_slice(&height.to_le_bytes());
+        engine.write(world, &bytes).unwrap();
+    }
+    let origin = engine.allocate(8, 4).unwrap();
+    engine
+        .write(
+            origin,
+            &[7i32.to_le_bytes(), (-2i32).to_le_bytes()].concat(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                HOST_ITERATE8_ORIGIN,
+                &[0, 0, 1, source_world, 0, origin, 0, CODE, destination_world],
+                TIMEOUT_MICROSECONDS,
+            )
+            .unwrap(),
+        0
+    );
+    let source_low = source_pixels as u8;
+    let zero_low = HOST_ZERO_PIXEL as u8;
+    let mut output = [0u8; 40];
+    engine.read(destination_pixels, &mut output).unwrap();
+    assert_eq!(
+        output,
+        [
+            source_low,
+            7,
+            254,
+            1,
+            source_low.wrapping_add(4),
+            8,
+            254,
+            5,
+            zero_low,
+            9,
+            254,
+            0,
+            zero_low,
+            10,
+            254,
+            0,
+            0xcc,
+            0xcc,
+            0xcc,
+            0xcc,
+            zero_low,
+            7,
+            255,
+            0,
+            zero_low,
+            8,
+            255,
+            0,
+            zero_low,
+            9,
+            255,
+            0,
+            zero_low,
+            10,
+            255,
+            0,
+            0xcc,
+            0xcc,
+            0xcc,
+            0xcc,
+        ]
+    );
 }
 
 #[test]
@@ -2141,6 +2314,7 @@ fn avx_fallback_decodes_a_complete_instruction_at_the_mapped_image_end() {
     const CODE: u64 = 0x1000_0000;
     let mut engine = test_engine(&[0xc3]);
     let instruction = CODE + PAGE_SIZE - 4;
+    engine.unicorn.get_data_mut().image_executable_ranges = vec![(CODE, CODE + PAGE_SIZE)];
     let expected = [0x5a; 32];
     engine.write(DATA_BASE, &expected).unwrap();
     engine
@@ -2637,18 +2811,11 @@ fn duplicate_avx_sync_points_do_not_consume_the_dense_budget() {
 #[test]
 fn dense_avx_sync_map_preserves_vex128_upper_zeroing() {
     const CODE: u64 = 0x1000_0000;
-    let mut engine = test_engine(&[0x90, 0xc3]);
-    engine
-        .unicorn
-        .mem_write(
-            CODE,
-            &[
-                0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
-                0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
-                0xc3,
-            ],
-        )
-        .unwrap();
+    let mut engine = test_engine(&[
+        0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+        0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
+        0xc3,
+    ]);
     let points = (0..=MAX_SPARSE_AVX_STATE_SYNC_HOOKS)
         .map(|offset| (CODE + offset as u64, AvxStateSync::RegisterUpper(0)))
         .collect::<Vec<_>>();
@@ -2667,6 +2834,33 @@ fn dense_avx_sync_map_preserves_vex128_upper_zeroing() {
         engine.unicorn.get_data().avx_state_sync_points.len(),
         MAX_SPARSE_AVX_STATE_SYNC_HOOKS + 1
     );
+}
+
+#[test]
+fn runtime_avx_sync_map_preserves_vex128_upper_zeroing() {
+    const CODE: u64 = 0x1000_0000;
+    let mut engine = test_engine(&[
+        0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+        0xc5, 0xfc, 0x11, 0x01, // vmovups [rcx],ymm0
+        0xc3,
+    ]);
+    install_runtime_avx_state_sync(
+        &mut engine.unicorn,
+        vec![(CODE, AvxStateSync::RegisterUpper(0))],
+    )
+    .unwrap();
+    install_translated_avx_state_sync(&mut engine.unicorn).unwrap();
+    engine
+        .unicorn
+        .reg_write_long(RegisterX86::YMM0, &[0x5a; 32])
+        .unwrap();
+
+    engine.call_win64(CODE, [DATA_BASE, 0, 0, 0, 0, 0]).unwrap();
+
+    let mut output = [0xff; 32];
+    engine.unicorn.mem_read(DATA_BASE, &mut output).unwrap();
+    assert_eq!(output, [0; 32]);
+    assert_eq!(engine.unicorn.get_data().avx_state_sync_points.len(), 1);
 }
 
 #[test]

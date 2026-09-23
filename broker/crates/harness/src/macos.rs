@@ -37,6 +37,7 @@ const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
 const RESIDENT_CLOSE_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_RESPONSE_POLL: Duration = Duration::from_millis(10);
+const MAX_RESIDENT_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_RESIDENT_PROTOCOL_BYTES: usize = 1024 * 1024;
 
 struct RenderResult {
@@ -116,6 +117,18 @@ struct ResidentFrameDone {
     output: Option<ResidentFrameOutput>,
     render_error: i32,
     generation: Option<u64>,
+    #[serde(default)]
+    timings_us: Option<ResidentFrameTimingsUs>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResidentFrameTimingsUs {
+    request_prepare: u64,
+    input_read: u64,
+    effect_render: u64,
+    output_write: u64,
+    checksum: u64,
 }
 
 fn validate_resident_frame(
@@ -133,6 +146,14 @@ fn validate_resident_frame(
     let Some(output) = done.output else {
         return Err(format!("resident frame has no output: {value}"));
     };
+    let _profiled_micros = done.timings_us.map(|timings| {
+        timings
+            .request_prepare
+            .saturating_add(timings.input_read)
+            .saturating_add(timings.effect_render)
+            .saturating_add(timings.output_write)
+            .saturating_add(timings.checksum)
+    });
     if done.v != 1
         || done.kind != "frame_done"
         || done.frame_index != frame_index
@@ -1303,7 +1324,7 @@ fn read_control_message_accounted(
         Err(error) => return Err(format!("read resident response prefix: {error}")),
     }
     let length = u32::from_le_bytes(prefix) as usize;
-    if length == 0 || length > 64 * 1024 {
+    if length == 0 || length > MAX_RESIDENT_RESPONSE_BYTES {
         return Err(format!("resident response length is invalid: {length}"));
     }
     *total = total
@@ -3427,6 +3448,50 @@ mod tests {
     }
 
     #[test]
+    fn resident_reader_accepts_large_setup_but_enforces_per_message_and_session_bounds() {
+        let payload = serde_json::to_vec(&json!({"setup": "x".repeat(400 * 1024)})).unwrap();
+        assert!(payload.len() > 64 * 1024);
+        assert!(payload.len() <= MAX_RESIDENT_RESPONSE_BYTES);
+        let mut framed = Vec::new();
+        framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&payload);
+
+        let mut total = 0;
+        assert!(
+            read_control_message_accounted(&mut &framed[..], &mut total)
+                .unwrap()
+                .is_some()
+        );
+
+        let mut three_messages = framed.repeat(3);
+        let mut reader = &three_messages[..];
+        let mut total = 0;
+        assert!(
+            read_control_message_accounted(&mut reader, &mut total)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            read_control_message_accounted(&mut reader, &mut total)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            read_control_message_accounted(&mut reader, &mut total)
+                .unwrap_err()
+                .contains("resident responses exceeded")
+        );
+
+        three_messages[..4]
+            .copy_from_slice(&((MAX_RESIDENT_RESPONSE_BYTES + 1) as u32).to_le_bytes());
+        assert!(
+            read_control_message(&mut &three_messages[..])
+                .unwrap_err()
+                .contains("response length is invalid")
+        );
+    }
+
+    #[test]
     fn resident_frame_response_is_strict_and_generation_bound() {
         let valid = json!({
             "v": 1,
@@ -3443,9 +3508,19 @@ mod tests {
                 "guards_intact": true
             },
             "render_error": 0,
-            "generation": 1
+            "generation": 1,
+            "timings_us": {
+                "request_prepare": 11,
+                "input_read": 12,
+                "effect_render": 13,
+                "output_write": 14,
+                "checksum": 15
+            }
         });
         assert!(validate_resident_frame(&valid, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
+        let mut legacy = valid.clone();
+        legacy.as_object_mut().unwrap().remove("timings_us");
+        assert!(validate_resident_frame(&legacy, 0, 2, 1, MacRenderFormat::PngArgb8).is_ok());
         let mut stale = valid.clone();
         stale["generation"] = json!(0);
         assert!(validate_resident_frame(&stale, 0, 2, 1, MacRenderFormat::PngArgb8).is_err());
@@ -3471,7 +3546,14 @@ mod tests {
                 "guards_intact": true
             },
             "render_error": 0,
-            "generation": 4
+            "generation": 4,
+            "timings_us": {
+                "request_prepare": 11,
+                "input_read": 12,
+                "effect_render": 13,
+                "output_write": 14,
+                "checksum": 15
+            }
         });
         assert!(validate_resident_frame(&response, 3, 1, 1, MacRenderFormat::ExrArgb32f).is_ok());
         assert!(validate_resident_frame(&response, 3, 1, 1, MacRenderFormat::PngArgb8).is_err());

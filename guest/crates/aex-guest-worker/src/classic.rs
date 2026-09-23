@@ -678,7 +678,18 @@ impl ClassicHost {
         image: &PeImage,
         effect_selector: Option<&str>,
     ) -> Result<Self, ClassicError> {
-        let mut engine = GuestEngine::load(image)?;
+        Self::from_engine_with_effect(GuestEngine::load(image)?, image, effect_selector)
+    }
+
+    /// Finish Classic-host construction from an already loaded engine. This is
+    /// used by forkserver children after they attach the same-SHA primary from
+    /// a deferred template; ordinary callers should use `new_with_effect`.
+    pub fn from_engine_with_effect(
+        mut engine: GuestEngine<'static>,
+        image: &PeImage,
+        effect_selector: Option<&str>,
+    ) -> Result<Self, ClassicError> {
+        engine.validate_attached_primary(image)?;
         let input = engine.allocate(abi::PF_IN_DATA_SIZE, 8)?;
         let output = engine.allocate(abi::PF_OUT_DATA_SIZE, 8)?;
         let utils = engine.allocate(abi::PF_UTIL_CALLBACKS_SIZE, 8)?;
@@ -783,13 +794,19 @@ impl ClassicHost {
                     color_descriptor(&param.bytes, param.param_type);
                 let (current_components, default_components) =
                     component_descriptor(&param.bytes, param.param_type);
-                let choices = if param.param_type == PARAM_POPUP {
-                    let pointer =
-                        read_u64(&param.bytes, abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET);
-                    Some(self.read_guest_text(pointer, 4096)?)
-                } else {
-                    None
-                };
+                let choices =
+                    if param.param_type == PARAM_POPUP {
+                        let pointer =
+                            read_u64(&param.bytes, abi::PARAM_U_OFFSET + abi::POPUP_NAMES_OFFSET);
+                        Some(self.read_guest_text(pointer, 4096).map_err(|error| {
+                        ClassicError::Input(format!(
+                            "popup choices for slot {} index {} name {:?} at {pointer:#x}: {error}",
+                            offset + 1, param.index, param.name
+                        ))
+                    })?)
+                    } else {
+                        None
+                    };
                 Ok(ParameterReport {
                     slot: offset + 1,
                     index: param.index,
@@ -1131,6 +1148,11 @@ impl ClassicHost {
                 && sequence_setdown_error == 0
                 && global_setdown_error == 0,
         }
+    }
+
+    pub(crate) fn flush_guest_console_diagnostics(&mut self) -> Result<(), ClassicError> {
+        self.engine.flush_guest_console_diagnostics()?;
+        Ok(())
     }
 
     pub fn apply_resident_parameter_values(
@@ -1721,6 +1743,9 @@ impl ClassicHost {
         trace_enabled: bool,
         backend: RenderBackendRequest,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
+        // A standalone image render is one frame at t=0, not an empty timeline.
+        // Resident/fixture callers provide their own explicit frame context.
+        self.write_frame_context(width, height, 0, 1, 1, 1)?;
         self.render_pixels_with_request_mode(
             width,
             height,
@@ -2416,8 +2441,22 @@ impl ClassicHost {
     }
 
     fn invoke(&mut self, selector: u64) -> Result<u64, GuestError> {
-        self.engine
-            .call_selector_win64(self.entry, [selector, self.input, self.output, 0, 0, 0])
+        let report_timings = std::env::var_os("AEXCOMPAT_LOAD_TIMINGS").is_some();
+        if report_timings {
+            eprintln!("aex_guest_load_timing: event=begin stage=selector selector={selector}");
+        }
+        let started = std::time::Instant::now();
+        let result = self
+            .engine
+            .call_selector_win64(self.entry, [selector, self.input, self.output, 0, 0, 0]);
+        if report_timings {
+            eprintln!(
+                "aex_guest_load_timing: event=end stage=selector selector={selector} elapsed_ms={} result={}",
+                started.elapsed().as_millis(),
+                if result.is_ok() { "ok" } else { "error" }
+            );
+        }
+        result
     }
 
     fn write_frame_context(
