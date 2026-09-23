@@ -13062,15 +13062,16 @@ fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lan
         }
     }
     let mut seed = 0x9e37_79b9u32;
-    for _ in 0..512 {
+    for _ in 0..4096 {
         seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let value = f32::from_bits(seed);
         if value.is_finite() {
             inputs.push(value);
         }
     }
-    for mode in [0u64, 0x2000, 0x4000, 0x6000] {
-        let mxcsr = 0x1fa0 | mode;
+    for mxcsr in [
+        0x1fa0u64, 0x3fa0, 0x5fa0, 0x7fa0, 0x0f80, 0x1fc0, 0x9f80, 0x9fc0,
+    ] {
         for &value in &inputs {
             let mut xmm0 = [0x5a; 16];
             xmm0[..4].copy_from_slice(&value.to_le_bytes());
@@ -13090,8 +13091,7 @@ fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lan
             assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap(), mxcsr);
         }
     }
-    // The guest may unmask inexact; the translated routine must not leak its
-    // intermediate add's exception or alter the caller's control word.
+    // The guest may unmask inexact; integer rounding must not alter MXCSR.
     engine
         .unicorn
         .reg_write(RegisterX86::MXCSR, 0x0f80)
@@ -13106,14 +13106,15 @@ fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lan
         1.0f32.to_bits()
     );
     assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap(), 0x0f80);
-    for value in [f32::NAN, f32::from_bits(0xffc0_1234)] {
+    for bits in [0x7f80_0001, 0xff80_0001, 0x7fc0_1234, 0xffc0_1234] {
         engine
             .unicorn
-            .reg_write(RegisterX86::XMM0, value.to_bits() as u64)
+            .reg_write(RegisterX86::XMM0, bits as u64)
             .unwrap();
         engine.call_win64(ROUNDF, [0; 6]).unwrap();
-        assert!(
-            f32::from_bits(engine.unicorn.reg_read(RegisterX86::XMM0).unwrap() as u32).is_nan()
+        assert_eq!(
+            engine.unicorn.reg_read(RegisterX86::XMM0).unwrap() as u32,
+            f32::from_bits(bits).round().to_bits()
         );
     }
 }
