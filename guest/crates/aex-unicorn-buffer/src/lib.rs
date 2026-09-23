@@ -242,15 +242,19 @@ mod tests {
             let code = [0xb8, 0, 0x40, 0, 0, 0xba, 0, 0x70, 0, 0, 0xff, 0xd0, 0x90];
             unicorn.mem_write(0x1000, &code).unwrap();
             // adc dword ptr [edx/rdx],0; mov ebx,[edx/rdx]; ret
-            unicorn.mem_write(0x4000, &[0x83, 0x12, 0, 0x8b, 0x1a, 0xc3]).unwrap();
+            unicorn
+                .mem_write(0x4000, &[0x83, 0x12, 0, 0x8b, 0x1a, 0xc3])
+                .unwrap();
             for carry in [0_u64, 1, 1, 0, 1, 0, 0, 1] {
                 unicorn.mem_write(0x7000, &41_u32.to_le_bytes()).unwrap();
                 unicorn.reg_write(RegisterX86::ESP, 0x8800).unwrap();
                 unicorn.reg_write(RegisterX86::EFLAGS, 2 | carry).unwrap();
                 unicorn.emu_start(0x1000, 0x100d, 0, 0).unwrap();
                 assert_eq!(unicorn.reg_read(RegisterX86::EBX).unwrap(), 41 + carry);
-                assert_eq!(unicorn.mem_read_as_vec(0x7000, 4).unwrap(),
-                           (41_u32 + carry as u32).to_le_bytes());
+                assert_eq!(
+                    unicorn.mem_read_as_vec(0x7000, 4).unwrap(),
+                    (41_u32 + carry as u32).to_le_bytes()
+                );
                 assert_eq!(unicorn.reg_read(RegisterX86::ESP).unwrap(), 0x8800);
                 // ADC cleared carry; its lazy flags must also survive RET.
                 assert_eq!(unicorn.reg_read(RegisterX86::EFLAGS).unwrap() & 1, 0);
