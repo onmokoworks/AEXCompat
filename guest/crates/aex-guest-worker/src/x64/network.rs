@@ -323,6 +323,151 @@ fn guest_get_adapters_addresses(unicorn: &mut Unicorn<'_, GuestState>) -> Result
     Ok(0)
 }
 
+#[cfg(target_os = "macos")]
+fn guest_getaddrinfo_local(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let node = read_win64_import_argument(unicorn, 0)?;
+    let service = read_win64_import_argument(unicorn, 1)?;
+    let hints = read_win64_import_argument(unicorn, 2)?;
+    let output = read_win64_import_argument(unicorn, 3)?;
+    if output == 0 || !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+        return Ok(10014); // WSAEFAULT
+    }
+    if node == 0 || service != 0 {
+        return Err("getaddrinfo null node or service lookup is not implemented".into());
+    }
+    let node_value = read_crt_stdio_c_string(unicorn, node, 256, "getaddrinfo node")?;
+    let hostname = aex_host_identity::current_hostname()?;
+    if node_value != hostname {
+        return Err("getaddrinfo non-local hostname lookup is not implemented".into());
+    }
+    if hints != 0 {
+        if !guest_range_has_permission(unicorn, hints, 48, Prot::READ)? {
+            return Ok(10014);
+        }
+        let mut hint_bytes = [0u8; 48];
+        unicorn
+            .mem_read(hints, &mut hint_bytes)
+            .map_err(|e| e.to_string())?;
+        let fields = [0, 4, 8, 12]
+            .map(|offset| i32::from_le_bytes(hint_bytes[offset..offset + 4].try_into().unwrap()));
+        if fields != [0, 2, 1, 0] || hint_bytes[16..].iter().any(|byte| *byte != 0) {
+            return Err("getaddrinfo requested hints are not implemented".into());
+        }
+    }
+    let interfaces = aex_host_identity::adapters::interfaces()?;
+    let addresses = local_ipv4_addresses(&interfaces);
+    if addresses.is_empty() {
+        return Ok(11001); // WSAHOST_NOT_FOUND
+    }
+    let count = addresses.len();
+    let size = count
+        .checked_mul(64)
+        .ok_or("getaddrinfo allocation overflow")?;
+    let base = allocate_crt_region(unicorn, size as u64).map_err(|e| e.to_string())?;
+    let mut bytes = vec![0u8; size];
+    for (index, address) in addresses.into_iter().enumerate() {
+        let offset = index * 64;
+        bytes[offset + 4..offset + 8].copy_from_slice(&2u32.to_le_bytes());
+        bytes[offset + 8..offset + 12].copy_from_slice(&1u32.to_le_bytes());
+        bytes[offset + 12..offset + 16].copy_from_slice(&6u32.to_le_bytes());
+        bytes[offset + 16..offset + 24].copy_from_slice(&16u64.to_le_bytes());
+        bytes[offset + 32..offset + 40].copy_from_slice(&(base + offset as u64 + 48).to_le_bytes());
+        if index + 1 < count {
+            bytes[offset + 40..offset + 48]
+                .copy_from_slice(&(base + offset as u64 + 64).to_le_bytes());
+        }
+        bytes[offset + 48..offset + 50].copy_from_slice(&2u16.to_le_bytes());
+        bytes[offset + 52..offset + 56].copy_from_slice(&address);
+    }
+    if let Err(error) = unicorn.mem_write(base, &bytes) {
+        let _ = free_crt_region(unicorn, base);
+        return Err(error.to_string());
+    }
+    if let Err(error) = unicorn.mem_write(output, &base.to_le_bytes()) {
+        let _ = free_crt_region(unicorn, base);
+        return Err(error.to_string());
+    }
+    unicorn.get_data_mut().addrinfo_allocations.insert(base);
+    Ok(0)
+}
+
+#[cfg(target_os = "macos")]
+fn local_ipv4_addresses(
+    interfaces: &[aex_host_identity::adapters::Interface],
+) -> BTreeSet<Vec<u8>> {
+    let mut non_loopback = BTreeSet::new();
+    let mut loopback = BTreeSet::new();
+    for interface in interfaces {
+        if interface.native_flags & 1 == 0 {
+            continue;
+        }
+        let destination = if interface.name == b"lo0" {
+            &mut loopback
+        } else {
+            &mut non_loopback
+        };
+        for address in &interface.addresses {
+            if address.family == 2 && address.sockaddr.len() >= 8 {
+                destination.insert(address.sockaddr[4..8].to_vec());
+            }
+        }
+    }
+    if non_loopback.is_empty() {
+        loopback
+    } else {
+        non_loopback
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn guest_getaddrinfo_local(_: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    Err("native getaddrinfo translation is not implemented on this host".into())
+}
+
+fn guest_freeaddrinfo_local(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let base = read_win64_import_argument(unicorn, 0)?;
+    if base == 0 {
+        return Ok(0);
+    }
+    if !unicorn.get_data_mut().addrinfo_allocations.remove(&base) {
+        return Err("freeaddrinfo received a foreign or stale pointer".into());
+    }
+    free_crt_region(unicorn, base)?;
+    Ok(0)
+}
+
+fn guest_inet_ntop(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    let family = read_win64_import_argument(unicorn, 0)? as u32;
+    let source = read_win64_import_argument(unicorn, 1)?;
+    let destination = read_win64_import_argument(unicorn, 2)?;
+    let capacity = read_win64_import_argument(unicorn, 3)?;
+    if family != 2 {
+        unicorn.get_data_mut().windows_last_error = 10047; // WSAEAFNOSUPPORT
+        return Ok(0);
+    }
+    if source == 0 || !guest_range_has_permission(unicorn, source, 4, Prot::READ)? {
+        unicorn.get_data_mut().windows_last_error = 87;
+        return Ok(0);
+    }
+    let mut octets = [0u8; 4];
+    unicorn
+        .mem_read(source, &mut octets)
+        .map_err(|e| e.to_string())?;
+    let mut text = std::net::Ipv4Addr::from(octets).to_string().into_bytes();
+    text.push(0);
+    if destination == 0
+        || capacity < text.len() as u64
+        || !guest_range_has_permission(unicorn, destination, text.len() as u64, Prot::WRITE)?
+    {
+        unicorn.get_data_mut().windows_last_error = 87;
+        return Ok(0);
+    }
+    unicorn
+        .mem_write(destination, &text)
+        .map_err(|e| e.to_string())?;
+    Ok(destination)
+}
+
 // Win64 IP_ADAPTER_INFO is 664 bytes; its embedded IP_ADDR_STRING fields are
 // 40 bytes each. Report only IPv4 interfaces observed on the real host.
 #[cfg(target_os = "macos")]

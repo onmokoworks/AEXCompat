@@ -89,6 +89,7 @@ enum LegacyWin64Import {
     InitializeAcl,
     CreateDirectoryA,
     CreateDirectoryW,
+    SetFileAttributesA,
     AreFileApisAnsi,
     GlobalMemoryStatusEx,
     InitOnceBeginInitialize,
@@ -99,6 +100,9 @@ enum LegacyWin64Import {
     GetHostByName,
     GetAdaptersAddresses,
     GetAdaptersInfo,
+    GetAddrInfo,
+    FreeAddrInfo,
+    InetNtop,
     ExitThread,
     CoCreateInstance,
     CoInitializeSecurity,
@@ -929,6 +933,12 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "GetAdaptersAddresses") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("iphlpapi.dll", "GetAdaptersInfo") => LegacyWin64Import::GetAdaptersInfo,
         (_, "GetAdaptersInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ws2_32.dll", "getaddrinfo") => LegacyWin64Import::GetAddrInfo,
+        (_, "getaddrinfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ws2_32.dll", "freeaddrinfo") => LegacyWin64Import::FreeAddrInfo,
+        (_, "freeaddrinfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("ws2_32.dll", "inet_ntop") => LegacyWin64Import::InetNtop,
+        (_, "inet_ntop") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ws2_32.dll" | "wsock32.dll", "WSAGetLastError" | "ORDINAL 111") => {
             LegacyWin64Import::GetLastError
         }
@@ -1245,6 +1255,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CreateDirectoryW
         }
         (_, "CreateDirectoryW") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "SetFileAttributesA") => {
+            LegacyWin64Import::SetFileAttributesA
+        }
+        (_, "SetFileAttributesA") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "IsValidAcl") => LegacyWin64Import::IsValidAcl,
         (_, "IsValidAcl") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "InitializeAcl") => LegacyWin64Import::InitializeAcl,
@@ -2066,6 +2080,19 @@ fn install_win64_import(
                         "install CreateDirectoryW",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = create_guest_directory(unicorn, true);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::SetFileAttributesA => {
+                    uc(
+                        "write SetFileAttributesA return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install SetFileAttributesA",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = set_guest_file_attributes_a(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;
@@ -3083,6 +3110,39 @@ fn install_win64_import(
                         "install GetAdaptersInfo",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_get_adapters_info(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetAddrInfo => {
+                    uc("write getaddrinfo return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install getaddrinfo",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_getaddrinfo_local(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::FreeAddrInfo => {
+                    uc(
+                        "write freeaddrinfo return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install freeaddrinfo",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_freeaddrinfo_local(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::InetNtop => {
+                    uc("write inet_ntop return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc(
+                        "install inet_ntop",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_inet_ntop(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;
@@ -8327,10 +8387,12 @@ fn guest_range_has_permission(
 }
 
 fn emulate_sh_get_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {
+    const CSIDL_APPDATA: u32 = 0x1a;
     const CSIDL_COMMON_APPDATA: u32 = 0x23;
     const CSIDL_PROGRAM_FILES: u32 = 0x26;
     const SHGFP_TYPE_CURRENT: u32 = 0;
     const COMMON_APPDATA_PATH: &[u8] = b"C:\\ProgramData\0";
+    const APPDATA_PATH: &[u8] = b"C:\\Users\\AEXCompat\\AppData\\Roaming\0";
     const PROGRAM_FILES_PATH: &[u8] = b"C:\\Program Files\0";
 
     let result = (|| {
@@ -8345,6 +8407,7 @@ fn emulate_sh_get_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {
             return Err(HRESULT_E_INVALIDARG);
         }
         let path = match csidl {
+            CSIDL_APPDATA => APPDATA_PATH,
             CSIDL_COMMON_APPDATA => COMMON_APPDATA_PATH,
             CSIDL_PROGRAM_FILES => PROGRAM_FILES_PATH,
             _ => return Err(HRESULT_E_INVALIDARG),
@@ -8357,6 +8420,13 @@ fn emulate_sh_get_folder_path_a(unicorn: &mut Unicorn<'_, GuestState>) {
         unicorn
             .mem_write(output, path)
             .map_err(|_| HRESULT_E_INVALIDARG)?;
+        if csidl == CSIDL_APPDATA {
+            let name = guest_file_name("C:\\Users\\AEXCompat\\AppData\\Roaming")
+                .map_err(|_| HRESULT_E_INVALIDARG)?;
+            let files = &mut unicorn.get_data_mut().guest_files;
+            files.record_directory_creation(&name);
+            files.directories.insert(name);
+        }
         Ok(0)
     })();
     let returned = result.unwrap_or_else(|error| error);

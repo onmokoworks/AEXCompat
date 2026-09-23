@@ -199,6 +199,7 @@ struct GuestState {
     persistent_blob_active: bool,
     persistent_strings: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
     persistent_longs: HashMap<(Vec<u8>, Vec<u8>), i32>,
+    addrinfo_allocations: HashSet<u64>,
     unsupported_suite_calls: Vec<UnsupportedSuiteCall>,
     dropped_unsupported_suite_calls: u64,
     smart_checkout_disk_id_fallbacks: Vec<SmartCheckoutDiskIdFallback>,
