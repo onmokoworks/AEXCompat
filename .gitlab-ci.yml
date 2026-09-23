@@ -1,0 +1,51 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+stages: [test]
+
+windows-tests:
+  stage: test
+  tags: [saas-windows-medium-amd64]
+  timeout: 2h
+  interruptible: true
+  variables:
+    PYTHONUTF8: "1"
+    VSLANG: "1033"
+    AEXCOMPAT_CARGO_PROFILE: debug
+    SDK_READY: "false"
+    CARGO_HOME: "$CI_PROJECT_DIR/.ci-cache/cargo"
+    RUSTUP_HOME: "$CI_PROJECT_DIR/.ci-cache/rustup"
+    UV_CACHE_DIR: "$CI_PROJECT_DIR/.ci-cache/uv"
+    UV_PYTHON_INSTALL_DIR: "$CI_PROJECT_DIR/.ci-cache/python"
+    SCCACHE_DIR: "$CI_PROJECT_DIR/.ci-cache/sccache"
+    SCCACHE_CACHE_SIZE: "2G"
+    CARGO_INCREMENTAL: "0"
+    RUSTC_WRAPPER: sccache
+    FF_USE_FASTZIP: "true"
+    CACHE_COMPRESSION_LEVEL: fastest
+  cache:
+    - key:
+        prefix: windows-crate-downloads-v2
+        files: [broker/Cargo.lock]
+      paths: [.ci-cache/cargo/registry/cache/]
+      when: always
+    - key: "windows-sccache-v1-$CI_COMMIT_REF_SLUG"
+      fallback_keys: ["windows-sccache-v1-$CI_DEFAULT_BRANCH"]
+      paths: [.ci-cache/sccache/]
+      when: always
+  script:
+    - powershell -NoProfile -ExecutionPolicy Bypass -File tools/gitlab/windows-tests.ps1
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
+      - gitlab-test-results.xml
+      - gitlab-python-tests.log
+      - gitlab-timings.jsonl
+      - gitlab-sccache.log
+    reports:
+      junit: gitlab-test-results.xml

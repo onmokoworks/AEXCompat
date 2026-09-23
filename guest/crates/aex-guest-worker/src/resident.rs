@@ -7,13 +7,14 @@ use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 const MAX_CONTROL_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_CONTROL_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_PARAMETER_PAYLOAD_BYTES: usize = 16 * 1024;
 
 #[derive(Deserialize)]
@@ -86,6 +87,17 @@ struct FrameDone {
     render_error: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timings_us: Option<FrameTimingsUs>,
+}
+
+#[derive(Default, Serialize)]
+struct FrameTimingsUs {
+    request_prepare: u64,
+    input_read: u64,
+    effect_render: u64,
+    output_write: u64,
+    checksum: u64,
 }
 
 #[derive(Serialize)]
@@ -182,6 +194,7 @@ pub fn run_resident_session(
             setup: &setup,
         },
     )?;
+    let report_frame_timings = std::env::var_os("AEXCOMPAT_RESIDENT_TIMINGS").is_some();
     let mut generation = 0u64;
     let processing = (|| -> Result<(), SessionError> {
         loop {
@@ -295,6 +308,7 @@ pub fn run_resident_session(
                         fixture_smart,
                         &mut host,
                         &mut generation,
+                        report_frame_timings,
                         &mut response,
                     )?;
                 }
@@ -326,6 +340,7 @@ pub fn run_resident_session(
     })();
 
     let close = host.close_resident_session();
+    host.flush_guest_console_diagnostics()?;
     let mut close_value = serde_json::to_value(&close)
         .map_err(|error| SessionError::Protocol(format!("serialize close report: {error}")))?;
     bound_session_close(&setup, std::process::id(), &mut close_value)?;
@@ -391,7 +406,7 @@ fn bound_session_close(
             setup,
             close: close.clone(),
         })
-        .map(|payload| payload.len() <= MAX_CONTROL_MESSAGE_BYTES)
+        .map(|payload| payload.len() <= MAX_CONTROL_RESPONSE_BYTES)
         .map_err(|error| SessionError::Protocol(format!("serialize close response: {error}")))
     };
     if fits(close)? {
@@ -439,8 +454,10 @@ fn parse_render_frame(
     fixture_smart: Option<bool>,
     host: &mut ClassicHost,
     generation: &mut u64,
+    report_timings: bool,
     response: &mut impl Write,
 ) -> Result<(), SessionError> {
+    let request_started = report_timings.then(Instant::now);
     let version = object
         .get("v")
         .and_then(Value::as_u64)
@@ -518,8 +535,10 @@ fn parse_render_frame(
         }
         _ => unreachable!(),
     };
+    let input_started = report_timings.then(Instant::now);
     let input = fs::read(input_slot)
         .map_err(|error| SessionError::Io(format!("read resident input slot: {error}")))?;
+    let input_read = input_started.map(|started| started.elapsed());
     if input.len() != pixel_bytes {
         return Err(SessionError::Protocol(format!(
             "resident input slot has {} bytes, expected {pixel_bytes}",
@@ -538,6 +557,10 @@ fn parse_render_frame(
             pixels: &layer.pixels,
         })
         .collect::<Vec<_>>();
+    let request_prepare = request_started
+        .zip(input_read)
+        .map(|(started, input_read)| started.elapsed().saturating_sub(input_read));
+    let render_started = report_timings.then(Instant::now);
     let rendered = match fixture_smart {
         Some(smart) => host.render_resident_fixture_pixels(
             width,
@@ -562,14 +585,20 @@ fn parse_render_frame(
             &parameters,
         ),
     };
+    let effect_render = render_started.map(|started| started.elapsed());
     match rendered {
         Ok(report) => {
+            let output_started = report_timings.then(Instant::now);
             fs::write(output_slot, &report.raw_pixels).map_err(|error| {
                 SessionError::Io(format!("write resident output slot: {error}"))
             })?;
+            let output_write = output_started.map(|started| started.elapsed());
             if fixture_smart.is_some() {
                 write_fixture_world_dumps(input_slot, &report)?;
             }
+            let checksum_started = report_timings.then(Instant::now);
+            let checksum_value = report.raw_pixel_sha256.clone();
+            let checksum_time = checksum_started.map(|started| started.elapsed());
             *generation += 1;
             write_message(
                 response,
@@ -588,11 +617,18 @@ fn parse_render_frame(
                         } else {
                             "classic"
                         },
-                        checksum: format!("{:x}", Sha256::digest(&report.raw_pixels)),
+                        checksum: checksum_value,
                         guards_intact: report.guards_intact,
                     }),
                     render_error: 0,
                     generation: Some(*generation),
+                    timings_us: report_timings.then(|| FrameTimingsUs {
+                        request_prepare: micros(request_prepare.expect("timing enabled")),
+                        input_read: micros(input_read.expect("timing enabled")),
+                        effect_render: micros(effect_render.expect("timing enabled")),
+                        output_write: micros(output_write.expect("timing enabled")),
+                        checksum: micros(checksum_time.expect("timing enabled")),
+                    }),
                 },
             )
         }
@@ -608,11 +644,21 @@ fn parse_render_frame(
                     output: None,
                     render_error,
                     generation: None,
+                    timings_us: report_timings.then(|| FrameTimingsUs {
+                        request_prepare: micros(request_prepare.expect("timing enabled")),
+                        input_read: micros(input_read.expect("timing enabled")),
+                        effect_render: micros(effect_render.expect("timing enabled")),
+                        ..FrameTimingsUs::default()
+                    }),
                 },
             )?;
             Err(SessionError::Classic(error))
         }
     }
+}
+
+fn micros(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
 fn parse_fixture_total_time(
@@ -966,7 +1012,7 @@ fn read_message(reader: &mut impl Read) -> Result<Option<Vec<u8>>, SessionError>
 fn write_message(writer: &mut impl Write, value: &impl Serialize) -> Result<(), SessionError> {
     let payload = serde_json::to_vec(value)
         .map_err(|error| SessionError::Protocol(format!("serialize response: {error}")))?;
-    if payload.is_empty() || payload.len() > MAX_CONTROL_MESSAGE_BYTES {
+    if payload.is_empty() || payload.len() > MAX_CONTROL_RESPONSE_BYTES {
         return Err(SessionError::Protocol(
             "resident response exceeds the control bound".into(),
         ));
@@ -1096,7 +1142,7 @@ mod tests {
         .unwrap();
         let length = u32::from_le_bytes(framed[..4].try_into().unwrap()) as usize;
         assert_eq!(length, framed.len() - 4);
-        assert!(length <= MAX_CONTROL_MESSAGE_BYTES);
+        assert!(length <= MAX_CONTROL_RESPONSE_BYTES);
         let value: Value = serde_json::from_slice(&framed[4..]).unwrap();
         assert_eq!(value["failure"]["stage"], "admission_probe");
         assert_eq!(value["failure"]["category"], "callback");
@@ -1144,7 +1190,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(framed.len() - 4 <= MAX_CONTROL_MESSAGE_BYTES);
+        assert!(framed.len() - 4 <= MAX_CONTROL_RESPONSE_BYTES);
     }
 
     #[test]
@@ -1209,7 +1255,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(framed.len() - 4 <= MAX_CONTROL_MESSAGE_BYTES);
+        assert!(framed.len() - 4 <= MAX_CONTROL_RESPONSE_BYTES);
     }
 
     #[test]
@@ -1401,6 +1447,22 @@ mod tests {
         assert!(
             read_message(&mut &((MAX_CONTROL_MESSAGE_BYTES + 1) as u32).to_le_bytes()[..]).is_err()
         );
+    }
+
+    #[test]
+    fn response_budget_is_larger_than_the_request_budget_but_still_bounded() {
+        let response = serde_json::json!({
+            "setup": "x".repeat(MAX_CONTROL_MESSAGE_BYTES),
+        });
+        let mut framed = Vec::new();
+        write_message(&mut framed, &response).unwrap();
+        assert!(framed.len() - 4 > MAX_CONTROL_MESSAGE_BYTES);
+        assert!(framed.len() - 4 <= MAX_CONTROL_RESPONSE_BYTES);
+
+        let oversized = serde_json::json!({
+            "setup": "x".repeat(MAX_CONTROL_RESPONSE_BYTES),
+        });
+        assert!(write_message(&mut Vec::new(), &oversized).is_err());
     }
 
     #[test]

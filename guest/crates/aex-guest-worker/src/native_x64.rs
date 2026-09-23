@@ -312,6 +312,7 @@ pub struct GuestEngine<'a> {
     image: Mapping,
     arena: Mapping,
     state: NativeState,
+    image_sha256: String,
     loaded_images: BTreeSet<String>,
     dllmain_attached: bool,
     lifetime: PhantomData<&'a ()>,
@@ -353,6 +354,10 @@ impl GuestEngine<'static> {
         "native-x86_64-carrier"
     }
 
+    pub fn flush_guest_console_diagnostics(&mut self) -> Result<(), GuestError> {
+        Ok(())
+    }
+
     pub fn load(image: &PeImage) -> Result<Self, GuestError> {
         let image_size = image.mapped_bytes().len();
         let image_mapping =
@@ -376,6 +381,7 @@ impl GuestEngine<'static> {
                 image_end: image.image_base() + image_size as u64,
                 ..NativeState::default()
             },
+            image_sha256: image.report().sha256,
             loaded_images: loaded_image_snapshot(),
             dllmain_attached: image.dll_entry_address().is_none(),
             lifetime: PhantomData,
@@ -447,6 +453,21 @@ impl GuestEngine<'static> {
             engine.dllmain_attached = true;
         }
         Ok(engine)
+    }
+
+    pub fn validate_attached_primary(&self, image: &PeImage) -> Result<(), GuestError> {
+        if image.report().sha256 != self.image_sha256
+            || image.image_base() != self.state.image_start
+            || image
+                .image_base()
+                .checked_add(image.mapped_bytes().len() as u64)
+                != Some(self.state.image_end)
+        {
+            return Err(GuestError::Callback(
+                "Classic host primary does not match the loaded native image".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub fn resolve_effect_entry(

@@ -12,7 +12,7 @@ use thiserror::Error;
 use unicorn_engine::unicorn_const::{Arch, Mode, Prot};
 use unicorn_engine::{Context, RegisterX86, UcHookId, Unicorn};
 
-use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_HEAP_BYTES};
+use crate::crt_heap::{CrtHeap, CrtHeapError, MAX_CRT_ALLOCATION_BYTES, MAX_CRT_HEAP_BYTES};
 use crate::pe::{PeImage, StaticTlsImage};
 use crate::plugin_data::{
     CALLBACK_REJECTED, EffectRegistry, RegistrationPointers, decode_registration,
@@ -30,6 +30,9 @@ const PAGE_SIZE: u64 = 0x1000;
 const STACK_BASE: u64 = 0x0000_0000_7000_0000;
 const STACK_SIZE: u64 = 0x20_0000;
 const MAX_WINDOWS_THREADS: usize = 32;
+const WINDOWS_HOOK_HANDLE_BASE: u64 = 0x0000_000a_0000_0000;
+const MAX_WINDOWS_HOOKS: usize = 64;
+const CRT_LOCALE_HANDLE_BASE: u64 = 0x0000_000a_0001_0000;
 const STUB_BASE: u64 = 0x0000_0000_6000_0000;
 const STUB_SIZE: u64 = 0x10_0000;
 const STUB_STRIDE: u64 = 16;
@@ -124,6 +127,21 @@ const HOST_AEGP_COMPUTE_CACHE_CALLBACKS: [u64; 6] = [
 const HOST_DYNAMIC_FLS_ALLOC: u64 = STUB_BASE + 0x80570;
 const HOST_REGISTER_UI: u64 = STUB_BASE + 0x80590;
 const HOST_CREATE_THREAD_CONTINUE: u64 = STUB_BASE + 0x80580;
+const HOST_ITERATE_ROW_TRAMPOLINE: u64 = STUB_BASE + 0x80700;
+// Win64 guest trampoline for a contiguous row of pixel callbacks. The host
+// writes the callback, count, and pixel stride into the incoming stack frame.
+// Keeping this loop in translated guest code avoids a Rust/Unicorn round trip
+// for every pixel while retaining the existing row-level progress/abort hooks.
+const ITERATE_ROW_TRAMPOLINE: &[u8] = &[
+    0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x89, 0xcb, 0x89, 0xd6,
+    0x44, 0x89, 0xc7, 0x4d, 0x89, 0xcc, 0x4c, 0x8b, 0x6c, 0x24, 0x60, 0x4c, 0x8b, 0x74, 0x24, 0x68,
+    0x44, 0x8b, 0x7c, 0x24, 0x70, 0x48, 0x8b, 0x44, 0x24, 0x78, 0x4c, 0x8b, 0x94, 0x24, 0x80, 0x00,
+    0x00, 0x00, 0x48, 0x83, 0xec, 0x40, 0x48, 0x89, 0x44, 0x24, 0x28, 0x4c, 0x89, 0x54, 0x24, 0x30,
+    0x48, 0x89, 0xd9, 0x89, 0xf2, 0x41, 0x89, 0xf8, 0x4d, 0x89, 0xe1, 0x4c, 0x89, 0x6c, 0x24, 0x20,
+    0x41, 0xff, 0xd6, 0x85, 0xc0, 0x75, 0x17, 0xff, 0xc6, 0x4c, 0x8b, 0x54, 0x24, 0x28, 0x4d, 0x01,
+    0xd4, 0x4c, 0x8b, 0x54, 0x24, 0x30, 0x4d, 0x01, 0xd5, 0x41, 0xff, 0xcf, 0x75, 0xd2, 0x48, 0x83,
+    0xc4, 0x40, 0x41, 0x5f, 0x41, 0x5e, 0x41, 0x5d, 0x41, 0x5c, 0x5f, 0x5e, 0x5b, 0xc3,
+];
 const WINDOWS_KERNEL32_MODULE_TOKEN: u64 = STUB_BASE + 0x8f000;
 const WINDOWS_NTDLL_MODULE_TOKEN: u64 = STUB_BASE + 0x8f180;
 const WINDOWS_STANDARD_INPUT_TOKEN: u64 = STUB_BASE + 0x8f100;
@@ -208,7 +226,10 @@ const MAX_ITERATE_PIXELS: i64 = 16_777_216;
 // whole run, which is prohibitively expensive for image kernels. The wall-clock
 // timeout and return-sentinel check still bound and validate guest execution.
 const MAX_INSTRUCTIONS: usize = 0;
-const TIMEOUT_MICROSECONDS: u64 = 600_000_000;
+// A plug-in call that cannot finish inside an interactive frame budget must
+// fail with a bounded crash snapshot instead of stalling the host or a corpus
+// sweep for minutes. This covers loader callbacks and effect selectors alike.
+const TIMEOUT_MICROSECONDS: u64 = 20_000_000;
 const MAX_TRACE_EVENTS: usize = 50_000;
 const MAX_TRACE_BASIC_BLOCKS: usize = 50_000;
 const MAX_TRACE_BRANCH_EDGES: usize = 100_000;
@@ -229,6 +250,7 @@ const MAX_AVX_FALLBACK_INSTRUCTIONS: u64 = 1_000_000;
 // when a smaller executable section contains dense or false-positive decodes.
 const MAX_SPARSE_AVX_STATE_SYNC_HOOKS: usize = 4_096;
 const MAX_AVX_STATE_SYNC_POINTS: usize = 512 * 1_024;
+const MAX_RUNTIME_AVX_STATE_SYNC_POINTS: usize = 2 * 1_024 * 1_024;
 const MAX_VCOMP_REQUESTED_THREADS: i32 = 1_024;
 const MAX_CRT_MEMORY_COPY_BYTES: u64 = 128 * 1024 * 1024;
 const CRT_MEMORY_COPY_CHUNK: usize = 64 * 1024;
@@ -239,7 +261,9 @@ const MAX_CRT_STDIO_ARGUMENTS: usize = 32;
 const MAX_CRT_INITIALIZERS: usize = 4096;
 const MAX_CRT_ONEXIT_TABLES: usize = 64;
 const WINDOWS_CRITICAL_SECTION_BYTES: usize = 40;
-const MAX_WINDOWS_CRITICAL_SECTIONS: usize = 256;
+// Shared across the primary image and every loaded runtime DLL. Real DLL
+// sets keep hundreds of startup locks alive; retain a finite resource bound.
+const MAX_WINDOWS_CRITICAL_SECTIONS: usize = 4096;
 const MAX_WINDOWS_CRITICAL_SECTION_RECURSION: u32 = 1024;
 const MAX_WINDOWS_SRW_LOCKS: usize = 256;
 const MAX_WINDOWS_SRW_WAITERS: usize = MAX_WINDOWS_THREADS;
@@ -433,6 +457,7 @@ include!("x64/types.rs");
 include!("x64/imports.rs");
 include!("x64/opencl_imports.rs");
 include!("x64/engine.rs");
+include!("x64/libraries.rs");
 include!("x64/callbacks.rs");
 include!("x64/iterate_and_suites.rs");
 include!("x64/tail.rs");
@@ -448,3 +473,21 @@ mod tests {
     include!("x64/tests_issue1077.rs");
     include!("x64/tests_gpu.rs");
 }
+
+include!("x64/lockit.rs");
+
+include!("x64/import_data.rs");
+
+include!("x64/environment.rs");
+
+include!("x64/files.rs");
+
+include!("x64/mutex.rs");
+
+include!("x64/sid.rs");
+
+include!("x64/acl.rs");
+include!("x64/network.rs");
+
+include!("x64/printf.rs");
+include!("x64/windows_files.rs");
