@@ -457,6 +457,28 @@ fn install_roundf_import(
     Ok(())
 }
 
+fn install_floorf_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    // The hot import branches into translated guest code. Its subnormal guard
+    // preserves floorf semantics when the caller enables MXCSR.DAZ.
+    let displacement = i32::try_from(GUEST_FLOORF as i64 - address as i64 - 5)
+        .map_err(|_| GuestError::StubCapacity)?;
+    let mut jump = [0u8; 5];
+    jump[0] = 0xe9;
+    jump[1..].copy_from_slice(&displacement.to_le_bytes());
+    uc(
+        "write translated floorf routine",
+        unicorn.mem_write(GUEST_FLOORF, GUEST_FLOORF_CODE),
+    )?;
+    uc(
+        "branch to translated floorf",
+        unicorn.mem_write(address, &jump),
+    )?;
+    Ok(())
+}
+
 fn deterministic_import_i32(name: &str) -> Option<i32> {
     match name {
         // The emulator is deliberately single-threaded. Returning one keeps

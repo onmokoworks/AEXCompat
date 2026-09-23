@@ -129,6 +129,16 @@ const HOST_REGISTER_UI: u64 = STUB_BASE + 0x80590;
 const HOST_CREATE_THREAD_CONTINUE: u64 = STUB_BASE + 0x80580;
 const HOST_ITERATE_ROW_TRAMPOLINE: u64 = STUB_BASE + 0x80700;
 const GUEST_ROUNDF: u64 = STUB_BASE + 0x80800;
+const GUEST_FLOORF: u64 = STUB_BASE + 0x80880;
+// Win64 floorf(float): handle negative subnormals explicitly before ROUNDSS.
+// DAZ would otherwise treat them as -0 and lose the required -1 result.
+// The 44-byte RIP-relative block has no relocations and preserves MXCSR and
+// XMM0's upper lanes.
+const GUEST_FLOORF_CODE: &[u8] = &[
+    0x66, 0x0f, 0x7e, 0xc0, 0x3d, 0x00, 0x00, 0x00, 0x80, 0x76, 0x14, 0x3d, 0x00, 0x00, 0x80, 0x80,
+    0x73, 0x0d, 0xf3, 0x0f, 0x10, 0x0d, 0x0e, 0x00, 0x00, 0x00, 0xf3, 0x0f, 0x10, 0xc1, 0xc3, 0x66,
+    0x0f, 0x3a, 0x0a, 0xc0, 0x09, 0xc3, 0x66, 0x90, 0x00, 0x00, 0x80, 0xbf,
+];
 // Win64 roundf(float): add the largest f32 below 0.5 with the input's sign,
 // then truncate. This gives ties-away-from-zero without host callbacks, while
 // avoiding a premature carry for the float immediately below a half integer.
