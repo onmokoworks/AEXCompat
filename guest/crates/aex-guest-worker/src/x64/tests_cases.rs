@@ -658,9 +658,20 @@ fn effect_ui_suite_v1_acquires_one_callable_slot_and_keeps_name_per_engine() {
     engine.read(HOST_EFFECT_UI_SUITE_V1, &mut pointer).unwrap();
     let callback = u64::from_le_bytes(pointer);
     assert_eq!(callback, HOST_SET_OPTIONS_BUTTON_NAME);
-    assert_eq!(engine.call_win64(callback, [1, button_name, 0, 0, 0, 0]).unwrap(), 0);
-    assert_eq!(engine.unicorn.get_data().options_button_name.as_deref(), Some(&b"Signal Options"[..]));
-    assert_eq!(test_engine(&[0xc3]).unicorn.get_data().options_button_name, None);
+    assert_eq!(
+        engine
+            .call_win64(callback, [1, button_name, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.unicorn.get_data().options_button_name.as_deref(),
+        Some(&b"Signal Options"[..])
+    );
+    assert_eq!(
+        test_engine(&[0xc3]).unicorn.get_data().options_button_name,
+        None
+    );
 }
 
 #[test]
@@ -670,14 +681,21 @@ fn effect_ui_button_name_rejects_bad_ref_pointer_and_unterminated_text() {
     engine.write(name, b"Options\0").unwrap();
     for (effect_ref, pointer) in [(0, name), (2, name), (1, 0), (1, DATA_BASE + DATA_SIZE - 1)] {
         assert_eq!(
-            engine.call_win64(HOST_SET_OPTIONS_BUTTON_NAME, [effect_ref, pointer, 0, 0, 0, 0]).unwrap(),
+            engine
+                .call_win64(
+                    HOST_SET_OPTIONS_BUTTON_NAME,
+                    [effect_ref, pointer, 0, 0, 0, 0]
+                )
+                .unwrap(),
             4
         );
         assert_eq!(engine.unicorn.get_data().options_button_name, None);
     }
     engine.write(name, &[b'A'; 256]).unwrap();
     assert_eq!(
-        engine.call_win64(HOST_SET_OPTIONS_BUTTON_NAME, [1, name, 0, 0, 0, 0]).unwrap(),
+        engine
+            .call_win64(HOST_SET_OPTIONS_BUTTON_NAME, [1, name, 0, 0, 0, 0])
+            .unwrap(),
         4
     );
     assert_eq!(engine.unicorn.get_data().options_button_name, None);
