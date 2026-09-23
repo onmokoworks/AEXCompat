@@ -168,7 +168,10 @@ jobs:
         with:
           rust-workspaces: broker
           cache-key: broker-nextest-archive
-          save-cache: 'false'
+          # PRs only restore; trusted main pushes seed this job's isolated target cache.
+          # Do not reuse the nextest archive itself across revisions: broker/build.rs
+          # embeds the current Git revision in the test binaries.
+          save-cache: ${{ github.event_name == 'push' }}
       - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
         with:
           tool: cargo-nextest@0.9.143
