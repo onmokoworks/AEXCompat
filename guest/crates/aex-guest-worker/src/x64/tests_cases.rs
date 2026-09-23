@@ -2729,6 +2729,39 @@ fn avx_fallback_rejects_undefined_extract_and_unbounded_blend_width() {
 }
 
 #[test]
+fn avx_sync_discovery_rewinds_decoder_between_candidates() {
+    const CODE: u64 = 0x1000_0000;
+    let code = [
+        0x90, // nop
+        0xc5, 0xf9, 0xef, 0xc0, // vpxor xmm0,xmm0,xmm0
+        0x90, // nop
+        0xc5, 0xf8, 0x77, // vzeroupper
+        0x90, // nop
+        0xc5, 0xf1, 0xef, 0xc9, // vpxor xmm1,xmm1,xmm1
+        0xc3, // ret
+    ];
+    assert_eq!(
+        discover_avx_state_sync_points(&code, CODE).unwrap(),
+        vec![
+            (CODE + 1, AvxStateSync::RegisterUpper(0)),
+            (CODE + 6, AvxStateSync::AllUpper),
+            (CODE + 10, AvxStateSync::RegisterUpper(1)),
+        ]
+    );
+
+    // The second prefix sits inside the first instruction's displacement.
+    // Decoding it requires moving the shared decoder back from offset 8 to 4.
+    let overlapping_candidates = [0xc5, 0xf9, 0x6f, 0x05, 0xc5, 0xf8, 0x77, 0x00];
+    assert_eq!(
+        discover_avx_state_sync_points(&overlapping_candidates, CODE).unwrap(),
+        vec![
+            (CODE, AvxStateSync::RegisterUpper(0)),
+            (CODE + 4, AvxStateSync::AllUpper),
+        ]
+    );
+}
+
+#[test]
 fn avx_state_sync_hook_count_is_bounded() {
     const CODE: u64 = 0x1000_0000;
     let mut code = Vec::with_capacity((MAX_AVX_STATE_SYNC_POINTS + 1) * 4);
