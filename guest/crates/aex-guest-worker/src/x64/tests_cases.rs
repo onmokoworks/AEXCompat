@@ -2808,7 +2808,7 @@ fn avx_state_sync_hook_count_is_bounded() {
 }
 
 #[test]
-fn avx_state_sync_accepts_the_exact_hard_limit_with_one_dense_hook() {
+fn avx_state_sync_accepts_the_exact_hard_limit_with_translator_sync() {
     const CODE: u64 = 0x1000_0000;
     let mut engine = test_engine(&[0xc3]);
     let points = (0..MAX_AVX_STATE_SYNC_POINTS)

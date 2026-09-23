@@ -1708,26 +1708,11 @@ fn install_avx_state_sync_points(
             )?;
         }
     } else {
-        let first = *unique.keys().min().ok_or_else(|| {
-            GuestError::Callback("dense AVX state sync map is unexpectedly empty".into())
-        })?;
-        let last = *unique.keys().max().ok_or_else(|| {
-            GuestError::Callback("dense AVX state sync map is unexpectedly empty".into())
-        })?;
+        // A range code hook calls back into Rust on every instruction between
+        // the first and last candidate. Dense plug-ins spend most of their
+        // render time in that dispatch; let the translator handle exact points.
         unicorn.get_data_mut().avx_state_sync_points = unique;
-        uc(
-            "install dense native AVX state sync",
-            unicorn.add_code_hook(first, last, |unicorn, address, _| {
-                let sync = unicorn
-                    .get_data()
-                    .avx_state_sync_points
-                    .get(&address)
-                    .copied();
-                if let Some(sync) = sync {
-                    synchronize_native_avx_state(unicorn, sync);
-                }
-            }),
-        )?;
+        install_translated_avx_state_sync(unicorn)?;
     }
     Ok(())
 }
