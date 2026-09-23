@@ -3238,11 +3238,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // this run": `render_contract.rs` turns a false into classification
   // `unsupported_pixel_depth` and drops the selector error with it, and
   // `run-conformance-bundle.py` calls the run "unsupported" (there a
-  // meaningful selector error still wins). A session that narrowed the
-  // plug-in's worlds and rendered did not refuse anything, so it reports what
-  // it did: served the depth. What the plug-in advertised and what it was
-  // actually dispatched at are recorded beside it, which is where a reader
-  // looks for the narrowing.
+  // meaningful selector error still wins). A session that dispatched the
+  // plug-in at another depth and rendered did not refuse anything, so it
+  // reports what it did: served the depth. What the plug-in advertised and
+  // what it was actually dispatched at are recorded beside it, which is where
+  // a reader looks for the conversion.
   classic_inputs.depth_supported =
       invocation.render_session_mode ? session_depth_ok : depth_supported;
   classic_inputs.advertised_depth_supported = depth_supported;
@@ -3333,11 +3333,11 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   // this run": `render_contract.rs` turns a false into classification
   // `unsupported_pixel_depth` and drops the selector error with it, and
   // `run-conformance-bundle.py` calls the run "unsupported" (there a
-  // meaningful selector error still wins). A session that narrowed the
-  // plug-in's worlds and rendered did not refuse anything, so it reports what
-  // it did: served the depth. What the plug-in advertised and what it was
-  // actually dispatched at are recorded beside it, which is where a reader
-  // looks for the narrowing.
+  // meaningful selector error still wins). A session that dispatched the
+  // plug-in at another depth and rendered did not refuse anything, so it
+  // reports what it did: served the depth. What the plug-in advertised and
+  // what it was actually dispatched at are recorded beside it, which is where
+  // a reader looks for the conversion.
   smart_inputs.depth_supported =
       invocation.render_session_mode ? session_depth_ok : depth_supported;
   smart_inputs.advertised_depth_supported = depth_supported;

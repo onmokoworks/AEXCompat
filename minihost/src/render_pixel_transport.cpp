@@ -208,8 +208,9 @@ int32_t conform_pixel_depth(std::vector<unsigned char>& captured,
   if (captured.size() % pixels != 0) return 0;
   const std::size_t stride = captured.size() / pixels;
   // Only the depth this frame was dispatched at, or the float32 the GPU
-  // negotiation transport plans from the session's depth and keeps regardless
-  // (#1072). Any other stride is malformed output.
+  // negotiation transport hands the plug-in whatever was dispatched when it is
+  // entered by a gpu_*_float32 case_id or by force_gpu_retry (#1072). Any
+  // other stride is malformed output.
   if (stride != static_cast<std::size_t>(dispatched_pixel_bytes) && stride != 16)
     return 0;
   const auto captured_pixel_bytes = static_cast<int32_t>(stride);
@@ -255,8 +256,9 @@ bool verify_pixel_depth_conform() {
         return false;
       }
       // The float32 the GPU negotiation transport captures is admitted
-      // whatever was dispatched, because that transport plans its worlds from
-      // the session's depth rather than the dispatched one (#1072).
+      // whatever was dispatched, because its case_id and retry entries hand
+      // the plug-in float32 worlds without looking at the dispatched depth
+      // (#1072).
       if (from == 16) {
         std::vector<unsigned char> gpu = frame;
         if (conform_pixel_depth(gpu, 2, to, to) != 16) return false;

@@ -32,7 +32,8 @@ struct RenderSessionOutcome {
   /// dispatched at, #1072). Before any frame
   /// completes it holds the depth the session decided to dispatch at. The
   /// session slot stays at the session's own depth either way; this is
-  /// recorded so a run that narrowed says so, rather than being inferred from
+  /// recorded so a run dispatched at another depth says so, rather than being
+  /// inferred from
   /// a flag a later selector may have rewritten.
   int32_t dispatch_pixel_bytes{4};
   std::string input_hash;

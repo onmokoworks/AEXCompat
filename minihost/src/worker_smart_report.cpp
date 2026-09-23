@@ -78,8 +78,8 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
   report::ReportSnapshot report_snapshot(std::cout);
   const auto& host_telemetry = aexcompat::worker_runtime::smart::host_telemetry();
   // In a session the caller receives the slot, not the plug-in's own world: a
-  // plug-in dispatched shallower than the session renders into a narrow world
-  // that the frame loop widens into the slot before anyone sees it. The final
+  // plug-in dispatched at another depth than the session renders into a world
+  // that the frame loop converts into the slot before anyone sees it. The final
   // report has to describe the same frame the per-frame message described.
   const int32_t world_pixel_bytes = smart.runtime->pixel_format == "argb32f" ? 16 :
       (smart.runtime->pixel_format == "argb16" ? 8 : 4);

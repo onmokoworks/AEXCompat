@@ -396,7 +396,8 @@ smart の 16 bpc session で `dispatch_pixel_bytes == 16` を確かめるテス�
 
 - 新しい e2e テスト 2 本を `tests/built_artifact_tests.txt` に登録した。
 - **訂正 (§2)**: GPU negotiation transport が「world を session の depth から
-  plan する」は不正確だった。case_id (`-opencl` / `-directx`) と frame loop の
+  plan する」は不正確だった。case_id (`gpu_opencl_float32` / `gpu_directx_float32`、
+  32 bpc の `--smart-session32-opencl-v1` / `-directx-v1` だけが持つ) と frame loop の
   `force_gpu_retry` で入る経路は dispatch depth と無関係に float32 world を渡す。
   自動判定 (`worker_smart_setup.cpp` の `external_pixel_bytes == 16 &&
   advertised_gpu_support`) は dispatch 後の depth を見る。§3 の GPU の項の方が正しい。
@@ -404,8 +405,11 @@ smart の 16 bpc session で `dispatch_pixel_bytes == 16` を確かめるテス�
   advertise し `SUPPORTS_GPU_RENDER_F32` も advertise する SmartFX は、16 bpc
   session でも 1 回目の attempt から GPU negotiation に入る。DEEP も advertise する
   plug-in は 16 bpc では 8 bytes で dispatch されるので CPU のまま。GPU context が
-  立たない機械では frame が落ちる。32 bpc session での扱いと同じなので main に
-  対する regression ではないが、AE がこの組み合わせで GPU を使うかは確認していない。
+  立たない機械では frame が落ちる。main ではこの組み合わせは 16 bpc session ごと
+  拒否されていたので regression ではない (扱いは 32 bpc session と同じ) が、AE が
+  この組み合わせで GPU を使うかは確認していない。16 bpc には
+  `--smart-session32-cpu-v1` に当たる CPU 固定のコマンドが無いので、GPU の無い
+  機械では caller がこの経路を避ける手段も無い。
   KO_Foil は GPU F32 を advertise していないので §4.1 の計測には影響しない。
   追従は #1538 に追記した。
 - 「narrow して広げる」前提で書かれていた worker 側のコメント

@@ -1282,8 +1282,8 @@ void run_session_frame_loop(
     // what AE does around the same call rather than refusing the effect. The source
     // depth is read off the captured buffer rather than recomputed so a route
     // that captures at a depth of its own (the GPU negotiation transport,
-    // whose float32 worlds are planned from the session's depth) conforms
-    // through the same step.
+    // whose case_id and retry entries hand out float32 worlds whatever was
+    // dispatched) conforms through the same step.
     const int32_t captured_pixel_bytes =
         aexcompat::render_pixel_transport::conform_pixel_depth(
             captured, expected_pixels, pixel_bytes, dispatch_bytes);
@@ -1313,8 +1313,8 @@ void run_session_frame_loop(
     outcome.rowbytes = reported_rowbytes;
     // What the plug-in actually rendered at, read off the frame it produced
     // rather than from the session's decision: the GPU negotiation transport
-    // (#1072) hands it float32 worlds planned from the session's depth
-    // whatever was dispatched, and this field is provenance - it says what
+    // (#1072) can hand it float32 worlds whatever was dispatched, and this
+    // field is provenance - it says what
     // ran, not what was planned.
     outcome.dispatch_pixel_bytes = captured_pixel_bytes;
     // Shrink, or an expand that still fits the launch output slot, is written

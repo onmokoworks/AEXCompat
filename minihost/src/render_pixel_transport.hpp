@@ -43,8 +43,10 @@ bool verify_argb32f_depth_conversion();
 /// `dispatched_pixel_bytes`, the depth the plug-in was handed its worlds at
 /// (`effect_bootstrap::dispatch_pixel_bytes`), and 16, because the GPU
 /// negotiation transport (#1072) hands the plug-in float32 worlds whatever
-/// depth was dispatched when it is entered by a case_id (`-opencl`,
-/// `-directx`) or by the frame loop's `force_gpu_retry` - a 32-bpc OpenCL
+/// depth was dispatched when it is entered by a case_id
+/// (`gpu_opencl_float32` / `gpu_directx_float32`, which only the 32-bpc
+/// `--smart-session32-opencl-v1` / `-directx-v1` commands carry) or by the
+/// frame loop's `force_gpu_retry` - a 32-bpc OpenCL
 /// session against a plug-in narrowed to 8 bits captures at 16. (Its automatic
 /// entry looks at the dispatched depth, so that one only arrives at 16 when 16
 /// was dispatched.)

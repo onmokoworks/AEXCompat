@@ -182,7 +182,7 @@ struct SmartReport {
     /// What the plug-in advertised, and what it was actually dispatched
     /// at. `depth_supported` above says whether the run served the
     /// caller's depth; these two say how, and differ when a session
-    /// narrowed the plug-in's worlds.
+    /// dispatched the plug-in at another depth.
     bool advertised_depth_supported{};
     int32_t dispatch_pixel_bytes{4};
     std::array<int64_t, 6> selector_errors{};
@@ -348,7 +348,7 @@ struct ClassicEmission {
   /// What the plug-in advertised, and what it was actually dispatched
   /// at. `depth_supported` above says whether the run served the
   /// caller's depth; these two say how, and differ when a session
-  /// narrowed the plug-in's worlds.
+  /// dispatched the plug-in at another depth.
   bool advertised_depth_supported{};
   int32_t dispatch_pixel_bytes{4};
   int32_t render_error{};
