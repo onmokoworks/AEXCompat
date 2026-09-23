@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: windows-clean-clone-${{ github.ref }}
@@ -224,11 +225,10 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # native成果物を読まないRust testsは共有archiveの到着直後に実行する。
+  # archiveを待つ間にconsumer側の環境を準備し、到着後すぐに実行する。
   rust-test-independent:
     runs-on: windows-latest
-    timeout-minutes: 60
-    needs: [rust-test-archive]
+    timeout-minutes: 90
     env:
       PYTHONUTF8: "1"
       AEXCOMPAT_CARGO_PROFILE: debug
@@ -243,6 +243,10 @@ jobs:
       - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
         with:
           tool: cargo-nextest@0.9.143
+      - name: Wait for this run's shared Rust test archive
+        run: python tools/wait-for-workflow-artifact.py broker-nextest-archive rust-test-archive
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Download the shared Rust test archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -252,13 +256,13 @@ jobs:
       - name: Test native-independent Rust partition
         run: uv run python tools/run-broker-rust-tests.py independent
 
-  # native worker/probeを実行するRust targetsだけを成果物の後で走らせる。
+  # native worker/probeを実行するRust targetsはnative成果物の後で走らせる。
   # runnerはnocapture出力のskipをfailにするため、成果物欠如をcoverageと
   # 取り違えない。残りは専用のrust-test-independent jobで並行実行する。
   rust-test:
     runs-on: windows-latest
-    timeout-minutes: 60
-    needs: [rust-test-archive, native-workers, native-probes]
+    timeout-minutes: 90
+    needs: [native-workers, native-probes]
     env:
       PYTHONUTF8: "1"
       AEXCOMPAT_CARGO_PROFILE: debug
@@ -273,12 +277,6 @@ jobs:
       - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
         with:
           tool: cargo-nextest@0.9.143
-      - name: Download the shared Rust test archive
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: broker-nextest-archive
-          path: broker/target
-
       - name: Download native workers
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -290,6 +288,15 @@ jobs:
           pattern: native-probes-*
           path: target
           merge-multiple: true
+      - name: Wait for this run's shared Rust test archive
+        run: python tools/wait-for-workflow-artifact.py broker-nextest-archive rust-test-archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Download the shared Rust test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: broker-nextest-archive
+          path: broker/target
 
       - name: Test native-dependent Rust partition
         run: uv run python tools/run-broker-rust-tests.py native
