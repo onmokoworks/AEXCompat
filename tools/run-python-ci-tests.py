@@ -27,6 +27,7 @@ AEGP_RENDER_OPTIONS_LIFECYCLE_NODE = (
 PF_ADV_TIME_RELEASE_BUILD_NODE = (
     "tests/test_pf_adv_time_probe.py::test_pf_adv_time_probe_release_build"
 )
+ARTIFACT_MARKERS = "built_artifact or sdk_required or local_artifact"
 
 
 def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
@@ -38,7 +39,7 @@ def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
             CLASSIC_FAILURE_EVIDENCE_NODE,
             "--run-built-artifact-tests",
         ]
-    if partition != "main":
+    if partition not in ("early", "main"):
         raise ValueError(f"unknown Python CI partition: {partition}")
 
     arguments = common + [
@@ -48,7 +49,11 @@ def pytest_arguments(partition: str, *, sdk_ready: bool) -> list[str]:
         "worksteal",
         "--durations=25",
     ]
-    if sdk_ready:
+    if partition == "early":
+        arguments += ["-m", f"not ({ARTIFACT_MARKERS})"]
+    else:
+        arguments += ["-m", ARTIFACT_MARKERS]
+    if partition == "main" and sdk_ready:
         arguments += [
             "--run-sdk-tests",
             "--run-built-artifact-tests",
@@ -90,7 +95,7 @@ def run_partition(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("partition", choices=("main", "classic-evidence"))
+    parser.add_argument("partition", choices=("early", "main", "classic-evidence"))
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
