@@ -782,6 +782,108 @@ fn pf_app_suite_v6_rejects_bad_outputs_and_reports_unsupported_slots() {
 }
 
 #[test]
+fn persistent_data_v3_tracks_long_and_string_keys_per_engine() {
+    let mut engine = test_engine(&[0xc3]);
+    let name = DATA_BASE + 0x100;
+    let table_output = DATA_BASE + 0x200;
+    let handle_output = DATA_BASE + 0x300;
+    let section = DATA_BASE + 0x400;
+    let key = DATA_BASE + 0x500;
+    let value = DATA_BASE + 0x600;
+    let exists = DATA_BASE + 0x700;
+    engine.write(name, b"AEGP Persistent Data Suite\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(HOST_ACQUIRE_SUITE, [name, 3, table_output, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut pointer = [0u8; 8];
+    engine.read(table_output, &mut pointer).unwrap();
+    assert_eq!(u64::from_le_bytes(pointer), HOST_PERSISTENT_DATA_SUITE_V3);
+    let mut table = [0u8; 18 * 8];
+    engine
+        .read(HOST_PERSISTENT_DATA_SUITE_V3, &mut table)
+        .unwrap();
+    let callbacks = table
+        .chunks_exact(8)
+        .map(|bytes| u64::from_le_bytes(bytes.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(callbacks, HOST_PERSISTENT_DATA_CALLBACKS_V3);
+    assert_eq!(
+        engine
+            .call_win64(callbacks[0], [handle_output, 0, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine.read(handle_output, &mut pointer).unwrap();
+    let handle = u64::from_le_bytes(pointer);
+    assert_eq!(handle, HOST_PERSISTENT_BLOB_TOKEN);
+    engine.write(section, b"signal\0").unwrap();
+    engine.write(key, b"setting\0").unwrap();
+    engine.write(value, b"value\0").unwrap();
+    assert_eq!(
+        engine
+            .call_win64(callbacks[3], [handle, section, key, exists, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut present = [1u8];
+    engine.read(exists, &mut present).unwrap();
+    assert_eq!(present, [0]);
+    assert_eq!(
+        engine
+            .call_win64(callbacks[14], [handle, section, key, 42, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine
+            .call_win64(callbacks[3], [handle, section, key, exists, 0, 0])
+            .unwrap(),
+        0
+    );
+    engine.read(exists, &mut present).unwrap();
+    assert_eq!(present, [1]);
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .persistent_longs
+            .get(&(b"signal".to_vec(), b"setting".to_vec())),
+        Some(&42)
+    );
+    assert_eq!(
+        engine
+            .call_win64(callbacks[13], [handle, section, key, value, 0, 0])
+            .unwrap(),
+        0
+    );
+    assert!(engine.unicorn.get_data().persistent_longs.is_empty());
+    assert_eq!(
+        engine
+            .unicorn
+            .get_data()
+            .persistent_strings
+            .get(&(b"signal".to_vec(), b"setting".to_vec())),
+        Some(&b"value".to_vec())
+    );
+    assert_eq!(
+        engine
+            .call_win64(callbacks[3], [handle + 8, section, key, exists, 0, 0])
+            .unwrap(),
+        3
+    );
+    assert!(
+        test_engine(&[0xc3])
+            .unicorn
+            .get_data()
+            .persistent_strings
+            .is_empty()
+    );
+}
+
+#[test]
 fn pf_ansi_suite_v2_matches_the_windows_slot_layout() {
     let mut engine = test_engine(&[0xc3]);
     let name = DATA_BASE + 0x100;

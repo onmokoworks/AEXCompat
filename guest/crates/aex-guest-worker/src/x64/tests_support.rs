@@ -363,6 +363,7 @@ fn test_engine(code: &[u8]) -> GuestEngine<'static> {
     install_pf_ansi_suite_v2(&mut unicorn).unwrap();
     install_effect_ui_suite_v1(&mut unicorn).unwrap();
     install_pf_app_suite_v6(&mut unicorn).unwrap();
+    install_persistent_data_suite_v3(&mut unicorn).unwrap();
     install_gpu_device_suite(&mut unicorn).unwrap();
     install_windows_condition_variable_callbacks(&mut unicorn).unwrap();
     install_dynamic_windows_import_callbacks(&mut unicorn).unwrap();
@@ -21498,6 +21499,55 @@ fn create_directory_tracks_parents_duplicates_and_acl_snapshot() {
 }
 
 #[test]
+fn create_directory_w_resolves_guest_root_and_rejects_mounted_parent() {
+    const CREATE: u64 = STUB_BASE + 0x418;
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(
+        &mut engine.unicorn,
+        CREATE,
+        "kernel32.dll",
+        "CreateDirectoryW",
+    )
+    .unwrap();
+    let path = DATA_BASE + 0x900;
+    let write_path = |engine: &mut GuestEngine<'static>, text: &str| {
+        let encoded = text
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        engine.write(path, &encoded).unwrap();
+    };
+    write_path(&mut engine, "\\");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
+    write_path(&mut engine, "\\aescripts\\");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 1);
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .guest_files
+            .directories
+            .contains("c:/aescripts")
+    );
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 183);
+    write_path(&mut engine, "\\aescripts\\child");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 1);
+    write_path(&mut engine, "\\missing\\child");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 3);
+    engine.unicorn.get_data_mut().guest_files.sources.insert(
+        "c:/mounted/asset.bin".into(),
+        std::path::PathBuf::from("/tmp/guest-mounted-asset"),
+    );
+    write_path(&mut engine, "C:\\mounted\\child");
+    assert_eq!(engine.call_win64(CREATE, [path, 0, 0, 0, 0, 0]).unwrap(), 0);
+    assert_eq!(engine.unicorn.get_data().windows_last_error, 5);
+}
+
+#[test]
 fn create_directory_failures_do_not_publish_objects() {
     const CREATE: u64 = STUB_BASE + 0x410;
     for case in 0..4 {
@@ -23012,6 +23062,80 @@ fn adapter_import_size_query_short_buffer_and_metadata_output() {
     );
     assert!(matches!(
         dispatch_win64_import("foreign.dll", "GetAdaptersAddresses"),
+        Win64ImportDispatch::UnsupportedLegacyImport
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn adapter_info_import_reports_real_ipv4_metadata_with_win64_layout() {
+    const CALL: u64 = STUB_BASE + 0x418;
+    let adapters = native_windows_adapters().unwrap();
+    let ipv4 = adapters
+        .iter()
+        .filter(|adapter| adapter.ipv4)
+        .collect::<Vec<_>>();
+    let mut engine = test_engine(&[0xc3]);
+    install_win64_import(&mut engine.unicorn, CALL, "iphlpapi.dll", "GetAdaptersInfo").unwrap();
+    let size_pointer = DATA_BASE + 0x100;
+    engine.write(size_pointer, &0u32.to_le_bytes()).unwrap();
+    let first = engine
+        .call_win64(CALL, [0, size_pointer, 0, 0, 0, 0])
+        .unwrap();
+    if ipv4.is_empty() {
+        assert_eq!(first, 232);
+        return;
+    }
+    assert_eq!(first, 111);
+    let mut size = [0u8; 4];
+    engine.read(size_pointer, &mut size).unwrap();
+    let required = u32::from_le_bytes(size);
+    assert_eq!(required as usize, ipv4.len() * 664);
+    let output = allocate_crt_region(&mut engine.unicorn, required as u64).unwrap();
+    engine.write(output, &[0x55; 8]).unwrap();
+    engine
+        .write(size_pointer, &(required - 1).to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CALL, [output, size_pointer, 0, 0, 0, 0])
+            .unwrap(),
+        111
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(output, 8).unwrap(),
+        [0x55; 8]
+    );
+    engine.write(size_pointer, &required.to_le_bytes()).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(CALL, [output, size_pointer, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let first_row = engine.unicorn.mem_read_as_vec(output, 664).unwrap();
+    assert_eq!(
+        &first_row[12..12 + ipv4[0].name.len()],
+        ipv4[0].name.as_bytes()
+    );
+    assert_eq!(
+        u32::from_le_bytes(first_row[404..408].try_into().unwrap()) as usize,
+        ipv4[0].physical_address.len()
+    );
+    assert_eq!(
+        &first_row[408..408 + ipv4[0].physical_address.len()],
+        ipv4[0].physical_address
+    );
+    assert_eq!(
+        u32::from_le_bytes(first_row[416..420].try_into().unwrap()),
+        ipv4[0].index
+    );
+    assert_eq!(
+        u32::from_le_bytes(first_row[424..428].try_into().unwrap()),
+        u32::from(ipv4[0].flags & 4 != 0)
+    );
+    assert!(matches!(
+        dispatch_win64_import("foreign.dll", "GetAdaptersInfo"),
         Win64ImportDispatch::UnsupportedLegacyImport
     ));
 }

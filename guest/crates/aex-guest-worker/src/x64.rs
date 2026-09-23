@@ -237,6 +237,30 @@ const HOST_PF_APP_CALLBACKS_V6: [u64; 11] = [
     STUB_BASE + 0x81b90,
     STUB_BASE + 0x81ba0,
 ];
+const HOST_PERSISTENT_DATA_SUITE_V3: u64 = STUB_BASE + 0x81c00;
+// Opaque, unmapped guest handle. A callback accepts it only after this engine
+// returned it through GetApplicationBlob.
+const HOST_PERSISTENT_BLOB_TOKEN: u64 = DATA_BASE + DATA_SIZE + 0x1000;
+const HOST_PERSISTENT_DATA_CALLBACKS_V3: [u64; 18] = [
+    STUB_BASE + 0x81d00,
+    STUB_BASE + 0x81d10,
+    STUB_BASE + 0x81d20,
+    STUB_BASE + 0x81d30,
+    STUB_BASE + 0x81d40,
+    STUB_BASE + 0x81d50,
+    STUB_BASE + 0x81d60,
+    STUB_BASE + 0x81d70,
+    STUB_BASE + 0x81d80,
+    STUB_BASE + 0x81d90,
+    STUB_BASE + 0x81da0,
+    STUB_BASE + 0x81db0,
+    STUB_BASE + 0x81dc0,
+    STUB_BASE + 0x81dd0,
+    STUB_BASE + 0x81de0,
+    STUB_BASE + 0x81df0,
+    STUB_BASE + 0x81e00,
+    STUB_BASE + 0x81e10,
+];
 const HOST_AEGP_UTILITY_TABLES: u64 = STUB_BASE + 0x82000;
 const HOST_AEGP_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x83000;
 const HOST_ITERATE8_UNSUPPORTED_STUBS: u64 = STUB_BASE + 0x88000;

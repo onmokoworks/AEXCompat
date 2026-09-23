@@ -88,6 +88,7 @@ enum LegacyWin64Import {
     IsValidAcl,
     InitializeAcl,
     CreateDirectoryA,
+    CreateDirectoryW,
     AreFileApisAnsi,
     GlobalMemoryStatusEx,
     InitOnceBeginInitialize,
@@ -97,6 +98,7 @@ enum LegacyWin64Import {
     Errno,
     GetHostByName,
     GetAdaptersAddresses,
+    GetAdaptersInfo,
     ExitThread,
     CoCreateInstance,
     CoInitializeSecurity,
@@ -925,6 +927,8 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         (_, "gethostbyname" | "ORDINAL 52") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("iphlpapi.dll", "GetAdaptersAddresses") => LegacyWin64Import::GetAdaptersAddresses,
         (_, "GetAdaptersAddresses") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("iphlpapi.dll", "GetAdaptersInfo") => LegacyWin64Import::GetAdaptersInfo,
+        (_, "GetAdaptersInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("ws2_32.dll" | "wsock32.dll", "WSAGetLastError" | "ORDINAL 111") => {
             LegacyWin64Import::GetLastError
         }
@@ -1237,6 +1241,10 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             LegacyWin64Import::CreateDirectoryA
         }
         (_, "CreateDirectoryA") => return Win64ImportDispatch::UnsupportedLegacyImport,
+        ("kernel32.dll" | "kernelbase.dll", "CreateDirectoryW") => {
+            LegacyWin64Import::CreateDirectoryW
+        }
+        (_, "CreateDirectoryW") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "IsValidAcl") => LegacyWin64Import::IsValidAcl,
         (_, "IsValidAcl") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("advapi32.dll", "InitializeAcl") => LegacyWin64Import::InitializeAcl,
@@ -2044,7 +2052,20 @@ fn install_win64_import(
                     uc(
                         "install CreateDirectoryA",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
-                            let result = create_guest_directory(unicorn);
+                            let result = create_guest_directory(unicorn, false);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::CreateDirectoryW => {
+                    uc(
+                        "write CreateDirectoryW return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install CreateDirectoryW",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = create_guest_directory(unicorn, true);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;
@@ -3049,6 +3070,19 @@ fn install_win64_import(
                         "install GetAdaptersAddresses",
                         unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
                             let result = guest_get_adapters_addresses(unicorn);
+                            finish_guest_stdio(unicorn, result);
+                        }),
+                    )?;
+                }
+                LegacyWin64Import::GetAdaptersInfo => {
+                    uc(
+                        "write GetAdaptersInfo return",
+                        unicorn.mem_write(stub, &[0xc3]),
+                    )?;
+                    uc(
+                        "install GetAdaptersInfo",
+                        unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                            let result = guest_get_adapters_info(unicorn);
                             finish_guest_stdio(unicorn, result);
                         }),
                     )?;

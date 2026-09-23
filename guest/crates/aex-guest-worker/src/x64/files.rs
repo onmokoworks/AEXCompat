@@ -1284,7 +1284,10 @@ fn emulate_guest_file_search(unicorn: &mut Unicorn<'_, GuestState>, operation: L
 
 const MAX_GUEST_DIRECTORIES: usize = 4096;
 
-fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+fn create_guest_directory(
+    unicorn: &mut Unicorn<'_, GuestState>,
+    wide: bool,
+) -> Result<u64, String> {
     let pointer = read_win64_import_argument(unicorn, 0)?;
     let attributes = read_win64_import_argument(unicorn, 1)?;
     let fail = |unicorn: &mut Unicorn<'_, GuestState>, error| {
@@ -1294,9 +1297,29 @@ fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, 
     if pointer == 0 {
         return fail(unicorn, 87);
     }
-    let bytes = read_crt_stdio_c_string(unicorn, pointer, 260, "CreateDirectoryA path")?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| "unsupported directory path encoding")?;
-    let name = guest_file_name(text)?;
+    let bytes;
+    let wide_text;
+    let text = if wide {
+        wide_text = read_guest_wide_file_string(unicorn, pointer, 260, "CreateDirectoryW path")?;
+        wide_text.as_str()
+    } else {
+        bytes = read_crt_stdio_c_string(unicorn, pointer, 260, "CreateDirectoryA path")?;
+        std::str::from_utf8(&bytes).map_err(|_| "unsupported directory path encoding")?
+    };
+    if text == "\\" || text == "/" {
+        return fail(unicorn, 183);
+    }
+    // A leading separator is rooted on the guest's C: drive. Keep this in
+    // the session-only namespace; never resolve it against the host filesystem.
+    let rooted;
+    let path =
+        if text.starts_with(['\\', '/']) && !text.starts_with("\\\\") && !text.starts_with("//") {
+            rooted = format!("C:{text}");
+            rooted.trim_end_matches(['\\', '/'])
+        } else {
+            text.trim_end_matches(['\\', '/'])
+        };
+    let name = guest_file_name(path)?;
     if name.len() < 4
         || name.as_bytes()[1..3] != *b":/"
         || !name.as_bytes()[0].is_ascii_alphabetic()
@@ -1310,12 +1333,12 @@ fn create_guest_directory(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, 
     if files.directory_exists(&name) || files.sources.contains_key(&name) {
         return fail(unicorn, 183);
     }
-    if !files.directory_exists(parent) {
+    if parent != "c:" && !files.directory_exists(parent) {
         return fail(unicorn, 3);
     }
     // Only session-created directories accept children. Mounted assets remain
     // read-only, including their implicit parent directories.
-    if !files.directories.contains(parent) {
+    if parent != "c:" && !files.directories.contains(parent) {
         return fail(unicorn, 5);
     }
     if files.directories.len() >= MAX_GUEST_DIRECTORIES {

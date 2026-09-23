@@ -322,3 +322,130 @@ fn guest_get_adapters_addresses(unicorn: &mut Unicorn<'_, GuestState>) -> Result
         .map_err(|e| format!("adapter size write: {e}"))?;
     Ok(0)
 }
+
+// Win64 IP_ADAPTER_INFO is 664 bytes; its embedded IP_ADDR_STRING fields are
+// 40 bytes each. Report only IPv4 interfaces observed on the real host.
+#[cfg(target_os = "macos")]
+fn guest_get_adapters_info(unicorn: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    const RECORD_SIZE: usize = 664;
+    let output = read_win64_import_argument(unicorn, 0)?;
+    let size_pointer = read_win64_import_argument(unicorn, 1)?;
+    if size_pointer == 0
+        || !guest_range_has_permission(unicorn, size_pointer, 4, Prot::READ | Prot::WRITE)?
+    {
+        return Ok(87);
+    }
+    let mut size_bytes = [0u8; 4];
+    unicorn
+        .mem_read(size_pointer, &mut size_bytes)
+        .map_err(|e| e.to_string())?;
+    let interfaces = aex_host_identity::adapters::interfaces()?;
+    let adapters = native_windows_adapters()?;
+    let mut rows = Vec::new();
+    for adapter in adapters.iter().filter(|adapter| adapter.ipv4) {
+        let interface = interfaces
+            .iter()
+            .find(|interface| interface.name == adapter.name.as_bytes())
+            .ok_or("adapter identity has no native interface")?;
+        let ipv4: Vec<_> = interface
+            .addresses
+            .iter()
+            .filter(|address| address.family == 2)
+            .collect();
+        if ipv4.len() > 1 {
+            return Err(
+                "GetAdaptersInfo multiple IPv4 addresses per interface are not implemented".into(),
+            );
+        }
+        rows.push((adapter, ipv4.first().copied()));
+    }
+    if rows.is_empty() {
+        return Ok(232);
+    }
+    let required = rows
+        .len()
+        .checked_mul(RECORD_SIZE)
+        .ok_or("adapter size overflow")?;
+    if required > u32::MAX as usize {
+        return Err("adapter size exceeds Win32 ULONG".into());
+    }
+    if output == 0 || (u32::from_le_bytes(size_bytes) as usize) < required {
+        unicorn
+            .mem_write(size_pointer, &(required as u32).to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        return Ok(111);
+    }
+    if !guest_range_has_permission(unicorn, output, required as u64, Prot::WRITE)? {
+        return Ok(87);
+    }
+    let output_end = output
+        .checked_add(required as u64)
+        .ok_or("adapter output overflow")?;
+    if output < size_pointer + 4 && size_pointer < output_end {
+        return Ok(87);
+    }
+    let mut bytes = vec![0u8; required];
+    for (index, (adapter, ipv4)) in rows.into_iter().enumerate() {
+        let at = index * RECORD_SIZE;
+        let put32 = |bytes: &mut [u8], offset: usize, value: u32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        let put64 = |bytes: &mut [u8], offset: usize, value: u64| {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        if index + 1 < required / RECORD_SIZE {
+            put64(&mut bytes, at, output + ((index + 1) * RECORD_SIZE) as u64);
+        }
+        for (offset, capacity, value) in [
+            (12, 260, adapter.name.as_bytes()),
+            (272, 132, adapter.description.as_bytes()),
+        ] {
+            if value.len() >= capacity {
+                return Err("adapter name exceeds Win32 field".into());
+            }
+            bytes[at + offset..at + offset + value.len()].copy_from_slice(value);
+        }
+        if adapter.physical_address.len() > 8 {
+            return Err("adapter physical address exceeds IP_ADAPTER_INFO field".into());
+        }
+        put32(&mut bytes, at + 404, adapter.physical_address.len() as u32);
+        bytes[at + 408..at + 408 + adapter.physical_address.len()]
+            .copy_from_slice(&adapter.physical_address);
+        put32(&mut bytes, at + 416, adapter.index);
+        put32(&mut bytes, at + 420, adapter.kind);
+        put32(&mut bytes, at + 424, u32::from(adapter.flags & 4 != 0));
+        if let Some(address) = ipv4 {
+            if address.sockaddr.len() < 8 {
+                return Err("native IPv4 sockaddr is truncated".into());
+            }
+            let ip = std::net::Ipv4Addr::new(
+                address.sockaddr[4],
+                address.sockaddr[5],
+                address.sockaddr[6],
+                address.sockaddr[7],
+            )
+            .to_string();
+            bytes[at + 448..at + 448 + ip.len()].copy_from_slice(ip.as_bytes());
+            if let Some(mask) = &address.netmask {
+                let octets = (0..4)
+                    .map(|index| mask.get(index + 4).copied().unwrap_or_default())
+                    .collect::<Vec<_>>();
+                let mask =
+                    std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], octets[3]).to_string();
+                bytes[at + 464..at + 464 + mask.len()].copy_from_slice(mask.as_bytes());
+            }
+        }
+    }
+    unicorn
+        .mem_write(output, &bytes)
+        .map_err(|e| e.to_string())?;
+    unicorn
+        .mem_write(size_pointer, &(required as u32).to_le_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn guest_get_adapters_info(_: &mut Unicorn<'_, GuestState>) -> Result<u64, String> {
+    Err("native GetAdaptersInfo translation is not implemented on this host".into())
+}
