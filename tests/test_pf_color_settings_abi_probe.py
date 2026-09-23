@@ -44,10 +44,10 @@ def test_color_settings_suite6_compiles_against_sdk_and_records_all_slots():
     assert [entry["offset"] for entry in suite["members"].values()] == list(range(0, 160, 8))
     assert all(entry["size"] == 8 for entry in suite["members"].values())
     assert all(entry["type_matches"] for entry in suite["members"].values())
-
-
-def test_color_settings_probe_records_related_sdk_type_sizes():
-    report = json.loads(RESULT.read_text(encoding="utf-8"))
+    # The related SDK type sizes come from the same build. They used to be a
+    # second test that read the JSON this one wrote, which pytest-xdist could
+    # schedule first on another worker (#1544); building twice would instead
+    # have two workers writing the same build directory.
     types = report["types"]
     assert types["pointer"] == 8
     assert types["A_Err"] == 4
