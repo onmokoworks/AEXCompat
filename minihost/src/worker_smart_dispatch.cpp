@@ -2217,6 +2217,7 @@ bool dispatch(const Request& request, const Hooks& hooks,
   if (plan.auto_gpu8 && !gpu_context_started)
     result.auto_gpu_declined = 1;
   if (plan.gpu_negotiation) {
+    const uint32_t setup_flags_before = read<uint32_t>(*request.output, 400);
     write<int32_t>(gpu_setup_input, 0, gpu_framework);
     write<uint32_t>(gpu_setup_input, 4, plan.gpu_device_index);
     write<void*>(gpu_setup_extra, 0, gpu_setup_input.data());
@@ -2233,6 +2234,9 @@ bool dispatch(const Request& request, const Hooks& hooks,
           : -6;
     }
     std::cerr << "stage:gpu_device_setup_end error=" << result.gpu_setup_error
+              << " flags_before=" << setup_flags_before
+              << " flags_after=" << read<uint32_t>(*request.output, 400)
+              << " has_gpu_data=" << (read<void*>(gpu_setup_output, 0) != nullptr)
               << "\n" << std::flush;
   }
 
