@@ -2,7 +2,7 @@
 
 **After Effects用の`.aex`プラグインをAfter Effects本体の外で読み込み・描画・デバッグする互換ホスト。**
 
-[English](README.en.md) · [クイックスタート](#クイックスタート) · [実AEX検証](#apple-siliconでの実aex検証) · [ドキュメント](#ドキュメント) · [ライセンス](#ライセンス)
+[English](README.en.md) · [クイックスタート](#クイックスタート) · [ドキュメント](#ドキュメント) · [ライセンス](#ライセンス)
 
 <p align="center">
   <img src="docs/images/aexcompat-gui.png" alt="AEXCompat GUI：解析ログ、Effect Controls、入力・出力ビューアー" width="1200">
@@ -26,32 +26,6 @@ After Effects全体、AEP編集環境、AEGP host全体の再実装は目的と�
 |---|---|
 | Windows x64 | desktop harness + native C++/MSVC worker |
 | Apple Silicon | arm64 Unicorn workerによるWindows x64 guest実行 |
-
-## Apple Siliconでの実AEX検証
-
-以下はApple Siliconのarm64 Unicorn workerだけを対象にした実測です（2026-08-20）。Windows native workerの集計ではありません。
-
-| 結果 | 本数 |
-|---|---:|
-| 画像を生成（`rendered`） | **27** |
-| 未対応importで停止 | 4 |
-| worker終了 | 8 |
-
-> [!NOTE]
-> これはlocal inventory 969本全体の成功率ではありません。`rendered`もAfter Effectsとのpixel一致や、全parameter・GPU経路の対応を意味しません。
-
-<details>
-<summary>検証範囲と再現用identity</summary>
-
-static PE解析でこの実行経路へ投入できると確認した39本が対象です。残る930本はこのrunに含めておらず、failedまたはskippedには分類していません。集計は `27 rendered / 4 unsupported_import / 8 worker_exit` です。
-
-- Source baseline: `b99dc6bad11d8dd38fd4ed54f6ba020c431dc614`
-- Worker SHA-256: `6581854c2d8eaa015f7c79146b424e29818c91ed4cc1db478124fb75f4b1213d`
-- Private report SHA-256: `53221497a11227f2f5df7db6afdc245ccba08a91e3f437620107d0bd2f68253d`
-
-commercial/private AEX本体とcorpusはrepositoryへ同梱しません。
-
-</details>
 
 ## クイックスタート
 
@@ -150,12 +124,15 @@ SDK、build artifact、machine-bound evidenceを使う検証は明示opt-inで�
 | Build、SDK、CI要件 | [Build Requirements](docs/BUILD_REQUIREMENTS.md) |
 | 互換性の現在地 | [Compatibility Status](docs/COMPATIBILITY_STATUS_2026-07-16.md) |
 | 方向性とroadmap | [Project Direction](docs/PROJECT_DIRECTION.md) |
+| MacでのAEX検証方法と日付付き結果 | [macOS Unicorn Corpus Metrics](docs/MACOS_UNICORN_CORPUS_METRICS.md) |
 | AEX移植・解析 | [AEX Porting Dossier](docs/aex-porting-dossier.md) |
 | Windows native hardening | [Windows Native Hardening Plan](docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
 | AE oracleの別machine取得 | [AE Oracle Cross-Machine Runbook](docs/AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md) |
 | 公開・第三者material境界 | [Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md) |
 | 脆弱性報告 | [Security Policy](SECURITY.md) |
 | 開発・投稿ルール | [Contributing](CONTRIBUTING.md) |
+
+ほかの設計・検証文書は[文書索引](docs/README.md)から探せます。
 
 ## Contributing
 
@@ -165,21 +142,6 @@ SDK、build artifact、machine-bound evidenceを使う検証は明示opt-inで�
 
 ## ライセンス
 
-AEXCompatの開発者が権利を持つソースコード、文書、仕様、テスト、検証用ツールは、下記の除外対象を除き[Mozilla Public License 2.0](LICENSE)で提供します。Adobe、After Effectsおよび関連製品名は各権利者の商標であり、本プロジェクトはAdobe公式ではありません。
+AEXCompatの開発者が権利を持つ部分は、[Mozilla Public License 2.0](LICENSE)で提供します。第三者の成果物、Adobe SDK、非公開AEXにはそれぞれの権利・利用条件が適用されます。Unicorn Engineを含む実行ファイルの配布条件、依存関係の告知、公開前の確認事項は[Public Release Audit](docs/PUBLIC_RELEASE_AUDIT.md)を参照してください。
 
-デスクトップUIの「ライセンス」から、AEXCompat自身のライセンスと、Windows/macOS版UIに組み込まれるCargo依存関係のライセンス告知をオフラインで確認できます。配布物には [`LICENSE`](LICENSE)、[`THIRD_PARTY_LICENSES.txt`](THIRD_PARTY_LICENSES.txt)、[`THIRD_PARTY_LICENSES.html`](THIRD_PARTY_LICENSES.html) を同梱してください。依存関係を更新した場合は `python tools/generate-third-party-licenses.py --refresh` で告知を更新し、通常実行（`--refresh`なし）でlocked graphとの一致を検証します。
-
-<details>
-<summary>第三者の成果物とUnicorn Engineを含む実行ファイルについて</summary>
-
-次のものにはAEXCompatのMPL-2.0ライセンスは適用されず、それぞれ元のライセンスや利用条件が引き続き適用されます。
-
-- 外部ライブラリなど、第三者が権利を持つもの
-- `imports/aviutlas-rust-contracts/`と、[来歴台帳](contracts/PROVENANCE.md)で外部から取り込んだものとされているファイル
-- Adobe SDKと、それを使って生成した成果物
-- 別のライセンスが明記されたテスト用ファイル
-- 非公開または市販のAEXと、その検証データ
-
-`guest/`のうちAEXCompatが独自に作成したソースコードはMPL-2.0です。一方、通常のguest実行ファイルにはGPLv2のUnicorn Engineが組み込まれます。この実行ファイルを配布する場合は、MPL 2.0第3.3節に従い、対象となるAEXCompatのソースコードをMPL-2.0とGPL-2.0の両方の条件で提供し、実行ファイルについてもGPLv2の配布条件を満たす必要があります。詳しくは[公開時の確認事項](docs/PUBLIC_RELEASE_AUDIT.md)を参照してください。
-
-</details>
+Adobe、After Effectsおよび関連製品名は各権利者の商標であり、本プロジェクトはAdobe公式ではありません。
