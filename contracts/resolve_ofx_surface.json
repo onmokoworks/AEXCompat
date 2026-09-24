@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "source": "https://github.com/AcademySoftwareFoundation/openfx",
+    "license": "BSD-3-Clause",
+    "vendored_headers": false
+  },
+  "package": {
+    "bundle_suffix": ".ofx.bundle",
+    "binary_suffix": ".ofx",
+    "windows_architecture": "Win64"
+  },
+  "lifecycle": {
+    "exports": ["OfxGetNumberOfPlugins", "OfxGetPlugin", "OfxSetHost", "OfxPluginMain"],
+    "actions": ["OfxActionLoad", "OfxActionDescribe", "OfxImageEffectActionDescribeInContext", "OfxActionCreateInstance", "OfxImageEffectActionRender", "OfxActionDestroyInstance", "OfxActionUnload"]
+  },
+  "pixel_contract": {
+    "components": "RGBA",
+    "depth": "8-bit",
+    "channel_order": "RGBA",
+    "alpha": "premultiplied",
+    "stride": "host-provided rowbytes; never assumed width * 4",
+    "frame_time": "OfxTime double",
+    "render_window": "host-provided OfxRectI render window"
+  },
+  "identity": {
+    "plugin_identifier": "com.aexcompat.resolve.ofx",
+    "source_sha256": "047BA904757D17F4130E3768C93BB5ADF1E18E906D55AE3CEA90DFB6C77A61FC",
+    "binary_sha256": "B0A8D2806559A5912F384C409E5A05E8C6AF0A180811A98F0F5BB84CBCB3A092",
+    "worker_identity": "not_claimed_until_shared_RenderSession_gate",
+    "input_sha256": null,
+    "output_sha256": null,
+    "pixel_diff": null
+  },
+  "control_render": {
+    "state": "verified_local_fixture",
+    "status": "kOfxStatOK",
+    "render_claim": "builtin_rgba8_control",
+    "aex_render_claim": "blocked_missing_aex_rendersession",
+    "width": 3,
+    "height": 2,
+    "render_window": [1, 0, 3, 2],
+    "source_rowbytes": 20,
+    "output_rowbytes": 24,
+    "frame_time": 7.0,
+    "parameter": {
+      "name": "strength",
+      "time": 7.0,
+      "value": 0.25
+    },
+    "input_sha256": "BAB34C631AD014956B753F38982CF9E10868FA5817C890754A7DFE2B72337FA6",
+    "output_sha256": "62D50D3EFA7A752FA5D300C98EAD1D4559E9F188B5E92EF5D66F69449693816C",
+    "pixel_diff": 12,
+    "alpha_preserved": true,
+    "padding_preserved": true
+  },
+  "aex_render_gate": {
+    "state": "blocked",
+    "success_status": "not_claimed",
+    "blocked_status": "kOfxStatErrUnsupported",
+    "reason": "approved bounded AEX RenderSession dependency is not available on this branch"
+  },
+  "host_evidence": {
+    "resolve_version": "18.6.6.7",
+    "resolve_exe_sha256": "16010AFE62C44284FEE083F645BD72D910C4462A8D8573E8BEB4BD44C4568CE0",
+    "ofxloader_exe_sha256": "ADEE38644103E1DAA9504BB0D2EF854B24915D02B668A8B592D9674F80176EB4",
+    "internal_openfx_plugin_sha256": "AA9CBA05F617D6AE51228A806E7640DB1299405F4C429A751EEEFBB9A95DAFC7",
+    "standard_external_path_entries": 0,
+    "real_resolve_smoke": "blocked_external_path_empty"
+  }
+}
