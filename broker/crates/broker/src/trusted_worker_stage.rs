@@ -95,11 +95,6 @@ impl TrustedWorkerStage {
         let mut source = open_source_no_reparse(source_path)
             .map_err(|error| stage_context("open worker source", error))?;
         validate_regular_no_reparse(&source)?;
-        let (source_size, source_hash) = hash_file(&mut source)?;
-        if source_size != expected_size || source_hash != expected_sha256 {
-            return Err(invalid("trusted worker source hash or size mismatch"));
-        }
-        source.rewind()?;
 
         let worker = root.join(WORKER_BASENAME);
         let staged_handle = open_or_populate_file(
@@ -107,6 +102,7 @@ impl TrustedWorkerStage {
             &mut source,
             expected_sha256,
             expected_size,
+            "trusted worker source hash or size mismatch",
             "trusted worker staged copy verification failed",
         )
         .map_err(|error| stage_context("populate worker", error))?;
@@ -144,6 +140,7 @@ impl TrustedWorkerStage {
                 &mut source_file,
                 asset.sha256,
                 asset.size,
+                "trusted worker auxiliary source hash or size mismatch",
                 "trusted worker auxiliary staged copy verification failed",
             )
             .map_err(|error| stage_context("populate auxiliary asset", error))?;
@@ -379,17 +376,29 @@ fn open_or_populate_file(
     source: &mut File,
     expected_sha256: [u8; 32],
     expected_size: u64,
+    source_mismatch_message: &'static str,
     mismatch_message: &'static str,
 ) -> io::Result<File> {
-    let mut destination_file = match create_destination(destination) {
+    let (mut destination_file, created) = match create_destination(destination) {
         Ok(mut file) => {
             source.rewind()?;
-            io::copy(source, &mut file)?;
+            let mut hashing_writer = HashingWriter::new(&mut file);
+            let source_size = io::copy(source, &mut hashing_writer)?;
+            let source_hash = hashing_writer.finish();
+            if source_size != expected_size || source_hash != expected_sha256 {
+                return Err(invalid(source_mismatch_message));
+            }
             file.flush()?;
             file.sync_all()?;
-            file
+            (file, true)
         }
-        Err(error) if is_existing_staged_file(&error) => open_staged_hold(destination)?,
+        Err(error) if is_existing_staged_file(&error) => {
+            let (source_size, source_hash) = hash_file(source)?;
+            if source_size != expected_size || source_hash != expected_sha256 {
+                return Err(invalid(source_mismatch_message));
+            }
+            (open_staged_hold(destination)?, false)
+        }
         Err(error) => return Err(error),
     };
     validate_regular_no_reparse(&destination_file)?;
@@ -397,8 +406,77 @@ fn open_or_populate_file(
     if size != expected_size || sha256 != expected_sha256 {
         return Err(invalid(mismatch_message));
     }
-    drop(destination_file);
-    open_staged_hold(destination)
+    if created {
+        // The write-capable handle cannot be retained while launching an EXE.
+        drop(destination_file);
+        open_staged_hold(destination)
+    } else {
+        // This handle was already opened read-only with FILE_SHARE_READ. Keep
+        // the verified object pinned instead of reopening it by path again.
+        destination_file.rewind()?;
+        Ok(destination_file)
+    }
+}
+
+struct HashingWriter<'a, W: Write> {
+    destination: &'a mut W,
+    hash: Sha256,
+}
+
+impl<'a, W: Write> HashingWriter<'a, W> {
+    fn new(destination: &'a mut W) -> Self {
+        Self {
+            destination,
+            hash: Sha256::new(),
+        }
+    }
+
+    fn finish(self) -> [u8; 32] {
+        self.hash.finalize().into()
+    }
+}
+
+impl<W: Write> Write for HashingWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.destination.write(bytes)?;
+        self.hash.update(&bytes[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.destination.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ShortWriter(Vec<u8>);
+
+    impl Write for ShortWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let count = bytes.len().min(3);
+            self.0.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hashing_writer_hashes_only_bytes_actually_written() {
+        let contents = b"trusted worker bytes crossing partial writes";
+        let mut destination = ShortWriter(Vec::new());
+        let mut writer = HashingWriter::new(&mut destination);
+        writer.write_all(contents).unwrap();
+        let copied_hash = writer.finish();
+        let expected: [u8; 32] = Sha256::digest(contents).into();
+        assert_eq!(destination.0, contents);
+        assert_eq!(copied_hash, expected);
+    }
 }
 
 fn is_existing_staged_file(error: &io::Error) -> bool {
