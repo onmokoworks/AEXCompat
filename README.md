@@ -29,9 +29,27 @@ After Effects全体、AEP編集環境、AEGP host全体の再実装は目的と�
 
 ## クイックスタート
 
-### Apple Silicon Mac
+### Windows
 
-Rust/Cargoだけでarm64 workerのRelease build、ad-hoc署名、DMG作成、mount後の検証まで実行できます。Windows、Rosetta、Adobe証明書は不要です。
+ソースからGUIをbuild・起動する場合に必要な環境:
+
+- Windows 10/11 x64
+- Rust/Cargo
+- Visual StudioまたはBuild Tools（MSVC C++ toolchain + Windows SDK）
+
+GUIを起動:
+
+```powershell
+git clone https://github.com/onmokoworks/AEXCompat.git
+cd AEXCompat\broker
+cargo run -p aexcompat-harness
+```
+
+AEXのinspect/renderには`minihost/` workerのbuildも必要です。そのbuildには上記に加えてCMakeが必要です。Adobe SDKはprobeやSDK fixtureのbuild時だけ必要です。正確なコマンドとtoolsetは[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
+
+### Apple Silicon Mac（補助経路）
+
+Rust/Cargoだけでarm64 workerのRelease build、ad-hoc署名、DMG作成、mount後の検証まで実行できます。WindowsとRosettaは不要です。
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -48,25 +66,6 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 ```
 
 AEXと入力画像はDMGへ収録されません。通常経路はarm64 Unicornのみです。Rosetta native carrierはtrusted AEX向けの任意経路で、`AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1`を指定した場合だけ追加されます。
-
-### Windows
-
-必要なもの:
-
-- Windows 10/11 x64
-- Rust/Cargo
-- Visual StudioまたはBuild Tools（MSVC C++ toolchain + Windows SDK）
-- CMake
-
-GUIを起動:
-
-```powershell
-git clone https://github.com/onmokoworks/AEXCompat.git
-cd AEXCompat\broker
-cargo run -p aexcompat-harness
-```
-
-AEXのinspect/renderには`minihost/` workerのbuildも必要です。Adobe SDKはprobeやSDK fixtureのbuild時だけ必要です。正確なコマンドとtoolsetは[Build Requirements](docs/BUILD_REQUIREMENTS.md)を参照してください。
 
 ## 使い方
 

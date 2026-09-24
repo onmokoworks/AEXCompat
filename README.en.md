@@ -29,9 +29,27 @@ It is not intended to recreate the complete After Effects application, AEP edito
 
 ## Quick start
 
-### Apple Silicon Mac
+### Windows
 
-With Rust/Cargo installed, one command builds the arm64 Release worker, applies an ad-hoc signature, creates a DMG, mounts it, and verifies the package. Windows, Rosetta, and an Adobe certificate are not required.
+Requirements for building and launching the GUI from source:
+
+- Windows 10/11 x64
+- Rust/Cargo
+- Visual Studio or Build Tools with MSVC C++ and the Windows SDK
+
+Launch the GUI:
+
+```powershell
+git clone https://github.com/onmokoworks/AEXCompat.git
+cd AEXCompat\broker
+cargo run -p aexcompat-harness
+```
+
+Inspecting or rendering an AEX also requires building the `minihost/` workers, which needs CMake in addition to the requirements above. The Adobe SDK is needed only when building probes or SDK fixtures. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for exact commands and toolsets.
+
+### Apple Silicon Mac (optional route)
+
+With Rust/Cargo installed, one command builds the arm64 Release worker, applies an ad-hoc signature, creates a DMG, mounts it, and verifies the package. Windows and Rosetta are not required.
 
 ```sh
 git clone https://github.com/onmokoworks/AEXCompat.git
@@ -48,25 +66,6 @@ AEXCOMPAT_SMOKE_INPUT_PNG=/absolute/path/to/input.png \
 ```
 
 The AEX and input image are not included in the DMG. The normal path uses only the arm64 Unicorn worker. The optional Rosetta carrier is included only with `AEXCOMPAT_INCLUDE_NATIVE_CARRIER=1` and is intended for trusted AEX plug-ins.
-
-### Windows
-
-Requirements:
-
-- Windows 10/11 x64
-- Rust/Cargo
-- Visual Studio or Build Tools with MSVC C++ and the Windows SDK
-- CMake
-
-Launch the GUI:
-
-```powershell
-git clone https://github.com/onmokoworks/AEXCompat.git
-cd AEXCompat\broker
-cargo run -p aexcompat-harness
-```
-
-Inspecting or rendering an AEX also requires the `minihost/` workers. The Adobe SDK is needed only when building probes or SDK fixtures. See [Build Requirements](docs/BUILD_REQUIREMENTS.md) for exact commands and toolsets.
 
 ## Workflow
 
