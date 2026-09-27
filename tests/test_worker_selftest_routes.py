@@ -108,15 +108,16 @@ def test_loaded_plugin_aegp_stream_values_pass_on_all_workers() -> None:
 
 
 def test_l2_point_defaults_use_the_lifecycle_layer_extent() -> None:
-    report = _passing_report(
-        "discovery",
-        "--self-test-l2-point-default-units",
-        "l2_point_default_units",
-    )
+    completed = _run_route("discovery", "--self-test-l2-point-default-units")
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert "stage:frame_setup_offer source=l2_probe_world width=1 height=1" in completed.stderr
+    report = json.loads(completed.stdout)
     assert report == {
         "l2_point_default_units": "passed",
         "width": 256,
         "height": 144,
+        "frame_setup_offer": [1, 1],
+        "origin_on_entry": [0, 0, 0, 0],
         "point": [64, 72],
         "point3d": [64, 72, 108],
     }
