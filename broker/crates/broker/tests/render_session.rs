@@ -3064,6 +3064,88 @@ mod windows_e2e {
     }
 
     #[test]
+    fn video_batch_delivers_declared_static_layer_pixels() {
+        let (repository, plugin, _sha) = temp_repository();
+        let inputs = write_input_frames(&repository.0, 2);
+        let layer_path = repository.0.join("map.png");
+        image::RgbaImage::from_pixel(WIDTH, HEIGHT, image::Rgba([3, 7, 11, 255]))
+            .save(&layer_path)
+            .unwrap();
+        let request_path = repository.0.join("layer-batch-request.json");
+        let report_path = repository.0.join("layer-batch-report.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "plugin": plugin.to_string_lossy(),
+                "input_frames": inputs,
+                "output_directory": repository.0.join("layer-batch-out").to_string_lossy(),
+                "parameters": [{
+                    "slot": 3, "name": "Map", "kind": "layer",
+                    "minimum": 0.0, "maximum": 0.0, "value": 0.0,
+                    "choices": [], "color": [255, 0, 0, 0],
+                    "components": [0.0, 0.0, 0.0], "component_count": 0,
+                    "layer_path": layer_path.to_string_lossy(),
+                    "enabled": true, "visible": true, "supervised": false,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let passed = run_video_batch(
+            &repository.0,
+            &request_path,
+            &report_path,
+            &behavior("require_static_layer_slot3"),
+        )
+        .expect("batch renders with a declared static layer");
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+        assert!(
+            passed,
+            "declared map pixels must reach the worker: {report}"
+        );
+        assert_eq!(report["frames_ok"], 2, "both frames use the same layer");
+    }
+
+    #[test]
+    fn video_batch_rejects_a_missing_declared_static_layer() {
+        let (repository, plugin, _sha) = temp_repository();
+        let inputs = write_input_frames(&repository.0, 1);
+        let request_path = repository.0.join("missing-layer-request.json");
+        std::fs::write(
+            &request_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "plugin": plugin.to_string_lossy(),
+                "input_frames": inputs,
+                "output_directory": repository.0.join("missing-layer-out").to_string_lossy(),
+                "parameters": [{
+                    "slot": 3, "name": "Map", "kind": "layer",
+                    "minimum": 0.0, "maximum": 0.0, "value": 0.0,
+                    "choices": [], "color": [255, 0, 0, 0],
+                    "components": [0.0, 0.0, 0.0], "component_count": 0,
+                    "layer_path": repository.0.join("missing-map.png").to_string_lossy(),
+                    "enabled": true, "visible": true, "supervised": false,
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = run_video_batch(
+            &repository.0,
+            &request_path,
+            &repository.0.join("missing-layer-report.json"),
+            &LaunchEnvironment::default(),
+        )
+        .expect_err("a missing declared layer must fail before render");
+        assert!(
+            error.to_string().contains("secondary image open failed"),
+            "unexpected failure: {error}"
+        );
+    }
+
+    #[test]
     fn video_batch_reports_an_empty_smart_frame_without_a_png() {
         // A SmartFX batch frame that legally renders an empty result (#278) has
         // no pixels, so there is no PNG or raw to write. The batch must report it
