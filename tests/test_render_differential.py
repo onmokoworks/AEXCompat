@@ -14,7 +14,8 @@ from _render_session import assert_artifact_fresh
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "broker" / "target"))
-HARNESS = BUILD_TARGET / "release" / "aexcompat-harness.exe"
+PROFILE = os.environ.get("AEXCOMPAT_CARGO_PROFILE", "release")
+HARNESS = BUILD_TARGET / PROFILE / "aexcompat-harness.exe"
 WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
 SOURCE = ROOT / "instruments" / "pf-smart-geometry-probe" / "pf_smart_geometry_probe.cpp"
 PROBES = (
@@ -28,7 +29,7 @@ CLASSIC_ORIGIN_PROBE = (
 
 
 def run_differential(tmp_path: Path, marker: str, depth: str = "argb8", route: str = "smart"):
-    assert HARNESS.is_file(), "build the Release harness before this built-artifact test"
+    assert HARNESS.is_file(), "build the selected harness profile before this built-artifact test"
     assert WORKER.is_file(), "build the Release worker before this built-artifact test"
     available = [probe for probe in PROBES if probe.is_file()]
     assert available, "build pf_smart_geometry_probe.aex before this built-artifact test"
