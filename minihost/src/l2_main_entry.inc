@@ -2686,6 +2686,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return admission_error;
   }
   WorkerSession session(runtime_context, trace_writer.get(), &g_trace_writer);
+  // A one-shot parameter probe has no next plug-in to load. Keep its image
+  // mapped until process exit: unloading PSL_Adjustments explicitly after
+  // GLOBAL_SETDOWN runs dvascripting's detach handlers while COR is live.
+  if (invocation.params_only_mode) session.set_deferred_module_release();
   SessionPreUnloadContext pre_unload_context{&companion_runtime};
   (void)session.set_pre_unload_hook(
       &teardown_session_providers, &pre_unload_context);

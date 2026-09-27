@@ -16,7 +16,7 @@ std::string read_file(const std::filesystem::path& path) {
 }
 
 int child(const wchar_t* module_path, const wchar_t* detach_marker,
-          bool prepared) {
+          const std::wstring& mode) {
   SetEnvironmentVariableW(L"AEXCOMPAT_DETACH_MARKER", detach_marker);
   HMODULE module = LoadLibraryW(module_path);
   assert(module);
@@ -24,7 +24,14 @@ int child(const wchar_t* module_path, const wchar_t* detach_marker,
   context.plugin_path = module_path;
   context.module = module;
   aexcompat::worker_runtime::WorkerSession session(context, nullptr, nullptr);
-  if (prepared) {
+  if (mode == L"deferred") {
+    session.set_deferred_module_release();
+    assert(session.finish(0) == 0);
+    assert(!std::filesystem::exists(detach_marker));
+    std::cout << "deferred-report\n" << std::flush;
+    return 0;
+  }
+  if (mode == L"prepared") {
     assert(session.prepare_protocol_report());
     std::cout << "{\"status\":\"complete-final-report\",\"padding\":\""
               << std::string(1024 * 1024, 'x') << "\"}\n";
@@ -35,10 +42,11 @@ int child(const wchar_t* module_path, const wchar_t* detach_marker,
 DWORD run_child(const std::filesystem::path& executable,
                 const std::filesystem::path& module,
                 const std::filesystem::path& detach_marker,
-                const std::filesystem::path& report_marker, bool prepared) {
+                const std::filesystem::path& report_marker,
+                const wchar_t* mode) {
   std::wstring command = L"\"" + executable.wstring() + L"\" --child \"" +
       module.wstring() + L"\" \"" + detach_marker.wstring() + L"\" " +
-      (prepared ? L"prepared" : L"unprepared");
+      mode;
   SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
   HANDLE report = CreateFileW(report_marker.c_str(), GENERIC_WRITE,
                               FILE_SHARE_READ, &security, CREATE_ALWAYS,
@@ -64,7 +72,7 @@ DWORD run_child(const std::filesystem::path& executable,
 
 int wmain(int argc, wchar_t** argv) {
   if (argc == 5 && std::wstring(argv[1]) == L"--child")
-    return child(argv[2], argv[3], std::wstring(argv[4]) == L"prepared");
+    return child(argv[2], argv[3], argv[4]);
   assert(argc == 2);
   const std::filesystem::path executable = argv[0];
   const std::filesystem::path module = argv[1];
@@ -74,7 +82,7 @@ int wmain(int argc, wchar_t** argv) {
 
   const auto detach = root / L"detach.txt";
   const auto report = root / L"report.txt";
-  assert(run_child(executable, module, detach, report, true) == 37);
+  assert(run_child(executable, module, detach, report, L"prepared") == 37);
   const std::string completed = read_file(report);
   const std::string prefix =
       "{\"status\":\"complete-final-report\",\"padding\":\"";
@@ -85,10 +93,14 @@ int wmain(int argc, wchar_t** argv) {
   assert(!std::filesystem::exists(detach));
 
   std::filesystem::remove(report);
-  const DWORD rejected = run_child(executable, module, detach, report, false);
+  const DWORD rejected = run_child(executable, module, detach, report, L"unprepared");
   assert(rejected != 37);
   assert(read_file(report).empty());
   assert(!std::filesystem::exists(detach));
+  std::filesystem::remove(report);
+  assert(run_child(executable, module, detach, report, L"deferred") == 0);
+  assert(read_file(report) == "deferred-report\r\n");
+  assert(read_file(detach) == "process");
   std::filesystem::remove_all(root);
   return 0;
 }

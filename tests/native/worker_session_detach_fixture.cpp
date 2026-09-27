@@ -2,14 +2,14 @@
 
 #include <fstream>
 
-BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID reserved) {
   if (reason != DLL_PROCESS_DETACH) return TRUE;
   wchar_t path[32768]{};
   const DWORD length = GetEnvironmentVariableW(
       L"AEXCOMPAT_DETACH_MARKER", path, static_cast<DWORD>(std::size(path)));
   if (length > 0 && length < std::size(path)) {
     std::ofstream marker(path, std::ios::binary | std::ios::trunc);
-    marker << "detached";
+    marker << (reserved ? "process" : "explicit");
   }
   return TRUE;
 }
