@@ -3929,6 +3929,35 @@ pub fn run_video_batch(
     let (width, height) = (first.width(), first.height());
     drop(first);
 
+    // A layer parameter's path is not part of the scalar parameter payload.
+    // Decode it once at session open and carry its pixels through the same
+    // inherited-handle transport used by one-shot renders. Otherwise the
+    // worker sees a declared but empty layer for every frame.
+    let selected_layers = request
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.kind == "layer" && parameter.layer_path.is_some())
+        .collect::<Vec<_>>();
+    if selected_layers.len() > 8 {
+        return Err(invalid("secondary layer count exceeds the transport limit"));
+    }
+    let mut layers = Vec::with_capacity(selected_layers.len());
+    for parameter in selected_layers {
+        let path = parameter
+            .layer_path
+            .as_ref()
+            .expect("selected layer has a path");
+        let decoded = decode_bounded_image(path, "secondary")?;
+        layers.push(SessionLayer {
+            slot: parameter.slot,
+            width: decoded.width(),
+            height: decoded.height(),
+            rgba: decoded.into_rgba8().into_raw(),
+            timed: None,
+            dynamic: false,
+        });
+    }
+
     let mut session = RenderSession::open(SessionOpenRequest {
         repository,
         plugin_path: &plugin_path,
@@ -3947,7 +3976,7 @@ pub fn run_video_batch(
         alpha_as_coverage_params: &request.alpha_as_coverage_params,
         // The video-batch entry does not apply conformance render settings.
         conformance_render_settings: None,
-        layers: &[],
+        layers: &layers,
         dependencies: Vec::new(),
         companions: Vec::new(),
         dependency_search_dirs: vec![plugin_directory],

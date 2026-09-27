@@ -686,6 +686,9 @@ mod worker {
             return 2;
         };
         let behavior = std::env::var("AEXCOMPAT_TEST_SESSION_BEHAVIOR").unwrap_or_default();
+        if behavior == "require_static_layer_slot3" && expected_layer_count != 1 {
+            return 3;
+        }
         if behavior == "plugin_data_secondary" && plugin_data_selector.is_none() {
             return 3;
         }
@@ -769,6 +772,14 @@ mod worker {
                 let handle = handle_value as HANDLE;
                 let mut buffer = vec![0u8; layer_bytes];
                 if !read_exact(handle, &mut buffer) || buffer[0] != slot as u8 {
+                    return EXIT_PROTOCOL_VIOLATION;
+                }
+                if behavior == "require_static_layer_slot3"
+                    && (slot != 3
+                        || layer_width != width
+                        || layer_height != height
+                        || !buffer.chunks_exact(4).all(|pixel| pixel == [3, 7, 11, 255]))
+                {
                     return EXIT_PROTOCOL_VIOLATION;
                 }
                 if dynamic {
