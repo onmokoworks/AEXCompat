@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <iomanip>
@@ -27,6 +28,8 @@ AuditCapture g_capture_audit{};
 AuditPassed g_audit_passed{};
 SelectorDispatchTrace g_selector_trace{};
 SelectorDispatchTelemetry g_telemetry;
+uint64_t g_render_selector_elapsed_ns{};
+bool g_render_selector_seen{};
 thread_local HMODULE g_active_entry_module{};
 thread_local const char* g_current_fault_module_class{};
 thread_local uint64_t g_current_plugin_rva{};
@@ -1102,6 +1105,16 @@ void configure_selector_dispatch_trace(SelectorDispatchTrace trace) noexcept {
 
 void reset_selector_return_message() noexcept { g_telemetry.return_message = {}; }
 
+void reset_render_selector_timing() noexcept {
+  g_render_selector_elapsed_ns = 0;
+  g_render_selector_seen = false;
+}
+
+bool render_selector_timing_ns(uint64_t& elapsed_ns) noexcept {
+  elapsed_ns = g_render_selector_elapsed_ns;
+  return g_render_selector_seen;
+}
+
 void reset_selector_fault_attribution() noexcept {
   g_telemetry.frame_fault = {};
 }
@@ -1970,10 +1983,22 @@ int32_t invoke_entry_seh(EffectEntry entry, int32_t command, void* input,
   g_current_access_violation = {};
   bool invocation_completed_normally = false;
   int32_t raw_return_code = 0;
+  const bool measure_render = command == 11 || command == 24 || command == 31;
+  const auto selector_started = measure_render
+      ? std::chrono::steady_clock::now()
+      : std::chrono::steady_clock::time_point{};
   const int32_t result = invoke_audited_effect_call_seh(
       entry, command, input, output, params, world, extra,
       &invocation_completed_normally, &raw_return_code, out_exception_code,
       selector);
+  if (measure_render) {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - selector_started).count();
+    if (elapsed >= 0) {
+      g_render_selector_elapsed_ns += static_cast<uint64_t>(elapsed);
+      g_render_selector_seen = true;
+    }
+  }
   note_selector_result(result, *out_exception_code);
   record_extended_allocation_selector_exit(selector);
   // The buffer was cleared before the call, so whatever is in it now was

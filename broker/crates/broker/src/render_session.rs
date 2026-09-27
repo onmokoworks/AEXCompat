@@ -761,6 +761,34 @@ pub struct FrameOutcome {
     pub frame_index: u32,
     pub status: FrameStatus,
     pub depth_provenance: Option<FrameDepthProvenance>,
+    pub performance: FramePerformance,
+}
+
+/// Advisory phase measurements for one frame. The broker-owned clock measures
+/// transport and validation; the worker clock measures only its own phases.
+/// Neither is used to change the frame verdict or deadline.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FramePerformance {
+    pub broker_frame_wall_ns: u64,
+    pub broker_input_write_ns: u64,
+    pub broker_output_verify_ns: Option<u64>,
+    pub worker_setup_ns: Option<u64>,
+    pub worker_render_ns: Option<u64>,
+    pub render_selector_ns: Option<u64>,
+    pub worker_finalize_ns: Option<u64>,
+    pub worker_live_commit_bytes: Option<u64>,
+    pub worker_peak_commit_bytes: Option<u64>,
+    pub worker_job_peak_commit_bytes: Option<u64>,
+    pub output_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerFramePerformance {
+    worker_setup_ns: Option<u64>,
+    worker_render_ns: Option<u64>,
+    render_selector_ns: Option<u64>,
+    worker_finalize_ns: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -929,6 +957,8 @@ struct FrameDone {
     #[serde(rename = "type")]
     kind: String,
     frame_index: u32,
+    #[serde(default)]
+    performance: Option<WorkerFramePerformance>,
     status: String,
     #[serde(default)]
     output: Option<FrameDoneOutput>,
@@ -2249,9 +2279,12 @@ impl RenderSession {
                 "per-frame parameter message exceeds the protocol message cap",
             ));
         }
+        let frame_started = Instant::now();
+        let input_started = Instant::now();
         self.transport.write_input_slot(rgba);
         self.transport
             .write_header_u32(INPUT_GENERATION_OFFSET, expected_generation);
+        let broker_input_write_ns = input_started.elapsed().as_nanos() as u64;
         if !self.transport.send_message(&message) {
             return Err(self.invalidate(
                 "request_pipe_closed",
@@ -2455,9 +2488,41 @@ impl RenderSession {
                     if done.smart_output_untouched {
                         self.smart_output_untouched_frames += 1;
                     }
+                    let memory = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.memory_commit_snapshot());
+                    let job_peak = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.job_peak_commit_bytes());
                     return Ok(FrameOutcome {
                         frame_index,
                         depth_provenance: None,
+                        performance: FramePerformance {
+                            broker_frame_wall_ns: frame_started.elapsed().as_nanos() as u64,
+                            broker_input_write_ns,
+                            worker_setup_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_setup_ns),
+                            worker_render_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_render_ns),
+                            render_selector_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.render_selector_ns),
+                            worker_finalize_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_finalize_ns),
+                            worker_live_commit_bytes: memory.map(|snapshot| snapshot.0),
+                            worker_peak_commit_bytes: memory.map(|snapshot| snapshot.1),
+                            worker_job_peak_commit_bytes: job_peak,
+                            ..FramePerformance::default()
+                        },
                         status: if done.smart_output_untouched {
                             FrameStatus::SmartOutputUntouched
                         } else {
@@ -2471,6 +2536,7 @@ impl RenderSession {
                     });
                 }
                 "ok" => {
+                    let output_verify_started = Instant::now();
                     let (Some(output), Some(generation)) = (done.output, done.generation) else {
                         return Err(self.invalidate(
                             "malformed_ok_response",
@@ -2546,9 +2612,43 @@ impl RenderSession {
                         .read_output_slot(self.geometry.output_slot_offset(), actual_bytes);
                     self.frames_ok += 1;
                     self.last_output_generation = expected_generation;
+                    let broker_output_verify_ns = output_verify_started.elapsed().as_nanos() as u64;
+                    let memory = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.memory_commit_snapshot());
+                    let job_peak = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.job_peak_commit_bytes());
                     return Ok(FrameOutcome {
                         frame_index,
                         depth_provenance,
+                        performance: FramePerformance {
+                            broker_frame_wall_ns: frame_started.elapsed().as_nanos() as u64,
+                            broker_input_write_ns,
+                            broker_output_verify_ns: Some(broker_output_verify_ns),
+                            worker_setup_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_setup_ns),
+                            worker_render_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_render_ns),
+                            render_selector_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.render_selector_ns),
+                            worker_finalize_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_finalize_ns),
+                            worker_live_commit_bytes: memory.map(|snapshot| snapshot.0),
+                            worker_peak_commit_bytes: memory.map(|snapshot| snapshot.1),
+                            worker_job_peak_commit_bytes: job_peak,
+                            output_bytes: Some(actual_bytes as u64),
+                        },
                         status: FrameStatus::Rendered {
                             pixels,
                             width: output.width,

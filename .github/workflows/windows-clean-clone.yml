@@ -543,6 +543,7 @@ jobs:
           $probes = @(
             'build-classic-failure-probes'
             'build-pf-sampling-probe'
+            'build-pf-performance-probe'
             'build-pf-aegp-async-layer-receipt-probe'
             'build-pf-aegp-external-cache-roundtrip-probe'
             'build-pf-aegp-fast-blur-probe'

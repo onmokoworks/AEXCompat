@@ -19,6 +19,7 @@
 #include "worker_ui_event_execution.hpp"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -901,6 +902,7 @@ void run_session_frame_loop(
     // And with no fault: a startup, custom-UI, or previous-frame fault is not
     // this frame's either (issue #983).
     aexcompat::worker_runtime::reset_selector_fault_attribution();
+    aexcompat::worker_runtime::reset_render_selector_timing();
     const auto& time_object = std::get<JsonValue::Object>(time_value->value);
     int32_t current_time{};
     int32_t current_scale{};
@@ -954,6 +956,36 @@ void run_session_frame_loop(
       frame_ui = &frame_ui_action;
     }
     const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
+    std::chrono::steady_clock::time_point setup_started{};
+    uint64_t worker_setup_ns = 0;
+    uint64_t worker_render_ns = 0;
+    std::chrono::steady_clock::time_point render_completed{};
+    const auto append_performance = [&](std::string& reply) {
+      uint64_t selector_ns = 0;
+      reply += ",\"performance\":{\"worker_setup_ns\":";
+      if (setup_started != std::chrono::steady_clock::time_point{} &&
+          render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(worker_setup_ns);
+      else
+        reply += "null";
+      reply += ",\"worker_render_ns\":";
+      if (render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(worker_render_ns);
+      else
+        reply += "null";
+      reply += ",\"render_selector_ns\":";
+      if (aexcompat::worker_runtime::render_selector_timing_ns(selector_ns))
+        reply += std::to_string(selector_ns);
+      else
+        reply += "null";
+      reply += ",\"worker_finalize_ns\":";
+      if (render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - render_completed).count());
+      else
+        reply += "null";
+      reply += "}";
+    };
     // Error responses carry no output or generation: a frame rejected before
     // or during rendering never updates the output slot, so there is no slot
     // metadata to report (protocol §4.3).
@@ -1061,6 +1093,7 @@ void run_session_frame_loop(
       }
       reply += ",\"guards_intact\":true},\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
+      append_performance(reply);
       reply += "}";
       return channels.write_message(reply);
     };
@@ -1079,6 +1112,7 @@ void run_session_frame_loop(
       reply += "\",\"packed_bytes\":0,\"guards_intact\":true,\"empty_result\":true},";
       reply += "\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
+      append_performance(reply);
       reply += "}";
       return channels.write_message(reply);
     };
@@ -1120,6 +1154,7 @@ void run_session_frame_loop(
       outcome.invariant_failure = true;
       break;
     }
+    setup_started = std::chrono::steady_clock::now();
     std::memcpy(frame_rgba.data(), channels.view() + input_offset, frame_rgba.size());
     // A swapped-in plug-in whose GLOBAL/PARAMS setup failed can never render;
     // answer every frame with the reserved continuation-impossible code and
@@ -1215,9 +1250,17 @@ void run_session_frame_loop(
       outcome.protocol_violation = true;
       break;
     }
+    const auto render_started = std::chrono::steady_clock::now();
+    worker_setup_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            render_started - setup_started).count());
     const SessionFrameOutput frame =
         render_frame(entry, current_time, frame_rgba, captured, frame_layers,
                      frame_override, frame_ui, dispatch_bytes);
+    render_completed = std::chrono::steady_clock::now();
+    worker_render_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            render_completed - render_started).count());
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.

@@ -837,6 +837,26 @@ fn query_worker_peak_commit(process: HANDLE) -> Option<u64> {
     (ok != 0).then_some(counters.PeakPagefileUsage as u64)
 }
 
+/// Current and peak committed bytes for a live worker. Unlike the monotone
+/// peak, PagefileUsage can fall after a frame releases temporary allocations.
+fn query_worker_commit(process: HANDLE) -> Option<(u64, u64)> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { zeroed() };
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(
+            process,
+            &mut counters,
+            size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    };
+    (ok != 0).then_some((
+        counters.PagefileUsage as u64,
+        counters.PeakPagefileUsage as u64,
+    ))
+}
+
 fn terminate_job_and_wait(job: HANDLE, process: HANDLE, wait_ms: u32) -> io::Result<()> {
     if unsafe { TerminateJobObject(job, 0xDEAD) } == 0 {
         return Err(io::Error::last_os_error());
@@ -1017,6 +1037,16 @@ impl LaunchedIsolatedProcess {
             return Err(io::Error::last_os_error());
         }
         Ok(duplicated as usize)
+    }
+
+    /// A best-effort per-frame memory observation; failure never changes the
+    /// worker or render verdict.
+    pub fn memory_commit_snapshot(&self) -> Option<(u64, u64)> {
+        query_worker_commit(self.process.raw())
+    }
+
+    pub fn job_peak_commit_bytes(&self) -> Option<u64> {
+        query_job_memory_peaks(self.job.raw()).1
     }
 
     /// Waits up to `timeout` for the worker to exit (terminating the job on

@@ -374,6 +374,11 @@ SelectorDispatchTelemetry& selector_dispatch_telemetry() noexcept;
 /// frame and on a cluster plug-in swap, so a frame never reports what a
 /// previous frame - or a previous plug-in - said (issue #707).
 void reset_selector_return_message() noexcept;
+/// Per-frame sum of audited RENDER/SMART_RENDER/SMART_RENDER_GPU selector calls.
+/// This includes the host audit boundary and must not be described as pure
+/// plug-in CPU time. A frame without such a call reports unavailable.
+void reset_render_selector_timing() noexcept;
+bool render_selector_timing_ns(uint64_t& elapsed_ns) noexcept;
 /// Forgets the faults and non-zero answers seen so far, so the next
 /// `frame_fault` describes only what follows. Called at the start of every
 /// session frame and of every retried render attempt (the retry's result
