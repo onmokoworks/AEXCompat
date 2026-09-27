@@ -18,6 +18,7 @@
 #include "worker_smart_setup.hpp"
 #include "worker_ui_event_execution.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -29,6 +30,7 @@
 #include <cwchar>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -1527,6 +1529,31 @@ SmartRenderSessionOutcome run_smart_render_session(
     uint32_t advertised_out_flags2,
     const std::vector<ExternalLayerInput>* external_layers) {
   SmartRenderSessionOutcome outcome;
+  // Resident sessions receive each input before its selector runs. Retain a
+  // bounded set of *actual* prior inputs for SmartFX temporal slot-0 checkouts;
+  // an evicted or not-yet-received time remains unavailable, never an alias of
+  // the current frame. The cap is shared by all frames in this session.
+  constexpr std::size_t kMaxTemporalHistoryBytes = 256u * 1024u * 1024u;
+  // The setup path materializes each retained RGBA8 frame in the dispatch
+  // depth too. Bound those additional worlds, not just the stored RGBA8.
+  constexpr std::size_t kMaxTemporalConvertedBytes = 512u * 1024u * 1024u;
+  constexpr std::size_t kMaxTemporalHistoryFrames = 64;
+  std::vector<ExternalLayerInput> temporal_layers;
+  std::size_t temporal_bytes = 0;
+  const auto trim_temporal_history = [&]() {
+    // A GPU-required retry may promote an ARGB8 dispatch to a float32 world
+    // inside smart_render_once. Budget the largest supported host pixel even
+    // before the retry decides which plan to run.
+    constexpr std::size_t kMaxHostPixelBytes = 16;
+    while (!temporal_layers.empty() &&
+           (temporal_layers.size() > kMaxTemporalHistoryFrames ||
+            temporal_bytes > kMaxTemporalHistoryBytes ||
+            temporal_bytes / 4 * kMaxHostPixelBytes >
+                kMaxTemporalConvertedBytes)) {
+      temporal_bytes -= temporal_layers.front().rgba.size();
+      temporal_layers.erase(temporal_layers.begin());
+    }
+  };
   run_session_frame_loop(
       outcome.session, entry, input, output, max_width, max_height,
       // Smart sessions (v1.1) render at fixed dimensions; no output expansion.
@@ -1540,6 +1567,25 @@ SmartRenderSessionOutcome run_smart_render_session(
           const RequestedAssignments* frame_override,
           const SessionUiAction* frame_ui, int32_t dispatch_bytes) {
         apply_session_ui_action(frame_ui);
+        // Drop a stale world for a repeated timestamp before constructing the
+        // hosted-world set. The new input is still recorded after this frame.
+        const auto repeated = std::find_if(temporal_layers.begin(),
+            temporal_layers.end(), [current_time, time_scale](const auto& layer) {
+              return layer.time == current_time && layer.time_scale == time_scale;
+            });
+        if (repeated != temporal_layers.end()) {
+          temporal_bytes -= repeated->rgba.size();
+          temporal_layers.erase(repeated);
+        }
+        // The selected dispatch can be promoted again by a GPU retry. Trim
+        // before setup materializes every retained frame at that depth.
+        trim_temporal_history();
+        const std::size_t history_count = temporal_layers.size();
+        if (frame_layers)
+          temporal_layers.insert(temporal_layers.end(), frame_layers->begin(),
+                                 frame_layers->end());
+        const auto* available_layers = temporal_layers.empty()
+            ? nullptr : &temporal_layers;
         SessionFrameOutput frame;
         worker_runtime::smart_execution::SessionFrame session_frame{&captured};
         // A retry below renders into its own SessionFrame; `verdict` always
@@ -1558,7 +1604,7 @@ SmartRenderSessionOutcome run_smart_render_session(
                 return smart_render_once(
                     current_entry, input, output, case_id,
                     frame_override ? frame_override : requested, &frame_rgba,
-                    max_width, max_height, frame_layers, current_time, time_step,
+                    max_width, max_height, available_layers, current_time, time_step,
                     total_time, time_scale, dispatch_bytes, attempt_frame,
                     advertised_out_flags2);
               });
@@ -1691,6 +1737,30 @@ SmartRenderSessionOutcome run_smart_render_session(
         frame.smart_output_untouched = frame_result.selector_error == 0 &&
             frame_result.pre_error == 0 && frame_result.render_error == -6 &&
             frame_result.output_untouched && !frame_result.empty_result_rect;
+        temporal_layers.resize(history_count);
+        if (frame_rgba.size() <= kMaxTemporalHistoryBytes) {
+          // A later dispatch may reuse a time with new input pixels. Keep only
+          // its newest world so a rational-time lookup cannot return stale data.
+          const auto previous = std::find_if(temporal_layers.begin(),
+              temporal_layers.end(), [current_time, time_scale](const auto& layer) {
+                return layer.time == current_time && layer.time_scale == time_scale;
+              });
+          if (previous != temporal_layers.end()) {
+            temporal_bytes -= previous->rgba.size();
+            temporal_layers.erase(previous);
+          }
+          ExternalLayerInput prior{};
+          prior.slot = 0;
+          prior.time = current_time;
+          prior.time_scale = time_scale;
+          prior.timed = true;
+          prior.width = max_width;
+          prior.height = max_height;
+          prior.rgba = frame_rgba;
+          temporal_bytes += prior.rgba.size();
+          temporal_layers.push_back(std::move(prior));
+          trim_temporal_history();
+        }
         return frame;
       },
       // Smart sessions are out of cluster-swap scope (design §1): no hook.

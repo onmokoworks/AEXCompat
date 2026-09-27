@@ -315,9 +315,16 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
     for (std::size_t layer_index = 0;
          layer_index < request.external_layers->size(); ++layer_index) {
       const auto& layer = (*request.external_layers)[layer_index];
-      if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
-          runtime.records[layer.slot - 1].type != 0 || layer.rgba.size() !=
-              static_cast<std::size_t>(layer.width) * layer.height * 4) return false;
+      const bool historical_input = layer.slot == 0 && layer.timed &&
+          layer.time_scale == request.external_time_scale &&
+          layer.time >= 0 && layer.time <= request.external_total_time &&
+          layer.width == plan.width && layer.height == plan.height;
+      if (!historical_input &&
+          (layer.slot <= 0 ||
+           static_cast<std::size_t>(layer.slot) >= definitions.size() ||
+           runtime.records[layer.slot - 1].type != 0)) return false;
+      if (layer.width <= 0 || layer.height <= 0 || layer.rgba.size() !=
+          static_cast<std::size_t>(layer.width) * layer.height * 4) return false;
       auto& pixels = prepared.hosted_pixels[layer_index];
       pixels.resize(static_cast<std::size_t>(layer.width) * layer.height *
                     plan.pixel_bytes);
@@ -342,7 +349,7 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
           request.external_time_scale;
       const bool same_time = static_cast<int64_t>(layer.time) * requested_scale ==
           static_cast<int64_t>(requested_time) * layer.time_scale;
-      if (!layer.timed || same_time)
+      if (!historical_input && (!layer.timed || same_time))
         copy_world_into_param_def(definitions[layer.slot], world);
       smart_state.hosted_layers.push_back({layer.slot, layer.time, layer.time_scale,
           layer.timed, layer.width, layer.height, -1, world.data(),
@@ -490,10 +497,41 @@ bool verify_animation_extent_wiring_for_test() {
   read_definition(point3d, 56, &point3d_x);
   read_definition(point3d, 64, &point3d_y);
   read_definition(point3d, 72, &point3d_z);
-  return point_x == 128 * 65536 && point_y == 36 * 65536 &&
-         std::abs(point3d_x - 64.0) < 1e-12 &&
-         std::abs(point3d_y - 72.0) < 1e-12 &&
-         std::abs(point3d_z - 108.0) < 1e-12;
+  if (point_x != 128 * 65536 || point_y != 36 * 65536 ||
+      std::abs(point3d_x - 64.0) >= 1e-12 ||
+      std::abs(point3d_y - 72.0) >= 1e-12 ||
+      std::abs(point3d_z - 108.0) >= 1e-12) return false;
+  // The session's total-time endpoint is inclusive. Exercise the real world
+  // preparation path, then prove a frame beyond that endpoint remains refused.
+  request_parser::LayerInput endpoint{};
+  endpoint.slot = 0;
+  endpoint.time = request.external_total_time;
+  endpoint.time_scale = request.external_time_scale;
+  endpoint.timed = true;
+  endpoint.width = plan.width;
+  endpoint.height = plan.height;
+  endpoint.rgba.assign(static_cast<std::size_t>(plan.width) * plan.height * 4, 255);
+  std::vector<request_parser::LayerInput> layers{endpoint};
+  request.external_layers = &layers;
+  ParameterState endpoint_prepared(runtime.records.size() + 1, layers.size());
+  copy_world_into_param_def(endpoint_prepared.definitions[0], input_world);
+  parameter_execution::initialize_parameter_definitions(
+      endpoint_prepared.definitions, plan.width, plan.height);
+  const bool endpoint_ready = prepare_parameters(request, endpoint_prepared, hooks) &&
+      smart::state().hosted_layers.size() == 1 &&
+      smart::state().hosted_layers.front().world != nullptr;
+  if (!endpoint_ready) {
+    smart::state().hosted_layers.clear();
+    return false;
+  }
+  layers.front().time = request.external_total_time + 1;
+  ParameterState outside_prepared(runtime.records.size() + 1, layers.size());
+  copy_world_into_param_def(outside_prepared.definitions[0], input_world);
+  parameter_execution::initialize_parameter_definitions(
+      outside_prepared.definitions, plan.width, plan.height);
+  const bool outside_refused = !prepare_parameters(request, outside_prepared, hooks);
+  smart::state().hosted_layers.clear();
+  return outside_refused;
 }
 
 }  // namespace aexcompat::worker_runtime::smart_setup
