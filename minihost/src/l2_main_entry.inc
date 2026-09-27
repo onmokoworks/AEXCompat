@@ -1784,6 +1784,8 @@ struct ClusterSwapContext {
       run_bootstrap;
   int32_t current_plugin_index{0};
   int32_t current_global_error{-1};
+  uint32_t current_advertised_out_flags{};
+  uint32_t current_advertised_out_flags2{};
   // String table of the currently loaded plug-in (#396): swapped in place so
   // the thread-local active pointer tracks the session's current plug-in.
   aexcompat::aex_strings::StringTable aex_string_table;
@@ -1908,6 +1910,12 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
         !validate_requested_assignments(context.invocation->requested_parameters)) {
       if (result.params_setup_error == 0) result.params_setup_error = -1;
     }
+  }
+  // A failed member never rendered; retain the last dispatchable member's
+  // advertised flags alongside the last dispatched/captured pixel depth.
+  if (result.global_setup_error == 0 && result.params_setup_error == 0) {
+    context.current_advertised_out_flags = bootstrap.advertised_out_flags;
+    context.current_advertised_out_flags2 = bootstrap.advertised_out_flags2;
   }
   return result;
 }
@@ -2896,6 +2904,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     cluster_swap_context.run_bootstrap = run_bootstrap;
     cluster_swap_context.current_plugin_index = 0;
     cluster_swap_context.current_global_error = global_error;
+    cluster_swap_context.current_advertised_out_flags = advertised_out_flags;
+    cluster_swap_context.current_advertised_out_flags2 = advertised_out_flags2;
     cluster_swap_hook.context = &cluster_swap_context;
     cluster_swap_hook.invoke = &cluster_swap_invoke;
     cluster_swap_hook.plugin_count =
@@ -3234,23 +3244,24 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   classic_inputs.parameter_count_contract_valid = parameter_count_contract_valid;
   classic_inputs.guards_intact = guards_intact;
   classic_inputs.arbitrary_defaults_disposed = arbitrary_defaults_disposed;
-  // `depth_supported` is read downstream as "the depth negotiation refused
-  // this run": `render_contract.rs` turns a false into classification
-  // `unsupported_pixel_depth` and drops the selector error with it, and
-  // `run-conformance-bundle.py` calls the run "unsupported" (there a
-  // meaningful selector error still wins). A session that dispatched the
-  // plug-in at another depth and rendered did not refuse anything, so it
-  // reports what it did: served the depth. What the plug-in advertised and
-  // what it was actually dispatched at are recorded beside it, which is where
-  // a reader looks for the conversion.
+  // A session can serve the requested depth by conversion even when the
+  // active plug-in did not advertise it. The advertised fields in a cluster
+  // report describe the current member, not the launch member.
   classic_inputs.depth_supported =
       invocation.render_session_mode ? session_depth_ok : depth_supported;
-  classic_inputs.advertised_depth_supported = depth_supported;
+  classic_inputs.advertised_depth_supported = cluster_session_active
+      ? aexcompat::worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
+            invocation.external_pixel_bytes,
+            cluster_swap_context.current_advertised_out_flags,
+            cluster_swap_context.current_advertised_out_flags2) == invocation.external_pixel_bytes
+      : depth_supported;
   classic_inputs.dispatch_pixel_bytes = session_dispatch_pixel_bytes;
   classic_inputs.session_pixel_bytes =
       invocation.render_session_mode ? invocation.external_pixel_bytes : 0;
-  classic_inputs.advertised_out_flags = advertised_out_flags;
-  classic_inputs.advertised_out_flags2 = advertised_out_flags2;
+  classic_inputs.advertised_out_flags = cluster_session_active
+      ? cluster_swap_context.current_advertised_out_flags : advertised_out_flags;
+  classic_inputs.advertised_out_flags2 = cluster_session_active
+      ? cluster_swap_context.current_advertised_out_flags2 : advertised_out_flags2;
   classic_inputs.image_render_supported = image_render_supported;
   classic_inputs.nop_render_advertised = nop_render_advertised;
   classic_inputs.input_write_advertised = input_write_advertised;
@@ -3329,15 +3340,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   smart_inputs.advertised_out_flags2 = advertised_out_flags2;
   smart_inputs.parameter_count_contract_valid = parameter_count_contract_valid;
   smart_inputs.arbitrary_defaults_disposed = arbitrary_defaults_disposed;
-  // `depth_supported` is read downstream as "the depth negotiation refused
-  // this run": `render_contract.rs` turns a false into classification
-  // `unsupported_pixel_depth` and drops the selector error with it, and
-  // `run-conformance-bundle.py` calls the run "unsupported" (there a
-  // meaningful selector error still wins). A session that dispatched the
-  // plug-in at another depth and rendered did not refuse anything, so it
-  // reports what it did: served the depth. What the plug-in advertised and
-  // what it was actually dispatched at are recorded beside it, which is where
-  // a reader looks for the conversion.
+  // Session conversion serves the requested depth even when the plug-in did
+  // not advertise it; keep the raw advertisement separate from that result.
   smart_inputs.depth_supported =
       invocation.render_session_mode ? session_depth_ok : depth_supported;
   smart_inputs.advertised_depth_supported = depth_supported;

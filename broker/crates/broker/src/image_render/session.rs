@@ -806,6 +806,7 @@ fn render_classic_via_length_one_session(
     };
     // The frame's actual (possibly expanded/shrunk) dimensions drive the PNG
     // encode and the public report, not the launch render dimensions (#261).
+    let frame_depth_provenance = outcome.depth_provenance.clone();
     let (pixels, rendered_width, rendered_height, origin_x, origin_y) = match outcome.status {
         FrameStatus::Rendered {
             pixels,
@@ -1016,6 +1017,7 @@ fn render_classic_via_length_one_session(
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut report = build_interactive_image_report(&final_report, facts);
+    report["depth_provenance"] = json!(frame_depth_provenance);
     if let Some(metadata) = artifact_metadata {
         report["output_transport"] = json!(match request.artifact_kind {
             Some(RenderArtifactKind::Raw) => "native_argb_raw+strict_metadata",
@@ -1254,6 +1256,7 @@ impl InteractiveRenderSession {
             parameters,
         )?;
         let render_ms = started.elapsed().as_millis() as u64;
+        let frame_depth_provenance = outcome.depth_provenance.clone();
         let session_facts = |frames_ok: u32, frames_errored: u32| {
             json!({
                 "frame_index": frame_index,
@@ -1323,6 +1326,7 @@ impl InteractiveRenderSession {
                     // classification to report; the honest value names the
                     // resident path instead of faking an exit state.
                     "worker_classification": "resident_session",
+                    "depth_provenance": frame_depth_provenance,
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
                     "passed": true,
                 });
@@ -1703,6 +1707,7 @@ pub(crate) fn build_interactive_image_report(
         "current_time": facts.timing.current_time, "time_step": facts.timing.time_step,
         "total_time": facts.timing.total_time, "time_scale": facts.timing.time_scale,
         "worker_classification": facts.worker_classification,
+        "image_render_supported": worker_report.get("image_render_supported"),
         "worker_diagnostics": facts.diagnostics,
         "suite_leases_balanced": worker_report.get("suite_leases_balanced"),
         "suite_lease_warning": worker_report.get("suite_lease_warning"),

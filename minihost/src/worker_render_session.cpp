@@ -461,6 +461,7 @@ void apply_session_ui_action(const SessionUiAction* action) {
 // fail-closed decisions stay identical across both session flavors.
 struct SessionFrameOutput {
   int32_t frame_error{0};
+  bool gpu_float32_transport{false};
   // True only when a Smart selector returned success but the host's guarded
   // output remained invalid/untouched. This is distinct from a plug-in
   // returning the same numeric -6 itself.
@@ -553,6 +554,8 @@ void run_session_frame_loop(
   // where the plug-in identity itself changes: a cluster swap.
   int32_t dispatch_bytes = worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
       pixel_bytes, advertised_out_flags, advertised_out_flags2);
+  uint32_t current_advertised_out_flags = advertised_out_flags;
+  uint32_t current_advertised_out_flags2 = advertised_out_flags2;
   outcome.dispatch_pixel_bytes = dispatch_bytes;
 
   const int32_t layer_slot_count =
@@ -830,6 +833,8 @@ void run_session_frame_loop(
       // later frame answers -47 and no dispatch happens, so the session keeps
       // the depth it had rather than publishing one that never ran.
       if (!swapped_plugin_setup_failed) {
+        current_advertised_out_flags = swap.advertised_out_flags;
+        current_advertised_out_flags2 = swap.advertised_out_flags2;
         dispatch_bytes = worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
             pixel_bytes, swap.advertised_out_flags, swap.advertised_out_flags2);
         outcome.dispatch_pixel_bytes = dispatch_bytes;
@@ -1015,7 +1020,8 @@ void run_session_frame_loop(
     };
     const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
                                 int32_t frame_rowbytes, std::size_t packed_bytes,
-                                int32_t frame_origin_x, int32_t frame_origin_y) {
+                                int32_t frame_origin_x, int32_t frame_origin_y,
+                                int32_t captured_pixel_bytes) {
       std::string reply;
       reply.reserve(256);
       reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
@@ -1038,6 +1044,20 @@ void run_session_frame_loop(
       reply += std::to_string(frame_origin_x);
       reply += ",\"origin_y\":";
       reply += std::to_string(frame_origin_y);
+      // An audio-only passthrough copies host pixels; it did not dispatch the
+      // plug-in at any depth and must not claim depth provenance.
+      if (captured_pixel_bytes != 0) {
+        reply += ",\"advertised_out_flags\":";
+        reply += std::to_string(current_advertised_out_flags);
+        reply += ",\"advertised_out_flags2\":";
+        reply += std::to_string(current_advertised_out_flags2);
+        reply += ",\"advertised_depth_supported\":";
+        reply += dispatch_bytes == pixel_bytes ? "true" : "false";
+        reply += ",\"planned_dispatch_pixel_bytes\":";
+        reply += std::to_string(dispatch_bytes);
+        reply += ",\"dispatch_pixel_bytes\":";
+        reply += std::to_string(captured_pixel_bytes);
+      }
       reply += ",\"guards_intact\":true},\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
       reply += "}";
@@ -1178,7 +1198,7 @@ void run_session_frame_loop(
       outcome.rowbytes = max_width * pixel_bytes;
       if (!respond_ok(max_width, max_height, max_width * pixel_bytes,
                       static_cast<std::size_t>(max_width) * max_height * pixel_bytes,
-                      0, 0)) {
+                      0, 0, 0)) {
         outcome.protocol_violation = true;
         break;
       }
@@ -1287,7 +1307,8 @@ void run_session_frame_loop(
     // dispatched) conforms through the same step.
     const int32_t captured_pixel_bytes =
         aexcompat::render_pixel_transport::conform_pixel_depth(
-            captured, expected_pixels, pixel_bytes, dispatch_bytes);
+            captured, expected_pixels, pixel_bytes, dispatch_bytes,
+            frame.gpu_float32_transport);
     // 0 means the frame did not arrive at a depth anything dispatched it at.
     // The size check below cannot stand in for this: a refused stride that
     // happens to equal the session depth passes it, and the un-narrowed buffer
@@ -1358,7 +1379,7 @@ void run_session_frame_loop(
     // (issue #690). The final report's output_hash keeps the one-shot
     // internal-ARGB definition (protocol §4.3).
     if (!respond_ok(frame.width, frame.height, reported_rowbytes, captured.size(),
-                    frame.origin_x, frame.origin_y)) {
+                    frame.origin_x, frame.origin_y, captured_pixel_bytes)) {
       outcome.protocol_violation = true;
       break;
     }
@@ -1559,6 +1580,7 @@ SmartRenderSessionOutcome run_smart_render_session(
           frame_result = render_attempt(&retry_frame);
         }
         outcome.last = frame_result;
+        frame.gpu_float32_transport = frame_result.gpu_render_dispatched;
         frame.width = frame_result.output_width;
         frame.height = frame_result.output_height;
         // The GPU transport captures float32 ARGB whatever the session asked
