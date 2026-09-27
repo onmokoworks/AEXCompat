@@ -839,7 +839,9 @@ fn unhandled_exception_marker(stderr: &str, classification: &str, exit_code: u32
         let mut fields = body.split_whitespace();
         let code_text = fields.next()?.strip_prefix("code=0x")?;
         if !(1..=8).contains(&code_text.len())
-            || !code_text.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !code_text
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         {
             return None;
         }
@@ -849,7 +851,10 @@ fn unhandled_exception_marker(stderr: &str, classification: &str, exit_code: u32
         }
         let site = fields.next()?.strip_prefix("site=")?;
         if site == "unknown" {
-            return fields.next().is_none().then(|| json!({"code": code, "site": site}));
+            return fields
+                .next()
+                .is_none()
+                .then(|| json!({"code": code, "site": site}));
         }
         if !matches!(site, "worker" | "module") {
             return None;
@@ -857,13 +862,17 @@ fn unhandled_exception_marker(stderr: &str, classification: &str, exit_code: u32
         let module = fields.next()?.strip_prefix("module=")?;
         if module.is_empty()
             || module.len() > 64
-            || !module.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || !module
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         {
             return None;
         }
         let rva_text = fields.next()?.strip_prefix("rva=0x")?;
         if !(1..=16).contains(&rva_text.len())
-            || !rva_text.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !rva_text
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
             || fields.next().is_some()
         {
             return None;
