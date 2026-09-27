@@ -23905,13 +23905,22 @@ fn windows_file_apis_open_read_seek_and_close_mounted_assets() {
 #[test]
 fn private_windows_file_survives_snapshot_and_reopen() {
     let mut engine = test_engine(&[0xc3]);
-    engine.unicorn.get_data_mut().guest_files.directories.insert("c:/appdata".into());
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .directories
+        .insert("c:/appdata".into());
     let open = STUB_BASE + 0x400;
     let write = open + 16;
     let close = open + 32;
     let read = open + 48;
     let set_time = open + 64;
-    for (address, symbol) in [(open, "CreateFileW"), (write, "WriteFile"), (read, "ReadFile")] {
+    for (address, symbol) in [
+        (open, "CreateFileW"),
+        (write, "WriteFile"),
+        (read, "ReadFile"),
+    ] {
         install_win64_import(&mut engine.unicorn, address, "kernel32.dll", symbol).unwrap();
     }
     install_win64_import(&mut engine.unicorn, close, "kernel32.dll", "CloseHandle").unwrap();
@@ -23919,51 +23928,145 @@ fn private_windows_file_survives_snapshot_and_reopen() {
     let name = DATA_BASE + 0x100;
     let payload = DATA_BASE + 0x300;
     let count = DATA_BASE + 0x500;
-    let path: Vec<u8> = "C:\\appdata\\license.bin\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let path: Vec<u8> = "C:\\appdata\\license.bin\0"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
     engine.write(name, &path).unwrap();
     engine.write(payload, b"fixture-only").unwrap();
-    let handle = engine.call_win64_with_timeout(open, &[name, 0x40000000, 1, 0, 2, 0x80, 0], TIMEOUT_MICROSECONDS).unwrap();
+    let handle = engine
+        .call_win64_with_timeout(
+            open,
+            &[name, 0x40000000, 1, 0, 2, 0x80, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
     assert_ne!(handle, u64::MAX);
-    assert_eq!(engine.call_win64(write, [handle, payload, 12, count, 0, 0]).unwrap(), 1);
+    assert_eq!(
+        engine
+            .call_win64(write, [handle, payload, 12, count, 0, 0])
+            .unwrap(),
+        1
+    );
     let time_pointer = DATA_BASE + 0x600;
-    engine.write(time_pointer, &133_000_000_000_000_000u64.to_le_bytes()).unwrap();
-    assert_eq!(engine.call_win64(set_time, [handle, 0, 0, time_pointer, 0, 0]).unwrap(), 1);
-    assert_eq!(engine.unicorn.mem_read_as_vec(count, 4).unwrap(), 12u32.to_le_bytes());
-    assert_eq!(engine.call_win64(close, [handle, 0, 0, 0, 0, 0]).unwrap(), 1);
+    engine
+        .write(time_pointer, &133_000_000_000_000_000u64.to_le_bytes())
+        .unwrap();
+    assert_eq!(
+        engine
+            .call_win64(set_time, [handle, 0, 0, time_pointer, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine.unicorn.mem_read_as_vec(count, 4).unwrap(),
+        12u32.to_le_bytes()
+    );
+    assert_eq!(
+        engine.call_win64(close, [handle, 0, 0, 0, 0, 0]).unwrap(),
+        1
+    );
     let snapshot = crate::guest_registry::GuestRegistry::default()
         .snapshot_with_files_and_times(
             &engine.unicorn.get_data().guest_files.private_files,
             &engine.unicorn.get_data().guest_files.private_file_times,
-        ).unwrap();
+        )
+        .unwrap();
     let restored = crate::guest_registry::GuestRegistry::from_snapshot(&snapshot).unwrap();
-    assert_eq!(restored.file_times()["c:/appdata/license.bin"][2], 133_000_000_000_000_000);
+    assert_eq!(
+        restored.file_times()["c:/appdata/license.bin"][2],
+        133_000_000_000_000_000
+    );
     let mut next = test_engine(&[0xc3]);
-    next.unicorn.get_data_mut().guest_files.install_saved_private_files(restored.files().clone(), restored.file_times().clone());
+    next.unicorn
+        .get_data_mut()
+        .guest_files
+        .install_saved_private_files(restored.files().clone(), restored.file_times().clone());
     let restored_files = &next.unicorn.get_data().guest_files;
     let mut stat = [0u8; 48];
-    assert_eq!(guest_stat_record(restored_files, "C:/appdata/license.bin", &mut stat).unwrap(), 0);
+    assert_eq!(
+        guest_stat_record(restored_files, "C:/appdata/license.bin", &mut stat).unwrap(),
+        0
+    );
     assert_eq!(i32::from_le_bytes(stat[20..24].try_into().unwrap()), 12);
-    assert_eq!(guest_stat_record(restored_files, "C:/appdata", &mut stat).unwrap(), 0);
+    assert_eq!(
+        guest_stat_record(restored_files, "C:/appdata", &mut stat).unwrap(),
+        0
+    );
     let records = guest_find_records(restored_files, "C:/appdata/*").unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(&records[0][44..55], b"license.bin");
-    assert_eq!(u32::from_le_bytes(records[0][32..36].try_into().unwrap()), 12);
+    assert_eq!(
+        u32::from_le_bytes(records[0][32..36].try_into().unwrap()),
+        12
+    );
     install_win64_import(&mut next.unicorn, open, "kernel32.dll", "CreateFileW").unwrap();
     install_win64_import(&mut next.unicorn, read, "kernel32.dll", "ReadFile").unwrap();
     let info = open + 80;
     let attributes = open + 96;
-    install_win64_import(&mut next.unicorn, info, "kernel32.dll", "GetFileInformationByHandle").unwrap();
-    install_win64_import(&mut next.unicorn, attributes, "kernel32.dll", "GetFileAttributesExW").unwrap();
+    install_win64_import(
+        &mut next.unicorn,
+        info,
+        "kernel32.dll",
+        "GetFileInformationByHandle",
+    )
+    .unwrap();
+    install_win64_import(
+        &mut next.unicorn,
+        attributes,
+        "kernel32.dll",
+        "GetFileAttributesExW",
+    )
+    .unwrap();
     next.write(name, &path).unwrap();
-    let handle = next.call_win64_with_timeout(open, &[name, 0x80000000, 1, 0, 3, 0x80, 0], TIMEOUT_MICROSECONDS).unwrap();
+    let handle = next
+        .call_win64_with_timeout(
+            open,
+            &[name, 0x80000000, 1, 0, 3, 0x80, 0],
+            TIMEOUT_MICROSECONDS,
+        )
+        .unwrap();
     assert_ne!(handle, u64::MAX);
     let metadata = DATA_BASE + 0x700;
-    assert_eq!(next.call_win64(info, [handle, metadata, 0, 0, 0, 0]).unwrap(), 1);
-    assert_eq!(u64::from_le_bytes(next.unicorn.mem_read_as_vec(metadata + 20, 8).unwrap().try_into().unwrap()), 133_000_000_000_000_000);
-    assert_eq!(next.call_win64(attributes, [name, 0, metadata, 0, 0, 0]).unwrap(), 1);
-    assert_eq!(u64::from_le_bytes(next.unicorn.mem_read_as_vec(metadata + 20, 8).unwrap().try_into().unwrap()), 133_000_000_000_000_000);
-    assert_eq!(next.call_win64(read, [handle, payload, 12, count, 0, 0]).unwrap(), 1);
-    assert_eq!(next.unicorn.mem_read_as_vec(payload, 12).unwrap(), b"fixture-only");
+    assert_eq!(
+        next.call_win64(info, [handle, metadata, 0, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            next.unicorn
+                .mem_read_as_vec(metadata + 20, 8)
+                .unwrap()
+                .try_into()
+                .unwrap()
+        ),
+        133_000_000_000_000_000
+    );
+    assert_eq!(
+        next.call_win64(attributes, [name, 0, metadata, 0, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        u64::from_le_bytes(
+            next.unicorn
+                .mem_read_as_vec(metadata + 20, 8)
+                .unwrap()
+                .try_into()
+                .unwrap()
+        ),
+        133_000_000_000_000_000
+    );
+    assert_eq!(
+        next.call_win64(read, [handle, payload, 12, count, 0, 0])
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        next.unicorn.mem_read_as_vec(payload, 12).unwrap(),
+        b"fixture-only"
+    );
 }
 
 #[test]

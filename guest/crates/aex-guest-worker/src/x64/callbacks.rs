@@ -1353,8 +1353,8 @@ fn message_box_result(group: u32, choice: rfd::MessageDialogResult) -> Result<u6
     use rfd::MessageDialogResult as Choice;
     let result = match (group, choice) {
         (0, Choice::Ok) | (1, Choice::Ok) => 1, // IDOK
-        (0, Choice::Cancel) => 1, // the only available action was dismissed
-        (1 | 3 | 5 | 6, Choice::Cancel) => 2, // IDCANCEL
+        (0, Choice::Cancel) => 1,               // the only available action was dismissed
+        (1 | 3 | 5 | 6, Choice::Cancel) => 2,   // IDCANCEL
         (2, Choice::Custom(label)) if label == "Abort" => 3,
         (2, Choice::Custom(label)) if label == "Retry" => 4,
         (2, Choice::Custom(label)) if label == "Ignore" => 5,

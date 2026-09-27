@@ -230,25 +230,35 @@ impl GuestEngine<'static> {
             options.read(true).write(true).create(true);
             #[cfg(unix)]
             options.mode(0o600);
-            let lock = options.open(&lock_path)
+            let lock = options
+                .open(&lock_path)
                 .map_err(|_| GuestError::Callback("open guest registry lock failed".into()))?;
-            lock.try_lock()
-                .map_err(|_| GuestError::Callback("guest registry is in use by another worker".into()))?;
+            lock.try_lock().map_err(|_| {
+                GuestError::Callback("guest registry is in use by another worker".into())
+            })?;
             unicorn.get_data_mut().registry_lock = Some(lock);
             match std::fs::symlink_metadata(path) {
                 Ok(metadata) => {
                     if !metadata.file_type().is_file()
                         || metadata.len() > crate::guest_registry::MAX_SNAPSHOT_BYTES as u64
                     {
-                        return Err(GuestError::Callback("guest registry snapshot file is invalid".into()));
+                        return Err(GuestError::Callback(
+                            "guest registry snapshot file is invalid".into(),
+                        ));
                     }
-                    let bytes = std::fs::read(path)
-                        .map_err(|_| GuestError::Callback("read guest registry snapshot failed".into()))?;
-                    unicorn.get_data_mut().registry = crate::guest_registry::GuestRegistry::from_snapshot(&bytes)
-                        .map_err(GuestError::Callback)?;
+                    let bytes = std::fs::read(path).map_err(|_| {
+                        GuestError::Callback("read guest registry snapshot failed".into())
+                    })?;
+                    unicorn.get_data_mut().registry =
+                        crate::guest_registry::GuestRegistry::from_snapshot(&bytes)
+                            .map_err(GuestError::Callback)?;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err(GuestError::Callback("inspect guest registry snapshot failed".into())),
+                Err(_) => {
+                    return Err(GuestError::Callback(
+                        "inspect guest registry snapshot failed".into(),
+                    ));
+                }
             }
         }
         uc(
@@ -258,10 +268,18 @@ impl GuestEngine<'static> {
         unicorn.get_data_mut().guest_files = GuestFiles::from_environment()?;
         let saved_files = unicorn.get_data().registry.files().clone();
         let saved_times = unicorn.get_data().registry.file_times().clone();
-        if saved_files.keys().any(|path| unicorn.get_data().guest_files.sources.contains_key(path)) {
-            return Err(GuestError::Callback("private guest file conflicts with mounted asset".into()));
+        if saved_files
+            .keys()
+            .any(|path| unicorn.get_data().guest_files.sources.contains_key(path))
+        {
+            return Err(GuestError::Callback(
+                "private guest file conflicts with mounted asset".into(),
+            ));
         }
-        unicorn.get_data_mut().guest_files.install_saved_private_files(saved_files, saved_times);
+        unicorn
+            .get_data_mut()
+            .guest_files
+            .install_saved_private_files(saved_files, saved_times);
         install_avx_fallback(&mut unicorn)?;
         unicorn.get_data_mut().next_handle_data = HANDLE_DATA_BASE;
         unicorn.get_data_mut().next_aegp_memory_handle = AEGP_MEMORY_HANDLE_BASE;
@@ -1074,22 +1092,29 @@ impl GuestEngine<'static> {
             return Ok(());
         };
         if self.unicorn.get_data().registry_lock.is_none() {
-            return Err(GuestError::Callback("guest registry lock was not acquired".into()));
+            return Err(GuestError::Callback(
+                "guest registry lock was not acquired".into(),
+            ));
         }
         let path = std::path::Path::new(&path);
         if self.unicorn.get_data().registry.is_empty()
             && self.unicorn.get_data().guest_files.private_files.is_empty()
-            && !path.exists() {
+            && !path.exists()
+        {
             return Ok(());
         }
-        let bytes = self.unicorn.get_data().registry.snapshot_with_files_and_times(
-            &self.unicorn.get_data().guest_files.private_files,
-            &self.unicorn.get_data().guest_files.private_file_times,
-        )
+        let bytes = self
+            .unicorn
+            .get_data()
+            .registry
+            .snapshot_with_files_and_times(
+                &self.unicorn.get_data().guest_files.private_files,
+                &self.unicorn.get_data().guest_files.private_file_times,
+            )
             .map_err(GuestError::Callback)?;
+        use std::io::Write;
         #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
-        use std::io::Write;
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| GuestError::Callback("guest registry clock failed".into()))?

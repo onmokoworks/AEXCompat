@@ -256,15 +256,28 @@ fn classic_options_dialog_dispatches_only_with_advertised_capability_and_live_pa
     ];
     let engine = test_engine(&code);
     let mut host = crate::classic::ClassicHost::from_test_engine(engine, TEST_CODE).unwrap();
-    assert_ne!(host.begin_resident_session(1, 1, 1).unwrap().out_flags & abi::PF_OUT_FLAG_I_DO_DIALOG as u32, 0);
-    assert_eq!(host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[]).unwrap().selector_error, 0);
-    assert!(format!("{}", host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[]).unwrap_err()).contains("already dispatched"));
+    assert_ne!(
+        host.begin_resident_session(1, 1, 1).unwrap().out_flags
+            & abi::PF_OUT_FLAG_I_DO_DIALOG as u32,
+        0
+    );
+    assert_eq!(
+        host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[])
+            .unwrap()
+            .selector_error,
+        0
+    );
+    assert!(
+        format!(
+            "{}",
+            host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[])
+                .unwrap_err()
+        )
+        .contains("already dispatched")
+    );
 
-    let mut after_render = crate::classic::ClassicHost::from_test_engine(
-        test_engine(&code),
-        TEST_CODE,
-    )
-    .unwrap();
+    let mut after_render =
+        crate::classic::ClassicHost::from_test_engine(test_engine(&code), TEST_CODE).unwrap();
     after_render.begin_resident_session(1, 1, 1).unwrap();
     after_render
         .render_resident_argb8(1, 1, 0, 30, &[0, 0, 0, 255], &[])
@@ -282,5 +295,8 @@ fn classic_options_dialog_dispatches_only_with_advertised_capability_and_live_pa
     assert_eq!(host.setup().unwrap().out_flags, 0);
     host.prepare_test_user_changed_parameters(vec![vec![0; abi::PF_PARAM_DEF_SIZE]])
         .unwrap();
-    assert!(host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[]).is_err());
+    assert!(
+        host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[])
+            .is_err()
+    );
 }

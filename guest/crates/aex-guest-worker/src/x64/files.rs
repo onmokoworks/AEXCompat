@@ -103,7 +103,11 @@ fn guest_file_name(name: &str) -> Result<String, String> {
 }
 
 impl GuestFiles {
-    fn install_saved_private_files(&mut self, files: BTreeMap<String, Vec<u8>>, times: BTreeMap<String, [u64; 3]>) {
+    fn install_saved_private_files(
+        &mut self,
+        files: BTreeMap<String, Vec<u8>>,
+        times: BTreeMap<String, [u64; 3]>,
+    ) {
         self.private_files = files;
         self.private_file_times = times;
         let paths: Vec<_> = self.private_files.keys().cloned().collect();
@@ -112,7 +116,9 @@ impl GuestFiles {
                 self.record_directory_creation(parent);
                 let mut directory = Some(parent);
                 while let Some(name) = directory {
-                    if name != "c:" { self.directories.insert(name.to_owned()); }
+                    if name != "c:" {
+                        self.directories.insert(name.to_owned());
+                    }
                     directory = name.rsplit_once('/').map(|(ancestor, _)| ancestor);
                 }
             }
@@ -164,7 +170,10 @@ impl GuestFiles {
                 .iter()
                 .any(|path| path.starts_with(&prefix))
             || self.sources.keys().any(|path| path.starts_with(&prefix))
-            || self.private_files.keys().any(|path| path.starts_with(&prefix))
+            || self
+                .private_files
+                .keys()
+                .any(|path| path.starts_with(&prefix))
     }
 
     fn from_environment() -> Result<Self, GuestError> {
@@ -1144,17 +1153,31 @@ fn canonical_guest_search_name(query: &str) -> Result<String, String> {
     guest_file_name(std::str::from_utf8(&path).unwrap())
 }
 
-fn private_file_system_times(files: &GuestFiles, name: &str) -> Result<[std::time::SystemTime; 3], String> {
+fn private_file_system_times(
+    files: &GuestFiles,
+    name: &str,
+) -> Result<[std::time::SystemTime; 3], String> {
     const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
     let now = std::time::SystemTime::now();
-    let Some(stored) = files.private_file_times.get(name) else { return Ok([now; 3]); };
+    let Some(stored) = files.private_file_times.get(name) else {
+        return Ok([now; 3]);
+    };
     let mut times = [now; 3];
     for (index, ticks) in stored.iter().enumerate() {
         times[index] = if *ticks >= EPOCH_TICKS {
-            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos((ticks - EPOCH_TICKS).checked_mul(100).ok_or("private file timestamp overflow")?))
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos(
+                (ticks - EPOCH_TICKS)
+                    .checked_mul(100)
+                    .ok_or("private file timestamp overflow")?,
+            ))
         } else {
-            std::time::UNIX_EPOCH.checked_sub(std::time::Duration::from_nanos((EPOCH_TICKS - ticks).checked_mul(100).ok_or("private file timestamp overflow")?))
-        }.ok_or("private file timestamp out of range")?;
+            std::time::UNIX_EPOCH.checked_sub(std::time::Duration::from_nanos(
+                (EPOCH_TICKS - ticks)
+                    .checked_mul(100)
+                    .ok_or("private file timestamp overflow")?,
+            ))
+        }
+        .ok_or("private file timestamp out of range")?;
     }
     Ok(times)
 }
@@ -1640,10 +1663,18 @@ fn guest_stat_record(files: &GuestFiles, text: &str, record: &mut [u8; 48]) -> R
             times,
         )
     } else if let Some(bytes) = files.private_files.get(&name) {
-        if trailing_slash { return Ok(2); }
-        if bytes.len() > i32::MAX as usize { return Ok(132); }
+        if trailing_slash {
+            return Ok(2);
+        }
+        if bytes.len() > i32::MAX as usize {
+            return Ok(132);
+        }
         let times = private_file_system_times(files, &name)?;
-        (0x8000u16 | 0o666, bytes.len() as i32, [times[1], times[2], times[0]])
+        (
+            0x8000u16 | 0o666,
+            bytes.len() as i32,
+            [times[1], times[2], times[0]],
+        )
     } else if files.directory_exists(&name) {
         let times = *files
             .directory_times
