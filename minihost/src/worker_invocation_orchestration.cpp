@@ -251,7 +251,8 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4,
                               aexcompat::worker_runtime::smart_execution::SessionFrame*
-                                  session = nullptr);
+                                  session = nullptr,
+                              uint32_t advertised_out_flags2 = 0);
 RenderSessionOutcome run_render_session(
     EffectEntry entry, std::array<std::byte, kInSize>& input,
     std::array<std::byte, kOutSize>& output, const RequestedAssignments* requested,
@@ -622,7 +623,8 @@ SmartFinalDispatchResult run_smart_final_dispatch(const FinalDispatchRequest& re
                           nullptr,
                           invocation.external_current_time, invocation.external_time_step,
                           invocation.external_total_time, invocation.external_time_scale,
-                          invocation.external_pixel_bytes)
+                          invocation.external_pixel_bytes, nullptr,
+                          request.advertised_out_flags2)
       : SmartResult{};
   }
   lifetime_fault_observed = invocation.mask_double_dispose_mode

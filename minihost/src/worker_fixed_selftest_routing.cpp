@@ -170,13 +170,17 @@ int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
       aexcompat::l2cli::verify_smart_diagnostic_auxiliary_admission();
   const bool fixed_case =
       aexcompat::worker_runtime::smart_setup::verify_fixed_image_case_admission();
-  const bool passed = auxiliary && fixed_case;
+  const bool gpu_snapshot =
+      aexcompat::worker_runtime::smart_setup::verify_gpu_advertisement_snapshot();
+  const bool passed = auxiliary && fixed_case && gpu_snapshot;
   std::cout << "{\"smart_diagnostic_auxiliary_admission\":\""
             << (passed ? "passed" : "failed")
             << "\",\"uses_effective_argc\":"
             << (auxiliary ? "true" : "false")
             << ",\"fixed_image_case_admitted\":"
             << (fixed_case ? "true" : "false")
+            << ",\"gpu_advertisement_snapshot\":"
+            << (gpu_snapshot ? "true" : "false")
             << ",\"commands_checked\":20}\n";
   return passed ? 0 : 1;
 }

@@ -157,6 +157,7 @@ def test_smart_diagnostic_auxiliary_admission_passes_on_all_workers() -> None:
     ):
         assert report["uses_effective_argc"] is True, name
         assert report["fixed_image_case_admitted"] is True, name
+        assert report["gpu_advertisement_snapshot"] is True, name
         assert report["commands_checked"] == 20, name
 
 

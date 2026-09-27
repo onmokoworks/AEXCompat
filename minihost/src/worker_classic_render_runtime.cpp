@@ -1084,7 +1084,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
                               int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4,
                               aexcompat::worker_runtime::smart_execution::SessionFrame* session =
-                                  nullptr) {
+                                  nullptr,
+                              uint32_t advertised_out_flags2 = 0) {
   SmartRuntimeSession smart_session;
   reset_smart_host_telemetry();
   SmartResult result;
@@ -1094,7 +1095,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
        g_pixel_aspect_ratio.numerator, g_pixel_aspect_ratio.denominator},
       {&command_output, &case_id, external_rgba != nullptr, external_width,
        external_height, external_current_time, external_time_scale,
-       external_pixel_bytes});
+       external_pixel_bytes, advertised_out_flags2});
   if (!plan.valid) return result;
   // The smart path serves parameter checkouts from the hosted ledger, not from a
   // classic dispatch context, and that ledger kept its default current_time 0 /
@@ -1334,12 +1335,13 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4,
                               aexcompat::worker_runtime::smart_execution::SessionFrame* session =
-                                  nullptr) {
+                                  nullptr,
+                              uint32_t advertised_out_flags2 = 0) {
   return aexcompat::worker_runtime::smart_execution::render_once(
       entry, input, output, case_id, requested, external_rgba,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale,
-      external_pixel_bytes, session);
+      external_pixel_bytes, session, advertised_out_flags2);
 }
 
 #undef entry

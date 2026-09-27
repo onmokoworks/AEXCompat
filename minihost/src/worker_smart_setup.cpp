@@ -82,7 +82,7 @@ Plan prepare(const Context& context, const Request& request) {
   }
   plan.force_cpu_image = case_id == "request_cpu";
   const bool advertised_gpu_support =
-      (read<uint32_t>(output, 400) & (1u << 25)) != 0;
+      (request.advertised_out_flags2 & (1u << 25)) != 0;
   plan.gpu_negotiation = plan.fixture_gpu_negotiation ||
       plan.opencl_gpu_negotiation || plan.directx_gpu_negotiation ||
       plan.explicit_gpu_device ||
@@ -134,6 +134,19 @@ bool verify_fixed_image_case_admission() {
   const auto plan = prepare({}, {&output, &case_id, false, 0, 0, 0, 1, 4});
   return plan.valid && plan.width == 16 && plan.height == 12 &&
       plan.pixel_bytes == 4 && plan.rowbytes == 64;
+}
+
+bool verify_gpu_advertisement_snapshot() {
+  constexpr uint32_t kGpuSupport = 1u << 25;
+  parameter_execution::BufferOut output{};
+  const std::string case_id = "request";
+  Request request{&output, &case_id, true, 16, 12, 0, 1, 16, kGpuSupport};
+  const auto advertised = prepare({}, request);
+  request.advertised_out_flags2 = 0;
+  std::memcpy(output.data() + 400, &kGpuSupport, sizeof(kGpuSupport));
+  const auto not_advertised = prepare({}, request);
+  return advertised.valid && advertised.gpu_negotiation &&
+      not_advertised.valid && !not_advertised.gpu_negotiation;
 }
 
 // A world handed to a plug-in inside a PF_ParamDef. The copy keeps the

@@ -122,7 +122,7 @@ using Execute = Result (*)(EffectEntry, Input&, Output&, const std::string&,
     const RequestedAssignments*, const std::vector<unsigned char>*,
     int32_t, int32_t,
     const std::vector<ExternalLayerInput>*, int32_t, int32_t, int32_t,
-    uint32_t, int32_t, SessionFrame*);
+    uint32_t, int32_t, SessionFrame*, uint32_t);
 
 struct Hooks {
   Execute execute{};
@@ -136,6 +136,7 @@ Result render_once(EffectEntry, Input&, Output&, const std::string&,
                    int32_t = 0, int32_t = 0,
                    const std::vector<ExternalLayerInput>* = nullptr,
                    int32_t = 0, int32_t = 1, int32_t = 1,
-                   uint32_t = 1, int32_t = 4, SessionFrame* = nullptr);
+                   uint32_t = 1, int32_t = 4, SessionFrame* = nullptr,
+                   uint32_t advertised_out_flags2 = 0);
 
 }  // namespace aexcompat::worker_runtime::smart_execution

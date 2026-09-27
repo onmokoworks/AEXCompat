@@ -23,6 +23,7 @@ struct Request {
   uint32_t external_time_scale;
   int32_t external_pixel_bytes;
   SessionFrame* session;
+  uint32_t advertised_out_flags2;
   Result result;
 };
 
@@ -41,7 +42,7 @@ int execute(void* opaque) {
       request.external_layers, request.external_current_time,
       request.external_time_step, request.external_total_time,
       request.external_time_scale, request.external_pixel_bytes,
-      request.session);
+      request.session, request.advertised_out_flags2);
   if (request.result.gpu_setup_error != 0) return request.result.gpu_setup_error;
   if (request.result.pre_error != 0) return request.result.pre_error;
   return request.result.render_error;
@@ -63,11 +64,13 @@ Result render_once(EffectEntry entry, Input& input, Output& output,
                    const std::vector<ExternalLayerInput>* external_layers,
                    int32_t external_current_time, int32_t external_time_step,
                    int32_t external_total_time, uint32_t external_time_scale,
-                   int32_t external_pixel_bytes, SessionFrame* session) {
+                   int32_t external_pixel_bytes, SessionFrame* session,
+                   uint32_t advertised_out_flags2) {
   Request request{entry, input, output, case_id, requested, external_rgba,
       external_width, external_height, external_layers,
       external_current_time, external_time_step, external_total_time,
-      external_time_scale, external_pixel_bytes, session, {}};
+      external_time_scale, external_pixel_bytes, session,
+      advertised_out_flags2, {}};
   render::RenderContext context{
       render::RenderKind::SmartPreRenderAndRender, &request,
       {&execute, &aexcompat::host_audio::cleanup_after_render,

@@ -345,7 +345,8 @@ worker_runtime::smart_execution::Result smart_render_once(
     int32_t external_current_time = 0, int32_t external_time_step = 1,
     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
     int32_t external_pixel_bytes = 4,
-    worker_runtime::smart_execution::SessionFrame* session = nullptr);
+    worker_runtime::smart_execution::SessionFrame* session = nullptr,
+    uint32_t advertised_out_flags2 = 0);
 std::string sha256_bytes(const unsigned char* data, std::size_t size);
 void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
                                    int32_t height, int32_t pixel_bytes);
@@ -1493,7 +1494,8 @@ SmartRenderSessionOutcome run_smart_render_session(
                     current_entry, input, output, case_id,
                     frame_override ? frame_override : requested, &frame_rgba,
                     max_width, max_height, frame_layers, current_time, time_step,
-                    total_time, time_scale, dispatch_bytes, attempt_frame);
+                    total_time, time_scale, dispatch_bytes, attempt_frame,
+                    advertised_out_flags2);
               });
         };
         worker_runtime::smart_execution::Result frame_result =
@@ -1505,7 +1507,7 @@ SmartRenderSessionOutcome run_smart_render_session(
         // the only signal. The 14 arrives before the plug-in touches suites,
         // worlds, or checkouts, so re-run the frame once through the GPU transport.
         if (frame_result.render_error == 14 &&
-            (read<uint32_t>(output, 400) & (1u << 25)) != 0 &&
+            (advertised_out_flags2 & (1u << 25)) != 0 &&
             !worker_runtime::smart_setup::force_gpu_retry_requested()) {
           const worker_runtime::smart_setup::ForceGpuRetryScope force_gpu;
           captured.clear();
