@@ -67,11 +67,23 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
     *r.session->captured_argb = logical_output;
   h.dump_world("smart-output", logical_output.data(), result.output_width,
                result.output_height, r.pixel_bytes);
+  std::array<int32_t, 4> promised{0, 0, result.output_width, result.output_height};
+  const auto& diagnostic = render::diagnostic_world_layout();
+  if (diagnostic.enabled && diagnostic.has_extent_hint) {
+    const auto local = [](int32_t coordinate, int32_t origin, int32_t extent) {
+      return static_cast<int32_t>(std::clamp<int64_t>(
+          static_cast<int64_t>(coordinate) - origin, 0, extent));
+    };
+    promised = {
+        local(diagnostic.extent_hint[0], result.output_origin_x, result.output_width),
+        local(diagnostic.extent_hint[1], result.output_origin_y, result.output_height),
+        local(diagnostic.extent_hint[2], result.output_origin_x, result.output_width),
+        local(diagnostic.extent_hint[3], result.output_origin_y, result.output_height)};
+  }
   if (!result.empty_result_rect && !result.output_coverage_external_world)
     result.output_coverage = output_coverage::inspect(
         logical_output.data(), logical_output.size(), result.output_width,
-        result.output_height, r.pixel_bytes,
-        {0, 0, result.output_width, result.output_height});
+        result.output_height, r.pixel_bytes, promised);
   // External worlds have their own initialization contract (GPU device and
   // VideoFrame adapter). Do not mistake their copied pixels for the host seed;
   // retain the pre-existing whole-frame 0xCC fallback check for those routes.

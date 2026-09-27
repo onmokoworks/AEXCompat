@@ -1,6 +1,7 @@
 #pragma once
 #include "worker_output_coverage.hpp"
 #include "worker_suite_abi.hpp"
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -56,6 +57,7 @@ struct Context {
   bool sentinels_intact{};
   output_coverage::Result* output_coverage{};
   bool output_written_by_host{};
+  std::array<int32_t, 4> promised_rect{};
 };
 int finalize(Context& context, const Hooks& hooks);
 }

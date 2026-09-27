@@ -2239,9 +2239,13 @@ bool dispatch(const Request& request, const Hooks& hooks,
 
   std::array<std::byte, 16> pre_callbacks{};
   std::array<std::byte, 24> pre_extra{};
-  const std::array<int32_t, 4> expected_request = plan.partial_output_request
-      ? std::array<int32_t, 4>{3, 2, 11, 8}
-      : std::array<int32_t, 4>{0, 0, plan.width, plan.height};
+  const auto& diagnostic = render::diagnostic_world_layout();
+  const std::array<int32_t, 4> expected_request =
+      diagnostic.enabled && diagnostic.has_request_rect
+          ? diagnostic.request_rect
+          : (plan.partial_output_request
+                 ? std::array<int32_t, 4>{3, 2, 11, 8}
+                 : std::array<int32_t, 4>{0, 0, plan.width, plan.height});
   const int16_t render_bitdepth = plan.float32 ? 32 : (plan.deep16 ? 16 : 8);
   // Both selector inputs come from one builder, so SmartRender cannot be handed
   // a different request or bitdepth than PreRender was (issue #699).
@@ -2331,6 +2335,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
 
   render::SmartOutputBounds smart_bounds = render::prepare_smart_output_bounds(
       dispatch_state.pre_output.data(), dispatch_state.pre_output.size(), plan.pixel_bytes);
+  if (diagnostic.enabled && smart_bounds.valid && !smart_bounds.empty_result)
+    smart_bounds.rowbytes += diagnostic.output_row_padding;
   result.result_rect = smart_bounds.result_rect;
   result.max_result_rect = smart_bounds.max_result_rect;
   result.rects_valid = result.pre_error == 0 && smart_bounds.valid;
@@ -2417,7 +2423,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
     smart_bounds.result_rect = passthrough_rect;
     smart_bounds.width = passthrough_width;
     smart_bounds.height = passthrough_height;
-    smart_bounds.rowbytes = passthrough_width * plan.pixel_bytes;
+    smart_bounds.rowbytes = passthrough_width * plan.pixel_bytes +
+        (diagnostic.enabled ? diagnostic.output_row_padding : 0);
     smart_bounds.origin_x = passthrough_rect[0];
     smart_bounds.origin_y = passthrough_rect[1];
   }

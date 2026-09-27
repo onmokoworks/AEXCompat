@@ -111,6 +111,22 @@ Plan prepare(const Context& context, const Request& request) {
       plan.height > 4096) return plan;
   plan.pixel_bytes = plan.float32 ? 16 : (plan.deep16 ? 8 : 4);
   plan.rowbytes = case_id == "padded_stride" ? 64 : plan.width * plan.pixel_bytes;
+  plan.output_rowbytes = plan.rowbytes;
+  const auto& diagnostic = render::diagnostic_world_layout();
+  if (diagnostic.enabled) {
+    if (plan.gpu_negotiation ||
+        diagnostic.input_row_padding % plan.pixel_bytes != 0 ||
+        diagnostic.output_row_padding % plan.pixel_bytes != 0 ||
+        (diagnostic.has_request_rect &&
+         (diagnostic.request_rect[2] > plan.width ||
+          diagnostic.request_rect[3] > plan.height)) ||
+        (diagnostic.has_extent_hint &&
+         (diagnostic.extent_hint[2] > plan.width ||
+          diagnostic.extent_hint[3] > plan.height))) return plan;
+    plan.rowbytes += diagnostic.input_row_padding;
+    plan.output_rowbytes = plan.width * plan.pixel_bytes +
+        diagnostic.output_row_padding;
+  }
   // `request_cpu` is a session case like `request`, and is admitted the same
   // way. It used to be admitted only incidentally, through `deep16`/`float32`
   // being true whenever the session was deep; dispatching a plug-in that
@@ -210,12 +226,21 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
   if (!source.set_plugin_writable(input_write_advertised)) return false;
   *buffers.destination = buffers.output->data();
   if (!output_coverage::seed(*buffers.destination, buffers.output->size(),
-          plan.width, plan.height, plan.rowbytes, plan.pixel_bytes)) return false;
-  const render::WorldLayout layout{(plan.deep16 || plan.float32) ? 1 : 0,
+          plan.width, plan.height, plan.output_rowbytes, plan.pixel_bytes)) return false;
+  const render::WorldLayout input_layout{(plan.deep16 || plan.float32) ? 1 : 0,
       plan.pixel_bytes, plan.width, plan.height, plan.rowbytes};
-  if (!render::prepare_world_layout(*buffers.input_world, layout, source.data()) ||
-      !render::prepare_world_layout(*buffers.output_world, layout,
+  const render::WorldLayout output_layout{(plan.deep16 || plan.float32) ? 1 : 0,
+      plan.pixel_bytes, plan.width, plan.height, plan.output_rowbytes};
+  if (!render::prepare_world_layout(*buffers.input_world, input_layout, source.data()) ||
+      !render::prepare_world_layout(*buffers.output_world, output_layout,
                                     *buffers.destination)) return false;
+  const auto& diagnostic = render::diagnostic_world_layout();
+  if (diagnostic.enabled) {
+    std::memcpy(buffers.input_world->data() + 104,
+                &diagnostic.input_origin_x, sizeof(diagnostic.input_origin_x));
+    std::memcpy(buffers.input_world->data() + 108,
+                &diagnostic.input_origin_y, sizeof(diagnostic.input_origin_y));
+  }
   const int32_t pixel_format = plan.float32 ? world_registry::kPixelFormatArgb128 :
       (plan.deep16 ? world_registry::kPixelFormatArgb64 :
                      world_registry::kPixelFormatArgb32);
@@ -384,6 +409,10 @@ bool prepare_parameters(const ParameterRequest& request, ParameterState& prepare
     const int32_t extent[4] = {3, 2, 11, 8};
     std::memcpy(request.input->data() + 260, extent, sizeof(extent));
   }
+  const auto& diagnostic = render::diagnostic_world_layout();
+  if (diagnostic.enabled && diagnostic.has_extent_hint)
+    std::memcpy(request.input->data() + 260,
+                diagnostic.extent_hint.data(), sizeof(diagnostic.extent_hint));
   smart_state.checkout_time = smart_state.checkout_time_step = 0;
   smart_state.checkout_time_scale = 0;
   prepared.pre_render_source.resize(

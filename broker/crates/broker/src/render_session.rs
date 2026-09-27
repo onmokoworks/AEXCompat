@@ -521,6 +521,70 @@ impl SessionGeometry {
 /// still fail-closes on `section_bytes() > SECTION_HARD_CAP_BYTES` as pure
 /// defense in depth; there is no longer a section-fit eligibility carve-out that
 /// keeps a large-layer render on the one-shot path.
+
+/// Host-controlled world transformations for a metamorphic diagnostic run.
+/// This is never inferred from the plug-in identity and is absent on ordinary
+/// renders. The worker revalidates the same bounds before creating any world.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DiagnosticWorldLayout {
+    pub input_row_padding: u32,
+    pub output_row_padding: u32,
+    pub input_origin_x: i32,
+    pub input_origin_y: i32,
+    pub request_rect: Option<[i32; 4]>,
+    pub extent_hint: Option<[i32; 4]>,
+}
+
+impl DiagnosticWorldLayout {
+    fn encoded(
+        self,
+        width: u32,
+        height: u32,
+        format: RenderPixelFormat,
+        smart: bool,
+    ) -> io::Result<String> {
+        let bytes = u32::try_from(format.bytes_per_pixel()).unwrap();
+        let valid_rect = |rect: [i32; 4]| {
+            rect[0] >= 0
+                && rect[1] >= 0
+                && rect[2] > rect[0]
+                && rect[3] > rect[1]
+                && i64::from(rect[2]) <= i64::from(width)
+                && i64::from(rect[3]) <= i64::from(height)
+        };
+        if self.input_row_padding > 256
+            || self.output_row_padding > 256
+            || self.input_row_padding % bytes != 0
+            || self.output_row_padding % bytes != 0
+            || self.input_origin_x.unsigned_abs() > MAX_DIMENSION
+            || self.input_origin_y.unsigned_abs() > MAX_DIMENSION
+            || self
+                .request_rect
+                .is_some_and(|rect| !smart || !valid_rect(rect))
+            || self.extent_hint.is_some_and(|rect| !valid_rect(rect))
+        {
+            return Err(invalid("render diagnostic world layout is invalid"));
+        }
+        let request = self.request_rect.unwrap_or([-1; 4]);
+        let extent = self.extent_hint.unwrap_or([-1; 4]);
+        Ok(format!(
+            "v1|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.input_row_padding,
+            self.output_row_padding,
+            self.input_origin_x,
+            self.input_origin_y,
+            request[0],
+            request[1],
+            request[2],
+            request[3],
+            extent[0],
+            extent[1],
+            extent[2],
+            extent[3]
+        ))
+    }
+}
+
 pub struct SessionOpenRequest<'a> {
     pub repository: &'a Path,
     pub plugin_path: &'a Path,
@@ -1151,7 +1215,22 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None, None)
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None, None, None)
+    }
+
+    /// Opens a private-desktop session with explicit, bounded world variants.
+    /// The regular `open` path never supplies this diagnostic-only option.
+    pub fn open_diagnostic(
+        request: SessionOpenRequest<'_>,
+        layout: DiagnosticWorldLayout,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            None,
+            Some(layout),
+        )
     }
 
     pub fn open_plugin_data_effect(
@@ -1163,6 +1242,7 @@ impl RenderSession {
             WorkerDesktopPolicy::Dedicated,
             None,
             Some(selector),
+            None,
         )
     }
 
@@ -1172,7 +1252,7 @@ impl RenderSession {
     pub(crate) fn open_on_current_desktop(
         request: SessionOpenRequest<'_>,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None, None)
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None, None, None)
     }
 
     fn open_with_desktop_policy(
@@ -1180,7 +1260,18 @@ impl RenderSession {
         desktop_policy: WorkerDesktopPolicy,
         cluster: Option<ClusterRenderPlugins>,
         plugin_data_selector: Option<&PluginDataEffectSelector>,
+        diagnostic_layout: Option<DiagnosticWorldLayout>,
     ) -> io::Result<RenderSession> {
+        let diagnostic_layout = diagnostic_layout
+            .map(|layout| {
+                layout.encoded(
+                    request.width,
+                    request.height,
+                    request.pixel_format,
+                    request.smart,
+                )
+            })
+            .transpose()?;
         if request.time_step <= 0
             // A zero-duration render (total_time == 0) is valid: the shared
             // RenderTiming::is_valid admits it at current_time == 0, and the
@@ -1604,6 +1695,9 @@ impl RenderSession {
         if request.output_checksum_detail {
             args_after_plugin.extend(["--output-checksum-detail-v1".to_owned(), "1".to_owned()]);
         }
+        if let Some(layout) = &diagnostic_layout {
+            args_after_plugin.extend(["--render-diagnostic-layout-v1".to_owned(), layout.clone()]);
+        }
         // Conformance render settings ride the same shared auxiliary option the
         // one-shot path forwards (#275); the worker peels it from the tail and
         // feeds it to its report only (the pixels are already pre-transformed by
@@ -1875,7 +1969,13 @@ impl RenderSession {
         request: SessionOpenRequest<'_>,
         cluster: ClusterRenderPlugins,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, Some(cluster), None)
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            Some(cluster),
+            None,
+            None,
+        )
     }
 
     pub fn invalidation(&self) -> Option<&SessionInvalidation> {

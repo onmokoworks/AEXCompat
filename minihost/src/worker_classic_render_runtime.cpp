@@ -588,7 +588,9 @@ struct ClassicRenderDispatchOwner {
     // before a `reset` that can fail would leave it scanning the enlarged
     // extent across the old, smaller allocation and straight into the guard
     // page that follows it.
-    const int32_t next_rowbytes = next_width * pixel_bytes;
+    const auto& diagnostic = aexcompat::render::diagnostic_world_layout();
+    const int32_t next_rowbytes = next_width * pixel_bytes +
+        (diagnostic.enabled ? diagnostic.output_row_padding : 0);
     // Through `fail`, which stops the session. The label is wrong - this is host
     // resource exhaustion, not the plug-in asking for something invalid - but
     // stopping is the property that matters: the host cannot give this frame an
@@ -692,13 +694,16 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   const int32_t pixel_bytes = image_request.pixel_bytes;
   smart_state().pixel_format = pixel_bytes == 16 ? "argb32f" :
       (pixel_bytes == 8 ? "argb16" : "argb8");
-  rowbytes = image_request.rowbytes;
+  const auto& diagnostic = aexcompat::render::diagnostic_world_layout();
+  const int32_t input_rowbytes = image_request.rowbytes;
+  rowbytes = diagnostic.enabled
+      ? width * pixel_bytes + diagnostic.output_row_padding : input_rowbytes;
   const aexcompat::render::ParameterProfile parameter_profile =
       aexcompat::render::prepare_parameter_profile(case_id);
   std::vector<unsigned char> logical_source(width * height * pixel_bytes);
-  InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
+  InputPixelBuffer source(static_cast<std::size_t>(input_rowbytes) * height);
   if (!source) return -3;
-  std::memset(source.data(), 0x5A, static_cast<std::size_t>(rowbytes) * height);
+  std::memset(source.data(), 0x5A, static_cast<std::size_t>(input_rowbytes) * height);
   if (!aexcompat::render::build_argb_input(image_request, external_rgba,
                                             logical_source, source.data())) return -3;
   dump_world_snapshot("classic-input", logical_source.data(), width, height, pixel_bytes);
@@ -713,10 +718,16 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   guards_intact = true;
 
   aexcompat::world_safety::EffectWorldStorage input_world{}, output_world{};
-  const aexcompat::render::WorldLayout primary_world{
+  const aexcompat::render::WorldLayout input_layout{
+      pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, input_rowbytes};
+  const aexcompat::render::WorldLayout output_layout{
       pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes};
-  if (!aexcompat::render::prepare_world_layout(input_world, primary_world, source.data()) ||
-      !aexcompat::render::prepare_world_layout(output_world, primary_world, destination)) return -3;
+  if (!aexcompat::render::prepare_world_layout(input_world, input_layout, source.data()) ||
+      !aexcompat::render::prepare_world_layout(output_world, output_layout, destination)) return -3;
+  if (diagnostic.enabled) {
+    write<int32_t>(input_world, 104, diagnostic.input_origin_x);
+    write<int32_t>(input_world, 108, diagnostic.input_origin_y);
+  }
   const int32_t dispatch_pixel_format = pixel_bytes == 4 ? kPixelFormatArgb32 :
       (pixel_bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128);
   DispatchWorldFormatScope dispatch_worlds;
@@ -819,6 +830,9 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     const int32_t extent[4] = {3, 2, 11, 8};
     std::memcpy(input.data() + kInExtentHint, extent, sizeof(extent));
   }
+  if (diagnostic.enabled && diagnostic.has_extent_hint)
+    std::memcpy(input.data() + kInExtentHint,
+                diagnostic.extent_hint.data(), sizeof(diagnostic.extent_hint));
   struct RenderUiContextScope {
     EffectEntry entry;
     std::array<std::byte, kInSize>& input;
@@ -940,7 +954,10 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       external_current_time, external_time_step, external_time_scale,
       read<int32_t>(input, kInQuality), dispatch_pixel_format, &output_hash,
       &guards_intact, captured_argb, guarded.sentinels_intact(),
-      frame_output ? &frame_output->output_coverage : nullptr, nop_render};
+      frame_output ? &frame_output->output_coverage : nullptr, nop_render,
+      diagnostic.enabled && diagnostic.has_extent_hint
+          ? diagnostic.extent_hint
+          : std::array<int32_t, 4>{0, 0, width, height}};
   error = aexcompat::worker_runtime::classic_execution::finalize(final_context, {
       +[](const unsigned char* data, int32_t rowbytes, int32_t width, int32_t height,
           int32_t bytes, std::vector<unsigned char>& output) {
@@ -1144,10 +1161,11 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   const int32_t pixel_bytes = plan.pixel_bytes;
   const int32_t rowbytes = plan.rowbytes;
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
-  OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
+  OutputPixelBuffer guarded(static_cast<std::size_t>(plan.output_rowbytes) * height);
   auto* destination = guarded.data();
   if (!aexcompat::worker_runtime::output_coverage::seed(
-          destination, guarded.size(), width, height, rowbytes, pixel_bytes)) return result;
+          destination, guarded.size(), width, height,
+          plan.output_rowbytes, pixel_bytes)) return result;
   result.guards_intact = true;
   // A session frame needs the sentinel verdict on every exit path, including
   // early refusals after this point; the one-shot report keeps its existing
@@ -1279,7 +1297,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
   if (nop_render) {
     for (int32_t y = 0; y < height; ++y)
-      std::memcpy(destination + y * rowbytes, source.data() + y * rowbytes,
+      std::memcpy(destination + y * plan.output_rowbytes,
+                  source.data() + y * rowbytes,
                   width * pixel_bytes);
     result.pre_error = 0;
     result.render_error = end_lifecycle(entry, input, command_output, params.data(),
@@ -1288,7 +1307,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     result.roi_contract_valid = true;
     result.output_width = width;
     result.output_height = height;
-    result.output_rowbytes = rowbytes;
+    result.output_rowbytes = plan.output_rowbytes;
     result.result_rect = {0, 0, width, height};
     result.max_result_rect = result.result_rect;
     result.output_extent_hint = result.result_rect;
@@ -1298,7 +1317,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       std::memcpy(logical_input.data() + y * width * pixel_bytes,
                   source.data() + y * rowbytes, width * pixel_bytes);
       std::memcpy(logical_output.data() + y * width * pixel_bytes,
-                  destination + y * rowbytes, width * pixel_bytes);
+                  destination + y * plan.output_rowbytes, width * pixel_bytes);
     }
     result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
     result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
