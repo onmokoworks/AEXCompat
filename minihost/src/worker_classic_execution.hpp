@@ -1,4 +1,5 @@
 #pragma once
+#include "worker_output_coverage.hpp"
 #include "worker_suite_abi.hpp"
 #include <cstdint>
 #include <string>
@@ -53,6 +54,8 @@ struct Context {
   std::string* output_hash{}; bool* guards_intact{};
   std::vector<unsigned char>* captured{};
   bool sentinels_intact{};
+  output_coverage::Result* output_coverage{};
+  bool output_written_by_host{};
 };
 int finalize(Context& context, const Hooks& hooks);
 }

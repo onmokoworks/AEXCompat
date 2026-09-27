@@ -127,7 +127,8 @@ void emit_classic_completion_report(const ClassicCompletionInputs& in) {
       in.render_rowbytes,
       in.render_width * bytes_per_pixel,
       std::max(0, in.render_rowbytes - in.render_width * bytes_per_pixel),
-      in.input_hash, in.output_hash, in.guards_intact, world_debug_report_json()};
+      in.input_hash, in.output_hash, in.guards_intact, world_debug_report_json(),
+      in.output_coverage};
   const report::CustomUiSnapshot classic_custom_ui{
       g_render_click_enabled, g_render_click_error, g_render_click_out_flags,
       g_render_click_changed_value, g_render_draw_enabled, g_render_draw_error,

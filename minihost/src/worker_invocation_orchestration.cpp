@@ -537,8 +537,10 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
     session_invariant_failure = session_outcome.invariant_failure;
     session_swap_failure = session_outcome.swap_failure;
     render_error = session_outcome.render_error;
+    result.output_coverage = session_outcome.output_coverage;
     result.dispatch_pixel_bytes = session_outcome.dispatch_pixel_bytes;
   } else if (params_error == 0 && image_render_supported && depth_supported) {
+    aexcompat::render::ClassicFrameOutput frame_output;
     render_error = render_once(entry, input, output, case_id, render_width, render_height,
                                render_rowbytes, input_hash, output_hash, guards_intact,
                                invocation.request_mode ? &invocation.requested_parameters : nullptr,
@@ -552,7 +554,9 @@ ClassicFinalDispatchResult run_classic_final_dispatch(const FinalDispatchRequest
                                nullptr,
                                invocation.external_current_time, invocation.external_time_step,
                                invocation.external_total_time, invocation.external_time_scale,
-                               invocation.external_pixel_bytes);
+                               invocation.external_pixel_bytes, true, nullptr,
+                               &frame_output);
+    result.output_coverage = frame_output.output_coverage;
   }
   std::cerr << "stage:render_end error=" << render_error << "\n" << std::flush;
   return result;

@@ -120,20 +120,44 @@ int render_with_parameter_checkout(void*) {
 int cleanup_after_parameter_checkout(void*) { return g_cleanup_result; }
 bool dependencies_are_ready(void*) { return true; }
 
+bool fill_synthetic_output(void* world) {
+  using namespace aexcompat::abi::x86_64_windows;
+  if (!world) return false;
+  unsigned char* pixels{};
+  int32_t width{}, height{}, rowbytes{};
+  std::memcpy(&pixels, static_cast<std::byte*>(world) + LAYER_DATA_OFFSET,
+              sizeof(pixels));
+  std::memcpy(&width, static_cast<std::byte*>(world) + LAYER_WIDTH_OFFSET,
+              sizeof(width));
+  std::memcpy(&height, static_cast<std::byte*>(world) + LAYER_HEIGHT_OFFSET,
+              sizeof(height));
+  std::memcpy(&rowbytes, static_cast<std::byte*>(world) + LAYER_ROWBYTES_OFFSET,
+              sizeof(rowbytes));
+  if (!pixels || width <= 0 || height <= 0 || rowbytes < width * 4) return false;
+  // This fixture observes lifecycle/context behavior, but a successful
+  // selector also has to honor the shipping output-write contract (#1592).
+  for (int32_t y = 0; y < height; ++y)
+    std::memset(pixels + static_cast<std::size_t>(y) * rowbytes, 0x11,
+                static_cast<std::size_t>(width) * 4);
+  return true;
+}
+
 int32_t __cdecl observe_frame_setup_checkout_time(
-    int32_t command, void*, void* output, void**, void*, void*) {
+    int32_t command, void*, void* output, void**, void* world, void*) {
   if (command == 18 && g_advertise_dynamic_wide_time) {
     constexpr uint32_t kWideTimeInput = 1u << 1;
     std::memcpy(static_cast<std::byte*>(output) + 96, &kWideTimeInput,
                 sizeof(kWideTimeInput));
     return 0;
   }
-  if (command == 11 && g_advertise_dynamic_wide_time) {
-    auto* context = active_context();
-    if (!context || !context->checkout_time_allowed(g_expected_frame_time + 1, 24))
-      return 4;
-    ++g_render_wide_time_observations;
-    return 0;
+  if (command == 11) {
+    if (g_advertise_dynamic_wide_time) {
+      auto* context = active_context();
+      if (!context || !context->checkout_time_allowed(g_expected_frame_time + 1, 24))
+        return 4;
+      ++g_render_wide_time_observations;
+    }
+    return fill_synthetic_output(world) ? 0 : 4;
   }
   if (command != 10) return 0;
   auto* context = active_context();
@@ -195,7 +219,7 @@ int32_t __cdecl mutate_out_data_after_frame_setup(
       read_i32(world, LAYER_HEIGHT_OFFSET) != kOutputHeight)
     return 4;
   ++g_frame_setup_geometry_render_observations;
-  return 0;
+  return fill_synthetic_output(world) ? 0 : 4;
 }
 }  // namespace
 

@@ -119,6 +119,14 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
   if (width < 8 || height < 4) return PF_Err_BAD_CALLBACK_PARAM;
   const PF_LRect full{0, 0, width, height};
   PF_CheckoutResult checkout{};
+  if (ModuleNameHas("-crop")) {
+    const PF_LRect cropped{2, 1, width - 2, height - 1};
+    const PF_Err err = CheckoutInput(in_data, extra, cropped, &checkout);
+    if (err) return err;
+    extra->output->result_rect = cropped;
+    extra->output->max_result_rect = full;
+    return PF_Err_NONE;
+  }
   switch (ProbeMode(in_data)) {
     case Mode::VerifyIntersection: {
       // A full-frame request answers full availability.
@@ -189,20 +197,41 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
 
 template <typename Pixel, typename Channel>
 void FillWorld(PF_EffectWorld* world, Channel opaque) {
+  const A_long write_width = ModuleNameHas("-partial")
+      ? world->width / 2 : world->width;
   for (A_long y = 0; y < world->height; ++y) {
     auto* row = reinterpret_cast<Pixel*>(
         reinterpret_cast<A_u_char*>(world->data) + y * world->rowbytes);
-    for (A_long x = 0; x < world->width; ++x) {
+    for (A_long x = 0; x < write_width; ++x) {
       auto* channels = reinterpret_cast<Channel*>(&row[x]);
-      channels[0] = opaque;
-      channels[1] = opaque;
-      channels[2] = Channel(0);
-      channels[3] = opaque;
+      Channel color = opaque;
+      if (ModuleNameHas("-solidcc")) {
+        if constexpr (sizeof(Channel) == 1) color = Channel(0xCC);
+        else if constexpr (sizeof(Channel) == 2) color = Channel(0xCCCC);
+        else color = Channel(0.8f);
+      }
+      channels[0] = color;
+      channels[1] = color;
+      channels[2] = ModuleNameHas("-solidcc") ? color : Channel(0);
+      channels[3] = color;
     }
   }
 }
 
+PF_Err ClassicRender(PF_LayerDef* output) {
+  if (ModuleNameHas("-selectorerror")) return PF_Err_BAD_CALLBACK_PARAM;
+  if (!output || !output->data) return PF_Err_BAD_CALLBACK_PARAM;
+  if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_PixelFloat)))
+    FillWorld<PF_PixelFloat, PF_FpShort>(output, 1.0f);
+  else if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_Pixel16)))
+    FillWorld<PF_Pixel16, A_u_short>(output, PF_MAX_CHAN16);
+  else
+    FillWorld<PF_Pixel8, A_u_char>(output, PF_MAX_CHAN8);
+  return PF_Err_NONE;
+}
+
 PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
+  if (ModuleNameHas("-selectorerror")) return PF_Err_BAD_CALLBACK_PARAM;
   if (!in_data || !extra || !extra->cb) return PF_Err_BAD_CALLBACK_PARAM;
   // The empty-result pre-render promised nothing, so the host must never
   // invoke the render selector for it.
@@ -226,13 +255,15 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
 
 extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
                                         PF_OutData* out_data, PF_ParamDef*[],
-                                        PF_LayerDef*, void* extra) {
+                                        PF_LayerDef* output_world, void* extra) {
   switch (cmd) {
     case PF_Cmd_GLOBAL_SETUP:
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
       out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT |
-          (AdvertisesDeepColor() ? PF_OutFlag_DEEP_COLOR_AWARE : 0);
-      out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER |
+          (AdvertisesDeepColor() ? PF_OutFlag_DEEP_COLOR_AWARE : 0) |
+          (ModuleNameHas("-nop") ? PF_OutFlag_NOP_RENDER : 0);
+      out_data->out_flags2 = (ModuleNameHas("-classic") ? 0 :
+          PF_OutFlag2_SUPPORTS_SMART_RENDER) |
           (AdvertisesFloatColor() ? PF_OutFlag2_FLOAT_COLOR_AWARE : 0);
       return PF_Err_NONE;
     case PF_Cmd_PARAMS_SETUP:
@@ -246,6 +277,8 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       return SmartPreRender(in_data, static_cast<PF_PreRenderExtra*>(extra));
     case PF_Cmd_SMART_RENDER:
       return SmartRender(in_data, static_cast<PF_SmartRenderExtra*>(extra));
+    case PF_Cmd_RENDER:
+      return ClassicRender(output_world);
     default:
       return PF_Err_NONE;
   }

@@ -485,6 +485,7 @@ struct SessionFrameOutput {
   std::string output_hash;
   bool guard_violation{false};
   bool output_validation_failed{false};
+  worker_runtime::output_coverage::Result output_coverage{};
   // A SmartFX frame whose PreRender returned a legally empty result_rect (#278):
   // the render selector was skipped and there are no output pixels. This is a
   // valid contract the one-shot path reports as a zero-dimension output, so the
@@ -1233,6 +1234,7 @@ void run_session_frame_loop(
     outcome.rowbytes = frame.width * pixel_bytes;
     outcome.input_hash = frame.input_hash;
     outcome.output_hash = frame.output_hash;
+    outcome.output_coverage = frame.output_coverage;
     // Corruption evidence outranks the render error: a plug-in that wrote
     // outside its guarded private buffer invalidates the session even when it
     // also reported a nonzero error. Host-protection invariant, fail closed.
@@ -1451,6 +1453,7 @@ RenderSessionOutcome run_render_session(
             &captured, &classic_output);
         frame.guard_violation = !frame_guards;
         frame.output_validation_failed = classic_output.validation_failed;
+        frame.output_coverage = classic_output.output_coverage;
         // Sign conversion, not a copy: `ClassicFrameOutput::input_origin_*` is
         // PF_OutData::origin, and this field is the layer-relative origin the
         // smart path feeds from `result_rect[0]`. The rule itself lives in

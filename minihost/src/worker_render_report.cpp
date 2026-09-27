@@ -214,6 +214,30 @@ void append_classic_frame(ReportSnapshot& report, const ClassicReport::Frame& va
       << value.output_sha256 << "\",\"guard_bytes_intact\":"
       << (value.guard_bytes_intact ? "true" : "false")
       << aexcompat::callback_diagnostics::report_field_json() << value.world_debug_json;
+  append_output_coverage(report, value.output_coverage);
+}
+
+void append_output_coverage(
+    ReportSnapshot& report,
+    const aexcompat::worker_runtime::output_coverage::Result& coverage) {
+  report.stream() << ",\"output_coverage\":{"
+      << "\"inspected\":" << (coverage.geometry_valid ? "true" : "false")
+      << ",\"promised_pixels\":" << coverage.promised_pixels
+      << ",\"unwritten_pixels\":" << coverage.unwritten_pixels
+      << ",\"unwritten_percent\":"
+      << (coverage.promised_pixels == 0 ? 0.0 :
+          100.0 * static_cast<double>(coverage.unwritten_pixels) /
+              static_cast<double>(coverage.promised_pixels))
+      << ",\"bbox\":[" << coverage.bbox[0] << ',' << coverage.bbox[1] << ','
+      << coverage.bbox[2] << ',' << coverage.bbox[3] << ']'
+      << ",\"max_row_run\":" << coverage.max_row_run
+      << ",\"max_column_run\":" << coverage.max_column_run
+      << ",\"validation_failed\":"
+      << (coverage.host_validation_failed ? "true" : "false")
+      << ",\"failure_reason\":"
+      << (coverage.host_validation_failed && coverage.geometry_valid &&
+          coverage.unwritten_pixels != 0
+              ? "\"partial_unwritten_output\"" : "null") << '}';
 }
 
 void append_classic_threads(ReportSnapshot& report, const ClassicReport::Threads& value) {

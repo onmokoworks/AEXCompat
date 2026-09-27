@@ -40,6 +40,7 @@ struct RenderSessionOutcome {
   std::string output_hash;
   bool guards_intact{true};
   int32_t render_error{-1};
+  worker_runtime::output_coverage::Result output_coverage{};
 };
 
 // SmartFX resident session (protocol v1.1): the shared session mechanics plus
@@ -251,6 +252,7 @@ struct ClassicFinalDispatchResult {
   int32_t get_flattened_sequence_data_error{-1};
   bool original_sequence_preserved{};
   int32_t render_error{-1};
+  output_coverage::Result output_coverage{};
 };
 
 struct SmartFinalDispatchResult {

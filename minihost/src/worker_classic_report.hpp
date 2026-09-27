@@ -1,4 +1,5 @@
 #pragma once
+#include "worker_output_coverage.hpp"
 
 #include "worker_parameter_runtime.hpp"
 
@@ -14,6 +15,7 @@ namespace aexcompat::l2_detail {
 // private protocol offsets arrive pre-extracted.
 struct ClassicCompletionInputs {
   int32_t render_error{};
+  worker_runtime::output_coverage::Result output_coverage{};
   int32_t global_error{};
   int32_t params_error{};
   int32_t setdown_error{};

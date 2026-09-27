@@ -601,6 +601,14 @@ target_compile_definitions(worker_classic_execution_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_classic_execution_selftest PRIVATE src)
 
+add_executable(worker_output_coverage_selftest
+  ../tests/native/worker_output_coverage_selftest.cpp
+)
+target_compile_features(worker_output_coverage_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_output_coverage_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_output_coverage_selftest PRIVATE src)
+
 add_executable(host_audio_runtime_selftest
   ../tests/native/host_audio_runtime_selftest.cpp
   src/host_audio_runtime.cpp
