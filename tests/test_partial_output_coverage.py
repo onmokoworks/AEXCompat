@@ -1,6 +1,7 @@
 """Built AEX regression: selector success must not certify partial output."""
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -95,6 +96,46 @@ def test_host_passthrough_does_not_claim_plugin_writes(
     assert report["passed"] is True
     assert report["output_coverage"]["inspected"] is False
     assert Image.open(output).convert("RGBA").tobytes() == Image.open(image).convert("RGBA").tobytes()
+
+
+@pytest.mark.parametrize("depth", ("argb8", "argb16", "argb32f"))
+def test_classic_nop_render_expansion_places_input_at_origin(tmp_path: Path, depth: str) -> None:
+    build_target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "broker" / "target"))
+    profile = os.environ.get("AEXCOMPAT_CARGO_PROFILE", "release")
+    harness = build_target / profile / "aexcompat-harness.exe"
+    available = [candidate for candidate in PROBE_CANDIDATES if candidate.is_file()]
+    assert available, "build the smart geometry probe before running this test"
+    probe = max(available, key=lambda candidate: candidate.stat().st_mtime_ns)
+    assert_artifact_fresh(probe, SOURCE, WORKER, harness)
+    image = tmp_path / "input.png"
+    pixels = bytes((x * 17 + y * 29 + channel * 53) % 256
+                   for y in range(12) for x in range(16) for channel in range(4))
+    Image.frombytes("RGBA", (16, 12), pixels).save(image)
+
+    rendered = []
+    for variant in ("classic-nop", "classic-nopresize"):
+        plugin = tmp_path / f"geometry-{variant}.aex"
+        shutil.copyfile(probe, plugin)
+        output = tmp_path / f"{variant}.png"
+        completed = subprocess.run(
+            [str(harness), "--render-experimental-session", str(plugin),
+             str(image), str(output), depth, "classic", "0", "1", "1"],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=60,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        report = json.loads(completed.stdout)
+        assert report["passed"] is True
+        assert report["output_coverage"]["inspected"] is False
+        rendered.append(Image.open(output).convert("RGBA"))
+
+    source, expanded = rendered
+    assert source.size == (16, 12)
+    assert expanded.size == (20, 16)
+    for y in range(16):
+        for x in range(20):
+            expected = source.getpixel((x - 3, y - 3)) if 3 <= x < 19 and 3 <= y < 15 else (0, 0, 0, 0)
+            assert expanded.getpixel((x, y)) == expected
 
 
 @pytest.mark.parametrize("variant,route,depth,time", (

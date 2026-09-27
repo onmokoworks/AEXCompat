@@ -451,6 +451,7 @@ struct ClassicRenderDispatchOwner {
   int32_t run(int32_t error) {
     return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
   }
+  int32_t prepare_nop_output() { return prepare_output(true); }
 
  private:
   static const aexcompat::worker_runtime::classic_execution::RenderHooks& hooks() {
@@ -513,14 +514,14 @@ struct ClassicRenderDispatchOwner {
     hint = aexcompat::render::extent_hint_within(hint, output_width, output_height);
     std::memcpy(input.data() + kInExtentHint, hint.data(), sizeof(hint));
   }
-  int32_t prepare_output() {
-    const auto fail = [this](int32_t error) {
-      if (frame_output) frame_output->validation_failed = true;
+  int32_t prepare_output(bool frame_local_refusal = false) {
+    const auto fail = [this](int32_t error, bool local = false) {
+      if (frame_output && !local) frame_output->validation_failed = true;
       return error;
     };
     if (!frame_setup_output.available) {
       resize_reason = "frame_setup_geometry_missing";
-      return fail(4);
+      return fail(4, frame_local_refusal);
     }
     const int32_t next_width = frame_setup_output.width;
     const int32_t next_height = frame_setup_output.height;
@@ -556,7 +557,7 @@ struct ClassicRenderDispatchOwner {
       std::cerr << "stage:classic_output_resize_denied from=" << width << "x" << height
                 << " to=" << next_width << "x" << next_height
                 << " out_flags=" << read<uint32_t>(output, kOutFlags) << "\n" << std::flush;
-      return fail(4);
+      return fail(4, frame_local_refusal);
     }
     const int32_t origin_x = frame_setup_output.origin_x;
     const int32_t origin_y = frame_setup_output.origin_y;
@@ -878,43 +879,48 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   input_hash = sha256_bytes(logical_source.data(), logical_source.size());
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
+  ClassicRenderDispatchOwner dispatch_owner{entry, input, command_output, output_world,
+      guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
+      pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
+      external_total_time, external_time_scale, case_id, requested, external_rgba,
+      external_layers, external_width, external_height, *classic_context, logical_source,
+      width, height, lifecycle_owner.frame_setup_output, frame_output};
   if (nop_render) {
-    // PF_OutFlag_NOP_RENDER means the host copies the input through instead of
-    // dispatching RENDER, so there is no `prepare_output` on this branch and no
-    // buffer to re-lay. FRAME_SETUP is still offered the extent (the offer is
-    // made before the branch is known), so an effect that advertised NOP_RENDER
-    // alongside a resize flag can now answer with a revision nothing here can
-    // honour. Copying the input through at the old extent and reporting success
-    // would ship a frame that is silently missing whatever the revision asked
-    // for, so this is a refusal with a name instead (issue #984).
-    // A frame-local diagnostic, not `frame_output->validation_failed`. That flag
-    // is the session's output-bounds invariant (worker_render_session.cpp) and
-    // tears the whole session down on the frame that sets it; nothing here
-    // touched the guarded buffer or the world registration, so the host's state
-    // is intact and the next frame can run. Escalating would turn one effect's
-    // unanswerable request into a dead session and a respawned worker per frame.
-    const auto& frame_setup_output = lifecycle_owner.frame_setup_output;
-    if (error == 0 && !frame_setup_output.available) {
-      std::cerr << "stage:classic_output_resize_end error=4 "
-                   "reason=frame_setup_geometry_missing\n"
-                << std::flush;
-      error = 4;
-    } else if (error == 0 && !aexcompat::render::output_extent_unchanged(
-                                 width, height, frame_setup_output.width,
-                                 frame_setup_output.height)) {
-      // Emitted here rather than through RenderHooks: this branch never reaches
-      // `prepare_output`, so nothing else files the stage. Without it the
-      // broker's stage parser sees only the plug-in's own `render_end` and
-      // attributes the host's refusal to the plug-in (the #722 shape).
-      std::cerr << "stage:classic_output_resize_end error=4 reason=nop_render_resize\n"
-                << std::flush;
-      error = 4;
+    // The host owns every NOP_RENDER pixel. Share Classic's guarded resize,
+    // world registration and origin relay, but keep a rejected FRAME_SETUP
+    // extent frame-local as it was before this branch could resize (#1002).
+    if (error == 0) {
+      error = dispatch_owner.prepare_nop_output();
+      if (error != 0 || dispatch_owner.resize_reason) {
+        std::cerr << "stage:classic_output_resize_end error=" << error;
+        if (dispatch_owner.resize_reason)
+          std::cerr << " reason=" << dispatch_owner.resize_reason;
+        std::cerr << "\n" << std::flush;
+      }
     }
     if (error == 0) {
-      for (int32_t y = 0; y < height; ++y)
-        std::memcpy(destination + y * rowbytes,
-                    logical_source.data() + y * width * pixel_bytes,
-                    width * pixel_bytes);
+      const int32_t origin_x = read<int32_t>(input, kInOutputOriginX);
+      const int32_t origin_y = read<int32_t>(input, kInOutputOriginY);
+      const int32_t copy_left = std::max(0, origin_x);
+      const int32_t copy_top = std::max(0, origin_y);
+      const int32_t source_left = std::max(0, -origin_x);
+      const int32_t source_top = std::max(0, -origin_y);
+      const int32_t copy_width = std::min(width - copy_left,
+                                          dispatch_owner.source_width - source_left);
+      const int32_t copy_height = std::min(height - copy_top,
+                                           dispatch_owner.source_height - source_top);
+      // The ordinary passthrough and a fully covered crop need no clear pass.
+      if (copy_left != 0 || copy_top != 0 || copy_width != width || copy_height != height)
+        for (int32_t y = 0; y < height; ++y)
+          std::memset(destination + static_cast<std::size_t>(y) * rowbytes, 0,
+                      static_cast<std::size_t>(width) * pixel_bytes);
+      for (int32_t y = 0; y < copy_height; ++y)
+        std::memcpy(destination + static_cast<std::size_t>(copy_top + y) * rowbytes +
+                        static_cast<std::size_t>(copy_left) * pixel_bytes,
+                    logical_source.data() +
+                        (static_cast<std::size_t>(source_top + y) * dispatch_owner.source_width +
+                         source_left) * pixel_bytes,
+                    static_cast<std::size_t>(copy_width) * pixel_bytes);
     }
     // A failing setdown still wins. Main reported `finish` unconditionally
     // here, so keeping the refusal above only when setdown was clean is what
@@ -923,12 +929,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     const int32_t finish_error = lifecycle_owner.finish(lifecycle);
     if (finish_error != 0) error = finish_error;
   } else {
-    ClassicRenderDispatchOwner dispatch_owner{entry, input, command_output, output_world,
-        guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
-        pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
-        external_total_time, external_time_scale, case_id, requested, external_rgba,
-        external_layers, external_width, external_height, *classic_context, logical_source,
-        width, height, lifecycle_owner.frame_setup_output, frame_output};
     // The per-frame `stage:classic_*` markers are emitted from inside RenderHooks
     // (see ClassicRenderDispatchOwner) so each brackets only the step it names.
     // UI markers are gated on a draw request or a live UI context, so ordinary

@@ -50,6 +50,11 @@ bool g_invalid_double_checkin{};
 int g_frame_setup_geometry_render_observations{};
 int32_t g_frame_setup_offered_width{};
 int32_t g_frame_setup_offered_height{};
+int32_t g_nop_width{};
+int32_t g_nop_height{};
+int32_t g_nop_origin_x{};
+int32_t g_nop_origin_y{};
+int g_nop_render_calls{};
 
 void observe_concurrent_render_context() {
   using namespace aexcompat::worker_runtime;
@@ -220,6 +225,30 @@ int32_t __cdecl mutate_out_data_after_frame_setup(
     return 4;
   ++g_frame_setup_geometry_render_observations;
   return fill_synthetic_output(world) ? 0 : 4;
+}
+
+int32_t __cdecl nop_render_passthrough(
+    int32_t command, void*, void*, void**, void*, void*) {
+  // The host owns the pixels on this path. The effect must never see RENDER.
+  if (command == 11) { ++g_nop_render_calls; return 4; }
+  return 0;
+}
+
+int32_t __cdecl request_nop_geometry(
+    int32_t command, void*, void* output, void**, void*, void*) {
+  using namespace aexcompat::abi::x86_64_windows;
+  if (command == 11) { ++g_nop_render_calls; return 4; }
+  if (command == PF_CMD_FRAME_SETUP) {
+    std::memcpy(static_cast<std::byte*>(output) + OUT_WIDTH_OFFSET,
+                &g_nop_width, sizeof(g_nop_width));
+    std::memcpy(static_cast<std::byte*>(output) + OUT_HEIGHT_OFFSET,
+                &g_nop_height, sizeof(g_nop_height));
+    std::memcpy(static_cast<std::byte*>(output) + OUT_ORIGIN_OFFSET,
+                &g_nop_origin_x, sizeof(g_nop_origin_x));
+    std::memcpy(static_cast<std::byte*>(output) + OUT_ORIGIN_OFFSET + sizeof(int32_t),
+                &g_nop_origin_y, sizeof(g_nop_origin_y));
+  }
+  return 0;
 }
 }  // namespace
 
@@ -440,26 +469,108 @@ int main() {
   }
   if (g_frame_setup_geometry_render_observations != 2) return 42;
 
-  // NOP_RENDER has no prepare_output call, but it must consume the same
-  // snapshot when deciding whether FRAME_SETUP requested the resize that #1002
-  // currently requires it to refuse explicitly. A later selector must not turn
-  // that refusal into a silent old-extent passthrough.
+  // NOP_RENDER still honors a FRAME_SETUP resize and places the source at the
+  // requested origin, leaving transparent pixels around it. Compare to an
+  // unresized host-owned passthrough so the generated input pattern is checked
+  // without depending on its implementation.
   frame_input = {};
   frame_output = {};
   constexpr uint32_t kNopRender = 1u << 18;
   constexpr uint32_t kNopExpand = kExpandBuffer | kNopRender;
   std::memcpy(frame_output.data() +
                   aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET,
-              &kNopExpand, sizeof(kNopExpand));
+              &kNopRender, sizeof(kNopRender));
+  std::vector<unsigned char> source_pixels;
   if (aexcompat::l2_detail::render_once(
+          &nop_render_passthrough, frame_input, frame_output, "default",
+          frame_width, frame_height, frame_rowbytes, frame_input_hash,
+          frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr, 0,
+          1, 1, 1, 4, false, &source_pixels) != 0 || !frame_guards ||
+      source_pixels.size() != static_cast<std::size_t>(frame_width) * frame_height * 4)
+    return 43;
+  if (g_nop_render_calls != 0) return 49;
+  const int32_t source_width = frame_width;
+  const int32_t source_height = frame_height;
+  std::memcpy(frame_output.data() +
+                  aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET,
+              &kNopExpand, sizeof(kNopExpand));
+  std::vector<unsigned char> resized_pixels;
+  aexcompat::render::ClassicFrameOutput nop_geometry{};
+  const int32_t nop_resize_error = aexcompat::l2_detail::render_once(
           &mutate_out_data_after_frame_setup, frame_input, frame_output, "default",
           frame_width, frame_height, frame_rowbytes, frame_input_hash,
           frame_output_hash, frame_guards, nullptr, nullptr, 0, 0, nullptr, 0,
-          1, 1, 1, 4, false) != 4 ||
-      frame_width != g_frame_setup_offered_width ||
-      frame_height != g_frame_setup_offered_height ||
-      g_frame_setup_geometry_render_observations != 2)
-    return 43;
+          1, 1, 1, 4, false, &resized_pixels, &nop_geometry);
+  if (nop_resize_error != 0) {
+    std::cerr << "nop_resize_error=" << nop_resize_error << "\n";
+    return 44;
+  }
+  if (frame_width != 260 || frame_height != 150 ||
+      frame_rowbytes != frame_width * 4) {
+    std::cerr << "nop_resize_dims=" << frame_width << "x" << frame_height
+              << " source=" << source_width << "x" << source_height
+              << " rowbytes=" << frame_rowbytes << "\n";
+    return 45;
+  }
+  if (!frame_guards || nop_geometry.input_origin_x != 2 ||
+      nop_geometry.input_origin_y != 3) return 46;
+  if (resized_pixels.size() != static_cast<std::size_t>(frame_width) * frame_height * 4 ||
+      g_frame_setup_geometry_render_observations != 2) return 47;
+  for (int32_t y = 0; y < frame_height; ++y)
+    for (int32_t x = 0; x < frame_width; ++x)
+      for (int32_t channel = 0; channel < 4; ++channel) {
+        const std::size_t offset = (static_cast<std::size_t>(y) * frame_width + x) * 4 + channel;
+        const unsigned char expected = x >= 2 && x < source_width + 2 &&
+                y >= 3 && y < source_height + 3
+            ? source_pixels[(static_cast<std::size_t>(y - 3) * source_width + (x - 2)) * 4 + channel]
+            : 0;
+        if (resized_pixels[offset] != expected) return 48;
+      }
+  if (g_nop_render_calls != 0) return 49;
+
+  // A refused extent and a disjoint origin remain frame-local. A subsequent
+  // crop must still use the original source, not either refused geometry.
+  auto run_nop_geometry = [&](uint32_t flags, int32_t requested_width,
+                              int32_t requested_height, int32_t origin_x,
+                              int32_t origin_y, std::vector<unsigned char>& pixels,
+                              aexcompat::render::ClassicFrameOutput& geometry) {
+    frame_input = {};
+    frame_output = {};
+    std::memcpy(frame_output.data() +
+                    aexcompat::abi::x86_64_windows::OUT_OUT_FLAGS_OFFSET,
+                &flags, sizeof(flags));
+    g_nop_width = requested_width;
+    g_nop_height = requested_height;
+    g_nop_origin_x = origin_x;
+    g_nop_origin_y = origin_y;
+    return aexcompat::l2_detail::render_once(
+        &request_nop_geometry, frame_input, frame_output, "default", frame_width,
+        frame_height, frame_rowbytes, frame_input_hash, frame_output_hash,
+        frame_guards, nullptr, nullptr, 0, 0, nullptr, 0, 1, 1, 1, 4,
+        false, &pixels, &geometry);
+  };
+  constexpr uint32_t kNopShrink = kNopRender | (1u << 12);
+  std::vector<unsigned char> crop_pixels;
+  aexcompat::render::ClassicFrameOutput crop_geometry{};
+  if (run_nop_geometry(kNopRender, 260, 150, 2, 3, crop_pixels,
+                       crop_geometry) != 4 || crop_geometry.validation_failed ||
+      g_nop_render_calls != 0) return 50;
+  crop_geometry = {};
+  if (run_nop_geometry(kNopShrink, 8, 6, 1000000, -2, crop_pixels,
+                       crop_geometry) != 4 || crop_geometry.validation_failed ||
+      g_nop_render_calls != 0) return 51;
+  crop_geometry = {};
+  if (run_nop_geometry(kNopShrink, 8, 6, -3, -2, crop_pixels,
+                       crop_geometry) != 0 || !frame_guards ||
+      frame_width != 8 || frame_height != 6 ||
+      crop_geometry.input_origin_x != -3 || crop_geometry.input_origin_y != -2 ||
+      crop_pixels.size() != 8u * 6u * 4u || g_nop_render_calls != 0) return 52;
+  for (int32_t y = 0; y < 6; ++y)
+    for (int32_t x = 0; x < 8; ++x)
+      for (int32_t channel = 0; channel < 4; ++channel)
+        if (crop_pixels[(static_cast<std::size_t>(y) * 8 + x) * 4 + channel] !=
+            source_pixels[(static_cast<std::size_t>(y + 2) * source_width + (x + 3)) * 4 + channel])
+          return 53;
   aexcompat::worker_runtime::parameters::state().ui.dynamic_flags_advertised = false;
 
   using namespace aexcompat::worker_runtime;
