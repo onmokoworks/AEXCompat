@@ -350,6 +350,14 @@ fn native_world_callbacks() -> [u64; 3] {
 }
 
 impl GuestEngine<'static> {
+    pub fn save_guest_registry_snapshot(&self) -> Result<(), GuestError> {
+        if std::env::var_os("AEXCOMPAT_GUEST_REGISTRY_FILE").is_some() {
+            return Err(GuestError::Callback(
+                "native carrier cannot persist a virtual guest registry".into(),
+            ));
+        }
+        Ok(())
+    }
     pub fn backend_name(&self) -> &'static str {
         "native-x86_64-carrier"
     }

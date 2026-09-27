@@ -234,6 +234,9 @@ enum LegacyWin64Import {
     VcompForStaticSimpleInit,
     VcompNoOp,
     GetSystemTimeAsFileTime,
+    GetSystemTime,
+    SystemTimeToFileTime,
+    SetFileTime,
     GetSystemInfo,
     Beep,
     VerifyVersionInfoA,
@@ -259,6 +262,7 @@ enum LegacyWin64Import {
     CreateFileA,
     WsPrintfA,
     ReadFile,
+    WriteFile,
     GetFileSizeEx,
     GetFileInformationByHandle,
     SetFilePointerEx,
@@ -577,6 +581,9 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
         ("kernel32.dll" | "api-ms-win-core-sysinfo-l1-1-0.dll", "GetSystemTimeAsFileTime") => {
             LegacyWin64Import::GetSystemTimeAsFileTime
         }
+        ("kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-sysinfo-l1-1-0.dll", "GetSystemTime") => LegacyWin64Import::GetSystemTime,
+        ("kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-sysinfo-l1-1-0.dll", "SystemTimeToFileTime") => LegacyWin64Import::SystemTimeToFileTime,
+        ("kernel32.dll" | "kernelbase.dll", "SetFileTime") => LegacyWin64Import::SetFileTime,
         ("kernel32.dll", "GetSystemInfo") => LegacyWin64Import::GetSystemInfo,
         (_, "GetSystemInfo") => return Win64ImportDispatch::UnsupportedLegacyImport,
         ("kernel32.dll" | "kernelbase.dll", "Beep") => LegacyWin64Import::Beep,
@@ -641,12 +648,14 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             "kernel32.dll" | "kernelbase.dll" | "api-ms-win-core-file-l1-1-0.dll",
             symbol @ ("CreateFileA"
             | "ReadFile"
+            | "WriteFile"
             | "GetFileSizeEx"
             | "GetFileInformationByHandle"
             | "SetFilePointerEx"),
         ) => match symbol {
             "CreateFileA" => LegacyWin64Import::CreateFileA,
             "ReadFile" => LegacyWin64Import::ReadFile,
+            "WriteFile" => LegacyWin64Import::WriteFile,
             "GetFileSizeEx" => LegacyWin64Import::GetFileSizeEx,
             "GetFileInformationByHandle" => LegacyWin64Import::GetFileInformationByHandle,
             _ => LegacyWin64Import::SetFilePointerEx,
@@ -655,6 +664,7 @@ fn dispatch_win64_import(library: &str, symbol: &str) -> Win64ImportDispatch {
             _,
             "CreateFileA"
             | "ReadFile"
+            | "WriteFile"
             | "GetFileSizeEx"
             | "GetFileInformationByHandle"
             | "SetFilePointerEx",
@@ -2788,6 +2798,25 @@ fn install_win64_import(
                         }),
                     )?;
                 }
+                LegacyWin64Import::GetSystemTime => {
+                    uc("write GetSystemTime return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc("install GetSystemTime import", unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_get_system_time(unicorn);
+                    }))?;
+                }
+                LegacyWin64Import::SystemTimeToFileTime => {
+                    uc("write SystemTimeToFileTime return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc("install SystemTimeToFileTime import", unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        emulate_system_time_to_file_time(unicorn);
+                    }))?;
+                }
+                LegacyWin64Import::SetFileTime => {
+                    uc("write SetFileTime return", unicorn.mem_write(stub, &[0xc3]))?;
+                    uc("install SetFileTime import", unicorn.add_code_hook(stub, stub, |unicorn, _, _| {
+                        let result = guest_set_file_time(unicorn);
+                        finish_windows_file_api(unicorn, result);
+                    }))?;
+                }
                 LegacyWin64Import::GetHostname => {
                     uc("write gethostname return", unicorn.mem_write(stub, &[0xc3]))?;
                     uc(
@@ -3017,6 +3046,7 @@ fn install_win64_import(
                 }
                 LegacyWin64Import::CreateFileA
                 | LegacyWin64Import::ReadFile
+                | LegacyWin64Import::WriteFile
                 | LegacyWin64Import::GetFileSizeEx
                 | LegacyWin64Import::GetFileInformationByHandle
                 | LegacyWin64Import::SetFilePointerEx => {
@@ -7562,6 +7592,55 @@ fn emulate_get_system_time_as_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
     if let Err(error) = result {
         unicorn.get_data_mut().callback_error = Some(error);
     }
+}
+
+fn emulate_get_system_time(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<(), String> {
+        let output = read_win64_import_argument(unicorn, 0)?;
+        if output == 0 || !guest_range_has_permission(unicorn, output, 16, Prot::WRITE)? {
+            return Err("GetSystemTime output is not writable".into());
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "GetSystemTime clock precedes epoch")?;
+        let fields = aex_host_time::utc_fields(now.as_secs() as i64)?;
+        let parts = [fields[5] + 1900, fields[4] + 1, fields[6], fields[3],
+            fields[2], fields[1], fields[0], now.subsec_millis() as i32];
+        let mut bytes = [0u8; 16];
+        for (index, value) in parts.into_iter().enumerate() {
+            let value = u16::try_from(value).map_err(|_| "GetSystemTime field is out of range")?;
+            bytes[index * 2..index * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        unicorn.mem_write(output, &bytes).map_err(|error| format!("GetSystemTime output: {error}"))
+    })();
+    if let Err(error) = result { unicorn.get_data_mut().callback_error = Some(error); }
+}
+
+fn emulate_system_time_to_file_time(unicorn: &mut Unicorn<'_, GuestState>) {
+    let result = (|| -> Result<u64, String> {
+        let input = read_win64_import_argument(unicorn, 0)?;
+        let output = read_win64_import_argument(unicorn, 1)?;
+        if input == 0 || output == 0
+            || !guest_range_has_permission(unicorn, input, 16, Prot::READ)?
+            || !guest_range_has_permission(unicorn, output, 8, Prot::WRITE)? {
+            return Ok(0);
+        }
+        let bytes = unicorn.mem_read_as_vec(input, 16).map_err(|error| format!("SystemTimeToFileTime input: {error}"))?;
+        let part = |index: usize| u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]]) as i32;
+        let (year, month, day, hour, minute, second, millis) =
+            (part(0), part(1), part(3), part(4), part(5), part(6), part(7));
+        if millis > 999 { return Ok(0); }
+        let Ok(seconds) = aex_host_time::utc_seconds(year, month, day, hour, minute, second) else {
+            unicorn.get_data_mut().windows_last_error = 87;
+            return Ok(0);
+        };
+        let ticks = (i128::from(seconds) + 11_644_473_600) * 10_000_000
+            + i128::from(millis) * 10_000;
+        let Ok(ticks) = u64::try_from(ticks) else { return Ok(0); };
+        unicorn.mem_write(output, &ticks.to_le_bytes())
+            .map_err(|error| format!("SystemTimeToFileTime output: {error}"))?;
+        Ok(1)
+    })();
+    finish_guest_stdio(unicorn, result);
 }
 
 fn emulate_get_system_info(unicorn: &mut Unicorn<'_, GuestState>) {

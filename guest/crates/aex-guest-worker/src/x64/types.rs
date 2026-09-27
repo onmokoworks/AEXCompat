@@ -280,6 +280,7 @@ struct GuestState {
     crt_errno_buffers: BTreeMap<u32, u64>,
     crt_random_states: BTreeMap<u32, u32>,
     registry: crate::guest_registry::GuestRegistry,
+    registry_lock: Option<std::fs::File>,
     guest_files: GuestFiles,
     performance_counter_origin: Option<std::time::Instant>,
     windows_module_refcounts: HashMap<u64, u32>,

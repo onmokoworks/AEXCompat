@@ -3,9 +3,11 @@
 const WINDOWS_ASSET_HANDLE_BASE: u64 = 0xc00000000;
 struct WindowsAssetFile {
     name: String,
-    bytes: Box<[u8]>,
+    bytes: Vec<u8>,
     position: u64,
     readable: bool,
+    writable: bool,
+    private: bool,
     inheritable: bool,
     share_read_access: bool,
     share: u32,
@@ -13,6 +15,64 @@ struct WindowsAssetFile {
 }
 
 impl GuestFiles {
+    fn open_private_file(
+        &mut self,
+        name: &str,
+        readable: bool,
+        writable: bool,
+        share_read_access: bool,
+        share: u32,
+        disposition: u32,
+    ) -> Result<Result<u64, u32>, String> {
+        if self.sources.contains_key(name) || self.directory_exists(name) {
+            return Ok(Err(5));
+        }
+        let exists = self.private_files.contains_key(name);
+        match disposition {
+            1 if exists => return Ok(Err(80)),
+            3 | 5 if !exists => return Ok(Err(2)),
+            1 | 2 | 4 if !exists => {
+                if !name.rsplit_once('/').is_some_and(|(parent, _)| parent == "c:" || self.directories.contains(parent)) {
+                    return Ok(Err(3));
+                }
+            }
+            _ => {}
+        }
+        if matches!(disposition, 1 | 2 | 5) && !writable {
+            return Ok(Err(5));
+        }
+        if self.windows_files.values().any(|file| file.name == name) {
+            return Ok(Err(32));
+        }
+        if self.windows_files.len() + self.streams.len() >= 64 || self.next_windows_file >= 65536 {
+            return Ok(Err(4));
+        }
+        let bytes = if matches!(disposition, 1 | 2 | 5) {
+            Vec::new()
+        } else {
+            self.private_files.get(name).cloned().unwrap_or_default()
+        };
+        if bytes.len() > MAX_GUEST_FILE_BYTES || self.live_bytes + bytes.len() > MAX_GUEST_STREAM_BYTES {
+            return Err("private guest file exceeds live byte capacity".into());
+        }
+        let handle = WINDOWS_ASSET_HANDLE_BASE + self.next_windows_file * 8;
+        self.next_windows_file += 1;
+        self.live_bytes += bytes.len();
+        self.private_files.insert(name.to_owned(), bytes.clone());
+        if !exists {
+            let now = windows_filetime(std::time::SystemTime::now())?;
+            self.private_file_times.insert(name.to_owned(), [now; 3]);
+        } else if matches!(disposition, 2 | 5) {
+            let now = windows_filetime(std::time::SystemTime::now())?;
+            self.private_file_times.entry(name.to_owned()).or_insert([now; 3])[2] = now;
+        }
+        self.windows_files.insert(handle, WindowsAssetFile {
+            name: name.to_owned(), bytes, position: 0, readable, writable,
+            private: true, inheritable: false, share_read_access, share, null_device: false,
+        });
+        Ok(Ok(handle))
+    }
+
     fn open_windows_asset(
         &mut self,
         name: &str,
@@ -82,9 +142,11 @@ impl GuestFiles {
             handle,
             WindowsAssetFile {
                 name: name.into(),
-                bytes: bytes.into_boxed_slice(),
+                bytes,
                 position: 0,
                 readable,
+                writable: false,
+                private: false,
                 inheritable: false,
                 share_read_access,
                 share,
@@ -115,9 +177,11 @@ impl GuestFiles {
             handle,
             WindowsAssetFile {
                 name: "nul".into(),
-                bytes: Box::default(),
+                bytes: Vec::new(),
                 position: 0,
                 readable,
+                writable: true,
+                private: false,
                 inheritable: false,
                 share_read_access,
                 share,
@@ -132,6 +196,9 @@ impl GuestFiles {
             return Err(6);
         };
         self.live_bytes -= file.bytes.len();
+        if file.private {
+            self.private_files.insert(file.name, file.bytes);
+        }
         Ok(())
     }
 }
@@ -207,12 +274,12 @@ fn guest_create_file(
         || name.starts_with("/?/")
         || name.starts_with("/./")
         || name.split('/').any(|p| p == "..")
-        || access & 0x500d0116 != 0
+        || access & 0x100d0116 != 0
         || flags & 0x04000000 != 0
     {
         return Ok((u64::MAX, 5));
     }
-    if access & !0xa01200a9 != 0 {
+    if access & !0xe01200a9 != 0 {
         return Err("CreateFile access mask is not implemented".into());
     }
     let null_device = path.eq_ignore_ascii_case("nul") || path.eq_ignore_ascii_case("nul:");
@@ -226,26 +293,6 @@ fn guest_create_file(
             .replace('\\', "/")
             .to_ascii_lowercase()
     };
-    let exists = null_device || unicorn.get_data().guest_files.sources.contains_key(&name);
-    if disposition == 1 && (exists || unicorn.get_data().guest_files.directory_exists(&name)) {
-        return Ok((u64::MAX, 80));
-    }
-    if !matches!(disposition, 3 | 4) || (!exists && disposition == 4) {
-        return Ok((u64::MAX, 5));
-    }
-    if !exists {
-        if unicorn.get_data().guest_files.directory_exists(&name) && flags & 0x02000000 != 0 {
-            return Err("CreateFile directory handles are not implemented".into());
-        }
-        return Ok((
-            u64::MAX,
-            if unicorn.get_data().guest_files.directory_exists(&name) {
-                5
-            } else {
-                2
-            },
-        ));
-    }
     // Only caching hints and file attributes are accepted for a regular,
     // synchronous, read-only asset. No raw-device, asynchronous or reparse I/O.
     // BACKUP_SEMANTICS and OPEN_REPARSE_POINT do not change an immutable,
@@ -270,12 +317,41 @@ fn guest_create_file(
         inheritable = u32::from_le_bytes(bytes[16..20].try_into().unwrap()) != 0;
     }
     let readable = access & 0x80000001 != 0;
+    let writable = access & 0x40000002 != 0;
     let share_read_access = access & 0xa0000021 != 0;
+    let private = unicorn.get_data().guest_files.private_files.contains_key(&name)
+        || (!null_device
+            && !unicorn.get_data().guest_files.sources.contains_key(&name)
+            && writable);
+    if !private {
+        let exists = null_device || unicorn.get_data().guest_files.sources.contains_key(&name);
+        if disposition == 1 && (exists || unicorn.get_data().guest_files.directory_exists(&name)) {
+            return Ok((u64::MAX, 80));
+        }
+        if !matches!(disposition, 3 | 4) || (!exists && disposition == 4) {
+            return Ok((u64::MAX, 5));
+        }
+        if !exists {
+            if unicorn.get_data().guest_files.directory_exists(&name) && flags & 0x02000000 != 0 {
+                return Err("CreateFile directory handles are not implemented".into());
+            }
+            return Ok((u64::MAX, if unicorn.get_data().guest_files.directory_exists(&name) { 5 } else { 2 }));
+        }
+        if writable {
+            return Ok((u64::MAX, 5));
+        }
+    }
+    let existed_before = null_device || unicorn.get_data().guest_files.sources.contains_key(&name)
+        || unicorn.get_data().guest_files.private_files.contains_key(&name);
     let opened = if null_device {
         unicorn
             .get_data_mut()
             .guest_files
             .open_windows_null(readable, share_read_access, share)?
+    } else if private {
+        unicorn.get_data_mut().guest_files.open_private_file(
+            &name, readable, writable, share_read_access, share, disposition,
+        )?
     } else {
         unicorn.get_data_mut().guest_files.open_windows_asset(
             &name,
@@ -293,7 +369,7 @@ fn guest_create_file(
                 .get_mut(&handle)
                 .unwrap()
                 .inheritable = inheritable;
-            Ok((handle, if disposition == 4 { 183 } else { 0 }))
+            Ok((handle, if disposition == 4 && existed_before { 183 } else { 0 }))
         }
         Err(error) => Ok((u64::MAX, error)),
     }
@@ -305,6 +381,62 @@ fn guest_windows_file_io(
 ) -> Result<(u64, u32), String> {
     let handle = read_win64_import_argument(unicorn, 0)?;
     let output = read_win64_import_argument(unicorn, 1)?;
+    if operation == LegacyWin64Import::WriteFile {
+        let requested = read_win64_import_argument(unicorn, 2)? as usize;
+        let count_pointer = read_win64_import_argument(unicorn, 3)?;
+        let overlapped = read_win64_import_argument(unicorn, 4)?;
+        if overlapped != 0 || count_pointer == 0 || requested > crate::guest_registry::MAX_PRIVATE_FILE_BYTES {
+            return Ok((0, 87));
+        }
+        if !guest_range_has_permission(unicorn, count_pointer, 4, Prot::WRITE)? {
+            return Err("WriteFile count is not writable".into());
+        }
+        let Some(file) = unicorn.get_data().guest_files.windows_files.get(&handle) else {
+            return Ok((0, 6));
+        };
+        if !file.writable {
+            return Ok((0, 5));
+        }
+        let position = usize::try_from(file.position).map_err(|_| "WriteFile position overflow")?;
+        let end = position.checked_add(requested).ok_or("WriteFile length overflow")?;
+        if end > crate::guest_registry::MAX_PRIVATE_FILE_BYTES {
+            return Ok((0, 112));
+        }
+        let name = file.name.clone();
+        let null_device = file.null_device;
+        let previous_len = file.bytes.len();
+        if requested != 0 && (output == 0 || !guest_range_has_permission(unicorn, output, requested as u64, Prot::READ)?) {
+            return Err("WriteFile input is not readable".into());
+        }
+        let payload = if requested == 0 { Vec::new() } else {
+            unicorn.mem_read_as_vec(output, requested).map_err(|error| format!("WriteFile input read: {error}"))?
+        };
+        if !null_device {
+            let files = &unicorn.get_data().guest_files;
+            let other_bytes: usize = files.private_files.iter()
+                .filter(|(path, _)| *path != &name)
+                .map(|(_, bytes)| bytes.len()).sum();
+            if other_bytes.checked_add(end.max(previous_len)).is_none_or(|total| total > crate::guest_registry::MAX_PRIVATE_FILE_BYTES) {
+                return Ok((0, 112));
+            }
+            if files.live_bytes.checked_add(end.saturating_sub(previous_len))
+                .is_none_or(|total| total > MAX_GUEST_STREAM_BYTES) {
+                return Ok((0, 112));
+            }
+            let files = &mut unicorn.get_data_mut().guest_files;
+            let file = files.windows_files.get_mut(&handle).unwrap();
+            if file.bytes.len() < end { file.bytes.resize(end, 0); }
+            file.bytes[position..end].copy_from_slice(&payload);
+            file.position = end as u64;
+            files.private_files.insert(name, file.bytes.clone());
+            let now = windows_filetime(std::time::SystemTime::now())?;
+            files.private_file_times.entry(file.name.clone()).or_insert([now; 3])[2] = now;
+            files.live_bytes += file.bytes.len() - previous_len;
+        }
+        unicorn.mem_write(count_pointer, &(requested as u32).to_le_bytes())
+            .map_err(|error| format!("WriteFile count write: {error}"))?;
+        return Ok((1, 0));
+    }
     if operation == LegacyWin64Import::ReadFile {
         let requested = read_win64_import_argument(unicorn, 2)? as u32;
         let count_pointer = read_win64_import_argument(unicorn, 3)?;
@@ -376,6 +508,13 @@ fn guest_windows_file_io(
         let size = file.bytes.len() as u64;
         let mut bytes = [0u8; 52];
         bytes[0..4].copy_from_slice(&0x80u32.to_le_bytes());
+        if file.private {
+            if let Some(times) = unicorn.get_data().guest_files.private_file_times.get(&file.name) {
+                for (offset, time) in [(4, times[0]), (12, times[1]), (20, times[2])] {
+                    bytes[offset..offset + 8].copy_from_slice(&time.to_le_bytes());
+                }
+            }
+        }
         bytes[32..36].copy_from_slice(&((size >> 32) as u32).to_le_bytes());
         bytes[36..40].copy_from_slice(&(size as u32).to_le_bytes());
         bytes[40..44].copy_from_slice(&1u32.to_le_bytes());
@@ -392,7 +531,7 @@ fn guest_windows_file_io(
             .mem_write(output, &size.to_le_bytes())
             .map_err(|e| format!("GetFileSizeEx output: {e}"))?;
     } else {
-        if !file.readable {
+        if !file.readable && !file.writable {
             return Ok((0, 5));
         }
         let position_pointer = read_win64_import_argument(unicorn, 2)?;
@@ -431,5 +570,28 @@ fn guest_windows_file_io(
             .unwrap()
             .position = next as u64;
     }
+    Ok((1, 0))
+}
+
+fn guest_set_file_time(unicorn: &mut Unicorn<'_, GuestState>) -> Result<(u64, u32), String> {
+    let handle = read_win64_import_argument(unicorn, 0)?;
+    let Some(file) = unicorn.get_data().guest_files.windows_files.get(&handle) else {
+        return Ok((0, 6));
+    };
+    if !file.private || !file.writable { return Ok((0, 5)); }
+    let name = file.name.clone();
+    let now = windows_filetime(std::time::SystemTime::now())?;
+    let mut times = unicorn.get_data().guest_files.private_file_times.get(&name).copied().unwrap_or([now; 3]);
+    for (index, time) in times.iter_mut().enumerate() {
+        let pointer = read_win64_import_argument(unicorn, index + 1)?;
+        if pointer != 0 {
+            if !guest_range_has_permission(unicorn, pointer, 8, Prot::READ)? {
+                return Ok((0, 87));
+            }
+            let bytes = unicorn.mem_read_as_vec(pointer, 8).map_err(|error| format!("SetFileTime input: {error}"))?;
+            *time = u64::from_le_bytes(bytes.try_into().unwrap());
+        }
+    }
+    unicorn.get_data_mut().guest_files.private_file_times.insert(name, times);
     Ok((1, 0))
 }

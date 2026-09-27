@@ -451,11 +451,15 @@ pub(crate) fn run_staged_setup(
     plugin: &Path,
     tier: SecurityTier,
     deadline: Duration,
+    registry_file: Option<&Path>,
 ) -> Result<BoundedOutput, String> {
     let mut session = WorkerSession::create()?;
     let staged_worker = session.stage_file(worker, "worker")?;
     let staged_plugin = session.stage_file(plugin, &staged_name("plugin", plugin))?;
     let mut command = session.command(&staged_worker, tier, ResourceLimits::default());
+    if let Some(registry_file) = registry_file {
+        command.env("AEXCOMPAT_GUEST_REGISTRY_FILE", registry_file);
+    }
     command.arg("setup").arg(staged_plugin);
     let result = wait_bounded(
         command
@@ -806,6 +810,42 @@ mod tests {
     }
 
     #[test]
+    fn staged_setup_receives_only_the_selected_registry_path() {
+        let mut fixture = WorkerSession::create().unwrap();
+        let worker = fixture.root().join("inspect-env.sh");
+        fs::write(
+            &worker,
+            b"#!/bin/sh\nprintf '%s' \"${AEXCOMPAT_GUEST_REGISTRY_FILE-unset}\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
+        let plugin = fixture.root().join("fixture.aex");
+        fs::write(&plugin, b"fixture").unwrap();
+        let registry = fixture.root().join("registry.json");
+        let with_registry = run_staged_setup(
+            &worker,
+            &plugin,
+            SecurityTier::UnicornGuest,
+            Duration::from_secs(5),
+            Some(&registry),
+        )
+        .unwrap();
+        assert!(with_registry.status.success());
+        assert_eq!(with_registry.stdout, registry.to_string_lossy().as_bytes());
+        let without_registry = run_staged_setup(
+            &worker,
+            &plugin,
+            SecurityTier::UnicornGuest,
+            Duration::from_secs(5),
+            None,
+        )
+        .unwrap();
+        assert!(without_registry.status.success());
+        assert_eq!(without_registry.stdout, b"unset");
+        fixture.cleanup().unwrap();
+    }
+
+    #[test]
     fn staged_release_worker_executes_from_private_session() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
         let worker = repository.join("guest/target/release/aex-guest-worker");
@@ -821,6 +861,7 @@ mod tests {
             &malformed,
             SecurityTier::UnicornGuest,
             Duration::from_secs(5),
+            None,
         )
         .unwrap();
         assert!(!output.status.success());
@@ -843,6 +884,7 @@ mod tests {
             &malformed,
             SecurityTier::NativeCarrierTrustedOnly,
             Duration::from_secs(5),
+            None,
         )
         .unwrap();
         assert!(!output.status.success());

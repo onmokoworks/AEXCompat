@@ -1285,6 +1285,19 @@ fn emulate_message_box(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
         if unicorn.get_data().windows_message_boxes.len() >= 32 {
             return Err("MessageBox diagnostic capacity exceeded".into());
         }
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("AEXCOMPAT_GUEST_INTERACTIVE_ALERTS").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            // A user-visible alert may contain registration details. Keep it
+            // out of diagnostic snapshots and return the user's actual choice.
+            unicorn.get_data_mut().windows_message_boxes.push((
+                "[interactive alert]".into(),
+                "[redacted]".into(),
+                style,
+            ));
+            return interactive_message_box(&caption, &text, style);
+        }
         unicorn
             .get_data_mut()
             .windows_message_boxes
@@ -1299,6 +1312,64 @@ fn emulate_message_box(unicorn: &mut Unicorn<'_, GuestState>, wide: bool) {
         })
     })();
     finish_guest_stdio(unicorn, result);
+}
+
+#[cfg(target_os = "macos")]
+fn interactive_message_box(caption: &str, text: &str, style: u32) -> Result<u64, String> {
+    use rfd::MessageLevel;
+    let group = style & 0xf;
+    let buttons = message_box_buttons(group)?;
+    let level = match style & 0x70 {
+        0x10 => MessageLevel::Error,
+        0x30 => MessageLevel::Warning,
+        _ => MessageLevel::Info,
+    };
+    let choice = rfd::MessageDialog::new()
+        .set_title(caption)
+        .set_description(text)
+        .set_level(level)
+        .set_buttons(buttons)
+        .show();
+    message_box_result(group, choice)
+}
+
+#[cfg(target_os = "macos")]
+fn message_box_buttons(group: u32) -> Result<rfd::MessageButtons, String> {
+    use rfd::MessageButtons as Buttons;
+    Ok(match group {
+        0 => Buttons::Ok,
+        1 => Buttons::OkCancel,
+        2 => Buttons::YesNoCancelCustom("Abort".into(), "Retry".into(), "Ignore".into()),
+        3 => Buttons::YesNoCancel,
+        4 => Buttons::YesNo,
+        5 => Buttons::OkCancelCustom("Retry".into(), "Cancel".into()),
+        6 => Buttons::YesNoCancelCustom("Cancel".into(), "Try Again".into(), "Continue".into()),
+        _ => return Err("unsupported MessageBox button group".into()),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn message_box_result(group: u32, choice: rfd::MessageDialogResult) -> Result<u64, String> {
+    use rfd::MessageDialogResult as Choice;
+    let result = match (group, choice) {
+        (0, Choice::Ok) | (1, Choice::Ok) => 1, // IDOK
+        (0, Choice::Cancel) => 1, // the only available action was dismissed
+        (1 | 3 | 5 | 6, Choice::Cancel) => 2, // IDCANCEL
+        (2, Choice::Custom(label)) if label == "Abort" => 3,
+        (2, Choice::Custom(label)) if label == "Retry" => 4,
+        (2, Choice::Custom(label)) if label == "Ignore" => 5,
+        (3 | 4, Choice::Yes) => 6,
+        (3 | 4, Choice::No) => 7,
+        (5, Choice::Custom(label)) if label == "Retry" => 4,
+        (5, Choice::Custom(label)) if label == "Cancel" => 2,
+        (6, Choice::Custom(label)) if label == "Cancel" => 2,
+        (6, Choice::Custom(label)) if label == "Try Again" => 10,
+        (6, Choice::Custom(label)) if label == "Continue" => 11,
+        (2, Choice::Cancel) => 3, // closed without a choice: abort
+        (4, Choice::Cancel) => 7, // closed without a choice: no
+        _ => return Err("MessageBox returned an unsupported button choice".into()),
+    };
+    Ok(result)
 }
 
 fn emulate_crt_realloc(unicorn: &mut Unicorn<'_, GuestState>) {

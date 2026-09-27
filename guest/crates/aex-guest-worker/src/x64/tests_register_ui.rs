@@ -234,3 +234,53 @@ fn classic_user_changed_param_uses_the_real_selector_slot_and_returns_dynamic_fl
     assert!(host.user_changed_parameter(0).is_err());
     assert!(host.user_changed_parameter(2).is_err());
 }
+
+#[test]
+fn classic_options_dialog_dispatches_only_with_advertised_capability_and_live_params() {
+    assert_eq!(abi::PARAM_U_OFFSET + abi::LAYER_WIDTH_OFFSET, 0x5c);
+    let code = [
+        0x83, 0xf9, 0x09, // cmp ecx, PF_CMD_DO_DIALOG
+        0x74, 0x0b, // je dialog
+        0x41, 0xc7, 0x40, 0x60, 0x20, 0x00, 0x00, 0x00, // out_flags = I_DO_DIALOG
+        0x31, 0xc0, 0xc3, // return zero
+        0x4d, 0x85, 0xc9, // test r9, r9 (params)
+        0x74, 0x16, // je failure
+        0x49, 0x8b, 0x01, // mov rax, [r9] (params[0])
+        0x48, 0x85, 0xc0, // test rax, rax
+        0x74, 0x0e, // je failure
+        0x8b, 0x80, 0x5c, 0x00, 0x00, 0x00, // mov eax, [rax + input world width]
+        0x83, 0xf8, 0x01, // cmp eax, 1
+        0x75, 0x03, // jne failure
+        0x31, 0xc0, 0xc3, // return zero
+        0xb8, 0x11, 0x00, 0x00, 0x00, 0xc3, // return 17
+    ];
+    let engine = test_engine(&code);
+    let mut host = crate::classic::ClassicHost::from_test_engine(engine, TEST_CODE).unwrap();
+    assert_ne!(host.begin_resident_session(1, 1, 1).unwrap().out_flags & abi::PF_OUT_FLAG_I_DO_DIALOG as u32, 0);
+    assert_eq!(host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[]).unwrap().selector_error, 0);
+    assert!(format!("{}", host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[]).unwrap_err()).contains("already dispatched"));
+
+    let mut after_render = crate::classic::ClassicHost::from_test_engine(
+        test_engine(&code),
+        TEST_CODE,
+    )
+    .unwrap();
+    after_render.begin_resident_session(1, 1, 1).unwrap();
+    after_render
+        .render_resident_argb8(1, 1, 0, 30, &[0, 0, 0, 255], &[])
+        .unwrap();
+    assert_eq!(
+        after_render
+            .do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[])
+            .unwrap()
+            .selector_error,
+        0
+    );
+
+    let engine = test_engine(&[0x31, 0xc0, 0xc3]);
+    let mut host = crate::classic::ClassicHost::from_test_engine(engine, TEST_CODE).unwrap();
+    assert_eq!(host.setup().unwrap().out_flags, 0);
+    host.prepare_test_user_changed_parameters(vec![vec![0; abi::PF_PARAM_DEF_SIZE]])
+        .unwrap();
+    assert!(host.do_options_dialog(1, 1, crate::pixel::FramePixelFormat::Argb8, &[]).is_err());
+}

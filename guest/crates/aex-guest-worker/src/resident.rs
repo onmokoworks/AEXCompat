@@ -1,7 +1,7 @@
 use crate::classic::{
-    ClassicError, ClassicHost, PARAM_ANGLE, PARAM_COLOR, PARAM_LAYER, PARAM_POINT, PARAM_POINT3D,
-    ParameterValue, RenderReport, ResidentFailureDiagnostic, ResidentLayer, SetupReport,
-    UserChangedReport,
+    ClassicError, ClassicHost, OptionsDialogReport, PARAM_ANGLE, PARAM_COLOR, PARAM_LAYER,
+    PARAM_POINT, PARAM_POINT3D, ParameterValue, RenderReport, ResidentFailureDiagnostic,
+    ResidentLayer, SetupReport, UserChangedReport,
 };
 use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
@@ -140,6 +140,16 @@ struct UserChangedDone<'a> {
     worker_pid: u32,
     status: &'static str,
     report: &'a UserChangedReport,
+}
+
+#[derive(Serialize)]
+struct OptionsDialogDone<'a> {
+    v: u32,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    worker_pid: u32,
+    status: &'static str,
+    report: &'a OptionsDialogReport,
 }
 
 pub fn run_resident_session(
@@ -327,6 +337,35 @@ pub fn run_resident_session(
                         },
                     )?;
                 }
+                Some("do_dialog") => {
+                    require_exact_keys(object.keys().map(String::as_str), &["type", "v"])?;
+                    if object.get("v").and_then(Value::as_u64) != Some(1) {
+                        return Err(SessionError::Protocol(
+                            "do_dialog requires protocol version 1".into(),
+                        ));
+                    }
+                    let borrowed_layers = layers
+                        .iter()
+                        .map(|layer| ResidentLayer {
+                            slot: layer.slot,
+                            width: layer.width,
+                            height: layer.height,
+                            pixels: &layer.pixels,
+                        })
+                        .collect::<Vec<_>>();
+                    let report =
+                        host.do_options_dialog(width, height, pixel_format, &borrowed_layers)?;
+                    write_message(
+                        &mut response,
+                        &OptionsDialogDone {
+                            v: 1,
+                            kind: "do_dialog_selector_done",
+                            worker_pid: std::process::id(),
+                            status: "selector_completed",
+                            report: &report,
+                        },
+                    )?;
+                }
                 Some(other) => {
                     return Err(SessionError::Protocol(format!(
                         "unsupported request type {other:?}"
@@ -340,6 +379,9 @@ pub fn run_resident_session(
     })();
 
     let close = host.close_resident_session();
+    if processing.is_ok() && close.session_clean {
+        host.save_guest_registry_snapshot()?;
+    }
     host.flush_guest_console_diagnostics()?;
     let mut close_value = serde_json::to_value(&close)
         .map_err(|error| SessionError::Protocol(format!("serialize close report: {error}")))?;

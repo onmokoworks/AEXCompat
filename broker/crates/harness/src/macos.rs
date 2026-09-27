@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Output, Stdio};
@@ -35,6 +37,7 @@ const MAX_HEIGHT: u32 = 1080;
 const NATIVE_SETUP_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_START_DEADLINE: Duration = Duration::from_secs(10);
 const RESIDENT_RENDER_DEADLINE: Duration = Duration::from_secs(30);
+const OPTIONS_DIALOG_DEADLINE: Duration = Duration::from_secs(300);
 const RESIDENT_CLOSE_DEADLINE: Duration = Duration::from_secs(2);
 const RESIDENT_RESPONSE_POLL: Duration = Duration::from_millis(10);
 const MAX_RESIDENT_RESPONSE_BYTES: usize = 512 * 1024;
@@ -44,6 +47,10 @@ struct RenderResult {
     report: String,
     output: PathBuf,
     preview: Option<PathBuf>,
+}
+
+struct OptionsDialogCompletion {
+    discovery: Result<(Vec<InteractiveParameter>, Vec<InteractiveParameter>, String), String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -273,6 +280,27 @@ fn validate_user_changed(
         .map_err(|error| format!("invalid USER_CHANGED_PARAM parameter table: {error}"))
 }
 
+fn validate_options_dialog(value: &Value, worker_pid: u32) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "options response is not an object".to_string())?;
+    if object.len() != 5
+        || value["v"].as_u64() != Some(1)
+        || value["type"].as_str() != Some("do_dialog_selector_done")
+        || value["worker_pid"].as_u64() != Some(worker_pid as u64)
+        || value["status"].as_str() != Some("selector_completed")
+    {
+        return Err("options response envelope is invalid".into());
+    }
+    let report = value["report"]
+        .as_object()
+        .ok_or_else(|| "options response report is missing".to_string())?;
+    if report.len() != 1 || report.get("selector_error").and_then(Value::as_i64) != Some(0) {
+        return Err("options selector did not complete successfully".into());
+    }
+    Ok(())
+}
+
 enum ResidentCommand {
     Render {
         frame_index: u64,
@@ -426,6 +454,8 @@ struct MacHarnessApp {
     resident: ResidentState,
     user_changed: Option<Receiver<Result<Vec<DynamicParameterUi>, String>>>,
     pending_user_changed: Option<u32>,
+    options_available: bool,
+    options_dialog: Option<Receiver<Result<OptionsDialogCompletion, String>>>,
 }
 
 impl Drop for MacHarnessApp {
@@ -460,6 +490,8 @@ impl MacHarnessApp {
             resident: ResidentState::Idle,
             user_changed: None,
             pending_user_changed: None,
+            options_available: false,
+            options_dialog: None,
         }
     }
 
@@ -479,6 +511,38 @@ impl MacHarnessApp {
         self.busy || self.resident.is_starting()
     }
 
+    fn open_options(&mut self) {
+        let Some(aex) = self.plugin_path.clone() else {
+            self.status = "Select an AEX before opening its options.".into();
+            return;
+        };
+        let input = self.input.clone();
+        if let Err(error) = self.close_resident() {
+            self.status = "Could not close the current session before opening options.".into();
+            self.report = error;
+            return;
+        }
+        let candidates = match guest_worker_candidates_for_aex(&self.repository, &aex, true) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                self.status = "Guest worker is not available.".into();
+                self.report = error;
+                return;
+            }
+        };
+        let format = self.render_format;
+        let repository = self.repository.clone();
+        self.options_dialog = Some(spawn_resident_admission(move || {
+            run_options_dialog(&candidates, &aex, input.as_deref(), format)?;
+            Ok(OptionsDialogCompletion {
+                discovery: discover_parameters(&repository, &aex),
+            })
+        }));
+        self.busy = true;
+        self.status = "Opening plug-in options...".into();
+        self.report.clear();
+    }
+
     fn choose_aex(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("After Effects plug-in", &["aex"])
@@ -491,6 +555,10 @@ impl MacHarnessApp {
             }
             match discover_parameters(&self.repository, &path) {
                 Ok((parameters, parameter_defaults, report)) => {
+                    self.options_available = serde_json::from_str::<Value>(&report)
+                        .ok()
+                        .and_then(|value| value["out_flags"].as_u64())
+                        .is_some_and(|flags| flags & 32 != 0);
                     self.status = format!(
                         "Selected AEX with {} editable parameters: {}",
                         parameters.len(),
@@ -503,11 +571,16 @@ impl MacHarnessApp {
                     self.viewer_mode = ViewerMode::Input;
                 }
                 Err(error) => {
-                    self.status = "Could not inspect AEX parameters.".into();
+                    // A license-gated effect may refuse normal setup before
+                    // the user opens its registration dialog. Keep it selected;
+                    // the guest still verifies I_DO_DIALOG before dispatch.
+                    self.options_available = true;
+                    self.status =
+                        "Could not inspect AEX parameters. Options can still be attempted.".into();
                     self.report = error;
                     self.parameters.clear();
                     self.parameter_defaults.clear();
-                    self.plugin_path = None;
+                    self.plugin_path = Some(path);
                 }
             }
             self.output = None;
@@ -576,7 +649,7 @@ impl MacHarnessApp {
         let (Some(aex), Some(input)) = (self.plugin_path.clone(), self.input.clone()) else {
             return;
         };
-        let workers = match guest_worker_candidates(&self.repository) {
+        let workers = match guest_worker_candidates_for_aex(&self.repository, &aex, false) {
             Ok(paths) => paths,
             Err(error) => {
                 self.status = "Guest worker is not built.".into();
@@ -767,6 +840,46 @@ impl MacHarnessApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        let options_result =
+            self.options_dialog
+                .as_ref()
+                .and_then(|receiver| match receiver.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(mpsc::TryRecvError::Empty) => None,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("options controller stopped without a result".into()))
+                    }
+                });
+        if let Some(result) = options_result {
+            self.options_dialog = None;
+            self.busy = false;
+            match result {
+                Ok(completion) => match completion.discovery {
+                    Ok((parameters, defaults, report)) => {
+                        self.options_available = serde_json::from_str::<Value>(&report)
+                            .ok()
+                            .and_then(|value| value["out_flags"].as_u64())
+                            .is_some_and(|flags| flags & 32 != 0);
+                        self.parameters = parameters;
+                        self.parameter_defaults = defaults;
+                        self.report = report;
+                        self.status =
+                            "Plug-in Options completed and parameters refreshed; registration is not verified."
+                                .into();
+                    }
+                    Err(error) => {
+                        self.status =
+                            "Plug-in Options completed, but parameters could not be refreshed."
+                                .into();
+                        self.report = error;
+                    }
+                },
+                Err(error) => {
+                    self.status = "Could not complete plug-in Options.".into();
+                    self.report = error;
+                }
+            }
+        }
         let user_changed =
             self.user_changed
                 .as_ref()
@@ -1097,6 +1210,18 @@ impl MacHarnessApp {
                 .and_then(|name| name.to_str())
                 .unwrap_or("Select an AEX to load its parameters."),
         );
+        if ui
+            .add_enabled(
+                !occupied && self.options_available,
+                egui::Button::new("Plug-in Options..."),
+            )
+            .on_hover_text(
+                "Requests the plug-in's Options command. Registration is verified separately.",
+            )
+            .clicked()
+        {
+            self.open_options();
+        }
         ui.separator();
         if self.parameters.is_empty() {
             ui.weak("This effect exposed no supported editable parameters.");
@@ -1551,7 +1676,7 @@ fn start_resident_worker(
     let mut failures = Vec::new();
     for candidate in candidates {
         let mut probe_worker =
-            match launch_resident_candidate(candidate, aex, input, format, fixture) {
+            match launch_resident_candidate(candidate, aex, input, format, fixture, false) {
                 Ok(worker) => worker,
                 Err(error) => {
                     failures.push(format!(
@@ -1611,7 +1736,7 @@ fn start_resident_worker(
             ));
             continue;
         }
-        match launch_resident_candidate(candidate, aex, input, format, fixture) {
+        match launch_resident_candidate(candidate, aex, input, format, fixture, false) {
             Ok(mut fresh_worker) => {
                 fresh_worker.fallback_reasons = failures;
                 return Ok(fresh_worker);
@@ -1635,13 +1760,119 @@ fn start_resident_worker(
     ))
 }
 
+fn run_options_dialog(
+    candidates: &[GuestWorkerCandidate],
+    aex: &Path,
+    input: Option<&Path>,
+    format: MacRenderFormat,
+) -> Result<(), String> {
+    let placeholder = if input.is_none() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("options input clock: {error}"))?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "aexcompat-options-input-{}-{nonce}.png",
+            std::process::id()
+        ));
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([0, 0, 0, 255]))
+            .save(&path)
+            .map_err(|error| format!("create options context image: {error}"))?;
+        Some(path)
+    } else {
+        None
+    };
+    let selected_input = input
+        .or(placeholder.as_deref())
+        .ok_or_else(|| "options context image is missing".to_string())?;
+    let result = run_options_dialog_with_input(candidates, aex, selected_input, format);
+    let cleanup = placeholder.map_or(Ok(()), |path| {
+        std::fs::remove_file(path).map_err(|error| format!("remove options context image: {error}"))
+    });
+    combine_fixture_inspection_and_close(result, cleanup)
+}
+
+fn run_options_dialog_with_input(
+    candidates: &[GuestWorkerCandidate],
+    aex: &Path,
+    input: &Path,
+    format: MacRenderFormat,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        // Options may be needed before the effect can render. Launch the
+        // isolated worker directly instead of gating this path on a probe.
+        let mut worker = match launch_resident_candidate(candidate, aex, input, format, None, true)
+        {
+            Ok(worker) => worker,
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+        };
+        let selector =
+            write_control_message(&mut worker.stdin, &json!({"v": 1, "type": "do_dialog"}))
+                .and_then(|()| {
+                    worker
+                        .response_receiver
+                        .recv_timeout(OPTIONS_DIALOG_DEADLINE)
+                        .map_err(|error| format!("options response timeout: {error}"))?
+                        .map_err(|error| format!("options response reader: {error}"))?
+                        .ok_or_else(|| "worker closed before options response".to_string())
+                })
+                .and_then(|response| validate_options_dialog(&response, worker.worker_pid));
+        let cleanup = close_probe_worker(worker);
+        // A dispatched selector can have side effects even when it reports an
+        // error. Never run it again through a fallback worker.
+        return combine_fixture_inspection_and_close(selector, cleanup);
+    }
+    Err(format!(
+        "all isolated options workers failed: {}",
+        failures.join(" | ")
+    ))
+}
+
+fn registry_store_path(aex: &Path) -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| "cannot locate the user's application support directory".to_string())?;
+    let root = PathBuf::from(home).join("Library/Application Support/AEXCompat/guest-registry");
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("create private guest registry directory: {error}"))?;
+    let metadata = std::fs::symlink_metadata(&root)
+        .map_err(|error| format!("inspect private guest registry directory: {error}"))?;
+    if !metadata.file_type().is_dir() {
+        return Err("guest registry directory is not a regular directory".into());
+    }
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("protect guest registry directory: {error}"))?;
+    let canonical = aex
+        .canonicalize()
+        .map_err(|error| format!("resolve AEX registry identity: {error}"))?;
+    let identity = format!("{:x}", Sha256::digest(canonical.as_os_str().as_bytes()));
+    let path = root.join(format!("{identity}.json"));
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.len() > 64 * 1024 * 1024 {
+                return Err("guest registry snapshot file is invalid".into());
+            }
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("protect guest registry snapshot: {error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("inspect guest registry snapshot: {error}")),
+    }
+    Ok(path)
+}
+
 fn launch_resident_candidate(
     candidate: &GuestWorkerCandidate,
     aex: &Path,
     input: &Path,
     format: MacRenderFormat,
     fixture: Option<&MacFixtureLaunch<'_>>,
+    interactive_alerts: bool,
 ) -> Result<StartedResidentWorker, String> {
+    let registry_store = registry_store_path(aex)?;
     let session = WorkerSession::create()?;
     let worker = session.stage_file(&candidate.path, "worker")?;
     let plugin = session.stage_file(aex, "plugin.aex")?;
@@ -1724,6 +1955,12 @@ fn launch_resident_candidate(
         candidate.security_tier(),
         ResourceLimits::default(),
     );
+    if !candidate.native {
+        command.env("AEXCOMPAT_GUEST_REGISTRY_FILE", registry_store);
+    }
+    if interactive_alerts {
+        command.env("AEXCOMPAT_GUEST_INTERACTIVE_ALERTS", "1");
+    }
     let mut child = command
         .args(arguments)
         .stdin(Stdio::piped())
@@ -2117,7 +2354,7 @@ pub fn render_fixture_headless(
         smart: fixture.render_path == "smart",
         time_scale: fixture.timing.time_scale,
     };
-    let workers = guest_worker_candidates(repository)?;
+    let workers = guest_worker_candidates_for_aex(repository, aex, false)?;
     let mut started =
         start_resident_worker(&workers, aex, &loaded.primary_layer, format, Some(&launch))?;
     let primary_width = started.width;
@@ -2649,7 +2886,8 @@ fn discover_parameters(
     repository: &Path,
     aex: &Path,
 ) -> Result<(Vec<InteractiveParameter>, Vec<InteractiveParameter>, String), String> {
-    let workers = guest_worker_candidates(repository)?;
+    let workers = guest_worker_candidates_for_aex(repository, aex, false)?;
+    let registry_file = registry_store_path(aex)?;
     let mut failures = Vec::new();
     let mut process = None;
     let mut selected_tier = None;
@@ -2659,7 +2897,13 @@ fn discover_parameters(
         } else {
             RESIDENT_RENDER_DEADLINE
         };
-        match run_staged_setup(&candidate.path, aex, candidate.security_tier(), deadline) {
+        match run_staged_setup(
+            &candidate.path,
+            aex,
+            candidate.security_tier(),
+            deadline,
+            (!candidate.native).then_some(registry_file.as_path()),
+        ) {
             Ok(output) if output.status.success() => {
                 process = Some(output);
                 selected_tier = Some(candidate.security_tier());
@@ -2766,6 +3010,24 @@ fn guest_worker_candidates(repository: &Path) -> Result<Vec<GuestWorkerCandidate
         })
     } else {
         Ok(existing)
+    }
+}
+
+fn guest_worker_candidates_for_aex(
+    repository: &Path,
+    aex: &Path,
+    options: bool,
+) -> Result<Vec<GuestWorkerCandidate>, String> {
+    let snapshot = registry_store_path(aex)?;
+    let requires_virtual_registry = options || snapshot.exists();
+    let candidates = guest_worker_candidates(repository)?
+        .into_iter()
+        .filter(|candidate| !requires_virtual_registry || !candidate.native)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        Err("AEX registration or saved license state requires the Unicorn guest worker".into())
+    } else {
+        Ok(candidates)
     }
 }
 
@@ -3640,6 +3902,51 @@ mod tests {
         let mut corrupted = probe;
         corrupted["guards_intact"] = json!(false);
         assert!(validate_resident_probe(&corrupted, 42, 2, 1).is_err());
+    }
+
+    #[test]
+    fn options_response_requires_matching_worker_and_completed_selector() {
+        let response = json!({
+            "v": 1,
+            "type": "do_dialog_selector_done",
+            "worker_pid": 42,
+            "status": "selector_completed",
+            "report": {"selector_error": 0},
+        });
+        assert!(validate_options_dialog(&response, 42).is_ok());
+        assert!(validate_options_dialog(&response, 41).is_err());
+        let mut incorrect = response.clone();
+        incorrect["report"]["selector_error"] = json!(5);
+        assert!(validate_options_dialog(&incorrect, 42).is_err());
+        let mut extra = response;
+        extra["license_key"] = json!("unexpected");
+        assert!(validate_options_dialog(&extra, 42).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_AEX"]
+    fn real_options_candidate_advertises_dialog() {
+        let aex = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_AEX").unwrap());
+        let repository = repository_root().unwrap();
+        let (_, _, report) = discover_parameters(&repository, &aex).unwrap();
+        let value: Value = serde_json::from_str(&report).unwrap();
+        assert!(
+            value["out_flags"]
+                .as_u64()
+                .is_some_and(|flags| flags & 32 != 0),
+            "selected AEX did not advertise PF_Cmd_DO_DIALOG"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires AEXCOMPAT_TEST_AEX and AEXCOMPAT_TEST_INPUT_PNG"]
+    fn real_options_adapter_dispatches_before_render_probe() {
+        let aex = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_AEX").unwrap());
+        let input = PathBuf::from(std::env::var_os("AEXCOMPAT_TEST_INPUT_PNG").unwrap());
+        let repository = repository_root().unwrap();
+        let candidates = guest_worker_candidates_for_aex(&repository, &aex, true).unwrap();
+        run_options_dialog(&candidates, &aex, Some(&input), MacRenderFormat::PngArgb8).unwrap();
+        run_options_dialog(&candidates, &aex, None, MacRenderFormat::PngArgb8).unwrap();
     }
 
     #[test]

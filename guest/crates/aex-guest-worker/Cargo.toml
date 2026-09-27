@@ -42,6 +42,9 @@ unicorn-engine.workspace = true
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 sha2 = { workspace = true, features = ["asm"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+rfd = { version = "0.15", default-features = false }
+
 [target.'cfg(not(all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
 sha2.workspace = true
 

@@ -8,6 +8,8 @@ const GUEST_STREAM_BUFFER_BASE: u64 = GUEST_STREAM_BASE + MAX_GUEST_STREAM_OPENS
 #[derive(Default)]
 struct GuestFiles {
     sources: BTreeMap<String, std::path::PathBuf>,
+    private_files: BTreeMap<String, Vec<u8>>,
+    private_file_times: BTreeMap<String, [u64; 3]>,
     directories: BTreeSet<String>,
     directory_dacls: BTreeMap<String, Vec<u8>>,
     directory_times: BTreeMap<String, [std::time::SystemTime; 3]>,
@@ -101,6 +103,21 @@ fn guest_file_name(name: &str) -> Result<String, String> {
 }
 
 impl GuestFiles {
+    fn install_saved_private_files(&mut self, files: BTreeMap<String, Vec<u8>>, times: BTreeMap<String, [u64; 3]>) {
+        self.private_files = files;
+        self.private_file_times = times;
+        let paths: Vec<_> = self.private_files.keys().cloned().collect();
+        for path in paths {
+            if let Some((parent, _)) = path.rsplit_once('/') {
+                self.record_directory_creation(parent);
+                let mut directory = Some(parent);
+                while let Some(name) = directory {
+                    if name != "c:" { self.directories.insert(name.to_owned()); }
+                    directory = name.rsplit_once('/').map(|(ancestor, _)| ancestor);
+                }
+            }
+        }
+    }
     fn flush_console_repeats(&mut self) -> Result<(), String> {
         use std::io::Write;
 
@@ -147,6 +164,7 @@ impl GuestFiles {
                 .iter()
                 .any(|path| path.starts_with(&prefix))
             || self.sources.keys().any(|path| path.starts_with(&prefix))
+            || self.private_files.keys().any(|path| path.starts_with(&prefix))
     }
 
     fn from_environment() -> Result<Self, GuestError> {
@@ -1126,6 +1144,21 @@ fn canonical_guest_search_name(query: &str) -> Result<String, String> {
     guest_file_name(std::str::from_utf8(&path).unwrap())
 }
 
+fn private_file_system_times(files: &GuestFiles, name: &str) -> Result<[std::time::SystemTime; 3], String> {
+    const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+    let now = std::time::SystemTime::now();
+    let Some(stored) = files.private_file_times.get(name) else { return Ok([now; 3]); };
+    let mut times = [now; 3];
+    for (index, ticks) in stored.iter().enumerate() {
+        times[index] = if *ticks >= EPOCH_TICKS {
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_nanos((ticks - EPOCH_TICKS).checked_mul(100).ok_or("private file timestamp overflow")?))
+        } else {
+            std::time::UNIX_EPOCH.checked_sub(std::time::Duration::from_nanos((EPOCH_TICKS - ticks).checked_mul(100).ok_or("private file timestamp overflow")?))
+        }.ok_or("private file timestamp out of range")?;
+    }
+    Ok(times)
+}
+
 fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>, String> {
     let query = canonical_guest_search_name(query)?;
     let (directory, pattern) = query
@@ -1149,6 +1182,14 @@ fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>,
                 } else {
                     Some(source)
                 });
+        }
+    }
+    for name in files.private_files.keys() {
+        if let Some(rest) = name.strip_prefix(&prefix) {
+            let leaf = rest.split('/').next().unwrap();
+            if guest_star_match(pattern.as_bytes(), leaf.as_bytes()) {
+                candidates.entry(leaf.to_string()).or_insert(None);
+            }
         }
     }
     for name in &files.directories {
@@ -1187,6 +1228,14 @@ fn guest_find_records(files: &GuestFiles, query: &str) -> Result<Vec<[u8; 320]>,
             }
             record[28..32].copy_from_slice(&((metadata.len() >> 32) as u32).to_le_bytes());
             record[32..36].copy_from_slice(&(metadata.len() as u32).to_le_bytes());
+        } else if let Some(bytes) = files.private_files.get(&format!("{prefix}{name}")) {
+            record[..4].copy_from_slice(&0x80u32.to_le_bytes());
+            let times = private_file_system_times(files, &format!("{prefix}{name}"))?;
+            for (offset, time) in [(4, times[0]), (12, times[1]), (20, times[2])] {
+                record[offset..offset + 8].copy_from_slice(&windows_filetime(time)?.to_le_bytes());
+            }
+            record[28..32].copy_from_slice(&((bytes.len() as u64 >> 32) as u32).to_le_bytes());
+            record[32..36].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
         } else {
             let attributes = files
                 .directory_attributes
@@ -1590,6 +1639,11 @@ fn guest_stat_record(files: &GuestFiles, text: &str, record: &mut [u8; 48]) -> R
             metadata.len() as i32,
             times,
         )
+    } else if let Some(bytes) = files.private_files.get(&name) {
+        if trailing_slash { return Ok(2); }
+        if bytes.len() > i32::MAX as usize { return Ok(132); }
+        let times = private_file_system_times(files, &name)?;
+        (0x8000u16 | 0o666, bytes.len() as i32, [times[1], times[2], times[0]])
     } else if files.directory_exists(&name) {
         let times = *files
             .directory_times
@@ -2066,6 +2120,12 @@ fn guest_file_attributes_ex(
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("file attributes time: {e}"))?;
+    } else if let Some(bytes) = files.private_files.get(&name) {
+        record[..4].copy_from_slice(&0x80u32.to_le_bytes());
+        record[28..32].copy_from_slice(&((bytes.len() as u64 >> 32) as u32).to_le_bytes());
+        record[32..36].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        let stored = private_file_system_times(files, &name)?;
+        times = vec![stored[0], stored[1], stored[2]];
     } else if files.directory_exists(&name) {
         let attributes = files
             .directory_attributes

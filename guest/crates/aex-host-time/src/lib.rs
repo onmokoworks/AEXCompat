@@ -26,6 +26,68 @@ pub fn localtime_fields(seconds: i64) -> Result<[i32; 9], String> {
     ])
 }
 
+/// UTC civil fields in the same order as `localtime_fields`.
+pub fn utc_fields(seconds: i64) -> Result<[i32; 9], String> {
+    let timestamp: libc::time_t = seconds
+        .try_into()
+        .map_err(|_| "host time_t range exceeded")?;
+    let mut value = std::mem::MaybeUninit::<libc::tm>::uninit();
+    #[cfg(unix)]
+    let success = unsafe { !libc::gmtime_r(&timestamp, value.as_mut_ptr()).is_null() };
+    #[cfg(windows)]
+    let success = unsafe { libc::gmtime_s(value.as_mut_ptr(), &timestamp) == 0 };
+    if !success {
+        return Err("host UTC conversion failed".into());
+    }
+    let value = unsafe { value.assume_init() };
+    Ok([
+        value.tm_sec,
+        value.tm_min,
+        value.tm_hour,
+        value.tm_mday,
+        value.tm_mon,
+        value.tm_year,
+        value.tm_wday,
+        value.tm_yday,
+        value.tm_isdst,
+    ])
+}
+
+#[cfg(windows)]
+unsafe extern "C" {
+    fn _mkgmtime64(tm: *mut libc::tm) -> libc::time_t;
+}
+
+pub fn utc_seconds(
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: i32,
+) -> Result<i64, String> {
+    let mut value: libc::tm = unsafe { std::mem::zeroed() };
+    value.tm_year = year - 1900;
+    value.tm_mon = month - 1;
+    value.tm_mday = day;
+    value.tm_hour = hour;
+    value.tm_min = minute;
+    value.tm_sec = second;
+    #[cfg(unix)]
+    let timestamp = unsafe { libc::timegm(&mut value) };
+    #[cfg(windows)]
+    let timestamp = unsafe { _mkgmtime64(&mut value) };
+    if timestamp == -1 {
+        return Err("host UTC conversion failed".into());
+    }
+    let seconds = i64::try_from(timestamp).map_err(|_| "host UTC range exceeded")?;
+    let fields = utc_fields(seconds)?;
+    if fields[..6] != [second, minute, hour, day, month - 1, year - 1900] {
+        return Err("invalid UTC civil date".into());
+    }
+    Ok(seconds)
+}
+
 #[cfg(windows)]
 unsafe extern "C" {
     fn _mktime64(tm: *mut libc::tm) -> libc::time_t;

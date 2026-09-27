@@ -23,6 +23,7 @@ const CMD_SEQUENCE_SETDOWN: u64 = abi::PF_CMD_SEQUENCE_SETDOWN as u64;
 const CMD_FRAME_SETUP: u64 = abi::PF_CMD_FRAME_SETUP as u64;
 const CMD_RENDER: u64 = abi::PF_CMD_RENDER as u64;
 const CMD_FRAME_SETDOWN: u64 = abi::PF_CMD_FRAME_SETDOWN as u64;
+const CMD_DO_DIALOG: u64 = abi::PF_CMD_DO_DIALOG as u64;
 const CMD_USER_CHANGED_PARAM: u64 = abi::PF_CMD_USER_CHANGED_PARAM as u64;
 const CMD_SMART_PRE_RENDER: u64 = abi::PF_CMD_SMART_PRE_RENDER as u64;
 const CMD_SMART_RENDER: u64 = abi::PF_CMD_SMART_RENDER as u64;
@@ -281,6 +282,11 @@ pub struct UserChangedReport {
     pub slot: usize,
     pub selector_error: i32,
     pub parameters: Vec<ParameterUiState>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct OptionsDialogReport {
+    pub selector_error: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -543,6 +549,7 @@ pub struct ClassicHost {
     setup_report: Option<SetupReport>,
     global_active: bool,
     sequence_active: bool,
+    options_dialog_dispatched: bool,
     frame_resources: Option<FrameResources>,
     user_changed_extra: Option<u64>,
     arbitrary_extra: Option<u64>,
@@ -660,6 +667,7 @@ impl ClassicHost {
             setup_report: None,
             global_active: false,
             sequence_active: false,
+            options_dialog_dispatched: false,
             frame_resources: None,
             user_changed_extra: None,
             arbitrary_extra: None,
@@ -735,6 +743,7 @@ impl ClassicHost {
             setup_report: None,
             global_active: false,
             sequence_active: false,
+            options_dialog_dispatched: false,
             frame_resources: None,
             user_changed_extra: None,
             arbitrary_extra: None,
@@ -1191,6 +1200,11 @@ impl ClassicHost {
         Ok(())
     }
 
+    pub(crate) fn save_guest_registry_snapshot(&self) -> Result<(), ClassicError> {
+        self.engine.save_guest_registry_snapshot()?;
+        Ok(())
+    }
+
     pub fn apply_resident_parameter_values(
         &mut self,
         parameter_values: &[ParameterValue],
@@ -1301,6 +1315,211 @@ impl ClassicHost {
             selector_error,
             parameters,
         })
+    }
+
+    pub fn do_options_dialog(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        secondary_layers: &[ResidentLayer<'_>],
+    ) -> Result<OptionsDialogReport, ClassicError> {
+        if !self.sequence_active {
+            return Err(ClassicError::Input(
+                "options dialog requires an open resident session".into(),
+            ));
+        }
+        if self.options_dialog_dispatched {
+            return Err(ClassicError::Input(
+                "options dialog was already dispatched in this resident session".into(),
+            ));
+        }
+        let setup = self.setup_report.as_ref().ok_or_else(|| {
+            ClassicError::Input("options dialog requires completed effect setup".into())
+        })?;
+        if setup.out_flags & abi::PF_OUT_FLAG_I_DO_DIALOG as u32 == 0 {
+            return Err(ClassicError::Input(
+                "AEX did not advertise an options dialog".into(),
+            ));
+        }
+        let result = (|| {
+            // Rebuild parameter definitions even after a probe or render:
+            // arbitrary value copies from that earlier command were disposed.
+            self.prepare_options_dialog_parameters(width, height, format, secondary_layers)?;
+            let params = self
+                .frame_resources
+                .as_ref()
+                .ok_or_else(|| {
+                    ClassicError::Input("options dialog parameters were not prepared".into())
+                })?
+                .params;
+            // A selector may have side effects even if it fails. A new Options
+            // attempt gets a fresh worker and fresh arbitrary parameter values.
+            self.options_dialog_dispatched = true;
+            let selector_error = self
+                .engine
+                .call_selector_win64(
+                    self.entry,
+                    [CMD_DO_DIALOG, self.input, self.output, params, 0, 0],
+                )
+                .map_err(|source| selector_guest_error("DO_DIALOG", source))?
+                as i32;
+            if selector_error != 0 {
+                return Err(ClassicError::Selector {
+                    selector: "DO_DIALOG",
+                    error: selector_error,
+                });
+            }
+            Ok(OptionsDialogReport { selector_error })
+        })();
+        let disposal = combine_failures(self.dispose_arbitrary_values());
+        match (result, disposal) {
+            (Ok(report), Ok(())) => Ok(report),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(primary), Err(secondary)) => Err(ClassicError::Compound {
+                primary: Box::new(primary),
+                secondary: Box::new(secondary),
+            }),
+        }
+    }
+
+    fn prepare_options_dialog_parameters(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: FramePixelFormat,
+        secondary_layers: &[ResidentLayer<'_>],
+    ) -> Result<(), ClassicError> {
+        let pixel_bytes = format
+            .byte_count(width, height)
+            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        let captured = self.engine.parameters().to_vec();
+        let resources = self.ensure_frame_resources(
+            width,
+            height,
+            format,
+            pixel_bytes,
+            captured.len(),
+            secondary_layers,
+        )?;
+        let rowbytes = format
+            .rowbytes(width)
+            .map_err(|error| ClassicError::Input(error.to_string()))?;
+        let mut input_world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+        write_i32(
+            &mut input_world,
+            abi::LAYER_WORLD_FLAGS_OFFSET,
+            format.world_flags(),
+        );
+        write_u64(
+            &mut input_world,
+            abi::LAYER_DATA_OFFSET,
+            resources.input_pixels,
+        );
+        write_i32(
+            &mut input_world,
+            abi::LAYER_ROWBYTES_OFFSET,
+            rowbytes as i32,
+        );
+        write_i32(&mut input_world, abi::LAYER_WIDTH_OFFSET, width as i32);
+        write_i32(&mut input_world, abi::LAYER_HEIGHT_OFFSET, height as i32);
+        write_rect(
+            &mut input_world,
+            abi::LAYER_EXTENT_HINT_OFFSET,
+            width,
+            height,
+        );
+        write_i32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
+        write_u32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
+        let mut input_definition = vec![0u8; abi::PF_PARAM_DEF_SIZE];
+        input_definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
+            .copy_from_slice(&input_world);
+        self.engine
+            .write(resources.input_param, &input_definition)?;
+        self.engine
+            .write(resources.input_pixels, &vec![0; pixel_bytes])?;
+        self.engine
+            .write_u64(resources.params, resources.input_param)?;
+        for (index, parameter) in captured.into_iter().enumerate() {
+            let mut definition = parameter.bytes;
+            materialize_default(&mut definition, parameter.param_type, width, height)
+                .map_err(ClassicError::Input)?;
+            materialize_layer_world(&mut definition, parameter.param_type, &input_world);
+            if parameter.param_type == PARAM_ARBITRARY_DATA {
+                let union = abi::PARAM_U_OFFSET;
+                let default = read_u64(&definition, union + ARBITRARY_DEFAULT_HANDLE_OFFSET);
+                if default != 0 {
+                    let id = read_i16(&definition, union);
+                    let refcon = read_u64(&definition, union + ARBITRARY_REFCON_OFFSET);
+                    let handle = self.copy_arbitrary_default(id, refcon, default)?;
+                    write_u64(
+                        &mut definition,
+                        union + ARBITRARY_VALUE_HANDLE_OFFSET,
+                        handle,
+                    );
+                    self.arbitrary_values.push(ArbitraryValue {
+                        id,
+                        refcon,
+                        handle,
+                        definition: resources.parameter_definitions[index],
+                    });
+                }
+            }
+            if let Some(layer) = resources
+                .secondary_layers
+                .iter()
+                .find(|layer| layer.slot == index + 1)
+            {
+                let requested = secondary_layers
+                    .iter()
+                    .find(|requested| requested.slot == layer.slot)
+                    .unwrap();
+                self.engine.write(layer.pixels, requested.pixels)?;
+                let mut layer_world = input_world.clone();
+                write_u64(&mut layer_world, abi::LAYER_DATA_OFFSET, layer.pixels);
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_ROWBYTES_OFFSET,
+                    format
+                        .rowbytes(layer.width)
+                        .map_err(|error| ClassicError::Input(error.to_string()))?
+                        as i32,
+                );
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_WIDTH_OFFSET,
+                    layer.width as i32,
+                );
+                write_i32(
+                    &mut layer_world,
+                    abi::LAYER_HEIGHT_OFFSET,
+                    layer.height as i32,
+                );
+                write_rect(
+                    &mut layer_world,
+                    abi::LAYER_EXTENT_HINT_OFFSET,
+                    layer.width,
+                    layer.height,
+                );
+                if parameter.param_type != PARAM_LAYER {
+                    return Err(ClassicError::Input(format!(
+                        "secondary layer slot {} is not a layer parameter",
+                        index + 1
+                    )));
+                }
+                definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
+                    .copy_from_slice(&layer_world);
+            }
+            let address = resources.parameter_definitions[index];
+            self.engine.write(address, &definition)?;
+            self.engine
+                .write_u64(resources.params + ((index + 1) * 8) as u64, address)?;
+        }
+        self.engine.configure_parameter_definitions(
+            resources.input_param,
+            resources.parameter_definitions,
+        )?;
+        Ok(())
     }
 
     #[cfg(test)]

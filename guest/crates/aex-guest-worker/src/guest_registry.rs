@@ -1,13 +1,87 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+pub(crate) const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_PRIVATE_FILE_BYTES: usize = 16 * 1024 * 1024;
+
+fn validate_snapshot_files(files: &BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+    if files.len() > 4096 {
+        return Err("guest file snapshot exceeds entry bound".into());
+    }
+    let mut total = 0usize;
+    for (path, data) in files {
+        if path.is_empty()
+            || path.len() > 1024
+            || !path.is_ascii()
+            || path
+                .bytes()
+                .any(|byte| byte.is_ascii_uppercase() || byte == 0 || byte == b'\\')
+            || path
+                .split('/')
+                .any(|component| component.is_empty() || component == "." || component == "..")
+            || data.len() > MAX_PRIVATE_FILE_BYTES
+        {
+            return Err("guest file snapshot path or size is invalid".into());
+        }
+        total = total
+            .checked_add(data.len())
+            .ok_or("guest file snapshot size overflow")?;
+        if total > MAX_PRIVATE_FILE_BYTES {
+            return Err("guest file snapshot exceeds byte bound".into());
+        }
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistrySnapshot {
+    version: u32,
+    keys: Vec<SnapshotKey>,
+    values: Vec<SnapshotValue>,
+    #[serde(default)]
+    files: Vec<SnapshotFile>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotFile {
+    path: String,
+    data: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    times: Option<[u64; 3]>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotKey {
+    root: u64,
+    view: u32,
+    path: Vec<u8>,
+    security: RegistrySecurity,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotValue {
+    root: u64,
+    view: u32,
+    path: Vec<u8>,
+    name: Vec<u8>,
+    kind: u32,
+    data: Vec<u8>,
+}
 
 // The initial virtual hive has no host accounts or installation records. Only
 // Everyone ACEs can currently be evaluated without inventing a Windows token.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RegistrySecurity {
     pub(crate) dacl: Option<Vec<RegistryAce>>,
     pub(crate) protected: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RegistryAce {
     pub(crate) deny: bool,
     pub(crate) flags: u8,
@@ -100,8 +174,156 @@ pub(crate) struct GuestRegistry {
     issued: u64,
     values: BTreeMap<(u64, u32, Vec<u8>, Vec<u8>), (u32, Vec<u8>)>,
     value_bytes: usize,
+    files: BTreeMap<String, Vec<u8>>,
+    file_times: BTreeMap<String, [u64; 3]>,
 }
 impl GuestRegistry {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.values.is_empty() && self.files.is_empty()
+    }
+
+    pub(crate) fn files(&self) -> &BTreeMap<String, Vec<u8>> {
+        &self.files
+    }
+
+    pub(crate) fn file_times(&self) -> &BTreeMap<String, [u64; 3]> {
+        &self.file_times
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<Vec<u8>, String> {
+        self.snapshot_with_files(&self.files)
+    }
+
+    pub(crate) fn snapshot_with_files(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<Vec<u8>, String> {
+        self.snapshot_with_files_and_times(files, &self.file_times)
+    }
+
+    pub(crate) fn snapshot_with_files_and_times(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        times: &BTreeMap<String, [u64; 3]>,
+    ) -> Result<Vec<u8>, String> {
+        if times.keys().any(|path| !files.contains_key(path)) {
+            return Err("guest file times have no matching file".into());
+        }
+        let snapshot = RegistrySnapshot {
+            version: 1,
+            keys: self
+                .keys
+                .iter()
+                .map(|((root, view, path), security)| SnapshotKey {
+                    root: *root,
+                    view: *view,
+                    path: path.clone(),
+                    security: security.clone(),
+                })
+                .collect(),
+            values: self
+                .values
+                .iter()
+                .map(|((root, view, path, name), (kind, data))| SnapshotValue {
+                    root: *root,
+                    view: *view,
+                    path: path.clone(),
+                    name: name.clone(),
+                    kind: *kind,
+                    data: data.clone(),
+                })
+                .collect(),
+            files: files
+                .iter()
+                .map(|(path, data)| SnapshotFile {
+                    path: path.clone(),
+                    data: data.clone(),
+                    times: times.get(path).copied(),
+                })
+                .collect(),
+        };
+        validate_snapshot_files(files)?;
+        let bytes = serde_json::to_vec(&snapshot)
+            .map_err(|_| "serialize registry snapshot failed".to_string())?;
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err("registry snapshot exceeds storage bound".into());
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn from_snapshot(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err("registry snapshot exceeds storage bound".into());
+        }
+        let snapshot: RegistrySnapshot = serde_json::from_slice(bytes)
+            .map_err(|_| "registry snapshot is invalid".to_string())?;
+        if snapshot.version != 1 || snapshot.keys.len() > 1024 || snapshot.values.len() > 4096 {
+            return Err("registry snapshot schema or counts are invalid".into());
+        }
+        let mut registry = Self::default();
+        for file in snapshot.files {
+            if file
+                .times
+                .is_some_and(|times| times.iter().any(|value| *value == u64::MAX))
+            {
+                return Err("guest file snapshot times are invalid".into());
+            }
+            if let Some(times) = file.times {
+                registry.file_times.insert(file.path.clone(), times);
+            }
+            if registry.files.insert(file.path, file.data).is_some() {
+                return Err("guest file snapshot contains duplicate paths".into());
+            }
+        }
+        validate_snapshot_files(&registry.files)?;
+        for key in snapshot.keys {
+            if !valid_snapshot_identity(key.root, key.view, &key.path)
+                || key
+                    .security
+                    .dacl
+                    .as_ref()
+                    .is_some_and(|aces| aces.len() > 256)
+                || registry
+                    .keys
+                    .insert((key.root, key.view, key.path), key.security)
+                    .is_some()
+            {
+                return Err("registry snapshot key is invalid or duplicated".into());
+            }
+        }
+        for value in snapshot.values {
+            if !valid_snapshot_identity(value.root, value.view, &value.path)
+                || value.name.len() > 16383
+                || !value.name.is_ascii()
+                || value.name.iter().any(u8::is_ascii_uppercase)
+                || value.kind > 11
+                || value.data.len() > 2 * 1024 * 1024
+                || (!value.path.is_empty()
+                    && !registry
+                        .keys
+                        .contains_key(&(value.root, value.view, value.path.clone())))
+            {
+                return Err("registry snapshot value is invalid".into());
+            }
+            registry.value_bytes = registry
+                .value_bytes
+                .checked_add(value.data.len())
+                .ok_or_else(|| "registry snapshot value capacity overflow".to_string())?;
+            if registry.value_bytes > 16 * 1024 * 1024
+                || registry
+                    .values
+                    .insert(
+                        (value.root, value.view, value.path, value.name),
+                        (value.kind, value.data),
+                    )
+                    .is_some()
+            {
+                return Err("registry snapshot value capacity or identity is invalid".into());
+            }
+        }
+        Ok(registry)
+    }
+
     pub(crate) fn resolve(&self, key: u64, view: u32) -> Result<(u64, u32, Vec<u8>), u32> {
         if matches!(
             key,
@@ -270,9 +492,45 @@ impl GuestRegistry {
     }
 }
 
+fn valid_snapshot_identity(root: u64, view: u32, path: &[u8]) -> bool {
+    matches!(
+        root,
+        0xffff_ffff_8000_0000..=0xffff_ffff_8000_0003 | 0xffff_ffff_8000_0005
+    ) && matches!(view, 0 | 0x100 | 0x200)
+        && path.len() <= 32767
+        && path.is_ascii()
+        && !path.iter().any(u8::is_ascii_uppercase)
+        && !path.starts_with(b"\\")
+        && !path.ends_with(b"\\")
+        && !path.windows(2).any(|pair| pair == b"\\\\")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn snapshot_preserves_values_but_never_live_handles() {
+        let root = 0xffff_ffff_8000_0001;
+        let mut registry = GuestRegistry::default();
+        let (handle, _) = registry
+            .open(root, b"Software\\Example", 0x2001f, true)
+            .unwrap();
+        registry
+            .set_value(handle, b"License", 3, vec![1, 2, 3, 4])
+            .unwrap();
+        let bytes = registry.snapshot().unwrap();
+        let mut restored = GuestRegistry::from_snapshot(&bytes).unwrap();
+        assert_eq!(restored.query_value(handle, b"License"), Err(6));
+        let (new_handle, created) = restored
+            .open(root, b"Software\\Example", 0x20019, false)
+            .unwrap();
+        assert!(!created);
+        assert_eq!(
+            restored.query_value(new_handle, b"LICENSE").unwrap(),
+            &(3, vec![1, 2, 3, 4])
+        );
+        assert_eq!(restored.snapshot().unwrap(), bytes);
+    }
     #[test]
     fn creation_survives_close_and_views_are_separate() {
         let mut registry = GuestRegistry::default();
