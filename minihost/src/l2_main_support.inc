@@ -1,6 +1,8 @@
 // Internal worker implementation uses a named namespace so subsystem
 // translation units can own callback state without including implementation
 // fragments into this file.
+namespace dvacore::threads { class AsyncEventLoopAdaptor; }
+
 namespace aexcompat::l2_detail {
 
 using aexcompat::parameter_selftests::verify_parameter_animation_transport;
@@ -1614,12 +1616,12 @@ void initialize_u_dll_allocator() {
 //     touch user state, so they stay out until something demonstrably needs
 //     them.
 //   * `COR_Birth(a, quiet_bib_errors, b)`, two steps after COR_Conception:
-//     it does not return in this worker (observed: the l2 worker was still
-//     inside it after 60 seconds, while COR_Conception returns 0), and
-//     COR_Conception is
-//     the step that sets the BIB resolver the 21249 comes from. Whatever
-//     COR_Birth waits for is recorded as its own follow-up rather than worked
-//     around.
+//     before #1606 it waited for a dvacore main-thread callback while this
+//     worker had registered no main thread. The registration immediately
+//     below lets COR execute that callback on the dispatch thread. It is
+//     attempted only when no other thread owns dvacore's main-thread slot at
+//     the decision point. A concurrent third-party registration could still
+//     race with dvacore's unconditional replacement; see the helper below.
 //   * TDB_Birth, TXT_Birth, BEE_Birth and the rest of the tail: not reached
 //     by any failure measured so far. `PF_Birth`, which sits in that tail, is
 //     run by initialize_pf_dll_host_layer below (issue #1212 / PR #1284) -
@@ -1632,6 +1634,58 @@ void initialize_u_dll_allocator() {
 // Same latch shape as U_Birth: keyed on the mapping, so a session whose first
 // member maps none of these still births them for a later member that does,
 // and a failed attempt is not retried on the same mapping.
+bool ensure_dvacore_dispatch_thread_is_main() {
+  // The worker calls this on its one dispatch thread before any plug-in
+  // selector. Dvacore's RegisterCurrentThreadAsMainThread unconditionally
+  // replaces the process-wide ID, however: this check cannot be made atomic
+  // against a thread spawned by a plug-in's DLL initializer. We avoid
+  // replacing an owner already visible here, but do not claim cross-plug-in
+  // event-loop arbitration or use this as a general main-thread dispatcher.
+  namespace main_thread = aexcompat::worker_runtime::dvacore_main_thread;
+  const HMODULE dva = GetModuleHandleW(L"dvacore.dll");
+  if (!dva) return false;
+  using MainThreadId = unsigned(__cdecl*)();
+  using IsMain = bool(__cdecl*)();
+  using Register =
+      std::shared_ptr<dvacore::threads::AsyncEventLoopAdaptor>(__cdecl*)();
+  const auto main_id = reinterpret_cast<MainThreadId>(GetProcAddress(
+      dva, "?GetCurrentMainThreadID@threads@dvacore@@YAIXZ"));
+  const auto is_main = reinterpret_cast<IsMain>(GetProcAddress(
+      dva, "?CurrentThreadIsMainThread@threads@dvacore@@YA_NXZ"));
+  const auto register_main = reinterpret_cast<Register>(GetProcAddress(
+      dva,
+      "?RegisterCurrentThreadAsMainThread@threads@dvacore@@YA?AV?$shared_ptr@VAsyncEventLoopAdaptor@threads@dvacore@@@std@@XZ"));
+  if (!main_id || !is_main || !register_main) {
+    std::cerr << "stage:dvacore_main_thread status=missing_export\n"
+              << std::flush;
+    return false;
+  }
+  switch (main_thread::decide(main_id(), GetCurrentThreadId())) {
+    case main_thread::Action::AlreadyMain:
+      return is_main();
+    case main_thread::Action::OtherMain:
+      std::cerr << "stage:dvacore_main_thread status=other_thread\n"
+                << std::flush;
+      return false;
+    case main_thread::Action::InvalidThread:
+      return false;
+    case main_thread::Action::Register:
+      // dvacore also retains the adaptor in its thread-local state. Release
+      // only our returned reference here; the dispatch thread owns the
+      // registration until its TLS teardown, before dvacore unloads.
+      {
+        auto adaptor = register_main();
+        if (!adaptor || !is_main()) {
+          std::cerr << "stage:dvacore_main_thread status=register_failed\n"
+                    << std::flush;
+          return false;
+        }
+      }
+      return is_main();
+  }
+  return false;
+}
+
 void initialize_process_support_libraries() {
   namespace legacy = aexcompat::worker_runtime::legacy_support;
   enum class BirthShape {
@@ -1644,6 +1698,7 @@ void initialize_process_support_libraries() {
     m_birth,
     // int (*)(bool), called with AE's non-quiet value
     cor_conception,
+    cor_birth,
     // int (*)(const boost::function<bool(const StdString16&)>&), called with
     // a reference to an empty function object (see the PLUG.dll entry below).
     // `?PLUG_Birth@@YAH...` mangles as `YAH` = `int __cdecl`, and `AEBV` = a
@@ -1672,6 +1727,8 @@ void initialize_process_support_libraries() {
        BirthShape::no_arguments_void},
       {L"COR.dll", "COR.dll", "?COR_Conception@@YAH_N@Z",
        BirthShape::cor_conception},
+      {L"COR.dll", "COR.dll", "?COR_Birth@@YAH_N00@Z",
+       BirthShape::cor_birth},
       // PLUG.dll's static-routine registry (issue #1280). Its guard is two
       // words that only PLUG_Birth writes: `PLUG_RegisterStaticRoutine`
       // (PLUG.dll+0x1ca80) compares PLUG.dll+0x6df90 and +0x6e098 against
@@ -1745,6 +1802,9 @@ void initialize_process_support_libraries() {
                 << std::flush;
     }
     if (decision != legacy::Decision::Call) continue;
+    if (library.shape == BirthShape::cor_birth &&
+        !ensure_dvacore_dispatch_thread_is_main())
+      continue;
     legacy::note_called(states[index], module);
     int result = -1;
     __try {
@@ -1762,6 +1822,10 @@ void initialize_process_support_libraries() {
           break;
         case BirthShape::cor_conception:
           result = reinterpret_cast<int(__cdecl*)(bool)>(birth)(false);
+          break;
+        case BirthShape::cor_birth:
+          result = reinterpret_cast<int(__cdecl*)(bool, bool, bool)>(birth)(
+              false, false, false);
           break;
         case BirthShape::plug_birth: {
           // AE hands PLUG_Birth a `boost::function<bool(const StdString16&)>`

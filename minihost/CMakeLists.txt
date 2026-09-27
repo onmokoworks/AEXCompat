@@ -687,6 +687,12 @@ target_compile_definitions(worker_legacy_support_init_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_legacy_support_init_selftest PRIVATE src)
 
+add_executable(worker_dvacore_main_thread_selftest
+  ../tests/native/worker_dvacore_main_thread_selftest.cpp
+)
+target_compile_features(worker_dvacore_main_thread_selftest PRIVATE cxx_std_17)
+target_include_directories(worker_dvacore_main_thread_selftest PRIVATE src)
+
 add_executable(worker_bee_bib_installer_selftest
   ../tests/native/worker_bee_bib_installer_selftest.cpp
 )
