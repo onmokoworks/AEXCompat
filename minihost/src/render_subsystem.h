@@ -57,6 +57,23 @@ struct ImageRequest {
   bool partial_extent_hint{};
 };
 
+// Bounded host-controlled transforms used only by metamorphic render sessions.
+// The launch option is parsed before any plug-in load; ordinary renders retain
+// this disabled default. Rectangles are layer-space [left, top, right, bottom].
+struct DiagnosticWorldLayout {
+  bool enabled{};
+  int32_t input_row_padding{};
+  int32_t output_row_padding{};
+  int32_t input_origin_x{};
+  int32_t input_origin_y{};
+  bool has_request_rect{};
+  std::array<int32_t, 4> request_rect{};
+  bool has_extent_hint{};
+  std::array<int32_t, 4> extent_hint{};
+};
+DiagnosticWorldLayout& diagnostic_world_layout();
+bool parse_diagnostic_world_layout(const wchar_t* encoded);
+
 // The fixed image cases shared by the Classic and Smart diagnostic adapters.
 // Keep admission beside the common request/profile shaping so the two worker
 // paths cannot drift on which named cases are renderable.

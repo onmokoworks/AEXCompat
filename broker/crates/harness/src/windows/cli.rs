@@ -326,6 +326,12 @@ fn cli_contract() -> serde_json::Value {
                 "note": "The final slot/value pair is required only for --render-experimental-session-param."
             },
             {
+                "name": "--render-differential",
+                "argv": ["--render-differential", "<aex>", "<input-image>", "argb8|argb16|argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
+                "result": "bounded-native-render-differential-json",
+                "note": "Runs one full frame plus stride, origin, extent and supported two-tile variants on CPU. Unsupported transforms are explicit and make passed false."
+            },
+            {
                 "name": "--render-performance-diagnostics",
                 "argv": ["--render-performance-diagnostics", "<aex>", "classic|smart", "argb8|argb16|argb32f", "<slot>", "<value>"],
                 "result": "advisory-performance-diagnostics-json",
@@ -423,6 +429,17 @@ mod artifact_cli_contract_tests {
             "uncompressed-scanline-float32-exr-artifact-report-json"
         );
         assert_eq!(
+            command("--render-differential")["argv"]
+                .as_array()
+                .unwrap()
+                .len(),
+            8
+        );
+        assert_eq!(
+            command("--render-differential")["result"],
+            "bounded-native-render-differential-json"
+        );
+        assert_eq!(
             command("--render-fixture")["argv"]
                 .as_array()
                 .unwrap()
@@ -514,7 +531,7 @@ fn required_plugin_parameters(
 
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-performance-diagnostics <aex> <classic|smart> <argb8|argb16|argb32f>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-differential <aex> <input> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-performance-diagnostics <aex> <classic|smart> <argb8|argb16|argb32f>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
     );
 }
 
@@ -917,6 +934,60 @@ fn main() -> eframe::Result {
             }
             Err(error) => {
                 eprintln!("performance diagnostic failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if args.len() == 9 && args[1] == "--render-differential" {
+        use aexcompat_broker::image_render::{RenderPixelFormat, RenderTiming};
+        let format = match args[4].to_string_lossy().as_ref() {
+            "argb8" => RenderPixelFormat::Argb8,
+            "argb16" => RenderPixelFormat::Argb16,
+            "argb32f" => RenderPixelFormat::Argb32f,
+            _ => {
+                eprintln!("pixel format must be argb8, argb16, or argb32f");
+                std::process::exit(1);
+            }
+        };
+        let smart = match args[5].to_string_lossy().as_ref() {
+            "classic" => false,
+            "smart" => true,
+            _ => {
+                eprintln!("render kind must be classic or smart");
+                std::process::exit(1);
+            }
+        };
+        let timing = RenderTiming {
+            current_time: args[6].to_string_lossy().parse().unwrap_or(-1),
+            time_step: 1,
+            total_time: args[7].to_string_lossy().parse().unwrap_or(-1),
+            time_scale: args[8].to_string_lossy().parse().unwrap_or(0),
+        };
+        let plugin = Path::new(&args[2]);
+        let hash = required_plugin_hash(plugin);
+        let parameters = required_plugin_parameters(&repository, plugin, &hash);
+        let report = aexcompat_broker::render_differential::run_native_differential(
+            aexcompat_broker::render_differential::DifferentialRequest {
+                repository: &repository,
+                plugin_path: plugin,
+                plugin_sha256: &hash,
+                input_path: Path::new(&args[3]),
+                parameters: &parameters,
+                timing,
+                smart,
+                format,
+            },
+        );
+        match report {
+            Ok(report) => {
+                println!("{report}");
+                if report["passed"] != true {
+                    std::process::exit(1);
+                }
+            }
+            Err(error) => {
+                eprintln!("render differential failed: {error}");
                 std::process::exit(1);
             }
         }

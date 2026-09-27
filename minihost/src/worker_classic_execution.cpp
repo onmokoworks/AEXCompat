@@ -74,7 +74,7 @@ int finalize(Context& c, const Hooks& h) {
   // writes. All other successful Classic frames promise their output extent.
   auto coverage = c.output_written_by_host ? output_coverage::Result{} :
       output_coverage::inspect(logical.data(), logical.size(), c.width, c.height,
-                               c.pixel_bytes, {0, 0, c.width, c.height});
+                               c.pixel_bytes, c.promised_rect);
   if (c.error == 0 && !c.output_written_by_host &&
       (!coverage.geometry_valid || coverage.unwritten_pixels != 0)) {
     coverage.host_validation_failed = true;

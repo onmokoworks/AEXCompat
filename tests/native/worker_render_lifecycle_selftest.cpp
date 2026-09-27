@@ -524,9 +524,40 @@ void the_smart_layout_drops_extents_but_clears_stale_origins() {
         "and it does not inherit in_data output_origin");
 }
 
+void diagnostic_world_layout_rejects_malformed_and_preserves_state() {
+  using aexcompat::render::diagnostic_world_layout;
+  using aexcompat::render::parse_diagnostic_world_layout;
+  check(parse_diagnostic_world_layout(
+            L"v1|16|8|-3|4|2|1|7|5|1|0|8|6"),
+        "a bounded diagnostic layout is accepted");
+  const auto accepted = diagnostic_world_layout();
+  check(accepted.enabled && accepted.input_row_padding == 16 &&
+            accepted.output_row_padding == 8 && accepted.input_origin_x == -3 &&
+            accepted.input_origin_y == 4 && accepted.has_request_rect &&
+            accepted.request_rect == std::array<int32_t, 4>{2, 1, 7, 5} &&
+            accepted.has_extent_hint &&
+            accepted.extent_hint == std::array<int32_t, 4>{1, 0, 8, 6},
+        "the parsed transform reaches the worker's typed state");
+  for (const wchar_t* bad : {
+           L"v1|16|8|-3|4|2|1|7|5|1|0|8",
+           L"v1|16|8|-3|4|2|1|7|5|1|0|8|6|0",
+           L"v1|16|8|-3|4|2|1|2|5|1|0|8|6",
+           L"v1|257|8|-3|4|2|1|7|5|1|0|8|6",
+           L"v1|16|8|-3|4|2|1|7|5|1|0|8|6x",
+       }) {
+    check(!parse_diagnostic_world_layout(bad),
+          "malformed diagnostic layout is rejected");
+    check(diagnostic_world_layout().request_rect == accepted.request_rect &&
+              diagnostic_world_layout().input_origin_x == accepted.input_origin_x,
+          "a rejected transform cannot mutate the admitted layout");
+  }
+  diagnostic_world_layout() = {};
+}
+
 }  // namespace
 
 int main() {
+  diagnostic_world_layout_rejects_malformed_and_preserves_state();
   frame_setup_receives_the_offered_output_extent();
   an_expanding_effect_still_overrides_what_it_was_offered();
   a_layout_without_extent_offsets_leaves_out_data_untouched();

@@ -1363,12 +1363,10 @@ void run_session_frame_loop(
       outcome.invariant_failure = true;
       break;
     }
-    // A conversion repacks every row at the slot's stride, so whatever padding
-    // the narrow buffer carried is gone and the reported rowbytes follows it.
-    // Without one the plug-in's own stride is the truth and is reported as-is.
-    const int32_t reported_rowbytes = captured_pixel_bytes != pixel_bytes
-        ? frame.width * pixel_bytes
-        : frame.rowbytes;
+    // `captured` is the packed session-slot image even when no depth conversion
+    // was needed. The plug-in's world can have padding, but the broker's frame
+    // protocol always describes the transferred image, not that private world.
+    const int32_t reported_rowbytes = frame.width * pixel_bytes;
     if (captured.size() != expected_pixels * pixel_bytes) {
       respond_error(kSessionOutputCaptureError);
       outcome.invariant_failure = true;

@@ -119,6 +119,16 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
   if (width < 8 || height < 4) return PF_Err_BAD_CALLBACK_PARAM;
   const PF_LRect full{0, 0, width, height};
   PF_CheckoutResult checkout{};
+  if (ModuleNameHas("-difftile")) {
+    // The diagnostic host request, not a probe-specific host switch, chooses
+    // the returned tile. Its output world must be placed at this rect's origin.
+    const PF_LRect requested = extra->input->output_request.rect;
+    const PF_Err err = CheckoutInput(in_data, extra, requested, &checkout);
+    if (err) return err;
+    extra->output->result_rect = requested;
+    extra->output->max_result_rect = full;
+    return PF_Err_NONE;
+  }
   if (ModuleNameHas("-crop")) {
     const PF_LRect cropped{2, 1, width - 2, height - 1};
     const PF_Err err = CheckoutInput(in_data, extra, cropped, &checkout);
@@ -196,13 +206,23 @@ PF_Err SmartPreRender(PF_InData* in_data, PF_PreRenderExtra* extra) {
 }
 
 template <typename Pixel, typename Channel>
-void FillWorld(PF_EffectWorld* world, Channel opaque) {
+void FillWorld(PF_EffectWorld* world, Channel opaque,
+               const PF_LRect* promised = nullptr) {
   const A_long write_width = ModuleNameHas("-partial")
       ? world->width / 2 : world->width;
-  for (A_long y = 0; y < world->height; ++y) {
+  const bool differential_tile = ModuleNameHas("-difftile");
+  const bool origin_bug = ModuleNameHas("-originbug");
+  const bool stride_bug = ModuleNameHas("-stridebug");
+  const A_long top = promised ? promised->top : 0;
+  const A_long bottom = promised ? promised->bottom : world->height;
+  const A_long left = promised ? promised->left : 0;
+  const A_long right = promised ? promised->right : write_width;
+  for (A_long y = top; y < bottom; ++y) {
     auto* row = reinterpret_cast<Pixel*>(
-        reinterpret_cast<A_u_char*>(world->data) + y * world->rowbytes);
-    for (A_long x = 0; x < write_width; ++x) {
+        reinterpret_cast<A_u_char*>(world->data) +
+        y * (stride_bug ? world->width * static_cast<A_long>(sizeof(Pixel))
+                        : world->rowbytes));
+    for (A_long x = left; x < right; ++x) {
       auto* channels = reinterpret_cast<Channel*>(&row[x]);
       Channel color = opaque;
       if (ModuleNameHas("-solidcc")) {
@@ -214,6 +234,15 @@ void FillWorld(PF_EffectWorld* world, Channel opaque) {
       channels[1] = color;
       channels[2] = ModuleNameHas("-solidcc") ? color : Channel(0);
       channels[3] = color;
+      if (differential_tile) {
+        const A_long layer_x = x + (origin_bug ? 0 : world->origin_x);
+        const A_long layer_y = y + (origin_bug ? 0 : world->origin_y);
+        const A_long code = (layer_x * 17 + layer_y * 29) % 251;
+        if constexpr (sizeof(Channel) == sizeof(float))
+          channels[1] = Channel(static_cast<float>(code) / 250.0f);
+        else
+          channels[1] = Channel(code);
+      }
     }
   }
 }
@@ -242,12 +271,28 @@ PF_Err SmartRender(PF_InData* in_data, PF_SmartRenderExtra* extra) {
   if (!err) err = extra->cb->checkout_output(in_data->effect_ref, &output);
   if (err) return err;
   if (!input || !input->data || !output || !output->data) return PF_Err_BAD_CALLBACK_PARAM;
+  const bool hint_only = ModuleNameHas("-difftile-hintonly") &&
+      in_data->extent_hint.left >= 0 && in_data->extent_hint.top >= 0 &&
+      in_data->extent_hint.right <= output->width &&
+      in_data->extent_hint.bottom <= output->height &&
+      !RectEmpty(in_data->extent_hint);
+  const PF_LRect* promised = hint_only ? &in_data->extent_hint : nullptr;
   if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_PixelFloat)))
-    FillWorld<PF_PixelFloat, PF_FpShort>(output, 1.0f);
+    FillWorld<PF_PixelFloat, PF_FpShort>(output, 1.0f, promised);
   else if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_Pixel16)))
-    FillWorld<PF_Pixel16, A_u_short>(output, PF_MAX_CHAN16);
+    FillWorld<PF_Pixel16, A_u_short>(output, PF_MAX_CHAN16, promised);
   else
-    FillWorld<PF_Pixel8, A_u_char>(output, PF_MAX_CHAN8);
+    FillWorld<PF_Pixel8, A_u_char>(output, PF_MAX_CHAN8, promised);
+  if (ModuleNameHas("-difftile-extentbug") &&
+      in_data->extent_hint.left >= 0 && in_data->extent_hint.top >= 0 &&
+      in_data->extent_hint.left < output->width &&
+      in_data->extent_hint.top < output->height &&
+      (in_data->extent_hint.left != 0 || in_data->extent_hint.top != 0)) {
+    const auto offset = static_cast<std::size_t>(in_data->extent_hint.top) *
+                        output->rowbytes +
+                        static_cast<std::size_t>(in_data->extent_hint.left) * 4;
+    reinterpret_cast<A_u_char*>(output->data)[offset + 1] ^= 1;
+  }
   return extra->cb->checkin_layer_pixels(in_data->effect_ref, 0);
 }
 

@@ -52,6 +52,7 @@ struct Plan {
   int32_t height{};
   int32_t pixel_bytes{};
   int32_t rowbytes{};
+  int32_t output_rowbytes{};
 };
 
 Plan prepare(const Context&, const Request&);

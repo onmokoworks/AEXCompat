@@ -1,6 +1,52 @@
 use super::*;
 
 #[test]
+fn diagnostic_world_layout_is_bounded_before_worker_launch() {
+    let layout = DiagnosticWorldLayout {
+        input_row_padding: 16,
+        output_row_padding: 8,
+        input_origin_x: -3,
+        input_origin_y: 4,
+        request_rect: Some([2, 1, 7, 5]),
+        extent_hint: Some([1, 0, 8, 6]),
+    };
+    assert_eq!(
+        layout
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .unwrap(),
+        "v1|16|8|-3|4|2|1|7|5|1|0|8|6"
+    );
+    assert!(
+        layout
+            .encoded(9, 7, RenderPixelFormat::Argb8, false)
+            .is_err()
+    );
+    assert!(
+        layout
+            .encoded(6, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+    let padded = DiagnosticWorldLayout {
+        input_row_padding: 2,
+        ..layout
+    };
+    assert!(
+        padded
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+    let excessive = DiagnosticWorldLayout {
+        output_row_padding: 260,
+        ..layout
+    };
+    assert!(
+        excessive
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+}
+
+#[test]
 fn plugin_data_effect_selector_is_exact_and_bounded() {
     let selector = PluginDataEffectSelector {
         index: 63,
