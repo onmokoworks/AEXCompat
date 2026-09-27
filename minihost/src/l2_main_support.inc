@@ -1686,6 +1686,10 @@ bool ensure_dvacore_dispatch_thread_is_main() {
   return false;
 }
 
+HMODULE g_successful_cor_birth_module = nullptr;
+HMODULE g_successful_pf_birth_module = nullptr;
+bool g_cor_birth_teardown_attempted = false;
+
 void initialize_process_support_libraries() {
   namespace legacy = aexcompat::worker_runtime::legacy_support;
   enum class BirthShape {
@@ -1787,6 +1791,7 @@ void initialize_process_support_libraries() {
   // library: it means this AE build moved or renamed the entry, which must
   // not look the same as "the library is not in this closure".
   static bool no_export_logged[std::size(kLibraries)]{};
+  static bool cor_pair_unavailable_logged = false;
   for (std::size_t index = 0; index < std::size(kLibraries); ++index) {
     const SupportLibrary& library = kLibraries[index];
     const HMODULE module = GetModuleHandleW(library.module);
@@ -1802,9 +1807,24 @@ void initialize_process_support_libraries() {
                 << std::flush;
     }
     if (decision != legacy::Decision::Call) continue;
-    if (library.shape == BirthShape::cor_birth &&
-        !ensure_dvacore_dispatch_thread_is_main())
-      continue;
+    if (library.shape == BirthShape::cor_birth) {
+      // COR-only closures previously used Conception without Birth. Do not
+      // start a new lifetime unless PF's already-mapped host layer can be
+      // born later and the reverse-order Death exports are present. PF_Birth
+      // still runs after COR_Birth, matching AE's startup order.
+      const HMODULE pf = GetModuleHandleW(L"PF.dll");
+      if (!pf || !GetProcAddress(pf, "PF_Birth") ||
+          !GetProcAddress(pf, "PF_Death") ||
+          !GetProcAddress(module, "?COR_Death@@YAHXZ")) {
+        if (!cor_pair_unavailable_logged) {
+          cor_pair_unavailable_logged = true;
+          std::cerr << "stage:cor_birth status=skipped_no_paired_teardown\n"
+                    << std::flush;
+        }
+        continue;
+      }
+      if (!ensure_dvacore_dispatch_thread_is_main()) continue;
+    }
     legacy::note_called(states[index], module);
     int result = -1;
     __try {
@@ -1875,6 +1895,8 @@ void initialize_process_support_libraries() {
     if (library.shape != BirthShape::no_arguments_void)
       std::cerr << " result=" << result;
     std::cerr << "\n" << std::flush;
+    if (library.shape == BirthShape::cor_birth && result == 0)
+      g_successful_cor_birth_module = module;
   }
 }
 
@@ -1924,6 +1946,58 @@ void initialize_pf_dll_host_layer() {
   }
   std::cerr << "stage:pf_host_layer_init status=called result=" << result
             << (faulted ? " faulted=1" : "") << "\n" << std::flush;
+  if (!faulted && result == 0) g_successful_pf_birth_module = pf_module;
+}
+
+// COR_Death clears state used by PF's process-exit cleanup. A focused AE 2025
+// PSL_Adjustments run returned 0 from COR_Death alone, then AV'd inside PF's
+// on-exit BIB lock; PF_Death followed by COR_Death returned 0 from both and
+// exited cleanly. Run this pair after plug-in GLOBAL_SETDOWN, before the
+// session releases DLLs or the BIB provider. Never invoke Death for a birth
+// that did not succeed, or through a remapped/unloaded image.
+bool teardown_cor_birth_sequence() noexcept {
+  if (!g_successful_cor_birth_module || g_cor_birth_teardown_attempted)
+    return true;
+  g_cor_birth_teardown_attempted = true;
+  const HMODULE cor = GetModuleHandleW(L"COR.dll");
+  const HMODULE pf = GetModuleHandleW(L"PF.dll");
+  if (cor != g_successful_cor_birth_module ||
+      !g_successful_pf_birth_module || pf != g_successful_pf_birth_module) {
+    std::cerr << "stage:cor_birth_teardown status=module_unavailable\n"
+              << std::flush;
+    return false;
+  }
+  const auto pf_death = reinterpret_cast<int(__cdecl*)()>(
+      GetProcAddress(pf, "PF_Death"));
+  const auto cor_death = reinterpret_cast<int(__cdecl*)()>(
+      GetProcAddress(cor, "?COR_Death@@YAHXZ"));
+  if (!pf_death || !cor_death) {
+    std::cerr << "stage:cor_birth_teardown status=missing_export\n"
+              << std::flush;
+    return false;
+  }
+  int pf_result = -1;
+  __try {
+    pf_result = pf_death();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    std::cerr << "stage:pf_host_layer_teardown status=faulted\n"
+              << std::flush;
+    return false;
+  }
+  std::cerr << "stage:pf_host_layer_teardown result=" << pf_result << "\n"
+            << std::flush;
+  if (pf_result != 0) return false;
+  int cor_result = -1;
+  __try {
+    cor_result = cor_death();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    std::cerr << "stage:cor_birth_teardown status=faulted\n"
+              << std::flush;
+    return false;
+  }
+  std::cerr << "stage:cor_birth_teardown result=" << cor_result << "\n"
+            << std::flush;
+  return cor_result == 0;
 }
 
 // dvacore's localization singleton (issue #1283). AE installs one at process
@@ -1948,8 +2022,8 @@ void initialize_pf_dll_host_layer() {
 // The object is a single vtable pointer (its constructor, dvacore+0xd8bb0,
 // runs the base constructor and stores the vptr and nothing else), so a
 // static, suitably aligned buffer holds it. It is never destroyed: this host
-// does not tear the localizer down, exactly as it does not run any of the
-// other libraries' `*_Death` entries, and nothing in dvacore deletes what
+// does not tear the localizer down (the COR/PF pair has its separate session
+// teardown), and nothing in dvacore deletes what
 // `Set` was given - `Set` is the only writer of `Localizer::S_localizerP` and
 // it stores unconditionally without releasing the previous value.
 //

@@ -103,8 +103,11 @@ bool __cdecl teardown_session_providers(void* opaque) noexcept {
   auto* context = static_cast<SessionPreUnloadContext*>(opaque);
   const bool companions_ok =
       !context || !context->companions || context->companions->shutdown();
-  const bool bib_ok = teardown_bib_suite(nullptr);
-  return companions_ok && bib_ok;
+  const bool cor_ok = teardown_cor_birth_sequence();
+  // A failed/partially faulted Death leaves support-library state unknown;
+  // do not run BIB termination through it. The session fails closed.
+  const bool bib_ok = cor_ok && teardown_bib_suite(nullptr);
+  return companions_ok && cor_ok && bib_ok;
 }
 
 // Captures the in-place dependency search directories carried by a
@@ -2026,6 +2029,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
   bool protocol_violation = false;
   bool swap_failure = false;
   bool bib_teardown_failed = false;
+  bool cor_teardown_failed = false;
   // Whether the session's baseline post_load snapshot was taken (the first
   // successful load). An in-place load failure retires the previous plug-in
   // without loading a successor, so without this latch the next successful
@@ -2034,8 +2038,9 @@ int run_discovery_session(const std::wstring& manifest_argument,
 
   // Terminal teardown shared by every exit path after the session loop. The
   // ownership order is explicit (owner review P1-1, amended by issue #474's
-  // deferred release): GLOBAL_SETDOWN → plug-in/module audit → BIB owned-only
-  // Terminate (session-global, runs exactly once here — never per swap — and
+  // deferred release): GLOBAL_SETDOWN → plug-in/module audit → PF/COR Death
+  // (when COR Birth succeeded) → BIB owned-only Terminate. The latter two
+  // are session-global, run exactly once here — never per swap — and
   // never for a borrowed, missing, or init-failed BIB). No plug-in image or
   // pin is freed mid-process: everything unloads in one loader-ordered pass
   // at process exit. Cookie removal, stdout restore, final report follow.
@@ -2051,13 +2056,13 @@ int run_discovery_session(const std::wstring& manifest_argument,
         }
       }
       audit.pre_unload = wr::capture_module_audit();
-      if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
       current_module = nullptr;
-    } else {
-      // No plug-in survived to teardown, but an owned BIB may still be live
-      // from an earlier plug-in; terminate it before the pins release.
-      if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
     }
+    // A previous member may have birthed COR even if no current plug-in
+    // survived. Retired images remain mapped until process exit (#474).
+    if (!teardown_cor_birth_sequence()) cor_teardown_failed = true;
+    if (!cor_teardown_failed && !teardown_bib_suite(nullptr))
+      bib_teardown_failed = true;
     // The sealed-directory cookie stays too: a detaching DLL may delay-load
     // from the sealed root during process teardown.
     runtime_hooks.restore_native_stdout();
@@ -2065,13 +2070,14 @@ int run_discovery_session(const std::wstring& manifest_argument,
         (audit.pre_unload.status == "passed" && wr::module_audit_passed());
     std::ostringstream report;
     report << "{\"schema_version\":1,\"stage\":\"discovery_session\",\"status\":\""
-           << (exit_code == 0 && !bib_teardown_failed
+           << (exit_code == 0 && !bib_teardown_failed && !cor_teardown_failed
                    ? "discovery_session_completed" : "discovery_session_failed")
            << "\",\"bib_terminations\":" << bib_termination_attempt_count()
            << ",\"module_audit\":" << wr::module_audit_json() << "}\n";
     if (!wr::emit_protocol_stdout(report.str())) return 23;
     if (!audit_ok && exit_code == 0) return 14;
-    if (bib_teardown_failed && exit_code == 0) return 25;
+    if ((bib_teardown_failed || cor_teardown_failed) && exit_code == 0)
+      return 25;
     return exit_code;
   };
 

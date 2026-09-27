@@ -44,3 +44,55 @@ def test_real_cor_aex_birth_returns_before_parameter_inspection():
     assert report["status"] == "parameters_inspected"
     assert report["reported_num_params"] > 1
     assert "entry=?COR_Birth@@YAH_N00@Z status=called result=0" in result.stderr
+    assert "stage:pf_host_layer_teardown result=0" in result.stderr
+    assert "stage:cor_birth_teardown result=0" in result.stderr
+
+
+def test_real_cor_aex_discovery_session_closes_after_paired_teardown(tmp_path):
+    """The resident discovery route has its own finish path, unlike one-shot."""
+    aex_name = os.environ.get("AEXCOMPAT_TEST_COR_AEX")
+    worker_name = os.environ.get("AEXCOMPAT_TEST_WORKER_PATH")
+    roots = os.environ.get("AEXCOMPAT_TEST_COR_DEPENDENCY_DIRS")
+    if not (aex_name and worker_name and roots):
+        pytest.skip("set COR AEX, worker, and dependency-dir paths for local gate")
+    from test_render_session_worker import SessionTransport
+
+    aex = Path(aex_name)
+    worker = Path(worker_name)
+    assert aex.is_file() and worker.is_file()
+    manifest_path = tmp_path / "cor-discovery-manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema": "cluster-manifest-v2",
+        "plugins": [{"path": str(aex),
+                     "sha256": hashlib.sha256(aex.read_bytes()).hexdigest()}],
+        "search_dirs": roots.split(";"),
+        "module_bound": 400,
+    }), encoding="utf-8")
+    transport = SessionTransport()
+    process = subprocess.Popen(
+        [str(worker), "--kind", "discovery", "--discovery-session-v1",
+         "--cluster-manifest-v2", str(manifest_path)],
+        env=transport.environment(), close_fds=False,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    transport.attach_process(process)
+    transport.close_child_ends()
+    try:
+        transport.send({"v": 1, "type": "inspect_plugin",
+                        "plugin_index": 0, "request_index": 0})
+        checkpoint = transport.receive(timeout=20)
+        done = transport.receive(timeout=20)
+        assert checkpoint["type"] == "inspect_checkpoint"
+        assert done["type"] == "inspect_done"
+        assert done["status"] == "ok"
+        assert done["report"]["status"] == "parameters_inspected"
+        transport.send({"v": 1, "type": "close"})
+        stdout, stderr = process.communicate(timeout=20)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+    assert process.returncode == 0, stderr
+    assert json.loads(stdout)["status"] == "discovery_session_completed"
+    assert "stage:pf_host_layer_teardown result=0" in stderr
+    assert "stage:cor_birth_teardown result=0" in stderr
