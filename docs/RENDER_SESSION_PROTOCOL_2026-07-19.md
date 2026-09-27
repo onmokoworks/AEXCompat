@@ -377,6 +377,22 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
  "generation":1}
 ```
 
+The worker may add an advisory `performance` object on a successful frame:
+`worker_setup_ns`, `worker_render_ns`, `render_selector_ns`, and
+`worker_finalize_ns`. Missing measurements are JSON `null`, not zero. The
+selector duration sums audited `RENDER`/`SMART_RENDER`/`SMART_RENDER_GPU`
+calls; it includes the host audit boundary and is not pure plug-in CPU time.
+`worker_setup_ns` starts after request/header validation and ends immediately
+before `render_frame`; the finalize duration starts immediately after it and
+ends while forming `frame_done`. Audio-only passthrough has no render phase and
+uses nulls. These fields never affect `status`, output validation, or the
+existing frame deadline. The broker accepts an older worker's missing object
+as unavailable and records its own input-write, output-verification, wall,
+current process commit, process peak and Job peak observations separately.
+The clocks are monotonic but independent; only elapsed durations, never
+timestamps, are compared. The bounded ladder report is described in
+`docs/PERFORMANCE_DIAGNOSTICS.md`.
+
 - `depth_code` in the launch and shared-section header is the requested output
   depth, not necessarily the depth handed to the plug-in. On a rendered image
   frame, `output` also records `advertised_out_flags` and

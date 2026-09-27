@@ -326,6 +326,12 @@ fn cli_contract() -> serde_json::Value {
                 "note": "The final slot/value pair is required only for --render-experimental-session-param."
             },
             {
+                "name": "--render-performance-diagnostics",
+                "argv": ["--render-performance-diagnostics", "<aex>", "classic|smart", "argb8|argb16|argb32f", "<slot>", "<value>"],
+                "result": "advisory-performance-diagnostics-json",
+                "note": "The slot/value pair is optional. Four resolutions and four frames per fresh worker; no image artifacts are saved."
+            },
+            {
                 "name": "--render-raw",
                 "argv": ["--render-raw", "<aex>", "<input-image>", "<output-directory>", "argb8|argb16|argb32f", "classic|smart", "<current-time>", "<total-time>", "<time-scale>"],
                 "result": "native-argb-raw-artifact-report-json"
@@ -508,7 +514,7 @@ fn required_plugin_parameters(
 
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-performance-diagnostics <aex> <classic|smart> <argb8|argb16|argb32f>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
     );
 }
 
@@ -842,6 +848,75 @@ fn main() -> eframe::Result {
             Ok(prepared) => println!("{}", prepared.report_json()),
             Err(error) => {
                 eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if (args.len() == 5 || args.len() == 7) && args[1] == "--render-performance-diagnostics" {
+        use aexcompat_broker::image_render::RenderPixelFormat;
+        use aexcompat_broker::performance_diagnostics::{RunRequest, run};
+        let plugin = match canonical_deverbatim(Path::new(&args[2])) {
+            Ok(plugin) => plugin,
+            Err(error) => {
+                eprintln!("performance plug-in path rejected: {error}");
+                std::process::exit(1);
+            }
+        };
+        let plugin = plugin.as_path();
+        let hash = required_plugin_hash(plugin);
+        let mut parameters = required_plugin_parameters(&repository, plugin, &hash);
+        if args.len() == 7 {
+            let slot = args[5].to_string_lossy().parse::<u32>().unwrap_or(0);
+            let value = args[6].to_string_lossy().parse::<f64>().unwrap_or(f64::NAN);
+            let Some(parameter) = parameters.iter_mut().find(|item| item.slot == slot) else {
+                eprintln!("performance parameter slot was not discovered");
+                std::process::exit(1);
+            };
+            if !value.is_finite() || value < parameter.minimum || value > parameter.maximum {
+                eprintln!("performance parameter value is outside the discovered range");
+                std::process::exit(1);
+            }
+            parameter.value = value;
+        }
+        let smart = match args[3].to_string_lossy().as_ref() {
+            "classic" => false,
+            "smart" => true,
+            _ => {
+                eprintln!("render kind must be classic or smart");
+                std::process::exit(1);
+            }
+        };
+        let pixel_format = match args[4].to_string_lossy().as_ref() {
+            "argb8" => RenderPixelFormat::Argb8,
+            "argb16" => RenderPixelFormat::Argb16,
+            "argb32f" => RenderPixelFormat::Argb32f,
+            _ => {
+                eprintln!("pixel format must be argb8, argb16, or argb32f");
+                std::process::exit(1);
+            }
+        };
+        let resolutions = [(320, 180), (640, 360), (1280, 720), (1920, 1080)];
+        let report = run(RunRequest {
+            repository: &repository,
+            plugin_path: plugin,
+            plugin_sha256: &hash,
+            parameters: &parameters,
+            smart,
+            pixel_format,
+            resolutions: &resolutions,
+            frames_per_resolution: 4,
+            timeout_ms: 30_000,
+        });
+        match report {
+            Ok(value) => {
+                println!("{}", serde_json::to_string_pretty(&value).unwrap());
+                if value["status"] != "available" {
+                    std::process::exit(2);
+                }
+            }
+            Err(error) => {
+                eprintln!("performance diagnostic failed: {error}");
                 std::process::exit(1);
             }
         }

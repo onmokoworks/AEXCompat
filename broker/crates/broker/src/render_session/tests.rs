@@ -155,6 +155,39 @@ fn frame_done_parsing_is_strict_about_unknown_fields() {
                 "render_error":0,"generation":1}"#,
     );
     assert!(ok.is_ok());
+    assert!(ok.unwrap().performance.is_none());
+    let measured: FrameDone = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":120,"worker_render_ns":900,
+                "render_selector_ns":500,"worker_finalize_ns":80}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        measured.performance.as_ref().unwrap().render_selector_ns,
+        Some(500)
+    );
+    let unavailable: FrameDone = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":null,"worker_render_ns":null,
+                "render_selector_ns":null,"worker_finalize_ns":null}}"#,
+    )
+    .unwrap();
+    assert!(
+        unavailable
+            .performance
+            .unwrap()
+            .render_selector_ns
+            .is_none()
+    );
+    let invalid_performance: Result<FrameDone, _> = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":1,"worker_render_ns":2,
+                "render_selector_ns":1,"worker_finalize_ns":1,"surprise":true}}"#,
+    );
+    assert!(invalid_performance.is_err());
     let unknown: Result<FrameDone, _> = serde_json::from_str(
         r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
                 "render_error":0,"generation":1,"surprise":true}"#,

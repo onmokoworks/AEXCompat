@@ -309,6 +309,15 @@ impl SecureSessionProcess {
             .duplicated_process_handle()
     }
 
+    /// Best-effort current/peak committed bytes; telemetry, not a launch gate.
+    pub fn memory_commit_snapshot(&self) -> Option<(u64, u64)> {
+        self.launched.as_ref()?.memory_commit_snapshot()
+    }
+
+    pub fn job_peak_commit_bytes(&self) -> Option<u64> {
+        self.launched.as_ref()?.job_peak_commit_bytes()
+    }
+
     /// See `LaunchedIsolatedProcess::has_exited`.
     pub fn has_exited(&self) -> bool {
         self.launched

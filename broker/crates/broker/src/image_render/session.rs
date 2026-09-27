@@ -1268,6 +1268,7 @@ impl InteractiveRenderSession {
         )?;
         let render_ms = started.elapsed().as_millis() as u64;
         let frame_depth_provenance = outcome.depth_provenance.clone();
+        let frame_performance = outcome.performance.clone();
         let session_facts = |frames_ok: u32, frames_errored: u32| {
             json!({
                 "frame_index": frame_index,
@@ -1339,6 +1340,12 @@ impl InteractiveRenderSession {
                     "worker_classification": "resident_session",
                     "depth_provenance": frame_depth_provenance,
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
                     "passed": true,
                 });
                 report["visual_diagnostics"] = visual_diagnostics::inspect(
@@ -1370,6 +1377,12 @@ impl InteractiveRenderSession {
                     "current_time": current_time,
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
                     // The plug-in's own account of the failure (issue #707).
@@ -1394,6 +1407,12 @@ impl InteractiveRenderSession {
                     "current_time": current_time,
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
                     "render_error": -6,
                     "host_failure_reason": "smart_output_untouched",
                     "passed": false,

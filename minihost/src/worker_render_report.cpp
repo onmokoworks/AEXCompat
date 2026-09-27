@@ -1,5 +1,6 @@
 #include "worker_render_report.hpp"
 #include "worker_callback_diagnostics.hpp"
+#include "runtime_module_audit.hpp"
 
 #include "gpu_directx_backend.hpp"
 #include "gpu_memory_world_transport.hpp"
@@ -108,6 +109,9 @@ void finish_requested_parameters(
       << ",\"requested_mix\":" << std::setprecision(17) << value.mix
       << ",\"requested_invert_map\":" << value.invert_map
       << ",\"render_performed\":" << (value.render_performed ? "true" : "false")
+      << ",\"worker_admitted_plugin_sha256\":\""
+      << aexcompat::worker_runtime::module_audit_report().worker_admitted_plugin_sha256
+      << '"'
       << ",\"module_audit\":" << value.module_audit_json
       << conformance_render_settings_report_json() << "}\n";
 }
