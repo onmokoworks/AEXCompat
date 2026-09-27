@@ -231,19 +231,27 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
   const bool current_time =
       static_cast<int64_t>(what_time) * runtime.current_time_scale ==
       static_cast<int64_t>(runtime.current_time) * time_scale;
-  if (!current_time && !runtime.wide_time_checkout_allowed) {
+  auto hosted = runtime.hosted_layers.end();
+  // A repeated timestamp may have a newer input than the retained history.
+  // Its current slot-0 checkout must always use this dispatch's input world.
+  if (!(index == 0 && current_time)) {
+    hosted = std::find_if(runtime.hosted_layers.begin(),
+        runtime.hosted_layers.end(), [index, what_time, time_scale](const auto& layer) {
+          return layer.slot == index && layer.timed &&
+              same_rational_time(layer.time, layer.time_scale, what_time, time_scale);
+        });
+    if (hosted == runtime.hosted_layers.end())
+      hosted = std::find_if(runtime.hosted_layers.begin(), runtime.hosted_layers.end(),
+          [index](const auto& layer) { return layer.slot == index && !layer.timed; });
+  }
+  // WIDE_TIME_INPUT describes a cache dependency; it cannot conjure pixels for
+  // another time. Serve an exact hosted frame (or a time-invariant layer), but
+  // never alias the current input world for an unavailable temporal request.
+  if (!current_time && hosted == runtime.hosted_layers.end()) {
     ++runtime.rejected_temporal_checkouts;
     return finish_callback(
         Callback::PreCheckoutLayer, 4, Reason::TemporalCheckoutDenied);
   }
-  auto hosted = std::find_if(runtime.hosted_layers.begin(),
-      runtime.hosted_layers.end(), [index, what_time, time_scale](const auto& layer) {
-        return layer.slot == index && layer.timed &&
-            same_rational_time(layer.time, layer.time_scale, what_time, time_scale);
-      });
-  if (hosted == runtime.hosted_layers.end())
-    hosted = std::find_if(runtime.hosted_layers.begin(), runtime.hosted_layers.end(),
-        [index](const auto& layer) { return layer.slot == index && !layer.timed; });
   const bool timed_slot = std::any_of(runtime.hosted_layers.begin(),
       runtime.hosted_layers.end(),
       [index](const auto& layer) { return layer.slot == index && layer.timed; });
@@ -293,7 +301,9 @@ int32_t __cdecl pre_checkout_layer(void*, int32_t index, int32_t checkout_id,
         hosted->view_world, hosted->checkout_rect, false});
     return finish_callback(Callback::PreCheckoutLayer, 0);
   }
-  if (timed_slot)
+  // Slot 0's current frame is the dedicated input_world, not a member of the
+  // retained history. Timed history for that slot must not hide this frame.
+  if (timed_slot && index != 0)
     return finish_callback(Callback::PreCheckoutLayer, 4, Reason::UnknownLayer);
   if (request && index == 0)
     std::memcpy(runtime.input_checkout_request.data(), request,
@@ -627,6 +637,39 @@ bool checkout_intersection_self_test() {
   passed = hosted_answer == std::array<int32_t, 4>{10, 10, 50, 40} &&
       hosted_maximum == std::array<int32_t, 4>{0, 0, 50, 40} &&
       runtime.hosted_layers.front().checkout_rect == hosted_answer && passed;
+  // The resident session has supplied an actual earlier primary-input world.
+  // A valid timed checkout must resolve that world even without WIDE_TIME_INPUT;
+  // a different, unsupplied time must still fail rather than alias the current.
+  aexcompat::world_safety::EffectWorldStorage prior_input{}, prior_view{};
+  runtime.hosted_layers.push_back({0, 6, 30, true, 640, 360, -1,
+      prior_input.data(), prior_view.data(), {-1, -1, -1, -1}});
+  // A resident session can render the same timestamp twice with different
+  // pixels. The old hosted world must not supersede the current input.
+  aexcompat::world_safety::EffectWorldStorage stale_input{}, stale_view{};
+  runtime.hosted_layers.push_back({0, 7, 30, true, 640, 360, -1,
+      stale_input.data(), stale_view.data(), {-1, -1, -1, -1}});
+  const uint32_t rejected_before_prior = runtime.rejected_temporal_checkouts;
+  passed = pre_checkout_layer(nullptr, 0, 10, nullptr, 6, 1, 30,
+                              hosted_result.data()) == 0 && passed;
+  void* prior_pixels{};
+  passed = checkout_pixels(nullptr, 10, &prior_pixels) == 0 &&
+      prior_pixels == prior_view.data() && checkin_pixels(nullptr, 10) == 0 &&
+      runtime.rejected_temporal_checkouts == rejected_before_prior && passed;
+  forget_checkout(runtime, 10);
+  void* current_pixels{};
+  passed = pre_checkout_layer(nullptr, 0, 11, nullptr, 7, 1, 30,
+                              hosted_result.data()) == 0 &&
+      checkout_pixels(nullptr, 11, &current_pixels) == 0 &&
+      current_pixels == input_view.data() &&
+      checkin_pixels(nullptr, 11) == 0 && passed;
+  forget_checkout(runtime, 11);
+  passed = pre_checkout_layer(nullptr, 0, 10, nullptr, 5, 1, 30,
+                              hosted_result.data()) == 4 &&
+      runtime.rejected_temporal_checkouts == rejected_before_prior + 1 &&
+      pre_checkout_layer(nullptr, 0, 10, nullptr, 6, 1, 0,
+                         hosted_result.data()) == 4 && passed;
+  runtime.hosted_layers.pop_back();
+  runtime.hosted_layers.pop_back();
   void* checked_out{};
   // Re-checking out an id answers the NEW geometry, leaves exactly one
   // registration, and that registration carries the new answer. Refusing the
