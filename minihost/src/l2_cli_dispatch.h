@@ -31,6 +31,8 @@ struct AuxiliaryOptionHooks {
   // Optional (issue #1260): exact PluginData registration selector encoded as
   // `v1|<index>|<lowercase match-name hex>`.
   bool (*set_plugin_data_selector)(void* context, const wchar_t* value){};
+  // Optional, render-session-only world transform diagnostic (#1593).
+  bool (*parse_render_diagnostic_layout)(void* context, const wchar_t* value){};
 };
 
 struct AuxiliaryOptionResult {

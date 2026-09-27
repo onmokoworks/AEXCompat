@@ -29,6 +29,7 @@ struct Request {
   int32_t external_current_time{};
   uint32_t external_time_scale{1};
   int32_t external_pixel_bytes{4};
+  uint32_t advertised_out_flags2{};
 };
 
 struct Plan {
@@ -51,6 +52,7 @@ struct Plan {
   int32_t height{};
   int32_t pixel_bytes{};
   int32_t rowbytes{};
+  int32_t output_rowbytes{};
 };
 
 Plan prepare(const Context&, const Request&);
@@ -58,6 +60,7 @@ Plan prepare(const Context&, const Request&);
 // Runs the production plan preparation used before Smart PreRender for the
 // fixed seed-max image case shared with Classic.
 bool verify_fixed_image_case_admission();
+bool verify_gpu_advertisement_snapshot();
 
 // GPU-required fallback (issue #1072): the color family advertises CPU smart
 // render (out_flags2 bit10) but returns PF_Err 14 at the start of SMART_RENDER

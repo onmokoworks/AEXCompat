@@ -44,6 +44,9 @@ struct ModuleAuditReport {
   ModuleAuditSnapshot observed_union;
   uint32_t phase_count{};
   std::filesystem::path plugin_path;
+  // SHA computed by the worker on the file it admitted before LoadLibraryExW.
+  // Recorded provenance only; never a new launch gate.
+  std::string worker_admitted_plugin_sha256;
   std::vector<ModuleAuditEpoch> epochs;
 };
 

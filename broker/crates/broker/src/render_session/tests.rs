@@ -1,6 +1,52 @@
 use super::*;
 
 #[test]
+fn diagnostic_world_layout_is_bounded_before_worker_launch() {
+    let layout = DiagnosticWorldLayout {
+        input_row_padding: 16,
+        output_row_padding: 8,
+        input_origin_x: -3,
+        input_origin_y: 4,
+        request_rect: Some([2, 1, 7, 5]),
+        extent_hint: Some([1, 0, 8, 6]),
+    };
+    assert_eq!(
+        layout
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .unwrap(),
+        "v1|16|8|-3|4|2|1|7|5|1|0|8|6"
+    );
+    assert!(
+        layout
+            .encoded(9, 7, RenderPixelFormat::Argb8, false)
+            .is_err()
+    );
+    assert!(
+        layout
+            .encoded(6, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+    let padded = DiagnosticWorldLayout {
+        input_row_padding: 2,
+        ..layout
+    };
+    assert!(
+        padded
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+    let excessive = DiagnosticWorldLayout {
+        output_row_padding: 260,
+        ..layout
+    };
+    assert!(
+        excessive
+            .encoded(9, 7, RenderPixelFormat::Argb8, true)
+            .is_err()
+    );
+}
+
+#[test]
 fn plugin_data_effect_selector_is_exact_and_bounded() {
     let selector = PluginDataEffectSelector {
         index: 63,
@@ -155,6 +201,39 @@ fn frame_done_parsing_is_strict_about_unknown_fields() {
                 "render_error":0,"generation":1}"#,
     );
     assert!(ok.is_ok());
+    assert!(ok.unwrap().performance.is_none());
+    let measured: FrameDone = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":120,"worker_render_ns":900,
+                "render_selector_ns":500,"worker_finalize_ns":80}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        measured.performance.as_ref().unwrap().render_selector_ns,
+        Some(500)
+    );
+    let unavailable: FrameDone = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":null,"worker_render_ns":null,
+                "render_selector_ns":null,"worker_finalize_ns":null}}"#,
+    )
+    .unwrap();
+    assert!(
+        unavailable
+            .performance
+            .unwrap()
+            .render_selector_ns
+            .is_none()
+    );
+    let invalid_performance: Result<FrameDone, _> = serde_json::from_str(
+        r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
+            "render_error":0,"generation":1,
+            "performance":{"worker_setup_ns":1,"worker_render_ns":2,
+                "render_selector_ns":1,"worker_finalize_ns":1,"surprise":true}}"#,
+    );
+    assert!(invalid_performance.is_err());
     let unknown: Result<FrameDone, _> = serde_json::from_str(
         r#"{"v":1,"type":"frame_done","frame_index":0,"status":"ok",
                 "render_error":0,"generation":1,"surprise":true}"#,
@@ -177,6 +256,43 @@ fn frame_done_parsing_is_strict_about_unknown_fields() {
         dependency_error.missing_dependency.as_deref().unwrap()
     ));
     assert!(!valid_dependency_basename("..\\escape.dll"));
+}
+
+#[test]
+fn rendered_frame_depth_provenance_distinguishes_fallback_and_rejects_malformed_capture() {
+    let mut output: FrameDoneOutput = serde_json::from_value(serde_json::json!({
+        "width": 1, "height": 1, "rowbytes": 8, "pixel_format": "argb16",
+        "packed_bytes": 8, "guards_intact": true,
+        "advertised_out_flags": 0, "advertised_out_flags2": 0,
+        "advertised_depth_supported": false,
+        "planned_dispatch_pixel_bytes": 4, "dispatch_pixel_bytes": 4
+    }))
+    .unwrap();
+    let fallback = output.depth_provenance(8).unwrap().unwrap();
+    assert!(!fallback.advertised_depth_supported);
+    assert_eq!(fallback.planned_dispatch_pixel_bytes, Some(4));
+    assert_eq!(fallback.dispatch_pixel_bytes, Some(4));
+
+    output.dispatch_pixel_bytes = Some(16);
+    assert_eq!(
+        output
+            .depth_provenance(8)
+            .unwrap()
+            .unwrap()
+            .dispatch_pixel_bytes,
+        Some(16)
+    );
+    output.dispatch_pixel_bytes = Some(12);
+    assert!(output.depth_provenance(8).is_err());
+    output.dispatch_pixel_bytes = None;
+    assert!(output.depth_provenance(8).is_err());
+    output.dispatch_pixel_bytes = Some(4);
+    output.advertised_depth_supported = Some(true);
+    assert!(output.depth_provenance(8).is_err());
+    output.advertised_depth_supported = Some(false);
+    output.planned_dispatch_pixel_bytes = Some(8);
+    output.dispatch_pixel_bytes = Some(8);
+    assert!(output.depth_provenance(8).is_err());
 }
 
 #[test]

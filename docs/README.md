@@ -1,7 +1,21 @@
 # Documentation Index
 
-This directory keeps project-level design material out of the root README so the
-repository has a short entry point and a durable place for longer plans.
+The root [README](../README.md) is the entry point. This index routes readers
+to the longer guides, current direction, and dated evidence without presenting
+a local run as a project-wide status.
+
+## Start here
+
+| Topic | Document |
+|---|---|
+| Build, SDK, and CI requirements | [Build Requirements](BUILD_REQUIREMENTS.md) |
+| Current compatibility and its limits | [Compatibility Status](COMPATIBILITY_STATUS_2026-07-16.md) |
+| Project direction | [Project Direction](PROJECT_DIRECTION.md) |
+| Mac Unicorn corpus method and dated local results | [macOS Unicorn Corpus Metrics](MACOS_UNICORN_CORPUS_METRICS.md) |
+| AEX porting and analysis | [AEX Porting Dossier](aex-porting-dossier.md) |
+| Public release and third-party licensing | [Public Release Audit](PUBLIC_RELEASE_AUDIT.md) |
+| Windows isolation and hardening | [Isolation Inventory](ISOLATION_INVENTORY_2026-08-04.md), [Hardening Plan](WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md) |
+| AE oracle collection on another machine | [Cross-Machine Runbook](AE_ORACLE_CROSS_MACHINE_RUNBOOK_2026-07-18.md) |
 
 ## Contributor Guides
 

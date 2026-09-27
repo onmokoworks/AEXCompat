@@ -23,6 +23,7 @@ BROKER = "aexcompat-broker"
 HARNESS = "aexcompat-harness"
 NATIVE_BROKER_TARGETS = {
     "parameter_animation",
+    "render_differential_real_aex",
     "render_session_wrapper",
     "resident_session_live",
     "smart_cpu_sealed_render",

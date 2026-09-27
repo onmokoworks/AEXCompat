@@ -75,6 +75,7 @@ endif()
 # rather than whether they are.
 if(DEFINED ENV{AE_SDK_ROOT} AND EXISTS "$ENV{AE_SDK_ROOT}")
   add_subdirectory(pf-null-echo)
+  add_subdirectory(pf-performance-probe)
   add_subdirectory(pf-delay-load-probe)
   add_subdirectory(pf-callback-tracer)
   add_subdirectory(pf-crashkit)

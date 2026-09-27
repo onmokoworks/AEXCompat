@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <iostream>
+#include <utility>
 
 namespace aexcompat::worker_runtime {
 namespace {
@@ -164,6 +165,7 @@ int prepare_runtime_environment(const RuntimeHostHooks& hooks,
     return 13;
   }
   context.plugin_path = plugin_path;
+  context.admitted_plugin_sha256 = std::move(actual_sha256);
   context.sealed_directory_cookie = sealed_directory_cookie;
   context.search_directory_cookies = std::move(search_directory_cookies);
   context.stdout_redirected = true;
@@ -187,6 +189,7 @@ int load_runtime_plugin(const RuntimeAdmissionRequest& request,
     return report_load_failure("load_library", error);
   }
   ModuleAuditReport& audit = module_audit_report();
+  audit.worker_admitted_plugin_sha256 = context.admitted_plugin_sha256;
   // Record, never enforce (issue #678/#751): the in-place route captures the
   // loaded-module set as provenance, and no status here fails the launch.
   audit.required = false;

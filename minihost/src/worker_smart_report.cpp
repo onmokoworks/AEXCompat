@@ -192,6 +192,7 @@ void emit_smart_completion_report(const SmartCompletionInputs& in) {
       {in.context_zoom[0], in.context_zoom[1]},
       {in.context_origin[0], in.context_origin[1]},
       {in.context_extent[0], in.context_extent[1]}});
+  report::append_output_coverage(report_snapshot, smart.output_coverage);
   const auto handle_stats = worker_runtime::handles::statistics();
   const auto world_stats = aexcompat::world_registry::statistics();
   report::append_smart_lifetimes(report_snapshot, {

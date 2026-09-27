@@ -93,6 +93,12 @@ FrameSetupOutput capture_frame_setup_output(const Layout& layout,
 
 }  // namespace
 
+void prepare_frame_setup_input(const Layout& layout, void* input, void* output,
+                               const void* world) {
+  clear_output_origin(layout, input, output);
+  offer_output_extent(layout, output, world);
+}
+
 RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
                             void* input, void* output, void** params, void* world) {
   RenderLifecycle lifecycle;
@@ -100,8 +106,7 @@ RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
     lifecycle.setup_error = 512;
     return lifecycle;
   }
-  clear_output_origin(layout, input, output);
-  offer_output_extent(layout, output, world);
+  prepare_frame_setup_input(layout, input, output, world);
   std::cerr << "stage:frame_setup_begin\n" << std::flush;
   const int32_t frame_error = hooks.invoke_frame(
       hooks.context, layout.frame_setup, input, output, params, world);

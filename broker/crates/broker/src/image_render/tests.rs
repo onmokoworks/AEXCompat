@@ -2738,6 +2738,123 @@ mod tests {
         assert_eq!(diagnostics["callback_addr_denials_truncated"], false);
     }
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires built aex_worker.exe; run explicitly with --ignored"]
+    fn unhandled_worker_thread_fault_round_trips_into_shipping_diagnostics() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
+        if !worker.exists() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must build aex_worker.exe before broker tests"
+            );
+            return;
+        }
+        let output = std::process::Command::new(&worker)
+            .args(["--kind", "discovery", "--self-test-unhandled-thread-crash"])
+            .env_remove("AEXCOMPAT_MINIDUMP_HANDLE")
+            .env_remove("AEXCOMPAT_MINIDUMP_ACK_HANDLE")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code().map(|code| code as u32),
+            Some(0xC000_0005)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostics = worker_diagnostics(&stderr, false, "crashed", 0xC000_0005, 1);
+        assert_eq!(diagnostics["unhandled_exception"]["code"], 0xC000_0005u32);
+        assert_eq!(diagnostics["unhandled_exception"]["site"], "worker");
+        assert_eq!(
+            diagnostics["unhandled_exception"]["module"],
+            "aex_worker.exe"
+        );
+        assert!(diagnostics["unhandled_exception"]["rva"].as_u64().unwrap() > 0);
+        assert!(diagnostics.get("stderr_tail").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires built aex_worker.exe and fault-module fixture; run explicitly with --ignored"]
+    fn unhandled_loaded_module_thread_fault_names_the_foreign_module() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap();
+        let worker = repository.join("target/minihost-build/aex_worker.exe");
+        let fixture =
+            repository.join("target/minihost-build/worker_unhandled_thread_fault_fixture.dll");
+        if !worker.exists() || !fixture.exists() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must build aex_worker.exe and its fault-module fixture before broker tests"
+            );
+            return;
+        }
+        let output = std::process::Command::new(&worker)
+            .args([
+                "--kind",
+                "discovery",
+                "--self-test-unhandled-module-thread-crash",
+            ])
+            .env_remove("AEXCOMPAT_MINIDUMP_HANDLE")
+            .env_remove("AEXCOMPAT_MINIDUMP_ACK_HANDLE")
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code().map(|code| code as u32),
+            Some(0xC000_0005)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let diagnostics = worker_diagnostics(&stderr, false, "crashed", 0xC000_0005, 1);
+        assert_eq!(diagnostics["unhandled_exception"]["code"], 0xC000_0005u32);
+        assert_eq!(diagnostics["unhandled_exception"]["site"], "module");
+        assert_eq!(
+            diagnostics["unhandled_exception"]["module"],
+            "worker_unhandled_thread_fault_fixture.dll"
+        );
+        assert!(diagnostics["unhandled_exception"]["rva"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn unhandled_exception_marker_is_crash_bound_and_path_free() {
+        let valid = "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x42";
+        assert_eq!(
+            unhandled_exception_marker(valid, "crashed", 0xC000_0005),
+            Some(
+                json!({"code": 0xC000_0005u32, "site": "module", "module": "plugin.aex", "rva": 66u64})
+            )
+        );
+        assert_eq!(unhandled_exception_marker(valid, "ok", 0xC000_0005), None);
+        assert_eq!(
+            unhandled_exception_marker(valid, "crashed", 0xC000_0094),
+            None
+        );
+        for forged in [
+            "stage:unhandled_seh code=0xc0000005 site=module module=C:\\private\\plugin.aex rva=0x42",
+            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x42 path=private",
+            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0xgg",
+            "stage:unhandled_seh code=0xc0000005 site=module module=plugin.aex rva=0x123456789abcdef01",
+            "stage:unhandled_seh code=0xc0000005 site=plugin module=plugin.aex rva=0x42",
+        ] {
+            assert_eq!(
+                unhandled_exception_marker(forged, "crashed", 0xC000_0005),
+                None
+            );
+        }
+        assert_eq!(
+            unhandled_exception_marker(
+                "stage:unhandled_seh code=0xc0000005 site=unknown",
+                "crashed",
+                0xC000_0005
+            ),
+            Some(json!({"code": 0xC000_0005u32, "site": "unknown"}))
+        );
+    }
+
     #[test]
     fn callback_denials_are_unique_and_identifier_shape_checked() {
         let trace = "stage:callback_denied callback=transform_world reason=transfer_mode value=2\n\

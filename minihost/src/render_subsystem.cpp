@@ -3,10 +3,13 @@
 #include "worker_pf_world_facade.hpp"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace aexcompat::render {
@@ -25,6 +28,63 @@ bool valid_world_layout(const WorldLayout& layout) {
 }
 
 }  // namespace
+
+DiagnosticWorldLayout& diagnostic_world_layout() {
+  static DiagnosticWorldLayout layout;
+  return layout;
+}
+
+bool parse_diagnostic_world_layout(const wchar_t* encoded) {
+  if (!encoded) return false;
+  const std::wstring value(encoded);
+  if (value.compare(0, 3, L"v1|") != 0 || value.size() > 160) return false;
+  std::array<int32_t, 12> fields{};
+  std::size_t start = 3;
+  for (std::size_t index = 0; index < fields.size(); ++index) {
+    const auto end = value.find(L'|', start);
+    if ((index + 1 == fields.size()) != (end == std::wstring::npos)) return false;
+    const auto token = value.substr(start, end == std::wstring::npos ? end : end - start);
+    if (token.empty() || token.size() > 11) return false;
+    const auto digits = token[0] == L'-' ? 1u : 0u;
+    if (digits == token.size()) return false;
+    for (std::size_t digit = digits; digit < token.size(); ++digit)
+      if (token[digit] < L'0' || token[digit] > L'9') return false;
+    errno = 0;
+    wchar_t* tail = nullptr;
+    const long parsed = std::wcstol(token.c_str(), &tail, 10);
+    if (errno == ERANGE || !tail || *tail != L'\0' ||
+        parsed < std::numeric_limits<int32_t>::min() ||
+        parsed > std::numeric_limits<int32_t>::max()) return false;
+    fields[index] = static_cast<int32_t>(parsed);
+    start = end + 1;
+  }
+  if (fields[0] < 0 || fields[0] > 256 || fields[1] < 0 || fields[1] > 256 ||
+      fields[2] < -4096 || fields[2] > 4096 ||
+      fields[3] < -4096 || fields[3] > 4096) return false;
+  auto parse_rect = [&](std::size_t offset, bool& present,
+                        std::array<int32_t, 4>& rect) {
+    if (fields[offset] == -1 && fields[offset + 1] == -1 &&
+        fields[offset + 2] == -1 && fields[offset + 3] == -1) {
+      present = false;
+      return true;
+    }
+    rect = {fields[offset], fields[offset + 1],
+            fields[offset + 2], fields[offset + 3]};
+    present = true;
+    return rect[0] >= 0 && rect[1] >= 0 && rect[2] > rect[0] &&
+           rect[3] > rect[1] && rect[2] <= 4096 && rect[3] <= 4096;
+  };
+  DiagnosticWorldLayout parsed{};
+  parsed.enabled = true;
+  parsed.input_row_padding = fields[0];
+  parsed.output_row_padding = fields[1];
+  parsed.input_origin_x = fields[2];
+  parsed.input_origin_y = fields[3];
+  if (!parse_rect(4, parsed.has_request_rect, parsed.request_rect) ||
+      !parse_rect(8, parsed.has_extent_hint, parsed.extent_hint)) return false;
+  diagnostic_world_layout() = parsed;
+  return true;
+}
 
 bool smart_geometry_rect_valid(const std::array<int32_t, 4>& rect) {
   const int64_t width = static_cast<int64_t>(rect[2]) - rect[0];
@@ -334,6 +394,16 @@ int prepare_image_request(const std::string& case_id, bool has_external_input,
     return -2;
   request.rowbytes = case_id == "padded_stride" ? 64 :
       request.width * request.pixel_bytes;
+  const auto& diagnostic = diagnostic_world_layout();
+  if (diagnostic.enabled) {
+    if (diagnostic.has_request_rect ||
+        diagnostic.input_row_padding % request.pixel_bytes != 0 ||
+        diagnostic.output_row_padding % request.pixel_bytes != 0 ||
+        (diagnostic.has_extent_hint &&
+         (diagnostic.extent_hint[2] > request.width ||
+          diagnostic.extent_hint[3] > request.height))) return -3;
+    request.rowbytes += diagnostic.input_row_padding;
+  }
   return 0;
 }
 

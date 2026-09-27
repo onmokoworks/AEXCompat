@@ -10,11 +10,11 @@ namespace aexcompat::worker_runtime::minidump {
 // Opt-in crash minidumps (issue #18) use a broker-created inherited pipe: the
 // worker never receives a directory path or a dump-file handle. Reads
 // AEXCOMPAT_MINIDUMP_HANDLE / AEXCOMPAT_MINIDUMP_ACK_HANDLE, preloads DbgHelp,
-// starts the dedicated writer thread, and installs the top-level crash filter.
-// Returns true when opt-in is off (no handle env) as well as on success;
-// returns false only on a real misconfiguration (invalid handle, writer setup
-// failure) so the worker can fail closed. The handle env vars are cleared so no
-// child or re-resolution can reach them.
+// installs an always-on top-level crash diagnostic filter. The bounded dump
+// writer remains opt-in: inherited pipe handles start its dedicated thread;
+// absent handles leave dump capture disabled. Returns false only on a real
+// handle/writer misconfiguration so the worker can fail closed. The handle env
+// vars are cleared so no child or re-resolution can reach them.
 bool configure_from_inherited_handle();
 
 // One-shot guard state and the broker's acknowledged capture size, exposed for

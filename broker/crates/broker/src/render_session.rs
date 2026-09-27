@@ -521,6 +521,70 @@ impl SessionGeometry {
 /// still fail-closes on `section_bytes() > SECTION_HARD_CAP_BYTES` as pure
 /// defense in depth; there is no longer a section-fit eligibility carve-out that
 /// keeps a large-layer render on the one-shot path.
+
+/// Host-controlled world transformations for a metamorphic diagnostic run.
+/// This is never inferred from the plug-in identity and is absent on ordinary
+/// renders. The worker revalidates the same bounds before creating any world.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DiagnosticWorldLayout {
+    pub input_row_padding: u32,
+    pub output_row_padding: u32,
+    pub input_origin_x: i32,
+    pub input_origin_y: i32,
+    pub request_rect: Option<[i32; 4]>,
+    pub extent_hint: Option<[i32; 4]>,
+}
+
+impl DiagnosticWorldLayout {
+    fn encoded(
+        self,
+        width: u32,
+        height: u32,
+        format: RenderPixelFormat,
+        smart: bool,
+    ) -> io::Result<String> {
+        let bytes = u32::try_from(format.bytes_per_pixel()).unwrap();
+        let valid_rect = |rect: [i32; 4]| {
+            rect[0] >= 0
+                && rect[1] >= 0
+                && rect[2] > rect[0]
+                && rect[3] > rect[1]
+                && i64::from(rect[2]) <= i64::from(width)
+                && i64::from(rect[3]) <= i64::from(height)
+        };
+        if self.input_row_padding > 256
+            || self.output_row_padding > 256
+            || self.input_row_padding % bytes != 0
+            || self.output_row_padding % bytes != 0
+            || self.input_origin_x.unsigned_abs() > MAX_DIMENSION
+            || self.input_origin_y.unsigned_abs() > MAX_DIMENSION
+            || self
+                .request_rect
+                .is_some_and(|rect| !smart || !valid_rect(rect))
+            || self.extent_hint.is_some_and(|rect| !valid_rect(rect))
+        {
+            return Err(invalid("render diagnostic world layout is invalid"));
+        }
+        let request = self.request_rect.unwrap_or([-1; 4]);
+        let extent = self.extent_hint.unwrap_or([-1; 4]);
+        Ok(format!(
+            "v1|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            self.input_row_padding,
+            self.output_row_padding,
+            self.input_origin_x,
+            self.input_origin_y,
+            request[0],
+            request[1],
+            request[2],
+            request[3],
+            extent[0],
+            extent[1],
+            extent[2],
+            extent[3]
+        ))
+    }
+}
+
 pub struct SessionOpenRequest<'a> {
     pub repository: &'a Path,
     pub plugin_path: &'a Path,
@@ -760,6 +824,44 @@ pub enum FrameStatus {
 pub struct FrameOutcome {
     pub frame_index: u32,
     pub status: FrameStatus,
+    pub depth_provenance: Option<FrameDepthProvenance>,
+    pub performance: FramePerformance,
+}
+
+/// Advisory phase measurements for one frame. The broker-owned clock measures
+/// transport and validation; the worker clock measures only its own phases.
+/// Neither is used to change the frame verdict or deadline.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FramePerformance {
+    pub broker_frame_wall_ns: u64,
+    pub broker_input_write_ns: u64,
+    pub broker_output_verify_ns: Option<u64>,
+    pub worker_setup_ns: Option<u64>,
+    pub worker_render_ns: Option<u64>,
+    pub render_selector_ns: Option<u64>,
+    pub worker_finalize_ns: Option<u64>,
+    pub worker_live_commit_bytes: Option<u64>,
+    pub worker_peak_commit_bytes: Option<u64>,
+    pub worker_job_peak_commit_bytes: Option<u64>,
+    pub output_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerFramePerformance {
+    worker_setup_ns: Option<u64>,
+    worker_render_ns: Option<u64>,
+    render_selector_ns: Option<u64>,
+    worker_finalize_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FrameDepthProvenance {
+    pub advertised_out_flags: u32,
+    pub advertised_out_flags2: u32,
+    pub advertised_depth_supported: bool,
+    pub planned_dispatch_pixel_bytes: Option<u32>,
+    pub dispatch_pixel_bytes: Option<u32>,
 }
 
 /// Why a session stopped accepting frames. Everything here is fail-closed:
@@ -801,6 +903,93 @@ struct FrameDoneOutput {
     /// failure. Only the worker's smart session frame loop sets it.
     #[serde(default)]
     empty_result: bool,
+    #[serde(default)]
+    advertised_out_flags: Option<u32>,
+    #[serde(default)]
+    advertised_out_flags2: Option<u32>,
+    #[serde(default)]
+    advertised_depth_supported: Option<bool>,
+    #[serde(default)]
+    planned_dispatch_pixel_bytes: Option<u32>,
+    #[serde(default)]
+    dispatch_pixel_bytes: Option<u32>,
+}
+
+impl FrameDoneOutput {
+    fn depth_provenance(
+        &self,
+        requested_pixel_bytes: u32,
+    ) -> Result<Option<FrameDepthProvenance>, &'static str> {
+        let supplied = self.advertised_out_flags.is_some()
+            || self.advertised_out_flags2.is_some()
+            || self.advertised_depth_supported.is_some()
+            || self.planned_dispatch_pixel_bytes.is_some()
+            || self.dispatch_pixel_bytes.is_some();
+        if !supplied {
+            return Ok(None);
+        }
+        let (
+            Some(advertised_out_flags),
+            Some(advertised_out_flags2),
+            Some(advertised_depth_supported),
+        ) = (
+            self.advertised_out_flags,
+            self.advertised_out_flags2,
+            self.advertised_depth_supported,
+        )
+        else {
+            return Err("frame depth provenance is incomplete");
+        };
+        let valid_depth = |depth: u32| matches!(depth, 4 | 8 | 16);
+        let deep = advertised_out_flags & (1 << 25) != 0;
+        let floating = advertised_out_flags2 & (1 << 12) != 0;
+        let expected_plan = match requested_pixel_bytes {
+            16 => {
+                if floating {
+                    16
+                } else if deep {
+                    8
+                } else {
+                    4
+                }
+            }
+            8 => {
+                if deep {
+                    8
+                } else if floating {
+                    16
+                } else {
+                    4
+                }
+            }
+            4 => 4,
+            _ => return Err("requested frame depth is invalid"),
+        };
+        if self.planned_dispatch_pixel_bytes.is_some() != self.dispatch_pixel_bytes.is_some()
+            || self
+                .planned_dispatch_pixel_bytes
+                .is_some_and(|depth| !valid_depth(depth))
+            || self
+                .dispatch_pixel_bytes
+                .is_some_and(|depth| !valid_depth(depth))
+            || (self.width != 0 && self.dispatch_pixel_bytes.is_none())
+            || self
+                .planned_dispatch_pixel_bytes
+                .is_some_and(|depth| depth != expected_plan)
+            || (self.planned_dispatch_pixel_bytes.is_some()
+                && advertised_depth_supported
+                    != (self.planned_dispatch_pixel_bytes == Some(requested_pixel_bytes)))
+        {
+            return Err("frame depth provenance contradicts the rendered frame");
+        }
+        Ok(Some(FrameDepthProvenance {
+            advertised_out_flags,
+            advertised_out_flags2,
+            advertised_depth_supported,
+            planned_dispatch_pixel_bytes: self.planned_dispatch_pixel_bytes,
+            dispatch_pixel_bytes: self.dispatch_pixel_bytes,
+        }))
+    }
 }
 
 /// A selector's own account of why it failed, as left in
@@ -832,6 +1021,8 @@ struct FrameDone {
     #[serde(rename = "type")]
     kind: String,
     frame_index: u32,
+    #[serde(default)]
+    performance: Option<WorkerFramePerformance>,
     status: String,
     #[serde(default)]
     output: Option<FrameDoneOutput>,
@@ -1024,7 +1215,22 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None, None)
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None, None, None)
+    }
+
+    /// Opens a private-desktop session with explicit, bounded world variants.
+    /// The regular `open` path never supplies this diagnostic-only option.
+    pub fn open_diagnostic(
+        request: SessionOpenRequest<'_>,
+        layout: DiagnosticWorldLayout,
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            None,
+            Some(layout),
+        )
     }
 
     pub fn open_plugin_data_effect(
@@ -1036,6 +1242,7 @@ impl RenderSession {
             WorkerDesktopPolicy::Dedicated,
             None,
             Some(selector),
+            None,
         )
     }
 
@@ -1045,7 +1252,7 @@ impl RenderSession {
     pub(crate) fn open_on_current_desktop(
         request: SessionOpenRequest<'_>,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None, None)
+        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None, None, None)
     }
 
     fn open_with_desktop_policy(
@@ -1053,7 +1260,18 @@ impl RenderSession {
         desktop_policy: WorkerDesktopPolicy,
         cluster: Option<ClusterRenderPlugins>,
         plugin_data_selector: Option<&PluginDataEffectSelector>,
+        diagnostic_layout: Option<DiagnosticWorldLayout>,
     ) -> io::Result<RenderSession> {
+        let diagnostic_layout = diagnostic_layout
+            .map(|layout| {
+                layout.encoded(
+                    request.width,
+                    request.height,
+                    request.pixel_format,
+                    request.smart,
+                )
+            })
+            .transpose()?;
         if request.time_step <= 0
             // A zero-duration render (total_time == 0) is valid: the shared
             // RenderTiming::is_valid admits it at current_time == 0, and the
@@ -1477,6 +1695,9 @@ impl RenderSession {
         if request.output_checksum_detail {
             args_after_plugin.extend(["--output-checksum-detail-v1".to_owned(), "1".to_owned()]);
         }
+        if let Some(layout) = &diagnostic_layout {
+            args_after_plugin.extend(["--render-diagnostic-layout-v1".to_owned(), layout.clone()]);
+        }
         // Conformance render settings ride the same shared auxiliary option the
         // one-shot path forwards (#275); the worker peels it from the tail and
         // feeds it to its report only (the pixels are already pre-transformed by
@@ -1748,7 +1969,13 @@ impl RenderSession {
         request: SessionOpenRequest<'_>,
         cluster: ClusterRenderPlugins,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, Some(cluster), None)
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            Some(cluster),
+            None,
+            None,
+        )
     }
 
     pub fn invalidation(&self) -> Option<&SessionInvalidation> {
@@ -2152,9 +2379,12 @@ impl RenderSession {
                 "per-frame parameter message exceeds the protocol message cap",
             ));
         }
+        let frame_started = Instant::now();
+        let input_started = Instant::now();
         self.transport.write_input_slot(rgba);
         self.transport
             .write_header_u32(INPUT_GENERATION_OFFSET, expected_generation);
+        let broker_input_write_ns = input_started.elapsed().as_nanos() as u64;
         if !self.transport.send_message(&message) {
             return Err(self.invalidate(
                 "request_pipe_closed",
@@ -2358,8 +2588,41 @@ impl RenderSession {
                     if done.smart_output_untouched {
                         self.smart_output_untouched_frames += 1;
                     }
+                    let memory = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.memory_commit_snapshot());
+                    let job_peak = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.job_peak_commit_bytes());
                     return Ok(FrameOutcome {
                         frame_index,
+                        depth_provenance: None,
+                        performance: FramePerformance {
+                            broker_frame_wall_ns: frame_started.elapsed().as_nanos() as u64,
+                            broker_input_write_ns,
+                            worker_setup_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_setup_ns),
+                            worker_render_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_render_ns),
+                            render_selector_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.render_selector_ns),
+                            worker_finalize_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_finalize_ns),
+                            worker_live_commit_bytes: memory.map(|snapshot| snapshot.0),
+                            worker_peak_commit_bytes: memory.map(|snapshot| snapshot.1),
+                            worker_job_peak_commit_bytes: job_peak,
+                            ..FramePerformance::default()
+                        },
                         status: if done.smart_output_untouched {
                             FrameStatus::SmartOutputUntouched
                         } else {
@@ -2373,6 +2636,7 @@ impl RenderSession {
                     });
                 }
                 "ok" => {
+                    let output_verify_started = Instant::now();
                     let (Some(output), Some(generation)) = (done.output, done.generation) else {
                         return Err(self.invalidate(
                             "malformed_ok_response",
@@ -2408,6 +2672,19 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     }
+                    let depth_provenance = match output
+                        .depth_provenance(self.geometry.pixel_format.bytes_per_pixel() as u32)
+                    {
+                        Ok(depth) => depth,
+                        Err(detail) => {
+                            return Err(self.invalidate(
+                                "frame_invariant_failure",
+                                format!("frame {frame_index}: {detail}"),
+                                true,
+                                POST_TERMINATION_COLLECT_TIMEOUT,
+                            ));
+                        }
+                    };
                     // Read only the frame's actual packed bytes, not the whole
                     // launch slot: a shrink-output effect fills less than the
                     // slot, and the worker packs exactly these bytes (#261).
@@ -2435,8 +2712,43 @@ impl RenderSession {
                         .read_output_slot(self.geometry.output_slot_offset(), actual_bytes);
                     self.frames_ok += 1;
                     self.last_output_generation = expected_generation;
+                    let broker_output_verify_ns = output_verify_started.elapsed().as_nanos() as u64;
+                    let memory = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.memory_commit_snapshot());
+                    let job_peak = self
+                        .process
+                        .as_ref()
+                        .and_then(|process| process.job_peak_commit_bytes());
                     return Ok(FrameOutcome {
                         frame_index,
+                        depth_provenance,
+                        performance: FramePerformance {
+                            broker_frame_wall_ns: frame_started.elapsed().as_nanos() as u64,
+                            broker_input_write_ns,
+                            broker_output_verify_ns: Some(broker_output_verify_ns),
+                            worker_setup_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_setup_ns),
+                            worker_render_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_render_ns),
+                            render_selector_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.render_selector_ns),
+                            worker_finalize_ns: done
+                                .performance
+                                .as_ref()
+                                .and_then(|p| p.worker_finalize_ns),
+                            worker_live_commit_bytes: memory.map(|snapshot| snapshot.0),
+                            worker_peak_commit_bytes: memory.map(|snapshot| snapshot.1),
+                            worker_job_peak_commit_bytes: job_peak,
+                            output_bytes: Some(actual_bytes as u64),
+                        },
                         status: FrameStatus::Rendered {
                             pixels,
                             width: output.width,

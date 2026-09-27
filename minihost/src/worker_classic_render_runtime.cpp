@@ -451,6 +451,7 @@ struct ClassicRenderDispatchOwner {
   int32_t run(int32_t error) {
     return aexcompat::worker_runtime::classic_execution::dispatch_render(this, error, hooks());
   }
+  int32_t prepare_nop_output() { return prepare_output(true); }
 
  private:
   static const aexcompat::worker_runtime::classic_execution::RenderHooks& hooks() {
@@ -513,14 +514,14 @@ struct ClassicRenderDispatchOwner {
     hint = aexcompat::render::extent_hint_within(hint, output_width, output_height);
     std::memcpy(input.data() + kInExtentHint, hint.data(), sizeof(hint));
   }
-  int32_t prepare_output() {
-    const auto fail = [this](int32_t error) {
-      if (frame_output) frame_output->validation_failed = true;
+  int32_t prepare_output(bool frame_local_refusal = false) {
+    const auto fail = [this](int32_t error, bool local = false) {
+      if (frame_output && !local) frame_output->validation_failed = true;
       return error;
     };
     if (!frame_setup_output.available) {
       resize_reason = "frame_setup_geometry_missing";
-      return fail(4);
+      return fail(4, frame_local_refusal);
     }
     const int32_t next_width = frame_setup_output.width;
     const int32_t next_height = frame_setup_output.height;
@@ -556,7 +557,7 @@ struct ClassicRenderDispatchOwner {
       std::cerr << "stage:classic_output_resize_denied from=" << width << "x" << height
                 << " to=" << next_width << "x" << next_height
                 << " out_flags=" << read<uint32_t>(output, kOutFlags) << "\n" << std::flush;
-      return fail(4);
+      return fail(4, frame_local_refusal);
     }
     const int32_t origin_x = frame_setup_output.origin_x;
     const int32_t origin_y = frame_setup_output.origin_y;
@@ -588,7 +589,9 @@ struct ClassicRenderDispatchOwner {
     // before a `reset` that can fail would leave it scanning the enlarged
     // extent across the old, smaller allocation and straight into the guard
     // page that follows it.
-    const int32_t next_rowbytes = next_width * pixel_bytes;
+    const auto& diagnostic = aexcompat::render::diagnostic_world_layout();
+    const int32_t next_rowbytes = next_width * pixel_bytes +
+        (diagnostic.enabled ? diagnostic.output_row_padding : 0);
     // Through `fail`, which stops the session. The label is wrong - this is host
     // resource exhaustion, not the plug-in asking for something invalid - but
     // stopping is the property that matters: the host cannot give this frame an
@@ -602,6 +605,9 @@ struct ClassicRenderDispatchOwner {
     }
     width = next_width; height = next_height; rowbytes = next_rowbytes;
     destination = guarded.data();
+    if (!aexcompat::worker_runtime::output_coverage::seed(
+            destination, guarded.size(), width, height, rowbytes, pixel_bytes))
+      return fail(-3);
     if (!aexcompat::render::prepare_world_layout(world,
             {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination))
       return fail(-3);
@@ -689,13 +695,16 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   const int32_t pixel_bytes = image_request.pixel_bytes;
   smart_state().pixel_format = pixel_bytes == 16 ? "argb32f" :
       (pixel_bytes == 8 ? "argb16" : "argb8");
-  rowbytes = image_request.rowbytes;
+  const auto& diagnostic = aexcompat::render::diagnostic_world_layout();
+  const int32_t input_rowbytes = image_request.rowbytes;
+  rowbytes = diagnostic.enabled
+      ? width * pixel_bytes + diagnostic.output_row_padding : input_rowbytes;
   const aexcompat::render::ParameterProfile parameter_profile =
       aexcompat::render::prepare_parameter_profile(case_id);
   std::vector<unsigned char> logical_source(width * height * pixel_bytes);
-  InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
+  InputPixelBuffer source(static_cast<std::size_t>(input_rowbytes) * height);
   if (!source) return -3;
-  std::memset(source.data(), 0x5A, static_cast<std::size_t>(rowbytes) * height);
+  std::memset(source.data(), 0x5A, static_cast<std::size_t>(input_rowbytes) * height);
   if (!aexcompat::render::build_argb_input(image_request, external_rgba,
                                             logical_source, source.data())) return -3;
   dump_world_snapshot("classic-input", logical_source.data(), width, height, pixel_bytes);
@@ -705,13 +714,21 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
   if (!guarded) return -3;
   unsigned char* destination = guarded.data();
+  if (!aexcompat::worker_runtime::output_coverage::seed(
+          destination, guarded.size(), width, height, rowbytes, pixel_bytes)) return -3;
   guards_intact = true;
 
   aexcompat::world_safety::EffectWorldStorage input_world{}, output_world{};
-  const aexcompat::render::WorldLayout primary_world{
+  const aexcompat::render::WorldLayout input_layout{
+      pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, input_rowbytes};
+  const aexcompat::render::WorldLayout output_layout{
       pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes};
-  if (!aexcompat::render::prepare_world_layout(input_world, primary_world, source.data()) ||
-      !aexcompat::render::prepare_world_layout(output_world, primary_world, destination)) return -3;
+  if (!aexcompat::render::prepare_world_layout(input_world, input_layout, source.data()) ||
+      !aexcompat::render::prepare_world_layout(output_world, output_layout, destination)) return -3;
+  if (diagnostic.enabled) {
+    write<int32_t>(input_world, 104, diagnostic.input_origin_x);
+    write<int32_t>(input_world, 108, diagnostic.input_origin_y);
+  }
   const int32_t dispatch_pixel_format = pixel_bytes == 4 ? kPixelFormatArgb32 :
       (pixel_bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128);
   DispatchWorldFormatScope dispatch_worlds;
@@ -814,6 +831,9 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     const int32_t extent[4] = {3, 2, 11, 8};
     std::memcpy(input.data() + kInExtentHint, extent, sizeof(extent));
   }
+  if (diagnostic.enabled && diagnostic.has_extent_hint)
+    std::memcpy(input.data() + kInExtentHint,
+                diagnostic.extent_hint.data(), sizeof(diagnostic.extent_hint));
   struct RenderUiContextScope {
     EffectEntry entry;
     std::array<std::byte, kInSize>& input;
@@ -859,43 +879,48 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   input_hash = sha256_bytes(logical_source.data(), logical_source.size());
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
+  ClassicRenderDispatchOwner dispatch_owner{entry, input, command_output, output_world,
+      guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
+      pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
+      external_total_time, external_time_scale, case_id, requested, external_rgba,
+      external_layers, external_width, external_height, *classic_context, logical_source,
+      width, height, lifecycle_owner.frame_setup_output, frame_output};
   if (nop_render) {
-    // PF_OutFlag_NOP_RENDER means the host copies the input through instead of
-    // dispatching RENDER, so there is no `prepare_output` on this branch and no
-    // buffer to re-lay. FRAME_SETUP is still offered the extent (the offer is
-    // made before the branch is known), so an effect that advertised NOP_RENDER
-    // alongside a resize flag can now answer with a revision nothing here can
-    // honour. Copying the input through at the old extent and reporting success
-    // would ship a frame that is silently missing whatever the revision asked
-    // for, so this is a refusal with a name instead (issue #984).
-    // A frame-local diagnostic, not `frame_output->validation_failed`. That flag
-    // is the session's output-bounds invariant (worker_render_session.cpp) and
-    // tears the whole session down on the frame that sets it; nothing here
-    // touched the guarded buffer or the world registration, so the host's state
-    // is intact and the next frame can run. Escalating would turn one effect's
-    // unanswerable request into a dead session and a respawned worker per frame.
-    const auto& frame_setup_output = lifecycle_owner.frame_setup_output;
-    if (error == 0 && !frame_setup_output.available) {
-      std::cerr << "stage:classic_output_resize_end error=4 "
-                   "reason=frame_setup_geometry_missing\n"
-                << std::flush;
-      error = 4;
-    } else if (error == 0 && !aexcompat::render::output_extent_unchanged(
-                                 width, height, frame_setup_output.width,
-                                 frame_setup_output.height)) {
-      // Emitted here rather than through RenderHooks: this branch never reaches
-      // `prepare_output`, so nothing else files the stage. Without it the
-      // broker's stage parser sees only the plug-in's own `render_end` and
-      // attributes the host's refusal to the plug-in (the #722 shape).
-      std::cerr << "stage:classic_output_resize_end error=4 reason=nop_render_resize\n"
-                << std::flush;
-      error = 4;
+    // The host owns every NOP_RENDER pixel. Share Classic's guarded resize,
+    // world registration and origin relay, but keep a rejected FRAME_SETUP
+    // extent frame-local as it was before this branch could resize (#1002).
+    if (error == 0) {
+      error = dispatch_owner.prepare_nop_output();
+      if (error != 0 || dispatch_owner.resize_reason) {
+        std::cerr << "stage:classic_output_resize_end error=" << error;
+        if (dispatch_owner.resize_reason)
+          std::cerr << " reason=" << dispatch_owner.resize_reason;
+        std::cerr << "\n" << std::flush;
+      }
     }
     if (error == 0) {
-      for (int32_t y = 0; y < height; ++y)
-        std::memcpy(destination + y * rowbytes,
-                    logical_source.data() + y * width * pixel_bytes,
-                    width * pixel_bytes);
+      const int32_t origin_x = read<int32_t>(input, kInOutputOriginX);
+      const int32_t origin_y = read<int32_t>(input, kInOutputOriginY);
+      const int32_t copy_left = std::max(0, origin_x);
+      const int32_t copy_top = std::max(0, origin_y);
+      const int32_t source_left = std::max(0, -origin_x);
+      const int32_t source_top = std::max(0, -origin_y);
+      const int32_t copy_width = std::min(width - copy_left,
+                                          dispatch_owner.source_width - source_left);
+      const int32_t copy_height = std::min(height - copy_top,
+                                           dispatch_owner.source_height - source_top);
+      // The ordinary passthrough and a fully covered crop need no clear pass.
+      if (copy_left != 0 || copy_top != 0 || copy_width != width || copy_height != height)
+        for (int32_t y = 0; y < height; ++y)
+          std::memset(destination + static_cast<std::size_t>(y) * rowbytes, 0,
+                      static_cast<std::size_t>(width) * pixel_bytes);
+      for (int32_t y = 0; y < copy_height; ++y)
+        std::memcpy(destination + static_cast<std::size_t>(copy_top + y) * rowbytes +
+                        static_cast<std::size_t>(copy_left) * pixel_bytes,
+                    logical_source.data() +
+                        (static_cast<std::size_t>(source_top + y) * dispatch_owner.source_width +
+                         source_left) * pixel_bytes,
+                    static_cast<std::size_t>(copy_width) * pixel_bytes);
     }
     // A failing setdown still wins. Main reported `finish` unconditionally
     // here, so keeping the refusal above only when setdown was clean is what
@@ -904,12 +929,6 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     const int32_t finish_error = lifecycle_owner.finish(lifecycle);
     if (finish_error != 0) error = finish_error;
   } else {
-    ClassicRenderDispatchOwner dispatch_owner{entry, input, command_output, output_world,
-        guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
-        pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
-        external_total_time, external_time_scale, case_id, requested, external_rgba,
-        external_layers, external_width, external_height, *classic_context, logical_source,
-        width, height, lifecycle_owner.frame_setup_output, frame_output};
     // The per-frame `stage:classic_*` markers are emitted from inside RenderHooks
     // (see ClassicRenderDispatchOwner) so each brackets only the step it names.
     // UI markers are gated on a draw request or a live UI context, so ordinary
@@ -934,7 +953,11 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       destination, rowbytes, width, height, pixel_bytes, error,
       external_current_time, external_time_step, external_time_scale,
       read<int32_t>(input, kInQuality), dispatch_pixel_format, &output_hash,
-      &guards_intact, captured_argb, guarded.sentinels_intact()};
+      &guards_intact, captured_argb, guarded.sentinels_intact(),
+      frame_output ? &frame_output->output_coverage : nullptr, nop_render,
+      diagnostic.enabled && diagnostic.has_extent_hint
+          ? diagnostic.extent_hint
+          : std::array<int32_t, 4>{0, 0, width, height}};
   error = aexcompat::worker_runtime::classic_execution::finalize(final_context, {
       +[](const unsigned char* data, int32_t rowbytes, int32_t width, int32_t height,
           int32_t bytes, std::vector<unsigned char>& output) {
@@ -1084,7 +1107,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
                               int32_t external_total_time = 1, uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4,
                               aexcompat::worker_runtime::smart_execution::SessionFrame* session =
-                                  nullptr) {
+                                  nullptr,
+                              uint32_t advertised_out_flags2 = 0) {
   SmartRuntimeSession smart_session;
   reset_smart_host_telemetry();
   SmartResult result;
@@ -1094,7 +1118,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
        g_pixel_aspect_ratio.numerator, g_pixel_aspect_ratio.denominator},
       {&command_output, &case_id, external_rgba != nullptr, external_width,
        external_height, external_current_time, external_time_scale,
-       external_pixel_bytes});
+       external_pixel_bytes, advertised_out_flags2});
   if (!plan.valid) return result;
   // The smart path serves parameter checkouts from the hosted ledger, not from a
   // classic dispatch context, and that ledger kept its default current_time 0 /
@@ -1137,8 +1161,11 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   const int32_t pixel_bytes = plan.pixel_bytes;
   const int32_t rowbytes = plan.rowbytes;
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
-  OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
+  OutputPixelBuffer guarded(static_cast<std::size_t>(plan.output_rowbytes) * height);
   auto* destination = guarded.data();
+  if (!aexcompat::worker_runtime::output_coverage::seed(
+          destination, guarded.size(), width, height,
+          plan.output_rowbytes, pixel_bytes)) return result;
   result.guards_intact = true;
   // A session frame needs the sentinel verdict on every exit path, including
   // early refusals after this point; the one-shot report keeps its existing
@@ -1270,7 +1297,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
   if (nop_render) {
     for (int32_t y = 0; y < height; ++y)
-      std::memcpy(destination + y * rowbytes, source.data() + y * rowbytes,
+      std::memcpy(destination + y * plan.output_rowbytes,
+                  source.data() + y * rowbytes,
                   width * pixel_bytes);
     result.pre_error = 0;
     result.render_error = end_lifecycle(entry, input, command_output, params.data(),
@@ -1279,7 +1307,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     result.roi_contract_valid = true;
     result.output_width = width;
     result.output_height = height;
-    result.output_rowbytes = rowbytes;
+    result.output_rowbytes = plan.output_rowbytes;
     result.result_rect = {0, 0, width, height};
     result.max_result_rect = result.result_rect;
     result.output_extent_hint = result.result_rect;
@@ -1289,7 +1317,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
       std::memcpy(logical_input.data() + y * width * pixel_bytes,
                   source.data() + y * rowbytes, width * pixel_bytes);
       std::memcpy(logical_output.data() + y * width * pixel_bytes,
-                  destination + y * rowbytes, width * pixel_bytes);
+                  destination + y * plan.output_rowbytes, width * pixel_bytes);
     }
     result.input_hash = sha256_bytes(logical_input.data(), logical_input.size());
     result.output_hash = sha256_bytes(logical_output.data(), logical_output.size());
@@ -1334,12 +1362,13 @@ SmartResult smart_render_once(EffectEntry entry, std::array<std::byte, kInSize>&
                               uint32_t external_time_scale = 1,
                               int32_t external_pixel_bytes = 4,
                               aexcompat::worker_runtime::smart_execution::SessionFrame* session =
-                                  nullptr) {
+                                  nullptr,
+                              uint32_t advertised_out_flags2 = 0) {
   return aexcompat::worker_runtime::smart_execution::render_once(
       entry, input, output, case_id, requested, external_rgba,
       external_width, external_height, external_layers, external_current_time,
       external_time_step, external_total_time, external_time_scale,
-      external_pixel_bytes, session);
+      external_pixel_bytes, session, advertised_out_flags2);
 }
 
 #undef entry

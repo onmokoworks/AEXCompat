@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_temporal_checkout_report.hpp"
+#include "worker_output_coverage.hpp"
 
 #include <iosfwd>
 #include <sstream>
@@ -47,6 +48,9 @@ struct CustomUiSnapshot {
 };
 
 void append_custom_ui(ReportSnapshot& report, const CustomUiSnapshot& snapshot);
+void append_output_coverage(
+    ReportSnapshot& report,
+    const aexcompat::worker_runtime::output_coverage::Result& coverage);
 
 struct RequestedParametersSnapshot {
   std::string parameters_json;
@@ -136,6 +140,7 @@ struct ClassicReport {
     std::string output_sha256;
     bool guard_bytes_intact{};
     std::string world_debug_json;
+    aexcompat::worker_runtime::output_coverage::Result output_coverage{};
   } frame;
   struct Threads {
     bool concurrent{};

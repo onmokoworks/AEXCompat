@@ -3364,6 +3364,108 @@ mod windows_e2e {
         assert_eq!(epochs[0]["plugin_index"], 0);
     }
 
+    #[test]
+    fn native_cluster_swap_records_each_members_depth_and_final_flags() {
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let worker = source_root.join("target/minihost-build/aex_worker.exe");
+        let probe =
+            source_root.join("target/pf-sampling-probe-build/Release/pf_sampling_probe.aex");
+        if !worker.is_file() || !probe.is_file() {
+            eprintln!("native cluster depth test needs the Release worker and sampling probe");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-native-cluster-depth-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        write_freshness_source_marker(&root);
+        let worker_dir = root.join("target/minihost-build");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::copy(&worker, worker_dir.join("aex_worker.exe")).unwrap();
+        let mut plugins = Vec::new();
+        for marker in ["shallow", "floatonly"] {
+            let path = root.join(format!("sampling-{marker}.aex"));
+            std::fs::copy(&probe, &path).unwrap();
+            plugins.push((
+                path.clone(),
+                format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap())),
+            ));
+        }
+        let repository = TempRepository(root);
+        let mut session = RenderSession::open_cluster(
+            SessionOpenRequest {
+                companions: Vec::new(),
+                repository: &repository.0,
+                plugin_path: &plugins[0].0,
+                plugin_sha256: &plugins[0].1,
+                parameters: None,
+                payload_override: None,
+                parameter_animation: None,
+                aux_manifest: None,
+                world_dump_dir: None,
+                output_checksum_detail: false,
+                mask_trailer: None,
+                spatial_trailer: None,
+                render_environment_trailer: None,
+                audio_trailer: None,
+                alpha_as_coverage_params: &[],
+                conformance_render_settings: None,
+                layers: &[],
+                dependencies: Vec::new(),
+                dependency_search_dirs: vec![repository.0.clone()],
+                width: WIDTH,
+                height: HEIGHT,
+                pixel_format: RenderPixelFormat::Argb16,
+                time_step: 1,
+                total_time: 300,
+                time_scale: 30,
+                frame_deadline: Duration::from_secs(30),
+                smart: false,
+                gpu_backend: RenderGpuBackend::Cpu,
+                gpu_runtime_policy: None,
+                launch_environment: LaunchEnvironment::default(),
+            },
+            ClusterRenderPlugins {
+                plugins: plugins
+                    .iter()
+                    .map(|(path, _)| approved_artifact(path))
+                    .collect(),
+                swap_payloads: vec![None, None],
+                module_bound: 64,
+            },
+        )
+        .expect("open native cluster session");
+        let first = session.render_frame(0, 0, &input_pattern(3)).unwrap();
+        let first_depth = first.depth_provenance.unwrap();
+        assert_eq!(first_depth.planned_dispatch_pixel_bytes, Some(4));
+        assert_eq!(first_depth.dispatch_pixel_bytes, Some(4));
+        assert!(!first_depth.advertised_depth_supported);
+        assert!(matches!(
+            session.swap_plugin(1).unwrap(),
+            SwapOutcome::Swapped
+        ));
+        let second = session.render_frame(1, 1, &input_pattern(9)).unwrap();
+        let second_depth = second.depth_provenance.unwrap();
+        assert_eq!(second_depth.planned_dispatch_pixel_bytes, Some(16));
+        assert_eq!(second_depth.dispatch_pixel_bytes, Some(16));
+        assert!(!second_depth.advertised_depth_supported);
+        let close = session.close();
+        assert_eq!(close["session_clean"], true, "{close}");
+        assert_eq!(
+            close["final_report"]["advertised_out_flags"],
+            second_depth.advertised_out_flags
+        );
+        assert_eq!(
+            close["final_report"]["advertised_out_flags2"],
+            second_depth.advertised_out_flags2
+        );
+        assert_eq!(close["final_report"]["dispatch_pixel_bytes"], 16);
+    }
+
     /// In-place cluster render session (issue #751): the v2 manifest names
     /// the cluster by real paths, the launch admits the search directories,
     /// and the swap selects members by index over the same transport as the

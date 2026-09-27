@@ -1,4 +1,5 @@
 #pragma once
+#include "worker_output_coverage.hpp"
 
 #include <array>
 #include <cstddef>
@@ -55,6 +56,23 @@ struct ImageRequest {
   bool connected_map{};
   bool partial_extent_hint{};
 };
+
+// Bounded host-controlled transforms used only by metamorphic render sessions.
+// The launch option is parsed before any plug-in load; ordinary renders retain
+// this disabled default. Rectangles are layer-space [left, top, right, bottom].
+struct DiagnosticWorldLayout {
+  bool enabled{};
+  int32_t input_row_padding{};
+  int32_t output_row_padding{};
+  int32_t input_origin_x{};
+  int32_t input_origin_y{};
+  bool has_request_rect{};
+  std::array<int32_t, 4> request_rect{};
+  bool has_extent_hint{};
+  std::array<int32_t, 4> extent_hint{};
+};
+DiagnosticWorldLayout& diagnostic_world_layout();
+bool parse_diagnostic_world_layout(const wchar_t* encoded);
 
 // The fixed image cases shared by the Classic and Smart diagnostic adapters.
 // Keep admission beside the common request/profile shaping so the two worker
@@ -155,6 +173,7 @@ struct ClassicFrameOutput {
   // caller tell host-side output validation apart from selector errors that
   // share the same numeric codes.
   bool validation_failed{};
+  aexcompat::worker_runtime::output_coverage::Result output_coverage{};
   // PF_OutData::origin as the effect stated it, in the plug-in's own
   // convention: the position of the input buffer's top-left corner in the
   // output buffer, so positive when the effect expanded and negative when it

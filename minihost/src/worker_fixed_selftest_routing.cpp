@@ -72,6 +72,45 @@ int selftest_crash_no_minidump(int, wchar_t**) {
   return passed ? 0 : 1;
 }
 
+__declspec(noinline) DWORD WINAPI unhandled_thread_fault(void*) {
+  *reinterpret_cast<volatile int*>(static_cast<uintptr_t>(1)) = 1;
+  return 0;
+}
+
+int selftest_unhandled_thread_crash(int, wchar_t**) {
+  SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+  HANDLE thread = CreateThread(nullptr, 0, unhandled_thread_fault, nullptr, 0, nullptr);
+  if (!thread) return 3;
+  const DWORD wait = WaitForSingleObject(thread, 5'000);
+  CloseHandle(thread);
+  // The process should have terminated with the unhandled thread exception.
+  // Reaching this line is a self-test failure, including a hung thread.
+  return wait == WAIT_OBJECT_0 ? 4 : 5;
+}
+
+int selftest_unhandled_module_thread_crash(int, wchar_t**) {
+  SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+  wchar_t executable[MAX_PATH]{};
+  const DWORD length = GetModuleFileNameW(nullptr, executable, MAX_PATH);
+  if (length == 0 || length >= MAX_PATH) return 2;
+  std::wstring path(executable, length);
+  const auto separator = path.find_last_of(L"\\/");
+  if (separator == std::wstring::npos) return 3;
+  path.resize(separator + 1);
+  path += L"worker_unhandled_thread_fault_fixture.dll";
+  HMODULE fixture = LoadLibraryExW(path.c_str(), nullptr,
+      LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+  if (!fixture) return 4;
+  const auto entry = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+      GetProcAddress(fixture, "worker_unhandled_thread_fault"));
+  if (!entry) return 5;
+  HANDLE thread = CreateThread(nullptr, 0, entry, nullptr, 0, nullptr);
+  if (!thread) return 6;
+  const DWORD wait = WaitForSingleObject(thread, 5'000);
+  CloseHandle(thread);
+  return wait == WAIT_OBJECT_0 ? 7 : 8;
+}
+
 int selftest_pf_adv_time(int, wchar_t**) {
   const bool passed = pf_adv_time::verify_suite_versions();
   std::cout << "{\"pf_adv_time_suite_versions\":\"" << (passed ? "passed" : "failed")
@@ -170,13 +209,17 @@ int selftest_smart_diagnostic_auxiliary_admission(int, wchar_t**) {
       aexcompat::l2cli::verify_smart_diagnostic_auxiliary_admission();
   const bool fixed_case =
       aexcompat::worker_runtime::smart_setup::verify_fixed_image_case_admission();
-  const bool passed = auxiliary && fixed_case;
+  const bool gpu_snapshot =
+      aexcompat::worker_runtime::smart_setup::verify_gpu_advertisement_snapshot();
+  const bool passed = auxiliary && fixed_case && gpu_snapshot;
   std::cout << "{\"smart_diagnostic_auxiliary_admission\":\""
             << (passed ? "passed" : "failed")
             << "\",\"uses_effective_argc\":"
             << (auxiliary ? "true" : "false")
             << ",\"fixed_image_case_admitted\":"
             << (fixed_case ? "true" : "false")
+            << ",\"gpu_advertisement_snapshot\":"
+            << (gpu_snapshot ? "true" : "false")
             << ",\"commands_checked\":20}\n";
   return passed ? 0 : 1;
 }
@@ -226,13 +269,17 @@ int selftest_selector_fault_attribution(int, wchar_t**) {
 
 Result dispatch(const Request& request, const Hooks& hooks) {
   g_host = &hooks.host;
-  const std::array<selftest::HostCommand, 14> host_commands{{
+  const std::array<selftest::HostCommand, 16> host_commands{{
       {L"--self-test-render-output-safety", 2, &selftest_render_output_safety},
       {L"--self-test-selector-fault-unwind", 2, &selftest_selector_fault_unwind},
       {L"--self-test-selector-fault-attribution", 2,
        &selftest_selector_fault_attribution},
       {L"--self-test-crash-minidump", 2, &selftest_crash_minidump},
       {L"--self-test-crash-no-minidump", 2, &selftest_crash_no_minidump},
+      {L"--self-test-unhandled-thread-crash", 2,
+       &selftest_unhandled_thread_crash},
+      {L"--self-test-unhandled-module-thread-crash", 2,
+       &selftest_unhandled_module_thread_crash},
       {L"--self-test-pf-adv-time-suite1", 2, &selftest_pf_adv_time},
       {L"--self-test-suite-entry-utility13", 2, &selftest_suite_entry_utility13},
       {L"--self-test-pf-adv-app-suite", 2, &selftest_pf_adv_app},

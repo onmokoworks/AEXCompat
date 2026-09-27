@@ -38,6 +38,7 @@ struct RuntimeAdmissionRequest {
 
 struct RuntimeContext {
   std::filesystem::path plugin_path;
+  std::string admitted_plugin_sha256;
   HMODULE module{};
   DLL_DIRECTORY_COOKIE sealed_directory_cookie{};
   // Cookies for the in-place dependency search directories (issue #751);

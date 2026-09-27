@@ -19,6 +19,7 @@
 #include "worker_ui_event_execution.hpp"
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -345,7 +346,8 @@ worker_runtime::smart_execution::Result smart_render_once(
     int32_t external_current_time = 0, int32_t external_time_step = 1,
     int32_t external_total_time = 1, uint32_t external_time_scale = 1,
     int32_t external_pixel_bytes = 4,
-    worker_runtime::smart_execution::SessionFrame* session = nullptr);
+    worker_runtime::smart_execution::SessionFrame* session = nullptr,
+    uint32_t advertised_out_flags2 = 0);
 std::string sha256_bytes(const unsigned char* data, std::size_t size);
 void record_output_checksum_detail(const unsigned char* rgba, int32_t width,
                                    int32_t height, int32_t pixel_bytes);
@@ -460,6 +462,7 @@ void apply_session_ui_action(const SessionUiAction* action) {
 // fail-closed decisions stay identical across both session flavors.
 struct SessionFrameOutput {
   int32_t frame_error{0};
+  bool gpu_float32_transport{false};
   // True only when a Smart selector returned success but the host's guarded
   // output remained invalid/untouched. This is distinct from a plug-in
   // returning the same numeric -6 itself.
@@ -483,6 +486,7 @@ struct SessionFrameOutput {
   std::string output_hash;
   bool guard_violation{false};
   bool output_validation_failed{false};
+  worker_runtime::output_coverage::Result output_coverage{};
   // A SmartFX frame whose PreRender returned a legally empty result_rect (#278):
   // the render selector was skipped and there are no output pixels. This is a
   // valid contract the one-shot path reports as a zero-dimension output, so the
@@ -552,6 +556,8 @@ void run_session_frame_loop(
   // where the plug-in identity itself changes: a cluster swap.
   int32_t dispatch_bytes = worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
       pixel_bytes, advertised_out_flags, advertised_out_flags2);
+  uint32_t current_advertised_out_flags = advertised_out_flags;
+  uint32_t current_advertised_out_flags2 = advertised_out_flags2;
   outcome.dispatch_pixel_bytes = dispatch_bytes;
 
   const int32_t layer_slot_count =
@@ -829,6 +835,8 @@ void run_session_frame_loop(
       // later frame answers -47 and no dispatch happens, so the session keeps
       // the depth it had rather than publishing one that never ran.
       if (!swapped_plugin_setup_failed) {
+        current_advertised_out_flags = swap.advertised_out_flags;
+        current_advertised_out_flags2 = swap.advertised_out_flags2;
         dispatch_bytes = worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
             pixel_bytes, swap.advertised_out_flags, swap.advertised_out_flags2);
         outcome.dispatch_pixel_bytes = dispatch_bytes;
@@ -894,6 +902,7 @@ void run_session_frame_loop(
     // And with no fault: a startup, custom-UI, or previous-frame fault is not
     // this frame's either (issue #983).
     aexcompat::worker_runtime::reset_selector_fault_attribution();
+    aexcompat::worker_runtime::reset_render_selector_timing();
     const auto& time_object = std::get<JsonValue::Object>(time_value->value);
     int32_t current_time{};
     int32_t current_scale{};
@@ -947,6 +956,36 @@ void run_session_frame_loop(
       frame_ui = &frame_ui_action;
     }
     const uint32_t expected_generation = static_cast<uint32_t>(frame_index) + 1;
+    std::chrono::steady_clock::time_point setup_started{};
+    uint64_t worker_setup_ns = 0;
+    uint64_t worker_render_ns = 0;
+    std::chrono::steady_clock::time_point render_completed{};
+    const auto append_performance = [&](std::string& reply) {
+      uint64_t selector_ns = 0;
+      reply += ",\"performance\":{\"worker_setup_ns\":";
+      if (setup_started != std::chrono::steady_clock::time_point{} &&
+          render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(worker_setup_ns);
+      else
+        reply += "null";
+      reply += ",\"worker_render_ns\":";
+      if (render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(worker_render_ns);
+      else
+        reply += "null";
+      reply += ",\"render_selector_ns\":";
+      if (aexcompat::worker_runtime::render_selector_timing_ns(selector_ns))
+        reply += std::to_string(selector_ns);
+      else
+        reply += "null";
+      reply += ",\"worker_finalize_ns\":";
+      if (render_completed != std::chrono::steady_clock::time_point{})
+        reply += std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - render_completed).count());
+      else
+        reply += "null";
+      reply += "}";
+    };
     // Error responses carry no output or generation: a frame rejected before
     // or during rendering never updates the output slot, so there is no slot
     // metadata to report (protocol §4.3).
@@ -1014,7 +1053,8 @@ void run_session_frame_loop(
     };
     const auto respond_ok = [&](int32_t frame_width, int32_t frame_height,
                                 int32_t frame_rowbytes, std::size_t packed_bytes,
-                                int32_t frame_origin_x, int32_t frame_origin_y) {
+                                int32_t frame_origin_x, int32_t frame_origin_y,
+                                int32_t captured_pixel_bytes) {
       std::string reply;
       reply.reserve(256);
       reply += "{\"v\":1,\"type\":\"frame_done\",\"frame_index\":";
@@ -1037,8 +1077,23 @@ void run_session_frame_loop(
       reply += std::to_string(frame_origin_x);
       reply += ",\"origin_y\":";
       reply += std::to_string(frame_origin_y);
+      // An audio-only passthrough copies host pixels; it did not dispatch the
+      // plug-in at any depth and must not claim depth provenance.
+      if (captured_pixel_bytes != 0) {
+        reply += ",\"advertised_out_flags\":";
+        reply += std::to_string(current_advertised_out_flags);
+        reply += ",\"advertised_out_flags2\":";
+        reply += std::to_string(current_advertised_out_flags2);
+        reply += ",\"advertised_depth_supported\":";
+        reply += dispatch_bytes == pixel_bytes ? "true" : "false";
+        reply += ",\"planned_dispatch_pixel_bytes\":";
+        reply += std::to_string(dispatch_bytes);
+        reply += ",\"dispatch_pixel_bytes\":";
+        reply += std::to_string(captured_pixel_bytes);
+      }
       reply += ",\"guards_intact\":true},\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
+      append_performance(reply);
       reply += "}";
       return channels.write_message(reply);
     };
@@ -1057,6 +1112,7 @@ void run_session_frame_loop(
       reply += "\",\"packed_bytes\":0,\"guards_intact\":true,\"empty_result\":true},";
       reply += "\"render_error\":0,\"generation\":";
       reply += std::to_string(expected_generation);
+      append_performance(reply);
       reply += "}";
       return channels.write_message(reply);
     };
@@ -1098,6 +1154,7 @@ void run_session_frame_loop(
       outcome.invariant_failure = true;
       break;
     }
+    setup_started = std::chrono::steady_clock::now();
     std::memcpy(frame_rgba.data(), channels.view() + input_offset, frame_rgba.size());
     // A swapped-in plug-in whose GLOBAL/PARAMS setup failed can never render;
     // answer every frame with the reserved continuation-impossible code and
@@ -1177,7 +1234,7 @@ void run_session_frame_loop(
       outcome.rowbytes = max_width * pixel_bytes;
       if (!respond_ok(max_width, max_height, max_width * pixel_bytes,
                       static_cast<std::size_t>(max_width) * max_height * pixel_bytes,
-                      0, 0)) {
+                      0, 0, 0)) {
         outcome.protocol_violation = true;
         break;
       }
@@ -1193,9 +1250,17 @@ void run_session_frame_loop(
       outcome.protocol_violation = true;
       break;
     }
+    const auto render_started = std::chrono::steady_clock::now();
+    worker_setup_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            render_started - setup_started).count());
     const SessionFrameOutput frame =
         render_frame(entry, current_time, frame_rgba, captured, frame_layers,
                      frame_override, frame_ui, dispatch_bytes);
+    render_completed = std::chrono::steady_clock::now();
+    worker_render_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            render_completed - render_started).count());
     // Aux channel chunks are host-owned and cannot outlive one frame's render
     // lifecycle (end_render's cleanup for the one-shot path); the manifest
     // itself stays active across frames.
@@ -1212,6 +1277,7 @@ void run_session_frame_loop(
     outcome.rowbytes = frame.width * pixel_bytes;
     outcome.input_hash = frame.input_hash;
     outcome.output_hash = frame.output_hash;
+    outcome.output_coverage = frame.output_coverage;
     // Corruption evidence outranks the render error: a plug-in that wrote
     // outside its guarded private buffer invalidates the session even when it
     // also reported a nonzero error. Host-protection invariant, fail closed.
@@ -1286,7 +1352,8 @@ void run_session_frame_loop(
     // dispatched) conforms through the same step.
     const int32_t captured_pixel_bytes =
         aexcompat::render_pixel_transport::conform_pixel_depth(
-            captured, expected_pixels, pixel_bytes, dispatch_bytes);
+            captured, expected_pixels, pixel_bytes, dispatch_bytes,
+            frame.gpu_float32_transport);
     // 0 means the frame did not arrive at a depth anything dispatched it at.
     // The size check below cannot stand in for this: a refused stride that
     // happens to equal the session depth passes it, and the un-narrowed buffer
@@ -1296,12 +1363,10 @@ void run_session_frame_loop(
       outcome.invariant_failure = true;
       break;
     }
-    // A conversion repacks every row at the slot's stride, so whatever padding
-    // the narrow buffer carried is gone and the reported rowbytes follows it.
-    // Without one the plug-in's own stride is the truth and is reported as-is.
-    const int32_t reported_rowbytes = captured_pixel_bytes != pixel_bytes
-        ? frame.width * pixel_bytes
-        : frame.rowbytes;
+    // `captured` is the packed session-slot image even when no depth conversion
+    // was needed. The plug-in's world can have padding, but the broker's frame
+    // protocol always describes the transferred image, not that private world.
+    const int32_t reported_rowbytes = frame.width * pixel_bytes;
     if (captured.size() != expected_pixels * pixel_bytes) {
       respond_error(kSessionOutputCaptureError);
       outcome.invariant_failure = true;
@@ -1357,7 +1422,7 @@ void run_session_frame_loop(
     // (issue #690). The final report's output_hash keeps the one-shot
     // internal-ARGB definition (protocol §4.3).
     if (!respond_ok(frame.width, frame.height, reported_rowbytes, captured.size(),
-                    frame.origin_x, frame.origin_y)) {
+                    frame.origin_x, frame.origin_y, captured_pixel_bytes)) {
       outcome.protocol_violation = true;
       break;
     }
@@ -1429,6 +1494,7 @@ RenderSessionOutcome run_render_session(
             &captured, &classic_output);
         frame.guard_violation = !frame_guards;
         frame.output_validation_failed = classic_output.validation_failed;
+        frame.output_coverage = classic_output.output_coverage;
         // Sign conversion, not a copy: `ClassicFrameOutput::input_origin_*` is
         // PF_OutData::origin, and this field is the layer-relative origin the
         // smart path feeds from `result_rect[0]`. The rule itself lives in
@@ -1493,7 +1559,8 @@ SmartRenderSessionOutcome run_smart_render_session(
                     current_entry, input, output, case_id,
                     frame_override ? frame_override : requested, &frame_rgba,
                     max_width, max_height, frame_layers, current_time, time_step,
-                    total_time, time_scale, dispatch_bytes, attempt_frame);
+                    total_time, time_scale, dispatch_bytes, attempt_frame,
+                    advertised_out_flags2);
               });
         };
         worker_runtime::smart_execution::Result frame_result =
@@ -1505,7 +1572,7 @@ SmartRenderSessionOutcome run_smart_render_session(
         // the only signal. The 14 arrives before the plug-in touches suites,
         // worlds, or checkouts, so re-run the frame once through the GPU transport.
         if (frame_result.render_error == 14 &&
-            (read<uint32_t>(output, 400) & (1u << 25)) != 0 &&
+            (advertised_out_flags2 & (1u << 25)) != 0 &&
             !worker_runtime::smart_setup::force_gpu_retry_requested()) {
           const worker_runtime::smart_setup::ForceGpuRetryScope force_gpu;
           captured.clear();
@@ -1557,6 +1624,7 @@ SmartRenderSessionOutcome run_smart_render_session(
           frame_result = render_attempt(&retry_frame);
         }
         outcome.last = frame_result;
+        frame.gpu_float32_transport = frame_result.gpu_render_dispatched;
         frame.width = frame_result.output_width;
         frame.height = frame_result.output_height;
         // The GPU transport captures float32 ARGB whatever the session asked

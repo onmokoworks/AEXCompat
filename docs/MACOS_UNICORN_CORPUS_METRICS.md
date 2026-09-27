@@ -1,5 +1,32 @@
 # macOS arm64 Unicorn corpus metrics
 
+## Dated local reference run (2026-08-20)
+
+The Apple Silicon arm64 Unicorn worker produced the following result in a
+Mac-local run. This is a historical measurement, not a current project-wide
+compatibility rate and not a Windows native-worker result.
+
+| Result | AEX files |
+|---|---:|
+| Produced an image (`rendered`) | 27 |
+| Stopped at an unsupported import | 4 |
+| Worker exited | 8 |
+
+Static PE analysis selected 39 of the 969 locally inventoried AEX files for
+this execution route. The other 930 were outside this run; they were not
+classified as failed or skipped. `rendered` does not establish After Effects
+pixel equivalence or complete parameter and GPU-path support.
+
+- Source baseline: `b99dc6bad11d8dd38fd4ed54f6ba020c431dc614`
+- Worker SHA-256: `6581854c2d8eaa015f7c79146b424e29818c91ed4cc1db478124fb75f4b1213d`
+- Private report SHA-256: `53221497a11227f2f5df7db6afdc245ccba08a91e3f437620107d0bd2f68253d`
+
+Commercial/private AEX binaries and the corpus are not distributed with the
+repository. These identities preserve the scope of the dated observation; the
+private report is not published here.
+
+## Reproduction and reporting contract
+
 `tools/sweep_macos_x64_aex.py` measures the Windows x64 AEX corpus that is
 available on a Mac through the arm64 Unicorn correctness backend. The normal
 invocation selects only Unicorn. It does not launch a Windows machine, VM,

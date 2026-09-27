@@ -37,6 +37,7 @@ AuxiliaryOptionResult strip_auxiliary_options(
   bool saw_cluster_manifest = false, saw_companion_manifest = false;
   bool saw_dependency_dirs = false;
   bool saw_plugin_data_selector = false;
+  bool saw_render_diagnostic_layout = false;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -80,6 +81,10 @@ AuxiliaryOptionResult strip_auxiliary_options(
                hooks.set_plugin_data_selector && !saw_plugin_data_selector) {
       accepted = hooks.set_plugin_data_selector(hooks.context, value);
       saw_plugin_data_selector = accepted;
+    } else if (equals(flag, L"--render-diagnostic-layout-v1") &&
+               hooks.parse_render_diagnostic_layout && !saw_render_diagnostic_layout) {
+      accepted = hooks.parse_render_diagnostic_layout(hooks.context, value);
+      saw_render_diagnostic_layout = accepted;
     } else {
       break;
     }

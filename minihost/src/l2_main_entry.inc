@@ -57,6 +57,10 @@ bool parse_l2_conformance_render_settings(void*, const wchar_t* value) {
   return aexcompat::worker_render_report::parse_conformance_render_settings(value);
 }
 
+bool parse_l2_render_diagnostic_layout(void*, const wchar_t* value) {
+  return aexcompat::render::parse_diagnostic_world_layout(value);
+}
+
 // Captures the AEXRMA1 manifest reference carried by a GPU render's
 // `--runtime-module-authorization-v1` trailer (#290/#300). The render/smart
 // worker accepts a sealed basename or, for #815 in-place dispatch, the
@@ -99,8 +103,11 @@ bool __cdecl teardown_session_providers(void* opaque) noexcept {
   auto* context = static_cast<SessionPreUnloadContext*>(opaque);
   const bool companions_ok =
       !context || !context->companions || context->companions->shutdown();
-  const bool bib_ok = teardown_bib_suite(nullptr);
-  return companions_ok && bib_ok;
+  const bool cor_ok = teardown_cor_birth_sequence();
+  // A failed/partially faulted Death leaves support-library state unknown;
+  // do not run BIB termination through it. The session fails closed.
+  const bool bib_ok = cor_ok && teardown_bib_suite(nullptr);
+  return companions_ok && cor_ok && bib_ok;
 }
 
 // Captures the in-place dependency search directories carried by a
@@ -226,6 +233,23 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
       ? invoke_sequence_selector(entry, kSequenceResetup, input.data(), output.data()) : -1;
   std::cerr << "stage:sequence_resetup_end error=" << lifecycle_errors[1] << "\n" << std::flush;
   write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  if (lifecycle_errors[1] == 0) {
+    aexcompat::render_lifecycle::Layout frame_layout{};
+    frame_layout.out_width = kOutWidth;
+    frame_layout.out_height = kOutHeight;
+    frame_layout.out_origin = kOutOrigin;
+    frame_layout.in_origin =
+        aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET;
+    frame_layout.world_width =
+        aexcompat::abi::x86_64_windows::LAYER_WIDTH_OFFSET;
+    frame_layout.world_height =
+        aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET;
+    aexcompat::render_lifecycle::prepare_frame_setup_input(
+        frame_layout, input.data(), output.data(), lifecycle_world.data());
+    std::cerr << "stage:frame_setup_offer source=l2_probe_world width="
+              << read<int32_t>(output, kOutWidth) << " height="
+              << read<int32_t>(output, kOutHeight) << "\n";
+  }
   std::cerr << "stage:frame_setup_begin\n" << std::flush;
   lifecycle_errors[2] = lifecycle_errors[1] == 0 ? entry(kFrameSetup, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
   std::cerr << "stage:frame_setup_end error=" << lifecycle_errors[2] << "\n" << std::flush;
@@ -246,15 +270,31 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
 
 struct L2PointDefaultProbe {
   bool frame_setup_seen{};
+  int32_t offered_width{};
+  int32_t offered_height{};
+  std::array<int32_t, 4> origin_on_entry{};
   std::array<double, 2> point{};
   std::array<double, 3> point3d{};
 };
 L2PointDefaultProbe g_l2_point_default_probe;
 
 int32_t __cdecl l2_point_default_probe_entry(
-    int32_t selector, void*, void*, void** params, void*, void*) {
+    int32_t selector, void* input, void* output, void** params, void*, void*) {
   if (selector != kFrameSetup) return 0;
   if (!params || !params[1] || !params[2]) return 4;
+  std::memcpy(&g_l2_point_default_probe.offered_width,
+              static_cast<const std::byte*>(output) + kOutWidth,
+              sizeof(int32_t));
+  std::memcpy(&g_l2_point_default_probe.offered_height,
+              static_cast<const std::byte*>(output) + kOutHeight,
+              sizeof(int32_t));
+  std::memcpy(g_l2_point_default_probe.origin_on_entry.data(),
+              static_cast<const std::byte*>(output) + kOutOrigin,
+              2 * sizeof(int32_t));
+  std::memcpy(g_l2_point_default_probe.origin_on_entry.data() + 2,
+              static_cast<const std::byte*>(input) +
+                  aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET,
+              2 * sizeof(int32_t));
   int32_t point_x = 0;
   int32_t point_y = 0;
   std::memcpy(&point_x, static_cast<const std::byte*>(params[1]) + 56,
@@ -298,6 +338,12 @@ bool verify_l2_point_default_units() {
 
   std::array<std::byte, kInSize> input{};
   std::array<std::byte, kOutSize> output{};
+  write<int32_t>(output, kOutOrigin, 9);
+  write<int32_t>(output, kOutOrigin + sizeof(int32_t), -7);
+  write<int32_t>(input,
+      aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET, 9);
+  write<int32_t>(input,
+      aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET, -7);
   std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
   bool lifecycle_data_null = false;
   bool user_changed_ok = false;
@@ -309,6 +355,10 @@ bool verify_l2_point_default_units() {
       conditional_ui_ok, 256, 144);
   const bool passed = !lifecycle_exit &&
       g_l2_point_default_probe.frame_setup_seen &&
+      g_l2_point_default_probe.offered_width == 1 &&
+      g_l2_point_default_probe.offered_height == 1 &&
+      g_l2_point_default_probe.origin_on_entry ==
+          std::array<int32_t, 4>{0, 0, 0, 0} &&
       g_l2_point_default_probe.point == std::array<double, 2>{64.0, 72.0} &&
       g_l2_point_default_probe.point3d ==
           std::array<double, 3>{64.0, 72.0, 108.0} &&
@@ -1784,6 +1834,8 @@ struct ClusterSwapContext {
       run_bootstrap;
   int32_t current_plugin_index{0};
   int32_t current_global_error{-1};
+  uint32_t current_advertised_out_flags{};
+  uint32_t current_advertised_out_flags2{};
   // String table of the currently loaded plug-in (#396): swapped in place so
   // the thread-local active pointer tracks the session's current plug-in.
   aexcompat::aex_strings::StringTable aex_string_table;
@@ -1909,6 +1961,12 @@ aexcompat::worker_render_session::SwapPluginResult cluster_swap_invoke(
       if (result.params_setup_error == 0) result.params_setup_error = -1;
     }
   }
+  // A failed member never rendered; retain the last dispatchable member's
+  // advertised flags alongside the last dispatched/captured pixel depth.
+  if (result.global_setup_error == 0 && result.params_setup_error == 0) {
+    context.current_advertised_out_flags = bootstrap.advertised_out_flags;
+    context.current_advertised_out_flags2 = bootstrap.advertised_out_flags2;
+  }
   return result;
 }
 
@@ -1971,6 +2029,7 @@ int run_discovery_session(const std::wstring& manifest_argument,
   bool protocol_violation = false;
   bool swap_failure = false;
   bool bib_teardown_failed = false;
+  bool cor_teardown_failed = false;
   // Whether the session's baseline post_load snapshot was taken (the first
   // successful load). An in-place load failure retires the previous plug-in
   // without loading a successor, so without this latch the next successful
@@ -1979,8 +2038,9 @@ int run_discovery_session(const std::wstring& manifest_argument,
 
   // Terminal teardown shared by every exit path after the session loop. The
   // ownership order is explicit (owner review P1-1, amended by issue #474's
-  // deferred release): GLOBAL_SETDOWN → plug-in/module audit → BIB owned-only
-  // Terminate (session-global, runs exactly once here — never per swap — and
+  // deferred release): GLOBAL_SETDOWN → plug-in/module audit → PF/COR Death
+  // (when COR Birth succeeded) → BIB owned-only Terminate. The latter two
+  // are session-global, run exactly once here — never per swap — and
   // never for a borrowed, missing, or init-failed BIB). No plug-in image or
   // pin is freed mid-process: everything unloads in one loader-ordered pass
   // at process exit. Cookie removal, stdout restore, final report follow.
@@ -1996,13 +2056,13 @@ int run_discovery_session(const std::wstring& manifest_argument,
         }
       }
       audit.pre_unload = wr::capture_module_audit();
-      if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
       current_module = nullptr;
-    } else {
-      // No plug-in survived to teardown, but an owned BIB may still be live
-      // from an earlier plug-in; terminate it before the pins release.
-      if (!teardown_bib_suite(nullptr)) bib_teardown_failed = true;
     }
+    // A previous member may have birthed COR even if no current plug-in
+    // survived. Retired images remain mapped until process exit (#474).
+    if (!teardown_cor_birth_sequence()) cor_teardown_failed = true;
+    if (!cor_teardown_failed && !teardown_bib_suite(nullptr))
+      bib_teardown_failed = true;
     // The sealed-directory cookie stays too: a detaching DLL may delay-load
     // from the sealed root during process teardown.
     runtime_hooks.restore_native_stdout();
@@ -2010,13 +2070,14 @@ int run_discovery_session(const std::wstring& manifest_argument,
         (audit.pre_unload.status == "passed" && wr::module_audit_passed());
     std::ostringstream report;
     report << "{\"schema_version\":1,\"stage\":\"discovery_session\",\"status\":\""
-           << (exit_code == 0 && !bib_teardown_failed
+           << (exit_code == 0 && !bib_teardown_failed && !cor_teardown_failed
                    ? "discovery_session_completed" : "discovery_session_failed")
            << "\",\"bib_terminations\":" << bib_termination_attempt_count()
            << ",\"module_audit\":" << wr::module_audit_json() << "}\n";
     if (!wr::emit_protocol_stdout(report.str())) return 23;
     if (!audit_ok && exit_code == 0) return 14;
-    if (bib_teardown_failed && exit_code == 0) return 25;
+    if ((bib_teardown_failed || cor_teardown_failed) && exit_code == 0)
+      return 25;
     return exit_code;
   };
 
@@ -2353,6 +2414,11 @@ int run_discovery_session(const std::wstring& manifest_argument,
 int worker_main_impl(int argc, wchar_t **argv) {
   if (const int bootstrap_error = configure_worker_entry_bootstrap())
     return bootstrap_error;
+  // Install before every AEX-loading route, including GPU module preflight.
+  // Only the bounded fault-site marker is unconditional; minidump capture
+  // still needs authenticated inherited handles and fails closed if malformed.
+  if (!aexcompat::worker_runtime::minidump::configure_from_inherited_handle())
+    return 3;
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pipl-entrypoint") {
     const bool passed = verify_pipl_entrypoint_parser();
     std::cout << "{\"pipl_entrypoint\":\"" << (passed ? "passed" : "failed")
@@ -2374,6 +2440,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
     std::cout << "{\"l2_point_default_units\":\""
               << (passed ? "passed" : "failed")
               << "\",\"width\":256,\"height\":144,"
+                 "\"frame_setup_offer\":["
+              << g_l2_point_default_probe.offered_width << ','
+              << g_l2_point_default_probe.offered_height << "],"
+                 "\"origin_on_entry\":["
+              << g_l2_point_default_probe.origin_on_entry[0] << ','
+              << g_l2_point_default_probe.origin_on_entry[1] << ','
+              << g_l2_point_default_probe.origin_on_entry[2] << ','
+              << g_l2_point_default_probe.origin_on_entry[3] << "],"
                  "\"point\":[64,72],\"point3d\":[64,72,108]}\n";
     return passed ? 0 : 74;
   }
@@ -2452,12 +2526,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
   }
   if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))
     return *selftest_exit;
-  // The broker passes only an authenticated inherited file handle via
-  // environment (issue #18). No dump directory or dump path is accepted on the
-  // worker command line, so nothing is consumed from argv here. Fails closed on
-  // a real misconfiguration; a no-op when opt-in is off.
-  if (!aexcompat::worker_runtime::minidump::configure_from_inherited_handle())
-    return 3;
 aexcompat::worker_runtime::invocation::InvocationState invocation;
 
 
@@ -2484,7 +2552,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         parse_l2_conformance_render_settings,
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
         capture_l2_companion_manifest, capture_l2_dependency_search_dirs,
-        capture_plugin_data_selector},
+        capture_plugin_data_selector, parse_l2_render_diagnostic_layout},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2499,7 +2567,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
           parse_l2_conformance_render_settings,
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
         capture_l2_companion_manifest, capture_l2_dependency_search_dirs,
-        capture_plugin_data_selector},
+        capture_plugin_data_selector, parse_l2_render_diagnostic_layout},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2624,6 +2692,10 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     return admission_error;
   }
   WorkerSession session(runtime_context, trace_writer.get(), &g_trace_writer);
+  // A one-shot parameter probe has no next plug-in to load. Keep its image
+  // mapped until process exit: unloading PSL_Adjustments explicitly after
+  // GLOBAL_SETDOWN runs dvascripting's detach handlers while COR is live.
+  if (invocation.params_only_mode) session.set_deferred_module_release();
   SessionPreUnloadContext pre_unload_context{&companion_runtime};
   (void)session.set_pre_unload_hook(
       &teardown_session_providers, &pre_unload_context);
@@ -2896,6 +2968,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     cluster_swap_context.run_bootstrap = run_bootstrap;
     cluster_swap_context.current_plugin_index = 0;
     cluster_swap_context.current_global_error = global_error;
+    cluster_swap_context.current_advertised_out_flags = advertised_out_flags;
+    cluster_swap_context.current_advertised_out_flags2 = advertised_out_flags2;
     cluster_swap_hook.context = &cluster_swap_context;
     cluster_swap_hook.invoke = &cluster_swap_invoke;
     cluster_swap_hook.plugin_count =
@@ -3072,6 +3146,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   int32_t get_flattened_sequence_data_error = -1;
   bool original_sequence_preserved = false;
   int32_t render_error = -1;
+  aexcompat::worker_runtime::output_coverage::Result classic_output_coverage{};
   SmartResult smart{};
   int32_t smart_session_frames_attempted = 0;
   int32_t smart_session_sequence_setup_error = -1;
@@ -3148,6 +3223,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     get_flattened_sequence_data_error = dispatch.get_flattened_sequence_data_error;
     original_sequence_preserved = dispatch.original_sequence_preserved;
     render_error = dispatch.render_error;
+    classic_output_coverage = dispatch.output_coverage;
     session_dispatch_pixel_bytes = dispatch.dispatch_pixel_bytes;
   } else if (is_smart_worker()) {
     const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
@@ -3228,29 +3304,31 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   restore_native_stdout();
   ClassicCompletionInputs classic_inputs;
   classic_inputs.render_error = render_error;
+  classic_inputs.output_coverage = classic_output_coverage;
   classic_inputs.global_error = global_error;
   classic_inputs.params_error = params_error;
   classic_inputs.setdown_error = setdown_error;
   classic_inputs.parameter_count_contract_valid = parameter_count_contract_valid;
   classic_inputs.guards_intact = guards_intact;
   classic_inputs.arbitrary_defaults_disposed = arbitrary_defaults_disposed;
-  // `depth_supported` is read downstream as "the depth negotiation refused
-  // this run": `render_contract.rs` turns a false into classification
-  // `unsupported_pixel_depth` and drops the selector error with it, and
-  // `run-conformance-bundle.py` calls the run "unsupported" (there a
-  // meaningful selector error still wins). A session that dispatched the
-  // plug-in at another depth and rendered did not refuse anything, so it
-  // reports what it did: served the depth. What the plug-in advertised and
-  // what it was actually dispatched at are recorded beside it, which is where
-  // a reader looks for the conversion.
+  // A session can serve the requested depth by conversion even when the
+  // active plug-in did not advertise it. The advertised fields in a cluster
+  // report describe the current member, not the launch member.
   classic_inputs.depth_supported =
       invocation.render_session_mode ? session_depth_ok : depth_supported;
-  classic_inputs.advertised_depth_supported = depth_supported;
+  classic_inputs.advertised_depth_supported = cluster_session_active
+      ? aexcompat::worker_runtime::effect_bootstrap::dispatch_pixel_bytes(
+            invocation.external_pixel_bytes,
+            cluster_swap_context.current_advertised_out_flags,
+            cluster_swap_context.current_advertised_out_flags2) == invocation.external_pixel_bytes
+      : depth_supported;
   classic_inputs.dispatch_pixel_bytes = session_dispatch_pixel_bytes;
   classic_inputs.session_pixel_bytes =
       invocation.render_session_mode ? invocation.external_pixel_bytes : 0;
-  classic_inputs.advertised_out_flags = advertised_out_flags;
-  classic_inputs.advertised_out_flags2 = advertised_out_flags2;
+  classic_inputs.advertised_out_flags = cluster_session_active
+      ? cluster_swap_context.current_advertised_out_flags : advertised_out_flags;
+  classic_inputs.advertised_out_flags2 = cluster_session_active
+      ? cluster_swap_context.current_advertised_out_flags2 : advertised_out_flags2;
   classic_inputs.image_render_supported = image_render_supported;
   classic_inputs.nop_render_advertised = nop_render_advertised;
   classic_inputs.input_write_advertised = input_write_advertised;
@@ -3329,15 +3407,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   smart_inputs.advertised_out_flags2 = advertised_out_flags2;
   smart_inputs.parameter_count_contract_valid = parameter_count_contract_valid;
   smart_inputs.arbitrary_defaults_disposed = arbitrary_defaults_disposed;
-  // `depth_supported` is read downstream as "the depth negotiation refused
-  // this run": `render_contract.rs` turns a false into classification
-  // `unsupported_pixel_depth` and drops the selector error with it, and
-  // `run-conformance-bundle.py` calls the run "unsupported" (there a
-  // meaningful selector error still wins). A session that dispatched the
-  // plug-in at another depth and rendered did not refuse anything, so it
-  // reports what it did: served the depth. What the plug-in advertised and
-  // what it was actually dispatched at are recorded beside it, which is where
-  // a reader looks for the conversion.
+  // Session conversion serves the requested depth even when the plug-in did
+  // not advertise it; keep the raw advertisement separate from that result.
   smart_inputs.depth_supported =
       invocation.render_session_mode ? session_depth_ok : depth_supported;
   smart_inputs.advertised_depth_supported = depth_supported;

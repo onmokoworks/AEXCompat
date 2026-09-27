@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_parameter_execution.hpp"
+#include "worker_output_coverage.hpp"
 #include "worker_request_parser.hpp"
 #include "worker_smart_runtime.hpp"
 
@@ -49,6 +50,10 @@ struct Result {
   // successful selector. Kept separate from non-finite/otherwise-invalid
   // output so only this exact no-output case can authorize route fallback.
   bool output_untouched{};
+  output_coverage::Result output_coverage{};
+  // Device/VideoFrame worlds overwrite the host buffer with independently
+  // initialized pixels. The host seed cannot attest their write coverage.
+  bool output_coverage_external_world{};
   bool gpu_render_possible{};
   bool gpu_render_dispatched{};
   int32_t checkout_time{};
@@ -122,7 +127,7 @@ using Execute = Result (*)(EffectEntry, Input&, Output&, const std::string&,
     const RequestedAssignments*, const std::vector<unsigned char>*,
     int32_t, int32_t,
     const std::vector<ExternalLayerInput>*, int32_t, int32_t, int32_t,
-    uint32_t, int32_t, SessionFrame*);
+    uint32_t, int32_t, SessionFrame*, uint32_t);
 
 struct Hooks {
   Execute execute{};
@@ -136,6 +141,7 @@ Result render_once(EffectEntry, Input&, Output&, const std::string&,
                    int32_t = 0, int32_t = 0,
                    const std::vector<ExternalLayerInput>* = nullptr,
                    int32_t = 0, int32_t = 1, int32_t = 1,
-                   uint32_t = 1, int32_t = 4, SessionFrame* = nullptr);
+                   uint32_t = 1, int32_t = 4, SessionFrame* = nullptr,
+                   uint32_t advertised_out_flags2 = 0);
 
 }  // namespace aexcompat::worker_runtime::smart_execution

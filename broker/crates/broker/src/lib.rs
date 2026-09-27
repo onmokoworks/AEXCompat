@@ -16,6 +16,7 @@ pub mod opencl_icd_adapter_binding;
 pub mod opencl_icd_collector;
 pub mod opencl_runtime_probe;
 pub mod parameter_animation;
+pub mod performance_diagnostics;
 pub mod plugin_dependency_closure;
 pub mod pnp_opencl_runtime_collector;
 #[cfg(windows)]
@@ -23,6 +24,7 @@ pub mod render;
 pub mod render_approval;
 #[path = "image_render/artifacts.rs"]
 pub mod render_artifacts;
+pub mod render_differential;
 pub mod render_fixture;
 pub mod render_pixel_format;
 #[cfg(windows)]

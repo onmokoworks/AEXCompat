@@ -76,6 +76,11 @@ struct Hooks {
   void (*cleanup_aux)(void*){};
 };
 
+// Prepare the frame-local geometry visible to FRAME_SETUP. The inspection
+// route uses this before its direct selector call with its own probe world.
+void prepare_frame_setup_input(const Layout& layout, void* input, void* output,
+                               const void* world);
+
 RenderLifecycle begin_frame(const Hooks& hooks, const Layout& layout,
                             void* input, void* output, void** params, void* world);
 int32_t end_frame(const Hooks& hooks, const Layout& layout, void* input,

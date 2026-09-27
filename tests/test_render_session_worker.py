@@ -20,7 +20,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKER = ROOT / "target" / "minihost-build" / "aex_worker.exe"
+WORKER = Path(os.environ.get(
+    "AEXCOMPAT_TEST_WORKER_PATH",
+    ROOT / "target" / "minihost-build" / "aex_worker.exe"))
 AEX = ROOT / "target" / "pf-sampling-probe-build" / "Release" / "pf_sampling_probe.aex"
 PARAMETER_ECHO_AEX = (
     ROOT / "target" / "pf-parameter-echo-probe-build" / "Release"
@@ -388,6 +390,9 @@ def test_classic_session_narrows_a_plug_in_that_does_not_advertise_the_depth():
         assert output["pixel_format"] == "argb16"
         assert output["rowbytes"] == WIDTH * 8
         assert output["packed_bytes"] == WIDTH * HEIGHT * 8
+        assert output["advertised_depth_supported"] is False
+        assert output["planned_dispatch_pixel_bytes"] == 4
+        assert output["dispatch_pixel_bytes"] == 4
         transport.send({"v": 1, "type": "close"})
         code, stdout, stderr = _finish(process)
         assert code == 0, (code, stderr[-800:])
@@ -427,6 +432,9 @@ def test_classic_session_dispatches_a_float_only_plug_in_at_float32():
         assert output["pixel_format"] == "argb16"
         assert output["rowbytes"] == WIDTH * 8
         assert output["packed_bytes"] == WIDTH * HEIGHT * 8
+        assert output["advertised_depth_supported"] is False
+        assert output["planned_dispatch_pixel_bytes"] == 16
+        assert output["dispatch_pixel_bytes"] == 16
         transport.send({"v": 1, "type": "close"})
         code, stdout, stderr = _finish(process)
         assert code == 0, (code, stderr[-800:])
@@ -459,6 +467,11 @@ def test_session_renders_frames_with_persistent_sequence_and_packed_extents():
             assert done["status"] == "ok", done
             assert done["render_error"] == 0
             assert done["generation"] == frame_index + 1
+            performance = done["performance"]
+            assert performance["worker_setup_ns"] >= 0
+            assert performance["render_selector_ns"] > 0
+            assert performance["worker_render_ns"] >= performance["render_selector_ns"]
+            assert performance["worker_finalize_ns"] >= 0
             output = done["output"]
             assert output["width"] == WIDTH
             assert output["height"] == HEIGHT
@@ -478,6 +491,8 @@ def test_session_renders_frames_with_persistent_sequence_and_packed_extents():
         assert code == 0, (code, stderr[-500:])
         report = json.loads(stdout.strip())
         assert isinstance(report, dict)
+        assert report["worker_admitted_plugin_sha256"] == hashlib.sha256(
+            AEX.read_bytes()).hexdigest()
     finally:
         if process.poll() is None:
             process.kill()

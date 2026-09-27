@@ -388,6 +388,12 @@ target_link_libraries(aex_worker_runtime_core PRIVATE aexcompat_trace_writer)
 # routes it did not name. Selecting the route at runtime removes the way to
 # express a half-built set.
 add_executable(aex_worker src/worker_main_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
+add_library(worker_unhandled_thread_fault_fixture SHARED
+  ../tests/native/worker_unhandled_thread_fault_fixture.cpp)
+target_compile_features(worker_unhandled_thread_fault_fixture PRIVATE cxx_std_17)
+target_compile_definitions(worker_unhandled_thread_fault_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+add_dependencies(aex_worker worker_unhandled_thread_fault_fixture)
 target_compile_features(aex_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_worker PRIVATE bcrypt aexcompat_trace_writer)
@@ -601,6 +607,14 @@ target_compile_definitions(worker_classic_execution_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_classic_execution_selftest PRIVATE src)
 
+add_executable(worker_output_coverage_selftest
+  ../tests/native/worker_output_coverage_selftest.cpp
+)
+target_compile_features(worker_output_coverage_selftest PRIVATE cxx_std_17)
+target_compile_definitions(worker_output_coverage_selftest PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_include_directories(worker_output_coverage_selftest PRIVATE src)
+
 add_executable(host_audio_runtime_selftest
   ../tests/native/host_audio_runtime_selftest.cpp
   src/host_audio_runtime.cpp
@@ -672,6 +686,12 @@ target_compile_features(worker_legacy_support_init_selftest PRIVATE cxx_std_17)
 target_compile_definitions(worker_legacy_support_init_selftest PRIVATE
   UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_include_directories(worker_legacy_support_init_selftest PRIVATE src)
+
+add_executable(worker_dvacore_main_thread_selftest
+  ../tests/native/worker_dvacore_main_thread_selftest.cpp
+)
+target_compile_features(worker_dvacore_main_thread_selftest PRIVATE cxx_std_17)
+target_include_directories(worker_dvacore_main_thread_selftest PRIVATE src)
 
 add_executable(worker_bee_bib_installer_selftest
   ../tests/native/worker_bee_bib_installer_selftest.cpp

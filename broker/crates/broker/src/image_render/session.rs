@@ -772,7 +772,11 @@ fn render_classic_via_length_one_session(
     // gate below turns that into an error carrying these diagnostics, so
     // without this the failure reads as an unattributed validation failure.
     // The deleted one-shot set the same annotation (#365).
-    if final_report.get("output_pixels_valid") == Some(&Value::Bool(false)) {
+    if final_report["output_coverage"]["validation_failed"] == true
+        || (final_report.get("output_pixels_valid") == Some(&Value::Bool(false))
+            && final_report["pre_render_error"] == 0
+            && final_report["smart_render_selector_error"] == 0)
+    {
         diagnostics["failure_stage"] = json!("output_validation");
     }
     let gate = validate_interactive_worker_report(
@@ -806,6 +810,7 @@ fn render_classic_via_length_one_session(
     };
     // The frame's actual (possibly expanded/shrunk) dimensions drive the PNG
     // encode and the public report, not the launch render dimensions (#261).
+    let frame_depth_provenance = outcome.depth_provenance.clone();
     let (pixels, rendered_width, rendered_height, origin_x, origin_y) = match outcome.status {
         FrameStatus::Rendered {
             pixels,
@@ -1016,6 +1021,14 @@ fn render_classic_via_length_one_session(
     };
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut report = build_interactive_image_report(&final_report, facts);
+    report["depth_provenance"] = json!(frame_depth_provenance);
+    report["visual_diagnostics"] = visual_diagnostics::inspect(
+        Some(request.rgba),
+        (request.width, request.height),
+        &pixels,
+        (rendered_width, rendered_height),
+        request.pixel_format,
+    );
     if let Some(metadata) = artifact_metadata {
         report["output_transport"] = json!(match request.artifact_kind {
             Some(RenderArtifactKind::Raw) => "native_argb_raw+strict_metadata",
@@ -1254,6 +1267,8 @@ impl InteractiveRenderSession {
             parameters,
         )?;
         let render_ms = started.elapsed().as_millis() as u64;
+        let frame_depth_provenance = outcome.depth_provenance.clone();
+        let frame_performance = outcome.performance.clone();
         let session_facts = |frames_ok: u32, frames_errored: u32| {
             json!({
                 "frame_index": frame_index,
@@ -1323,9 +1338,23 @@ impl InteractiveRenderSession {
                     // classification to report; the honest value names the
                     // resident path instead of faking an exit state.
                     "worker_classification": "resident_session",
+                    "depth_provenance": frame_depth_provenance,
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
                     "passed": true,
                 });
+                report["visual_diagnostics"] = visual_diagnostics::inspect(
+                    Some(rgba),
+                    (self.width, self.height),
+                    &pixels,
+                    (frame_width, frame_height),
+                    self.pixel_format,
+                );
                 annotate_interactive_selection(&mut report, self.selection);
                 Ok(report)
             }
@@ -1348,6 +1377,12 @@ impl InteractiveRenderSession {
                     "current_time": current_time,
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
                     "render_error": render_error,
                     "missing_dependency": missing_dependency,
                     // The plug-in's own account of the failure (issue #707).
@@ -1372,6 +1407,12 @@ impl InteractiveRenderSession {
                     "current_time": current_time,
                     "worker_classification": "resident_session",
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
+                    "performance_diagnostics": {
+                        "advisory": true,
+                        "timer": "monotonic_nanoseconds",
+                        "clocks": "independent_broker_and_worker",
+                        "sample": frame_performance,
+                    },
                     "render_error": -6,
                     "host_failure_reason": "smart_output_untouched",
                     "passed": false,
@@ -1703,6 +1744,7 @@ pub(crate) fn build_interactive_image_report(
         "current_time": facts.timing.current_time, "time_step": facts.timing.time_step,
         "total_time": facts.timing.total_time, "time_scale": facts.timing.time_scale,
         "worker_classification": facts.worker_classification,
+        "image_render_supported": worker_report.get("image_render_supported"),
         "worker_diagnostics": facts.diagnostics,
         "suite_leases_balanced": worker_report.get("suite_leases_balanced"),
         "suite_lease_warning": worker_report.get("suite_lease_warning"),
@@ -1885,6 +1927,7 @@ pub(crate) fn build_interactive_image_report(
         "smart_render_selector_error",
         "smart_render_error",
         "output_pixels_valid",
+        "output_coverage",
         "cuda_context_used",
         "cuda_upload_bytes",
         "cuda_download_bytes",

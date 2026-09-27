@@ -1902,6 +1902,9 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * out_frame_h))
     return decline("output_buffer_alloc");
   *request.destination = request.guarded->data();
+  if (!output_coverage::seed(*request.destination, request.guarded->size(),
+          out_frame_w, out_frame_h, rowbytes, session_pixel_bytes))
+    return decline("output_buffer_seed");
   std::vector<float> output_float32;
   void* download_pixels = request.guarded->data();
   if (session_pixel_bytes != 16) {
@@ -2063,11 +2066,14 @@ bool verify_selector_inputs() {
 namespace {
 bool reset_smart_output(render_safety::OutputPixelBuffer& guarded,
                         std::size_t requested_size,
+                        int32_t width, int32_t height, int32_t rowbytes,
+                        int32_t pixel_bytes,
                         unsigned char*& destination,
                         smart_execution::Result& result) {
   if (guarded.reset(requested_size)) {
     destination = guarded.data();
-    return true;
+    if (output_coverage::seed(destination, guarded.size(), width, height,
+                              rowbytes, pixel_bytes)) return true;
   }
   result.rects_valid = false;
   result.pre_error = -3;
@@ -2181,8 +2187,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
           pr_gpu_filter_route_available(), plan.float32,
           smart_setup::pr_gpu_pf_first_requested(),
           smart_setup::force_pr_gpu_retry_requested(), result, run_pr_gpu_route,
-          &pr_gpu_context))
+          &pr_gpu_context)) {
+    result.output_coverage_external_world = true;
     return true;
+  }
 
   std::array<std::byte, 8> gpu_setup_input{}, gpu_setup_output{};
   std::array<std::byte, 16> gpu_setup_extra{};
@@ -2231,9 +2239,13 @@ bool dispatch(const Request& request, const Hooks& hooks,
 
   std::array<std::byte, 16> pre_callbacks{};
   std::array<std::byte, 24> pre_extra{};
-  const std::array<int32_t, 4> expected_request = plan.partial_output_request
-      ? std::array<int32_t, 4>{3, 2, 11, 8}
-      : std::array<int32_t, 4>{0, 0, plan.width, plan.height};
+  const auto& diagnostic = render::diagnostic_world_layout();
+  const std::array<int32_t, 4> expected_request =
+      diagnostic.enabled && diagnostic.has_request_rect
+          ? diagnostic.request_rect
+          : (plan.partial_output_request
+                 ? std::array<int32_t, 4>{3, 2, 11, 8}
+                 : std::array<int32_t, 4>{0, 0, plan.width, plan.height});
   const int16_t render_bitdepth = plan.float32 ? 32 : (plan.deep16 ? 16 : 8);
   // Both selector inputs come from one builder, so SmartRender cannot be handed
   // a different request or bitdepth than PreRender was (issue #699).
@@ -2323,6 +2335,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
 
   render::SmartOutputBounds smart_bounds = render::prepare_smart_output_bounds(
       dispatch_state.pre_output.data(), dispatch_state.pre_output.size(), plan.pixel_bytes);
+  if (diagnostic.enabled && smart_bounds.valid && !smart_bounds.empty_result)
+    smart_bounds.rowbytes += diagnostic.output_row_padding;
   result.result_rect = smart_bounds.result_rect;
   result.max_result_rect = smart_bounds.max_result_rect;
   result.rects_valid = result.pre_error == 0 && smart_bounds.valid;
@@ -2409,7 +2423,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
     smart_bounds.result_rect = passthrough_rect;
     smart_bounds.width = passthrough_width;
     smart_bounds.height = passthrough_height;
-    smart_bounds.rowbytes = passthrough_width * plan.pixel_bytes;
+    smart_bounds.rowbytes = passthrough_width * plan.pixel_bytes +
+        (diagnostic.enabled ? diagnostic.output_row_padding : 0);
     smart_bounds.origin_x = passthrough_rect[0];
     smart_bounds.origin_y = passthrough_rect[1];
   }
@@ -2431,6 +2446,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
     const bool output_reset = reset_smart_output(
         *request.guarded,
         static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height,
+        smart_bounds.width, smart_bounds.height, smart_bounds.rowbytes,
+        plan.pixel_bytes,
         *request.destination, result);
     // `OutputPixelBuffer::reset` preserves the previous allocation on
     // failure. The helper clears its report geometry; only a successful reset
@@ -2699,6 +2716,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
       !plan.gpu_negotiation && result.render_error == 0 &&
       !video_frame_worlds.copy_output_to(*request.output_world))
     result.render_error = -6;
+  result.output_coverage_external_world = transport_prepared ||
+      video_frame_gpu_ready ||
+      (video_frame_adapter_ready && result.selector_dispatched &&
+       !plan.gpu_negotiation);
   std::cerr << "stage:"
             << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
             << "_end error=" << result.render_error << "\n" << std::flush;

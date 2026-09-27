@@ -1,6 +1,8 @@
 // Internal worker implementation uses a named namespace so subsystem
 // translation units can own callback state without including implementation
 // fragments into this file.
+namespace dvacore::threads { class AsyncEventLoopAdaptor; }
+
 namespace aexcompat::l2_detail {
 
 using aexcompat::parameter_selftests::verify_parameter_animation_transport;
@@ -1614,12 +1616,12 @@ void initialize_u_dll_allocator() {
 //     touch user state, so they stay out until something demonstrably needs
 //     them.
 //   * `COR_Birth(a, quiet_bib_errors, b)`, two steps after COR_Conception:
-//     it does not return in this worker (observed: the l2 worker was still
-//     inside it after 60 seconds, while COR_Conception returns 0), and
-//     COR_Conception is
-//     the step that sets the BIB resolver the 21249 comes from. Whatever
-//     COR_Birth waits for is recorded as its own follow-up rather than worked
-//     around.
+//     before #1606 it waited for a dvacore main-thread callback while this
+//     worker had registered no main thread. The registration immediately
+//     below lets COR execute that callback on the dispatch thread. It is
+//     attempted only when no other thread owns dvacore's main-thread slot at
+//     the decision point. A concurrent third-party registration could still
+//     race with dvacore's unconditional replacement; see the helper below.
 //   * TDB_Birth, TXT_Birth, BEE_Birth and the rest of the tail: not reached
 //     by any failure measured so far. `PF_Birth`, which sits in that tail, is
 //     run by initialize_pf_dll_host_layer below (issue #1212 / PR #1284) -
@@ -1632,6 +1634,62 @@ void initialize_u_dll_allocator() {
 // Same latch shape as U_Birth: keyed on the mapping, so a session whose first
 // member maps none of these still births them for a later member that does,
 // and a failed attempt is not retried on the same mapping.
+bool ensure_dvacore_dispatch_thread_is_main() {
+  // The worker calls this on its one dispatch thread before any plug-in
+  // selector. Dvacore's RegisterCurrentThreadAsMainThread unconditionally
+  // replaces the process-wide ID, however: this check cannot be made atomic
+  // against a thread spawned by a plug-in's DLL initializer. We avoid
+  // replacing an owner already visible here, but do not claim cross-plug-in
+  // event-loop arbitration or use this as a general main-thread dispatcher.
+  namespace main_thread = aexcompat::worker_runtime::dvacore_main_thread;
+  const HMODULE dva = GetModuleHandleW(L"dvacore.dll");
+  if (!dva) return false;
+  using MainThreadId = unsigned(__cdecl*)();
+  using IsMain = bool(__cdecl*)();
+  using Register =
+      std::shared_ptr<dvacore::threads::AsyncEventLoopAdaptor>(__cdecl*)();
+  const auto main_id = reinterpret_cast<MainThreadId>(GetProcAddress(
+      dva, "?GetCurrentMainThreadID@threads@dvacore@@YAIXZ"));
+  const auto is_main = reinterpret_cast<IsMain>(GetProcAddress(
+      dva, "?CurrentThreadIsMainThread@threads@dvacore@@YA_NXZ"));
+  const auto register_main = reinterpret_cast<Register>(GetProcAddress(
+      dva,
+      "?RegisterCurrentThreadAsMainThread@threads@dvacore@@YA?AV?$shared_ptr@VAsyncEventLoopAdaptor@threads@dvacore@@@std@@XZ"));
+  if (!main_id || !is_main || !register_main) {
+    std::cerr << "stage:dvacore_main_thread status=missing_export\n"
+              << std::flush;
+    return false;
+  }
+  switch (main_thread::decide(main_id(), GetCurrentThreadId())) {
+    case main_thread::Action::AlreadyMain:
+      return is_main();
+    case main_thread::Action::OtherMain:
+      std::cerr << "stage:dvacore_main_thread status=other_thread\n"
+                << std::flush;
+      return false;
+    case main_thread::Action::InvalidThread:
+      return false;
+    case main_thread::Action::Register:
+      // dvacore also retains the adaptor in its thread-local state. Release
+      // only our returned reference here; the dispatch thread owns the
+      // registration until its TLS teardown, before dvacore unloads.
+      {
+        auto adaptor = register_main();
+        if (!adaptor || !is_main()) {
+          std::cerr << "stage:dvacore_main_thread status=register_failed\n"
+                    << std::flush;
+          return false;
+        }
+      }
+      return is_main();
+  }
+  return false;
+}
+
+HMODULE g_successful_cor_birth_module = nullptr;
+HMODULE g_successful_pf_birth_module = nullptr;
+bool g_cor_birth_teardown_attempted = false;
+
 void initialize_process_support_libraries() {
   namespace legacy = aexcompat::worker_runtime::legacy_support;
   enum class BirthShape {
@@ -1644,6 +1702,7 @@ void initialize_process_support_libraries() {
     m_birth,
     // int (*)(bool), called with AE's non-quiet value
     cor_conception,
+    cor_birth,
     // int (*)(const boost::function<bool(const StdString16&)>&), called with
     // a reference to an empty function object (see the PLUG.dll entry below).
     // `?PLUG_Birth@@YAH...` mangles as `YAH` = `int __cdecl`, and `AEBV` = a
@@ -1672,6 +1731,8 @@ void initialize_process_support_libraries() {
        BirthShape::no_arguments_void},
       {L"COR.dll", "COR.dll", "?COR_Conception@@YAH_N@Z",
        BirthShape::cor_conception},
+      {L"COR.dll", "COR.dll", "?COR_Birth@@YAH_N00@Z",
+       BirthShape::cor_birth},
       // PLUG.dll's static-routine registry (issue #1280). Its guard is two
       // words that only PLUG_Birth writes: `PLUG_RegisterStaticRoutine`
       // (PLUG.dll+0x1ca80) compares PLUG.dll+0x6df90 and +0x6e098 against
@@ -1730,6 +1791,7 @@ void initialize_process_support_libraries() {
   // library: it means this AE build moved or renamed the entry, which must
   // not look the same as "the library is not in this closure".
   static bool no_export_logged[std::size(kLibraries)]{};
+  static bool cor_pair_unavailable_logged = false;
   for (std::size_t index = 0; index < std::size(kLibraries); ++index) {
     const SupportLibrary& library = kLibraries[index];
     const HMODULE module = GetModuleHandleW(library.module);
@@ -1745,6 +1807,24 @@ void initialize_process_support_libraries() {
                 << std::flush;
     }
     if (decision != legacy::Decision::Call) continue;
+    if (library.shape == BirthShape::cor_birth) {
+      // COR-only closures previously used Conception without Birth. Do not
+      // start a new lifetime unless PF's already-mapped host layer can be
+      // born later and the reverse-order Death exports are present. PF_Birth
+      // still runs after COR_Birth, matching AE's startup order.
+      const HMODULE pf = GetModuleHandleW(L"PF.dll");
+      if (!pf || !GetProcAddress(pf, "PF_Birth") ||
+          !GetProcAddress(pf, "PF_Death") ||
+          !GetProcAddress(module, "?COR_Death@@YAHXZ")) {
+        if (!cor_pair_unavailable_logged) {
+          cor_pair_unavailable_logged = true;
+          std::cerr << "stage:cor_birth status=skipped_no_paired_teardown\n"
+                    << std::flush;
+        }
+        continue;
+      }
+      if (!ensure_dvacore_dispatch_thread_is_main()) continue;
+    }
     legacy::note_called(states[index], module);
     int result = -1;
     __try {
@@ -1762,6 +1842,10 @@ void initialize_process_support_libraries() {
           break;
         case BirthShape::cor_conception:
           result = reinterpret_cast<int(__cdecl*)(bool)>(birth)(false);
+          break;
+        case BirthShape::cor_birth:
+          result = reinterpret_cast<int(__cdecl*)(bool, bool, bool)>(birth)(
+              false, false, false);
           break;
         case BirthShape::plug_birth: {
           // AE hands PLUG_Birth a `boost::function<bool(const StdString16&)>`
@@ -1811,6 +1895,8 @@ void initialize_process_support_libraries() {
     if (library.shape != BirthShape::no_arguments_void)
       std::cerr << " result=" << result;
     std::cerr << "\n" << std::flush;
+    if (library.shape == BirthShape::cor_birth && result == 0)
+      g_successful_cor_birth_module = module;
   }
 }
 
@@ -1860,6 +1946,58 @@ void initialize_pf_dll_host_layer() {
   }
   std::cerr << "stage:pf_host_layer_init status=called result=" << result
             << (faulted ? " faulted=1" : "") << "\n" << std::flush;
+  if (!faulted && result == 0) g_successful_pf_birth_module = pf_module;
+}
+
+// COR_Death clears state used by PF's process-exit cleanup. A focused AE 2025
+// PSL_Adjustments run returned 0 from COR_Death alone, then AV'd inside PF's
+// on-exit BIB lock; PF_Death followed by COR_Death returned 0 from both and
+// exited cleanly. Run this pair after plug-in GLOBAL_SETDOWN, before the
+// session releases DLLs or the BIB provider. Never invoke Death for a birth
+// that did not succeed, or through a remapped/unloaded image.
+bool teardown_cor_birth_sequence() noexcept {
+  if (!g_successful_cor_birth_module || g_cor_birth_teardown_attempted)
+    return true;
+  g_cor_birth_teardown_attempted = true;
+  const HMODULE cor = GetModuleHandleW(L"COR.dll");
+  const HMODULE pf = GetModuleHandleW(L"PF.dll");
+  if (cor != g_successful_cor_birth_module ||
+      !g_successful_pf_birth_module || pf != g_successful_pf_birth_module) {
+    std::cerr << "stage:cor_birth_teardown status=module_unavailable\n"
+              << std::flush;
+    return false;
+  }
+  const auto pf_death = reinterpret_cast<int(__cdecl*)()>(
+      GetProcAddress(pf, "PF_Death"));
+  const auto cor_death = reinterpret_cast<int(__cdecl*)()>(
+      GetProcAddress(cor, "?COR_Death@@YAHXZ"));
+  if (!pf_death || !cor_death) {
+    std::cerr << "stage:cor_birth_teardown status=missing_export\n"
+              << std::flush;
+    return false;
+  }
+  int pf_result = -1;
+  __try {
+    pf_result = pf_death();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    std::cerr << "stage:pf_host_layer_teardown status=faulted\n"
+              << std::flush;
+    return false;
+  }
+  std::cerr << "stage:pf_host_layer_teardown result=" << pf_result << "\n"
+            << std::flush;
+  if (pf_result != 0) return false;
+  int cor_result = -1;
+  __try {
+    cor_result = cor_death();
+  } __except (u_birth_seh_filter(GetExceptionInformation())) {
+    std::cerr << "stage:cor_birth_teardown status=faulted\n"
+              << std::flush;
+    return false;
+  }
+  std::cerr << "stage:cor_birth_teardown result=" << cor_result << "\n"
+            << std::flush;
+  return cor_result == 0;
 }
 
 // dvacore's localization singleton (issue #1283). AE installs one at process
@@ -1884,8 +2022,8 @@ void initialize_pf_dll_host_layer() {
 // The object is a single vtable pointer (its constructor, dvacore+0xd8bb0,
 // runs the base constructor and stores the vptr and nothing else), so a
 // static, suitably aligned buffer holds it. It is never destroyed: this host
-// does not tear the localizer down, exactly as it does not run any of the
-// other libraries' `*_Death` entries, and nothing in dvacore deletes what
+// does not tear the localizer down (the COR/PF pair has its separate session
+// teardown), and nothing in dvacore deletes what
 // `Set` was given - `Set` is the only writer of `Localizer::S_localizerP` and
 // it stores unconditionally without releasing the previous value.
 //
