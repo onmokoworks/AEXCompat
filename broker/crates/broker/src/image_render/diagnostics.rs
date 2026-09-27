@@ -675,6 +675,7 @@ fn worker_diagnostics(
     let mut plugin_kind: Option<&str> = None;
     let mut minidump: Option<String> = None;
     let load_failure = load_failure_marker(stderr, exit_code);
+    let unhandled_exception = unhandled_exception_marker(stderr, classification, exit_code);
     let mut suite_acquire_failures = suite_acquire_failures(stderr);
     let mut callback_addr_denials = callback_addr_denials(stderr);
     let mut callback_denials = callback_denials(stderr);
@@ -822,6 +823,53 @@ fn worker_diagnostics(
         "plugin_kind": plugin_kind,
         "minidump": minidump,
         "load_failure": load_failure,
+        "unhandled_exception": unhandled_exception,
+    })
+}
+
+/// Accept only the bounded, path-free last-chance marker from a worker that
+/// actually exited with that exception code. stderr is shared with the
+/// plug-in, so this is a diagnostic hint, not authenticated provenance.
+fn unhandled_exception_marker(stderr: &str, classification: &str, exit_code: u32) -> Option<Value> {
+    if classification != "crashed" {
+        return None;
+    }
+    stderr.lines().rev().find_map(|line| {
+        let body = line.trim().strip_prefix("stage:unhandled_seh ")?;
+        let mut fields = body.split_whitespace();
+        let code_text = fields.next()?.strip_prefix("code=0x")?;
+        if !(1..=8).contains(&code_text.len())
+            || !code_text.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return None;
+        }
+        let code = u32::from_str_radix(code_text, 16).ok()?;
+        if code != exit_code {
+            return None;
+        }
+        let site = fields.next()?.strip_prefix("site=")?;
+        if site == "unknown" {
+            return fields.next().is_none().then(|| json!({"code": code, "site": site}));
+        }
+        if !matches!(site, "worker" | "module") {
+            return None;
+        }
+        let module = fields.next()?.strip_prefix("module=")?;
+        if module.is_empty()
+            || module.len() > 64
+            || !module.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return None;
+        }
+        let rva_text = fields.next()?.strip_prefix("rva=0x")?;
+        if !(1..=16).contains(&rva_text.len())
+            || !rva_text.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || fields.next().is_some()
+        {
+            return None;
+        }
+        let rva = u64::from_str_radix(rva_text, 16).ok()?;
+        Some(json!({"code": code, "site": site, "module": module, "rva": rva}))
     })
 }
 

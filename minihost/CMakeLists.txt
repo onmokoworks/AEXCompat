@@ -388,6 +388,12 @@ target_link_libraries(aex_worker_runtime_core PRIVATE aexcompat_trace_writer)
 # routes it did not name. Selecting the route at runtime removes the way to
 # express a half-built set.
 add_executable(aex_worker src/worker_main_entry.cpp $<TARGET_OBJECTS:aex_worker_runtime_core>)
+add_library(worker_unhandled_thread_fault_fixture SHARED
+  ../tests/native/worker_unhandled_thread_fault_fixture.cpp)
+target_compile_features(worker_unhandled_thread_fault_fixture PRIVATE cxx_std_17)
+target_compile_definitions(worker_unhandled_thread_fault_fixture PRIVATE
+  UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+add_dependencies(aex_worker worker_unhandled_thread_fault_fixture)
 target_compile_features(aex_worker PRIVATE cxx_std_17)
 target_compile_definitions(aex_worker PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(aex_worker PRIVATE bcrypt aexcompat_trace_writer)

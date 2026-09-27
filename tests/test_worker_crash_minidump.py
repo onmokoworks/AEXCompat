@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import struct
 import subprocess
 import threading
@@ -166,3 +167,57 @@ def test_crash_writes_nothing_without_opt_in(kind: str, tmp_path: Path) -> None:
     assert report["crash_minidump"] == "disabled"
     assert report["attempted"] is False
     assert not list(tmp_path.glob("**/*.dmp"))
+
+
+def test_unhandled_foreign_thread_fault_records_site_without_opt_in() -> None:
+    if os.name != "nt":
+        pytest.skip("unhandled thread SEH is Windows-only")
+    if not WORKER.is_file():
+        pytest.skip(f"{WORKER.name} is not built; run tools\\build-native.ps1")
+
+    environment = os.environ.copy()
+    environment.pop("AEXCOMPAT_MINIDUMP_HANDLE", None)
+    environment.pop("AEXCOMPAT_MINIDUMP_ACK_HANDLE", None)
+    result = subprocess.run(
+        [str(WORKER), "--kind", "discovery", "--self-test-unhandled-thread-crash"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=environment,
+    )
+    assert result.returncode & 0xFFFFFFFF == 0xC0000005
+    assert result.stdout == ""
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1
+    assert re.fullmatch(
+        r"stage:unhandled_seh code=0xc0000005 "
+        r"site=worker module=aex_worker\.exe rva=0x[0-9a-f]+",
+        lines[0],
+    )
+
+
+def test_unhandled_loaded_module_thread_fault_records_module() -> None:
+    if os.name != "nt":
+        pytest.skip("unhandled thread SEH is Windows-only")
+    if not WORKER.is_file():
+        pytest.skip(f"{WORKER.name} is not built; run tools\\build-native.ps1")
+    fixture = WORKER.with_name("worker_unhandled_thread_fault_fixture.dll")
+    assert fixture.is_file(), "build aex_worker with its fault-module fixture dependency"
+
+    environment = os.environ.copy()
+    environment.pop("AEXCOMPAT_MINIDUMP_HANDLE", None)
+    environment.pop("AEXCOMPAT_MINIDUMP_ACK_HANDLE", None)
+    result = subprocess.run(
+        [str(WORKER), "--kind", "discovery", "--self-test-unhandled-module-thread-crash"],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        env=environment,
+    )
+    assert result.returncode & 0xFFFFFFFF == 0xC0000005
+    assert result.stdout == ""
+    assert re.fullmatch(
+        r"stage:unhandled_seh code=0xc0000005 "
+        r"site=module module=worker_unhandled_thread_fault_fixture\.dll rva=0x[0-9a-f]+\n?",
+        result.stderr,
+    )

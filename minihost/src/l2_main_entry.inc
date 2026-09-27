@@ -2408,6 +2408,11 @@ int run_discovery_session(const std::wstring& manifest_argument,
 int worker_main_impl(int argc, wchar_t **argv) {
   if (const int bootstrap_error = configure_worker_entry_bootstrap())
     return bootstrap_error;
+  // Install before every AEX-loading route, including GPU module preflight.
+  // Only the bounded fault-site marker is unconditional; minidump capture
+  // still needs authenticated inherited handles and fails closed if malformed.
+  if (!aexcompat::worker_runtime::minidump::configure_from_inherited_handle())
+    return 3;
   if (argc == 2 && std::wstring(argv[1]) == L"--self-test-pipl-entrypoint") {
     const bool passed = verify_pipl_entrypoint_parser();
     std::cout << "{\"pipl_entrypoint\":\"" << (passed ? "passed" : "failed")
@@ -2515,12 +2520,6 @@ int worker_main_impl(int argc, wchar_t **argv) {
   }
   if (const auto selftest_exit = dispatch_worker_selftests(argc, argv))
     return *selftest_exit;
-  // The broker passes only an authenticated inherited file handle via
-  // environment (issue #18). No dump directory or dump path is accepted on the
-  // worker command line, so nothing is consumed from argv here. Fails closed on
-  // a real misconfiguration; a no-op when opt-in is off.
-  if (!aexcompat::worker_runtime::minidump::configure_from_inherited_handle())
-    return 3;
 aexcompat::worker_runtime::invocation::InvocationState invocation;
 
 
