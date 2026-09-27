@@ -369,10 +369,26 @@ u32 LE の長さ接頭辞 + UTF-8 JSON 本文。1 メッセージ上限 64 KiB (
 {"v":1,"type":"frame_done","frame_index":0,"status":"ok",
  "output":{"width":1920,"height":1080,"rowbytes":7680,
            "pixel_format":"argb8","packed_bytes":8294400,
+           "advertised_out_flags":0,"advertised_out_flags2":0,
+           "advertised_depth_supported":true,
+           "planned_dispatch_pixel_bytes":4,"dispatch_pixel_bytes":4,
            "guards_intact":true},
  "render_error":0,
  "generation":1}
 ```
+
+- `depth_code` in the launch and shared-section header is the requested output
+  depth, not necessarily the depth handed to the plug-in. On a rendered image
+  frame, `output` also records `advertised_out_flags` and
+  `advertised_out_flags2` from the active plug-in's GLOBAL_SETUP snapshot,
+  `advertised_depth_supported` (whether that snapshot selects the requested
+  depth), `planned_dispatch_pixel_bytes` (4/8/16 bytes per pixel handed to the
+  plug-in), and `dispatch_pixel_bytes` (4/8/16 bytes per pixel actually captured
+  before conversion into the section's requested output depth). GPU transport
+  may capture 16-byte pixels even when the plan is narrower; CPU capture at an
+  unplanned depth is an invariant failure. A successful cluster swap changes
+  this provenance starting with the swapped member's frames. Empty results and
+  audio-only passthroughs have no pixel dispatch and omit these fields.
 
 - `status`: `"ok"` | `"error"`。`"error"` のうち**フレーム局所の互換性診断**
   (selector 非 0、`render_error` 非 0、時刻 scale 不一致) のみセッション
@@ -507,6 +523,11 @@ publish_effect_sequence) →
 - フレームループ中の suite/handle ownership・出力 bounds・pixel 検証は
   one-shot と同一の fail-closed を per-frame 適用する (host-protection
   invariant、常時オン)。
+- レンダー前に GLOBAL_SETUP の depth advertisement から各 member の
+  dispatch depth を選ぶ。requested `depth_code` と異なる場合はフレームの
+  出力を requested depth へ変換し、変換前の depth と広告 snapshot は
+  `frame_done.output` に記録する。最終 stdout report は session 集計であり、
+  cluster swap 後を含む各フレームの depth provenance は `frame_done` が正本。
 
 ## 6. データチャネル: 共有メモリレイアウト
 

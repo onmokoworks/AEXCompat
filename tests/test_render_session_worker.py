@@ -388,6 +388,9 @@ def test_classic_session_narrows_a_plug_in_that_does_not_advertise_the_depth():
         assert output["pixel_format"] == "argb16"
         assert output["rowbytes"] == WIDTH * 8
         assert output["packed_bytes"] == WIDTH * HEIGHT * 8
+        assert output["advertised_depth_supported"] is False
+        assert output["planned_dispatch_pixel_bytes"] == 4
+        assert output["dispatch_pixel_bytes"] == 4
         transport.send({"v": 1, "type": "close"})
         code, stdout, stderr = _finish(process)
         assert code == 0, (code, stderr[-800:])
@@ -427,6 +430,9 @@ def test_classic_session_dispatches_a_float_only_plug_in_at_float32():
         assert output["pixel_format"] == "argb16"
         assert output["rowbytes"] == WIDTH * 8
         assert output["packed_bytes"] == WIDTH * HEIGHT * 8
+        assert output["advertised_depth_supported"] is False
+        assert output["planned_dispatch_pixel_bytes"] == 16
+        assert output["dispatch_pixel_bytes"] == 16
         transport.send({"v": 1, "type": "close"})
         code, stdout, stderr = _finish(process)
         assert code == 0, (code, stderr[-800:])

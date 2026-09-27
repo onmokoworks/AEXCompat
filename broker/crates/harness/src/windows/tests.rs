@@ -1858,21 +1858,18 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_depth_is_not_misreported_as_a_selector_or_rect_failure() {
+    fn stale_unsupported_depth_flag_does_not_hide_a_selector_or_rect_failure() {
         let message = concat!(
             r#"failed: diagnostics={"classification":"nonzero_exit","failure_stage":"render"}, report="#,
             r#"{"depth_supported":false,"smart_render_error":-1,"result_rects_valid":false}"#,
         );
         let diagnostics = failure_diagnostics(message).unwrap();
-        assert_eq!(diagnostics.classification, "unsupported_pixel_depth");
-        assert_eq!(
-            diagnostics.failure_stage.as_deref(),
-            Some("pixel_depth_negotiation")
-        );
-        assert_eq!(diagnostics.selector_error, None);
+        assert_eq!(diagnostics.classification, "nonzero_exit");
+        assert_eq!(diagnostics.failure_stage.as_deref(), Some("render"));
+        assert_eq!(diagnostics.selector_error, Some(-1));
         assert_eq!(
             matrix_error_summary(message),
-            "AEX did not advertise support for the requested pixel depth"
+            "SmartFX did not return a valid result rectangle"
         );
     }
 
@@ -1902,13 +1899,16 @@ mod tests {
             "cases": [
                 {"render_path":"classic","pixel_format":"argb8","passed":true,
                  "classification":"ok","output_png":"classic.png",
-                 "output_relation":"pixels_changed","differing_input_pixels":42},
+                 "output_relation":"pixels_changed","differing_input_pixels":42,
+                 "advertised_depth_supported":true,"planned_dispatch_pixel_bytes":4,
+                 "dispatch_pixel_bytes":4,"depth_relation":"native"},
                 {"render_path":"smartfx","pixel_format":"argb32f","passed":false,
                  "classification":"crashed","failure_stage":"smart_render_gpu",
                  "selector_error":512,"error":"GPU selector crashed"},
-                {"render_path":"classic","pixel_format":"argb16","passed":false,
-                 "applicable":false,"classification":"unsupported_pixel_depth",
-                 "failure_stage":"pixel_depth_negotiation"}
+                {"render_path":"classic","pixel_format":"argb16","passed":true,
+                 "applicable":true,"classification":"depth_fallback_rendered",
+                 "advertised_depth_supported":false,"planned_dispatch_pixel_bytes":4,
+                 "dispatch_pixel_bytes":4,"depth_relation":"advertised_fallback"}
             ]
         });
         let cases = compatibility_matrix(&report).unwrap();
@@ -1918,14 +1918,79 @@ mod tests {
         assert_eq!(cases[0].output_png.as_deref(), Some("classic.png"));
         assert_eq!(cases[0].output_relation.as_deref(), Some("pixels_changed"));
         assert_eq!(cases[0].differing_input_pixels, Some(42));
+        assert_eq!(cases[0].depth_relation.as_deref(), Some("native"));
         assert!(!cases[1].passed);
         assert_eq!(cases[1].classification, "crashed");
         assert_eq!(cases[1].failure_stage.as_deref(), Some("smart_render_gpu"));
         assert_eq!(cases[1].selector_error, Some(512));
         assert_eq!(cases[1].error.as_deref(), Some("GPU selector crashed"));
-        assert!(!cases[2].passed);
-        assert!(!cases[2].applicable);
-        assert_eq!(cases[2].classification, "unsupported_pixel_depth");
+        assert!(cases[2].passed);
+        assert!(cases[2].applicable);
+        assert_eq!(cases[2].classification, "depth_fallback_rendered");
+        assert_eq!(cases[2].advertised_depth_supported, Some(false));
+        assert_eq!(cases[2].planned_dispatch_pixel_bytes, Some(4));
+        assert_eq!(cases[2].dispatch_pixel_bytes, Some(4));
+        assert_eq!(
+            cases[2].depth_relation.as_deref(),
+            Some("advertised_fallback")
+        );
+    }
+
+    #[test]
+    fn depth_render_classification_separates_plugin_fallback_from_gpu_capture() {
+        assert_eq!(depth_render_classification(4, 4, 4), ("ok", "native"));
+        assert_eq!(
+            depth_render_classification(8, 4, 4),
+            ("depth_fallback_rendered", "advertised_fallback")
+        );
+        assert_eq!(
+            depth_render_classification(4, 4, 16),
+            ("capture_converted_rendered", "gpu_capture_conversion")
+        );
+        assert_eq!(
+            depth_render_classification(8, 4, 16),
+            ("depth_fallback_rendered", "fallback_and_gpu_capture")
+        );
+    }
+
+    #[test]
+    fn matrix_success_classification_distinguishes_no_image_from_missing_provenance() {
+        let empty =
+            serde_json::json!({"width":0,"height":0,"output_png":null,"depth_provenance":null});
+        assert_eq!(
+            matrix_success_classification(&empty, 4),
+            (
+                "empty_result",
+                "not_dispatched",
+                false,
+                true,
+                Some("empty_result")
+            )
+        );
+        let audio_only = serde_json::json!({"width":2,"height":2,"output_png":"passthrough.png",
+                                           "image_render_supported":false,"depth_provenance":null});
+        assert_eq!(
+            matrix_success_classification(&audio_only, 4),
+            (
+                "unsupported_media_type",
+                "not_dispatched",
+                false,
+                false,
+                Some("media_type_negotiation")
+            )
+        );
+        let malformed = serde_json::json!({"width":2,"height":2,"output_png":"render.png",
+                                          "image_render_supported":true,"depth_provenance":null});
+        assert_eq!(
+            matrix_success_classification(&malformed, 4),
+            (
+                "depth_provenance_missing",
+                "unknown",
+                false,
+                true,
+                Some("report_validation")
+            )
+        );
     }
 
     #[test]

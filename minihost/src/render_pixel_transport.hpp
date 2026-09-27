@@ -39,17 +39,11 @@ bool verify_argb32f_depth_conversion();
 /// for the caller to report, not something to convert. A frame already at
 /// `pixel_bytes` is left untouched.
 ///
-/// The admissible arrival depths are exactly two, and nothing else converts:
-/// `dispatched_pixel_bytes`, the depth the plug-in was handed its worlds at
-/// (`effect_bootstrap::dispatch_pixel_bytes`), and 16, because the GPU
-/// negotiation transport (#1072) hands the plug-in float32 worlds whatever
-/// depth was dispatched when it is entered by a case_id
-/// (`gpu_opencl_float32` / `gpu_directx_float32`, which only the 32-bpc
-/// `--smart-session32-opencl-v1` / `-directx-v1` commands carry) or by the
-/// frame loop's `force_gpu_retry` - a 32-bpc OpenCL
-/// session against a plug-in narrowed to 8 bits captures at 16. (Its automatic
-/// entry looks at the dispatched depth, so that one only arrives at 16 when 16
-/// was dispatched.)
+/// The admissible arrival depth is `dispatched_pixel_bytes`, the depth the
+/// plug-in was handed its worlds at (`effect_bootstrap::dispatch_pixel_bytes`).
+/// Float32 is also admissible only when this frame actually used the GPU
+/// transport (#1072), which always captures float32 even when the plug-in's
+/// advertised dispatch depth was lower.
 /// (The Premiere GPU-filter route, #1271, narrows its own download to the
 /// plan's depth before publishing, so it never arrives wide.) Admitting any
 /// recognised stride instead would swallow the case this check exists for: a
@@ -57,7 +51,8 @@ bool verify_argb32f_depth_conversion();
 /// output, and widening it silently would report it as a good frame.
 int32_t conform_pixel_depth(std::vector<unsigned char>& captured,
                             std::size_t pixels, int32_t pixel_bytes,
-                            int32_t dispatched_pixel_bytes);
+                            int32_t dispatched_pixel_bytes,
+                            bool gpu_float32_transport);
 
 // Self-test: a frame already at the target depth is untouched (not round-
 // tripped, which would clamp a 16-bit channel above 32768), widening and

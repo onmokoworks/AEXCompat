@@ -180,6 +180,43 @@ fn frame_done_parsing_is_strict_about_unknown_fields() {
 }
 
 #[test]
+fn rendered_frame_depth_provenance_distinguishes_fallback_and_rejects_malformed_capture() {
+    let mut output: FrameDoneOutput = serde_json::from_value(serde_json::json!({
+        "width": 1, "height": 1, "rowbytes": 8, "pixel_format": "argb16",
+        "packed_bytes": 8, "guards_intact": true,
+        "advertised_out_flags": 0, "advertised_out_flags2": 0,
+        "advertised_depth_supported": false,
+        "planned_dispatch_pixel_bytes": 4, "dispatch_pixel_bytes": 4
+    }))
+    .unwrap();
+    let fallback = output.depth_provenance(8).unwrap().unwrap();
+    assert!(!fallback.advertised_depth_supported);
+    assert_eq!(fallback.planned_dispatch_pixel_bytes, Some(4));
+    assert_eq!(fallback.dispatch_pixel_bytes, Some(4));
+
+    output.dispatch_pixel_bytes = Some(16);
+    assert_eq!(
+        output
+            .depth_provenance(8)
+            .unwrap()
+            .unwrap()
+            .dispatch_pixel_bytes,
+        Some(16)
+    );
+    output.dispatch_pixel_bytes = Some(12);
+    assert!(output.depth_provenance(8).is_err());
+    output.dispatch_pixel_bytes = None;
+    assert!(output.depth_provenance(8).is_err());
+    output.dispatch_pixel_bytes = Some(4);
+    output.advertised_depth_supported = Some(true);
+    assert!(output.depth_provenance(8).is_err());
+    output.advertised_depth_supported = Some(false);
+    output.planned_dispatch_pixel_bytes = Some(8);
+    output.dispatch_pixel_bytes = Some(8);
+    assert!(output.depth_provenance(8).is_err());
+}
+
+#[test]
 fn frame_done_carries_the_selector_return_message() {
     // The plug-in's own account of the failure travels with the frame error, so
     // "Couldn't load suite." reaches the caller instead of only the number

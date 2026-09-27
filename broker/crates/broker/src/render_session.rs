@@ -760,6 +760,16 @@ pub enum FrameStatus {
 pub struct FrameOutcome {
     pub frame_index: u32,
     pub status: FrameStatus,
+    pub depth_provenance: Option<FrameDepthProvenance>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FrameDepthProvenance {
+    pub advertised_out_flags: u32,
+    pub advertised_out_flags2: u32,
+    pub advertised_depth_supported: bool,
+    pub planned_dispatch_pixel_bytes: Option<u32>,
+    pub dispatch_pixel_bytes: Option<u32>,
 }
 
 /// Why a session stopped accepting frames. Everything here is fail-closed:
@@ -801,6 +811,93 @@ struct FrameDoneOutput {
     /// failure. Only the worker's smart session frame loop sets it.
     #[serde(default)]
     empty_result: bool,
+    #[serde(default)]
+    advertised_out_flags: Option<u32>,
+    #[serde(default)]
+    advertised_out_flags2: Option<u32>,
+    #[serde(default)]
+    advertised_depth_supported: Option<bool>,
+    #[serde(default)]
+    planned_dispatch_pixel_bytes: Option<u32>,
+    #[serde(default)]
+    dispatch_pixel_bytes: Option<u32>,
+}
+
+impl FrameDoneOutput {
+    fn depth_provenance(
+        &self,
+        requested_pixel_bytes: u32,
+    ) -> Result<Option<FrameDepthProvenance>, &'static str> {
+        let supplied = self.advertised_out_flags.is_some()
+            || self.advertised_out_flags2.is_some()
+            || self.advertised_depth_supported.is_some()
+            || self.planned_dispatch_pixel_bytes.is_some()
+            || self.dispatch_pixel_bytes.is_some();
+        if !supplied {
+            return Ok(None);
+        }
+        let (
+            Some(advertised_out_flags),
+            Some(advertised_out_flags2),
+            Some(advertised_depth_supported),
+        ) = (
+            self.advertised_out_flags,
+            self.advertised_out_flags2,
+            self.advertised_depth_supported,
+        )
+        else {
+            return Err("frame depth provenance is incomplete");
+        };
+        let valid_depth = |depth: u32| matches!(depth, 4 | 8 | 16);
+        let deep = advertised_out_flags & (1 << 25) != 0;
+        let floating = advertised_out_flags2 & (1 << 12) != 0;
+        let expected_plan = match requested_pixel_bytes {
+            16 => {
+                if floating {
+                    16
+                } else if deep {
+                    8
+                } else {
+                    4
+                }
+            }
+            8 => {
+                if deep {
+                    8
+                } else if floating {
+                    16
+                } else {
+                    4
+                }
+            }
+            4 => 4,
+            _ => return Err("requested frame depth is invalid"),
+        };
+        if self.planned_dispatch_pixel_bytes.is_some() != self.dispatch_pixel_bytes.is_some()
+            || self
+                .planned_dispatch_pixel_bytes
+                .is_some_and(|depth| !valid_depth(depth))
+            || self
+                .dispatch_pixel_bytes
+                .is_some_and(|depth| !valid_depth(depth))
+            || (self.width != 0 && self.dispatch_pixel_bytes.is_none())
+            || self
+                .planned_dispatch_pixel_bytes
+                .is_some_and(|depth| depth != expected_plan)
+            || (self.planned_dispatch_pixel_bytes.is_some()
+                && advertised_depth_supported
+                    != (self.planned_dispatch_pixel_bytes == Some(requested_pixel_bytes)))
+        {
+            return Err("frame depth provenance contradicts the rendered frame");
+        }
+        Ok(Some(FrameDepthProvenance {
+            advertised_out_flags,
+            advertised_out_flags2,
+            advertised_depth_supported,
+            planned_dispatch_pixel_bytes: self.planned_dispatch_pixel_bytes,
+            dispatch_pixel_bytes: self.dispatch_pixel_bytes,
+        }))
+    }
 }
 
 /// A selector's own account of why it failed, as left in
@@ -2360,6 +2457,7 @@ impl RenderSession {
                     }
                     return Ok(FrameOutcome {
                         frame_index,
+                        depth_provenance: None,
                         status: if done.smart_output_untouched {
                             FrameStatus::SmartOutputUntouched
                         } else {
@@ -2408,6 +2506,19 @@ impl RenderSession {
                             POST_TERMINATION_COLLECT_TIMEOUT,
                         ));
                     }
+                    let depth_provenance = match output
+                        .depth_provenance(self.geometry.pixel_format.bytes_per_pixel() as u32)
+                    {
+                        Ok(depth) => depth,
+                        Err(detail) => {
+                            return Err(self.invalidate(
+                                "frame_invariant_failure",
+                                format!("frame {frame_index}: {detail}"),
+                                true,
+                                POST_TERMINATION_COLLECT_TIMEOUT,
+                            ));
+                        }
+                    };
                     // Read only the frame's actual packed bytes, not the whole
                     // launch slot: a shrink-output effect fills less than the
                     // slot, and the worker packs exactly these bytes (#261).
@@ -2437,6 +2548,7 @@ impl RenderSession {
                     self.last_output_generation = expected_generation;
                     return Ok(FrameOutcome {
                         frame_index,
+                        depth_provenance,
                         status: FrameStatus::Rendered {
                             pixels,
                             width: output.width,
