@@ -304,13 +304,31 @@ def test_generic_nonzero_exit_is_refined_by_report_evidence():
     assert selector["classification"] == "selector_error"
     assert selector["selector"]["error_code"] == 25
 
-    unsupported = module.normalize_structured_failure(
+    unadvertised_depth = module.normalize_structured_failure(
         "argb8",
-        {"classification": "nonzero_exit", "depth_supported": False},
+        {"classification": "nonzero_exit", "depth_supported": False,
+         "advertised_depth_supported": False},
         input_world,
         "smartfx",
     )
-    assert unsupported["classification"] == "unsupported"
+    # Depth fallback makes raw advertisement non-gating on session renders.
+    # A generic failure with stale depth_supported=false must not conceal its
+    # unknown cause as an unsupported format.
+    assert unadvertised_depth["classification"] == "nonzero_exit"
+    unsupported_path = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "nonzero_exit", "smart_render_supported": False},
+        input_world,
+        "smartfx",
+    )
+    assert unsupported_path["classification"] == "unsupported"
+    classic_without_smartfx = module.normalize_structured_failure(
+        "argb8",
+        {"classification": "nonzero_exit", "smart_render_supported": False},
+        input_world,
+        "classic",
+    )
+    assert classic_without_smartfx["classification"] == "nonzero_exit"
 
     missing = module.normalize_structured_failure(
         "argb8",

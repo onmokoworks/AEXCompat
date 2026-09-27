@@ -536,7 +536,7 @@ def normalize_structured_failure(
     missing = schema_valid_missing_suites(raw_missing)
     # The native harness reports a process-level classification that is usually
     # the generic `nonzero_exit`, alongside report evidence (render_error,
-    # pre_render_error, depth_supported, missing_suites). Treat `nonzero_exit`
+    # pre_render_error, smart_render_supported, missing_suites). Treat `nonzero_exit`
     # (and any unrecognized value) as refinable so the evidence branches below
     # can upgrade it to the actionable selector_error/unsupported/missing_suite,
     # while keeping specific classes (crashes, timeouts, loader/host errors) final.
@@ -557,7 +557,7 @@ def normalize_structured_failure(
             classification = "missing_suite"
         elif meaningful_selector_error(value) is not None:
             classification = "selector_error"
-        elif value.get("depth_supported") is False or value.get("smart_render_supported") is False:
+        elif render_path == "smartfx" and value.get("smart_render_supported") is False:
             classification = "unsupported"
         else:
             classification = "nonzero_exit"
