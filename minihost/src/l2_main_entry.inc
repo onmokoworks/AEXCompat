@@ -230,6 +230,23 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
       ? invoke_sequence_selector(entry, kSequenceResetup, input.data(), output.data()) : -1;
   std::cerr << "stage:sequence_resetup_end error=" << lifecycle_errors[1] << "\n" << std::flush;
   write<void*>(input, kInSequenceData, read<void*>(output, kOutSequenceData));
+  if (lifecycle_errors[1] == 0) {
+    aexcompat::render_lifecycle::Layout frame_layout{};
+    frame_layout.out_width = kOutWidth;
+    frame_layout.out_height = kOutHeight;
+    frame_layout.out_origin = kOutOrigin;
+    frame_layout.in_origin =
+        aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET;
+    frame_layout.world_width =
+        aexcompat::abi::x86_64_windows::LAYER_WIDTH_OFFSET;
+    frame_layout.world_height =
+        aexcompat::abi::x86_64_windows::LAYER_HEIGHT_OFFSET;
+    aexcompat::render_lifecycle::prepare_frame_setup_input(
+        frame_layout, input.data(), output.data(), lifecycle_world.data());
+    std::cerr << "stage:frame_setup_offer source=l2_probe_world width="
+              << read<int32_t>(output, kOutWidth) << " height="
+              << read<int32_t>(output, kOutHeight) << "\n";
+  }
   std::cerr << "stage:frame_setup_begin\n" << std::flush;
   lifecycle_errors[2] = lifecycle_errors[1] == 0 ? entry(kFrameSetup, input.data(), output.data(), lifecycle_params.data(), lifecycle_world.data(), nullptr) : -1;
   std::cerr << "stage:frame_setup_end error=" << lifecycle_errors[2] << "\n" << std::flush;
@@ -250,15 +267,31 @@ std::optional<int> run_l2_parameter_lifecycle(EffectEntry entry,
 
 struct L2PointDefaultProbe {
   bool frame_setup_seen{};
+  int32_t offered_width{};
+  int32_t offered_height{};
+  std::array<int32_t, 4> origin_on_entry{};
   std::array<double, 2> point{};
   std::array<double, 3> point3d{};
 };
 L2PointDefaultProbe g_l2_point_default_probe;
 
 int32_t __cdecl l2_point_default_probe_entry(
-    int32_t selector, void*, void*, void** params, void*, void*) {
+    int32_t selector, void* input, void* output, void** params, void*, void*) {
   if (selector != kFrameSetup) return 0;
   if (!params || !params[1] || !params[2]) return 4;
+  std::memcpy(&g_l2_point_default_probe.offered_width,
+              static_cast<const std::byte*>(output) + kOutWidth,
+              sizeof(int32_t));
+  std::memcpy(&g_l2_point_default_probe.offered_height,
+              static_cast<const std::byte*>(output) + kOutHeight,
+              sizeof(int32_t));
+  std::memcpy(g_l2_point_default_probe.origin_on_entry.data(),
+              static_cast<const std::byte*>(output) + kOutOrigin,
+              2 * sizeof(int32_t));
+  std::memcpy(g_l2_point_default_probe.origin_on_entry.data() + 2,
+              static_cast<const std::byte*>(input) +
+                  aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET,
+              2 * sizeof(int32_t));
   int32_t point_x = 0;
   int32_t point_y = 0;
   std::memcpy(&point_x, static_cast<const std::byte*>(params[1]) + 56,
@@ -302,6 +335,12 @@ bool verify_l2_point_default_units() {
 
   std::array<std::byte, kInSize> input{};
   std::array<std::byte, kOutSize> output{};
+  write<int32_t>(output, kOutOrigin, 9);
+  write<int32_t>(output, kOutOrigin + sizeof(int32_t), -7);
+  write<int32_t>(input,
+      aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_X_OFFSET, 9);
+  write<int32_t>(input,
+      aexcompat::abi::x86_64_windows::IN_OUTPUT_ORIGIN_Y_OFFSET, -7);
   std::array<int32_t, 5> lifecycle_errors{-1, -1, -1, -1, -1};
   bool lifecycle_data_null = false;
   bool user_changed_ok = false;
@@ -313,6 +352,10 @@ bool verify_l2_point_default_units() {
       conditional_ui_ok, 256, 144);
   const bool passed = !lifecycle_exit &&
       g_l2_point_default_probe.frame_setup_seen &&
+      g_l2_point_default_probe.offered_width == 1 &&
+      g_l2_point_default_probe.offered_height == 1 &&
+      g_l2_point_default_probe.origin_on_entry ==
+          std::array<int32_t, 4>{0, 0, 0, 0} &&
       g_l2_point_default_probe.point == std::array<double, 2>{64.0, 72.0} &&
       g_l2_point_default_probe.point3d ==
           std::array<double, 3>{64.0, 72.0, 108.0} &&
@@ -2386,6 +2429,14 @@ int worker_main_impl(int argc, wchar_t **argv) {
     std::cout << "{\"l2_point_default_units\":\""
               << (passed ? "passed" : "failed")
               << "\",\"width\":256,\"height\":144,"
+                 "\"frame_setup_offer\":["
+              << g_l2_point_default_probe.offered_width << ','
+              << g_l2_point_default_probe.offered_height << "],"
+                 "\"origin_on_entry\":["
+              << g_l2_point_default_probe.origin_on_entry[0] << ','
+              << g_l2_point_default_probe.origin_on_entry[1] << ','
+              << g_l2_point_default_probe.origin_on_entry[2] << ','
+              << g_l2_point_default_probe.origin_on_entry[3] << "],"
                  "\"point\":[64,72],\"point3d\":[64,72,108]}\n";
     return passed ? 0 : 74;
   }
