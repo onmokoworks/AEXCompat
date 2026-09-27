@@ -248,6 +248,8 @@ void FillWorld(PF_EffectWorld* world, Channel opaque,
 }
 
 PF_Err ClassicRender(PF_LayerDef* output) {
+  if (ModuleNameHas("-classic-nopresize"))
+    return PF_Err_INTERNAL_STRUCT_DAMAGED;
   if (ModuleNameHas("-selectorerror")) return PF_Err_BAD_CALLBACK_PARAM;
   if (!output || !output->data) return PF_Err_BAD_CALLBACK_PARAM;
   if (output->rowbytes >= output->width * static_cast<A_long>(sizeof(PF_PixelFloat)))
@@ -306,7 +308,8 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       out_data->my_version = PF_VERSION(1, 0, 0, PF_Stage_DEVELOP, 0);
       out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT |
           (AdvertisesDeepColor() ? PF_OutFlag_DEEP_COLOR_AWARE : 0) |
-          (ModuleNameHas("-nop") ? PF_OutFlag_NOP_RENDER : 0);
+          (ModuleNameHas("-nop") ? PF_OutFlag_NOP_RENDER : 0) |
+          (ModuleNameHas("-classic-nopresize") ? PF_OutFlag_I_EXPAND_BUFFER : 0);
       out_data->out_flags2 = (ModuleNameHas("-classic") ? 0 :
           PF_OutFlag2_SUPPORTS_SMART_RENDER) |
           (AdvertisesFloatColor() ? PF_OutFlag2_FLOAT_COLOR_AWARE : 0);
@@ -316,6 +319,15 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
       if (RewritesFlagsInParamsSetup()) {
         out_data->out_flags = PF_OutFlag_PIX_INDEPENDENT;
         out_data->out_flags2 = PF_OutFlag2_SUPPORTS_SMART_RENDER;
+      }
+      return PF_Err_NONE;
+    case PF_Cmd_FRAME_SETUP:
+      if (ModuleNameHas("-classic-nopresize")) {
+        // Exercise the host-owned image placement path without dispatching RENDER.
+        out_data->width += 4;
+        out_data->height += 4;
+        out_data->origin.h = 3;
+        out_data->origin.v = 3;
       }
       return PF_Err_NONE;
     case PF_Cmd_SMART_PRE_RENDER:
