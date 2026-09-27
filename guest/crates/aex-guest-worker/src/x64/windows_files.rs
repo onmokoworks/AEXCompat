@@ -32,10 +32,11 @@ impl GuestFiles {
             1 if exists => return Ok(Err(80)),
             3 | 5 if !exists => return Ok(Err(2)),
             1 | 2 | 4 if !exists => {
-                if !name
-                    .rsplit_once('/')
-                    .is_some_and(|(parent, _)| parent == "c:" || self.directories.contains(parent))
-                {
+                if let Some((parent, _)) = name.rsplit_once('/') {
+                    if parent != "c:" && !self.directories.contains(parent) {
+                        return Ok(Err(if self.directory_exists(parent) { 5 } else { 3 }));
+                    }
+                } else {
                     return Ok(Err(3));
                 }
             }
@@ -319,6 +320,20 @@ fn guest_create_file(
         return Err(format!(
             "CreateFile flags {flags:#x} are not implemented for mounted assets"
         ));
+    }
+    let exists = null_device
+        || unicorn.get_data().guest_files.sources.contains_key(&name)
+        || unicorn
+            .get_data()
+            .guest_files
+            .private_files
+            .contains_key(&name)
+        || unicorn.get_data().guest_files.directory_exists(&name);
+    if disposition == 3 && !exists && access & 0x40000002 != 0 {
+        return Ok((u64::MAX, 5));
+    }
+    if disposition == 3 && !exists && access & 0x40000002 == 0 {
+        return Ok((u64::MAX, 2));
     }
     let mut inheritable = false;
     if security != 0 {

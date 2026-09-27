@@ -10697,6 +10697,34 @@ fn create_file_w_ignores_legal_optional_arguments_for_missing_open_existing_path
 }
 
 #[test]
+fn create_file_w_open_existing_directory_is_not_reported_missing() {
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .unicorn
+        .get_data_mut()
+        .guest_files
+        .directories
+        .insert("c:/saved".into());
+    let path = write_test_wide_path(&mut engine, r"C:\saved");
+    let stub = STUB_BASE + 0x1c4;
+    install_win64_import(&mut engine.unicorn, stub, "kernel32.dll", "CreateFileW").unwrap();
+    assert_eq!(
+        engine
+            .call_win64_with_timeout(
+                stub,
+                &[path, 0x8000_0000, 1, 0, 3, 0x80, 0],
+                TIMEOUT_MICROSECONDS
+            )
+            .unwrap(),
+        u64::MAX
+    );
+    assert_eq!(
+        engine.unicorn.get_data().windows_last_error,
+        ERROR_ACCESS_DENIED
+    );
+}
+
+#[test]
 fn create_file_w_treats_null_as_api_failure_but_aborts_on_unreadable_non_null_path() {
     let mut engine = test_engine(&[0xc3]);
     engine.unicorn.reg_write(RegisterX86::RCX, 0).unwrap();
