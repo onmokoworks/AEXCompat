@@ -18,5 +18,6 @@ include!("image_render/types_and_transport.rs");
 include!("image_render/render_operations.rs");
 include!("image_render/declarative_fixture.rs");
 include!("image_render/inspection_and_probes.rs");
+include!("image_render/visual_diagnostics.rs");
 include!("image_render/session.rs");
 include!("image_render/tests.rs");

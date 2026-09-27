@@ -1022,6 +1022,13 @@ fn render_classic_via_length_one_session(
     RENDER_SESSION_WRAPPER_RENDERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut report = build_interactive_image_report(&final_report, facts);
     report["depth_provenance"] = json!(frame_depth_provenance);
+    report["visual_diagnostics"] = visual_diagnostics::inspect(
+        Some(request.rgba),
+        (request.width, request.height),
+        &pixels,
+        (rendered_width, rendered_height),
+        request.pixel_format,
+    );
     if let Some(metadata) = artifact_metadata {
         report["output_transport"] = json!(match request.artifact_kind {
             Some(RenderArtifactKind::Raw) => "native_argb_raw+strict_metadata",
@@ -1334,6 +1341,13 @@ impl InteractiveRenderSession {
                     "resident_session": session_facts(self.frames_ok, self.frames_errored),
                     "passed": true,
                 });
+                report["visual_diagnostics"] = visual_diagnostics::inspect(
+                    Some(rgba),
+                    (self.width, self.height),
+                    &pixels,
+                    (frame_width, frame_height),
+                    self.pixel_format,
+                );
                 annotate_interactive_selection(&mut report, self.selection);
                 Ok(report)
             }
