@@ -602,6 +602,9 @@ struct ClassicRenderDispatchOwner {
     }
     width = next_width; height = next_height; rowbytes = next_rowbytes;
     destination = guarded.data();
+    if (!aexcompat::worker_runtime::output_coverage::seed(
+            destination, guarded.size(), width, height, rowbytes, pixel_bytes))
+      return fail(-3);
     if (!aexcompat::render::prepare_world_layout(world,
             {pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes}, destination))
       return fail(-3);
@@ -705,6 +708,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
   if (!guarded) return -3;
   unsigned char* destination = guarded.data();
+  if (!aexcompat::worker_runtime::output_coverage::seed(
+          destination, guarded.size(), width, height, rowbytes, pixel_bytes)) return -3;
   guards_intact = true;
 
   aexcompat::world_safety::EffectWorldStorage input_world{}, output_world{};
@@ -934,7 +939,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       destination, rowbytes, width, height, pixel_bytes, error,
       external_current_time, external_time_step, external_time_scale,
       read<int32_t>(input, kInQuality), dispatch_pixel_format, &output_hash,
-      &guards_intact, captured_argb, guarded.sentinels_intact()};
+      &guards_intact, captured_argb, guarded.sentinels_intact(),
+      frame_output ? &frame_output->output_coverage : nullptr, nop_render};
   error = aexcompat::worker_runtime::classic_execution::finalize(final_context, {
       +[](const unsigned char* data, int32_t rowbytes, int32_t width, int32_t height,
           int32_t bytes, std::vector<unsigned char>& output) {
@@ -1140,6 +1146,8 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   InputPixelBuffer source(static_cast<std::size_t>(rowbytes) * height);
   OutputPixelBuffer guarded(static_cast<std::size_t>(rowbytes) * height);
   auto* destination = guarded.data();
+  if (!aexcompat::worker_runtime::output_coverage::seed(
+          destination, guarded.size(), width, height, rowbytes, pixel_bytes)) return result;
   result.guards_intact = true;
   // A session frame needs the sentinel verdict on every exit path, including
   // early refusals after this point; the one-shot report keeps its existing

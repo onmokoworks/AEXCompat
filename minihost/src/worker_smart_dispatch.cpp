@@ -1902,6 +1902,9 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   if (!request.guarded->reset(static_cast<std::size_t>(rowbytes) * out_frame_h))
     return decline("output_buffer_alloc");
   *request.destination = request.guarded->data();
+  if (!output_coverage::seed(*request.destination, request.guarded->size(),
+          out_frame_w, out_frame_h, rowbytes, session_pixel_bytes))
+    return decline("output_buffer_seed");
   std::vector<float> output_float32;
   void* download_pixels = request.guarded->data();
   if (session_pixel_bytes != 16) {
@@ -2063,11 +2066,14 @@ bool verify_selector_inputs() {
 namespace {
 bool reset_smart_output(render_safety::OutputPixelBuffer& guarded,
                         std::size_t requested_size,
+                        int32_t width, int32_t height, int32_t rowbytes,
+                        int32_t pixel_bytes,
                         unsigned char*& destination,
                         smart_execution::Result& result) {
   if (guarded.reset(requested_size)) {
     destination = guarded.data();
-    return true;
+    if (output_coverage::seed(destination, guarded.size(), width, height,
+                              rowbytes, pixel_bytes)) return true;
   }
   result.rects_valid = false;
   result.pre_error = -3;
@@ -2181,8 +2187,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
           pr_gpu_filter_route_available(), plan.float32,
           smart_setup::pr_gpu_pf_first_requested(),
           smart_setup::force_pr_gpu_retry_requested(), result, run_pr_gpu_route,
-          &pr_gpu_context))
+          &pr_gpu_context)) {
+    result.output_coverage_external_world = true;
     return true;
+  }
 
   std::array<std::byte, 8> gpu_setup_input{}, gpu_setup_output{};
   std::array<std::byte, 16> gpu_setup_extra{};
@@ -2431,6 +2439,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
     const bool output_reset = reset_smart_output(
         *request.guarded,
         static_cast<std::size_t>(smart_bounds.rowbytes) * smart_bounds.height,
+        smart_bounds.width, smart_bounds.height, smart_bounds.rowbytes,
+        plan.pixel_bytes,
         *request.destination, result);
     // `OutputPixelBuffer::reset` preserves the previous allocation on
     // failure. The helper clears its report geometry; only a successful reset
@@ -2699,6 +2709,10 @@ bool dispatch(const Request& request, const Hooks& hooks,
       !plan.gpu_negotiation && result.render_error == 0 &&
       !video_frame_worlds.copy_output_to(*request.output_world))
     result.render_error = -6;
+  result.output_coverage_external_world = transport_prepared ||
+      video_frame_gpu_ready ||
+      (video_frame_adapter_ready && result.selector_dispatched &&
+       !plan.gpu_negotiation);
   std::cerr << "stage:"
             << (result.gpu_render_dispatched ? "smart_render_gpu" : "smart_render_cpu")
             << "_end error=" << result.render_error << "\n" << std::flush;

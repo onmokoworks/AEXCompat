@@ -3082,6 +3082,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   int32_t get_flattened_sequence_data_error = -1;
   bool original_sequence_preserved = false;
   int32_t render_error = -1;
+  aexcompat::worker_runtime::output_coverage::Result classic_output_coverage{};
   SmartResult smart{};
   int32_t smart_session_frames_attempted = 0;
   int32_t smart_session_sequence_setup_error = -1;
@@ -3158,6 +3159,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
     get_flattened_sequence_data_error = dispatch.get_flattened_sequence_data_error;
     original_sequence_preserved = dispatch.original_sequence_preserved;
     render_error = dispatch.render_error;
+    classic_output_coverage = dispatch.output_coverage;
     session_dispatch_pixel_bytes = dispatch.dispatch_pixel_bytes;
   } else if (is_smart_worker()) {
     const auto dispatch = aexcompat::worker_runtime::invocation::run_smart_final_dispatch(
@@ -3238,6 +3240,7 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
   restore_native_stdout();
   ClassicCompletionInputs classic_inputs;
   classic_inputs.render_error = render_error;
+  classic_inputs.output_coverage = classic_output_coverage;
   classic_inputs.global_error = global_error;
   classic_inputs.params_error = params_error;
   classic_inputs.setdown_error = setdown_error;

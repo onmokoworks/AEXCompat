@@ -1,6 +1,7 @@
 #pragma once
 
 #include "worker_parameter_execution.hpp"
+#include "worker_output_coverage.hpp"
 #include "worker_request_parser.hpp"
 #include "worker_smart_runtime.hpp"
 
@@ -49,6 +50,10 @@ struct Result {
   // successful selector. Kept separate from non-finite/otherwise-invalid
   // output so only this exact no-output case can authorize route fallback.
   bool output_untouched{};
+  output_coverage::Result output_coverage{};
+  // Device/VideoFrame worlds overwrite the host buffer with independently
+  // initialized pixels. The host seed cannot attest their write coverage.
+  bool output_coverage_external_world{};
   bool gpu_render_possible{};
   bool gpu_render_dispatched{};
   int32_t checkout_time{};

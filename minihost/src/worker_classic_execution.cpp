@@ -70,6 +70,17 @@ int finalize(Context& c, const Hooks& h) {
   if (!h.copy_packed || !h.hash || !h.copy_packed(c.destination, c.rowbytes, c.width,
       c.height, c.pixel_bytes, logical)) return -3;
   if (c.output_hash) *c.output_hash = h.hash(logical.data(), logical.size());
+  // A NOP_RENDER frame is a host-owned passthrough; the plug-in promised no
+  // writes. All other successful Classic frames promise their output extent.
+  auto coverage = c.output_written_by_host ? output_coverage::Result{} :
+      output_coverage::inspect(logical.data(), logical.size(), c.width, c.height,
+                               c.pixel_bytes, {0, 0, c.width, c.height});
+  if (c.error == 0 && !c.output_written_by_host &&
+      (!coverage.geometry_valid || coverage.unwritten_pixels != 0)) {
+    coverage.host_validation_failed = true;
+    c.error = -6;
+  }
+  if (c.output_coverage) *c.output_coverage = coverage;
   if (c.error == 0 && (!h.publish_stage || !h.publish_stage(
       {c.current_time, c.time_scale}, {c.time_step, c.time_scale},
       static_cast<int8_t>(c.quality == 0 ? 0 : 1), c.pixel_format,

@@ -772,7 +772,11 @@ fn render_classic_via_length_one_session(
     // gate below turns that into an error carrying these diagnostics, so
     // without this the failure reads as an unattributed validation failure.
     // The deleted one-shot set the same annotation (#365).
-    if final_report.get("output_pixels_valid") == Some(&Value::Bool(false)) {
+    if final_report["output_coverage"]["validation_failed"] == true
+        || (final_report.get("output_pixels_valid") == Some(&Value::Bool(false))
+            && final_report["pre_render_error"] == 0
+            && final_report["smart_render_selector_error"] == 0)
+    {
         diagnostics["failure_stage"] = json!("output_validation");
     }
     let gate = validate_interactive_worker_report(
@@ -1890,6 +1894,7 @@ pub(crate) fn build_interactive_image_report(
         "smart_render_selector_error",
         "smart_render_error",
         "output_pixels_valid",
+        "output_coverage",
         "cuda_context_used",
         "cuda_upload_bytes",
         "cuda_download_bytes",

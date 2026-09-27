@@ -1,4 +1,5 @@
 #pragma once
+#include "worker_output_coverage.hpp"
 
 #include <array>
 #include <cstddef>
@@ -155,6 +156,7 @@ struct ClassicFrameOutput {
   // caller tell host-side output validation apart from selector errors that
   // share the same numeric codes.
   bool validation_failed{};
+  aexcompat::worker_runtime::output_coverage::Result output_coverage{};
   // PF_OutData::origin as the effect stated it, in the plug-in's own
   // convention: the position of the input buffer's top-left corner in the
   // output buffer, so positive when the effect expanded and negative when it

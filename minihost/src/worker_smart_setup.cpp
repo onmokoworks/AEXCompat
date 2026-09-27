@@ -4,6 +4,7 @@
 
 #include "gpu_device_info_registry.hpp"
 #include "worker_smart_runtime.hpp"
+#include "worker_output_coverage.hpp"
 #include "render_pixel_transport.hpp"
 #include "worker_world_registry.hpp"
 
@@ -208,6 +209,8 @@ bool prepare_world_buffers(const Plan& plan, const std::string& case_id,
   }
   if (!source.set_plugin_writable(input_write_advertised)) return false;
   *buffers.destination = buffers.output->data();
+  if (!output_coverage::seed(*buffers.destination, buffers.output->size(),
+          plan.width, plan.height, plan.rowbytes, plan.pixel_bytes)) return false;
   const render::WorldLayout layout{(plan.deep16 || plan.float32) ? 1 : 0,
       plan.pixel_bytes, plan.width, plan.height, plan.rowbytes};
   if (!render::prepare_world_layout(*buffers.input_world, layout, source.data()) ||

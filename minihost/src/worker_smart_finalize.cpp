@@ -67,9 +67,19 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
     *r.session->captured_argb = logical_output;
   h.dump_world("smart-output", logical_output.data(), result.output_width,
                result.output_height, r.pixel_bytes);
-  const bool untouched = !logical_output.empty() &&
-      std::all_of(logical_output.begin(), logical_output.end(),
-                  [](unsigned char value) { return value == 0xCC; });
+  if (!result.empty_result_rect && !result.output_coverage_external_world)
+    result.output_coverage = output_coverage::inspect(
+        logical_output.data(), logical_output.size(), result.output_width,
+        result.output_height, r.pixel_bytes,
+        {0, 0, result.output_width, result.output_height});
+  // External worlds have their own initialization contract (GPU device and
+  // VideoFrame adapter). Do not mistake their copied pixels for the host seed;
+  // retain the pre-existing whole-frame 0xCC fallback check for those routes.
+  const bool untouched = result.output_coverage_external_world
+      ? !logical_output.empty() && std::all_of(logical_output.begin(),
+          logical_output.end(), [](unsigned char byte) { return byte == 0xCC; })
+      : result.output_coverage.promised_pixels != 0 &&
+          result.output_coverage.unwritten_pixels == result.output_coverage.promised_pixels;
   result.output_untouched = untouched;
   // An 8/16bpc world cannot hold a non-finite value, so the check is on the
   // float32 world; the Premiere GPU-filter route reports the same condition
@@ -79,11 +89,19 @@ bool finalize(const Request& r, const Hooks& h, smart_execution::Result& result)
       !result.output_non_finite;
   // A legally empty result promised no pixels; zero output bytes are the
   // correct fulfillment of that contract, not a validation failure.
-  result.output_pixels_valid = (result.empty_result_rect &&
-                                !result.empty_result_passthrough)
-      ? true
-      : !logical_output.empty() && !untouched && finite;
-  if (result.render_error == 0 && !result.output_pixels_valid) result.render_error = -6;
+  result.output_pixels_valid = result.empty_result_rect
+      ? (!result.empty_result_passthrough || (!logical_output.empty() && finite))
+      : !logical_output.empty() && finite &&
+          (result.output_coverage_external_world ? !untouched :
+           result.output_coverage.geometry_valid &&
+           result.output_coverage.unwritten_pixels == 0);
+  result.output_coverage.host_validation_failed = result.pre_error == 0 &&
+      result.render_error == 0 &&
+      !result.empty_result_rect && !result.output_coverage_external_world &&
+      (!result.output_coverage.geometry_valid ||
+       result.output_coverage.unwritten_pixels != 0);
+  if (result.pre_error == 0 && result.render_error == 0 &&
+      !result.output_pixels_valid) result.render_error = -6;
   // The output world extent_hint is read back from the world the plug-in saw.
   // The empty answer never resized or dispatched the output world; reporting
   // the stale full-frame extent would claim pixels that were never promised.
