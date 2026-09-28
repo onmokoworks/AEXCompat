@@ -41,3 +41,9 @@ windows = { version = "0.58", features = [
   "Wdk_Graphics_Direct3D",
   "Wdk_System_SystemServices"
 ] }
+
+# The debug harness hashes its own executable before and after every native
+# differential variant. Keep the broker debuggable while avoiding a software
+# SHA-256 bottleneck in the dependency used by CI's built-artifact tests.
+[profile.dev.package.sha2]
+opt-level = 3
