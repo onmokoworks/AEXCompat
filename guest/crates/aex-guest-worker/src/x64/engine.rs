@@ -2879,6 +2879,12 @@ impl GuestEngine<'static> {
         self.unicorn.get_data_mut().render_pixel_format = pixel_format;
     }
 
+    pub fn configure_resident_world_formats(&mut self, formats: &[(u64, i32)]) {
+        let registered = &mut self.unicorn.get_data_mut().resident_world_formats;
+        registered.clear();
+        registered.extend(formats.iter().copied());
+    }
+
     pub fn finish_smart_checkout_scope(&mut self) -> bool {
         let state = self.unicorn.get_data_mut();
         let balanced = state

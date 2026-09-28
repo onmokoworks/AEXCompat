@@ -692,11 +692,53 @@ fn render_classic_via_length_one_session(
         gpu_runtime_policy: request.gpu_runtime_policy,
         launch_environment: Default::default(),
     };
+    let capture_spec = fixture_capture_override();
+    let mut capture_files = Vec::new();
+    for spec in capture_spec.as_deref().unwrap_or_default() {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&spec.path)
+        {
+            Ok(file) => capture_files.push(file),
+            Err(error) => {
+                return SessionWrapperOutcome::Failure(invalid(format!(
+                    "checkpoint capture file open failed: {error}"
+                )));
+            }
+        }
+    }
+    let captures = capture_spec
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .zip(&capture_files)
+        .map(|(spec, file)| crate::render_session::SessionWorldCapture {
+            stage: &spec.stage,
+            file,
+        })
+        .collect::<Vec<_>>();
     // A custom UI action is the explicit interactive harness route (#107/#238)
     // and must retain the caller's desktop. Plain discovery/render workers stay
     // on the private desktop boundary from RenderSession::open.
     let mut session = match if request.custom_ui_action.is_some() {
+        if fixture_world_layout_override().is_some()
+            || fixture_secondary_layouts_override().is_some()
+            || !captures.is_empty()
+        {
+            return SessionWrapperOutcome::Failure(invalid(
+                "fixture world layout cannot use the interactive desktop",
+            ));
+        }
         RenderSession::open_on_current_desktop(session_request)
+    } else if let Some(layout) = fixture_world_layout_override() {
+        let layer_layouts = fixture_secondary_layouts_override().unwrap_or_default();
+        RenderSession::open_diagnostic_with_layer_layouts(
+            session_request,
+            layout,
+            &layer_layouts,
+            &captures,
+        )
     } else {
         RenderSession::open(session_request)
     } {
@@ -886,7 +928,7 @@ fn render_classic_via_length_one_session(
             Ok(value) => value,
             Err(error) => return SessionWrapperOutcome::Failure(error),
         };
-        let conditions = RenderArtifactConditions {
+        let mut conditions = RenderArtifactConditions {
             premultiplication: premultiplication.into(),
             working_space: "None".into(),
             render_mode: "software".into(),
@@ -906,6 +948,9 @@ fn render_classic_via_length_one_session(
                 "origin": {"x": origin_x, "y": origin_y},
             }),
         };
+        if let Some(case) = fixture_case_identity_override() {
+            conditions.comparison_identity["fixture_case"] = json!(case);
+        }
         match request.artifact_kind {
             Some(RenderArtifactKind::Raw) => match write_raw_world_artifact(
                 request.output_path,

@@ -20,13 +20,15 @@ use crate::macos_worker_controller::{
     MAX_STDERR_BYTES, ResourceLimits, SecurityTier, WorkerSession, audit_process, read_bounded,
     run_staged_setup, terminate_process_group,
 };
+use aexcompat_broker::render_artifacts::{CapturedWorldRecord, read_captured_world};
 use aexcompat_broker::render_artifacts::{
     RenderArtifactConditions, write_float32_exr_artifact, write_raw_world_artifact,
-    write_raw_world_checkpoint_artifact,
+    write_raw_world_checkpoint_artifact, write_strided_world_checkpoint_artifact,
 };
 use aexcompat_broker::render_fixture::{
-    FixtureFinalArtifact, FixturePixelFormat, FixtureTiming, InteractiveParameter,
-    load_render_fixture,
+    FixtureCaseIdentity, FixtureCheckpoint, FixtureFinalArtifact, FixturePixelFormat,
+    FixtureTiming, FixtureWorldLayout, FixtureWorlds, InteractiveParameter, LoadedRenderFixture,
+    expand_fixture_cases, fixture_case_identity, load_render_fixture,
 };
 use aexcompat_broker::render_pixel_format::RenderPixelFormat;
 
@@ -69,20 +71,6 @@ impl MacRenderFormat {
             Self::RawArgb16 => 8,
             Self::ExrArgb32f => 16,
         }
-    }
-
-    fn validate_bytes(self, width: u32, height: u32, bytes: &[u8]) -> Result<(), String> {
-        let expected = (width as usize)
-            .checked_mul(height as usize)
-            .and_then(|pixels| pixels.checked_mul(self.bytes_per_pixel()))
-            .ok_or_else(|| "fixture world byte count overflow".to_string())?;
-        if bytes.len() != expected {
-            return Err(format!(
-                "fixture world has {} bytes, expected {expected}",
-                bytes.len()
-            ));
-        }
-        Ok(())
     }
 
     fn artifact_format(self) -> RenderPixelFormat {
@@ -1518,11 +1506,12 @@ struct StartedResidentWorker {
     input_sha256: String,
     additional_session_files: usize,
     fixture_input_world: Option<PathBuf>,
-    fixture_layer_worlds: Vec<(u32, u32, u32, PathBuf)>,
+    fixture_layer_worlds: Vec<(u32, u32, u32, MacRenderFormat, PathBuf)>,
 }
 
 struct MacFixtureLaunch<'a> {
     layers: &'a [(u32, PathBuf)],
+    worlds: Option<&'a FixtureWorlds>,
     smart: bool,
     time_scale: u32,
 }
@@ -1530,7 +1519,37 @@ struct MacFixtureLaunch<'a> {
 #[derive(Serialize)]
 struct StagedLayerManifest<'a> {
     v: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary: Option<StagedWorldLayout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    primary_pixel_format: Option<&'a str>,
     layers: &'a [StagedLayerEntry],
+}
+
+#[derive(Serialize)]
+struct StagedWorldLayout {
+    rowbytes: u32,
+    padding_byte: u8,
+    origin_x: i32,
+    origin_y: i32,
+    extent: [i32; 4],
+}
+
+impl From<&FixtureWorldLayout> for StagedWorldLayout {
+    fn from(world: &FixtureWorldLayout) -> Self {
+        Self {
+            rowbytes: world.rowbytes,
+            padding_byte: world.padding_byte,
+            origin_x: world.origin.x,
+            origin_y: world.origin.y,
+            extent: [
+                world.extent.left,
+                world.extent.top,
+                world.extent.right,
+                world.extent.bottom,
+            ],
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -1539,6 +1558,10 @@ struct StagedLayerEntry {
     width: u32,
     height: u32,
     path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pixel_format: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout: Option<StagedWorldLayout>,
 }
 
 fn start_resident_worker(
@@ -1645,13 +1668,21 @@ fn launch_resident_candidate(
     let session = WorkerSession::create()?;
     let worker = session.stage_file(&candidate.path, "worker")?;
     let plugin = session.stage_file(aex, "plugin.aex")?;
+    let primary_format = fixture
+        .and_then(|fixture| fixture.worlds)
+        .map(|worlds| match worlds.primary.pixel_format {
+            FixturePixelFormat::Argb8 => MacRenderFormat::PngArgb8,
+            FixturePixelFormat::Argb16 => MacRenderFormat::RawArgb16,
+            FixturePixelFormat::Argb32f => MacRenderFormat::ExrArgb32f,
+        })
+        .unwrap_or(format);
     let input_slot = session
         .root()
-        .join(format!("input.{}", format.pixel_format()));
+        .join(format!("input.{}", primary_format.pixel_format()));
     let output_slot = session
         .root()
         .join(format!("output.{}", format.pixel_format()));
-    let (width, height) = write_resident_input_slot(input, &input_slot, format)?;
+    let (width, height) = write_resident_input_slot(input, &input_slot, primary_format)?;
     let plugin_sha256 = format!(
         "{:x}",
         Sha256::digest(
@@ -1683,22 +1714,67 @@ fn launch_resident_candidate(
     ];
     let mut fixture_layer_worlds = Vec::new();
     if let Some(fixture) = fixture {
+        let mixed_primary = primary_format != format;
+        let mixed_secondary = fixture.worlds.is_some_and(|worlds| {
+            worlds
+                .secondary
+                .iter()
+                .any(|world| world.pixel_format.name() != format.pixel_format())
+        });
+        if let Some(worlds) = fixture.worlds {
+            if worlds.primary.width != width
+                || worlds.primary.height != height
+                || worlds.secondary.iter().any(|world| {
+                    !fixture
+                        .layers
+                        .iter()
+                        .any(|(slot, _)| Some(*slot) == world.slot)
+                })
+            {
+                return Err("fixture world layout does not match staged image or depth".into());
+            }
+        }
         let mut staged_layers = Vec::with_capacity(fixture.layers.len());
         for (slot, source) in fixture.layers {
+            let declared_layout = fixture.worlds.and_then(|worlds| {
+                worlds
+                    .secondary
+                    .iter()
+                    .find(|world| world.slot == Some(*slot))
+            });
+            let layer_format = declared_layout
+                .map(|world| match world.pixel_format {
+                    FixturePixelFormat::Argb8 => MacRenderFormat::PngArgb8,
+                    FixturePixelFormat::Argb16 => MacRenderFormat::RawArgb16,
+                    FixturePixelFormat::Argb32f => MacRenderFormat::ExrArgb32f,
+                })
+                .unwrap_or(format);
             let path = session
                 .root()
-                .join(format!("layer-{slot}.{}", format.pixel_format()));
-            let (layer_width, layer_height) = write_resident_input_slot(source, &path, format)?;
+                .join(format!("layer-{slot}.{}", layer_format.pixel_format()));
+            let (layer_width, layer_height) =
+                write_resident_input_slot(source, &path, layer_format)?;
+            if declared_layout
+                .is_some_and(|world| world.width != layer_width || world.height != layer_height)
+            {
+                return Err(format!(
+                    "fixture layer slot {slot} layout dimensions differ from image"
+                ));
+            }
             staged_layers.push(StagedLayerEntry {
                 slot: *slot,
                 width: layer_width,
                 height: layer_height,
                 path,
+                pixel_format: (mixed_primary || mixed_secondary)
+                    .then_some(layer_format.pixel_format()),
+                layout: declared_layout.map(StagedWorldLayout::from),
             });
             fixture_layer_worlds.push((
                 *slot,
                 layer_width,
                 layer_height,
+                layer_format,
                 session
                     .root()
                     .join(format!("fixture-layer-slot{slot}-world.bin")),
@@ -1706,7 +1782,19 @@ fn launch_resident_candidate(
         }
         let manifest_path = session.root().join("fixture-layers-v1.json");
         let manifest = serde_json::to_vec(&StagedLayerManifest {
-            v: 1,
+            v: if mixed_primary {
+                4
+            } else if mixed_secondary {
+                3
+            } else if fixture.worlds.is_some() {
+                2
+            } else {
+                1
+            },
+            primary: fixture
+                .worlds
+                .map(|worlds| StagedWorldLayout::from(&worlds.primary)),
+            primary_pixel_format: mixed_primary.then_some(primary_format.pixel_format()),
             layers: &staged_layers,
         })
         .map_err(|error| format!("serialize fixture layer manifest: {error}"))?;
@@ -1912,6 +2000,25 @@ fn fixture_parameter_payload(
                     json!(parameter.value as i64),
                 )
             }
+            "popup" => {
+                if !parameter.value.is_finite()
+                    || parameter.value.fract() != 0.0
+                    || parameter.choices.is_empty()
+                    || parameter.choices.len() > 64
+                    || parameter.minimum != 1.0
+                    || parameter.maximum != parameter.choices.len() as f64
+                {
+                    return Err(format!(
+                        "fixture popup slot {} requires a one-based choice",
+                        parameter.slot
+                    ));
+                }
+                (
+                    format!("i32={}", parameter.value as i64),
+                    "popup",
+                    json!(parameter.value as i64),
+                )
+            }
             "float" => {
                 if !parameter.value.is_finite() {
                     return Err(format!(
@@ -2042,26 +2149,77 @@ fn fixture_conditions(
     time_step: i32,
     total_time: i32,
     time_scale: u32,
+    case_identity: Option<&FixtureCaseIdentity>,
 ) -> RenderArtifactConditions {
+    let mut comparison_identity = json!({
+        "plugin_sha256": plugin_sha256,
+        "input_sha256": input_sha256,
+        "world_sha256": format!("{:x}", Sha256::digest(world)),
+        "render_path": render_path,
+        "pixel_format": pixel_format,
+        "timing": {
+            "current_time": current_time,
+            "time_step": time_step,
+            "total_time": total_time,
+            "time_scale": time_scale
+        },
+        "requested_parameters": requested_parameters,
+        "origin": {"x": 0, "y": 0}
+    });
+    if let Some(case_identity) = case_identity {
+        comparison_identity["fixture_case"] = json!(case_identity);
+    }
     RenderArtifactConditions {
         premultiplication: premultiplication.into(),
         working_space: "None".into(),
         render_mode: "software".into(),
-        comparison_identity: json!({
-            "plugin_sha256": plugin_sha256,
-            "input_sha256": input_sha256,
-            "world_sha256": format!("{:x}", Sha256::digest(world)),
-            "render_path": render_path,
-            "pixel_format": pixel_format,
-            "timing": {
-                "current_time": current_time,
-                "time_step": time_step,
-                "total_time": total_time,
-                "time_scale": time_scale
-            },
-            "requested_parameters": requested_parameters,
-            "origin": {"x": 0, "y": 0}
-        }),
+        comparison_identity,
+    }
+}
+
+fn fixture_checkpoint_source<'a>(
+    suffix: &str,
+    primary: &'a CapturedWorldRecord,
+    output: &'a [u8],
+    output_format: MacRenderFormat,
+    primary_format: MacRenderFormat,
+    layers: &'a [(u32, MacRenderFormat, CapturedWorldRecord)],
+) -> Result<
+    (
+        u32,
+        u32,
+        &'a [u8],
+        Option<&'a CapturedWorldRecord>,
+        MacRenderFormat,
+    ),
+    String,
+> {
+    match suffix {
+        "input" => Ok((
+            primary.width,
+            primary.height,
+            &primary.raw_argb,
+            Some(primary),
+            primary_format,
+        )),
+        "output" => Ok((primary.width, primary.height, output, None, output_format)),
+        layer if layer.starts_with("layer-slot") => {
+            let slot = layer["layer-slot".len()..]
+                .parse::<u32>()
+                .map_err(|_| "checkpoint layer slot is invalid".to_string())?;
+            let (_, format, world) = layers
+                .iter()
+                .find(|(candidate, _, _)| *candidate == slot)
+                .ok_or_else(|| format!("requested checkpoint layer slot {slot} was not staged"))?;
+            Ok((
+                world.width,
+                world.height,
+                &world.raw_argb,
+                Some(world),
+                *format,
+            ))
+        }
+        _ => Err("checkpoint stage is unsupported".into()),
     }
 }
 
@@ -2080,6 +2238,50 @@ fn fixture_render_request(timing: &FixtureTiming, parameters: &str) -> Value {
     })
 }
 
+fn validate_fixture_world_record(
+    observed: &CapturedWorldRecord,
+    expected: Option<&FixtureWorldLayout>,
+    width: u32,
+    height: u32,
+    format: MacRenderFormat,
+) -> Result<(), String> {
+    let packed = width
+        .checked_mul(format.bytes_per_pixel() as u32)
+        .ok_or_else(|| "fixture world packed row overflow".to_string())?;
+    let (rowbytes, origin_x, origin_y, extent, padding_byte) = match expected {
+        Some(world) => (
+            world.rowbytes,
+            world.origin.x,
+            world.origin.y,
+            [
+                world.extent.left,
+                world.extent.top,
+                world.extent.right,
+                world.extent.bottom,
+            ],
+            Some(world.padding_byte),
+        ),
+        None => (packed, 0, 0, [0, 0, width as i32, height as i32], None),
+    };
+    if observed.width != width
+        || observed.height != height
+        || observed.pixel_bytes != format.bytes_per_pixel() as u32
+        || observed.rowbytes != rowbytes
+        || observed.origin_x != origin_x
+        || observed.origin_y != origin_y
+        || observed.extent != extent
+        || padding_byte.is_some_and(|fill| {
+            observed
+                .raw_argb
+                .chunks_exact(rowbytes as usize)
+                .any(|row| row[packed as usize..].iter().any(|byte| *byte != fill))
+        })
+    {
+        return Err("fixture observed world differs from declared layout".into());
+    }
+    Ok(())
+}
+
 pub fn render_fixture_headless(
     repository: &Path,
     aex: &Path,
@@ -2091,15 +2293,85 @@ pub fn render_fixture_headless(
     }
     let loaded = load_render_fixture(fixture_path)
         .map_err(|error| format!("load declarative fixture: {error}"))?;
+    if loaded.document.schema_version == 1 {
+        return render_single_fixture_headless(
+            repository,
+            aex,
+            &loaded,
+            &loaded.parameters,
+            None,
+            output_directory,
+        );
+    }
+    let plugin_sha256 = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(aex).map_err(|error| error.to_string())?)
+    );
+    let cases = expand_fixture_cases(&loaded);
+    let staging = fixture_staging_path(output_directory)?;
+    let result = (|| -> Result<Value, String> {
+        let mut case_reports = Vec::with_capacity(cases.len());
+        for case in &cases {
+            let identity = fixture_case_identity(&loaded, case, &plugin_sha256)
+                .map_err(|error| format!("fixture case identity: {error}"))?;
+            let relative = format!("cases/{}", identity.sha256);
+            let case_output = staging.join(&relative);
+            let report = render_single_fixture_headless(
+                repository,
+                aex,
+                &loaded,
+                &case.parameters,
+                Some(&identity),
+                &case_output,
+            )
+            .map_err(|error| format!("fixture case {} failed: {error}", case.index))?;
+            case_reports.push(json!({
+                "case_identity": identity,
+                "artifact_directory": relative,
+                "report": report
+            }));
+        }
+        std::fs::rename(&staging, output_directory)
+            .map_err(|error| format!("publish fixture matrix: {error}"))?;
+        Ok(json!({
+            "schema":"aexcompat.render_fixture_report", "schema_version":2,
+            "fixture_sha256":loaded.sha256, "complete":true, "cases":case_reports
+        }))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn render_single_fixture_headless(
+    repository: &Path,
+    aex: &Path,
+    loaded: &LoadedRenderFixture,
+    case_parameters: &[InteractiveParameter],
+    case_identity: Option<&FixtureCaseIdentity>,
+    output_directory: &Path,
+) -> Result<Value, String> {
+    if output_directory.exists() {
+        return Err("fixture output exists".into());
+    }
     let fixture = &loaded.document;
     let format = match fixture.pixel_format {
         FixturePixelFormat::Argb8 => MacRenderFormat::PngArgb8,
         FixturePixelFormat::Argb16 => MacRenderFormat::RawArgb16,
         FixturePixelFormat::Argb32f => MacRenderFormat::ExrArgb32f,
     };
-    let parameters = fixture_parameter_payload(&loaded.parameters)?;
-    let layer_paths = loaded
-        .parameters
+    let primary_format = fixture
+        .worlds
+        .as_ref()
+        .map(|worlds| match worlds.primary.pixel_format {
+            FixturePixelFormat::Argb8 => MacRenderFormat::PngArgb8,
+            FixturePixelFormat::Argb16 => MacRenderFormat::RawArgb16,
+            FixturePixelFormat::Argb32f => MacRenderFormat::ExrArgb32f,
+        })
+        .unwrap_or(format);
+    let parameters = fixture_parameter_payload(case_parameters)?;
+    let layer_paths = case_parameters
         .iter()
         .filter(|parameter| parameter.kind == "layer")
         .filter_map(|parameter| {
@@ -2114,6 +2386,7 @@ pub fn render_fixture_headless(
     }
     let launch = MacFixtureLaunch {
         layers: &layer_paths,
+        worlds: fixture.worlds.as_ref(),
         smart: fixture.render_path == "smart",
         time_scale: fixture.timing.time_scale,
     };
@@ -2176,26 +2449,32 @@ pub fn render_fixture_headless(
             .fixture_input_world
             .as_ref()
             .ok_or_else(|| "fixture input world dump path is unavailable".to_string())?;
-        let input_world = std::fs::read(input_path)
+        let input_world = read_captured_world(input_path)
             .map_err(|error| format!("read fixture input world dump: {error}"))?;
-        format
-            .validate_bytes(primary_width, primary_height, &input_world)
-            .map_err(|error| format!("validate fixture input world dump: {error}"))?;
+        validate_fixture_world_record(
+            &input_world,
+            fixture.worlds.as_ref().map(|worlds| &worlds.primary),
+            primary_width,
+            primary_height,
+            primary_format,
+        )?;
         let mut layer_worlds = Vec::with_capacity(started.fixture_layer_worlds.len());
-        for (slot, width, height, path) in &started.fixture_layer_worlds {
-            let bytes = std::fs::read(path)
+        for (slot, width, height, layer_format, path) in &started.fixture_layer_worlds {
+            let observed = read_captured_world(path)
                 .map_err(|error| format!("read fixture layer slot {slot} world dump: {error}"))?;
-            format
-                .validate_bytes(*width, *height, &bytes)
-                .map_err(|error| {
-                    format!("validate fixture layer slot {slot} world dump: {error}")
-                })?;
-            layer_worlds.push((*slot, *width, *height, bytes));
+            let declared = fixture.worlds.as_ref().and_then(|worlds| {
+                worlds
+                    .secondary
+                    .iter()
+                    .find(|world| world.slot == Some(*slot))
+            });
+            validate_fixture_world_record(&observed, declared, *width, *height, *layer_format)?;
+            layer_worlds.push((*slot, *layer_format, observed));
         }
         Ok((output, input_world, layer_worlds))
     })();
     let close = close_probe_worker(started);
-    let (output_argb, primary_argb, layer_worlds) =
+    let (output_argb, primary_world, layer_worlds) =
         combine_fixture_inspection_and_close(inspected, close)?;
 
     let staging = fixture_staging_path(output_directory)?;
@@ -2219,6 +2498,7 @@ pub fn render_fixture_headless(
             fixture.timing.time_step,
             fixture.timing.total_time,
             fixture.timing.time_scale,
+            case_identity,
         );
         let final_metadata = match fixture.final_artifact {
             FixtureFinalArtifact::Raw => write_raw_world_artifact(
@@ -2249,28 +2529,21 @@ pub fn render_fixture_headless(
                 .stage
                 .strip_prefix(&format!("{}-", fixture.render_path))
                 .ok_or_else(|| "checkpoint stage does not match render path".to_string())?;
-            let (width, height, argb) = match suffix {
-                "input" => (primary_width, primary_height, primary_argb.as_slice()),
-                "output" => (primary_width, primary_height, output_argb.as_slice()),
-                layer if layer.starts_with("layer-slot") => {
-                    let slot = layer["layer-slot".len()..]
-                        .parse::<u32>()
-                        .map_err(|_| "checkpoint layer slot is invalid".to_string())?;
-                    let (_, width, height, bytes) = layer_worlds
-                        .iter()
-                        .find(|(candidate, _, _, _)| *candidate == slot)
-                        .ok_or_else(|| {
-                            format!("requested checkpoint layer slot {slot} was not staged")
-                        })?;
-                    (*width, *height, bytes.as_slice())
-                }
-                _ => return Err("checkpoint stage is unsupported".into()),
-            };
-            let rgba = argb_to_rgba_words(argb, component_bytes);
-            let checkpoint_conditions = fixture_conditions(
+            let (width, height, argb, observed, checkpoint_format) = fixture_checkpoint_source(
+                suffix,
+                &primary_world,
+                &output_argb,
+                format,
+                primary_format,
+                &layer_worlds,
+            )?;
+            let rgba = observed
+                .is_none()
+                .then(|| argb_to_rgba_words(argb, checkpoint_format.bytes_per_pixel() / 4));
+            let mut checkpoint_conditions = fixture_conditions(
                 &plugin_sha256,
                 &input_sha256,
-                &rgba,
+                rgba.as_deref().unwrap_or(argb),
                 format.pixel_format(),
                 artifact_render_path,
                 &parameters.identity,
@@ -2279,20 +2552,46 @@ pub fn render_fixture_headless(
                 fixture.timing.time_step,
                 fixture.timing.total_time,
                 fixture.timing.time_scale,
+                case_identity,
             );
-            let metadata = write_raw_world_checkpoint_artifact(
-                &staging.join("checkpoints").join(&checkpoint.id),
-                &rgba,
-                width,
-                height,
-                format.artifact_format(),
-                0,
-                0,
-                checkpoint_conditions,
-                &checkpoint.id,
-                &checkpoint.stage,
-                &loaded.sha256,
-            )
+            let metadata = if fixture.worlds.is_some()
+                && let Some(world) = observed
+            {
+                checkpoint_conditions.comparison_identity["origin"] =
+                    json!({"x":world.origin_x,"y":world.origin_y});
+                write_strided_world_checkpoint_artifact(
+                    &staging.join("checkpoints").join(&checkpoint.id),
+                    &world.raw_argb,
+                    width,
+                    height,
+                    checkpoint_format.artifact_format(),
+                    world.rowbytes,
+                    world.origin_x,
+                    world.origin_y,
+                    world.extent,
+                    checkpoint_conditions,
+                    &checkpoint.id,
+                    &checkpoint.stage,
+                    &loaded.sha256,
+                )
+            } else {
+                let rgba = rgba.unwrap_or_else(|| {
+                    argb_to_rgba_words(argb, checkpoint_format.bytes_per_pixel() / 4)
+                });
+                write_raw_world_checkpoint_artifact(
+                    &staging.join("checkpoints").join(&checkpoint.id),
+                    &rgba,
+                    width,
+                    height,
+                    checkpoint_format.artifact_format(),
+                    0,
+                    0,
+                    checkpoint_conditions,
+                    &checkpoint.id,
+                    &checkpoint.stage,
+                    &loaded.sha256,
+                )
+            }
             .map_err(|error| format!("write fixture checkpoint: {error}"))?;
             checkpoint_reports.insert(checkpoint.id.clone(), metadata);
         }
@@ -2438,6 +2737,7 @@ fn start_resident_session(
     }
     let fixture = (!layers.is_empty()).then_some(MacFixtureLaunch {
         layers: &layers,
+        worlds: None,
         smart: false,
         time_scale: 30,
     });
@@ -3097,6 +3397,133 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn mixed_primary_checkpoint_keeps_input_depth_and_output_case_identity() {
+        let primary = CapturedWorldRecord {
+            width: 1,
+            height: 1,
+            pixel_bytes: 8,
+            rowbytes: 16,
+            origin_x: 0,
+            origin_y: 0,
+            extent: [0, 0, 1, 1],
+            raw_argb: [
+                0u8, 128, 0, 16, 0, 32, 0, 48, 90, 90, 90, 90, 90, 90, 90, 90,
+            ]
+            .to_vec(),
+        };
+        let output = [255u8, 40, 60, 80];
+        let (width, height, raw, observed, format) = fixture_checkpoint_source(
+            "input",
+            &primary,
+            &output,
+            MacRenderFormat::PngArgb8,
+            MacRenderFormat::RawArgb16,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(format, MacRenderFormat::RawArgb16);
+        assert_eq!(raw, primary.raw_argb);
+        assert!(observed.is_some());
+        let plugin_sha256 = "a".repeat(64);
+        let fixture_sha256 = "c".repeat(64);
+        let mut case = FixtureCaseIdentity {
+            sha256: String::new(),
+            fixture_sha256: fixture_sha256.clone(),
+            plugin_sha256: plugin_sha256.clone(),
+            input_asset_sha256: "d".repeat(64),
+            case_index: 0,
+            selections: Vec::new(),
+            render_path: "classic".into(),
+            pixel_format: "argb8".into(),
+            checkpoints: vec![FixtureCheckpoint {
+                id: "input".into(),
+                stage: "classic-input".into(),
+            }],
+            world_layout_identity: "e".repeat(64),
+        };
+        case.sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    &case.fixture_sha256,
+                    &case.plugin_sha256,
+                    &case.input_asset_sha256,
+                    case.case_index,
+                    &case.selections,
+                    &case.render_path,
+                    &case.pixel_format,
+                    &case.checkpoints,
+                    &case.world_layout_identity,
+                ))
+                .unwrap()
+            )
+        );
+        case.validate().unwrap();
+        let conditions = fixture_conditions(
+            &plugin_sha256,
+            &"b".repeat(64),
+            raw,
+            MacRenderFormat::PngArgb8.pixel_format(),
+            "classic",
+            &json!([]),
+            "straight",
+            0,
+            1,
+            1,
+            1,
+            Some(&case),
+        );
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-mac-mixed-checkpoint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let metadata = write_strided_world_checkpoint_artifact(
+            &root,
+            raw,
+            width,
+            height,
+            format.artifact_format(),
+            primary.rowbytes,
+            0,
+            0,
+            primary.extent,
+            conditions,
+            "input",
+            "classic-input",
+            &fixture_sha256,
+        )
+        .unwrap();
+        assert_eq!(metadata["pixel_format"], "argb16");
+        assert_eq!(metadata["comparison_identity"]["pixel_format"], "argb8");
+        assert_eq!(
+            metadata["comparison_identity"]["fixture_case"]["sha256"],
+            case.sha256
+        );
+        assert_eq!(
+            metadata["comparison_identity"]["fixture_case"]["pixel_format"],
+            "argb8"
+        );
+        assert_eq!(metadata["rowbytes"], 16);
+        assert_eq!(std::fs::read(root.join("output.bin")).unwrap(), raw);
+        let (_, _, final_raw, _, final_format) = fixture_checkpoint_source(
+            "output",
+            &primary,
+            &output,
+            MacRenderFormat::PngArgb8,
+            MacRenderFormat::RawArgb16,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(final_format, MacRenderFormat::PngArgb8);
+        assert_eq!(final_raw, output);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn fixture_parameter(slot: u32, kind: &str, value: f64) -> InteractiveParameter {
         InteractiveParameter {
             slot,
@@ -3147,6 +3574,26 @@ mod tests {
                 }}
             ])
         );
+    }
+
+    #[test]
+    fn fixture_payload_carries_one_based_popup_choice() {
+        let mut popup = fixture_parameter(3, "popup", 2.0);
+        popup.minimum = 1.0;
+        popup.maximum = 2.0;
+        popup.choices = vec!["Base".into(), "Alternate".into()];
+        let payload = fixture_parameter_payload(&[popup.clone()]).unwrap();
+        assert_eq!(payload.transport, "v2|param_3@3:i32=2");
+        assert_eq!(
+            payload.identity,
+            json!([{"id":"param_3","slot":3,"kind":"popup","value":2}])
+        );
+        popup.value = 0.0;
+        assert!(fixture_parameter_payload(&[popup.clone()]).is_err());
+        popup.value = 3.0;
+        assert!(fixture_parameter_payload(&[popup.clone()]).is_err());
+        popup.value = 1.5;
+        assert!(fixture_parameter_payload(&[popup]).is_err());
     }
 
     #[test]

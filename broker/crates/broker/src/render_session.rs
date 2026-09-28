@@ -528,6 +528,8 @@ impl SessionGeometry {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DiagnosticWorldLayout {
     pub input_row_padding: u32,
+    pub input_padding_byte: Option<u8>,
+    pub input_pixel_format: Option<RenderPixelFormat>,
     pub output_row_padding: u32,
     pub input_origin_x: i32,
     pub input_origin_y: i32,
@@ -543,7 +545,9 @@ impl DiagnosticWorldLayout {
         format: RenderPixelFormat,
         smart: bool,
     ) -> io::Result<String> {
-        let bytes = u32::try_from(format.bytes_per_pixel()).unwrap();
+        let input_bytes =
+            u32::try_from(self.input_pixel_format.unwrap_or(format).bytes_per_pixel()).unwrap();
+        let output_bytes = u32::try_from(format.bytes_per_pixel()).unwrap();
         let valid_rect = |rect: [i32; 4]| {
             rect[0] >= 0
                 && rect[1] >= 0
@@ -554,8 +558,8 @@ impl DiagnosticWorldLayout {
         };
         if self.input_row_padding > 256
             || self.output_row_padding > 256
-            || self.input_row_padding % bytes != 0
-            || self.output_row_padding % bytes != 0
+            || self.input_row_padding % input_bytes != 0
+            || self.output_row_padding % output_bytes != 0
             || self.input_origin_x.unsigned_abs() > MAX_DIMENSION
             || self.input_origin_y.unsigned_abs() > MAX_DIMENSION
             || self
@@ -567,7 +571,7 @@ impl DiagnosticWorldLayout {
         }
         let request = self.request_rect.unwrap_or([-1; 4]);
         let extent = self.extent_hint.unwrap_or([-1; 4]);
-        Ok(format!(
+        let legacy = format!(
             "v1|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             self.input_row_padding,
             self.output_row_padding,
@@ -581,7 +585,17 @@ impl DiagnosticWorldLayout {
             extent[1],
             extent[2],
             extent[3]
-        ))
+        );
+        Ok(match (self.input_padding_byte, self.input_pixel_format) {
+            (fill, Some(input_format)) => format!(
+                "v3|{}|{}|{}",
+                &legacy[3..],
+                fill.unwrap_or(0x5a),
+                input_format.bytes_per_pixel()
+            ),
+            (Some(fill), None) => format!("v2|{}|{fill}", &legacy[3..]),
+            (None, None) => legacy,
+        })
     }
 }
 
@@ -757,6 +771,24 @@ pub struct SessionLayer {
     /// the bytes may change. Not combinable with `timed`, which already means
     /// "this layer belongs to one point in time".
     pub dynamic: bool,
+}
+
+/// A per-layer world shape carried beside (not inside) the inherited RGBA8
+/// HANDLE transport. Ordinary sessions omit this and retain the v2 trailer.
+#[derive(Clone, Debug)]
+pub struct SessionLayerLayout {
+    pub slot: u32,
+    pub pixel_format: RenderPixelFormat,
+    pub row_padding: u32,
+    pub padding_byte: u8,
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub extent: [i32; 4],
+}
+
+pub struct SessionWorldCapture<'a> {
+    pub stage: &'a str,
+    pub file: &'a std::fs::File,
 }
 
 #[derive(Debug)]
@@ -1215,7 +1247,15 @@ impl RenderSession {
     /// slot in place mid-session (protocol §3, issue #262), so there is no
     /// launch-time output-capacity parameter.
     pub fn open(request: SessionOpenRequest<'_>) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Dedicated, None, None, None)
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        )
     }
 
     /// Opens a private-desktop session with explicit, bounded world variants.
@@ -1230,6 +1270,25 @@ impl RenderSession {
             None,
             None,
             Some(layout),
+            &[],
+            None,
+        )
+    }
+
+    pub fn open_diagnostic_with_layer_layouts(
+        request: SessionOpenRequest<'_>,
+        layout: DiagnosticWorldLayout,
+        layer_layouts: &[SessionLayerLayout],
+        captures: &[SessionWorldCapture<'_>],
+    ) -> io::Result<RenderSession> {
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Dedicated,
+            None,
+            None,
+            Some(layout),
+            layer_layouts,
+            Some(captures),
         )
     }
 
@@ -1243,6 +1302,8 @@ impl RenderSession {
             None,
             Some(selector),
             None,
+            &[],
+            None,
         )
     }
 
@@ -1252,7 +1313,15 @@ impl RenderSession {
     pub(crate) fn open_on_current_desktop(
         request: SessionOpenRequest<'_>,
     ) -> io::Result<RenderSession> {
-        Self::open_with_desktop_policy(request, WorkerDesktopPolicy::Current, None, None, None)
+        Self::open_with_desktop_policy(
+            request,
+            WorkerDesktopPolicy::Current,
+            None,
+            None,
+            None,
+            &[],
+            None,
+        )
     }
 
     fn open_with_desktop_policy(
@@ -1261,6 +1330,8 @@ impl RenderSession {
         cluster: Option<ClusterRenderPlugins>,
         plugin_data_selector: Option<&PluginDataEffectSelector>,
         diagnostic_layout: Option<DiagnosticWorldLayout>,
+        layer_layouts: &[SessionLayerLayout],
+        captures: Option<&[SessionWorldCapture<'_>]>,
     ) -> io::Result<RenderSession> {
         let diagnostic_layout = diagnostic_layout
             .map(|layout| {
@@ -1322,6 +1393,20 @@ impl RenderSession {
         )?;
         if request.layers.len() > 64 {
             return Err(invalid("render session layer count exceeds 64"));
+        }
+        for (index, shape) in layer_layouts.iter().enumerate() {
+            if !request
+                .layers
+                .iter()
+                .any(|layer| layer.slot == shape.slot && layer.timed.is_none() && !layer.dynamic)
+                || layer_layouts[..index]
+                    .iter()
+                    .any(|other| other.slot == shape.slot)
+            {
+                return Err(invalid(
+                    "secondary world layout slot is missing or duplicated",
+                ));
+            }
         }
         // Validate each layer. Layer pixels travel as inherited per-layer file
         // HANDLEs (#268), not section slots, so a secondary or timed layer of any
@@ -1602,12 +1687,86 @@ impl RenderSession {
         // value is identical in the worker; the worker reads exactly w*h*4 bytes
         // from it into the layer's private vector.
         if !request.layers.is_empty() {
-            let mut encoded = String::from("session-layers:v2|");
+            let mixed_depth = layer_layouts
+                .iter()
+                .any(|shape| shape.pixel_format != request.pixel_format);
+            let mut encoded = String::from(if layer_layouts.is_empty() {
+                "session-layers:v2|"
+            } else if mixed_depth {
+                "session-layers:v4|"
+            } else {
+                "session-layers:v3|"
+            });
             for (index, layer) in request.layers.iter().enumerate() {
                 if index != 0 {
                     encoded.push(';');
                 }
                 let handle = layer_handles[index] as usize;
+                if !layer_layouts.is_empty() {
+                    if layer.timed.is_some() || layer.dynamic {
+                        return Err(invalid("world layouts require static secondary layers"));
+                    }
+                    let shape = layer_layouts.iter().find(|shape| shape.slot == layer.slot);
+                    let padding = shape.map_or(0, |shape| shape.row_padding);
+                    let fill = shape.map_or(0x5a, |shape| shape.padding_byte);
+                    let origin_x = shape.map_or(0, |shape| shape.origin_x);
+                    let origin_y = shape.map_or(0, |shape| shape.origin_y);
+                    let extent = shape
+                        .map_or([0, 0, layer.width as i32, layer.height as i32], |shape| {
+                            shape.extent
+                        });
+                    let layer_format =
+                        shape.map_or(request.pixel_format, |shape| shape.pixel_format);
+                    let bytes = layer_format.bytes_per_pixel() as u32;
+                    if padding > 256
+                        || padding % bytes != 0
+                        || origin_x.unsigned_abs() > MAX_DIMENSION
+                        || origin_y.unsigned_abs() > MAX_DIMENSION
+                        || extent[0] < 0
+                        || extent[1] < 0
+                        || extent[2] <= extent[0]
+                        || extent[3] <= extent[1]
+                        || extent[2] > layer.width as i32
+                        || extent[3] > layer.height as i32
+                    {
+                        return Err(invalid("secondary world layout is invalid"));
+                    }
+                    if mixed_depth {
+                        encoded.push_str(&format!(
+                            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                            layer.slot,
+                            layer.width,
+                            layer.height,
+                            handle,
+                            bytes,
+                            padding,
+                            fill,
+                            origin_x,
+                            origin_y,
+                            extent[0],
+                            extent[1],
+                            extent[2],
+                            extent[3]
+                        ));
+                    } else {
+                        encoded.push_str(&format!(
+                            "{},{},{},{},{},{},{},{},{},{},{},{}",
+                            layer.slot,
+                            layer.width,
+                            layer.height,
+                            handle,
+                            padding,
+                            fill,
+                            origin_x,
+                            origin_y,
+                            extent[0],
+                            extent[1],
+                            extent[2],
+                            extent[3]
+                        ));
+                    }
+                    continue;
+                }
                 match (layer.timed, layer.dynamic) {
                     (Some((time, time_scale)), _) => encoded.push_str(&format!(
                         "{},{},{},{},{},{}",
@@ -1692,6 +1851,50 @@ impl RenderSession {
                 dump.path.to_string_lossy().into_owned(),
             ]);
         }
+        let mut capture_handles = Vec::new();
+        for capture in captures.unwrap_or_default() {
+            if capture.stage.is_empty()
+                || capture.stage.len() > 96
+                || !capture
+                    .stage
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                || !(capture.stage
+                    == if request.smart {
+                        "smart-input"
+                    } else {
+                        "classic-input"
+                    }
+                    || capture.stage.starts_with(if request.smart {
+                        "smart-layer-slot"
+                    } else {
+                        "classic-layer-slot"
+                    }))
+            {
+                return Err(invalid("world capture stage is invalid for this session"));
+            }
+            if capture_handles.len() >= 16
+                || captures
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|other| other.stage == capture.stage)
+                    .count()
+                    != 1
+            {
+                return Err(invalid("world capture stages must be unique and bounded"));
+            }
+            let handle = capture.file.as_raw_handle() as HANDLE;
+            if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }
+                == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            args_after_plugin.extend([
+                "--capture-world-handle-v1".to_owned(),
+                format!("{}|{}", capture.stage, handle as usize),
+            ]);
+            capture_handles.push(handle);
+        }
         if request.output_checksum_detail {
             args_after_plugin.extend(["--output-checksum-detail-v1".to_owned(), "1".to_owned()]);
         }
@@ -1761,6 +1964,8 @@ impl RenderSession {
         } else {
             None
         };
+        let mut inherited_sidecars = layer_handles.clone();
+        inherited_sidecars.extend(capture_handles);
         let child_handles = SessionChildHandles {
             request_read: request_read.raw(),
             response_write: response_write.raw(),
@@ -1768,7 +1973,7 @@ impl RenderSession {
             // Per-layer inherited read handles (#268); their numeric values also
             // ride the session-layers trailer so the worker knows which handle
             // carries which layer.
-            layers: layer_handles.clone(),
+            layers: inherited_sidecars,
         };
         let mut cluster_state = None;
         let mut in_place_transport = None;
@@ -1974,6 +2179,8 @@ impl RenderSession {
             WorkerDesktopPolicy::Dedicated,
             Some(cluster),
             None,
+            None,
+            &[],
             None,
         )
     }
@@ -2803,16 +3010,16 @@ impl RenderSession {
                         || requested_pixels <= current_pixels
                     {
                         return Err(self.invalidate(
-                        "resize_out_of_range",
-                        format!(
+                            "resize_out_of_range",
+                            format!(
                             "frame {frame_index} resize_needed {width}x{height} is out of range \
                              (current capacity {}x{})",
                             self.geometry.output_capacity_width,
                             self.geometry.output_capacity_height
                         ),
-                        true,
-                        POST_TERMINATION_COLLECT_TIMEOUT,
-                    ));
+                            true,
+                            POST_TERMINATION_COLLECT_TIMEOUT,
+                        ));
                     }
                     // The header and generation must be untouched, like an error
                     // response: nothing was written to the slot.

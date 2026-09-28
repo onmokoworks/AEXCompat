@@ -737,6 +737,125 @@ mod windows_e2e {
     }
 
     #[test]
+    fn declarative_primary_world_layout_captures_smart_input() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex =
+            root.join("target/pf-smart-geometry-probe-build/Release/pf_smart_geometry_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping smart world layout fixture: build worker and geometry probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-smart-primary-layout-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(8, 6, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png","parameters":[],"matrix":[],
+            "pixel_format":"argb8","render_path":"smart",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw","checkpoints":[{"id":"input","stage":"smart-input"}],
+            "worlds":{
+                "primary":{
+                    "pixel_format":"argb8","width":8,"height":6,"rowbytes":36,
+                    "row_padding":4,"padding_byte":0,"origin":{"x":2,"y":-1},
+                    "extent":{"left":1,"top":0,"right":8,"bottom":6}
+                },
+                "secondary":[]
+            }
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("smart primary layout must be captured");
+        let case = &report["cases"][0];
+        let case_output = output.join(case["artifact_directory"].as_str().unwrap());
+        assert!(
+            !std::fs::read(case_output.join("final/output.bin"))
+                .unwrap()
+                .is_empty()
+        );
+        let checkpoint_raw =
+            std::fs::read(case_output.join("checkpoints/input/output.bin")).unwrap();
+        assert_eq!(
+            checkpoint_raw.len(),
+            36 * 6,
+            "smart input stride was flattened"
+        );
+        for row in checkpoint_raw.chunks_exact(36) {
+            assert_eq!(&row[32..36], &[0; 4], "smart input padding was lost");
+        }
+        let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(case_output.join("checkpoints/input/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_metadata["rowbytes"], 36);
+        assert_eq!(checkpoint_metadata["row_padding"], 4);
+        assert_eq!(
+            checkpoint_metadata["origin"],
+            serde_json::json!({"x":2,"y":-1})
+        );
+        assert_eq!(
+            checkpoint_metadata["extent"],
+            serde_json::json!({"left":1,"top":0,"right":8,"bottom":6})
+        );
+        assert_eq!(
+            checkpoint_metadata["comparison_identity"]["fixture_case"]["sha256"],
+            case["case_identity"]["sha256"]
+        );
+        let mut mixed_primary = fixture.clone();
+        mixed_primary["worlds"]["primary"]["pixel_format"] = serde_json::json!("argb16");
+        mixed_primary["worlds"]["primary"]["rowbytes"] = serde_json::json!(72);
+        mixed_primary["worlds"]["primary"]["row_padding"] = serde_json::json!(8);
+        let mixed_path = scratch.join("smart-mixed-primary.json");
+        std::fs::write(&mixed_path, serde_json::to_vec(&mixed_primary).unwrap()).unwrap();
+        let mixed_output = scratch.join("smart-mixed-output");
+        let mixed_report =
+            render_declarative_fixture(&root, &aex, &sha, &mixed_path, &mixed_output)
+                .expect("SmartFX ARGB16 primary must render with ARGB8 final output");
+        let mixed_case = &mixed_report["cases"][0];
+        let mixed_case_output =
+            mixed_output.join(mixed_case["artifact_directory"].as_str().unwrap());
+        let mixed_raw =
+            std::fs::read(mixed_case_output.join("checkpoints/input/output.bin")).unwrap();
+        assert_eq!(mixed_raw.len(), 72 * 6);
+        let mixed_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(mixed_case_output.join("checkpoints/input/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mixed_metadata["pixel_format"], "argb16");
+        assert_eq!(mixed_metadata["rowbytes"], 72);
+        let mut empty_mixed = mixed_primary;
+        empty_mixed["timing"] = serde_json::json!({
+            "current_time":3,"time_step":1,"total_time":300,"time_scale":30
+        });
+        let empty_path = scratch.join("smart-empty-mixed-primary.json");
+        std::fs::write(&empty_path, serde_json::to_vec(&empty_mixed).unwrap()).unwrap();
+        let empty_output = scratch.join("smart-empty-mixed-output");
+        let empty_report =
+            render_declarative_fixture(&root, &aex, &sha, &empty_path, &empty_output)
+                .expect("empty SmartFX result must convert ARGB16 input to ARGB8 output");
+        let empty_case = &empty_report["cases"][0];
+        let empty_case_output =
+            empty_output.join(empty_case["artifact_directory"].as_str().unwrap());
+        let empty_raw = std::fs::read(empty_case_output.join("final/output.bin")).unwrap();
+        assert_eq!(empty_raw, [255, 40, 60, 80].repeat(8 * 6));
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
     fn declarative_classic_fixture_carries_secondary_layer_and_scalar_parameter() {
         let _env_guard = SESSION_ROUTE_ENV_LOCK
             .lock()
@@ -800,6 +919,468 @@ mod windows_e2e {
             "changing the fixture scalar parameter did not change the render"
         );
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn declarative_matrix_renders_distinct_cases_with_stable_artifact_identity() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping matrix fixture: build classic worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-matrix-fixture-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[layer_parameter(1, Path::new("secondary.png")),float_parameter(2, 20.0)],
+            "matrix":[{"slot":2,"values":[20.0,200.0]}],
+            "pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw",
+            "checkpoints":[{"id":"secondary","stage":"classic-layer-slot1"}]
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec_pretty(&fixture).unwrap()).unwrap();
+
+        let mut runs = Vec::new();
+        for run in 0..2 {
+            let output = scratch.join(format!("result-{run}"));
+            let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+                .expect("two-case declarative fixture render");
+            let cases = report["cases"].as_array().expect("matrix case records");
+            assert_eq!(cases.len(), 2);
+            let mut outputs = Vec::new();
+            let mut identities = Vec::new();
+            for case in cases {
+                let case_id = case["case_identity"]["sha256"]
+                    .as_str()
+                    .expect("stable case identity");
+                let relative = case["artifact_directory"]
+                    .as_str()
+                    .expect("relative case directory");
+                let directory = output.join(relative);
+                let final_metadata: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(directory.join("final/output.json")).unwrap(),
+                )
+                .unwrap();
+                let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(directory.join("checkpoints/secondary/output.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    final_metadata["comparison_identity"]["fixture_case"]["sha256"],
+                    case_id
+                );
+                assert_eq!(
+                    checkpoint_metadata["comparison_identity"]["fixture_case"]["sha256"],
+                    case_id
+                );
+                outputs.push(std::fs::read(directory.join("final/output.bin")).unwrap());
+                identities.push(case_id.to_owned());
+            }
+            assert_ne!(
+                outputs[0], outputs[1],
+                "matrix value did not change the AEX output"
+            );
+            assert_ne!(identities[0], identities[1], "two cases share an identity");
+            runs.push((outputs, identities));
+        }
+        assert_eq!(runs[0], runs[1], "rerun changed bytes or case identities");
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn declarative_popup_matrix_changes_the_classic_aex_output() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping popup matrix fixture: build worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-popup-matrix-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[
+                layer_parameter(1, Path::new("secondary.png")),
+                float_parameter(2, 20.0),
+                popup_parameter(3, 1.0)
+            ],
+            "matrix":[{"slot":3,"values":[1.0,2.0]}],
+            "pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw",
+            "checkpoints":[{"id":"input","stage":"classic-input"}]
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("popup matrix must render");
+        let cases = report["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 2);
+        let pixels = cases
+            .iter()
+            .map(|case| {
+                let directory = output.join(case["artifact_directory"].as_str().unwrap());
+                let raw = std::fs::read(directory.join("final/output.bin")).unwrap();
+                assert_eq!(raw.len(), 4 * 3 * 4);
+                [raw[0], raw[1], raw[2], raw[3]]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pixels[0][0], 255);
+        assert_eq!(pixels[1][0], 255);
+        assert_eq!(pixels[0][1..3], pixels[1][1..3]);
+        assert_eq!(u16::from(pixels[1][3]), u16::from(pixels[0][3]) + 17);
+        assert_ne!(
+            cases[0]["case_identity"]["sha256"],
+            cases[1]["case_identity"]["sha256"]
+        );
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn declarative_primary_world_layout_reaches_the_classic_aex() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping world-layout fixture: build worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-primary-layout-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[layer_parameter(1, Path::new("secondary.png")),float_parameter(2, 255.0)],
+            "matrix":[],"pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw","checkpoints":[{"id":"input","stage":"classic-input"}],
+            "worlds":{
+                "primary":{
+                    "pixel_format":"argb8","width":4,"height":3,"rowbytes":20,
+                    "row_padding":4,"padding_byte":0,"origin":{"x":2,"y":-1},
+                    "extent":{"left":1,"top":0,"right":4,"bottom":3}
+                },
+                "secondary":[]
+            }
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("primary layout must reach the AEX");
+        let case = &report["cases"][0];
+        let case_output = output.join(case["artifact_directory"].as_str().unwrap());
+        let raw = std::fs::read(case_output.join("final/output.bin")).unwrap();
+        assert_eq!(&raw[0..4], &[255, 4, 130, 127]);
+        assert_eq!(&raw[4..8], &[255, 1, 0, 4]);
+        assert_eq!(&raw[8..12], &[255, 3, 0, 128]);
+        let mut mixed_primary = fixture.clone();
+        mixed_primary["worlds"]["primary"]["pixel_format"] = serde_json::json!("argb16");
+        mixed_primary["worlds"]["primary"]["rowbytes"] = serde_json::json!(40);
+        mixed_primary["worlds"]["primary"]["row_padding"] = serde_json::json!(8);
+        let mixed_path = scratch.join("mixed-primary-fixture.json");
+        std::fs::write(&mixed_path, serde_json::to_vec(&mixed_primary).unwrap()).unwrap();
+        let mixed_output = scratch.join("mixed-primary-output");
+        let mixed_report =
+            render_declarative_fixture(&root, &aex, &sha, &mixed_path, &mixed_output)
+                .expect("ARGB16 primary must render with ARGB8 final output");
+        let mixed_case = &mixed_report["cases"][0];
+        let mixed_case_output =
+            mixed_output.join(mixed_case["artifact_directory"].as_str().unwrap());
+        let mixed_raw =
+            std::fs::read(mixed_case_output.join("checkpoints/input/output.bin")).unwrap();
+        assert_eq!(mixed_raw.len(), 40 * 3);
+        let mixed_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(mixed_case_output.join("checkpoints/input/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mixed_metadata["pixel_format"], "argb16");
+        assert_eq!(mixed_metadata["rowbytes"], 40);
+        assert!(
+            !std::fs::read(mixed_case_output.join("final/output.bin"))
+                .unwrap()
+                .is_empty()
+        );
+        let checkpoint_raw =
+            std::fs::read(case_output.join("checkpoints/input/output.bin")).unwrap();
+        assert_eq!(checkpoint_raw.len(), 20 * 3, "primary stride was flattened");
+        for row in checkpoint_raw.chunks_exact(20) {
+            assert_eq!(&row[16..20], &[0; 4], "primary padding was lost");
+        }
+        let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(case_output.join("checkpoints/input/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_metadata["rowbytes"], 20);
+        assert_eq!(checkpoint_metadata["row_padding"], 4);
+        assert_eq!(
+            checkpoint_metadata["origin"],
+            serde_json::json!({"x":2,"y":-1})
+        );
+        assert_eq!(
+            checkpoint_metadata["extent"],
+            serde_json::json!({"left":1,"top":0,"right":4,"bottom":3})
+        );
+        assert_eq!(
+            checkpoint_metadata["comparison_identity"]["fixture_case"]["sha256"],
+            case["case_identity"]["sha256"]
+        );
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn declarative_secondary_world_layout_reaches_the_classic_aex() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping secondary world-layout fixture: build worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-secondary-layout-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[layer_parameter(1, Path::new("secondary.png")),float_parameter(2, 255.0)],
+            "matrix":[],"pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw","checkpoints":[
+                {"id":"primary","stage":"classic-input"},
+                {"id":"secondary","stage":"classic-layer-slot1"}
+            ],
+            "worlds":{
+                "primary":{
+                    "pixel_format":"argb8","width":4,"height":3,"rowbytes":16,
+                    "row_padding":0,"padding_byte":90,"origin":{"x":0,"y":0},
+                    "extent":{"left":0,"top":0,"right":4,"bottom":3}
+                },
+                "secondary":[{
+                    "slot":1,"pixel_format":"argb8","width":4,"height":3,"rowbytes":24,
+                    "row_padding":8,"padding_byte":90,"origin":{"x":-2,"y":3},
+                    "extent":{"left":0,"top":0,"right":4,"bottom":3}
+                }]
+            }
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("secondary layout must reach the AEX");
+        let case = &report["cases"][0];
+        let case_output = output.join(case["artifact_directory"].as_str().unwrap());
+        let raw = std::fs::read(case_output.join("final/output.bin")).unwrap();
+        assert_eq!(&raw[0..4], &[255, 0, 128, 128]);
+        assert_eq!(&raw[8..12], &[255, 3, 8, 126]);
+        assert_eq!(&raw[12..16], &[255, 131, 4, 3]);
+        let final_metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(case_output.join("final/output.json")).unwrap())
+                .unwrap();
+        let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(case_output.join("checkpoints/secondary/output.json")).unwrap(),
+        )
+        .unwrap();
+        for metadata in [&final_metadata, &checkpoint_metadata] {
+            assert_eq!(
+                metadata["comparison_identity"]["fixture_case"]["sha256"],
+                case["case_identity"]["sha256"]
+            );
+        }
+        let checkpoint_raw =
+            std::fs::read(case_output.join("checkpoints/secondary/output.bin")).unwrap();
+        let primary_raw =
+            std::fs::read(case_output.join("checkpoints/primary/output.bin")).unwrap();
+        assert_eq!(primary_raw.len(), 16 * 3);
+        assert_eq!(
+            checkpoint_raw.len(),
+            24 * 3,
+            "secondary stride was flattened"
+        );
+        for row in checkpoint_raw.chunks_exact(24) {
+            assert_eq!(&row[16..24], &[90; 8], "secondary padding was lost");
+        }
+        assert_eq!(checkpoint_metadata["rowbytes"], 24);
+        assert_eq!(checkpoint_metadata["row_padding"], 8);
+        assert_eq!(
+            checkpoint_metadata["origin"],
+            serde_json::json!({"x":-2,"y":3})
+        );
+        assert_eq!(
+            checkpoint_metadata["extent"],
+            serde_json::json!({"left":0,"top":0,"right":4,"bottom":3})
+        );
+        let _ = std::fs::remove_dir_all(scratch);
+    }
+
+    #[test]
+    fn declarative_mixed_depth_secondary_reaches_classic_aex() {
+        let _env_guard = SESSION_ROUTE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let root = repository_root();
+        let worker = root.join("target/minihost-build/aex_worker.exe");
+        let aex = root.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !worker.is_file() || !aex.is_file() {
+            eprintln!("skipping mixed-depth fixture: build worker and layer probe");
+            return;
+        }
+        let sha = format!("{:x}", Sha256::digest(std::fs::read(&aex).unwrap()));
+        let scratch = std::env::temp_dir().join(format!(
+            "aexcompat-mixed-depth-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir_all(&scratch).unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([40, 60, 80, 255]))
+            .save(scratch.join("primary.png"))
+            .unwrap();
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 100, 140, 255]))
+            .save(scratch.join("secondary.png"))
+            .unwrap();
+        let mut fixture = serde_json::json!({
+            "schema":"aexcompat.render_fixture","schema_version":2,
+            "primary_layer":"primary.png",
+            "parameters":[layer_parameter(1, Path::new("secondary.png")),float_parameter(2, 255.0)],
+            "matrix":[],"pixel_format":"argb8","render_path":"classic",
+            "premultiplication":"straight",
+            "timing":{"current_time":0,"time_step":1,"total_time":1,"time_scale":1},
+            "final_artifact":"raw",
+            "checkpoints":[{"id":"secondary","stage":"classic-layer-slot1"}],
+            "worlds":{
+                "primary":{
+                    "pixel_format":"argb8","width":4,"height":3,"rowbytes":16,
+                    "row_padding":0,"padding_byte":90,"origin":{"x":0,"y":0},
+                    "extent":{"left":0,"top":0,"right":4,"bottom":3}
+                },
+                "secondary":[{
+                    "slot":1,"pixel_format":"argb16","width":4,"height":3,"rowbytes":40,
+                    "row_padding":8,"padding_byte":90,"origin":{"x":-2,"y":3},
+                    "extent":{"left":0,"top":0,"right":4,"bottom":3}
+                }]
+            }
+        });
+        let fixture_path = scratch.join("fixture.json");
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let output = scratch.join("output");
+        let report = render_declarative_fixture(&root, &aex, &sha, &fixture_path, &output)
+            .expect("mixed-depth secondary must reach the AEX");
+        let case = &report["cases"][0];
+        let case_output = output.join(case["artifact_directory"].as_str().unwrap());
+        let final_raw = std::fs::read(case_output.join("final/output.bin")).unwrap();
+        assert_eq!(&final_raw[8..12], &[255, 3, 24, 126]);
+        let checkpoint_raw =
+            std::fs::read(case_output.join("checkpoints/secondary/output.bin")).unwrap();
+        assert_eq!(checkpoint_raw.len(), 40 * 3);
+        for row in checkpoint_raw.chunks_exact(40) {
+            assert_eq!(&row[32..40], &[90; 8]);
+        }
+        let checkpoint_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(case_output.join("checkpoints/secondary/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(checkpoint_metadata["pixel_format"], "argb16");
+        assert_eq!(checkpoint_metadata["rowbytes"], 40);
+        assert_eq!(checkpoint_metadata["row_padding"], 8);
+        assert_eq!(
+            checkpoint_metadata["origin"],
+            serde_json::json!({"x":-2,"y":3})
+        );
+        fixture["worlds"]["secondary"][0]["pixel_format"] = serde_json::json!("argb32f");
+        fixture["worlds"]["secondary"][0]["rowbytes"] = serde_json::json!(80);
+        fixture["worlds"]["secondary"][0]["row_padding"] = serde_json::json!(16);
+        std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let float_output = scratch.join("output-32f");
+        let float_report =
+            render_declarative_fixture(&root, &aex, &sha, &fixture_path, &float_output)
+                .expect("ARGB32f secondary must reach the AEX independently of ARGB8 primary");
+        let float_case = &float_report["cases"][0];
+        let float_case_output =
+            float_output.join(float_case["artifact_directory"].as_str().unwrap());
+        let float_final = std::fs::read(float_case_output.join("final/output.bin")).unwrap();
+        assert_eq!(&float_final[8..12], &[255, 3, 64, 126]);
+        let float_checkpoint =
+            std::fs::read(float_case_output.join("checkpoints/secondary/output.bin")).unwrap();
+        assert_eq!(float_checkpoint.len(), 80 * 3);
+        assert!(
+            float_checkpoint
+                .chunks_exact(80)
+                .all(|row| row[64..] == [90; 16])
+        );
+        let float_metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(float_case_output.join("checkpoints/secondary/output.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(float_metadata["pixel_format"], "argb32f");
+        assert_eq!(float_metadata["rowbytes"], 80);
+        let _ = std::fs::remove_dir_all(scratch);
     }
 
     /// Three timed secondary layers at one slot, carried by the smart session's
@@ -974,6 +1555,18 @@ mod windows_e2e {
             "enabled": true, "visible": true, "supervised": false,
         }))
         .expect("float parameter fixture")
+    }
+
+    fn popup_parameter(slot: u32, value: f64) -> InteractiveParameter {
+        serde_json::from_value(serde_json::json!({
+            "slot": slot, "name": "mode", "kind": "popup",
+            "minimum": 1.0, "maximum": 2.0, "value": value,
+            "choices": ["Base", "Alternate"], "color": [0, 0, 0, 0],
+            "components": [0.0, 0.0, 0.0], "component_count": 0,
+            "layer_path": null, "enabled": true, "visible": true,
+            "supervised": false
+        }))
+        .expect("popup parameter fixture")
     }
 
     /// Real-AEX coverage of the session wrapper's secondary-layer transport
@@ -1374,12 +1967,12 @@ mod windows_e2e {
             Some(&serde_json::json!([{"slot": 1, "width": 64, "height": 32}])),
             "the secondary layer did not reach the report at its declared slot              and size: {base}"
         );
-        // The probe declares input + layer + slider; a count that drifts means
+        // The probe declares input + layer + slider + defaulted popup; a count that drifts means
         // the parameter table the worker saw is not the one that was sent.
         assert_eq!(
             base.get("in_data_num_params"),
-            Some(&serde_json::json!(3)),
-            "the plug-in did not see all three parameters: {base}"
+            Some(&serde_json::json!(4)),
+            "the plug-in did not see all four parameters: {base}"
         );
 
         let out_repeat = scratch.join("repeat.png");

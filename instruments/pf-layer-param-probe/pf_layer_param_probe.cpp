@@ -26,7 +26,7 @@ namespace {
 
 // params[0] is the implicit primary input layer; the first PF_ADD_* call becomes
 // params[1], the second params[2]. Keep this order in sync with PARAMS_SETUP.
-enum ParamIndex { kInput = 0, kLayer = 1, kSlider = 2, kNumParams = 3 };
+enum ParamIndex { kInput = 0, kLayer = 1, kSlider = 2, kMode = 3, kNumParams = 4 };
 
 unsigned char clamp_channel(long value) {
   if (value < 0) return 0;
@@ -54,8 +54,9 @@ PF_Pixel sample(const PF_LayerDef* world, A_long x, A_long y) {
   return row[cx];
 }
 
-PF_Err render(PF_ParamDef* params[], PF_LayerDef* output) {
+PF_Err render(PF_InData* in_data, PF_ParamDef* params[], PF_LayerDef* output) {
   if (!params || !params[kInput] || !params[kLayer] || !params[kSlider] ||
+      !params[kMode] ||
       !output || !output->data)
     return PF_Err_BAD_CALLBACK_PARAM;
   const PF_LayerDef* input = &params[kInput]->u.ld;
@@ -65,6 +66,46 @@ PF_Err render(PF_ParamDef* params[], PF_LayerDef* output) {
       output->width <= 0 || output->height <= 0)
     return PF_Err_BAD_CALLBACK_PARAM;
   const int s = slider_amount(params[kSlider]->u.fs_d.value);
+  const A_long mode = params[kMode]->u.pd.value;
+  if (mode < 1 || mode > 2) return PF_Err_BAD_CALLBACK_PARAM;
+  // The maximum slider value is a public fixture diagnostic: encode the
+  // worlds the effect actually received into pixels. Ordinary scalar values
+  // retain the compositing behaviour used by the session/matrix tests.
+  if (s == 255) {
+    if (!in_data) return PF_Err_BAD_CALLBACK_PARAM;
+    for (A_long y = 0; y < output->height; ++y) {
+      auto* dst = reinterpret_cast<PF_Pixel*>(
+          reinterpret_cast<char*>(output->data) + y * output->rowbytes);
+      for (A_long x = 0; x < output->width; ++x) {
+        PF_Pixel pixel{};
+        pixel.alpha = 255;
+        switch (x % 4) {
+          case 0:
+            pixel.red = clamp_channel(input->rowbytes - input->width * 4);
+            pixel.green = clamp_channel(input->origin_x + 128);
+            pixel.blue = clamp_channel(input->origin_y + 128);
+            break;
+          case 1:
+            pixel.red = clamp_channel(in_data->extent_hint.left);
+            pixel.green = clamp_channel(in_data->extent_hint.top);
+            pixel.blue = clamp_channel(in_data->extent_hint.right);
+            break;
+          case 2:
+            pixel.red = clamp_channel(in_data->extent_hint.bottom);
+            pixel.green = clamp_channel(layer->rowbytes - layer->width * 4);
+            pixel.blue = clamp_channel(layer->origin_x + 128);
+            break;
+          default:
+            pixel.red = clamp_channel(layer->origin_y + 128);
+            pixel.green = clamp_channel(layer->width);
+            pixel.blue = clamp_channel(layer->height);
+            break;
+        }
+        dst[x] = pixel;
+      }
+    }
+    return PF_Err_NONE;
+  }
   for (A_long y = 0; y < output->height; ++y) {
     PF_Pixel* dst = reinterpret_cast<PF_Pixel*>(
         reinterpret_cast<char*>(output->data) + y * output->rowbytes);
@@ -78,8 +119,9 @@ PF_Err render(PF_ParamDef* params[], PF_LayerDef* output) {
       // blue = mean(input, layer).
       out.red = clamp_channel(static_cast<long>(in.red) + s - 128);
       out.green = clamp_channel(static_cast<long>(lp.green) + 128 - s);
-      out.blue = static_cast<unsigned char>(
-          (static_cast<long>(in.blue) + lp.blue + 1) / 2);
+      out.blue = clamp_channel(
+          (static_cast<long>(in.blue) + lp.blue + 1) / 2 +
+          (mode - 1) * 17);
       dst[x] = out;
     }
   }
@@ -91,6 +133,8 @@ PF_Err setup_params(PF_InData* in_data, PF_OutData* out_data) {
   PF_ADD_LAYER("Layer", PF_LayerDefault_MYSELF, kLayer);
   PF_ADD_FLOAT_SLIDERX("Amount", 0, 255, 0, 255, 0, 1,
                        PF_ValueDisplayFlag_NONE, 0, kSlider);
+  AEFX_CLR_STRUCT(def);
+  PF_ADD_POPUP("Mode", 2, 1, "Base|Alternate", kMode);
   out_data->num_params = kNumParams;
   return PF_Err_NONE;
 }
@@ -109,7 +153,7 @@ extern "C" DllExport PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data,
     case PF_Cmd_PARAMS_SETUP:
       return setup_params(in_data, out_data);
     case PF_Cmd_RENDER:
-      return render(params, output);
+      return render(in_data, params, output);
     default:
       return PF_Err_NONE;
   }

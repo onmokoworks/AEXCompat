@@ -61,6 +61,10 @@ bool parse_l2_render_diagnostic_layout(void*, const wchar_t* value) {
   return aexcompat::render::parse_diagnostic_world_layout(value);
 }
 
+bool parse_l2_world_capture(void*, const wchar_t* value) {
+  return aexcompat::render::parse_world_capture_target(value);
+}
+
 // Captures the AEXRMA1 manifest reference carried by a GPU render's
 // `--runtime-module-authorization-v1` trailer (#290/#300). The render/smart
 // worker accepts a sealed basename or, for #815 in-place dispatch, the
@@ -2552,7 +2556,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
         parse_l2_conformance_render_settings,
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
         capture_l2_companion_manifest, capture_l2_dependency_search_dirs,
-        capture_plugin_data_selector, parse_l2_render_diagnostic_layout},
+        capture_plugin_data_selector, parse_l2_render_diagnostic_layout,
+        parse_l2_world_capture},
        &parse_layer_transport_key, &parse_mask_context_payload,
        &parse_spatial_context_payload, &parse_render_environment_payload,
        &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});
@@ -2567,7 +2572,8 @@ aexcompat::worker_runtime::invocation::InvocationState invocation;
           parse_l2_conformance_render_settings,
         capture_l2_runtime_module_authorization, capture_l2_cluster_manifest,
         capture_l2_companion_manifest, capture_l2_dependency_search_dirs,
-        capture_plugin_data_selector, parse_l2_render_diagnostic_layout},
+        capture_plugin_data_selector, parse_l2_render_diagnostic_layout,
+        parse_l2_world_capture},
          &parse_layer_transport_key, &parse_mask_context_payload,
          &parse_spatial_context_payload, &parse_render_environment_payload,
          &invocation.requested_parameters, parse_requested_payload, &configure_mask_scene});

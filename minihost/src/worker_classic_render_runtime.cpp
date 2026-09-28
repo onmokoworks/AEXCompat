@@ -424,7 +424,7 @@ struct ClassicRenderDispatchOwner {
   std::vector<void*>& params;
   int32_t& width; int32_t& height; int32_t& rowbytes;
   unsigned char*& destination;
-  int32_t pixel_bytes; int32_t pixel_format;
+  int32_t pixel_bytes; int32_t pixel_format; int32_t input_pixel_bytes;
   int32_t current_time; int32_t time_step; int32_t total_time; uint32_t time_scale;
   const std::string& case_id; const RequestedAssignments* requested;
   const std::vector<unsigned char>* external_rgba;
@@ -654,7 +654,7 @@ struct ClassicRenderDispatchOwner {
     LayerRenderContext next{
         entry, &input, &output, current_time, static_cast<int32_t>(time_scale), case_id,
         requested, external_rgba, external_layers, external_width, external_height,
-        time_step, total_time, pixel_bytes, &logical_source, source_width, source_height};
+        time_step, total_time, input_pixel_bytes, &logical_source, source_width, source_height};
     void* render_ref = nullptr;
     std::memcpy(&render_ref, input.data() + kInEffectRef, sizeof(render_ref));
     next.active_effect_instance =
@@ -692,7 +692,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   const bool partial_extent_hint = image_request.partial_extent_hint;
   width = image_request.width;
   height = image_request.height;
-  const int32_t pixel_bytes = image_request.pixel_bytes;
+  const int32_t pixel_bytes = external_pixel_bytes;
+  const int32_t input_pixel_bytes = image_request.pixel_bytes;
   smart_state().pixel_format = pixel_bytes == 16 ? "argb32f" :
       (pixel_bytes == 8 ? "argb16" : "argb8");
   const auto& diagnostic = aexcompat::render::diagnostic_world_layout();
@@ -701,13 +702,14 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       ? width * pixel_bytes + diagnostic.output_row_padding : input_rowbytes;
   const aexcompat::render::ParameterProfile parameter_profile =
       aexcompat::render::prepare_parameter_profile(case_id);
-  std::vector<unsigned char> logical_source(width * height * pixel_bytes);
+  std::vector<unsigned char> logical_source(width * height * input_pixel_bytes);
   InputPixelBuffer source(static_cast<std::size_t>(input_rowbytes) * height);
   if (!source) return -3;
-  std::memset(source.data(), 0x5A, static_cast<std::size_t>(input_rowbytes) * height);
+  std::memset(source.data(), diagnostic.input_padding_byte,
+              static_cast<std::size_t>(input_rowbytes) * height);
   if (!aexcompat::render::build_argb_input(image_request, external_rgba,
                                             logical_source, source.data())) return -3;
-  dump_world_snapshot("classic-input", logical_source.data(), width, height, pixel_bytes);
+  dump_world_snapshot("classic-input", logical_source.data(), width, height, input_pixel_bytes);
   const bool input_write_advertised =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagIWriteInputBuffer) != 0;
   if (!source.set_plugin_writable(input_write_advertised)) return -3;
@@ -720,7 +722,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
 
   aexcompat::world_safety::EffectWorldStorage input_world{}, output_world{};
   const aexcompat::render::WorldLayout input_layout{
-      pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, input_rowbytes};
+      input_pixel_bytes == 4 ? 0 : 1, input_pixel_bytes, width, height, input_rowbytes};
   const aexcompat::render::WorldLayout output_layout{
       pixel_bytes == 4 ? 0 : 1, pixel_bytes, width, height, rowbytes};
   if (!aexcompat::render::prepare_world_layout(input_world, input_layout, source.data()) ||
@@ -728,11 +730,19 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
   if (diagnostic.enabled) {
     write<int32_t>(input_world, 104, diagnostic.input_origin_x);
     write<int32_t>(input_world, 108, diagnostic.input_origin_y);
+    if (diagnostic.has_extent_hint)
+      std::memcpy(input_world.data() + 44, diagnostic.extent_hint.data(),
+                  sizeof(diagnostic.extent_hint));
   }
+  if (!aexcompat::render::capture_requested_world(
+          "classic-input", input_world, source.data(),
+          static_cast<std::size_t>(input_rowbytes) * height, input_pixel_bytes)) return -3;
   const int32_t dispatch_pixel_format = pixel_bytes == 4 ? kPixelFormatArgb32 :
       (pixel_bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128);
+  const int32_t input_pixel_format = input_pixel_bytes == 4 ? kPixelFormatArgb32 :
+      (input_pixel_bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128);
   DispatchWorldFormatScope dispatch_worlds;
-  if (!dispatch_worlds.register_world(input_world.data(), dispatch_pixel_format) ||
+  if (!dispatch_worlds.register_world(input_world.data(), input_pixel_format) ||
       !dispatch_worlds.register_world(output_world.data(), dispatch_pixel_format)) return -3;
 
   aexcompat::render::MapWorld map_world;
@@ -772,19 +782,46 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
     if (layer.slot <= 0 || static_cast<std::size_t>(layer.slot) >= definitions.size() ||
         g_params[layer.slot - 1].type != 0 || layer.rgba.size() !=
             static_cast<std::size_t>(layer.width) * layer.height * 4) return -3;
+    const int32_t layer_pixel_bytes = layer.pixel_bytes != 0
+        ? layer.pixel_bytes : pixel_bytes;
+    if (layer.has_world_layout && layer.row_padding % layer_pixel_bytes != 0) return -3;
     auto& pixels = hosted_pixels[layer_index];
-      pixels.resize(static_cast<std::size_t>(layer.width) * layer.height * pixel_bytes);
-      for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4) {
-      rgba8_to_argb(pixels.data() + (offset / 4) * pixel_bytes,
-                    layer.rgba.data() + offset, pixel_bytes);
+    pixels.resize(static_cast<std::size_t>(layer.width) * layer.height * layer_pixel_bytes);
+    for (std::size_t offset = 0; offset < layer.rgba.size(); offset += 4) {
+      rgba8_to_argb(pixels.data() + (offset / 4) * layer_pixel_bytes,
+                    layer.rgba.data() + offset, layer_pixel_bytes);
     }
     dump_world_snapshot("classic-layer-slot" + std::to_string(layer.slot),
-                        pixels.data(), layer.width, layer.height, pixel_bytes);
+                        pixels.data(), layer.width, layer.height, layer_pixel_bytes);
+    const int32_t packed_rowbytes = layer.width * layer_pixel_bytes;
+    const int32_t layer_rowbytes = packed_rowbytes +
+        (layer.has_world_layout ? layer.row_padding : 0);
+    if (layer.has_world_layout && layer.row_padding != 0) {
+      std::vector<unsigned char> strided(
+          static_cast<std::size_t>(layer_rowbytes) * layer.height,
+          layer.padding_byte);
+      for (int32_t y = 0; y < layer.height; ++y)
+        std::memcpy(strided.data() + static_cast<std::size_t>(y) * layer_rowbytes,
+                    pixels.data() + static_cast<std::size_t>(y) * packed_rowbytes,
+                    packed_rowbytes);
+      pixels.swap(strided);
+    }
     auto& world = hosted_worlds[layer_index];
     if (!aexcompat::render::prepare_world_layout(
-            world, {pixel_bytes == 4 ? 0 : 1, pixel_bytes, layer.width, layer.height,
-                    layer.width * pixel_bytes}, pixels.data()) ||
-        !dispatch_worlds.register_world(world.data(), dispatch_pixel_format)) return -3;
+            world, {layer_pixel_bytes == 4 ? 0 : 1, layer_pixel_bytes,
+                    layer.width, layer.height,
+                    layer_rowbytes}, pixels.data()) ||
+        !dispatch_worlds.register_world(world.data(),
+            layer_pixel_bytes == 4 ? kPixelFormatArgb32 :
+            (layer_pixel_bytes == 8 ? kPixelFormatArgb64 : kPixelFormatArgb128))) return -3;
+    if (layer.has_world_layout) {
+      write<int32_t>(world, 104, layer.origin_x);
+      write<int32_t>(world, 108, layer.origin_y);
+      std::memcpy(world.data() + 44, layer.extent.data(), sizeof(layer.extent));
+    }
+    if (!aexcompat::render::capture_requested_world(
+            "classic-layer-slot" + std::to_string(layer.slot), world,
+            pixels.data(), pixels.size(), layer_pixel_bytes)) return -3;
     if (!layer.timed || same_rational_time(layer.time, layer.time_scale,
             external_current_time, external_time_scale))
       copy_world_into_param_def(definitions[layer.slot], world);
@@ -844,7 +881,7 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         close_render_ui_context(entry, input, output, definitions);
     }
   } render_ui_context_scope{entry, input, command_output, definitions};
-  publish_alpha_coverage_provider(logical_source, width, height, pixel_bytes,
+  publish_alpha_coverage_provider(logical_source, width, height, input_pixel_bytes,
                                   external_current_time, external_time_scale);
   // FRAME_SETUP is already plug-in code and may checkout parameters. Publish
   // this frame's time before the first lifecycle selector, using the static
@@ -881,7 +918,8 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
   ClassicRenderDispatchOwner dispatch_owner{entry, input, command_output, output_world,
       guarded, dispatch_worlds, definitions, params, width, height, rowbytes, destination,
-      pixel_bytes, dispatch_pixel_format, external_current_time, external_time_step,
+      pixel_bytes, dispatch_pixel_format, input_pixel_bytes,
+      external_current_time, external_time_step,
       external_total_time, external_time_scale, case_id, requested, external_rgba,
       external_layers, external_width, external_height, *classic_context, logical_source,
       width, height, lifecycle_owner.frame_setup_output, frame_output};
@@ -914,13 +952,25 @@ int32_t classic_render_runtime(EffectEntry entry, std::array<std::byte, kInSize>
         for (int32_t y = 0; y < height; ++y)
           std::memset(destination + static_cast<std::size_t>(y) * rowbytes, 0,
                       static_cast<std::size_t>(width) * pixel_bytes);
-      for (int32_t y = 0; y < copy_height; ++y)
-        std::memcpy(destination + static_cast<std::size_t>(copy_top + y) * rowbytes +
-                        static_cast<std::size_t>(copy_left) * pixel_bytes,
-                    logical_source.data() +
-                        (static_cast<std::size_t>(source_top + y) * dispatch_owner.source_width +
-                         source_left) * pixel_bytes,
-                    static_cast<std::size_t>(copy_width) * pixel_bytes);
+      for (int32_t y = 0; y < copy_height; ++y) {
+        auto* target = destination + static_cast<std::size_t>(copy_top + y) * rowbytes +
+            static_cast<std::size_t>(copy_left) * pixel_bytes;
+        const auto* source = logical_source.data() +
+            (static_cast<std::size_t>(source_top + y) * dispatch_owner.source_width +
+             source_left) * input_pixel_bytes;
+        if (input_pixel_bytes == pixel_bytes) {
+          std::memcpy(target, source, static_cast<std::size_t>(copy_width) * pixel_bytes);
+        } else {
+          for (int32_t x = 0; x < copy_width; ++x) {
+            unsigned char rgba[4]{};
+            aexcompat::render_pixel_transport::argb_to_rgba8(
+                rgba, source + static_cast<std::size_t>(x) * input_pixel_bytes,
+                input_pixel_bytes);
+            rgba8_to_argb(target + static_cast<std::size_t>(x) * pixel_bytes,
+                          rgba, pixel_bytes);
+          }
+        }
+      }
     }
     // A failing setdown still wins. Main reported `finish` unconditionally
     // here, so keeping the refusal above only when setdown was clean is what
@@ -1248,7 +1298,7 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   } render_ui_context_scope{entry, input, command_output, definitions};
   // This immutable provider is published before Smart Pre-Render and remains pinned
   // through Smart Render; output pixels are never used to infer auxiliary planes.
-  publish_alpha_coverage_provider(pre_render_source, width, height, pixel_bytes,
+  publish_alpha_coverage_provider(pre_render_source, width, height, plan.input_pixel_bytes,
                                   external_current_time, external_time_scale);
   // Session frames run under a hoisted SEQUENCE owned by the session loop
   // (protocol v1.1): only the FRAME pair is managed here, mirroring the
@@ -1296,10 +1346,22 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
   const bool nop_render =
       (read<uint32_t>(command_output, kOutFlags) & kOutFlagNopRender) != 0;
   if (nop_render) {
-    for (int32_t y = 0; y < height; ++y)
-      std::memcpy(destination + y * plan.output_rowbytes,
-                  source.data() + y * rowbytes,
-                  width * pixel_bytes);
+    for (int32_t y = 0; y < height; ++y) {
+      auto* target = destination + static_cast<std::size_t>(y) * plan.output_rowbytes;
+      const auto* input_row = source.data() + static_cast<std::size_t>(y) * rowbytes;
+      if (plan.input_pixel_bytes == pixel_bytes) {
+        std::memcpy(target, input_row, static_cast<std::size_t>(width) * pixel_bytes);
+      } else {
+        for (int32_t x = 0; x < width; ++x) {
+          unsigned char rgba[4]{};
+          aexcompat::render_pixel_transport::argb_to_rgba8(
+              rgba, input_row + static_cast<std::size_t>(x) * plan.input_pixel_bytes,
+              plan.input_pixel_bytes);
+          rgba8_to_argb(target + static_cast<std::size_t>(x) * pixel_bytes,
+                        rgba, pixel_bytes);
+        }
+      }
+    }
     result.pre_error = 0;
     result.render_error = end_lifecycle(entry, input, command_output, params.data(),
                                         output_world.data(), lifecycle, 0);
@@ -1311,11 +1373,11 @@ SmartResult smart_render_runtime(EffectEntry entry, std::array<std::byte, kInSiz
     result.result_rect = {0, 0, width, height};
     result.max_result_rect = result.result_rect;
     result.output_extent_hint = result.result_rect;
-    std::vector<unsigned char> logical_input(width * height * pixel_bytes);
+    std::vector<unsigned char> logical_input(width * height * plan.input_pixel_bytes);
     std::vector<unsigned char> logical_output(width * height * pixel_bytes);
     for (int32_t y = 0; y < height; ++y) {
-      std::memcpy(logical_input.data() + y * width * pixel_bytes,
-                  source.data() + y * rowbytes, width * pixel_bytes);
+      std::memcpy(logical_input.data() + y * width * plan.input_pixel_bytes,
+                  source.data() + y * rowbytes, width * plan.input_pixel_bytes);
       std::memcpy(logical_output.data() + y * width * pixel_bytes,
                   destination + y * plan.output_rowbytes, width * pixel_bytes);
     }

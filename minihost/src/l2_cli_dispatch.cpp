@@ -38,6 +38,7 @@ AuxiliaryOptionResult strip_auxiliary_options(
   bool saw_dependency_dirs = false;
   bool saw_plugin_data_selector = false;
   bool saw_render_diagnostic_layout = false;
+  int world_capture_count = 0;
   while (effective_argc >= 3) {
     const wchar_t* flag = argv[effective_argc - 2];
     const wchar_t* value = argv[effective_argc - 1];
@@ -85,6 +86,10 @@ AuxiliaryOptionResult strip_auxiliary_options(
                hooks.parse_render_diagnostic_layout && !saw_render_diagnostic_layout) {
       accepted = hooks.parse_render_diagnostic_layout(hooks.context, value);
       saw_render_diagnostic_layout = accepted;
+    } else if (equals(flag, L"--capture-world-handle-v1") &&
+               hooks.parse_world_capture_target && world_capture_count < 16) {
+      accepted = hooks.parse_world_capture_target(hooks.context, value);
+      if (accepted) ++world_capture_count;
     } else {
       break;
     }
@@ -140,7 +145,9 @@ WorkerMode classify_worker_mode(
       // The secondary-layer trailer sits ahead of the context trailers in the
       // positional tail; peel it last to reach the ten-slot session contract.
       mode.session_layers = mode.image_argc >= 11 &&
-          starts_with(argv[mode.image_argc - 1], L"session-layers:v2|");
+          (starts_with(argv[mode.image_argc - 1], L"session-layers:v2|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v3|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v4|"));
       const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {
@@ -207,7 +214,9 @@ WorkerMode classify_worker_mode(
           starts_with(argv[mode.image_trailer_argc - 1], L"v2|");
       mode.image_argc = mode.image_trailer_argc - (mode.image_mask_context ? 1 : 0);
       mode.session_layers = mode.image_argc >= 11 &&
-          starts_with(argv[mode.image_argc - 1], L"session-layers:v2|");
+          (starts_with(argv[mode.image_argc - 1], L"session-layers:v2|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v3|") ||
+           starts_with(argv[mode.image_argc - 1], L"session-layers:v4|"));
       const int session_core_argc = mode.image_argc - (mode.session_layers ? 1 : 0);
       mode.render_session_mode = session_core_argc == 10;
       if (mode.render_session_mode) {

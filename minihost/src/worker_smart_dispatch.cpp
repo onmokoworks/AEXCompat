@@ -2409,7 +2409,7 @@ bool dispatch(const Request& request, const Hooks& hooks,
   const int32_t passthrough_rowbytes = passthrough_world.rowbytes;
   result.empty_result_passthrough = result.empty_result_rect && !plan.missing_input &&
       !plan.gpu_negotiation && passthrough_source &&
-      passthrough_world.rowbytes >= passthrough_world.width * plan.pixel_bytes &&
+      passthrough_world.rowbytes >= passthrough_world.width * plan.input_pixel_bytes &&
       passthrough_rect[0] >= 0 && passthrough_rect[1] >= 0 &&
       passthrough_width > 0 && passthrough_height > 0 &&
       render::smart_rect_contained(
@@ -2613,7 +2613,8 @@ bool dispatch(const Request& request, const Hooks& hooks,
     // buffer sized above, when the passthrough conditions held (see the
     // AE-equivalence note at `empty_result_passthrough`). Both worlds are the
     // host's own guarded allocations at `plan.pixel_bytes`, and the rect was
-    // checked to lie inside the input, so each row copy stays in bounds.
+    // checked to lie inside the input, so each row read stays in bounds. A
+    // mixed-depth primary is converted into the output depth per pixel.
     result.render_error = 0;
     // The `_begin` / `_end` pair is the shape the broker turns into a stage
     // event, so the copy is on the record of an ordinary sweep and not only in
@@ -2645,14 +2646,26 @@ bool dispatch(const Request& request, const Hooks& hooks,
         const std::size_t row = static_cast<std::size_t>(smart_bounds.width) *
             static_cast<std::size_t>(plan.pixel_bytes);
         for (int32_t y = 0; y < smart_bounds.height; ++y) {
-          std::memcpy(*request.destination +
-                          static_cast<std::size_t>(y) * smart_bounds.rowbytes,
-                      passthrough_source +
-                          static_cast<std::size_t>(smart_bounds.origin_y + y) *
-                              passthrough_rowbytes +
-                          static_cast<std::size_t>(smart_bounds.origin_x) *
-                              plan.pixel_bytes,
-                      row);
+          auto* target = *request.destination +
+              static_cast<std::size_t>(y) * smart_bounds.rowbytes;
+          const auto* input_row = passthrough_source +
+              static_cast<std::size_t>(smart_bounds.origin_y + y) *
+                  passthrough_rowbytes +
+              static_cast<std::size_t>(smart_bounds.origin_x) *
+                  plan.input_pixel_bytes;
+          if (plan.input_pixel_bytes == plan.pixel_bytes) {
+            std::memcpy(target, input_row, row);
+          } else {
+            for (int32_t x = 0; x < smart_bounds.width; ++x) {
+              unsigned char rgba[4]{};
+              render_pixel_transport::argb_to_rgba8(
+                  rgba, input_row + static_cast<std::size_t>(x) * plan.input_pixel_bytes,
+                  plan.input_pixel_bytes);
+              render_pixel_transport::rgba8_to_argb(
+                  target + static_cast<std::size_t>(x) * plan.pixel_bytes,
+                  rgba, plan.pixel_bytes);
+            }
+          }
         }
       }
       std::cerr << "stage:smart_empty_result_passthrough_end reason="
