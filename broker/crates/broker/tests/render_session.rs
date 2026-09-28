@@ -23,7 +23,7 @@ mod windows_e2e {
     use aexcompat_broker::secure_launch::LaunchEnvironment;
     use sha2::{Digest, Sha256};
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const WIDTH: u32 = 8;
     const HEIGHT: u32 = 4;
@@ -3814,6 +3814,68 @@ mod windows_e2e {
         assert_eq!(close["session_clean"], true, "close: {close}");
         assert_eq!(close["inspects_ok"], 2, "close: {close}");
         assert_eq!(close["invalidated"], false, "close: {close}");
+    }
+
+    #[test]
+    fn native_discovery_close_skips_post_report_dll_detach_delay() {
+        let source_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .unwrap();
+        let worker = source_root.join("target/minihost-build/aex_worker.exe");
+        let fixture = source_root.join("target/minihost-build/worker_session_detach_fixture.dll");
+        if !worker.is_file() || !fixture.is_file() {
+            eprintln!(
+                "skipping native discovery close test: Release worker or detach fixture missing"
+            );
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-discovery-close-{}-{:032x}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        write_freshness_source_marker(&root);
+        let worker_dir = root.join("target/minihost-build");
+        std::fs::create_dir_all(&worker_dir).unwrap();
+        std::fs::copy(&worker, worker_dir.join("aex_worker.exe")).unwrap();
+        let mut plugins = Vec::new();
+        for name in ["first", "second"] {
+            let path = root.join(format!("{name}.aex"));
+            std::fs::copy(&fixture, &path).unwrap();
+            plugins.push(approved_artifact(&path));
+        }
+        let repository = TempRepository(root);
+        let mut session = DiscoverySession::open_in_place(InPlaceDiscoverySessionOpenRequest {
+            repository: &repository.0,
+            plugins,
+            dependency_search_dirs: vec![repository.0.clone()],
+            module_bound: 64,
+            inspect_deadline: Some(Duration::from_secs(30)),
+            launch_environment: LaunchEnvironment::default()
+                .with_child_var("AEXCOMPAT_DETACH_DELAY_MS", "5000"),
+        })
+        .expect("open native discovery session");
+        for index in 0..2 {
+            let outcome = session.inspect_plugin(index, index).unwrap();
+            assert!(
+                matches!(outcome, InspectOutcome::InspectError { ref error_kind, .. } if error_kind == "entrypoint_unresolved"),
+                "fixture has no EffectMain: {outcome:?}"
+            );
+        }
+        let started = Instant::now();
+        let close = session.close();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "close stalled: {close}"
+        );
+        assert_eq!(close["session_clean"], true, "close: {close}");
+        assert_eq!(close["inspects_errored"], 2, "close: {close}");
+        assert_eq!(close["worker"]["classification"], "ok", "close: {close}");
+        assert_eq!(
+            close["final_report"]["status"], "discovery_session_completed",
+            "close: {close}"
+        );
     }
 
     /// An in-place identity mismatch (issue #751, the #309 state transition)

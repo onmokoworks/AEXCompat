@@ -4303,6 +4303,7 @@ mod tests {
                 &[one.clone(), two.clone()],
                 &dependency(),
                 build(1),
+                false,
                 &|batch| {
                     completed
                         .lock()
@@ -4356,6 +4357,7 @@ mod tests {
                 &[one.clone(), two.clone()],
                 &dependency(),
                 build(1),
+                false,
                 &|batch| {
                     completed
                         .lock()
@@ -4494,6 +4496,27 @@ mod tests {
             let three = shard_in_place_clusters(vec![cluster(&[0, 1, 2])], 8);
             assert_eq!(three.len(), 1);
             assert!(matches!(&three[0], DiscoveryTask::Cluster(chunk) if chunk.len() == 3));
+        }
+
+        #[test]
+        fn diagnostic_one_shot_uses_same_members_but_no_cluster_tasks() {
+            let planned: Vec<PlannedMember> = (0..7)
+                .map(|_| PlannedMember {
+                    identity: Some("same-roots".to_owned()),
+                })
+                .collect();
+            let clustered = plan_discovery_tasks(&planned, 3, false);
+            assert_eq!(clustered.len(), 3);
+            assert!(
+                clustered
+                    .iter()
+                    .all(|task| matches!(task, DiscoveryTask::Cluster(_)))
+            );
+            let one_shot = plan_discovery_tasks(&planned, 3, true);
+            assert_eq!(one_shot.len(), planned.len());
+            for (index, task) in one_shot.iter().enumerate() {
+                assert!(matches!(task, DiscoveryTask::Single(slot) if *slot == index));
+            }
         }
 
         #[test]
