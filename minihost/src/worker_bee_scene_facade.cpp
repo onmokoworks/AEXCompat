@@ -196,6 +196,15 @@ const ItemObject* __cdecl get_const_source_item(const LayerObject* self,
   ++g_observed_calls[kLayerSlotGetConstSourceItem];
   return self ? self->source_item : nullptr;
 }
+ItemObject* __cdecl get_source_item_2025(LayerObject* self, const void* /*bag*/) {
+  ++g_observed_calls[kLayer2025SlotGetSourceItem];
+  return self ? self->source_item_2025 : nullptr;
+}
+const ItemObject* __cdecl get_const_source_item_2025(
+    const LayerObject* self, const void* /*bag*/) {
+  ++g_observed_calls[kLayer2025SlotGetConstSourceItem];
+  return self ? self->source_item_2025 : nullptr;
+}
 
 template <std::size_t... Slots>
 std::array<const void*, sizeof...(Slots)> make_layer_vtable(
@@ -220,11 +229,15 @@ std::array<const void*, sizeof...(Slots)> make_project_vtable(
 
 struct Tables {
   std::array<const void*, kLayerVtableSlots> layer;
+  std::array<const void*, kLayerVtableSlots> layer_2025;
+  std::array<const void*, kLayerVtableSlots> layer_opaque;
   std::array<const void*, kItemVtableSlots> item;
   std::array<const void*, kItemVtableSlots> footage;
   std::array<const void*, kProjectVtableSlots> project;
   Tables()
       : layer(make_layer_vtable(std::make_index_sequence<kLayerVtableSlots>{})),
+        layer_2025(make_layer_vtable(std::make_index_sequence<kLayerVtableSlots>{})),
+        layer_opaque(make_layer_vtable(std::make_index_sequence<kLayerVtableSlots>{})),
         item(make_item_vtable(std::make_index_sequence<kItemVtableSlots>{})),
         footage(make_footage_vtable(std::make_index_sequence<kItemVtableSlots>{})),
         project(make_project_vtable(
@@ -237,6 +250,14 @@ struct Tables {
         reinterpret_cast<const void*>(&get_source_item);
     layer[kLayerSlotGetConstSourceItem] =
         reinterpret_cast<const void*>(&get_const_source_item);
+    layer_2025[kLayerSlotCanStore] = reinterpret_cast<const void*>(&can_store);
+    layer_2025[kLayerSlotGetStream] = reinterpret_cast<const void*>(&get_stream);
+    layer_2025[kLayerSlotIsLayerType] =
+        reinterpret_cast<const void*>(&is_layer_type);
+    layer_2025[kLayer2025SlotGetSourceItem] =
+        reinterpret_cast<const void*>(&get_source_item_2025);
+    layer_2025[kLayer2025SlotGetConstSourceItem] =
+        reinterpret_cast<const void*>(&get_const_source_item_2025);
   }
 };
 
@@ -261,15 +282,149 @@ int32_t clamp_dimension(int32_t value) noexcept {
   return value > INT16_MAX ? INT16_MAX : value;
 }
 
+using BeeGetSource = const ItemObject* (__cdecl*)(const LayerObject*, const void*);
+
+const ItemObject* __cdecl probe_const_source_2025(
+    const LayerObject* layer, const void*) noexcept {
+  return layer ? layer->source_item_2025 : nullptr;
+}
+const ItemObject* __cdecl probe_const_source_2026(
+    const LayerObject* layer, const void*) noexcept {
+  return layer ? layer->source_item : nullptr;
+}
+
+bool source_exports_match_layout(LayerLayout layout, BeeGetSource source,
+                                 BeeGetSource const_source) noexcept {
+  if (!source || !const_source ||
+      (layout != LayerLayout::Ae2025 && layout != LayerLayout::Ae2026))
+    return false;
+  LayerObject probe{};
+  auto probe_vtable = layout == LayerLayout::Ae2025
+                          ? tables().layer_2025 : tables().layer;
+  // A foreign non-const export may call the virtual const-source slot. Use
+  // side-effect-free probe slots so this ABI check is not reported as a
+  // plug-in call in the effect's attribution window.
+  probe_vtable[layout == LayerLayout::Ae2025 ? kLayer2025SlotGetConstSourceItem
+                                              : kLayerSlotGetConstSourceItem] =
+      layout == LayerLayout::Ae2025
+          ? reinterpret_cast<const void*>(&probe_const_source_2025)
+          : reinterpret_cast<const void*>(&probe_const_source_2026);
+  probe.vtable = probe_vtable.data();
+  probe.source_item_2025 = &objects().footage_item;
+  probe.source_item = &objects().comp_item;
+  const auto expected = layout == LayerLayout::Ae2025
+                            ? probe.source_item_2025 : probe.source_item;
+  return source(&probe, nullptr) == expected &&
+         const_source(&probe, nullptr) == expected;
+}
+
+LayerLayout inspect_bee_layout_unchecked(HMODULE module) noexcept {
+  const auto* image = reinterpret_cast<const std::byte*>(module);
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew < 0 ||
+      dos->e_lfanew > 0x1000)
+    return LayerLayout::Unsupported;
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+      image + dos->e_lfanew);
+  if (nt->Signature != IMAGE_NT_SIGNATURE ||
+      nt->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
+    return LayerLayout::Unsupported;
+  const uint32_t image_size = nt->OptionalHeader.SizeOfImage;
+  const LayerLayout layout =
+      layout_for_bee_image(image_size, nt->FileHeader.TimeDateStamp);
+  if (layout == LayerLayout::Unsupported) return layout;
+  const auto* vtable = reinterpret_cast<const void* const*>(
+      GetProcAddress(module, "??_7BEE_AVLayer@@6B@"));
+  const void* source = reinterpret_cast<const void*>(GetProcAddress(
+      module, "?pGetSourceItem@BEE_AVLayer@@UEAAPEAVBEE_Item@@PEBVTDB_ParamBag@@@Z"));
+  const void* const_source = reinterpret_cast<const void*>(GetProcAddress(
+      module, "?pGetConstSourceItem@BEE_AVLayer@@UEBAPEBVBEE_Item@@PEBVTDB_ParamBag@@@Z"));
+  const auto within_image = [module, image_size](const void* address,
+                                                  std::size_t bytes) {
+    const auto base = reinterpret_cast<uintptr_t>(module);
+    const auto pointer = reinterpret_cast<uintptr_t>(address);
+    if (!address || pointer < base) return false;
+    const auto offset = pointer - base;
+    return offset <= image_size && bytes <= image_size - offset;
+  };
+  const std::size_t source_slot =
+      layout == LayerLayout::Ae2025 ? kLayer2025SlotGetSourceItem
+                                     : kLayerSlotGetSourceItem;
+  const std::size_t const_source_slot = source_slot + 1;
+  if (!within_image(vtable, (const_source_slot + 1) * sizeof(void*)) ||
+      !within_image(source, 1) || !within_image(const_source, 1) ||
+      vtable[source_slot] != source ||
+      vtable[const_source_slot] != const_source)
+    return LayerLayout::Unsupported;
+  // Validate what both loaded exports actually do with a null parameter bag.
+  // A matching PE header and export/vtable table can still contain a changed
+  // field offset. Give the two layouts different source sentinels so either
+  // export reading the other layout is rejected, not silently misidentified.
+  if (!source_exports_match_layout(layout,
+          reinterpret_cast<BeeGetSource>(source),
+          reinterpret_cast<BeeGetSource>(const_source)))
+    return LayerLayout::Unsupported;
+  return layout;
+}
+
+// A foreign BEE image may have valid-looking metadata while a header, vtable
+// page, or export body is unreadable. Contain that read/call rather than
+// crashing the worker at AEGP_GetEffectLayer.
+__declspec(noinline) LayerLayout inspect_bee_layout(HMODULE module) noexcept {
+  __try {
+    return inspect_bee_layout_unchecked(module);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return LayerLayout::Unsupported;
+  }
+}
+
+LayerLayout loaded_bee_layout() noexcept {
+  HMODULE module = nullptr;
+  if (!GetModuleHandleExW(0, L"BEE.dll", &module))
+    return LayerLayout::Opaque;
+  struct ReleaseModule {
+    HMODULE module;
+    ~ReleaseModule() { FreeLibrary(module); }
+  } release{module};
+  return inspect_bee_layout(module);
+}
+
 }  // namespace
 
-void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcept {
+LayerLayout layout_for_bee_image(uint32_t image_size,
+                                  uint32_t timestamp) noexcept {
+  if (image_size == 0x1648000 && timestamp == 0x67d4aa97)
+    return LayerLayout::Ae2025;
+  if (image_size == 0x17d3000 && timestamp == 0x6a2ae3d2)
+    return LayerLayout::Ae2026;
+  return LayerLayout::Unsupported;
+}
+
+bool prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcept {
+  const LayerLayout layout = loaded_bee_layout();
+  if (layout == LayerLayout::Unsupported) {
+    std::cerr << "stage:bee_scene_layout_unsupported\n" << std::flush;
+    return false;
+  }
+  return prepare_effect_layer_for_layout(layer, values, layout);
+}
+
+bool prepare_effect_layer_for_layout(LayerObject& layer,
+                                     const SceneValues& values,
+                                     LayerLayout layout) noexcept {
+  if (layout == LayerLayout::Unsupported) return false;
   // Counted, not just latched: a report that says the facade was handed out
   // zero times is what separates "a plug-in took the BEE path and the facade
   // held" from "nothing ever reached the facade", and a sweep cannot tell
   // those apart from the absence of a trap alone (issue #1264).
   ++g_hand_out_count;
   const Tables& vtables = tables();
+  const bool is_2025 = layout == LayerLayout::Ae2025;
+  const bool is_2026 = layout == LayerLayout::Ae2026;
+  const void* const* selected_vtable =
+      is_2025 ? vtables.layer_2025.data()
+              : is_2026 ? vtables.layer.data()
+                        : vtables.layer_opaque.data();
   Objects& graph = objects();
   // Hand-outs from concurrent smart-render threads must not tear each other's
   // writes; an SRW lock cannot throw, which a std::mutex under noexcept could.
@@ -300,9 +455,11 @@ void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcep
     const ProjectObject& project = graph.project;
     const ItemObject& comp = graph.comp_item;
     const ItemObject& footage = graph.footage_item;
-    if (layer.vtable == vtables.layer.data() &&
-        layer.parent_comp_item == &graph.comp_item &&
-        layer.source_item == &graph.footage_item &&
+    if (layer.vtable == selected_vtable &&
+        layer.parent_comp_item == (is_2026 ? &graph.comp_item : nullptr) &&
+        layer.parent_comp_item_2025 == (is_2025 ? &graph.comp_item : nullptr) &&
+        layer.source_item == (is_2026 ? &graph.footage_item : nullptr) &&
+        layer.source_item_2025 == (is_2025 ? &graph.footage_item : nullptr) &&
         project.vtable == vtables.project.data() &&
         project.time_display.byte0 == 1 && project.time_display.byte1 == 1 &&
         project.time_display.byte2 == 0 && project.time_display.byte3 == 0 &&
@@ -327,7 +484,7 @@ void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcep
         footage.parent_project == &graph.project &&
         footage.type == kItemTypeFootage &&
         footage.flags == kStillFootageItemFlags)
-      return;
+      return true;
   }
 
   ProjectObject& project = graph.project;
@@ -371,9 +528,12 @@ void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcep
   footage.type = kItemTypeFootage;
   footage.flags = kStillFootageItemFlags;
 
-  layer.vtable = vtables.layer.data();
-  layer.parent_comp_item = &comp;
-  layer.source_item = &footage;
+  layer.vtable = selected_vtable;
+  layer.parent_comp_item = is_2026 ? &comp : nullptr;
+  layer.parent_comp_item_2025 = is_2025 ? &comp : nullptr;
+  layer.source_item = is_2026 ? &footage : nullptr;
+  layer.source_item_2025 = is_2025 ? &footage : nullptr;
+  return true;
 }
 
 const ItemObject& comp_item() noexcept { return objects().comp_item; }
@@ -521,13 +681,39 @@ bool selftest() {
   SceneValues values{};
   values.comp_width = 320;
   values.comp_height = 180;
-  prepare_effect_layer(layer, values);
+  const bool prepared = prepare_effect_layer_for_layout(
+      layer, values, LayerLayout::Ae2026);
   bool passed = true;
   auto check = [&](bool condition, const char* what) {
     if (condition) return;
     passed = false;
     std::cerr << "bee_scene_facade: " << what << "\n" << std::flush;
   };
+  check(prepared, "default BEE layer preparation was refused");
+  check(layout_for_bee_image(0x1648000, 0x67d4aa97) == LayerLayout::Ae2025 &&
+            layout_for_bee_image(0x17d3000, 0x6a2ae3d2) == LayerLayout::Ae2026 &&
+            layout_for_bee_image(0x1648000, 0x6a2ae3d2) ==
+                LayerLayout::Unsupported &&
+            layout_for_bee_image(0x17d3000, 0x67d4aa97) ==
+                LayerLayout::Unsupported,
+        "BEE image identity did not select/refuse the observed layouts");
+  check(source_exports_match_layout(
+            LayerLayout::Ae2025,
+            reinterpret_cast<BeeGetSource>(&get_source_item_2025),
+            reinterpret_cast<BeeGetSource>(&get_const_source_item_2025)) &&
+            !source_exports_match_layout(
+                LayerLayout::Ae2025,
+                reinterpret_cast<BeeGetSource>(&get_source_item),
+                reinterpret_cast<BeeGetSource>(&get_const_source_item)) &&
+            source_exports_match_layout(
+                LayerLayout::Ae2026,
+                reinterpret_cast<BeeGetSource>(&get_source_item),
+                reinterpret_cast<BeeGetSource>(&get_const_source_item)) &&
+            !source_exports_match_layout(
+                LayerLayout::Ae2026,
+                reinterpret_cast<BeeGetSource>(&get_source_item_2025),
+                reinterpret_cast<BeeGetSource>(&get_const_source_item_2025)),
+        "loaded-source behavior probe accepted the wrong layout");
 
   using IsLayerType = uint8_t (__cdecl*)(const void*, int32_t);
   using CanStore = uint8_t (__cdecl*)(const void*, const void*);
@@ -577,6 +763,71 @@ bool selftest() {
       *reinterpret_cast<ItemObject* const*>(
           reinterpret_cast<const std::byte*>(&layer) + 0x2720);
   check(source_via_field == &footage_item(), "layer+0x2720 is not the source item");
+  check(layer.parent_comp_item_2025 == nullptr &&
+            layer.source_item_2025 == nullptr,
+        "2026 layer published 2025-only fields");
+  LayerObject layer_2025{};
+  check(prepare_effect_layer_for_layout(layer_2025, values,
+                                         LayerLayout::Ae2025),
+        "2025 layer preparation failed");
+  check(layer_2025.parent_comp_item_2025 == &comp_item() &&
+            layer_2025.source_item_2025 == &footage_item() &&
+            layer_2025.parent_comp_item == nullptr &&
+            layer_2025.source_item == nullptr &&
+            layer_2025.parent_comp_item_2025->parent_project == &project(),
+        "2025 layer fields did not publish the BEE object graph");
+  const void* const* vtable_2025 = layer_2025.vtable;
+  check(vtable_2025 != vtable &&
+            distinct_entries(vtable_2025, kLayerVtableSlots),
+        "2025 layer vtable did not retain separate identifying slots");
+  const auto source_2025 =
+      reinterpret_cast<GetSourceItem>(vtable_2025[kLayer2025SlotGetSourceItem]);
+  const auto const_source_2025 = reinterpret_cast<GetSourceItem>(
+      vtable_2025[kLayer2025SlotGetConstSourceItem]);
+  const uint32_t source_2025_before =
+      observed_call_count(kLayer2025SlotGetSourceItem);
+  check(source_2025(&layer_2025, nullptr) == &footage_item() &&
+            const_source_2025(&layer_2025, nullptr) == &footage_item() &&
+            observed_call_count(kLayer2025SlotGetSourceItem) ==
+                source_2025_before + 1,
+        "2025 source slots did not return the observed source item");
+  check(call_slot_expecting_trap(vtable_2025, kLayerSlotGetSourceItem,
+                                 nullptr) ==
+            kTrapExceptionBase + kLayerSlotGetSourceItem,
+        "2025 layer incorrectly implements a 2026-only source slot");
+  LayerObject opaque_layer{};
+  check(prepare_effect_layer_for_layout(opaque_layer, values,
+                                         LayerLayout::Opaque) &&
+            opaque_layer.vtable != vtable &&
+            opaque_layer.vtable != vtable_2025 &&
+            opaque_layer.parent_comp_item == nullptr &&
+            opaque_layer.parent_comp_item_2025 == nullptr &&
+            opaque_layer.source_item == nullptr &&
+            opaque_layer.source_item_2025 == nullptr &&
+            comp_item_handle() == &comp_item(),
+        "unbound layer guessed a BEE ABI or lost the AEGP comp handle");
+  check(call_slot_expecting_trap(opaque_layer.vtable,
+                                 kLayer2025SlotGetSourceItem, nullptr) ==
+            kTrapExceptionBase + kLayer2025SlotGetSourceItem &&
+            call_slot_expecting_trap(opaque_layer.vtable,
+                                     kLayerSlotGetSourceItem, nullptr) ==
+                kTrapExceptionBase + kLayerSlotGetSourceItem,
+        "unbound layer returned a guessed source item");
+  if (!GetModuleHandleW(L"BEE.dll")) {
+    LayerObject auto_opaque_layer{};
+    check(prepare_effect_layer(auto_opaque_layer, values) &&
+              auto_opaque_layer.vtable == opaque_layer.vtable &&
+              auto_opaque_layer.parent_comp_item_2025 == nullptr &&
+              auto_opaque_layer.source_item == nullptr,
+          "real no-BEE hand-out did not use the opaque layout");
+  }
+  const uint32_t handouts_before_refusal = counters().effect_layer_hand_outs;
+  LayerObject refused_layer{};
+  check(!prepare_effect_layer_for_layout(refused_layer, values,
+                                          LayerLayout::Unsupported) &&
+            refused_layer.vtable == nullptr &&
+            counters().effect_layer_hand_outs == handouts_before_refusal,
+        "unknown BEE layout handed out a guessed layer");
   const ItemObject& comp = comp_item();
   check(comp.tag == kItemTag && comp.type == kItemTypeComposition &&
             comp.flags == kCompItemFlags && comp.parent_project == &project() &&
@@ -603,7 +854,7 @@ bool selftest() {
   values.comp_height = 1080;
   values.frames_per_second = 24;
   values.display_dropframe = true;
-  prepare_effect_layer(layer, values);
+  prepare_effect_layer_for_layout(layer, values, LayerLayout::Ae2026);
   check(comp_via_field == &comp_item() && comp.width == 1920 &&
             comp.height == 1080 && comp.frame_rate_fixed == (24 << 16) &&
             comp.display_dropframe == 1 &&
@@ -611,7 +862,7 @@ bool selftest() {
         "re-preparing did not update the published values in place");
   values = SceneValues{};
   values.comp_width = 40000;  // past int16: clamps rather than wraps
-  prepare_effect_layer(layer, values);
+  prepare_effect_layer_for_layout(layer, values, LayerLayout::Ae2026);
   check(comp.width == INT16_MAX && comp.height == 0 &&
             comp.frame_rate_fixed == (30 << 16),
         "out-of-range dimensions did not clamp");
@@ -677,7 +928,7 @@ bool selftest() {
     const auto typed = reinterpret_cast<IsLayerType>(vtable[kLayerSlotIsLayerType]);
     typed(&layer, 0);
     typed(&layer, 0);
-    prepare_effect_layer(layer, SceneValues{});
+    prepare_effect_layer_for_layout(layer, SceneValues{}, LayerLayout::Ae2026);
 
     const std::string report = report_json();
     check(report.rfind(",\"bee_facade\":{", 0) == 0,
@@ -711,7 +962,7 @@ bool selftest() {
   }
   // Leave the shared graph as a fresh hand-out would (every AEGP_GetEffectLayer
   // re-publishes anyway).
-  prepare_effect_layer(layer, SceneValues{});
+  prepare_effect_layer_for_layout(layer, SceneValues{}, LayerLayout::Ae2026);
   return passed;
 }
 

@@ -76,6 +76,13 @@ inline constexpr std::size_t kLayerSlotGetStream = 65;             // TDB_NamedS
 inline constexpr std::size_t kLayerSlotIsLayerType = 79;           // BEE_AVLayer::IsLayerType(int) const
 inline constexpr std::size_t kLayerSlotGetSourceItem = 183;        // BEE_AVLayer::pGetSourceItem(const TDB_ParamBag*)
 inline constexpr std::size_t kLayerSlotGetConstSourceItem = 184;   // BEE_AVLayer::pGetConstSourceItem(const TDB_ParamBag*) const
+inline constexpr std::size_t kLayer2025SlotGetSourceItem = 177;
+inline constexpr std::size_t kLayer2025SlotGetConstSourceItem = 178;
+
+enum class LayerLayout { Opaque, Ae2025, Ae2026, Unsupported };
+// These are candidate layouts from loaded BEE.dll PE headers, not AEX
+// identities or launch gates. The mapped export/vtable shape is checked too.
+LayerLayout layout_for_bee_image(uint32_t image_size, uint32_t timestamp) noexcept;
 
 // Every unobserved slot raises this code plus the slot index (SEH, contained
 // by the selector dispatch), after recording the slot in the report's
@@ -154,20 +161,25 @@ static_assert(offsetof(ItemObject, std_motion_blur_samples) == 0x41c);
 static_assert(offsetof(ItemObject, display_dropframe) == 0x424);
 static_assert(sizeof(ItemObject) == 0x430);
 
-// BEE_AVLayer: the parent comp item at +0x260 (read directly by Timecode and
-// by BEE_GetSourceTimeFormat) and the source item at +0x2720
-// (BEE_AVLayer::pGetConstSourceItem reads this[0x4e4]).
+// BEE_AVLayer fields observed in the 2026 and 2025 BEE builds. Only the
+// selected layout's fields are populated; the other layout stays null.
 struct alignas(16) LayerObject {
   const void* const* vtable{};                 // 0x0000
   std::byte reserved_0008[0x260 - 0x08]{};
-  ItemObject* parent_comp_item{};              // 0x0260
-  std::byte reserved_0268[0x2720 - 0x268]{};
-  ItemObject* source_item{};                   // 0x2720
-  std::byte reserved_2728[0x2740 - 0x2728]{};
+  ItemObject* parent_comp_item{};              // 0x0260 (AE 2026)
+  std::byte reserved_0268[0x338 - 0x268]{};
+  ItemObject* parent_comp_item_2025{};         // 0x0338 (AE 2025)
+  std::byte reserved_0340[0x2720 - 0x340]{};
+  ItemObject* source_item{};                   // 0x2720 (AE 2026)
+  std::byte reserved_2728[0x27c8 - 0x2728]{};
+  ItemObject* source_item_2025{};              // 0x27c8 (AE 2025)
+  std::byte reserved_27d0[0x27e0 - 0x27d0]{};
 };
 static_assert(offsetof(LayerObject, parent_comp_item) == 0x260);
+static_assert(offsetof(LayerObject, parent_comp_item_2025) == 0x338);
 static_assert(offsetof(LayerObject, source_item) == 0x2720);
-static_assert(sizeof(LayerObject) == 0x2740);
+static_assert(offsetof(LayerObject, source_item_2025) == 0x27c8);
+static_assert(sizeof(LayerObject) == 0x27e0);
 
 // Values the facade publishes; taken from the host's scene contract (30 fps,
 // 300 frames, comp dimensions from the render context) at hand-out time.
@@ -186,7 +198,13 @@ struct SceneValues {
 // written, otherwise (a first hand-out, a render context change, a published
 // field a plug-in overwrote) the graph is rewritten to the contract. Reserved
 // bytes are not re-zeroed.
-void prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcept;
+// Returns false for an unknown loaded BEE build instead of handing out a
+// guessed ABI. Without BEE.dll loaded, the layer is opaque: an effect may
+// retain it across a later DLL load, so no BEE layout is guessed at hand-out.
+bool prepare_effect_layer(LayerObject& layer, const SceneValues& values) noexcept;
+bool prepare_effect_layer_for_layout(LayerObject& layer,
+                                     const SceneValues& values,
+                                     LayerLayout layout) noexcept;
 
 // The objects `prepare_effect_layer` links to `layer`.
 const ItemObject& comp_item() noexcept;

@@ -34,7 +34,7 @@ fn prepare_discovery_in_place(
     // any inspect runs; `keep_best` carries it across a failed
     // re-verification, so learning it does not need the inspect to succeed.
     entry.category = pipl_category(&bytes);
-    let roots = search_roots_for(plugin, &dependency.dirs);
+    let roots = search_roots_for(plugin, &dependency.dirs, dependency.default_runtime);
     entry.closure = CachedClosure {
         roots: roots
             .iter()
@@ -95,7 +95,7 @@ fn finish_one_shot_in_place(
     if entry.sha.is_empty() {
         return entry;
     }
-    let roots = search_roots_for(plugin, &dependency.dirs);
+    let roots = search_roots_for(plugin, &dependency.dirs, dependency.default_runtime);
     if roots.is_empty() {
         return entry;
     }
@@ -1064,7 +1064,7 @@ fn discover_cluster_in_place(
     // Every member shares one search-root set by construction (the in-place
     // identity), so the first member's roots stand for the cluster.
     let search_dirs =
-        override_search_dirs.unwrap_or_else(|| search_roots_for(&members[0].0, &dependency.dirs));
+        override_search_dirs.unwrap_or_else(|| search_roots_for(&members[0].0, &dependency.dirs, dependency.default_runtime));
     if search_dirs.is_empty() {
         return fallback_members_in_place(
             repository,
@@ -1530,6 +1530,7 @@ pub fn discover_all_one_shot_for_diagnostics(
 ) -> Vec<(PathBuf, bool, Option<String>)> {
     let dependency = DependencyConfig {
         dirs: dependency_dirs,
+        default_runtime: false,
         module_limit: None,
         byte_limit: None,
     };
@@ -1611,7 +1612,7 @@ pub fn discover_records_for_diagnostics(
     paths: &[PathBuf],
     dependency_dirs: Vec<PathBuf>,
 ) -> Vec<DiagnosticDiscovery> {
-    discover_records_for_diagnostics_with_progress(repository, paths, dependency_dirs, |_| {})
+    discover_records_for_diagnostics_with_progress(repository, paths, dependency_dirs, false, |_| {})
 }
 
 /// Diagnostic entry point with task-completion evidence. The callback runs
@@ -1623,10 +1624,12 @@ pub fn discover_records_for_diagnostics_with_progress(
     repository: &Path,
     paths: &[PathBuf],
     dependency_dirs: Vec<PathBuf>,
+    default_runtime: bool,
     on_completed: impl Fn(Vec<DiagnosticDiscovery>) + Sync,
 ) -> Vec<DiagnosticDiscovery> {
     let dependency = DependencyConfig {
         dirs: dependency_dirs,
+        default_runtime,
         module_limit: None,
         byte_limit: None,
     };
@@ -2205,6 +2208,20 @@ fn registration_label(plugin: &Path, entry: &CacheEntry, japanese_categories: bo
 /// Registers one discovered AEX as an AviUtl2 filter. Runs on the RegisterPlugin
 /// (host callback) thread only. `name` comes from [`unique_filter_names`], which
 /// is what keeps the host from being handed two filters under one name.
+fn dependency_for_discovered_entry(
+    dependency: &DependencyConfig,
+    entry: &CacheEntry,
+) -> DependencyConfig {
+    let mut resolved = dependency.clone();
+    if !entry.closure.roots.is_empty() {
+        resolved.dirs = entry.closure.roots.iter().map(PathBuf::from).collect();
+        // These are the roots discovery actually admitted (possibly after a
+        // registered-runtime retry), not the default candidate to reselect.
+        resolved.default_runtime = false;
+    }
+    resolved
+}
+
 fn register_discovered(
     host: *mut HOST_APP_TABLE,
     repository: &Path,
@@ -2216,10 +2233,7 @@ fn register_discovered(
     plugin_data_selector: Option<PluginDataEffectSelector>,
     japanese_categories: bool,
 ) {
-    let mut resolved_dependency = dependency.clone();
-    if !entry.closure.roots.is_empty() {
-        resolved_dependency.dirs = entry.closure.roots.iter().map(PathBuf::from).collect();
-    }
+    let resolved_dependency = dependency_for_discovered_entry(dependency, entry);
     // Build config items + readers + normalized defaults from the exposed params.
     let mut items: Vec<*const c_void> = Vec::new();
     let mut readers: Vec<ItemReader> = Vec::new();

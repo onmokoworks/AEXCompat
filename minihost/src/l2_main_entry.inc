@@ -1514,9 +1514,16 @@ bool verify_bee_scene_facade() {
           "AEGP_GetEffectLayer accepted a non-effect handle");
     if (layer == &g_layer) {
       const auto* object = static_cast<const bee::LayerObject*>(layer);
-      check(object->vtable == bee::layer_vtable(), "layer handle lacks the facade vtable");
-      check(object->parent_comp_item == &bee::comp_item(), "layer+0x260 is not the comp item");
-      check(object->source_item == &bee::footage_item(), "layer+0x2720 is not the source item");
+      // This route has no BEE.dll loaded. The production hand-out must not
+      // guess either version's direct-field ABI; the explicit-layout native
+      // facade self-test exercises those fields separately.
+      check(object->vtable != nullptr && object->vtable != bee::layer_vtable(),
+            "unbound layer guessed the 2026 facade vtable");
+      check(object->parent_comp_item == nullptr &&
+                object->parent_comp_item_2025 == nullptr &&
+                object->source_item == nullptr &&
+                object->source_item_2025 == nullptr,
+            "unbound layer published a versioned BEE field");
       const bee::ItemObject& comp = bee::comp_item();
       check(comp.tag == bee::kItemTag && comp.type == bee::kItemTypeComposition &&
                 comp.parent_project == &bee::project(),
@@ -1542,15 +1549,14 @@ bool verify_bee_scene_facade() {
             "comp item duration differs from the AEGP item suite");
       // The effect layer's parent comp handle (AEGP Layer Suite
       // AEGP_GetLayerParentComp) is the same comp item object the layer's
-      // +0x260 names, so a caller that reads its AEGP_CompH as a BEE_CompItem*
+      // handle names, so a caller that reads its AEGP_CompH as a BEE_CompItem*
       // (ShapeBlur, issue #1264) lands on the facade; the comp accessors
       // resolve it as this worker's composition, and the project it names
       // carries an empty shared_ptr<PF_ColorSettings> at +0xe8/+0xf0 (what
       // BEE_CompItem::GetColorSettings copies out).
       void* parent_comp = nullptr;
       check(aegp_get_layer_parent_comp(layer, &parent_comp) == 0 &&
-                parent_comp == bee::comp_item_handle() &&
-                parent_comp == object->parent_comp_item,
+                parent_comp == bee::comp_item_handle(),
             "AEGP_GetLayerParentComp did not hand out the facade comp item");
       check(scene_handle_is_composition(parent_comp),
             "the facade comp item does not resolve as the composition");
