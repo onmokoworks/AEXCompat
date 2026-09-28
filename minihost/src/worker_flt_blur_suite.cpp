@@ -302,6 +302,30 @@ int32_t session_pixel_format_value() {
   return 0;
 }
 
+// Some effects construct their own float scratch PF_Worlds while rendering an
+// ARGB16 frame. Only use a float anchor when *both* foreign operands carry
+// the observed PPix-world flags and an exact 16-byte stride per pixel. The
+// bounded-world check also enforces non-null pixels and finite geometry; the
+// registry/ownership checks below keep stale host worlds out of this fallback.
+bool foreign_float_scratch_pair(const void* source_world,
+                                const void* destination_world) {
+  if (!g_hooks.bounded_world || !g_hooks.world_reference_known ||
+      !g_hooks.world_pixels_owned) return false;
+  const auto is_float_scratch = [](const void* world) {
+    if (!world || g_hooks.world_reference_known(world) ||
+        g_hooks.world_pixels_owned(const_cast<void*>(world))) return false;
+    int32_t flags{};
+    std::memcpy(&flags, static_cast<const std::byte*>(world) + 16, sizeof(flags));
+    if (flags != 0x02000000) return false;
+    unsigned char* pixels{};
+    int32_t rowbytes{}, width{}, height{};
+    return g_hooks.bounded_world(const_cast<void*>(world), 16, pixels,
+                                 rowbytes, width, height) &&
+        rowbytes == width * 16;
+  };
+  return is_float_scratch(source_world) && is_float_scratch(destination_world);
+}
+
 // Resolves the source/destination pair, admitting foreign operands against a
 // format anchor: the resolved side's format when one side is known, else the
 // session's negotiated pixel format (Cartoon passes two foreign scratch worlds
@@ -319,9 +343,15 @@ bool resolve_blur_worlds(const void* source_world, void* destination_world,
   const bool destination_known =
       g_hooks.resolve_world(destination_world, destination);
   if (source_known && destination_known) return true;
+  const int32_t session_format = session_pixel_format_value();
+  const int32_t foreign_anchor =
+      !source_known && !destination_known &&
+          session_format == world_registry::kPixelFormatArgb64 &&
+          foreign_float_scratch_pair(source_world, destination_world)
+      ? world_registry::kPixelFormatArgb128 : session_format;
   const int32_t anchor = source_known ? source.pixel_format
       : destination_known ? destination.pixel_format
-                          : session_pixel_format_value();
+                          : foreign_anchor;
   if (!bytes_per_pixel(anchor)) return false;
   if (!source_known && !resolve_foreign_blur_world(source_world, anchor, source))
     return false;
@@ -703,6 +733,43 @@ bool selftest() {
         g_hooks.effect_ref, &foreign_source_world, 1.0f, 0.0f, 1,
         kHorizontal | kAllChannels, 0, 1, &foreign_destination_world) == 0 &&
         foreign_destination == expected8;
+    g_hooks = saved;
+  }
+  // Cartoon's ARGB16 render hands FLT two plug-in-owned float scratch worlds.
+  // Their depth must beat the session anchor, but only for the exact observed
+  // float shape. Wrong flags/stride still refuse without touching destination.
+  {
+    const Hooks saved = g_hooks;
+    g_hooks.session_pixel_format = +[]() -> const char* { return "argb16"; };
+    auto foreign_float_source = source_float_before;
+    std::array<float, width * height * 4> foreign_float_destination{};
+    auto float_source = make_world(foreign_float_source.data(), width * 16);
+    auto float_destination =
+        make_world(foreign_float_destination.data(), width * 16);
+    float_source.world_flags = 0x02000000;
+    float_destination.world_flags = 0x02000000;
+    foreign_float_destination.fill(0.0f);
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &float_source, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &float_destination) == 0 &&
+        foreign_float_source == source_float_before;
+    constexpr std::array<float, 3> box_red{1.0f / 3.0f, 1.0f / 3.0f,
+                                           1.0f / 3.0f};
+    for (int32_t x = 0; x < width; ++x)
+      ok = ok && std::abs(foreign_float_destination[x * 4 + 1] - box_red[x]) < 1e-6f;
+    foreign_float_destination.fill(-1.0f);
+    const auto float_sentinel = foreign_float_destination;
+    float_source.world_flags = 0;
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &float_source, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &float_destination) ==
+        kBadCallbackParam && foreign_float_destination == float_sentinel;
+    float_source.world_flags = 0x02000000;
+    float_source.rowbytes = width * 8;
+    ok = ok && suite->box_blur(
+        g_hooks.effect_ref, &float_source, 1.0f, 0.0f, 1,
+        kHorizontal | kAllChannels, 0, 1, &float_destination) ==
+        kBadCallbackParam && foreign_float_destination == float_sentinel;
     g_hooks = saved;
   }
   // The alias re-declares the registered source's pixel base with a wider
