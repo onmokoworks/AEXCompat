@@ -4,6 +4,7 @@ pub mod companion_manifest;
 pub mod cuda_compute_probe;
 pub mod fixture_profiles;
 pub mod gpu_platform_collector;
+pub mod gpu_runtime_policy_generator;
 pub mod host_core;
 #[cfg(windows)]
 pub mod image_render;

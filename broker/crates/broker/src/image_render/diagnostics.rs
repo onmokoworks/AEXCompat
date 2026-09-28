@@ -240,6 +240,7 @@ pub fn prepare_gpu_runtime_policy(
 ) -> io::Result<PreparedGpuRuntimePolicy> {
     let backend = runtime_backend(gpu_backend)
         .ok_or_else(|| invalid("the CPU backend has no GPU runtime module policy"))?;
+    crate::gpu_runtime_policy_generator::validate_active_gpu_policy(&policy)?;
     let authorization = prepare_runtime_authorization_transport(repository, &policy, backend)?;
     let session_identity = authorization.session_identity;
     let args_before_plugin = vec!["--gpu-module-report-v1".to_owned()];

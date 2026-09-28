@@ -544,7 +544,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_search_dirs(
     dependencies: Vec<ApprovedImageArtifact>,
     dependency_search_dirs: Vec<PathBuf>,
 ) -> io::Result<Value> {
-    render_experimental_image_with_approved_dependencies_and_runtime_policy_and_search_dirs(
+    render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
         repository,
         plugin_path,
         approved_sha256,
@@ -579,7 +579,7 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
     dependencies: Vec<ApprovedImageArtifact>,
     gpu_runtime_policy: Option<GpuRuntimePolicyInput<'_>>,
 ) -> io::Result<Value> {
-    render_experimental_image_with_approved_dependencies_and_runtime_policy_and_search_dirs(
+    render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
         repository,
         plugin_path,
         approved_sha256,
@@ -598,7 +598,54 @@ pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_poli
     )
 }
 
-fn render_experimental_image_with_approved_dependencies_and_runtime_policy_and_search_dirs(
+/// Shipping OpenCL route shared by the CLI and GUI. Its caller supplies normal
+/// discovered dependency roots, not a policy file or a hand-picked GPU runtime
+/// folder. Failure at generation or preflight is explicit; no CPU retry can
+/// accidentally inherit the GPU authorization.
+pub fn render_experimental_image_with_auto_opencl_policy(
+    repository: &Path,
+    plugin_path: &Path,
+    approved_sha256: &str,
+    input_path: &Path,
+    output_path: &Path,
+    parameters: &[InteractiveParameter],
+    timing: RenderTiming,
+    host_context: Option<&crate::render_request::HostContext>,
+    custom_ui_action: Option<RenderUiAction>,
+    dependencies: Vec<ApprovedImageArtifact>,
+    dependency_search_dirs: Vec<PathBuf>,
+) -> io::Result<Value> {
+    let policy = crate::gpu_runtime_policy_generator::generate_opencl_runtime_policy()?;
+    let prepared = prepare_gpu_runtime_policy(
+        repository,
+        plugin_path,
+        approved_sha256,
+        RenderGpuBackend::OpenCl,
+        policy,
+        dependencies.clone(),
+    )?;
+    render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
+        repository,
+        plugin_path,
+        approved_sha256,
+        input_path,
+        output_path,
+        parameters,
+        timing,
+        true,
+        RenderPixelFormat::Argb32f,
+        host_context,
+        custom_ui_action,
+        RenderGpuBackend::OpenCl,
+        dependencies,
+        dependency_search_dirs,
+        Some(prepared.as_input()),
+    )
+}
+
+/// Renders through the authenticated GPU policy route while retaining the
+/// dependency search roots discovered by the shipping GUI.
+pub fn render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy_and_search_dirs(
     repository: &Path,
     plugin_path: &Path,
     approved_sha256: &str,

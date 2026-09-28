@@ -359,6 +359,12 @@ fn cli_contract() -> serde_json::Value {
                 "result": "render-report-json"
             },
             {
+                "name": "--render-experimental-smart-32-gpu-auto-policy",
+                "argv": ["--render-experimental-smart-32-gpu-auto-policy", "<aex>", "<input-image>", "<output-image>", "opencl"],
+                "result": "render-report-json",
+                "note": "Generates a short-lived active-driver-bound OpenCL policy and requires an authenticated GPU preflight. No runtime folder or policy file is selected manually."
+            },
+            {
                 "name": "experimental-probes",
                 "aliases": [
                     "--probe-experimental-options-dialog",
@@ -531,7 +537,7 @@ fn required_plugin_parameters(
 
 fn print_cli_help() {
     println!(
-        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-differential <aex> <input> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-performance-diagnostics <aex> <classic|smart> <argb8|argb16|argb32f>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
+        "aexcompat-harness\n\nUse --print-cli-contract for machine-readable command metadata. Prefix any command with --headless for agent/CI use.\n\nCommon commands:\n  --inspect-experimental <aex>\n  --inspect-experimental-with-deps <aex> <dependency-root>...\n  --inspect-experimental-dependencies <aex> <all|missing>\n  --render-scattermap-fixture <input-image> <output-image>\n  --render-experimental-request <aex> <input> <output> <debug-request.json>\n  --render-experimental-session <aex> <input> <output> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-experimental-smart-32-gpu-auto-policy <aex> <input> <output> opencl\n  --render-differential <aex> <input> <pixel-format> <classic|smart> <current-time> <total-time> <time-scale>\n  --render-performance-diagnostics <aex> <classic|smart> <argb8|argb16|argb32f>\n\nSuccessful commands write JSON to stdout. Failures write diagnostics to stderr and return a nonzero exit code. Unknown or malformed arguments open the GUI by default; --headless reports a structured CLI failure and exits 64."
     );
 }
 
@@ -721,7 +727,9 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    if args.len() == 7 && args[1] == "--render-experimental-smart-32-gpu-policy" {
+    if (args.len() == 7 && args[1] == "--render-experimental-smart-32-gpu-policy")
+        || (args.len() == 6 && args[1] == "--render-experimental-smart-32-gpu-auto-policy")
+    {
         // GPU single-image render routed through the length-one session (#290):
         // parse the runtime-module policy JSON, run the GPU module-audit preflight
         // to assemble the authenticated policy input, then render an Argb32f smart
@@ -740,14 +748,22 @@ fn main() -> eframe::Result {
                 std::process::exit(1);
             }
         };
-        let policy = match fs::read(&args[6])
-            .and_then(|bytes| aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes))
-        {
-            Ok(policy) => policy,
-            Err(error) => {
-                eprintln!("runtime module policy rejected: {error}");
+        let policy = if args.len() == 6 {
+            if gpu_backend != RenderGpuBackend::OpenCl {
+                eprintln!("automatic GPU policy currently supports only opencl");
                 std::process::exit(1);
             }
+            None
+        } else {
+            Some(match fs::read(&args[6]).and_then(|bytes| {
+                aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes)
+            }) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    eprintln!("runtime module policy rejected: {error}");
+                    std::process::exit(1);
+                }
+            })
         };
         // The preflight seals the same approved dependency artifacts the render
         // dispatches with, so a plug-in that imports one loads in both.
@@ -788,36 +804,52 @@ fn main() -> eframe::Result {
         };
         let parameters =
             aexcompat_broker::image_render::normalize_default_interactive_parameters(&parameters);
-        let prepared = match aexcompat_broker::image_render::prepare_gpu_runtime_policy(
-            &repository,
-            plugin,
-            &hash,
-            gpu_backend,
-            policy,
-            render_dependencies.clone(),
-        ) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                eprintln!("GPU runtime policy preparation failed: {error}");
-                std::process::exit(1);
-            }
+        let report = if let Some(policy) = policy {
+            let prepared = match aexcompat_broker::image_render::prepare_gpu_runtime_policy(
+                &repository,
+                plugin,
+                &hash,
+                gpu_backend,
+                policy,
+                render_dependencies.clone(),
+            ) {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    eprintln!("GPU runtime policy preparation failed: {error}");
+                    std::process::exit(1);
+                }
+            };
+            aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                RenderTiming::default(),
+                true,
+                RenderPixelFormat::Argb32f,
+                None,
+                None,
+                gpu_backend,
+                render_dependencies,
+                Some(prepared.as_input()),
+            )
+        } else {
+            aexcompat_broker::image_render::render_experimental_image_with_auto_opencl_policy(
+                &repository,
+                plugin,
+                &hash,
+                Path::new(&args[3]),
+                Path::new(&args[4]),
+                &parameters,
+                RenderTiming::default(),
+                None,
+                None,
+                render_dependencies,
+                dependency_roots,
+            )
         };
-        let report = aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_gpu_runtime_policy(
-            &repository,
-            plugin,
-            &hash,
-            Path::new(&args[3]),
-            Path::new(&args[4]),
-            &parameters,
-            RenderTiming::default(),
-            true,
-            RenderPixelFormat::Argb32f,
-            None,
-            None,
-            gpu_backend,
-            render_dependencies,
-            Some(prepared.as_input()),
-        );
         match report {
             Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
             Err(error) => {

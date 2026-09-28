@@ -1943,6 +1943,7 @@ impl RenderSession {
             let policy_input = request
                 .gpu_runtime_policy
                 .expect("gpu attempt was validated to carry a policy at open");
+            crate::gpu_runtime_policy_generator::validate_active_gpu_policy(policy_input.policy)?;
             let backend =
                 runtime_backend(effective_backend).expect("GPU attempt has a runtime backend");
             // Reuse the preflight's session identity so the manifest the worker

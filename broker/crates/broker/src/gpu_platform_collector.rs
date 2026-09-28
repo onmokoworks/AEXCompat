@@ -1,5 +1,9 @@
+use crate::runtime_module_identity::{
+    RuntimeModuleIdentityEvidence, capture_runtime_module_identity_in_catalog,
+};
 use crate::runtime_module_policy::{GpuPlatformIdentity, RuntimeBackend};
 use std::io;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GpuAdapterObservation {
@@ -47,6 +51,20 @@ pub fn collect_gpu_platform_identity(
         return Err(invalid("GPU platform collector rejects the CPU backend"));
     }
     platform::collect_gpu_platform_identity(adapter_luid, backend)
+}
+
+/// Proves that the opened module bytes belong to the active driver catalog
+/// of one exact current GPU adapter. The private catalog path never leaves
+/// this boundary; the returned evidence contains only its digest.
+pub fn collect_active_driver_module_identity(
+    adapter_luid: u64,
+    backend: RuntimeBackend,
+    module_path: &Path,
+) -> io::Result<(GpuPlatformIdentity, RuntimeModuleIdentityEvidence)> {
+    if backend == RuntimeBackend::Cpu {
+        return Err(invalid("GPU module collector rejects the CPU backend"));
+    }
+    platform::collect_active_driver_module_identity(adapter_luid, backend, module_path)
 }
 
 /// Emits only shareable adapter/package identity. Absolute INF, catalog, and
@@ -106,6 +124,17 @@ mod platform {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "GPU platform collection requires Windows",
+        ))
+    }
+
+    pub fn collect_active_driver_module_identity(
+        _: u64,
+        _: RuntimeBackend,
+        _: &Path,
+    ) -> io::Result<(GpuPlatformIdentity, RuntimeModuleIdentityEvidence)> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "GPU module collection requires Windows",
         ))
     }
 }
@@ -219,6 +248,34 @@ mod platform {
         adapter_luid: u64,
         backend: RuntimeBackend,
     ) -> io::Result<GpuPlatformIdentity> {
+        collect_platform_and_catalog(adapter_luid, backend).map(|(identity, _)| identity)
+    }
+
+    pub fn collect_active_driver_module_identity(
+        adapter_luid: u64,
+        backend: RuntimeBackend,
+        module_path: &Path,
+    ) -> io::Result<(GpuPlatformIdentity, RuntimeModuleIdentityEvidence)> {
+        let (identity, catalog_path) = collect_platform_and_catalog(adapter_luid, backend)?;
+        let module = capture_runtime_module_identity_in_catalog(
+            module_path,
+            &catalog_path,
+            &identity.driver_catalog_sha256,
+        )
+        .map_err(|error| invalid(format!("active driver module rejected: {error}")))?;
+        let (current, current_catalog_path) = collect_platform_and_catalog(adapter_luid, backend)?;
+        if current != identity || current_catalog_path != catalog_path {
+            return Err(invalid(
+                "active driver package changed during module verification",
+            ));
+        }
+        Ok((identity, module))
+    }
+
+    fn collect_platform_and_catalog(
+        adapter_luid: u64,
+        backend: RuntimeBackend,
+    ) -> io::Result<(GpuPlatformIdentity, PathBuf)> {
         let dxgi = enumerate_gpu_adapters()?
             .into_iter()
             .find(|adapter| adapter.adapter_luid == adapter_luid)
@@ -253,9 +310,9 @@ mod platform {
         }
 
         let package = find_active_driver_package(address, dxgi)?;
-        let catalog_sha256 = verified_inf_catalog_digest(&package.driver_store_inf)?;
+        let (catalog_path, catalog_sha256) = verified_inf_catalog(&package.driver_store_inf)?;
         let os_build = os_build()?;
-        Ok(GpuPlatformIdentity {
+        let identity = GpuPlatformIdentity {
             backend,
             adapter_luid,
             pci_vendor_id: dxgi.pci_vendor_id,
@@ -266,7 +323,8 @@ mod platform {
             driver_catalog_sha256: catalog_sha256,
             driver_version: package.driver_version,
             os_build,
-        })
+        };
+        Ok((identity, catalog_path))
     }
 
     struct KmtAdapter(u32);
@@ -557,7 +615,7 @@ mod platform {
         ))))
     }
 
-    fn verified_inf_catalog_digest(inf: &Path) -> io::Result<[u8; 32]> {
+    fn verified_inf_catalog(inf: &Path) -> io::Result<(PathBuf, [u8; 32])> {
         let inf = canonical_absolute(inf)?;
         let parent = inf
             .parent()
@@ -586,7 +644,8 @@ mod platform {
             return Err(invalid("driver catalog escaped the DriverStore package"));
         }
         verify_signed_catalog(&catalog)?;
-        hash_regular_file(&catalog)
+        let digest = hash_regular_file(&catalog)?;
+        Ok((catalog, digest))
     }
 
     fn verify_signed_catalog(catalog: &Path) -> io::Result<()> {
