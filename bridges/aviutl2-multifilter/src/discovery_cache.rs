@@ -336,7 +336,11 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         // already-queued one pays nothing.
         if !decision.discover
             && let Some(entry) = cached
-            && needs_closure_recheck(entry, build, &search_roots_for(plugin, &dependency.dirs, dependency.default_runtime))
+            && needs_closure_recheck(
+                entry,
+                build,
+                &search_roots_for(plugin, &dependency.dirs, dependency.default_runtime),
+            )
         {
             decision.discover = true;
         }
@@ -1205,8 +1209,8 @@ fn default_dirs() -> (Vec<PathBuf>, bool) {
 /// After Effects runtime folder — plus the operator's optional ceilings. An AEX's
 /// own folder is not listed; it is always searched first, per plug-in.
 fn resolve_dependency_config(config: &Config) -> DependencyConfig {
-    let default_runtime = std::env::var_os(ENV_DEPENDENCY_DIRS).is_none()
-        && config.dependency_dirs.is_empty();
+    let default_runtime =
+        std::env::var_os(ENV_DEPENDENCY_DIRS).is_none() && config.dependency_dirs.is_empty();
     let dirs = if let Some(dirs) = std::env::var_os(ENV_DEPENDENCY_DIRS) {
         dirs.to_string_lossy()
             .split(';')
@@ -1269,20 +1273,37 @@ fn ae_support_files_for_plugin(plugin: &Path) -> Option<&Path> {
             .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Plug-ins"))
     })?;
     let support = plugins.parent()?;
-    if !support.file_name()?.to_string_lossy().eq_ignore_ascii_case("Support Files") {
+    if !support
+        .file_name()?
+        .to_string_lossy()
+        .eq_ignore_ascii_case("Support Files")
+    {
         return None;
     }
     let ae = support.parent()?;
-    if !ae.file_name()?.to_string_lossy().starts_with("Adobe After Effects ") {
+    if !ae
+        .file_name()?
+        .to_string_lossy()
+        .starts_with("Adobe After Effects ")
+    {
         return None;
     }
-    if !ae.parent()?.file_name()?.to_string_lossy().eq_ignore_ascii_case("Adobe") {
+    if !ae
+        .parent()?
+        .file_name()?
+        .to_string_lossy()
+        .eq_ignore_ascii_case("Adobe")
+    {
         return None;
     }
     Some(support)
 }
 
-fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf], default_runtime: bool) -> Vec<PathBuf> {
+fn search_roots_for(
+    plugin: &Path,
+    dependency_dirs: &[PathBuf],
+    default_runtime: bool,
+) -> Vec<PathBuf> {
     let canonical_dir = |dir: &Path| {
         std::fs::canonicalize(dir)
             .ok()
@@ -1293,9 +1314,18 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf], default_runtime:
         .and_then(canonical_dir)
         .into_iter()
         .collect();
-    let matching_runtime = default_runtime.then(|| ae_support_files_for_plugin(plugin)).flatten();
-    let runtime_dirs: &[PathBuf] = if matching_runtime.is_some() { &[] } else { dependency_dirs };
-    for dir in matching_runtime.into_iter().chain(runtime_dirs.iter().map(PathBuf::as_path)) {
+    let matching_runtime = default_runtime
+        .then(|| ae_support_files_for_plugin(plugin))
+        .flatten();
+    let runtime_dirs: &[PathBuf] = if matching_runtime.is_some() {
+        &[]
+    } else {
+        dependency_dirs
+    };
+    for dir in matching_runtime
+        .into_iter()
+        .chain(runtime_dirs.iter().map(PathBuf::as_path))
+    {
         if let Some(dir) = canonical_dir(dir)
             && !roots.iter().any(|root| root == &dir)
         {

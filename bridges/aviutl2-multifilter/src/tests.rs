@@ -680,10 +680,16 @@ mod tests {
         let expected_new = new_support.canonicalize().unwrap();
 
         let defaults = search_roots_for(&plugin, &[new_support.clone()], true);
-        assert_eq!(defaults, vec![effect_dir.canonicalize().unwrap(), expected_old]);
+        assert_eq!(
+            defaults,
+            vec![effect_dir.canonicalize().unwrap(), expected_old]
+        );
 
         let explicit = search_roots_for(&plugin, &[new_support], false);
-        assert_eq!(explicit, vec![effect_dir.canonicalize().unwrap(), expected_new]);
+        assert_eq!(
+            explicit,
+            vec![effect_dir.canonicalize().unwrap(), expected_new]
+        );
     }
 
     #[test]
@@ -713,11 +719,17 @@ mod tests {
         assert!(!resolved.default_runtime);
         assert_eq!(
             search_roots_for(&plugin, &resolved.dirs, resolved.default_runtime),
-            vec![effect_dir.canonicalize().unwrap(), retry.canonicalize().unwrap()],
+            vec![
+                effect_dir.canonicalize().unwrap(),
+                retry.canonicalize().unwrap()
+            ],
         );
         assert_eq!(
             search_roots_for(&plugin, &defaults.dirs, defaults.default_runtime),
-            vec![effect_dir.canonicalize().unwrap(), original.canonicalize().unwrap()],
+            vec![
+                effect_dir.canonicalize().unwrap(),
+                original.canonicalize().unwrap()
+            ],
         );
     }
 

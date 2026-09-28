@@ -1196,7 +1196,11 @@ fn open_mf_session(config: MfSessionConfig) -> Result<MfSession, String> {
             let dynamic_layer_open = config.layers.iter().any(|layer| layer.dynamic);
             // Issue #816: render is in-place only. The worker resolves the
             // closure through the same search roots discovery inspected.
-            let roots = search_roots_for(&config.plugin, &config.dependency.dirs, config.dependency.default_runtime);
+            let roots = search_roots_for(
+                &config.plugin,
+                &config.dependency.dirs,
+                config.dependency.default_runtime,
+            );
             if roots.is_empty() {
                 let _ = open_tx.send(Err("no dependency search roots resolved".to_owned()));
                 return;

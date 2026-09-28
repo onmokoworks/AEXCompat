@@ -1063,8 +1063,9 @@ fn discover_cluster_in_place(
     let member_count = members.len();
     // Every member shares one search-root set by construction (the in-place
     // identity), so the first member's roots stand for the cluster.
-    let search_dirs =
-        override_search_dirs.unwrap_or_else(|| search_roots_for(&members[0].0, &dependency.dirs, dependency.default_runtime));
+    let search_dirs = override_search_dirs.unwrap_or_else(|| {
+        search_roots_for(&members[0].0, &dependency.dirs, dependency.default_runtime)
+    });
     if search_dirs.is_empty() {
         return fallback_members_in_place(
             repository,
@@ -1612,7 +1613,13 @@ pub fn discover_records_for_diagnostics(
     paths: &[PathBuf],
     dependency_dirs: Vec<PathBuf>,
 ) -> Vec<DiagnosticDiscovery> {
-    discover_records_for_diagnostics_with_progress(repository, paths, dependency_dirs, false, |_| {})
+    discover_records_for_diagnostics_with_progress(
+        repository,
+        paths,
+        dependency_dirs,
+        false,
+        |_| {},
+    )
 }
 
 /// Diagnostic entry point with task-completion evidence. The callback runs
