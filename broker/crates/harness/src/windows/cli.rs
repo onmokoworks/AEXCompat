@@ -755,15 +755,17 @@ fn main() -> eframe::Result {
             }
             None
         } else {
-            Some(match fs::read(&args[6]).and_then(|bytes| {
-                aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes)
-            }) {
-                Ok(policy) => policy,
-                Err(error) => {
-                    eprintln!("runtime module policy rejected: {error}");
-                    std::process::exit(1);
-                }
-            })
+            Some(
+                match fs::read(&args[6]).and_then(|bytes| {
+                    aexcompat_broker::runtime_module_policy::parse_and_validate(&bytes)
+                }) {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        eprintln!("runtime module policy rejected: {error}");
+                        std::process::exit(1);
+                    }
+                },
+            )
         };
         // The preflight seals the same approved dependency artifacts the render
         // dispatches with, so a plug-in that imports one loads in both.
