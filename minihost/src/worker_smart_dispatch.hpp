@@ -86,6 +86,9 @@ bool dispatch_pr_gpu_filter_route(bool route_available, bool float32,
 /// Self-test hook for the depth-independent PF-first admission contract.
 bool verify_pr_gpu_route_admission();
 
+/// Synthetic export/mapping probe for the 2025 and 2026 VideoFrame ABI.
+bool verify_video_frame_runtime_abi();
+
 /// Whether the active plug-in exports the Premiere GPU-filter entry
 /// (`xGPUFilterEntry`), i.e. the dispatch has a Premiere GPU-filter route to
 /// offer it. The session frame loop uses this to decide whether a CPU

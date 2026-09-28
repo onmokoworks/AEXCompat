@@ -45,6 +45,7 @@ def test_native_selector_input_self_test_passes_all_three_workers() -> None:
         report = _self_test(kind)
         assert report["smart_selector_inputs"] == "passed"
         assert report["pr_gpu_pf_first_all_depths"] is True
+        assert report["video_frame_runtime_abi"] is True
 
 
 def test_reported_offsets_match_the_frozen_sdk_abi_observation() -> None:

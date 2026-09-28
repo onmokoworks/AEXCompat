@@ -214,27 +214,51 @@ inline void remove_ptx_at_executable_dir() {
   RemoveDirectoryW(ptx.c_str());
 }
 
+enum class VideoFrameRuntimeAbi { unavailable, current, legacy };
+
+VideoFrameRuntimeAbi select_video_frame_runtime_abi(
+    FARPROC current_rowbytes, FARPROC legacy_rowbytes,
+    FARPROC current_initialize, FARPROC legacy_initialize,
+    bool video_frame_initialize_available) {
+  if (!video_frame_initialize_available) return VideoFrameRuntimeAbi::unavailable;
+  if (current_rowbytes && current_initialize) return VideoFrameRuntimeAbi::current;
+  if (legacy_rowbytes && legacy_initialize) return VideoFrameRuntimeAbi::legacy;
+  return VideoFrameRuntimeAbi::unavailable;
+}
+
+struct VideoFrameTypedQuery { const char* name; std::uint64_t len; };
+
+void* query_video_frame_mapping(void* mapping, const char* name,
+                                std::uint64_t len, VideoFrameRuntimeAbi abi) {
+  if (!mapping || abi == VideoFrameRuntimeAbi::unavailable) return nullptr;
+  auto* obj = static_cast<void***>(mapping);
+  using QueryFn = void* (*)(void*, const VideoFrameTypedQuery*);
+  // AE 2025's VF::GetGPUIVFFromPFEffectWorld calls slot 0 on the mapping
+  // object; the 2026 interface recovered for #1072 uses slot 1. AE 2024
+  // also uses slot 1 but fails the separate VF::Initialize(bool) export gate.
+  const size_t slot = abi == VideoFrameRuntimeAbi::legacy ? 0 : 1;
+  VideoFrameTypedQuery query{name, len};
+  return reinterpret_cast<QueryFn>((*obj)[slot])(mapping, &query);
+}
+
 // #1072:query a GPU VideoFrame's typed memory-access
 // interfaces (Contrast FUN_1800078c0/FUN_180007980). `mapping` is the object at
 // InterfaceRef slot [8] of GetGPUIVFFromPFEffectWorld's 24-byte return, NOT the
-// IVideoFrame at [0]. vtable[1] is the query-by-type-name entry.
+// IVideoFrame at [0]. The query-by-type-name vtable slot is versioned below.
 // This dereferences a vtable on `mapping` whose layout was recovered from the
 // RE of the color family; a GPU frame whose mapping object has a different shape
 // than the one observed there could fault. That is crash-contained by the worker
 // process floor (separate process + Job Object + minidump), not turned into a
 // structured diagnostic here — the transport is only reached for effects that
 // already advertise GPU F32 render and returned 14 on the CPU path.
-inline bool gpu_frame_device_memory(void* mapping, void** out_ptr, int32_t* out_rowbytes) {
+inline bool gpu_frame_device_memory(void* mapping, void** out_ptr,
+                                    int32_t* out_rowbytes,
+                                    VideoFrameRuntimeAbi abi) {
   if (!mapping) return false;
-  struct TypedQuery { const char* name; std::uint64_t len; };
-  auto* obj = static_cast<void***>(mapping);
-  using QueryFn = void* (*)(void*, const TypedQuery*);
-  const auto query = [&](const char* name, std::uint64_t len) -> void* {
-    TypedQuery q{name, len};
-    return reinterpret_cast<QueryFn>((*obj)[1])(mapping, &q);
-  };
-  void* gpu_access = query("VF::IGPUVideoFrameMemoryAccess>(void)", 30);
-  void* pixel_access = query("VF::IVideoFrame2DPixelMemoryAccess>(void)", 34);
+  void* gpu_access = query_video_frame_mapping(
+      mapping, "VF::IGPUVideoFrameMemoryAccess>(void)", 30, abi);
+  void* pixel_access = query_video_frame_mapping(
+      mapping, "VF::IVideoFrame2DPixelMemoryAccess>(void)", 34, abi);
   if (!gpu_access || !pixel_access) return false;
   auto* g = static_cast<void***>(gpu_access);
   auto* p = static_cast<void***>(pixel_access);
@@ -288,9 +312,10 @@ class VideoFrameCpuWorlds {
         "?DisposePF_WorldFromVideoFrame@VF@@YAXPEAUPF_LayerDef@@@Z"));
     par_ctor_ = reinterpret_cast<ParConstructor>(GetProcAddress(
         dva_media_types, "??0PixelAspectRatio@dvamediatypes@@QEAA@II@Z"));
-    format_rowbytes_ = reinterpret_cast<FormatRowbytes>(GetProcAddress(
-        dva_media_types,
-        "?UncompressedPixelFormatRowBytes@dvamediatypes@@YA_KAEBUPixelFormat@1@H@Z"));
+    const FARPROC current_rowbytes = GetProcAddress(dva_media_types,
+        "?UncompressedPixelFormatRowBytes@dvamediatypes@@YA_KAEBUPixelFormat@1@H@Z");
+    const FARPROC legacy_rowbytes = GetProcAddress(dva_media_types,
+        "?UncompressedPixelFormatRowBytes@dvamediatypes@@YA_KUPixelFormat@1@H@Z");
     get_mapping_ = reinterpret_cast<GetWorldMapping>(GetProcAddress(video_frame,
         "?GetPFWorldFrameMapping@VF@@YA?AV?$InterfaceRef@"
         "UIVideoFrameMemoryAccess@VF@@@classref@dvacore@@PEAUPF_LayerDef@@@Z"));
@@ -313,9 +338,25 @@ class VideoFrameCpuWorlds {
         GetProcAddress(asl_foundation, "?Initialize@Foundation@ASL@@YAXXZ"));
     terminate_asl_foundation_ = reinterpret_cast<TerminateAslFoundation>(
         GetProcAddress(asl_foundation, "?Terminate@Foundation@ASL@@YAXXZ"));
-    initialize_gpu_foundation_ = reinterpret_cast<InitializeGpuFoundation>(
-        GetProcAddress(gpu_foundation,
-            "?Initialize@GF@@YAX_N0000W4KernelLoadAction@1@@Z"));
+    const FARPROC current_initialize = GetProcAddress(gpu_foundation,
+        "?Initialize@GF@@YAX_N0000W4KernelLoadAction@1@@Z");
+    const FARPROC legacy_initialize = GetProcAddress(gpu_foundation,
+        "?Initialize@GF@@YAX_N0000W4KernelLoadAction@1@PEAX22@Z");
+    abi_ = select_video_frame_runtime_abi(
+        current_rowbytes, legacy_rowbytes,
+        current_initialize, legacy_initialize,
+        initialize_video_frame_ != nullptr);
+    // Rowbytes is a capability check only; never call either export with the
+    // other version's PixelFormat by-value/by-reference signature.
+    format_rowbytes_ = abi_ == VideoFrameRuntimeAbi::current
+        ? current_rowbytes : abi_ == VideoFrameRuntimeAbi::legacy
+            ? legacy_rowbytes : nullptr;
+    if (abi_ == VideoFrameRuntimeAbi::current)
+      initialize_gpu_foundation_ = reinterpret_cast<InitializeGpuFoundation>(
+          current_initialize);
+    if (abi_ == VideoFrameRuntimeAbi::legacy)
+      initialize_gpu_foundation_legacy_ =
+          reinterpret_cast<InitializeGpuFoundationLegacy>(legacy_initialize);
     terminate_gpu_foundation_ = reinterpret_cast<TerminateGpuFoundation>(
         GetProcAddress(gpu_foundation, "?Terminate@GF@@YAXXZ"));
     is_gpu_foundation_initialized_ =
@@ -374,7 +415,8 @@ class VideoFrameCpuWorlds {
         create_ && dispose_ && par_ctor_ && format_rowbytes_ && get_mapping_ && new_ppix_ &&
         get_frame_ && init_gpu_ && dispose_gpu_ && initialize_asl_foundation_ &&
         initialize_video_frame_ && shutdown_video_frame_ &&
-        terminate_asl_foundation_ && initialize_gpu_foundation_ &&
+        terminate_asl_foundation_ &&
+        (initialize_gpu_foundation_ || initialize_gpu_foundation_legacy_) &&
         terminate_gpu_foundation_ && is_gpu_foundation_initialized_ &&
         get_primary_device_ && get_device_count_ && get_device_ &&
         create_gpu_frame_ && ensure_gpu_transfer_ && create_gpu_frame_from_handle_ &&
@@ -414,6 +456,10 @@ class VideoFrameCpuWorlds {
     return initialize_gpu_foundation_at_module_root();
   }
 
+  bool uses_legacy_gpu_foundation() const {
+    return abi_ == VideoFrameRuntimeAbi::legacy;
+  }
+
   void* cuda_context() const { return gf_cuda_context_; }
 
   // --- Premiere GPU-filter host primitives (issue #1058) ---------------------
@@ -422,8 +468,9 @@ class VideoFrameCpuWorlds {
   // The PPix handle lives at world+64: a VF-backed PPix that
   // VF::GetPPixHandFrameMapping maps, which is exactly what the plug-in reads.
   bool pr_gpu_ready() {
-    if (!(available() && initialize_gpu_foundation_at_module_root() &&
-          (owns_video_frame_ || (owns_video_frame_ = initialize_video_frame_()))))
+    if (!available()) return false;
+    if (!initialize_gpu_foundation_at_module_root()) return false;
+    if (!owns_video_frame_ && !(owns_video_frame_ = initialize_video_frame_()))
       return false;
     // A Premiere GPU filter fetches its device itself via GF::Detail::GetDevice
     // (unlike the PF SmartFX GPU route, which is handed a device through the PF
@@ -479,7 +526,7 @@ class VideoFrameCpuWorlds {
     std::memcpy(&mapping, ivf.data() + 8, sizeof(mapping));
     void* dev_ptr{};
     int32_t gpu_rowbytes{};
-    return gpu_frame_device_memory(mapping, &dev_ptr, &gpu_rowbytes) ? dev_ptr
+    return gpu_frame_device_memory(mapping, &dev_ptr, &gpu_rowbytes, abi_) ? dev_ptr
                                                                       : nullptr;
   }
 
@@ -513,8 +560,6 @@ class VideoFrameCpuWorlds {
                                       const void*, void*);
   using DisposeWorld = void(__cdecl*)(void*);
   using ParConstructor = void*(__cdecl*)(void*, uint32_t, uint32_t);
-  // AE 2026 passes the PixelFormat by const reference (a pointer), not by value.
-  using FormatRowbytes = uint64_t(__cdecl*)(const void*, int32_t);
   using GetWorldMapping = void*(__cdecl*)(void*, void*);
   using NewPPixFromMapping = void**(__cdecl*)(void*);
   using GetFrameFromPPix = void*(__cdecl*)(void*, void**);
@@ -526,6 +571,8 @@ class VideoFrameCpuWorlds {
   using TerminateAslFoundation = void(__cdecl*)();
   using InitializeGpuFoundation = void(__cdecl*)(
       bool, bool, bool, bool, bool, int32_t);
+  using InitializeGpuFoundationLegacy = void(__cdecl*)(
+      bool, bool, bool, bool, bool, int32_t, void*, void*, void*);
   using TerminateGpuFoundation = void(__cdecl*)();
   using IsGpuFoundationInitialized = bool(__cdecl*)();
   using GetPrimaryDevice = void*(__cdecl*)(void*, int32_t);
@@ -676,8 +723,14 @@ class VideoFrameCpuWorlds {
         }
       }
     }
-    initialize_gpu_foundation_(true, true, true, true, true,
-                               /*kernel_load_action=*/2);  // #1072
+    if (initialize_gpu_foundation_) {
+      initialize_gpu_foundation_(true, true, true, true, true,
+                                 /*kernel_load_action=*/2);  // #1072
+    } else {
+      initialize_gpu_foundation_legacy_(true, true, true, true, true,
+                                        /*kernel_load_action=*/2,
+                                        nullptr, nullptr, nullptr);
+    }
     // GF creates and leaves its private CUDA context current. The transport
     // starts from the primary context immediately after this adapter returns;
     // keep the two owners separate by removing GF's context from this thread's
@@ -804,7 +857,7 @@ class VideoFrameCpuWorlds {
     std::memcpy(&mapping, ivf.data() + 8, sizeof(mapping));  // slot [8]
     void* dev_ptr{};
     int32_t gpu_rowbytes{};
-    if (!gpu_frame_device_memory(mapping, &dev_ptr, &gpu_rowbytes) ||
+    if (!gpu_frame_device_memory(mapping, &dev_ptr, &gpu_rowbytes, abi_) ||
         static_cast<size_t>(gpu_rowbytes) < row)
       return false;
     const HMODULE cuda = GetModuleHandleW(L"nvcuda.dll");
@@ -854,12 +907,13 @@ class VideoFrameCpuWorlds {
 
   bool resolved_{};
   bool available_{};
+  VideoFrameRuntimeAbi abi_{VideoFrameRuntimeAbi::unavailable};
   bool input_live_{};
   bool output_live_{};
   CreateWorld create_{};
   DisposeWorld dispose_{};
   ParConstructor par_ctor_{};
-  FormatRowbytes format_rowbytes_{};
+  FARPROC format_rowbytes_{};
   GetWorldMapping get_mapping_{};
   NewPPixFromMapping new_ppix_{};
   GetFrameFromPPix get_frame_{};
@@ -870,6 +924,7 @@ class VideoFrameCpuWorlds {
   InitializeAslFoundation initialize_asl_foundation_{};
   TerminateAslFoundation terminate_asl_foundation_{};
   InitializeGpuFoundation initialize_gpu_foundation_{};
+  InitializeGpuFoundationLegacy initialize_gpu_foundation_legacy_{};
   TerminateGpuFoundation terminate_gpu_foundation_{};
   IsGpuFoundationInitialized is_gpu_foundation_initialized_{};
   GetPrimaryDevice get_primary_device_{};
@@ -2146,6 +2201,61 @@ bool verify_pr_gpu_route_admission() {
   return true;
 }
 
+bool verify_video_frame_runtime_abi() {
+  // Exercise the same paired export selection and typed mapping query used by
+  // the worker. Mismatched DVA/GF generations must fail closed.
+  const FARPROC present = reinterpret_cast<FARPROC>(
+      &verify_video_frame_runtime_abi);
+  if (select_video_frame_runtime_abi(present, present, present, present, true) !=
+          VideoFrameRuntimeAbi::current ||
+      select_video_frame_runtime_abi(nullptr, present, nullptr, present, true) !=
+          VideoFrameRuntimeAbi::legacy ||
+      select_video_frame_runtime_abi(present, nullptr, nullptr, present, true) !=
+          VideoFrameRuntimeAbi::unavailable ||
+      select_video_frame_runtime_abi(nullptr, present, present, nullptr, true) !=
+          VideoFrameRuntimeAbi::unavailable ||
+      // AE 2024 has the legacy GF/DVA pair, but only void VF::Initialize.
+      select_video_frame_runtime_abi(nullptr, present, nullptr, present, false) !=
+          VideoFrameRuntimeAbi::unavailable)
+    return false;
+
+  struct MappingProbe {
+    void* (**vtable)(void*, const VideoFrameTypedQuery*);
+    int legacy_calls{};
+    int current_calls{};
+    bool valid_query{true};
+  } probe;
+  using QueryFn = void* (*)(void*, const VideoFrameTypedQuery*);
+  QueryFn vtable[2] = {
+      +[](void* raw, const VideoFrameTypedQuery* query) -> void* {
+        auto& state = *static_cast<MappingProbe*>(raw);
+        ++state.legacy_calls;
+        state.valid_query &= query && query->len == 30 &&
+            std::strcmp(query->name, "VF::IGPUVideoFrameMemoryAccess>(void)") == 0;
+        return raw;
+      },
+      +[](void* raw, const VideoFrameTypedQuery* query) -> void* {
+        auto& state = *static_cast<MappingProbe*>(raw);
+        ++state.current_calls;
+        state.valid_query &= query && query->len == 34 &&
+            std::strcmp(query->name, "VF::IVideoFrame2DPixelMemoryAccess>(void)") == 0;
+        return raw;
+      },
+  };
+  probe.vtable = vtable;
+  if (query_video_frame_mapping(&probe,
+          "VF::IGPUVideoFrameMemoryAccess>(void)", 30,
+          VideoFrameRuntimeAbi::legacy) != &probe ||
+      query_video_frame_mapping(&probe,
+          "VF::IVideoFrame2DPixelMemoryAccess>(void)", 34,
+          VideoFrameRuntimeAbi::current) != &probe ||
+      query_video_frame_mapping(&probe, "unused", 0,
+          VideoFrameRuntimeAbi::unavailable) != nullptr)
+    return false;
+  return probe.valid_query && probe.legacy_calls == 1 &&
+      probe.current_calls == 1;
+}
+
 bool dispatch(const Request& request, const Hooks& hooks,
               smart_execution::Result& result, State& dispatch_state) {
   if (!request.entry || !request.input || !request.output || !request.plan ||
@@ -2206,7 +2316,11 @@ bool dispatch(const Request& request, const Hooks& hooks,
       (gpu_framework == 1 || gpu_framework == 3 || gpu_framework == 4);
   VideoFrameCpuWorlds video_frame_worlds;
   const bool video_frame_adapter_ready =
-      use_video_frame_worlds && video_frame_worlds.available();
+      use_video_frame_worlds && video_frame_worlds.available() &&
+      // The 2025 VF CPU backing changes the VR family's first PF pass
+      // from a 516 refusal into a plug-in null dereference. Preserve the
+      // original PF pass so the resident 512/516 GPU retry can run instead.
+      !video_frame_worlds.uses_legacy_gpu_foundation();
   const bool gpu_host_ready = !plan.gpu_negotiation ||
       !video_frame_adapter_ready || video_frame_worlds.initialize_gpu_host();
   if (plan.gpu_negotiation) hooks.capture_module_audit();
