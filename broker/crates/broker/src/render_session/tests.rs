@@ -4,6 +4,8 @@ use super::*;
 fn diagnostic_world_layout_is_bounded_before_worker_launch() {
     let layout = DiagnosticWorldLayout {
         input_row_padding: 16,
+        input_padding_byte: None,
+        input_pixel_format: None,
         output_row_padding: 8,
         input_origin_x: -3,
         input_origin_y: 4,
@@ -15,6 +17,24 @@ fn diagnostic_world_layout_is_bounded_before_worker_launch() {
             .encoded(9, 7, RenderPixelFormat::Argb8, true)
             .unwrap(),
         "v1|16|8|-3|4|2|1|7|5|1|0|8|6"
+    );
+    assert_eq!(
+        DiagnosticWorldLayout {
+            input_padding_byte: Some(0),
+            ..layout
+        }
+        .encoded(9, 7, RenderPixelFormat::Argb8, true)
+        .unwrap(),
+        "v2|16|8|-3|4|2|1|7|5|1|0|8|6|0"
+    );
+    assert_eq!(
+        DiagnosticWorldLayout {
+            input_pixel_format: Some(RenderPixelFormat::Argb16),
+            ..layout
+        }
+        .encoded(9, 7, RenderPixelFormat::Argb8, true)
+        .unwrap(),
+        "v3|16|8|-3|4|2|1|7|5|1|0|8|6|90|8"
     );
     assert!(
         layout

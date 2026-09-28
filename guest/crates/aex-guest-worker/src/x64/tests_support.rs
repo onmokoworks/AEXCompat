@@ -14509,6 +14509,47 @@ fn pf_world_suite_v2_owns_formats_and_fails_closed() {
 }
 
 #[test]
+fn resident_mixed_depth_world_format_is_explicit_despite_padding() {
+    let mut engine = test_engine(&[0xc3]);
+    let world = engine.allocate(abi::PF_LAYER_DEF_SIZE, 8).unwrap();
+    let output = engine.allocate(4, 4).unwrap();
+    let mut definition = vec![0u8; abi::PF_LAYER_DEF_SIZE];
+    definition[abi::LAYER_WIDTH_OFFSET..abi::LAYER_WIDTH_OFFSET + 4]
+        .copy_from_slice(&4i32.to_le_bytes());
+    definition[abi::LAYER_ROWBYTES_OFFSET..abi::LAYER_ROWBYTES_OFFSET + 4]
+        .copy_from_slice(&40i32.to_le_bytes());
+    engine.write(world, &definition).unwrap();
+    assert_eq!(
+        engine
+            .call_win64(HOST_GET_WORLD_PIXEL_FORMAT, [world, output, 0, 0, 0, 0])
+            .unwrap(),
+        4,
+        "padded rowbytes cannot infer the format"
+    );
+    engine.configure_resident_world_formats(&[(world, crate::pixel::PF_PIXEL_FORMAT_ARGB64)]);
+    assert_eq!(
+        engine
+            .call_win64(HOST_GET_WORLD_PIXEL_FORMAT, [world, output, 0, 0, 0, 0])
+            .unwrap(),
+        0
+    );
+    let mut observed = [0u8; 4];
+    engine.read(output, &mut observed).unwrap();
+    assert_eq!(
+        i32::from_le_bytes(observed),
+        crate::pixel::PF_PIXEL_FORMAT_ARGB64
+    );
+    engine.configure_resident_world_formats(&[]);
+    assert_eq!(
+        engine
+            .call_win64(HOST_GET_WORLD_PIXEL_FORMAT, [world, output, 0, 0, 0, 0])
+            .unwrap(),
+        4,
+        "the next frame must not inherit a stale world format"
+    );
+}
+
+#[test]
 fn pf_handle_suite_fails_closed_on_unknown_lock() {
     let mut engine = test_engine(&[0xc3]);
     let error = engine

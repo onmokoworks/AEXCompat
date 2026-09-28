@@ -224,6 +224,7 @@ struct GuestState {
     latest_runtime_target: Option<TraceRuntimeTarget>,
     handles: HashMap<u64, GuestHandle>,
     worlds: HashMap<u64, GuestWorld>,
+    resident_world_formats: HashMap<u64, i32>,
     aegp_memory_handles: HashMap<u64, AegpMemoryHandle>,
     aegp_memory_free: Vec<AegpMemoryBlock>,
     next_aegp_memory_handle: u64,

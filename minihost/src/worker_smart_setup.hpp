@@ -51,6 +51,7 @@ struct Plan {
   int32_t width{};
   int32_t height{};
   int32_t pixel_bytes{};
+  int32_t input_pixel_bytes{};
   int32_t rowbytes{};
   int32_t output_rowbytes{};
 };

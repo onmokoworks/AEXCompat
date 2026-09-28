@@ -14,6 +14,8 @@
 #include "render_lifecycle.hpp"
 #include "render_subsystem.h"
 
+#include <windows.h>
+
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -532,6 +534,7 @@ void diagnostic_world_layout_rejects_malformed_and_preserves_state() {
         "a bounded diagnostic layout is accepted");
   const auto accepted = diagnostic_world_layout();
   check(accepted.enabled && accepted.input_row_padding == 16 &&
+            accepted.input_padding_byte == 0x5a &&
             accepted.output_row_padding == 8 && accepted.input_origin_x == -3 &&
             accepted.input_origin_y == 4 && accepted.has_request_rect &&
             accepted.request_rect == std::array<int32_t, 4>{2, 1, 7, 5} &&
@@ -544,6 +547,8 @@ void diagnostic_world_layout_rejects_malformed_and_preserves_state() {
            L"v1|16|8|-3|4|2|1|2|5|1|0|8|6",
            L"v1|257|8|-3|4|2|1|7|5|1|0|8|6",
            L"v1|16|8|-3|4|2|1|7|5|1|0|8|6x",
+           L"v2|16|8|-3|4|2|1|7|5|1|0|8|6|256",
+           L"v3|16|8|-3|4|2|1|7|5|1|0|8|6|90|12",
        }) {
     check(!parse_diagnostic_world_layout(bad),
           "malformed diagnostic layout is rejected");
@@ -551,12 +556,94 @@ void diagnostic_world_layout_rejects_malformed_and_preserves_state() {
               diagnostic_world_layout().input_origin_x == accepted.input_origin_x,
           "a rejected transform cannot mutate the admitted layout");
   }
+  check(parse_diagnostic_world_layout(
+            L"v2|16|8|-3|4|2|1|7|5|1|0|8|6|0") &&
+            diagnostic_world_layout().input_padding_byte == 0,
+        "v2 diagnostic layout carries a nondefault primary padding fill");
+  check(parse_diagnostic_world_layout(
+            L"v2|16|8|-3|4|2|1|7|5|1|0|8|6|90") &&
+            diagnostic_world_layout().input_padding_byte == accepted.input_padding_byte &&
+            diagnostic_world_layout().input_row_padding == accepted.input_row_padding &&
+            diagnostic_world_layout().output_row_padding == accepted.output_row_padding &&
+            diagnostic_world_layout().input_origin_x == accepted.input_origin_x &&
+            diagnostic_world_layout().input_origin_y == accepted.input_origin_y &&
+            diagnostic_world_layout().request_rect == accepted.request_rect &&
+            diagnostic_world_layout().extent_hint == accepted.extent_hint,
+        "v2 with the legacy fill preserves the v1 world layout");
+  check(parse_diagnostic_world_layout(
+            L"v3|16|8|-3|4|2|1|7|5|1|0|8|6|90|8") &&
+            diagnostic_world_layout().input_pixel_bytes == 8 &&
+            diagnostic_world_layout().input_padding_byte == 90,
+        "v3 carries an independent primary depth");
   diagnostic_world_layout() = {};
+}
+
+void checkpoint_capture_keeps_the_live_world_stride_and_bounds() {
+  std::array<unsigned char, 72> pixels{};
+  pixels.fill(0x5a);
+  for (int32_t row = 0; row < 3; ++row)
+    for (int32_t index = 0; index < 16; ++index)
+      pixels[static_cast<std::size_t>(row) * 24 + index] =
+          static_cast<unsigned char>(row * 16 + index);
+  aexcompat::world_safety::EffectWorldStorage world{};
+  check(aexcompat::render::prepare_world_layout(world, {0, 4, 4, 3, 24}, pixels.data()),
+        "the checkpoint fixture owns a strided world");
+  const int32_t origin_x = -2, origin_y = 3;
+  const std::array<int32_t, 4> extent{0, 0, 4, 3};
+  std::memcpy(world.data() + 104, &origin_x, sizeof(origin_x));
+  std::memcpy(world.data() + 108, &origin_y, sizeof(origin_y));
+  std::memcpy(world.data() + 44, extent.data(), sizeof(extent));
+  aexcompat::render::CapturedWorld captured{};
+  check(aexcompat::render::capture_host_world(world, pixels.data(), pixels.size(), 4, captured),
+        "capture accepts the host-owned world");
+  check(captured.width == 4 && captured.height == 3 && captured.rowbytes == 24 &&
+            captured.origin_x == -2 && captured.origin_y == 3 &&
+            captured.extent == extent && captured.raw_argb.size() == 72 &&
+            std::memcmp(captured.raw_argb.data(), pixels.data(), pixels.size()) == 0,
+        "capture records the actual strided bytes and world geometry");
+  HANDLE read_handle = nullptr, write_handle = nullptr;
+  if (CreatePipe(&read_handle, &write_handle, nullptr, 4096)) {
+    check(aexcompat::render::write_captured_world_handle(
+              reinterpret_cast<uint64_t>(write_handle), captured),
+          "capture writes through an already-open HANDLE");
+    std::array<unsigned char, 56> header{};
+    std::array<unsigned char, 72> written_pixels{};
+    DWORD count = 0;
+    check(ReadFile(read_handle, header.data(), header.size(), &count, nullptr) &&
+              count == header.size() &&
+              std::memcmp(header.data(), "AEXWRAW1", 8) == 0,
+          "the handle transport has a versioned header");
+    int32_t recorded_rowbytes = 0, recorded_origin_x = 0;
+    uint64_t recorded_count = 0;
+    std::memcpy(&recorded_rowbytes, header.data() + 20, sizeof(recorded_rowbytes));
+    std::memcpy(&recorded_origin_x, header.data() + 24, sizeof(recorded_origin_x));
+    std::memcpy(&recorded_count, header.data() + 48, sizeof(recorded_count));
+    check(recorded_rowbytes == 24 && recorded_origin_x == -2 && recorded_count == 72,
+          "the header records the live stride, origin, and byte count");
+    check(ReadFile(read_handle, written_pixels.data(), written_pixels.size(), &count,
+                   nullptr) && count == written_pixels.size() &&
+              written_pixels == pixels,
+          "the handle payload preserves all three padding rows");
+    CloseHandle(read_handle);
+    CloseHandle(write_handle);
+  } else {
+    check(false, "the capture transport pipe opens");
+  }
+  check(!aexcompat::render::capture_host_world(world, pixels.data() + 1, pixels.size() - 1,
+                                              4, captured),
+        "capture rejects a mismatched allocation base");
+  check(!aexcompat::render::capture_host_world(world, pixels.data(), 71, 4, captured),
+        "capture refuses a world larger than the host-owned allocation");
+  const int32_t invalid_rowbytes = 15;
+  std::memcpy(world.data() + 32, &invalid_rowbytes, sizeof(invalid_rowbytes));
+  check(!aexcompat::render::capture_host_world(world, pixels.data(), pixels.size(), 4, captured),
+        "capture rejects a short source stride");
 }
 
 }  // namespace
 
 int main() {
+  checkpoint_capture_keeps_the_live_world_stride_and_bounds();
   diagnostic_world_layout_rejects_malformed_and_preserves_state();
   frame_setup_receives_the_offered_output_extent();
   an_expanding_effect_still_overrides_what_it_was_offered();

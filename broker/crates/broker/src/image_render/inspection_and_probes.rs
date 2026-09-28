@@ -1511,6 +1511,15 @@ pub fn encode_interactive_payload(parameters: &[InteractiveParameter]) -> io::Re
             "integer" | "path" if item.value.fract() == 0.0 => {
                 payload.push_str(&format!("{id}@{}:i32={}", item.slot, item.value as i64))
             }
+            "popup"
+                if item.value.fract() == 0.0
+                    && !item.choices.is_empty()
+                    && item.choices.len() <= 64
+                    && item.minimum == 1.0
+                    && item.maximum == item.choices.len() as f64 =>
+            {
+                payload.push_str(&format!("{id}@{}:i32={}", item.slot, item.value as i64))
+            }
             "float" => payload.push_str(&format!("{id}@{}:f64={}", item.slot, item.value)),
             "color" => payload.push_str(&format!(
                 "{id}@{}:argb8={},{},{},{}",
@@ -1585,14 +1594,14 @@ pub fn normalize_default_interactive_parameters(
         .filter(|item| !(item.kind == "arbitrary_data" && item.debug_summary.is_none()))
         .cloned()
         .map(|mut item| {
-            if matches!(item.kind.as_str(), "integer" | "float" | "path")
+            if matches!(item.kind.as_str(), "integer" | "float" | "path" | "popup")
                 && item.value.is_finite()
                 && item.minimum.is_finite()
                 && item.maximum.is_finite()
                 && item.minimum <= item.maximum
             {
                 item.value = item.value.clamp(item.minimum, item.maximum);
-            } else if !matches!(item.kind.as_str(), "integer" | "float" | "path") {
+            } else if !matches!(item.kind.as_str(), "integer" | "float" | "path" | "popup") {
                 // These fields share descriptor storage with the typed value
                 // and are not part of color/component/arbitrary transport.
                 item.minimum = 0.0;

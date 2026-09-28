@@ -114,6 +114,8 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
       // layer's bytes from its handle once at open.
       if (mode.session_layers) {
         const std::wstring trailer(argv[mode.image_argc - 1]);
+        const bool layout_v3 = trailer.rfind(L"session-layers:v3|", 0) == 0;
+        const bool layout_v4 = trailer.rfind(L"session-layers:v4|", 0) == 0;
         const std::wstring body = trailer.substr(std::wcslen(L"session-layers:v2|"));
         std::size_t offset = 0;
         while (offset < body.size()) {
@@ -128,7 +130,40 @@ ParseResult parse(Kind kind, int argc, wchar_t** argv, const Hooks& hooks) {
           // and `slot,w,h,handle` (4) the static secondary (W1-4). The handle
           // is the last field of the static forms and of the timed one (#268).
           const auto commas = std::count(field.begin(), field.end(), L',');
-          if (commas == 5) {
+          if (layout_v3 || layout_v4) {
+            int32_t padding_fill = -1;
+            const bool parsed = layout_v4
+                ? commas == 12 &&
+                    swscanf_s(field.c_str(),
+                        L"%d,%d,%d,%llu,%d,%d,%d,%d,%d,%d,%d,%d,%d%n",
+                        &layer.slot, &layer.width, &layer.height, &layer.rgba_handle,
+                        &layer.pixel_bytes, &layer.row_padding, &padding_fill,
+                        &layer.origin_x, &layer.origin_y, &layer.extent[0],
+                        &layer.extent[1], &layer.extent[2], &layer.extent[3],
+                        &consumed) == 13
+                : commas == 11 &&
+                    swscanf_s(field.c_str(),
+                        L"%d,%d,%d,%llu,%d,%d,%d,%d,%d,%d,%d,%d%n",
+                        &layer.slot, &layer.width, &layer.height, &layer.rgba_handle,
+                        &layer.row_padding, &padding_fill, &layer.origin_x,
+                        &layer.origin_y, &layer.extent[0], &layer.extent[1],
+                        &layer.extent[2], &layer.extent[3], &consumed) == 12;
+            if (!parsed ||
+                (layout_v4 && layer.pixel_bytes != 4 &&
+                 layer.pixel_bytes != 8 && layer.pixel_bytes != 16) ||
+                layer.row_padding < 0 || layer.row_padding > 256 ||
+                (layout_v4 && layer.row_padding % layer.pixel_bytes != 0) ||
+                padding_fill < 0 || padding_fill > 255 ||
+                layer.origin_x < -4096 || layer.origin_x > 4096 ||
+                layer.origin_y < -4096 || layer.origin_y > 4096 ||
+                layer.extent[0] < 0 || layer.extent[1] < 0 ||
+                layer.extent[2] <= layer.extent[0] ||
+                layer.extent[3] <= layer.extent[1] ||
+                layer.extent[2] > layer.width || layer.extent[3] > layer.height)
+              throw 1;
+            layer.padding_byte = static_cast<uint8_t>(padding_fill);
+            layer.has_world_layout = true;
+          } else if (commas == 5) {
             if (swscanf_s(field.c_str(), L"%d,%d,%d,%d,%u,%llu%n", &layer.slot,
                     &layer.width, &layer.height, &layer.time, &layer.time_scale,
                     &layer.rgba_handle, &consumed) != 6 ||

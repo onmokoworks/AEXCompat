@@ -1,6 +1,7 @@
 use aex_abi::x86_64_windows as abi;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
@@ -30,6 +31,9 @@ const CMD_SMART_RENDER_GPU: u64 = abi::PF_CMD_SMART_RENDER_GPU as u64;
 const CMD_GPU_DEVICE_SETUP: u64 = abi::PF_CMD_GPU_DEVICE_SETUP as u64;
 const CMD_GPU_DEVICE_SETDOWN: u64 = abi::PF_CMD_GPU_DEVICE_SETDOWN as u64;
 const CMD_ARBITRARY_CALLBACK: u64 = abi::PF_CMD_ARBITRARY_CALLBACK as u64;
+// PF_LayerDef origin fields; mirrored by the native worker's world facade.
+const LAYER_ORIGIN_X_OFFSET: usize = 104;
+const LAYER_ORIGIN_Y_OFFSET: usize = 108;
 pub const PARAM_LAYER: i32 = 0;
 const PARAM_SLIDER: i32 = 1;
 const PARAM_FIXED_SLIDER: i32 = 2;
@@ -226,6 +230,87 @@ pub struct ResidentLayer<'a> {
     pub width: u32,
     pub height: u32,
     pub pixels: &'a [u8],
+    pub format: FramePixelFormat,
+    pub layout: Option<ResidentWorldLayout>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResidentWorldLayout {
+    pub rowbytes: u32,
+    pub padding_byte: u8,
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub extent: [i32; 4],
+}
+
+fn resident_world_shape(
+    format: FramePixelFormat,
+    width: u32,
+    height: u32,
+    requested: Option<ResidentWorldLayout>,
+) -> Result<(ResidentWorldLayout, usize), ClassicError> {
+    let packed = format
+        .rowbytes(width)
+        .map_err(|error| ClassicError::Input(error.to_string()))?;
+    let layout = requested.unwrap_or(ResidentWorldLayout {
+        rowbytes: packed,
+        padding_byte: 0,
+        origin_x: 0,
+        origin_y: 0,
+        extent: [0, 0, width as i32, height as i32],
+    });
+    if width == 0
+        || height == 0
+        || width > MAX_RENDER_WIDTH
+        || height > MAX_RENDER_HEIGHT
+        || layout.rowbytes < packed
+        || layout.rowbytes - packed > 256
+        || layout.rowbytes % format.bytes_per_pixel() as u32 != 0
+        || layout.origin_x.unsigned_abs() > 4096
+        || layout.origin_y.unsigned_abs() > 4096
+        || layout.extent[0] < 0
+        || layout.extent[1] < 0
+        || layout.extent[2] <= layout.extent[0]
+        || layout.extent[3] <= layout.extent[1]
+        || layout.extent[2] > width as i32
+        || layout.extent[3] > height as i32
+    {
+        return Err(ClassicError::Input(
+            "resident world layout is invalid".into(),
+        ));
+    }
+    let bytes = (layout.rowbytes as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| ClassicError::Input("resident world size overflow".into()))?;
+    Ok((layout, bytes))
+}
+
+fn resident_world_pixels<'a>(
+    packed_pixels: &'a [u8],
+    format: FramePixelFormat,
+    width: u32,
+    height: u32,
+    layout: ResidentWorldLayout,
+) -> Result<Cow<'a, [u8]>, ClassicError> {
+    format
+        .validate_bytes(width, height, packed_pixels)
+        .map_err(|error| ClassicError::Input(error.to_string()))?;
+    let packed_rowbytes = format
+        .rowbytes(width)
+        .map_err(|error| ClassicError::Input(error.to_string()))?
+        as usize;
+    if layout.rowbytes as usize == packed_rowbytes {
+        return Ok(Cow::Borrowed(packed_pixels));
+    }
+    let mut strided = vec![layout.padding_byte; layout.rowbytes as usize * height as usize];
+    for (source, destination) in packed_pixels
+        .chunks_exact(packed_rowbytes)
+        .zip(strided.chunks_exact_mut(layout.rowbytes as usize))
+    {
+        destination[..packed_rowbytes].copy_from_slice(source);
+    }
+    Ok(Cow::Owned(strided))
 }
 
 #[derive(Debug)]
@@ -234,6 +319,8 @@ pub struct ResidentWorldDump {
     pub width: u32,
     pub height: u32,
     pub raw_pixels: Vec<u8>,
+    pub format: FramePixelFormat,
+    pub layout: ResidentWorldLayout,
 }
 
 #[derive(Debug, Serialize)]
@@ -374,6 +461,10 @@ pub struct RenderReport {
     pub raw_pixels: Vec<u8>,
     #[serde(skip)]
     pub raw_input_pixels: Vec<u8>,
+    #[serde(skip)]
+    pub raw_input_layout: Option<ResidentWorldLayout>,
+    #[serde(skip)]
+    pub raw_input_format: Option<FramePixelFormat>,
     #[serde(skip)]
     pub raw_secondary_layers: Vec<ResidentWorldDump>,
 }
@@ -569,7 +660,9 @@ struct FrameResources {
     width: u32,
     height: u32,
     format: FramePixelFormat,
+    input_format: FramePixelFormat,
     pixel_bytes: usize,
+    input_alloc_bytes: usize,
     input_param: u64,
     params: u64,
     output_world: u64,
@@ -586,6 +679,8 @@ struct ResidentLayerResources {
     width: u32,
     height: u32,
     pixels: u64,
+    format: FramePixelFormat,
+    layout: ResidentWorldLayout,
 }
 
 pub(crate) fn build_interact_callbacks(
@@ -967,12 +1062,14 @@ impl ClassicHost {
             0,
             time_scale,
             format,
+            None,
             input_pixels,
             parameter_values,
             true,
             &[],
             None,
             false,
+            None,
         )
     }
 
@@ -997,12 +1094,14 @@ impl ClassicHost {
             0,
             time_scale,
             format,
+            None,
             input_pixels,
             parameter_values,
             true,
             &[],
             None,
             true,
+            None,
         )
     }
 
@@ -1016,10 +1115,12 @@ impl ClassicHost {
         total_time: i32,
         time_scale: u32,
         format: FramePixelFormat,
+        input_format: FramePixelFormat,
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         secondary_layers: &[ResidentLayer<'_>],
         smart: bool,
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<RenderReport, ClassicError> {
         self.render_resident_pixels_mode(
             width,
@@ -1029,12 +1130,14 @@ impl ClassicHost {
             total_time,
             time_scale,
             format,
+            Some(input_format),
             input_pixels,
             parameter_values,
             true,
             secondary_layers,
             Some(smart),
             false,
+            primary_layout,
         )
     }
 
@@ -1045,9 +1148,11 @@ impl ClassicHost {
         height: u32,
         time_scale: u32,
         format: FramePixelFormat,
+        input_format: FramePixelFormat,
         input_pixels: &[u8],
         secondary_layers: &[ResidentLayer<'_>],
         smart: bool,
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<RenderReport, ClassicError> {
         self.render_resident_pixels_mode(
             width,
@@ -1057,12 +1162,14 @@ impl ClassicHost {
             0,
             time_scale,
             format,
+            Some(input_format),
             input_pixels,
             &[],
             false,
             secondary_layers,
             Some(smart),
             false,
+            primary_layout,
         )
     }
 
@@ -1099,12 +1206,14 @@ impl ClassicHost {
             0,
             time_scale,
             format,
+            None,
             input_pixels,
             &[],
             false,
             &[],
             None,
             false,
+            None,
         )
     }
 
@@ -1118,12 +1227,14 @@ impl ClassicHost {
         total_time: i32,
         time_scale: u32,
         format: FramePixelFormat,
+        input_format: Option<FramePixelFormat>,
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         count_frame: bool,
         secondary_layers: &[ResidentLayer<'_>],
         smart_override: Option<bool>,
         compact_report: bool,
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<RenderReport, ClassicError> {
         if !self.sequence_active {
             return Err(ClassicError::Input(
@@ -1143,6 +1254,7 @@ impl ClassicHost {
                 width,
                 height,
                 format,
+                input_format,
                 input_pixels,
                 parameter_values,
                 [0, 0, width as i32, height as i32],
@@ -1153,6 +1265,7 @@ impl ClassicHost {
                 secondary_layers,
                 smart_override,
                 compact_report,
+                primary_layout,
             )?
             .0;
         if count_frame {
@@ -1328,7 +1441,9 @@ impl ClassicHost {
             width: 1,
             height: 1,
             format: FramePixelFormat::Argb8,
+            input_format: FramePixelFormat::Argb8,
             pixel_bytes: 4,
+            input_alloc_bytes: 4,
             input_param: placeholder,
             params,
             output_world: placeholder,
@@ -1786,6 +1901,7 @@ impl ClassicHost {
             width,
             height,
             format,
+            None,
             input_pixels,
             parameter_values,
             output_request,
@@ -1796,6 +1912,7 @@ impl ClassicHost {
             &[],
             None,
             false,
+            None,
         )
     }
 
@@ -1805,6 +1922,7 @@ impl ClassicHost {
         width: u32,
         height: u32,
         format: FramePixelFormat,
+        input_format: Option<FramePixelFormat>,
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
@@ -1815,11 +1933,13 @@ impl ClassicHost {
         secondary_layers: &[ResidentLayer<'_>],
         smart_override: Option<bool>,
         compact_report: bool,
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         let result = self.render_pixels_with_request_mode_body(
             width,
             height,
             format,
+            input_format,
             input_pixels,
             parameter_values,
             output_request,
@@ -1830,6 +1950,7 @@ impl ClassicHost {
             secondary_layers,
             smart_override,
             compact_report,
+            primary_layout,
         );
         // The arbitrary value copies live exactly as long as this render, the
         // minihost ArbitraryValuesScope: dispose them on every exit path. A
@@ -1847,6 +1968,7 @@ impl ClassicHost {
         width: u32,
         height: u32,
         format: FramePixelFormat,
+        input_format: Option<FramePixelFormat>,
         input_pixels: &[u8],
         parameter_values: &[ParameterValue],
         output_request: [i32; 4],
@@ -1857,6 +1979,7 @@ impl ClassicHost {
         secondary_layers: &[ResidentLayer<'_>],
         smart_override: Option<bool>,
         compact_report: bool,
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<(RenderReport, Vec<ExecutionTrace>), ClassicError> {
         self.last_gpu_diagnostic = GpuRenderDiagnostic::pending(backend);
         if width == 0 || height == 0 || width > MAX_RENDER_WIDTH || height > MAX_RENDER_HEIGHT {
@@ -1875,20 +1998,26 @@ impl ClassicHost {
                 "output request must be a non-empty rectangle inside {width}x{height}, got {output_request:?}"
             )));
         }
+        let input_format = input_format.unwrap_or(format);
         let rowbytes = format
             .rowbytes(width)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
         let pixel_bytes = format
             .byte_count(width, height)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
-        format
+        let (input_layout, input_alloc_bytes) =
+            resident_world_shape(input_format, width, height, primary_layout)?;
+        input_format
             .validate_bytes(width, height, input_pixels)
             .map_err(|error| ClassicError::Input(error.to_string()))?;
         let setup = self.setup()?;
-        if !format.advertised_by(setup.out_flags, setup.out_flags2) {
+        if !format.advertised_by(setup.out_flags, setup.out_flags2)
+            || !input_format.advertised_by(setup.out_flags, setup.out_flags2)
+        {
             return Err(ClassicError::Input(format!(
-                "AEX did not advertise support for {} pixel depth",
-                format.name()
+                "AEX did not advertise support for output {} or input {} pixel depth",
+                format.name(),
+                input_format.name()
             )));
         }
         let smart_capable = setup.out_flags2 & (1 << 10) != 0;
@@ -1946,9 +2075,11 @@ impl ClassicHost {
             width,
             height,
             format,
+            input_format,
             pixel_bytes,
             captured_params.len(),
             secondary_layers,
+            primary_layout,
         )?;
         let input_param = resources.input_param;
         let params = resources.params;
@@ -1983,21 +2114,32 @@ impl ClassicHost {
         write_i32(
             &mut input_world,
             abi::LAYER_WORLD_FLAGS_OFFSET,
-            format.world_flags(),
+            input_format.world_flags(),
         );
         write_u64(&mut input_world, abi::LAYER_DATA_OFFSET, guest_input_pixels);
         write_i32(
             &mut input_world,
             abi::LAYER_ROWBYTES_OFFSET,
-            rowbytes as i32,
+            input_layout.rowbytes as i32,
         );
         write_i32(&mut input_world, abi::LAYER_WIDTH_OFFSET, width as i32);
         write_i32(&mut input_world, abi::LAYER_HEIGHT_OFFSET, height as i32);
-        write_rect(
+        for (index, value) in input_layout.extent.into_iter().enumerate() {
+            write_i32(
+                &mut input_world,
+                abi::LAYER_EXTENT_HINT_OFFSET + index * 4,
+                value,
+            );
+        }
+        write_i32(
             &mut input_world,
-            abi::LAYER_EXTENT_HINT_OFFSET,
-            width,
-            height,
+            LAYER_ORIGIN_X_OFFSET,
+            input_layout.origin_x,
+        );
+        write_i32(
+            &mut input_world,
+            LAYER_ORIGIN_Y_OFFSET,
+            input_layout.origin_y,
         );
         write_i32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
         write_u32(&mut input_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
@@ -2005,9 +2147,18 @@ impl ClassicHost {
         input_definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
             .copy_from_slice(&input_world);
         self.engine.write(input_param, &input_definition)?;
-        self.engine.write(guest_input_pixels, input_pixels)?;
+        let prepared_input =
+            resident_world_pixels(input_pixels, input_format, width, height, input_layout)?;
+        self.engine.write(guest_input_pixels, &prepared_input)?;
         for (layer, allocated) in secondary_layers.iter().zip(&resources.secondary_layers) {
-            self.engine.write(allocated.pixels, layer.pixels)?;
+            let prepared = resident_world_pixels(
+                layer.pixels,
+                layer.format,
+                layer.width,
+                layer.height,
+                allocated.layout,
+            )?;
+            self.engine.write(allocated.pixels, &prepared)?;
         }
         let output_guard = vec![OUTPUT_GUARD_PATTERN; OUTPUT_GUARD_BYTES];
         self.engine
@@ -2018,6 +2169,13 @@ impl ClassicHost {
         // a partially written result region.
         self.engine.write(output_pixels, &vec![0u8; pixel_bytes])?;
         self.engine.write_u64(params, input_param)?;
+        let mut resident_world_formats = vec![
+            (
+                input_param + abi::PARAM_U_OFFSET as u64,
+                input_format.pf_pixel_format(),
+            ),
+            (output_world, format.pf_pixel_format()),
+        ];
         for (index, captured) in captured_params.into_iter().enumerate() {
             let mut definition = captured.bytes;
             materialize_default(&mut definition, captured.param_type, width, height)
@@ -2050,20 +2208,17 @@ impl ClassicHost {
                 .iter()
                 .find(|layer| layer.slot == index + 1)
             {
-                let layer_rowbytes = format
-                    .rowbytes(layer.width)
-                    .map_err(|error| ClassicError::Input(error.to_string()))?;
                 let mut layer_world = vec![0u8; abi::PF_LAYER_DEF_SIZE];
                 write_i32(
                     &mut layer_world,
                     abi::LAYER_WORLD_FLAGS_OFFSET,
-                    format.world_flags(),
+                    layer.format.world_flags(),
                 );
                 write_u64(&mut layer_world, abi::LAYER_DATA_OFFSET, layer.pixels);
                 write_i32(
                     &mut layer_world,
                     abi::LAYER_ROWBYTES_OFFSET,
-                    layer_rowbytes as i32,
+                    layer.layout.rowbytes as i32,
                 );
                 write_i32(
                     &mut layer_world,
@@ -2075,11 +2230,22 @@ impl ClassicHost {
                     abi::LAYER_HEIGHT_OFFSET,
                     layer.height as i32,
                 );
-                write_rect(
+                for (index, value) in layer.layout.extent.into_iter().enumerate() {
+                    write_i32(
+                        &mut layer_world,
+                        abi::LAYER_EXTENT_HINT_OFFSET + index * 4,
+                        value,
+                    );
+                }
+                write_i32(
                     &mut layer_world,
-                    abi::LAYER_EXTENT_HINT_OFFSET,
-                    layer.width,
-                    layer.height,
+                    LAYER_ORIGIN_X_OFFSET,
+                    layer.layout.origin_x,
+                );
+                write_i32(
+                    &mut layer_world,
+                    LAYER_ORIGIN_Y_OFFSET,
+                    layer.layout.origin_y,
                 );
                 write_i32(&mut layer_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
                 write_u32(&mut layer_world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
@@ -2091,6 +2257,10 @@ impl ClassicHost {
                 }
                 definition[abi::PARAM_U_OFFSET..abi::PARAM_U_OFFSET + abi::PF_LAYER_DEF_SIZE]
                     .copy_from_slice(&layer_world);
+                resident_world_formats.push((
+                    resources.parameter_definitions[index] + abi::PARAM_U_OFFSET as u64,
+                    layer.format.pf_pixel_format(),
+                ));
             } else if smart_render {
                 materialize_layer_world(&mut definition, captured.param_type, &input_world);
             }
@@ -2152,6 +2322,8 @@ impl ClassicHost {
         write_i32(&mut world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET, 1);
         write_u32(&mut world, abi::LAYER_PIX_ASPECT_RATIO_OFFSET + 4, 1);
         self.engine.write(output_world, &world)?;
+        self.engine
+            .configure_resident_world_formats(&resident_world_formats);
         self.engine
             .configure_render_pixel_format(format.pf_pixel_format());
         let mut input_data = vec![0u8; abi::PF_IN_DATA_SIZE];
@@ -2329,7 +2501,7 @@ impl ClassicHost {
         let mut raw_input_pixels = if compact_report {
             Vec::new()
         } else {
-            vec![0u8; pixel_bytes]
+            vec![0u8; input_alloc_bytes]
         };
         if !compact_report {
             self.engine
@@ -2345,9 +2517,7 @@ impl ClassicHost {
             .iter()
             .filter(|_| !compact_report)
         {
-            let layer_bytes = format
-                .byte_count(layer.width, layer.height)
-                .map_err(|error| ClassicError::Input(error.to_string()))?;
+            let layer_bytes = layer.layout.rowbytes as usize * layer.height as usize;
             let mut pixels = vec![0u8; layer_bytes];
             self.engine.read(layer.pixels, &mut pixels)?;
             raw_secondary_layers.push(ResidentWorldDump {
@@ -2355,6 +2525,8 @@ impl ClassicHost {
                 width: layer.width,
                 height: layer.height,
                 raw_pixels: pixels,
+                format: layer.format,
+                layout: layer.layout,
             });
         }
         let argb8 = if compact_report {
@@ -2405,6 +2577,8 @@ impl ClassicHost {
                 argb8,
                 raw_pixels,
                 raw_input_pixels,
+                raw_input_layout: (!compact_report).then_some(input_layout),
+                raw_input_format: (!compact_report).then_some(input_format),
                 raw_secondary_layers,
             },
             traces,
@@ -2416,15 +2590,21 @@ impl ClassicHost {
         width: u32,
         height: u32,
         format: FramePixelFormat,
+        input_format: FramePixelFormat,
         pixel_bytes: usize,
         parameter_count: usize,
         secondary_layers: &[ResidentLayer<'_>],
+        primary_layout: Option<ResidentWorldLayout>,
     ) -> Result<FrameResources, ClassicError> {
+        let (_, input_alloc_bytes) =
+            resident_world_shape(input_format, width, height, primary_layout)?;
         if let Some(resources) = &self.frame_resources {
             if resources.width != width
                 || resources.height != height
                 || resources.format != format
+                || resources.input_format != input_format
                 || resources.pixel_bytes != pixel_bytes
+                || resources.input_alloc_bytes != input_alloc_bytes
                 || resources.parameter_definitions.len() != parameter_count
                 || resources.secondary_layers.len() != secondary_layers.len()
                 || resources.secondary_layers.iter().zip(secondary_layers).any(
@@ -2432,6 +2612,20 @@ impl ClassicHost {
                         allocated.slot != requested.slot
                             || allocated.width != requested.width
                             || allocated.height != requested.height
+                            || allocated.format != requested.format
+                            || resident_world_shape(
+                                requested.format,
+                                requested.width,
+                                requested.height,
+                                requested.layout,
+                            )
+                            .map_or(true, |(layout, _)| {
+                                allocated.layout.rowbytes != layout.rowbytes
+                                    || allocated.layout.origin_x != layout.origin_x
+                                    || allocated.layout.origin_y != layout.origin_y
+                                    || allocated.layout.extent != layout.extent
+                                    || allocated.layout.padding_byte != layout.padding_byte
+                            })
                     },
                 )
             {
@@ -2444,7 +2638,7 @@ impl ClassicHost {
         let input_param = self.engine.allocate(abi::PF_PARAM_DEF_SIZE, 8)?;
         let params = self.engine.allocate((parameter_count + 1) * 8, 8)?;
         let output_world = self.engine.allocate(abi::PF_LAYER_DEF_SIZE, 8)?;
-        let input_pixels = self.engine.allocate(pixel_bytes, 64)?;
+        let input_pixels = self.engine.allocate(input_alloc_bytes, 64)?;
         let guarded_output_bytes = pixel_bytes
             .checked_add(OUTPUT_GUARD_BYTES * 2)
             .ok_or_else(|| ClassicError::Input("guarded output size overflow".into()))?;
@@ -2467,24 +2661,28 @@ impl ClassicHost {
                     "secondary layer identity or dimensions are invalid".into(),
                 ));
             }
-            format
+            layer
+                .format
                 .validate_bytes(layer.width, layer.height, layer.pixels)
                 .map_err(|error| ClassicError::Input(error.to_string()))?;
-            let bytes = format
-                .byte_count(layer.width, layer.height)
-                .map_err(|error| ClassicError::Input(error.to_string()))?;
+            let (layout, bytes) =
+                resident_world_shape(layer.format, layer.width, layer.height, layer.layout)?;
             allocated_layers.push(ResidentLayerResources {
                 slot: layer.slot,
                 width: layer.width,
                 height: layer.height,
                 pixels: self.engine.allocate(bytes, 64)?,
+                format: layer.format,
+                layout,
             });
         }
         let resources = FrameResources {
             width,
             height,
             format,
+            input_format,
             pixel_bytes,
+            input_alloc_bytes,
             input_param,
             params,
             output_world,
@@ -3903,6 +4101,182 @@ fn bounded_text(value: &str, max_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_world_layout_expands_actual_stride_and_rejects_bad_geometry() {
+        let requested = ResidentWorldLayout {
+            rowbytes: 24,
+            padding_byte: 0x5a,
+            origin_x: -2,
+            origin_y: 3,
+            extent: [0, 0, 4, 3],
+        };
+        let (layout, bytes) =
+            resident_world_shape(FramePixelFormat::Argb8, 4, 3, Some(requested)).unwrap();
+        assert_eq!(bytes, 72);
+        let packed = (0..48u8).collect::<Vec<_>>();
+        let expanded =
+            resident_world_pixels(&packed, FramePixelFormat::Argb8, 4, 3, layout).unwrap();
+        for (index, row) in expanded.chunks_exact(24).enumerate() {
+            assert_eq!(&row[..16], &packed[index * 16..(index + 1) * 16]);
+            assert_eq!(&row[16..], &[0x5a; 8]);
+        }
+        let bad = ResidentWorldLayout {
+            extent: [0, 0, 5, 3],
+            ..requested
+        };
+        assert!(resident_world_shape(FramePixelFormat::Argb8, 4, 3, Some(bad)).is_err());
+    }
+
+    #[test]
+    fn resident_layout_reaches_public_layer_probe_and_preserves_raw_stride() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let aex =
+            repository.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !aex.is_file() {
+            eprintln!("skipping guest layout AEX smoke: build public layer probe");
+            return;
+        }
+        let image = PeImage::parse_and_map(&std::fs::read(aex).unwrap()).unwrap();
+        let mut host = ClassicHost::new_with_effect(&image, None).unwrap();
+        host.begin_resident_session(4, 3, 1).unwrap();
+        let primary = [255u8, 40, 60, 80].repeat(12);
+        let secondary = [255u8, 20, 100, 140].repeat(12);
+        let layer = ResidentLayer {
+            slot: 1,
+            width: 4,
+            height: 3,
+            pixels: &secondary,
+            format: FramePixelFormat::Argb8,
+            layout: Some(ResidentWorldLayout {
+                rowbytes: 24,
+                padding_byte: 0x5a,
+                origin_x: -2,
+                origin_y: 3,
+                extent: [0, 0, 4, 3],
+            }),
+        };
+        let scalar = ParameterValue {
+            slot: Some(2),
+            name: "Amount".into(),
+            value: Some(255.0),
+            color: None,
+            point: None,
+            angle: None,
+            point3d: None,
+        };
+        let report = host
+            .render_resident_fixture_pixels(
+                4,
+                3,
+                0,
+                1,
+                1,
+                1,
+                FramePixelFormat::Argb8,
+                FramePixelFormat::Argb8,
+                &primary,
+                &[scalar],
+                &[layer],
+                false,
+                Some(ResidentWorldLayout {
+                    rowbytes: 20,
+                    padding_byte: 0x5a,
+                    origin_x: 2,
+                    origin_y: -1,
+                    extent: [1, 0, 4, 3],
+                }),
+            )
+            .unwrap();
+        assert_eq!(report.raw_input_pixels.len(), 60);
+        assert!(
+            report
+                .raw_input_pixels
+                .chunks_exact(20)
+                .all(|row| row[16..] == [0x5a; 4])
+        );
+        assert_eq!(report.raw_secondary_layers[0].raw_pixels.len(), 72);
+        assert!(
+            report.raw_secondary_layers[0]
+                .raw_pixels
+                .chunks_exact(24)
+                .all(|row| row[16..] == [0x5a; 8])
+        );
+        assert_eq!(report.raw_secondary_layers[0].layout.origin_x, -2);
+        assert_eq!(&report.raw_pixels[8..12], &[255, 3, 8, 126]);
+        let _ = host.close_resident_session();
+    }
+
+    #[test]
+    fn resident_mixed_depth_layer_reaches_public_probe_with_raw_stride() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let aex =
+            repository.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !aex.is_file() {
+            eprintln!("skipping guest mixed-depth AEX smoke: build public layer probe");
+            return;
+        }
+        let image = PeImage::parse_and_map(&std::fs::read(aex).unwrap()).unwrap();
+        let mut host = ClassicHost::new_with_effect(&image, None).unwrap();
+        host.begin_resident_session(4, 3, 1).unwrap();
+        let primary = [255u8, 40, 60, 80].repeat(12);
+        let secondary = FramePixelFormat::Argb16
+            .promote_rgba8(&[20u8, 100, 140, 255].repeat(12))
+            .unwrap();
+        let layer = ResidentLayer {
+            slot: 1,
+            width: 4,
+            height: 3,
+            pixels: &secondary,
+            format: FramePixelFormat::Argb16,
+            layout: Some(ResidentWorldLayout {
+                rowbytes: 40,
+                padding_byte: 0x5a,
+                origin_x: -2,
+                origin_y: 3,
+                extent: [0, 0, 4, 3],
+            }),
+        };
+        let scalar = ParameterValue {
+            slot: Some(2),
+            name: "Amount".into(),
+            value: Some(255.0),
+            color: None,
+            point: None,
+            angle: None,
+            point3d: None,
+        };
+        let report = host
+            .render_resident_fixture_pixels(
+                4,
+                3,
+                0,
+                1,
+                1,
+                1,
+                FramePixelFormat::Argb8,
+                FramePixelFormat::Argb8,
+                &primary,
+                &[scalar],
+                &[layer],
+                false,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            report.raw_secondary_layers[0].format,
+            FramePixelFormat::Argb16
+        );
+        assert_eq!(report.raw_secondary_layers[0].raw_pixels.len(), 120);
+        assert!(
+            report.raw_secondary_layers[0]
+                .raw_pixels
+                .chunks_exact(40)
+                .all(|row| row[32..] == [0x5a; 8])
+        );
+        assert_eq!(&report.raw_pixels[8..12], &[255, 3, 24, 126]);
+        let _ = host.close_resident_session();
+    }
 
     #[test]
     fn failure_text_is_utf8_safe_and_bounded() {

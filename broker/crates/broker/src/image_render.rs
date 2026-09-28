@@ -7,8 +7,9 @@ pub use crate::parameter_animation::{
 };
 
 pub use crate::render_artifacts::{
-    RenderArtifactConditions, RenderArtifactKind, write_float32_exr_artifact,
-    write_raw_world_artifact, write_raw_world_checkpoint_artifact,
+    CapturedWorldRecord, RenderArtifactConditions, RenderArtifactKind, read_captured_world,
+    write_float32_exr_artifact, write_raw_world_artifact, write_raw_world_checkpoint_artifact,
+    write_strided_world_checkpoint_artifact,
 };
 pub use crate::render_fixture::InteractiveParameter;
 pub use crate::render_pixel_format::RenderPixelFormat;

@@ -31,6 +31,16 @@ struct LayerInput {
   // re-read before each frame instead of being consumed at open. Geometry is
   // still fixed at open, so only the bytes may change.
   bool dynamic{};
+  // v3 session trailer: independently shaped world around the same packed
+  // RGBA8 HANDLE payload. v2 and one-shot layers retain packed defaults.
+  bool has_world_layout{};
+  // v4 session trailer; zero means use the frame's output/primary depth.
+  int32_t pixel_bytes{};
+  int32_t row_padding{};
+  uint8_t padding_byte{};
+  int32_t origin_x{};
+  int32_t origin_y{};
+  std::array<int32_t, 4> extent{};
 };
 
 struct Hooks {

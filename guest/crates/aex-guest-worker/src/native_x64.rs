@@ -230,6 +230,7 @@ struct NativeState {
     parameter_definitions: Vec<u64>,
     handles: HashMap<u64, NativeHandle>,
     worlds: HashMap<u64, NativeWorld>,
+    resident_world_formats: HashMap<u64, i32>,
     aegp_memory: NativeAegpMemory,
     handle_allocations: Vec<u64>,
     arena_next: u64,
@@ -906,6 +907,12 @@ impl GuestEngine<'static> {
         // Native classic worlds carry enough row-byte information for
         // native_world_pixel_format() to recover ARGB8/16/32F directly.
     }
+    pub fn configure_resident_world_formats(&mut self, formats: &[(u64, i32)]) {
+        self.state.resident_world_formats.clear();
+        self.state
+            .resident_world_formats
+            .extend(formats.iter().copied());
+    }
     // The extended Inter callbacks are implemented only by the Unicorn
     // backend in this issue. Keep the native carrier buildable without
     // advertising silent success at an unimplemented callback boundary.
@@ -1152,6 +1159,7 @@ fn native_world_pixel_format(state: &NativeState, world: u64) -> Option<i32> {
         .worlds
         .get(&world)
         .map(|record| record.pixel_format)
+        .or_else(|| state.resident_world_formats.get(&world).copied())
         .or_else(|| {
             (world != 0 && (world == state.smart_input_world || world == state.smart_output_world))
                 .then_some(state.smart_pixel_format)

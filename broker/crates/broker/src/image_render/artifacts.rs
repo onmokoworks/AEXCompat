@@ -1,3 +1,4 @@
+use crate::render_fixture::FixtureCaseIdentity;
 use crate::render_pixel_format::RenderPixelFormat;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -21,6 +22,74 @@ pub enum RenderArtifactKind {
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+/// Versioned raw PF world capture shared by the Windows HANDLE and macOS
+/// resident fixture transports. The payload retains every strided row byte.
+pub struct CapturedWorldRecord {
+    pub width: u32,
+    pub height: u32,
+    pub pixel_bytes: u32,
+    pub rowbytes: u32,
+    pub origin_x: i32,
+    pub origin_y: i32,
+    pub extent: [i32; 4],
+    pub raw_argb: Vec<u8>,
+}
+
+pub fn read_captured_world(path: &Path) -> io::Result<CapturedWorldRecord> {
+    if fs::metadata(path)?.len() > (1 << 30) + 56 {
+        return Err(invalid("checkpoint world record exceeds the size limit"));
+    }
+    let bytes = fs::read(path)?;
+    if bytes.len() < 56 || &bytes[..8] != b"AEXWRAW1" {
+        return Err(invalid("checkpoint world record is missing or malformed"));
+    }
+    let word = |index: usize| -> i32 {
+        i32::from_le_bytes(bytes[8 + index * 4..12 + index * 4].try_into().unwrap())
+    };
+    let width = word(0);
+    let height = word(1);
+    let pixel_bytes = word(2);
+    let rowbytes = word(3);
+    let origin_x = word(4);
+    let origin_y = word(5);
+    let extent = [word(6), word(7), word(8), word(9)];
+    let count = u64::from_le_bytes(bytes[48..56].try_into().unwrap());
+    if width <= 0
+        || height <= 0
+        || width > 4096
+        || height > 4096
+        || !matches!(pixel_bytes, 4 | 8 | 16)
+        || rowbytes < width * pixel_bytes
+        || rowbytes > width * pixel_bytes + 256
+        || rowbytes % pixel_bytes != 0
+        || origin_x.unsigned_abs() > 4096
+        || origin_y.unsigned_abs() > 4096
+        || extent[0] < 0
+        || extent[1] < 0
+        || extent[2] <= extent[0]
+        || extent[3] <= extent[1]
+        || extent[2] > width
+        || extent[3] > height
+        || count != u64::from(rowbytes as u32) * u64::from(height as u32)
+        || count != (bytes.len() - 56) as u64
+        || count > (1 << 30)
+    {
+        return Err(invalid(
+            "checkpoint world record geometry or length is invalid",
+        ));
+    }
+    Ok(CapturedWorldRecord {
+        width: width as u32,
+        height: height as u32,
+        pixel_bytes: pixel_bytes as u32,
+        rowbytes: rowbytes as u32,
+        origin_x,
+        origin_y,
+        extent,
+        raw_argb: bytes[56..].to_vec(),
+    })
 }
 
 fn validate_conditions(
@@ -53,7 +122,8 @@ fn validate_conditions(
             return Err(invalid(format!("comparison identity lacks {key}")));
         }
     }
-    if identity.len() != if checkpoint_expected { 9 } else { 8 }
+    let fixture_case = identity.get("fixture_case");
+    if identity.len() != 8 + usize::from(checkpoint_expected) + usize::from(fixture_case.is_some())
         || (checkpoint_expected && !identity.contains_key("checkpoint"))
     {
         return Err(invalid("comparison identity has unknown keys"));
@@ -99,6 +169,24 @@ fn validate_conditions(
         })
         .ok_or_else(|| invalid("comparison identity origin is not canonical"))?;
     let _ = (timing, origin);
+    if let Some(value) = fixture_case {
+        let case: FixtureCaseIdentity = serde_json::from_value(value.clone())
+            .map_err(|_| invalid("comparison identity fixture case is malformed"))?;
+        case.validate()?;
+        let expected_path = if case.render_path == "smart" {
+            "smartfx"
+        } else {
+            "classic"
+        };
+        if Some(case.plugin_sha256.as_str()) != identity["plugin_sha256"].as_str()
+            || Some(case.pixel_format.as_str()) != identity["pixel_format"].as_str()
+            || Some(expected_path) != identity["render_path"].as_str()
+        {
+            return Err(invalid(
+                "comparison identity fixture case disagrees with render",
+            ));
+        }
+    }
     if let Some(checkpoint) = identity.get("checkpoint") {
         let checkpoint = checkpoint
             .as_object()
@@ -284,6 +372,96 @@ pub fn write_raw_world_checkpoint_artifact(
         conditions,
         Some(checkpoint_identity),
     )
+}
+
+pub fn write_strided_world_checkpoint_artifact(
+    directory: &Path,
+    raw_argb: &[u8],
+    width: u32,
+    height: u32,
+    format: RenderPixelFormat,
+    rowbytes: u32,
+    origin_x: i32,
+    origin_y: i32,
+    extent: [i32; 4],
+    conditions: RenderArtifactConditions,
+    checkpoint_id: &str,
+    checkpoint_stage: &str,
+    fixture_sha256: &str,
+) -> io::Result<serde_json::Value> {
+    let component = component_bytes(format);
+    let packed = width
+        .checked_mul((4 * component) as u32)
+        .ok_or_else(|| invalid("checkpoint rowbytes overflow"))?;
+    if width == 0
+        || height == 0
+        || width > 4096
+        || height > 4096
+        || rowbytes < packed
+        || rowbytes > packed + 256
+        || rowbytes % (4 * component) as u32 != 0
+        || raw_argb.len() != rowbytes as usize * height as usize
+        || extent[0] < 0
+        || extent[1] < 0
+        || extent[2] <= extent[0]
+        || extent[3] <= extent[1]
+        || extent[2] > width as i32
+        || extent[3] > height as i32
+    {
+        return Err(invalid("strided checkpoint world is invalid"));
+    }
+    let canonical = |value: &str, limit: usize| {
+        !value.is_empty()
+            && value.len() <= limit
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':'))
+    };
+    if !canonical(checkpoint_id, 64)
+        || !canonical(checkpoint_stage, 96)
+        || fixture_sha256.len() != 64
+        || !fixture_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid("checkpoint identity is not canonical"));
+    }
+    let checkpoint_identity = serde_json::json!({
+        "id":checkpoint_id, "stage":checkpoint_stage, "fixture_sha256":fixture_sha256
+    });
+    let mut conditions = conditions;
+    conditions.comparison_identity["checkpoint"] = checkpoint_identity.clone();
+    validate_conditions(&conditions, true)?;
+    validate_identity_origin(&conditions, origin_x, origin_y)?;
+    let metadata = serde_json::json!({
+        "schema":"aexcompat.render_raw", "schema_version":3,
+        "width":width, "height":height, "rowbytes":rowbytes,
+        "row_padding":rowbytes-packed, "channel_order":"ARGB",
+        "source_world_rowbytes":rowbytes, "source_world_row_padding":rowbytes-packed,
+        "pixel_format":format.report_name(), "component_bytes":component,
+        "component_representation":match format {
+            RenderPixelFormat::Argb8 => "unsigned_integer_0_255",
+            RenderPixelFormat::Argb16 => "unsigned_integer_0_32768_ae_internal",
+            RenderPixelFormat::Argb32f => "ieee754_binary32_raw_words",
+        },
+        "endianness":if component == 1 {"not_applicable"} else {"little"},
+        "premultiplication":conditions.premultiplication,
+        "working_space":conditions.working_space,
+        "render_mode":conditions.render_mode,
+        "comparison_identity":conditions.comparison_identity,
+        "checkpoint_identity":checkpoint_identity,
+        "origin":{"x":origin_x,"y":origin_y},
+        "extent":{"left":extent[0],"top":extent[1],"right":extent[2],"bottom":extent[3]},
+        "data_file":"output.bin", "data_size_bytes":raw_argb.len(),
+        "data_sha256":format!("{:x}", Sha256::digest(raw_argb)),
+        "comparison_boundaries":{"aex_arithmetic":"internal_world_raw","host_export":"not_applicable"}
+    });
+    let json = serde_json::to_vec_pretty(&metadata)?;
+    commit_directory(
+        directory,
+        &[("output.bin", raw_argb), ("output.json", &json)],
+    )?;
+    Ok(metadata)
 }
 
 fn write_raw_world_artifact_with_checkpoint(

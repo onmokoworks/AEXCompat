@@ -3036,6 +3036,13 @@ fn emulate_get_world_pixel_format(unicorn: &mut Unicorn<'_, GuestState>, _: u64,
                 .map(|record| record.pixel_format)
         })
         .or_else(|| {
+            unicorn
+                .get_data()
+                .resident_world_formats
+                .get(&world)
+                .copied()
+        })
+        .or_else(|| {
             (world != 0
                 && (world == unicorn.get_data().smart_input_world
                     || world == unicorn.get_data().smart_output_world))

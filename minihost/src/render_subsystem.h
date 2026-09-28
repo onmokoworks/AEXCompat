@@ -63,6 +63,8 @@ struct ImageRequest {
 struct DiagnosticWorldLayout {
   bool enabled{};
   int32_t input_row_padding{};
+  uint8_t input_padding_byte{0x5a};
+  int32_t input_pixel_bytes{};
   int32_t output_row_padding{};
   int32_t input_origin_x{};
   int32_t input_origin_y{};
@@ -93,6 +95,33 @@ struct WorldLayout {
 
 bool prepare_world_layout(aexcompat::world_safety::EffectWorldStorage& world,
                           const WorldLayout& layout, void* pixels);
+
+// Snapshot the bytes and geometry of a host-owned world, including row padding.
+// This is the bounded payload for a broker-owned checkpoint HANDLE; the caller
+// must pass the allocation base it owns, not a plug-in-supplied data pointer.
+struct CapturedWorld {
+  int32_t width{};
+  int32_t height{};
+  int32_t pixel_bytes{};
+  int32_t rowbytes{};
+  int32_t origin_x{};
+  int32_t origin_y{};
+  std::array<int32_t, 4> extent{};
+  std::vector<unsigned char> raw_argb;
+};
+bool capture_host_world(const aexcompat::world_safety::EffectWorldStorage& world,
+                        const unsigned char* owned_pixels, std::size_t owned_size,
+                        int32_t pixel_bytes,
+                        CapturedWorld& captured);
+// Versioned 56-byte header (magic, ten signed geometry words, u64 byte count)
+// followed by the exact ARGB world allocation, written to a broker-owned
+// inherited HANDLE. Never resolves or opens a worker-side pathname.
+bool write_captured_world_handle(uint64_t handle_value, const CapturedWorld& captured);
+bool parse_world_capture_target(const wchar_t* encoded);
+bool capture_requested_world(const std::string& stage,
+                             const aexcompat::world_safety::EffectWorldStorage& world,
+                             const unsigned char* owned_pixels, std::size_t owned_size,
+                             int32_t pixel_bytes);
 
 struct MapWorld {
   int32_t width{};

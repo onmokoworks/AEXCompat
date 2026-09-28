@@ -1,7 +1,7 @@
 use crate::classic::{
     ClassicError, ClassicHost, PARAM_ANGLE, PARAM_COLOR, PARAM_LAYER, PARAM_POINT, PARAM_POINT3D,
-    ParameterValue, RenderReport, ResidentFailureDiagnostic, ResidentLayer, SetupReport,
-    UserChangedReport,
+    ParameterValue, RenderReport, ResidentFailureDiagnostic, ResidentLayer, ResidentWorldLayout,
+    SetupReport, UserChangedReport,
 };
 use crate::pe::PeImage;
 use crate::pixel::FramePixelFormat;
@@ -21,6 +21,10 @@ const MAX_PARAMETER_PAYLOAD_BYTES: usize = 16 * 1024;
 #[serde(deny_unknown_fields)]
 struct ResidentLayerManifest {
     v: u32,
+    #[serde(default)]
+    primary: Option<ResidentWorldLayout>,
+    #[serde(default)]
+    primary_pixel_format: Option<String>,
     layers: Vec<ResidentLayerEntry>,
 }
 
@@ -31,6 +35,10 @@ struct ResidentLayerEntry {
     width: u32,
     height: u32,
     path: PathBuf,
+    #[serde(default)]
+    pixel_format: Option<String>,
+    #[serde(default)]
+    layout: Option<ResidentWorldLayout>,
 }
 
 struct OwnedResidentLayer {
@@ -38,6 +46,8 @@ struct OwnedResidentLayer {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+    format: FramePixelFormat,
+    layout: Option<ResidentWorldLayout>,
 }
 
 #[derive(Debug)]
@@ -156,10 +166,11 @@ pub fn run_resident_session(
     mut request: impl Read,
     mut response: impl Write,
 ) -> Result<(), SessionError> {
-    let pixel_bytes = pixel_format
+    let (primary_layout, input_format, layers) =
+        load_resident_layers(input_slot, fixture_layers, pixel_format)?;
+    let input_pixel_bytes = input_format
         .byte_count(width, height)
         .map_err(|error| SessionError::Protocol(error.to_string()))?;
-    let layers = load_resident_layers(input_slot, fixture_layers, pixel_format)?;
     let mut host = ClassicHost::new_with_effect(image, effect_selector)?;
     let setup = host.begin_resident_session(width, height, time_scale)?;
     if fixture_smart == Some(true) && setup.out_flags2 & (1 << 10) == 0 {
@@ -218,9 +229,9 @@ pub fn run_resident_session(
                     let input = fs::read(input_slot).map_err(|error| {
                         SessionError::Io(format!("read resident probe input slot: {error}"))
                     })?;
-                    if input.len() != pixel_bytes {
+                    if input.len() != input_pixel_bytes {
                         return Err(SessionError::Protocol(format!(
-                            "resident probe input slot has {} bytes, expected {pixel_bytes}",
+                            "resident probe input slot has {} bytes, expected {input_pixel_bytes}",
                             input.len()
                         )));
                     }
@@ -231,6 +242,8 @@ pub fn run_resident_session(
                             width: layer.width,
                             height: layer.height,
                             pixels: &layer.pixels,
+                            format: layer.format,
+                            layout: layer.layout,
                         })
                         .collect::<Vec<_>>();
                     let probe = match fixture_smart {
@@ -239,9 +252,11 @@ pub fn run_resident_session(
                             height,
                             time_scale,
                             pixel_format,
+                            input_format,
                             &input,
                             &borrowed_layers,
                             smart,
+                            primary_layout,
                         ),
                         None => host.probe_resident_pixels(
                             width,
@@ -302,9 +317,11 @@ pub fn run_resident_session(
                         output_slot,
                         width,
                         height,
-                        pixel_bytes,
                         pixel_format,
+                        input_pixel_bytes,
+                        input_format,
                         &layers,
+                        primary_layout,
                         fixture_smart,
                         &mut host,
                         &mut generation,
@@ -448,9 +465,11 @@ fn parse_render_frame(
     output_slot: &Path,
     width: u32,
     height: u32,
-    pixel_bytes: usize,
     pixel_format: FramePixelFormat,
+    input_pixel_bytes: usize,
+    input_format: FramePixelFormat,
     fixture_layers: &[OwnedResidentLayer],
+    primary_layout: Option<ResidentWorldLayout>,
     fixture_smart: Option<bool>,
     host: &mut ClassicHost,
     generation: &mut u64,
@@ -539,9 +558,9 @@ fn parse_render_frame(
     let input = fs::read(input_slot)
         .map_err(|error| SessionError::Io(format!("read resident input slot: {error}")))?;
     let input_read = input_started.map(|started| started.elapsed());
-    if input.len() != pixel_bytes {
+    if input.len() != input_pixel_bytes {
         return Err(SessionError::Protocol(format!(
-            "resident input slot has {} bytes, expected {pixel_bytes}",
+            "resident input slot has {} bytes, expected {input_pixel_bytes}",
             input.len()
         )));
     }
@@ -555,6 +574,8 @@ fn parse_render_frame(
             width: layer.width,
             height: layer.height,
             pixels: &layer.pixels,
+            format: layer.format,
+            layout: layer.layout,
         })
         .collect::<Vec<_>>();
     let request_prepare = request_started
@@ -570,10 +591,12 @@ fn parse_render_frame(
             total_time,
             current_scale,
             pixel_format,
+            input_format,
             &input,
             &parameters,
             &borrowed_layers,
             smart,
+            primary_layout,
         ),
         None => host.render_resident_frame_pixels(
             width,
@@ -699,14 +722,62 @@ fn write_fixture_world_dumps(input_slot: &Path, report: &RenderReport) -> Result
             ))
         })
     };
+    let encode = |width: u32,
+                  height: u32,
+                  layout: ResidentWorldLayout,
+                  raw: &[u8],
+                  format: FramePixelFormat| {
+        if raw.len() != layout.rowbytes as usize * height as usize {
+            return Err(SessionError::Protocol(
+                "fixture world dump length differs from live stride".into(),
+            ));
+        }
+        let mut record = Vec::with_capacity(56 + raw.len());
+        record.extend_from_slice(b"AEXWRAW1");
+        for word in [
+            width as i32,
+            height as i32,
+            format.bytes_per_pixel() as i32,
+            layout.rowbytes as i32,
+            layout.origin_x,
+            layout.origin_y,
+            layout.extent[0],
+            layout.extent[1],
+            layout.extent[2],
+            layout.extent[3],
+        ] {
+            record.extend_from_slice(&word.to_le_bytes());
+        }
+        record.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+        record.extend_from_slice(raw);
+        Ok(record)
+    };
+    let primary_layout = report.raw_input_layout.ok_or_else(|| {
+        SessionError::Protocol("fixture input world layout was not captured".into())
+    })?;
+    let primary_format = report.raw_input_format.ok_or_else(|| {
+        SessionError::Protocol("fixture input world format was not captured".into())
+    })?;
     write_new(
         &root.join("fixture-input-world.bin"),
-        &report.raw_input_pixels,
+        &encode(
+            report.width,
+            report.height,
+            primary_layout,
+            &report.raw_input_pixels,
+            primary_format,
+        )?,
     )?;
     for layer in &report.raw_secondary_layers {
         write_new(
             &root.join(format!("fixture-layer-slot{}-world.bin", layer.slot)),
-            &layer.raw_pixels,
+            &encode(
+                layer.width,
+                layer.height,
+                layer.layout,
+                &layer.raw_pixels,
+                layer.format,
+            )?,
         )?;
     }
     Ok(())
@@ -716,9 +787,16 @@ fn load_resident_layers(
     input_slot: &Path,
     manifest_path: Option<&Path>,
     format: FramePixelFormat,
-) -> Result<Vec<OwnedResidentLayer>, SessionError> {
+) -> Result<
+    (
+        Option<ResidentWorldLayout>,
+        FramePixelFormat,
+        Vec<OwnedResidentLayer>,
+    ),
+    SessionError,
+> {
     let Some(manifest_path) = manifest_path else {
-        return Ok(Vec::new());
+        return Ok((None, format, Vec::new()));
     };
     let session_root = input_slot
         .parent()
@@ -745,14 +823,46 @@ fn load_resident_layers(
         .map_err(|error| SessionError::Io(format!("read layer manifest: {error}")))?;
     let manifest: ResidentLayerManifest = serde_json::from_slice(&bytes)
         .map_err(|error| SessionError::Protocol(format!("parse layer manifest: {error}")))?;
-    if manifest.v != 1 || manifest.layers.len() > 8 {
+    if !matches!(manifest.v, 1 | 2 | 3 | 4)
+        || manifest.layers.len() > 8
+        || (manifest.v == 1
+            && (manifest.primary.is_some()
+                || manifest.layers.iter().any(|layer| layer.layout.is_some())))
+        || (manifest.v >= 2 && manifest.primary.is_none())
+        || (manifest.v != 4 && manifest.primary_pixel_format.is_some())
+        || (manifest.v == 4 && manifest.primary_pixel_format.is_none())
+        || (manifest.v < 3
+            && manifest
+                .layers
+                .iter()
+                .any(|layer| layer.pixel_format.is_some()))
+        || (manifest.v >= 3
+            && manifest
+                .layers
+                .iter()
+                .any(|layer| layer.pixel_format.is_none()))
+    {
         return Err(SessionError::Protocol(
             "resident layer manifest version or count is invalid".into(),
         ));
     }
+    let input_format = manifest
+        .primary_pixel_format
+        .as_deref()
+        .map(FramePixelFormat::parse)
+        .transpose()
+        .map_err(|error| SessionError::Protocol(error.to_string()))?
+        .unwrap_or(format);
     let mut seen = BTreeSet::new();
     let mut layers = Vec::with_capacity(manifest.layers.len());
     for layer in manifest.layers {
+        let layer_format = layer
+            .pixel_format
+            .as_deref()
+            .map(FramePixelFormat::parse)
+            .transpose()
+            .map_err(|error| SessionError::Protocol(error.to_string()))?
+            .unwrap_or(format);
         if layer.slot == 0 || !seen.insert(layer.slot) || !layer.path.is_absolute() {
             return Err(SessionError::Protocol(
                 "resident layer identity is invalid".into(),
@@ -767,7 +877,7 @@ fn load_resident_layers(
                 "resident layer must be staged beside the input slot".into(),
             ));
         }
-        let expected = format
+        let expected = layer_format
             .byte_count(layer.width, layer.height)
             .map_err(|error| SessionError::Protocol(error.to_string()))?;
         let observed = fs::metadata(&path)
@@ -780,7 +890,7 @@ fn load_resident_layers(
         }
         let pixels = fs::read(&path)
             .map_err(|error| SessionError::Io(format!("read resident layer: {error}")))?;
-        format
+        layer_format
             .validate_bytes(layer.width, layer.height, &pixels)
             .map_err(|error| SessionError::Protocol(error.to_string()))?;
         layers.push(OwnedResidentLayer {
@@ -788,9 +898,11 @@ fn load_resident_layers(
             width: layer.width,
             height: layer.height,
             pixels,
+            format: layer_format,
+            layout: layer.layout,
         });
     }
-    Ok(layers)
+    Ok((manifest.primary, input_format, layers))
 }
 
 fn parse_parameter_payload(
@@ -1486,10 +1598,31 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({"v":1,"layers":[entry.clone()]})).unwrap(),
         )
         .unwrap();
-        let loaded =
+        let (primary, _, loaded) =
             load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).unwrap();
+        assert!(primary.is_none());
         assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].format, FramePixelFormat::Argb8);
         assert_eq!(loaded[0].pixels, [255, 1, 2, 3]);
+
+        let layout = serde_json::json!({
+            "rowbytes":8,"padding_byte":90,"origin_x":-2,"origin_y":3,
+            "extent":[0,0,1,1]
+        });
+        let mut v2_entry = entry.clone();
+        v2_entry["layout"] = layout.clone();
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "v":2,"primary":layout,"layers":[v2_entry]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (primary, _, loaded) =
+            load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).unwrap();
+        assert_eq!(primary.unwrap().rowbytes, 8);
+        assert_eq!(loaded[0].layout.unwrap().origin_x, -2);
 
         fs::write(
             &manifest,
@@ -1508,6 +1641,399 @@ mod tests {
         )
         .unwrap();
         assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_three_manifest_preserves_independent_secondary_depth() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-resident-mixed-depth-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let input = root.join("input.argb8");
+        let layer = root.join("layer.argb16");
+        let manifest = root.join("layers.json");
+        fs::write(&input, [255u8, 40, 60, 80]).unwrap();
+        let layer_pixels = [0u8, 128, 0, 16, 0, 32, 0, 48];
+        fs::write(&layer, layer_pixels).unwrap();
+        let mut document = serde_json::json!({
+            "v":3,
+            "primary":{"rowbytes":4,"padding_byte":0,"origin_x":0,"origin_y":0,"extent":[0,0,1,1]},
+            "layers":[{
+                "slot":1,"width":1,"height":1,"path":layer,"pixel_format":"argb16",
+                "layout":{"rowbytes":16,"padding_byte":90,"origin_x":-2,"origin_y":3,"extent":[0,0,1,1]}
+            }]
+        });
+        fs::write(&manifest, serde_json::to_vec(&document).unwrap()).unwrap();
+        let (_, _, loaded) =
+            load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].format, FramePixelFormat::Argb16);
+        assert_eq!(loaded[0].pixels, layer_pixels);
+        assert_eq!(loaded[0].layout.unwrap().rowbytes, 16);
+        let float_pixels = FramePixelFormat::Argb32f
+            .promote_rgba8(&[20, 100, 140, 255])
+            .unwrap();
+        fs::write(&layer, &float_pixels).unwrap();
+        document["layers"][0]["pixel_format"] = serde_json::json!("argb32f");
+        document["layers"][0]["layout"]["rowbytes"] = serde_json::json!(32);
+        fs::write(&manifest, serde_json::to_vec(&document).unwrap()).unwrap();
+        let (_, _, float_loaded) =
+            load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).unwrap();
+        assert_eq!(float_loaded[0].format, FramePixelFormat::Argb32f);
+        assert_eq!(float_loaded[0].pixels, float_pixels);
+        fs::write(&layer, layer_pixels).unwrap();
+        fs::write(&manifest, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+        document["layers"][0]["pixel_format"] = serde_json::json!("argb16");
+        document["v"] = serde_json::json!(2);
+        fs::write(&manifest, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+        document["v"] = serde_json::json!(3);
+        document["layers"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("pixel_format");
+        fs::write(&manifest, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_four_manifest_preserves_independent_primary_depth() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-resident-primary-depth-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let input = root.join("input.argb16");
+        let manifest = root.join("layers.json");
+        let primary = FramePixelFormat::Argb16
+            .promote_rgba8(&[20, 100, 140, 255])
+            .unwrap();
+        fs::write(&input, primary).unwrap();
+        let mut document = serde_json::json!({
+            "v":4,
+            "primary_pixel_format":"argb16",
+            "primary":{
+                "rowbytes":16,"padding_byte":90,"origin_x":2,"origin_y":-1,
+                "extent":[0,0,1,1]
+            },
+            "layers":[]
+        });
+        fs::write(&manifest, serde_json::to_vec(&document).unwrap()).unwrap();
+        let (layout, format, layers) =
+            load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).unwrap();
+        assert_eq!(format, FramePixelFormat::Argb16);
+        assert_eq!(layout.unwrap().rowbytes, 16);
+        assert!(layers.is_empty());
+        document["v"] = serde_json::json!(3);
+        fs::write(&manifest, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+        document["v"] = serde_json::json!(4);
+        document
+            .as_object_mut()
+            .unwrap()
+            .remove("primary_pixel_format");
+        fs::write(&manifest, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(load_resident_layers(&input, Some(&manifest), FramePixelFormat::Argb8).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_two_world_manifest_renders_public_probe_and_dumps_exact_rows() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let aex =
+            repository.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !aex.is_file() {
+            eprintln!("skipping resident world-manifest AEX smoke: build public layer probe");
+            return;
+        }
+        let image = PeImage::parse_and_map(&fs::read(aex).unwrap()).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-resident-world-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let input = root.join("input.argb8");
+        let output = root.join("output.argb8");
+        let layer = root.join("layer.argb8");
+        let manifest = root.join("layers.json");
+        fs::write(&input, [255u8, 40, 60, 80].repeat(12)).unwrap();
+        fs::write(&output, [0u8; 48]).unwrap();
+        fs::write(&layer, [255u8, 20, 100, 140].repeat(12)).unwrap();
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "v":2,
+                "primary":{
+                    "rowbytes":20,"padding_byte":90,"origin_x":2,"origin_y":-1,
+                    "extent":[1,0,4,3]
+                },
+                "layers":[{
+                    "slot":1,"width":4,"height":3,"path":layer,
+                    "layout":{
+                        "rowbytes":24,"padding_byte":90,"origin_x":-2,"origin_y":3,
+                        "extent":[0,0,4,3]
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut request = Vec::new();
+        write_message(
+            &mut request,
+            &serde_json::json!({
+                "v":4,"type":"render_frame","frame_index":0,
+                "current_time":{"value":0,"step":1,"total":1,"scale":1},
+                "parameters":"v4|param_2@2:f64=255"
+            }),
+        )
+        .unwrap();
+        write_message(&mut request, &serde_json::json!({"v":1,"type":"close"})).unwrap();
+        let mut response = Vec::new();
+        run_resident_session(
+            &image,
+            &input,
+            &output,
+            4,
+            3,
+            1,
+            FramePixelFormat::Argb8,
+            None,
+            Some(&manifest),
+            Some(false),
+            request.as_slice(),
+            &mut response,
+        )
+        .unwrap();
+        let mut response = response.as_slice();
+        let ready: Value =
+            serde_json::from_slice(&read_message(&mut response).unwrap().unwrap()).unwrap();
+        let frame: Value =
+            serde_json::from_slice(&read_message(&mut response).unwrap().unwrap()).unwrap();
+        assert_eq!(ready["type"], "session_ready");
+        assert_eq!(frame["status"], "ok");
+        assert_eq!(&fs::read(&output).unwrap()[8..12], &[255, 3, 8, 126]);
+        let primary = fs::read(root.join("fixture-input-world.bin")).unwrap();
+        let secondary = fs::read(root.join("fixture-layer-slot1-world.bin")).unwrap();
+        assert_eq!(&primary[..8], b"AEXWRAW1");
+        assert_eq!(&secondary[..8], b"AEXWRAW1");
+        assert_eq!(i32::from_le_bytes(primary[20..24].try_into().unwrap()), 20);
+        assert_eq!(
+            i32::from_le_bytes(secondary[20..24].try_into().unwrap()),
+            24
+        );
+        assert_eq!(primary.len(), 56 + 60);
+        assert_eq!(secondary.len(), 56 + 72);
+        assert!(
+            primary[56..]
+                .chunks_exact(20)
+                .all(|row| row[16..] == [90; 4])
+        );
+        assert!(
+            secondary[56..]
+                .chunks_exact(24)
+                .all(|row| row[16..] == [90; 8])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_three_mixed_depth_manifest_renders_and_dumps_secondary_argb16() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let aex =
+            repository.join("target/pf-layer-param-probe-build/Release/pf_layer_param_probe.aex");
+        if !aex.is_file() {
+            eprintln!("skipping resident mixed-depth AEX smoke: build public layer probe");
+            return;
+        }
+        let image = PeImage::parse_and_map(&fs::read(aex).unwrap()).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-resident-mixed-world-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let input = root.join("input.argb8");
+        let output = root.join("output.argb8");
+        let layer = root.join("layer.argb16");
+        let manifest = root.join("layers.json");
+        fs::write(&input, [255u8, 40, 60, 80].repeat(12)).unwrap();
+        fs::write(&output, [0u8; 48]).unwrap();
+        let secondary = FramePixelFormat::Argb16
+            .promote_rgba8(&[20u8, 100, 140, 255].repeat(12))
+            .unwrap();
+        fs::write(&layer, secondary).unwrap();
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "v":3,
+                "primary":{
+                    "rowbytes":20,"padding_byte":90,"origin_x":2,"origin_y":-1,
+                    "extent":[1,0,4,3]
+                },
+                "layers":[{
+                    "slot":1,"width":4,"height":3,"path":layer,"pixel_format":"argb16",
+                    "layout":{
+                        "rowbytes":40,"padding_byte":90,"origin_x":-2,"origin_y":3,
+                        "extent":[0,0,4,3]
+                    }
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut request = Vec::new();
+        write_message(
+            &mut request,
+            &serde_json::json!({
+                "v":4,"type":"render_frame","frame_index":0,
+                "current_time":{"value":0,"step":1,"total":1,"scale":1},
+                "parameters":"v4|param_2@2:f64=255"
+            }),
+        )
+        .unwrap();
+        write_message(&mut request, &serde_json::json!({"v":1,"type":"close"})).unwrap();
+        let mut response = Vec::new();
+        run_resident_session(
+            &image,
+            &input,
+            &output,
+            4,
+            3,
+            1,
+            FramePixelFormat::Argb8,
+            None,
+            Some(&manifest),
+            Some(false),
+            request.as_slice(),
+            &mut response,
+        )
+        .unwrap();
+        let mut response = response.as_slice();
+        let ready: Value =
+            serde_json::from_slice(&read_message(&mut response).unwrap().unwrap()).unwrap();
+        let frame: Value =
+            serde_json::from_slice(&read_message(&mut response).unwrap().unwrap()).unwrap();
+        assert_eq!(ready["type"], "session_ready");
+        assert_eq!(frame["status"], "ok");
+        assert_eq!(&fs::read(&output).unwrap()[8..12], &[255, 3, 24, 126]);
+        let captured = fs::read(root.join("fixture-layer-slot1-world.bin")).unwrap();
+        assert_eq!(&captured[..8], b"AEXWRAW1");
+        assert_eq!(i32::from_le_bytes(captured[16..20].try_into().unwrap()), 8);
+        assert_eq!(i32::from_le_bytes(captured[20..24].try_into().unwrap()), 40);
+        assert_eq!(captured.len(), 56 + 120);
+        assert!(
+            captured[56..]
+                .chunks_exact(40)
+                .all(|row| row[32..] == [90; 8])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_four_mixed_primary_depth_renders_and_dumps_argb16_input() {
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let aex = repository.join("target/pf-custom-ui-probe-build/Release/pf_custom_ui_probe.aex");
+        if !aex.is_file() {
+            eprintln!("skipping resident primary-depth AEX smoke: build public custom UI probe");
+            return;
+        }
+        let image = PeImage::parse_and_map(&fs::read(aex).unwrap()).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-resident-primary-world-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let input = root.join("input.argb16");
+        let output = root.join("output.argb8");
+        let manifest = root.join("layers.json");
+        let source = FramePixelFormat::Argb16
+            .promote_rgba8(&[40, 60, 80, 255].repeat(12))
+            .unwrap();
+        fs::write(&input, source).unwrap();
+        fs::write(&output, [0u8; 48]).unwrap();
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "v":4,
+                "primary_pixel_format":"argb16",
+                "primary":{
+                    "rowbytes":40,"padding_byte":90,"origin_x":2,"origin_y":-1,
+                    "extent":[1,0,4,3]
+                },
+                "layers":[]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut request = Vec::new();
+        write_message(
+            &mut request,
+            &serde_json::json!({
+                "v":4,"type":"render_frame","frame_index":0,
+                "current_time":{"value":0,"step":1,"total":1,"scale":1},
+                "parameters":"v4|"
+            }),
+        )
+        .unwrap();
+        write_message(&mut request, &serde_json::json!({"v":1,"type":"close"})).unwrap();
+        let mut response = Vec::new();
+        run_resident_session(
+            &image,
+            &input,
+            &output,
+            4,
+            3,
+            1,
+            FramePixelFormat::Argb8,
+            None,
+            Some(&manifest),
+            Some(false),
+            request.as_slice(),
+            &mut response,
+        )
+        .unwrap();
+        let mut response = response.as_slice();
+        let ready: Value =
+            serde_json::from_slice(&read_message(&mut response).unwrap().unwrap()).unwrap();
+        let frame: Value =
+            serde_json::from_slice(&read_message(&mut response).unwrap().unwrap()).unwrap();
+        assert_eq!(ready["type"], "session_ready");
+        assert_eq!(frame["status"], "ok");
+        assert_eq!(frame["output"]["pixel_format"], "argb8");
+        let captured = fs::read(root.join("fixture-input-world.bin")).unwrap();
+        assert_eq!(&captured[..8], b"AEXWRAW1");
+        assert_eq!(i32::from_le_bytes(captured[16..20].try_into().unwrap()), 8);
+        assert_eq!(i32::from_le_bytes(captured[20..24].try_into().unwrap()), 40);
+        assert_eq!(captured.len(), 56 + 120);
+        assert!(
+            captured[56..]
+                .chunks_exact(40)
+                .all(|row| row[32..] == [90; 8])
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
