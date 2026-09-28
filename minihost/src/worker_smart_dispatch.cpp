@@ -281,6 +281,8 @@ class VideoFrameCpuWorlds {
   using World = std::array<std::byte, 120>;
   using HostWorld = aexcompat::world_safety::EffectWorldStorage;
 
+  static bool verify_create_gpu_frame_source_ref();
+
   bool available() {
     // Cache the full resolution result, not a re-derived subset: an earlier
     // version recomputed a 15-of-30 proc AND on the resolved_ fast path, so if a
@@ -509,10 +511,9 @@ class VideoFrameCpuWorlds {
     std::memcpy(&ppix, world.data() + 64, sizeof(ppix));
     return ppix;
   }
-  // The frame's real dimensions as stored in its VF GPU world. create_gpu only
+  // The frame's dimensions as stored in its VF GPU world. create_gpu only
   // returns a live world whose width/height fields (offsets 36/40) equal the
-  // requested size, so these are authoritative - unlike the FrameRecord scalar
-  // members, which the world build corrupts (issue #1058).
+  // requested size.
   void pr_world_dims(const World& world, int32_t& width, int32_t& height) const {
     width = world_i32(world, 36);
     height = world_i32(world, 40);
@@ -581,6 +582,17 @@ class VideoFrameCpuWorlds {
   using CreateGpuFrame = int32_t(__cdecl*)(
       void*, const void*, uint64_t, uint32_t, uint32_t, const void*, int32_t,
       uint64_t, uint64_t, uint64_t, uint64_t, const void*, const void*);
+  template <typename... Args>
+  static int32_t create_gpu_frame_with_empty_source(CreateGpuFrame create,
+                                                     Args... args) {
+    // The final CreateGPUVideoFrame argument is const InterfaceRef<IVideoFrame>&,
+    // not another shared_ptr. A 16-byte shared_ptr here made VideoFrame read an
+    // adjacent pointer as the 24-byte ref's control block and increment a host
+    // FrameRecord height as though it were a reference count (issue #1201).
+    alignas(8) const std::array<std::byte, 24> empty_source_frame{};
+    static_assert(sizeof(empty_source_frame) == 24);
+    return create(args..., empty_source_frame.data());
+  }
   using EnsureGpuTransfer = int32_t(__cdecl*)(void*, const void*);
   using CreateGpuFrameFromHandle = int32_t(__cdecl*)(
       void*, const void*, const void*, uint64_t, uint32_t, uint32_t, uint64_t);
@@ -803,11 +815,11 @@ class VideoFrameCpuWorlds {
     constexpr uint64_t kDvaArgbFloat = 0x0008213A62675241ULL;
     int32_t create_error{};
     try {
-      create_error = create_gpu_frame_(
+      create_error = create_gpu_frame_with_empty_source(create_gpu_frame_,
           frame.data(), &device, kDvaArgbFloat, static_cast<uint32_t>(width),
           static_cast<uint32_t>(height), square_par.data(), /*field_type=*/0,
           /*origin=*/0, /*render_time=*/0, /*reserved_size_1=*/0,
-          /*reserved_size_2=*/0, &no_recycled_memory, &no_recycled_memory);
+          /*reserved_size_2=*/0, &no_recycled_memory);
     } catch (const std::exception&) {
       return false;
     } catch (...) {
@@ -954,6 +966,29 @@ class VideoFrameCpuWorlds {
   World output_{};
 };
 
+bool VideoFrameCpuWorlds::verify_create_gpu_frame_source_ref() {
+  struct Probe { bool valid{}; } probe;
+  const auto fake_create = +[](void* output, const void*, uint64_t,
+                               uint32_t width, uint32_t height, const void*,
+                               int32_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                               const void* recycled_memory,
+                               const void* source_frame) -> int32_t {
+    auto& observed = *static_cast<Probe*>(output);
+    const std::array<std::byte, 24> zero_ref{};
+    observed.valid = width == 256 && height == 144 && source_frame &&
+        source_frame != recycled_memory &&
+        reinterpret_cast<uintptr_t>(source_frame) % alignof(void*) == 0 &&
+        std::memcmp(source_frame, zero_ref.data(), zero_ref.size()) == 0;
+    return observed.valid ? 0 : -1;
+  };
+  const std::shared_ptr<const void> no_recycled_memory;
+  return create_gpu_frame_with_empty_source(
+             fake_create, &probe, nullptr, uint64_t{0}, uint32_t{256},
+             uint32_t{144}, nullptr, int32_t{0}, uint64_t{0}, uint64_t{0},
+             uint64_t{0}, uint64_t{0}, &no_recycled_memory) == 0 &&
+         probe.valid;
+}
+
 template <typename T, std::size_t N>
 void write(std::array<std::byte, N>& buffer, std::size_t offset, T value) {
   std::memcpy(buffer.data() + offset, &value, sizeof(value));
@@ -1052,10 +1087,19 @@ struct HostContext {
 // set for the duration of one run_pr_gpu_filter() call on the render thread.
 thread_local HostContext* g_ctx{};
 
+bool frame_extent_matches_world(const FrameRecord& record) {
+  if (!g_ctx || !g_ctx->frames || record.width <= 0 || record.height <= 0)
+    return false;
+  int32_t world_width{};
+  int32_t world_height{};
+  g_ctx->frames->pr_world_dims(record.world, world_width, world_height);
+  return record.width == world_width && record.height == world_height;
+}
+
 FrameRecord* find_frame(abi::PPixHand ppix) {
   if (!g_ctx || !ppix) return nullptr;
   for (auto& record : g_ctx->gpu_frames)
-    if (record->live &&
+    if (record->live && frame_extent_matches_world(*record) &&
         g_ctx->frames->pr_ppix(record->world) == static_cast<void*>(ppix))
       return record.get();
   return nullptr;
@@ -1085,13 +1129,12 @@ abi::prSuiteError GPUDev_CreateGPUPPix(abi::csSDK_uint32, abi::PrPixelFormat fmt
   record->format = fmt;
   if (!g_ctx->frames->pr_make_gpu_ppix(record->world, record->live, w, h))
     return -1;
-  // Note: building the VF GPU world leaves record->height at h+1 (the world
-  // build writes an allocated-height value onto this adjacent member; the
-  // mechanism is an InitEffectWorldGPU ABI quirk tracked separately). The
-  // authoritative requested size lives in the world at offsets 36/40, which
-  // pr_world_dims reads; the output readback uses those, not this member. The
-  // suite queries below (GetGPUPPixSize / PPix_GetBounds) still report the
-  // member, which the in-corpus plug-ins render correctly against.
+  if (!frame_extent_matches_world(*record)) {
+    g_ctx->frames->pr_dispose(record->world, record->live);
+    return -1;
+  }
+  // CreateGPUVideoFrame receives a distinct empty 24-byte source InterfaceRef,
+  // so it cannot treat the adjacent host height as a reference count (#1201).
   record->plugin_created = true;
   *out = reinterpret_cast<abi::PPixHand>(g_ctx->frames->pr_ppix(record->world));
   g_ctx->gpu_frames.push_back(std::move(record));
@@ -1156,6 +1199,39 @@ abi::prSuiteError PPix_GetPixelFormat(abi::PPixHand ppix,
 }
 abi::prSuiteError PPix2_GetSize(abi::PPixHand ppix, size_t* out) {
   return GPUDev_GetGPUPPixSize(ppix, out);
+}
+
+bool verify_frame_extent_suite_contract() {
+  VideoFrameCpuWorlds frames;
+  HostContext context;
+  context.frames = &frames;
+  auto record = std::make_unique<FrameRecord>();
+  record->live = true;
+  record->width = 256;
+  record->height = 144;
+  std::memcpy(record->world.data() + 36, &record->width, sizeof(record->width));
+  std::memcpy(record->world.data() + 40, &record->height, sizeof(record->height));
+  int ppix_token{};
+  const auto ppix = reinterpret_cast<abi::PPixHand>(&ppix_token);
+  std::memcpy(record->world.data() + 64, &ppix, sizeof(ppix));
+  FrameRecord* tracked = record.get();
+  context.gpu_frames.push_back(std::move(record));
+  HostContext* previous = g_ctx;
+  g_ctx = &context;
+  size_t pixel_bytes{};
+  abi::prRect bounds{};
+  const bool valid = GPUDev_GetGPUPPixSize(ppix, &pixel_bytes) == 0 &&
+      pixel_bytes == 256u * 144u * 16u &&
+      PPix_GetBounds(ppix, &bounds) == 0 &&
+      bounds.right == 256 && bounds.bottom == 144;
+  // A formerly mis-bound InterfaceRef control pointer incremented this exact
+  // member to 145; neither suite may report an extent larger than the world.
+  tracked->height = 145;
+  const bool rejects_mutation = GPUDev_GetGPUPPixSize(ppix, &pixel_bytes) != 0 &&
+      PPix_GetBounds(ppix, &bounds) != 0;
+  tracked->live = false;  // synthetic world has no VideoFrame to dispose
+  g_ctx = previous;
+  return valid && rejects_mutation;
 }
 abi::prSuiteError PPix2_GetOrigin(abi::PPixHand, abi::csSDK_int32* x,
                                   abi::csSDK_int32* y) {
@@ -1932,9 +2008,8 @@ bool run_pr_gpu_filter(const Request& request, VideoFrameCpuWorlds& frames,
   // than requested - VRConverter, driven by its "Output Frame Ratio" popup,
   // reprojects a 256x256 equirect input to a 256x128 2:1 frame (Project
   // Direction 3: verify variable output size). Read the frame's size from its VF
-  // world (offsets 36/40), not the FrameRecord scalar members: building the
-  // world leaves FrameRecord::height at height+1 (see GPUDev_CreateGPUPPix), so
-  // those members are unreliable (issue #1058). The world width/height are what
+  // world (offsets 36/40), not the requested plan or FrameRecord scalar
+  // members. The world width/height are what
   // create_gpu validated the allocation against, so reading exactly that many
   // rows of that stride never over-reads the device allocation - the fail-closed
   // property the earlier plan-size cross-check provided. Reject only a
@@ -2253,7 +2328,9 @@ bool verify_video_frame_runtime_abi() {
           VideoFrameRuntimeAbi::unavailable) != nullptr)
     return false;
   return probe.valid_query && probe.legacy_calls == 1 &&
-      probe.current_calls == 1;
+      probe.current_calls == 1 &&
+      VideoFrameCpuWorlds::verify_create_gpu_frame_source_ref() &&
+      pr_host::verify_frame_extent_suite_contract();
 }
 
 bool dispatch(const Request& request, const Hooks& hooks,
