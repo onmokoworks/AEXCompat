@@ -12,19 +12,20 @@ and bounded image input/output are now the main implementation path.
   Every route that loads an AEX gets the same always-on crash containment:
   separate worker process, kill-on-close Job Object with a process-memory
   limit, and a private desktop with modal-dialog sweep (issue #351). No route
-  requires an approval receipt, allowlist, or enforced pre-selection hash
-  match, so an in-development or unknown AEX can be loaded, dispatched, and
+  requires an approval receipt, approval allowlist, or enforced pre-selection
+  hash match, so an in-development or unknown AEX can be loaded, dispatched, and
   observed, and a rebuilt plug-in re-runs without re-approval. Failure
   isolation comes from process + Job Object, not from identity pinning;
   hashing the plug-in buys nothing for crash containment.
 - A deadline is not part of that floor. Where a wrong answer is worse than a
   slow one, there is none: parameter inspection (discovery) waits indefinitely,
   because a watchdog there contains nothing the Job Object does not already
-  contain and instead decides results by wall-clock — a plug-in still mapping a
-  sealed closure was reported as "timed out" and that verdict was cached
-  (issue #354). Deadlines stay where a caller cannot wait: the interactive
-  render session's frame deadline, the selection files' per-plug-in timeouts,
-  and the broker's own probe workers in `selftest`. A worker that blocks on a
+  contain and instead decides results by wall-clock — under the former sealed
+  staging route, a plug-in still mapping its dependency closure was reported
+  as "timed out" and that verdict was cached (issue #354). Deadlines stay where
+  a caller cannot wait: the interactive render session's frame deadline, the
+  selection files' per-plug-in timeouts, and the broker's own probe workers in
+  `selftest`. A worker that blocks on a
   modal dialog is a UI-containment problem (issue #351), not a reason to
   reintroduce a discovery deadline.
 - Evidence is a recording depth, not an execution tier. Provenance for the
@@ -33,8 +34,8 @@ and bounded image input/output are now the main implementation path.
   loaded-module list, the environment — on every run. A recorded identity that
   fails to match at comparison time disqualifies that evidence; it never gates
   launch. The former evidence-tier enforcement (sealed-tree ACL machinery,
-  receipt-pinned identity, fail-closed module audit, restricted token) is
-  scheduled for removal (#729-#733) and must not be extended.
+  receipt-pinned identity, fail-closed module audit, restricted token) was
+  removed across #729-#733, #739, #751, and #816; do not reintroduce it.
 - Do not bypass output bounds, pixel/output validation, or fail-closed
   suite/handle ownership (reject stale, foreign, exhausted, or double-disposed
   references) to make an AEX appear compatible. These are host-protection
@@ -52,25 +53,18 @@ and bounded image input/output are now the main implementation path.
   protection belongs in cache keys (the multifilter `BuildFingerprint` pattern:
   results are keyed by plug-in bytes + host build, so a rebuild invalidates its
   own cache), not in dispatch gates.
-- Implementation gap: most of the enforcement this policy removes is gone.
-  The worker freshness gate (#729), the module audit (#730), the selection
-  file's recorded identity (#732), and the interactive pre-selection hash
-  match (#739) are recorded warnings rather than refusals; the restricted
-  token, protected DACL, and staged-tree deny ACEs were removed in #731 (the
-  worker shares the broker's token, and staging records which bytes ran); the
-  compiled-in fixture identities went with #733; and the per-frame output hash
-  became an extent cross-check in #690; the `l1` route (load-only probe, the
-  last plug-in-loading normal-token route) was deleted outright in #732 —
-  nothing executed it and the discovery route plus multifilter discovery cover
-  the property it observed. What remains: the `l2`/`render*`/`smart*`/`render_request` CLI
-  routes read a selection file that names the plug-in and its dependencies
-  (`selftest` launches only the broker's own probe workers and is out of
-  scope). Sealed staging still copies and hashes
-  the load tree, which #751 is reconsidering. Do not add new enforcement, and
-  when touching one of these routes migrate it toward the floor rather than
-  extending a gate. The receipt-free routes that already exist
-  (`render-video-batch`, `InteractiveRenderSession`, self-hash admission in
-  `dispatch_secure_image`) are the floor's reference implementations.
+- Implementation status: worker freshness (#729), module audit (#730),
+  selection-file identity drift (#732), and interactive pre-selection identity
+  drift (#739) are recorded rather than used as launch refusals. The
+  restricted token and deny-ACE machinery went with #731, compiled-in fixture
+  identities with #733, and the per-frame output hash became an extent
+  cross-check in #690. The unused `l1` route was deleted in #732. Native AEX
+  dispatch moved to real-path, in-place loading in #751; GPU sessions followed
+  in #815, and #816 removed sealed plug-in staging. The
+  `l2`/`render*`/`smart*`/`render_request` CLI routes still read selection files
+  that name the plug-in, dependencies, worker, and timeout, but those files are
+  not approval receipts or identity gates. Keep the always-on floor and the
+  record of what actually loaded; do not add a new enforcement tier.
 - Keep `imports/` as frozen provenance. Do not redistribute Adobe SDK headers
   or source; the SDK selected by `AFTER_EFFECTS_SDK_ROOT` is an external ABI
   verification and fixture-build input only.
@@ -304,11 +298,10 @@ Current status is tracked in `docs/COMPATIBILITY_STATUS_2026-07-16.md`, current
 direction in `docs/PROJECT_DIRECTION.md`, and security limitations in
 `docs/WINDOWS_NATIVE_HARDENING_PLAN_2026-07-16.md`. Before describing the
 worker isolation in security terms, read
-`docs/ISOLATION_INVENTORY_2026-08-04.md`: it fixes what is actually
-implemented, what is documented plan only (mitigation policies, UI limits,
-integrity levels, AppContainer are NOT implemented), and which routes are
-sealed versus normal-token. The audit and decision record behind the
-single-floor policy is `docs/ENFORCEMENT_AUDIT_2026-08-05.md`. Before running
+`docs/ISOLATION_INVENTORY_2026-08-04.md` for the historical isolation limits;
+its sealed-versus-normal route table predates #751 and #816 and is not the
+current dispatch map. The audit and decision record behind the single-floor
+policy is `docs/ENFORCEMENT_AUDIT_2026-08-05.md`. Before running
 or citing a render sweep (which folder was swept, how a sweep session and its
 worker builds are set up, which local pytest failures are environmental), read
 `docs/SWEEP_INVESTIGATION_WORKFLOW_2026-08-17.md`.

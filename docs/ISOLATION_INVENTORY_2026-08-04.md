@@ -4,8 +4,17 @@ worker isolation の「実装されている機構」「対処している失敗
 1 枚に固定する参照文書。エージェントセッションが isolation を security sandbox と
 誤読する事故が繰り返されているため、その再発防止を目的とする (issue #641)。
 
+> **Historical snapshot, not the current route inventory (2026-09-28).**
+> This dated inventory and its later addenda describe past implementation
+> states. The single execution floor and record policy in
+> `CLAUDE.md` is current. #751 moved native AEX loading to in-place paths,
+> #815 moved GPU sessions, and #816 removed sealed plug-in staging. The
+> two-tier description and sealed-versus-normal route table below are
+> historical; do not use them to describe a current launch or security
+> guarantee. See `docs/ENFORCEMENT_AUDIT_2026-08-05.md` for the decision.
+
 規範 (何をしてよいか) は `CLAUDE.md` の Execution Floor and Safety Rules が正本。
-本書は実装状態の記述であり、方針を追加しない。実装が変わったらこの文書を更新する。
+本書は当時の実装状態の記述であり、方針を追加しない。
 
 > 追記 2 (2026-08-05, issue #731): restricted token・保護 DACL・staged tree の
 > deny ACE は**撤去済み**。§2 の該当機構と §7 の "token" 列は歴史記述として
