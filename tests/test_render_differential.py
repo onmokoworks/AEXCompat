@@ -1,5 +1,6 @@
 """Shipping CLI regression for native-depth metamorphic renders (#1593)."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -83,6 +84,17 @@ def test_odd_frame_matches_both_tile_axes_at_native_depth(tmp_path, depth):
     assert all(case["comparison"]["differing_pixels"] == 0
                for case in report["cases"][1:]
                if case["status"] == "matched")
+    if depth == "argb8":
+        host_hash = hashlib.sha256(HARNESS.read_bytes()).hexdigest()
+        worker_hash = hashlib.sha256(WORKER.read_bytes()).hexdigest()
+        assert report["provenance"]["host_executable_sha256"] == host_hash
+        assert report["provenance"]["worker_executable_sha256"] == worker_hash
+        for case in report["cases"]:
+            for receipt in case["session_receipts"]:
+                assert receipt["host_file_sha256_before"] == host_hash
+                assert receipt["host_file_sha256_after"] == host_hash
+                assert receipt["worker_file_sha256_before"] == worker_hash
+                assert receipt["worker_file_sha256_after"] == worker_hash
 
 
 @pytest.mark.parametrize(
