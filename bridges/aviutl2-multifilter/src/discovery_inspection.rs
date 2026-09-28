@@ -1431,8 +1431,18 @@ fn discover_cluster_in_place(
             .get("invalidated_reason")
             .and_then(|invalidation| invalidation.get("reason"))
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("session close not clean")
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                let worker = close
+                    .pointer("/worker/classification")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("not_collected");
+                let status = close
+                    .pointer("/final_report/status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no_final_report");
+                format!("session close not clean: worker={worker}, status={status}")
+            });
         let redo: Vec<(PathBuf, CacheEntry)> = std::mem::take(&mut results);
         for (path, _) in redo {
             let prepared = prepare_discovery_in_place(&path, dependency, build);
@@ -1492,6 +1502,42 @@ pub fn discover_all_for_diagnostics(
     dependency_dirs: Vec<PathBuf>,
 ) -> Vec<(PathBuf, bool, Option<String>)> {
     discover_records_for_diagnostics(repository, paths, dependency_dirs)
+        .into_iter()
+        .map(|record| (record.path, record.ok, record.failure_classification))
+        .collect()
+}
+
+fn plan_discovery_tasks(
+    planned: &[PlannedMember],
+    parallelism: usize,
+    diagnostic_one_shot: bool,
+) -> Vec<DiscoveryTask> {
+    if diagnostic_one_shot {
+        (0..planned.len()).map(DiscoveryTask::Single).collect()
+    } else {
+        shard_in_place_clusters(plan_tasks(planned), parallelism)
+    }
+}
+
+/// Diagnostic counterfactual for #419: keep the shipping preparation,
+/// worker budget, and result classification, but inspect each selected AEX in
+/// its own in-place one-shot worker. Never used by registration or UI paths.
+#[doc(hidden)]
+pub fn discover_all_one_shot_for_diagnostics(
+    repository: &Path,
+    paths: &[PathBuf],
+    dependency_dirs: Vec<PathBuf>,
+) -> Vec<(PathBuf, bool, Option<String>)> {
+    let dependency = DependencyConfig {
+        dirs: dependency_dirs,
+        module_limit: None,
+        byte_limit: None,
+    };
+    let build = build_fingerprint(repository, &dependency);
+    finalize_diagnostic_discovery(
+        repository,
+        discover_all_with_progress(repository, paths, &dependency, build, true, &|_| {}),
+    )
         .into_iter()
         .map(|record| (record.path, record.ok, record.failure_classification))
         .collect()
@@ -1594,8 +1640,21 @@ pub fn discover_records_for_diagnostics_with_progress(
                 .collect(),
         );
     };
-    let discovered =
-        discover_all_with_progress(repository, paths, &dependency, build, &report_completed);
+    let discovered = discover_all_with_progress(
+        repository,
+        paths,
+        &dependency,
+        build,
+        false,
+        &report_completed,
+    );
+    finalize_diagnostic_discovery(repository, discovered)
+}
+
+fn finalize_diagnostic_discovery(
+    repository: &Path,
+    discovered: Vec<(PathBuf, CacheEntry)>,
+) -> Vec<DiagnosticDiscovery> {
     // Diagnostic/shipping CLI callers do not have the persistent UI cache
     // orchestrator. Complete the same demand phase once, after their entire
     // selected discovery set is available, so provider/effect chunk ordering
@@ -1643,7 +1702,7 @@ fn discover_all(
     dependency: &DependencyConfig,
     build: BuildFingerprint,
 ) -> Vec<(PathBuf, CacheEntry)> {
-    discover_all_with_progress(repository, paths, dependency, build, &|_| {})
+    discover_all_with_progress(repository, paths, dependency, build, false, &|_| {})
 }
 
 fn discover_all_with_progress(
@@ -1651,6 +1710,7 @@ fn discover_all_with_progress(
     paths: &[PathBuf],
     dependency: &DependencyConfig,
     build: BuildFingerprint,
+    diagnostic_one_shot: bool,
     on_completed: &(dyn Fn(&[(PathBuf, CacheEntry)]) + Sync),
 ) -> Vec<(PathBuf, CacheEntry)> {
     let parallelism = std::thread::available_parallelism()
@@ -1704,7 +1764,7 @@ fn discover_all_with_progress(
                 })
         })
         .collect();
-    let tasks = shard_in_place_clusters(plan_tasks(&planned), parallelism);
+    let tasks = plan_discovery_tasks(&planned, parallelism, diagnostic_one_shot);
 
     // Phase 2: process tasks with the same worker budget. A cluster is one
     // unit of work: its members are inspected sequentially inside one

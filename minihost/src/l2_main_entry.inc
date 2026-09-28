@@ -2082,7 +2082,21 @@ int run_discovery_session(const std::wstring& manifest_argument,
     if (!audit_ok && exit_code == 0) return 14;
     if ((bib_teardown_failed || cor_teardown_failed) && exit_code == 0)
       return 25;
-    return exit_code;
+    if (exit_code != 0) return exit_code;
+    // The final report proves GLOBAL_SETDOWN, COR/BIB teardown, and terminal
+    // module audit have completed. Returning through process-wide DLL/CRT
+    // detach can block indefinitely when two otherwise healthy AEX have
+    // shared a discovery worker (#419). Render sessions already use this
+    // post-report process exit; do not skip any host teardown or turn a
+    // failed terminal check into success.
+    std::cout.flush();
+    std::cerr.flush();
+    std::fflush(stdout);
+    std::fflush(stderr);
+    if (!std::cout.good()) __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+    if (!TerminateProcess(GetCurrentProcess(), 0))
+      __fastfail(FAST_FAIL_FATAL_APP_EXIT);
+    __assume(0);
   };
 
   const auto run_inspect = [&](EffectEntry entry) -> wr::effect_bootstrap::Result {
