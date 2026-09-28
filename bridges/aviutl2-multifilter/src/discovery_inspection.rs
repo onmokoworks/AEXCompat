@@ -1538,9 +1538,9 @@ pub fn discover_all_one_shot_for_diagnostics(
         repository,
         discover_all_with_progress(repository, paths, &dependency, build, true, &|_| {}),
     )
-        .into_iter()
-        .map(|record| (record.path, record.ok, record.failure_classification))
-        .collect()
+    .into_iter()
+    .map(|record| (record.path, record.ok, record.failure_classification))
+    .collect()
 }
 
 /// Whether a SmartFX advertisement is internally usable for render routing.

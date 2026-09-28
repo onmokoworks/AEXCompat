@@ -4507,9 +4507,11 @@ mod tests {
                 .collect();
             let clustered = plan_discovery_tasks(&planned, 3, false);
             assert_eq!(clustered.len(), 3);
-            assert!(clustered
-                .iter()
-                .all(|task| matches!(task, DiscoveryTask::Cluster(_))));
+            assert!(
+                clustered
+                    .iter()
+                    .all(|task| matches!(task, DiscoveryTask::Cluster(_)))
+            );
             let one_shot = plan_discovery_tasks(&planned, 3, true);
             assert_eq!(one_shot.len(), planned.len());
             for (index, task) in one_shot.iter().enumerate() {
