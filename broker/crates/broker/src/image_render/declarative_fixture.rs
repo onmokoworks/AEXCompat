@@ -466,11 +466,25 @@ fn render_single_declarative_fixture(
                     return Err(invalid(format!(
                         "captured world differs from fixture layout: stage={} observed={}x{}x{} rowbytes={} origin=({}, {}) extent={:?}; expected={}x{}x{} rowbytes={} origin=({}, {}) extent={:?}; padding_byte={}",
                         checkpoint.stage,
-                        observed.width, observed.height, observed.pixel_bytes, observed.rowbytes,
-                        observed.origin_x, observed.origin_y, observed.extent,
-                        expected.width, expected.height, expected.pixel_format.bytes_per_pixel(),
-                        expected.rowbytes, expected.origin.x, expected.origin.y,
-                        [expected.extent.left, expected.extent.top, expected.extent.right, expected.extent.bottom],
+                        observed.width,
+                        observed.height,
+                        observed.pixel_bytes,
+                        observed.rowbytes,
+                        observed.origin_x,
+                        observed.origin_y,
+                        observed.extent,
+                        expected.width,
+                        expected.height,
+                        expected.pixel_format.bytes_per_pixel(),
+                        expected.rowbytes,
+                        expected.origin.x,
+                        expected.origin.y,
+                        [
+                            expected.extent.left,
+                            expected.extent.top,
+                            expected.extent.right,
+                            expected.extent.bottom
+                        ],
                         expected.padding_byte,
                     )));
                 }
