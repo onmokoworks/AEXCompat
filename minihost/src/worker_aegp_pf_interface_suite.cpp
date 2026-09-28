@@ -62,7 +62,7 @@ int32_t __cdecl get_effect_layer(void* effect, void** layer) {
       ? g_full_resolution_width : smart_state().width;
   values.comp_height = g_full_resolution_height > 0
       ? g_full_resolution_height : smart_state().height;
-  bee::prepare_effect_layer(g_layer, values);
+  if (!bee::prepare_effect_layer(g_layer, values)) return 4;
   *layer = &g_layer;
   return 0;
 }

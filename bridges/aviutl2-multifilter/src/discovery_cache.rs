@@ -336,7 +336,11 @@ pub extern "C" fn RegisterPlugin(host: *mut HOST_APP_TABLE) {
         // already-queued one pays nothing.
         if !decision.discover
             && let Some(entry) = cached
-            && needs_closure_recheck(entry, build, &search_roots_for(plugin, &dependency.dirs))
+            && needs_closure_recheck(
+                entry,
+                build,
+                &search_roots_for(plugin, &dependency.dirs, dependency.default_runtime),
+            )
         {
             decision.discover = true;
         }
@@ -1205,6 +1209,8 @@ fn default_dirs() -> (Vec<PathBuf>, bool) {
 /// After Effects runtime folder — plus the operator's optional ceilings. An AEX's
 /// own folder is not listed; it is always searched first, per plug-in.
 fn resolve_dependency_config(config: &Config) -> DependencyConfig {
+    let default_runtime =
+        std::env::var_os(ENV_DEPENDENCY_DIRS).is_none() && config.dependency_dirs.is_empty();
     let dirs = if let Some(dirs) = std::env::var_os(ENV_DEPENDENCY_DIRS) {
         dirs.to_string_lossy()
             .split(';')
@@ -1219,6 +1225,7 @@ fn resolve_dependency_config(config: &Config) -> DependencyConfig {
     };
     DependencyConfig {
         dirs,
+        default_runtime,
         module_limit: config.dependency_module_limit,
         byte_limit: config.dependency_byte_limit,
     }
@@ -1230,6 +1237,7 @@ fn resolve_dependency_config(config: &Config) -> DependencyConfig {
 #[derive(Clone, Default)]
 struct DependencyConfig {
     dirs: Vec<PathBuf>,
+    default_runtime: bool,
     module_limit: Option<usize>,
     byte_limit: Option<u64>,
 }
@@ -1259,7 +1267,43 @@ fn default_dependency_dirs() -> Vec<PathBuf> {
 /// would only turn a stale config line into "nothing discovers at all". Too
 /// *many* folders is not softened — the resolver rejects that, so a config over
 /// the root limit fails loudly instead of silently ignoring the tail.
-fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> {
+fn ae_support_files_for_plugin(plugin: &Path) -> Option<&Path> {
+    let plugins = plugin.ancestors().find(|dir| {
+        dir.file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Plug-ins"))
+    })?;
+    let support = plugins.parent()?;
+    if !support
+        .file_name()?
+        .to_string_lossy()
+        .eq_ignore_ascii_case("Support Files")
+    {
+        return None;
+    }
+    let ae = support.parent()?;
+    if !ae
+        .file_name()?
+        .to_string_lossy()
+        .starts_with("Adobe After Effects ")
+    {
+        return None;
+    }
+    if !ae
+        .parent()?
+        .file_name()?
+        .to_string_lossy()
+        .eq_ignore_ascii_case("Adobe")
+    {
+        return None;
+    }
+    Some(support)
+}
+
+fn search_roots_for(
+    plugin: &Path,
+    dependency_dirs: &[PathBuf],
+    default_runtime: bool,
+) -> Vec<PathBuf> {
     let canonical_dir = |dir: &Path| {
         std::fs::canonicalize(dir)
             .ok()
@@ -1270,7 +1314,18 @@ fn search_roots_for(plugin: &Path, dependency_dirs: &[PathBuf]) -> Vec<PathBuf> 
         .and_then(canonical_dir)
         .into_iter()
         .collect();
-    for dir in dependency_dirs {
+    let matching_runtime = default_runtime
+        .then(|| ae_support_files_for_plugin(plugin))
+        .flatten();
+    let runtime_dirs: &[PathBuf] = if matching_runtime.is_some() {
+        &[]
+    } else {
+        dependency_dirs
+    };
+    for dir in matching_runtime
+        .into_iter()
+        .chain(runtime_dirs.iter().map(PathBuf::as_path))
+    {
         if let Some(dir) = canonical_dir(dir)
             && !roots.iter().any(|root| root == &dir)
         {
@@ -1553,6 +1608,9 @@ pub struct DiagnosticScan {
     pub seen: usize,
     /// The dependency search folders the discovery pass will admit.
     pub dependency_dirs: Vec<PathBuf>,
+    /// Whether dependency_dirs came from the newest-AE fallback rather than
+    /// an explicit override. A versioned AE AEX uses its own runtime in this case.
+    pub default_runtime: bool,
     /// Why this walk was not exhaustive, if it was not. A sweep that reports a
     /// plug-in count has to carry this: an unreadable folder or a tree past
     /// [`MAX_SCAN_DEPTH`] silently shrinks the denominator (issue #660).
@@ -1567,6 +1625,7 @@ pub struct DiagnosticScan {
 #[doc(hidden)]
 pub fn scan_for_diagnostics(dirs: Option<Vec<PathBuf>>) -> DiagnosticScan {
     let config = load_config();
+    let dependency = resolve_dependency_config(&config);
     let (resolved, complete) = match dirs {
         Some(dirs) => (dirs, true),
         None => resolve_scan_dirs(&config),
@@ -1578,7 +1637,8 @@ pub fn scan_for_diagnostics(dirs: Option<Vec<PathBuf>>) -> DiagnosticScan {
         dirs: resolved,
         plugins: scan.plugins,
         seen: scan.seen.len(),
-        dependency_dirs: resolve_dependency_config(&config).dirs,
+        dependency_dirs: dependency.dirs,
+        default_runtime: dependency.default_runtime,
         incomplete_reason: limits.describe(),
     }
 }

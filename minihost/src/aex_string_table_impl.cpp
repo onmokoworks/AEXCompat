@@ -137,7 +137,19 @@ bool has_about_version_id0(
 
 const char* StringTable::lookup(int32_t id) const {
   const auto found = values.find(id);
-  return found == values.end() ? nullptr : found->second.c_str();
+  if (found == values.end()) return nullptr;
+  // LStr values may carry a single platform choice. On Windows the text
+  // after this marker is the value supplied to the effect (for example a
+  // Windows font family after its Mac counterpart). Keep unrecognised or
+  // compound forms verbatim rather than guessing which branch to use.
+  constexpr std::string_view marker = "{{*MSWindows*}}";
+  const std::string& value = found->second;
+  const std::size_t choice = value.find(marker);
+  if (choice != std::string::npos &&
+      value.find("{{*") == choice &&
+      value.find("{{*", choice + marker.size()) == std::string::npos)
+    return value.c_str() + choice + marker.size();
+  return value.c_str();
 }
 
 StringTable parse_readonly_pe_strings(const unsigned char* bytes,

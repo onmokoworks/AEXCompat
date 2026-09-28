@@ -440,6 +440,7 @@ fn main() {
         &repository,
         &targets,
         scan.dependency_dirs.clone(),
+        scan.default_runtime,
         |batch| {
             record_discovery_progress(&batch, &scan, &build, &partial, &completed, targets.len());
         },
@@ -2320,6 +2321,7 @@ mod tests {
             plugins: vec![plugin],
             seen: 1,
             dependency_dirs: Vec::new(),
+            default_runtime: false,
             incomplete_reason: None,
         };
         let report_path = root.join("discovery.json");

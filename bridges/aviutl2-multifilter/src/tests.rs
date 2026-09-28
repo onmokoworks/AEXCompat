@@ -629,7 +629,7 @@ mod tests {
         let plugin = root.join("locked.aex");
         std::fs::write(&plugin, b"fixture").unwrap();
         let meta = file_meta(&plugin).expect("fixture metadata");
-        let roots = search_roots_for(&plugin, &[]);
+        let roots = search_roots_for(&plugin, &[], false);
         let mut entry = negative_entry(&plugin, build(1));
         assert!(needs_closure_recheck(&entry, build(1), &roots));
 
@@ -663,6 +663,74 @@ mod tests {
         entry = keep_best(Some(&entry), negative_entry(&plugin, build(2)), Some(meta)).unwrap();
         assert_eq!(entry.checked, build(2));
         assert_eq!(entry.attempts, 1, "the new host starts its own ledger");
+    }
+
+    #[test]
+    fn default_runtime_follows_the_installed_ae_plugin_version() {
+        let root = temp_root("ae-versioned-runtime-root");
+        let adobe = root.join("Adobe");
+        let old_support = adobe.join("Adobe After Effects 2025").join("Support Files");
+        let new_support = adobe.join("Adobe After Effects 2026").join("Support Files");
+        let effect_dir = old_support.join("Plug-ins").join("Effects");
+        std::fs::create_dir_all(&effect_dir).unwrap();
+        std::fs::create_dir_all(&new_support).unwrap();
+        let plugin = effect_dir.join("Timecode.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let expected_old = old_support.canonicalize().unwrap();
+        let expected_new = new_support.canonicalize().unwrap();
+
+        let defaults = search_roots_for(&plugin, &[new_support.clone()], true);
+        assert_eq!(
+            defaults,
+            vec![effect_dir.canonicalize().unwrap(), expected_old]
+        );
+
+        let explicit = search_roots_for(&plugin, &[new_support], false);
+        assert_eq!(
+            explicit,
+            vec![effect_dir.canonicalize().unwrap(), expected_new]
+        );
+    }
+
+    #[test]
+    fn registration_preserves_discovery_retry_roots_for_render() {
+        let root = temp_root("ae-retried-runtime-root");
+        let adobe = root.join("Adobe");
+        let original = adobe.join("Adobe After Effects 2025").join("Support Files");
+        let retry = root.join("Registered Runtime");
+        let effect_dir = original.join("Plug-ins").join("Effects");
+        std::fs::create_dir_all(&effect_dir).unwrap();
+        std::fs::create_dir_all(&retry).unwrap();
+        let plugin = effect_dir.join("Timecode.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let mut entry = discovered(1, 1, build(1));
+        entry.closure.roots = vec![
+            effect_dir.to_string_lossy().into_owned(),
+            retry.to_string_lossy().into_owned(),
+        ];
+        let defaults = DependencyConfig {
+            dirs: vec![original.clone()],
+            default_runtime: true,
+            module_limit: None,
+            byte_limit: None,
+        };
+
+        let resolved = dependency_for_discovered_entry(&defaults, &entry);
+        assert!(!resolved.default_runtime);
+        assert_eq!(
+            search_roots_for(&plugin, &resolved.dirs, resolved.default_runtime),
+            vec![
+                effect_dir.canonicalize().unwrap(),
+                retry.canonicalize().unwrap()
+            ],
+        );
+        assert_eq!(
+            search_roots_for(&plugin, &defaults.dirs, defaults.default_runtime),
+            vec![
+                effect_dir.canonicalize().unwrap(),
+                original.canonicalize().unwrap()
+            ],
+        );
     }
 
     /// A replaced AEX is a different plug-in, so its old parameters are
@@ -4239,6 +4307,7 @@ mod tests {
         fn dependency() -> DependencyConfig {
             DependencyConfig {
                 dirs: Vec::new(),
+                default_runtime: false,
                 module_limit: None,
                 byte_limit: None,
             }

@@ -93,6 +93,24 @@ bool freeform_value_cases() {
          std::string(empty_table.lookup(3)).empty();
 }
 
+bool windows_platform_choice_cases() {
+  const auto bytes = make_pe({
+      "$$$/AE/Timecode/LStr/0000=Timecode, v%ld.%ld",
+      "$$$/AE/Timecode/LStr/0010=Monaco{{*MSWindows*}}Arial",
+      "$$$/AE/Timecode/LStr/0011={{*MSWindows*}}Consolas",
+      "$$$/AE/Timecode/LStr/0012=Mac{{*MSWindows*}}",
+      "$$$/AE/Timecode/LStr/0013=Mac{{*MSWindows*}}Win{{*Other*}}Other"});
+  const auto table = aexcompat::aex_strings::parse_readonly_pe_strings(
+      bytes.data(), bytes.size());
+  return table.status == aexcompat::aex_strings::ParseStatus::Valid &&
+         std::string(table.lookup(10)) == "Arial" &&
+         std::string(table.lookup(11)) == "Consolas" &&
+         std::string(table.lookup(12)).empty() &&
+         std::string(table.lookup(13)) ==
+             "Mac{{*MSWindows*}}Win{{*Other*}}Other" &&
+         table.values.at(10) == "Monaco{{*MSWindows*}}Arial";
+}
+
 // One image can carry several LStr groups (match-name/category, shared
 // libraries such as CAMLIGHT, sibling effects). The runtime lookup serves
 // the unique group whose id 0 is the about-version string ", v%".
@@ -143,6 +161,7 @@ bool negative_cases() {
 
 int main() {
   const bool passed = valid_case() && freeform_value_cases() &&
+                      windows_platform_choice_cases() &&
                       primary_group_case() && negative_cases();
   std::cout << "{\"aex_string_table\":\""
             << (passed ? "passed" : "failed")
