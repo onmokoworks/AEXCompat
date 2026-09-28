@@ -175,7 +175,8 @@ int selftest_smart_selector_inputs(int, wchar_t**) {
   namespace smart_dispatch = aexcompat::worker_runtime::smart_dispatch;
   const bool selector_inputs = smart_dispatch::verify_selector_inputs();
   const bool pr_gpu_admission = smart_dispatch::verify_pr_gpu_route_admission();
-  const bool passed = selector_inputs && pr_gpu_admission;
+  const bool video_frame_abi = smart_dispatch::verify_video_frame_runtime_abi();
+  const bool passed = selector_inputs && pr_gpu_admission && video_frame_abi;
   const auto layout = smart_dispatch::selector_input_layout();
   std::cout << "{\"smart_selector_inputs\":\"" << (passed ? "passed" : "failed")
             << "\",\"render_request_bytes\":" << layout.render_request_bytes
@@ -185,6 +186,8 @@ int selftest_smart_selector_inputs(int, wchar_t**) {
             << ",\"pre_render_data_offset\":" << layout.pre_render_data_offset
             << ",\"pr_gpu_pf_first_all_depths\":"
             << (pr_gpu_admission ? "true" : "false")
+            << ",\"video_frame_runtime_abi\":"
+            << (video_frame_abi ? "true" : "false")
             << "}\n";
   return passed ? 0 : 1;
 }
