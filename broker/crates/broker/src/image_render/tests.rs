@@ -2,6 +2,64 @@
 mod tests {
     use super::*;
 
+    #[test]
+    fn default_inspection_search_roots_include_the_owning_ae_support_files() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-inspection-support-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let support = root
+            .join("Adobe")
+            .join("Adobe After Effects 2025")
+            .join("Support Files");
+        let plugin_dir = support.join("Plug-ins").join("Effect");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(support.join("libmmd.dll"), b"runtime").unwrap();
+        let plugin = plugin_dir.join("Effect.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+
+        let roots = search_root(&plugin).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(roots, vec![plugin_dir, support]);
+    }
+
+    #[test]
+    fn session_search_roots_use_ae_defaults_only_without_explicit_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "aexcompat-session-support-roots-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let support = root
+            .join("Adobe")
+            .join("Adobe After Effects 2025")
+            .join("Support Files");
+        let plugin_dir = support.join("Plug-ins").join("Effect");
+        let explicit = root.join("caller-runtime");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::create_dir_all(&explicit).unwrap();
+        let plugin = plugin_dir.join("Effect.aex");
+        std::fs::write(&plugin, b"fixture").unwrap();
+        let dependency = ApprovedImageArtifact {
+            path: support.join("libmmd.dll"),
+            expected_sha256: [0; 32],
+            expected_size: 0,
+        };
+
+        let defaults = in_place_session_search_dirs(&plugin, &[dependency], &[]).unwrap();
+        let caller_roots = in_place_session_search_dirs(&plugin, &[], &[explicit.clone()]).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(defaults, vec![plugin_dir.clone(), support]);
+        assert_eq!(caller_roots, vec![plugin_dir, explicit]);
+    }
+
     /// Minimal facts for the public-report flattening; only the audio field
     /// varies across the audio projection tests below.
     fn audio_report_facts(audio_input_sha256: Option<&str>) -> InteractiveImageReportFacts {

@@ -94,13 +94,13 @@ pub fn smart_render_advertised(out_flags2: u64) -> bool {
     out_flags2 & PF_OUTFLAG2_SUPPORTS_SMART_RENDER != 0
 }
 
-// #816 made a non-empty search root set part of the in-place protocol, and the
-// loader resolves the closure from the plug-in's own directory.
+// #816 made a non-empty search root set part of the in-place protocol. Use the
+// same AE Support Files default as other in-place entry points (#1641).
 fn search_root(plugin_path: &Path) -> io::Result<Vec<std::path::PathBuf>> {
-    let parent = plugin_path
+    plugin_path
         .parent()
         .ok_or_else(|| invalid("plugin path has no parent directory to search for dependencies"))?;
-    Ok(vec![parent.to_path_buf()])
+    Ok(crate::after_effects_install::in_place_dependency_search_dirs(plugin_path))
 }
 
 fn dispatch_approved_image(
