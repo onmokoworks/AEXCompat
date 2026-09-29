@@ -1,5 +1,7 @@
 # Blender Compositor adapter (Issue #387)
 
+This document records the original #387 transport-only baseline. The macOS real-AEX baked-image path added by #1654 is documented in [BLENDER_REAL_AEX_MACOS_2026-09-30.md](BLENDER_REAL_AEX_MACOS_2026-09-30.md).
+
 ## Compatibility matrix
 
 | Blender | `bpy.types.CompositorNode` | `bpy.types.CompositorNodeOFX` | `CompositorNodeTree` | Result |
@@ -42,8 +44,8 @@ The JSON evidence records register/create/direct transport evaluate, fixture pix
 ## Explicit blockers
 
 - `CompositorNodeOFX` is absent in both tested installations.
-- The current repository's AEX/OFX facade is no-load/mock-only, so no real AEX can be loaded from this adapter.
+- The OFX facade remains no-load/mock-only. The newer macOS baked-image route uses the headless fixture harness and guest worker directly.
 - A Python-defined compositor node can be registered and serialized, but real compositor-engine execution of its Python method is not proven by the public API; the implementation uses the baked-image bridge instead.
 - Connecting the Python-defined node to the compositor executor was probed once on each installed version and caused `EXCEPTION_ACCESS_VIOLATION`; the repeatable smoke intentionally avoids that crash path and records it as an external host blocker.
-- The fixture invert path is deliberately named and reported as non-AEX evidence. Replacing it with the common RenderSession/AEX backend is a dependency boundary, not hidden in Blender-specific code.
+- The fixture invert path remains deliberately named and reported as non-AEX evidence. The separate `render_aex` mode uses the macOS headless fixture harness.
 - #385's common OpenFX/RenderSession implementation and #386's AEX load audit are dependencies. This issue does not change either dependency.

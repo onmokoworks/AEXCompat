@@ -7,10 +7,10 @@
   "properties": {
     "schema_version": {"const": 1},
     "response_kind": {"const": "aexcompat_blender_session_result"},
-    "status": {"enum": ["identity_only", "fixture_transform", "unsupported", "error"]},
-    "failure_class": {"enum": ["aex_not_loaded", "request_validation_error", "empty_input"]},
-    "aex_render_performed": {"const": false},
-    "host_success": {"const": false},
+    "status": {"enum": ["identity_only", "fixture_transform", "rendered", "unsupported", "error"]},
+    "failure_class": {"enum": ["none", "aex_not_loaded", "request_validation_error", "empty_input", "unsupported_platform", "worker_unavailable", "worker_crash", "worker_failure", "session_timeout", "artifact_mismatch"]},
+    "aex_render_performed": {"type": "boolean"},
+    "host_success": {"type": "boolean"},
     "worker_identity": {
       "type": "object",
       "required": ["name", "version", "source_sha256"],
@@ -21,11 +21,31 @@
       },
       "additionalProperties": false
     },
+    "render_identity": {
+      "type": "object",
+      "required": ["harness_sha256", "guest_worker_sha256", "post_run", "files_unchanged"],
+      "properties": {
+        "harness_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "guest_worker_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "post_run": {
+          "type": "object",
+          "required": ["plugin_sha256", "harness_sha256", "guest_worker_sha256"],
+          "properties": {
+            "plugin_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "harness_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "guest_worker_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        },
+        "files_unchanged": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
     "plugin_identity": {
       "type": "object",
       "required": ["state", "source_relative_path", "sha256"],
       "properties": {
-        "state": {"const": "not_loaded"},
+        "state": {"enum": ["not_loaded", "loaded"]},
         "source_relative_path": {"type": ["string", "null"]},
         "sha256": {"type": ["string", "null"]}
       },
@@ -48,6 +68,33 @@
     "error": {"type": "string"}
   },
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "rendered"}}, "required": ["status"]},
+      "then": {
+        "required": ["render_identity", "frame", "input", "output", "diff"],
+        "properties": {
+          "failure_class": {"const": "none"},
+          "aex_render_performed": {"const": true},
+          "host_success": {"const": true},
+          "plugin_identity": {
+            "properties": {
+              "state": {"const": "loaded"},
+              "source_relative_path": {"type": "string"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "aex_render_performed": {"const": false},
+          "host_success": {"const": false},
+          "plugin_identity": {"properties": {"state": {"const": "not_loaded"}}}
+        }
+      }
+    }
+  ],
   "$defs": {
     "artifact": {
       "type": "object",
