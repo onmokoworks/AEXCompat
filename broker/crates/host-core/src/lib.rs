@@ -9,6 +9,7 @@
 pub mod boundary;
 pub mod error;
 pub mod handle;
+pub mod parameter;
 pub mod report;
 pub mod scene;
 pub mod session;

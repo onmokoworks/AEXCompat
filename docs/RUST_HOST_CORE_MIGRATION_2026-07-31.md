@@ -289,6 +289,34 @@ including Issue #98; no resident, one-shot, or render-session path consumes
 the handle. Stream/keyframe/parameter/world/pixel/report state is outside the
 slice. It does not require After Effects and does not compare pixels.
 
+## Phase 9 typed parameter-animation value dual-run (Issue #636)
+
+Phase 9 adds a bounded, pointer-free value ABI for rational render time, at
+most 256 typed animation keys, and one evaluated scalar, ARGB8 color, or
+1–3-component value. A minimal descriptor checks the ABI version, layout,
+capacity, and capability before the C++ adapter casts the evaluator export.
+Rust validates the entire timeline before evaluation: positive time scales,
+strictly increasing rational key times, known kind and interpolation, valid
+component counts, finite floating inputs, and zero reserved fields. Rejected
+calls clear the output; the FFI contains Rust panics and the adapter contains
+Windows SEH faults separately.
+
+The worker's existing C++ evaluator now lives in
+`parameter_animation_transport` and remains the production owner. A standalone
+MSVC `/W4 /WX` test calls that exact C++ function beside the Rust DLL. It
+compares kind and ARGB8 channels exactly; scalar and component values use an
+absolute/relative tolerance of `1e-12 * (1 + max(abs(a), abs(b)))`. MSVC
+represents `long double` as double, and the Rust evaluator follows the C++
+operation order for the interpolation factor. The dual-run checks negative and
+fractional times, endpoints, linear and hold intervals, incompatible adjacent
+types/counts, malformed timelines, zeroed error outputs, and synthetic SEH.
+Strictly ordered rational times can collapse to one double on MSVC; this
+unrepresentable interval fails closed in both implementations. The C++ owner
+returns a nonfinite marker that the worker's value writer rejects for every
+kind, while Rust returns an error and zeroes its output.
+The Rust unit test also exercises panic containment without an actual native
+fault. No AE launch or production routing is involved.
+
 ## Later phases
 
 1. Define the next bounded scene/world/parameter state owner beyond the Phase
@@ -307,6 +335,5 @@ slice. It does not require After Effects and does not compare pixels.
 Each phase requires one Issue and one PR, focused Rust tests, relevant native
 Release self-tests when native code is touched, source-contract tests,
 and independent review with no unresolved P1/P2. For this migration task,
-GitHub Actions are explicitly disabled/non-gating by user policy; the merge
-gate is the focused Release build/tests, latest-head independent review,
-resolved threads, and CLEAN/MERGEABLE GitHub state.
+GitHub Actions, latest-head independent review, resolved owner threads, and
+the exact-head merge gate follow the current repository `AGENTS.md` rules.

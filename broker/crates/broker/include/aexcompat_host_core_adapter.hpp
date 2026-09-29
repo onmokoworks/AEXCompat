@@ -29,6 +29,8 @@ enum class AdapterLoadStatus : uint32_t {
   kIncompatibleSceneOwnerRelationAbiDescriptor = 10,
   kMissingSceneTopologyAbiDescriptor = 11,
   kIncompatibleSceneTopologyAbiDescriptor = 12,
+  kMissingParameterAnimationAbiDescriptor = 13,
+  kIncompatibleParameterAnimationAbiDescriptor = 14,
 };
 
 struct ApiV1 {
@@ -49,6 +51,8 @@ struct ApiV1 {
       nullptr;
   AexHostCoreSceneTopologySnapshotDestroyV1Fn
       scene_topology_snapshot_destroy = nullptr;
+  AexHostCoreParameterAnimationEvaluateV1Fn parameter_animation_evaluate =
+      nullptr;
 
   bool complete() const noexcept {
     return session_create != nullptr && session_open != nullptr &&
@@ -60,7 +64,8 @@ struct ApiV1 {
            scene_topology_snapshot_create != nullptr &&
            scene_topology_snapshot_query != nullptr &&
            scene_topology_snapshot_summary != nullptr &&
-           scene_topology_snapshot_destroy != nullptr;
+           scene_topology_snapshot_destroy != nullptr &&
+           parameter_animation_evaluate != nullptr;
   }
 };
 
@@ -109,6 +114,12 @@ struct SceneTopologySnapshotSummaryInvocation {
   int32_t return_code = AEX_HOST_INVALID_STATE;
   uint32_t exception_code = 0;
   AexHostSceneTopologySummary summary{};
+};
+
+struct ParameterAnimationInvocation {
+  int32_t return_code = AEX_HOST_INVALID_STATE;
+  uint32_t exception_code = 0;
+  AexHostAnimationValue value{};
 };
 
 // Owns one loaded host-core DLL and its complete v1 function table. Callers
@@ -202,6 +213,27 @@ class AdapterV1 {
            descriptor.capabilities ==
                (AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_SUMMARY_V1 |
                 AEXCOMPAT_HOST_CORE_SCENE_TOPOLOGY_CAPABILITY_OWNED_SNAPSHOT_V1);
+  }
+
+  static bool IsCompatibleParameterAnimationDescriptor(
+      const AexHostParameterAnimationAbiDescriptorV1 &descriptor) noexcept {
+    return descriptor.magic ==
+               AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_ABI_DESCRIPTOR_MAGIC &&
+           descriptor.abi_version ==
+               AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_ABI_VERSION &&
+           descriptor.struct_size ==
+               sizeof(AexHostParameterAnimationAbiDescriptorV1) &&
+           descriptor.time_size == sizeof(AexHostRationalTime) &&
+           descriptor.time_alignment == alignof(AexHostRationalTime) &&
+           descriptor.key_size == sizeof(AexHostAnimationKey) &&
+           descriptor.key_alignment == alignof(AexHostAnimationKey) &&
+           descriptor.output_size == sizeof(AexHostAnimationValue) &&
+           descriptor.output_alignment == alignof(AexHostAnimationValue) &&
+           descriptor.max_keys ==
+               AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_MAX_KEYS &&
+           descriptor.reserved == 0 &&
+           descriptor.capabilities ==
+               AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_CAPABILITY_EVALUATE_V1;
   }
 
   static AdapterLoadStatus ValidateApi(const ApiV1 &api) noexcept {
@@ -341,6 +373,31 @@ class AdapterV1 {
       return AdapterLoadStatus::kIncompatibleSceneTopologyAbiDescriptor;
     }
 
+    const FARPROC parameter_descriptor_symbol = GetProcAddress(
+        module, "aex_host_core_parameter_animation_abi_descriptor_v1");
+    if (parameter_descriptor_symbol == nullptr) {
+      output->native_error_ = ERROR_PROC_NOT_FOUND;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kMissingParameterAnimationAbiDescriptor;
+    }
+    const auto *published_parameter_descriptor =
+        reinterpret_cast<const AexHostParameterAnimationAbiDescriptorV1 *>(
+            parameter_descriptor_symbol);
+    AexHostParameterAnimationAbiDescriptorV1 parameter_descriptor{};
+    DWORD parameter_descriptor_error = ERROR_SUCCESS;
+    if (!CopyParameterAnimationDescriptor(
+            published_parameter_descriptor, &parameter_descriptor,
+            &parameter_descriptor_error)) {
+      output->native_error_ = parameter_descriptor_error;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kIncompatibleParameterAnimationAbiDescriptor;
+    }
+    if (!IsCompatibleParameterAnimationDescriptor(parameter_descriptor)) {
+      output->native_error_ = ERROR_BAD_FORMAT;
+      FreeLibrary(module);
+      return AdapterLoadStatus::kIncompatibleParameterAnimationAbiDescriptor;
+    }
+
     ApiV1 api;
     api.session_create = Resolve<AexHostCoreSessionCreateV1Fn>(
         module, "aex_host_core_session_create_v1");
@@ -374,6 +431,9 @@ class AdapterV1 {
     api.scene_topology_snapshot_destroy =
         Resolve<AexHostCoreSceneTopologySnapshotDestroyV1Fn>(
             module, "aex_host_core_scene_topology_snapshot_destroy_v1");
+    api.parameter_animation_evaluate =
+        Resolve<AexHostCoreParameterAnimationEvaluateV1Fn>(
+            module, "aex_host_core_parameter_animation_evaluate_v1");
     if (ValidateApi(api) != AdapterLoadStatus::kOk) {
       output->native_error_ = ERROR_PROC_NOT_FOUND;
       FreeLibrary(module);
@@ -386,6 +446,7 @@ class AdapterV1 {
     output->scene_identity_descriptor_ = scene_descriptor;
     output->scene_owner_relation_descriptor_ = owner_relation_descriptor;
     output->scene_topology_descriptor_ = topology_descriptor;
+    output->parameter_animation_descriptor_ = parameter_descriptor;
     output->native_error_ = ERROR_SUCCESS;
     return AdapterLoadStatus::kOk;
   }
@@ -396,6 +457,8 @@ class AdapterV1 {
            IsCompatibleSceneOwnerRelationDescriptor(
                scene_owner_relation_descriptor_) &&
            IsCompatibleSceneTopologyDescriptor(scene_topology_descriptor_) &&
+           IsCompatibleParameterAnimationDescriptor(
+               parameter_animation_descriptor_) &&
            api_.complete();
   }
 
@@ -424,6 +487,11 @@ class AdapterV1 {
   const AexHostSceneTopologyAbiDescriptorV1 &
   scene_topology_descriptor() const noexcept {
     return scene_topology_descriptor_;
+  }
+
+  const AexHostParameterAnimationAbiDescriptorV1 &
+  parameter_animation_descriptor() const noexcept {
+    return parameter_animation_descriptor_;
   }
 
   // Normal callers use value copies so the pointers passed to Rust always
@@ -531,6 +599,18 @@ class AdapterV1 {
       AexHostCallContext context, AexHostOpaqueHandle handle) const noexcept {
     return InvokeSceneTopologySnapshotDestroyRaw(
         api_.scene_topology_snapshot_destroy, &context, handle);
+  }
+
+  ParameterAnimationInvocation EvaluateParameterAnimation(
+      AexHostRationalTime now, const AexHostAnimationKey *keys,
+      uint32_t key_count) const noexcept {
+    ParameterAnimationInvocation invocation;
+    const SehCallResult result = InvokeParameterAnimationRaw(
+        api_.parameter_animation_evaluate, &now, keys, key_count,
+        &invocation.value);
+    invocation.return_code = result.return_code;
+    invocation.exception_code = result.exception_code;
+    return invocation;
   }
 
   // Low-level ABI conformance hooks. Each non-null pointer must remain valid;
@@ -726,6 +806,29 @@ class AdapterV1 {
     return result;
   }
 
+  static SehCallResult InvokeParameterAnimationRaw(
+      AexHostCoreParameterAnimationEvaluateV1Fn function,
+      const AexHostRationalTime *now, const AexHostAnimationKey *keys,
+      uint32_t key_count, AexHostAnimationValue *output) noexcept {
+    if (output != nullptr) {
+      *output = AexHostAnimationValue{};
+    }
+    if (function == nullptr) {
+      return SehCallResult{AEX_HOST_INVALID_STATE, 0};
+    }
+    SehCallResult result{AEX_HOST_SEH_FAULT, 0};
+    __try {
+      result.return_code = function(now, keys, key_count, output);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      result.return_code = AEX_HOST_SEH_FAULT;
+      result.exception_code = static_cast<uint32_t>(GetExceptionCode());
+    }
+    if (result.return_code != AEX_HOST_OK && output != nullptr) {
+      *output = AexHostAnimationValue{};
+    }
+    return result;
+  }
+
  private:
   static bool CopyDescriptor(
       const AexHostCoreAbiDescriptorV1 *source,
@@ -836,6 +939,33 @@ class AdapterV1 {
     return copied;
   }
 
+  static bool CopyParameterAnimationDescriptor(
+      const AexHostParameterAnimationAbiDescriptorV1 *source,
+      AexHostParameterAnimationAbiDescriptorV1 *destination,
+      DWORD *native_error) noexcept {
+    if (source == nullptr || destination == nullptr || native_error == nullptr) {
+      return false;
+    }
+    bool copied = false;
+    __try {
+      destination->magic = source->magic;
+      destination->abi_version = source->abi_version;
+      destination->struct_size = source->struct_size;
+      if (destination->magic ==
+              AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_ABI_DESCRIPTOR_MAGIC &&
+          destination->abi_version ==
+              AEXCOMPAT_HOST_CORE_PARAMETER_ANIMATION_ABI_VERSION &&
+          destination->struct_size ==
+              sizeof(AexHostParameterAnimationAbiDescriptorV1)) {
+        *destination = *source;
+      }
+      copied = true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+      *native_error = static_cast<DWORD>(GetExceptionCode());
+    }
+    return copied;
+  }
+
   static Invocation InvokeSession(AexHostCoreSessionCallV1Fn function,
                                   AexHostCallContext context,
                                   AexHostOpaqueHandle session) noexcept {
@@ -897,6 +1027,7 @@ class AdapterV1 {
     scene_owner_relation_descriptor_ =
         AexHostSceneOwnerRelationAbiDescriptorV1{};
     scene_topology_descriptor_ = AexHostSceneTopologyAbiDescriptorV1{};
+    parameter_animation_descriptor_ = AexHostParameterAnimationAbiDescriptorV1{};
     absolute_path_.fill(L'\0');
     native_error_ = ERROR_SUCCESS;
   }
@@ -909,6 +1040,7 @@ class AdapterV1 {
     scene_owner_relation_descriptor_ =
         other.scene_owner_relation_descriptor_;
     scene_topology_descriptor_ = other.scene_topology_descriptor_;
+    parameter_animation_descriptor_ = other.parameter_animation_descriptor_;
     absolute_path_ = other.absolute_path_;
     native_error_ = other.native_error_;
     other.module_ = nullptr;
@@ -920,6 +1052,8 @@ class AdapterV1 {
         AexHostSceneOwnerRelationAbiDescriptorV1{};
     other.scene_topology_descriptor_ =
         AexHostSceneTopologyAbiDescriptorV1{};
+    other.parameter_animation_descriptor_ =
+        AexHostParameterAnimationAbiDescriptorV1{};
     other.absolute_path_.fill(L'\0');
     other.native_error_ = ERROR_SUCCESS;
   }
@@ -931,6 +1065,7 @@ class AdapterV1 {
   AexHostSceneOwnerRelationAbiDescriptorV1
       scene_owner_relation_descriptor_{};
   AexHostSceneTopologyAbiDescriptorV1 scene_topology_descriptor_{};
+  AexHostParameterAnimationAbiDescriptorV1 parameter_animation_descriptor_{};
   std::array<wchar_t, 32768> absolute_path_{};
   DWORD native_error_ = ERROR_SUCCESS;
 };
