@@ -392,7 +392,9 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
             gpu_runtime_policy: None,
             dependencies: Vec::new(),
             companions: Vec::new(),
-            dependency_search_dirs: vec![parent.to_path_buf()],
+            dependency_search_dirs: crate::after_effects_install::in_place_dependency_search_dirs(
+                parent,
+            ),
             width,
             height,
             pixel_format: request.pixel_format,

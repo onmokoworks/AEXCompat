@@ -1247,12 +1247,7 @@ struct DependencyConfig {
 /// (`dvacore.dll` and friends) live, one level above the `Plug-ins\` tree that
 /// is scanned for effects.
 fn default_dependency_dirs() -> Vec<PathBuf> {
-    latest_after_effects_plugins()
-        .0
-        .and_then(|plugins| plugins.parent().map(Path::to_path_buf))
-        .filter(|support_files| support_files.is_dir())
-        .into_iter()
-        .collect()
+    latest_after_effects_support_files().into_iter().collect()
 }
 
 /// The search roots for one AEX: its own folder first (an AEX that ships its
@@ -1414,104 +1409,6 @@ fn cached_missing(unresolved: &[String]) -> Vec<String> {
         .filter(|name| !is_api_set(name))
         .cloned()
         .collect()
-}
-
-/// `%ProgramFiles%\Adobe`, the root of Adobe app installs.
-fn adobe_root() -> Option<PathBuf> {
-    let program_files = std::env::var_os("ProgramFiles")?;
-    Some(PathBuf::from(program_files).join("Adobe"))
-}
-
-/// The newest `Adobe After Effects <year>\Support Files\Plug-ins`, or `None`.
-fn latest_after_effects_plugins() -> (Option<PathBuf>, bool) {
-    let Some(adobe) = adobe_root() else {
-        return (None, false);
-    };
-    newest_versioned(
-        &adobe,
-        "Adobe After Effects ",
-        &["Support Files", "Plug-ins"],
-    )
-}
-
-/// The newest `Adobe\Common\Plug-ins\<version>\MediaCore`, or `None`.
-fn mediacore_dir() -> (Option<PathBuf>, bool) {
-    let Some(adobe) = adobe_root() else {
-        return (None, false);
-    };
-    let root = adobe.join("Common").join("Plug-ins");
-    newest_versioned(&root, "", &["MediaCore"])
-}
-
-/// The `leaf` folder under the newest versioned subfolder of `root` whose name
-/// starts with `prefix` (e.g. `Adobe After Effects 2025/Support Files/Plug-ins`).
-///
-/// The second value is false when the pick cannot be trusted to be the newest:
-/// the folder could not be enumerated, an entry could not be read, or a version
-/// *newer than the pick* was present without its `leaf`. That last case is what
-/// an install being updated looks like, and silently falling back to an older
-/// version while reporting a complete scan would make the newer version's
-/// plug-ins look deleted — which prunes their cache entries and unregisters them
-/// on the next launch, deleting objects from saved projects (issue #307). A
-/// leafless *older* version is just an uninstall leftover and means nothing.
-fn newest_versioned(root: &Path, prefix: &str, leaf: &[&str]) -> (Option<PathBuf>, bool) {
-    let Ok(read) = std::fs::read_dir(root) else {
-        return (None, false);
-    };
-    let mut best: Option<(Vec<u64>, PathBuf)> = None;
-    let mut leafless: Vec<Vec<u64>> = Vec::new();
-    let mut complete = true;
-    for entry in read {
-        let Ok(entry) = entry else {
-            complete = false;
-            continue;
-        };
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let Some(version) = name.strip_prefix(prefix) else {
-            continue;
-        };
-        // A numbered name is what an install in progress looks like. Unnumbered
-        // ones (`... (Beta)`) are still picked when nothing numbered exists, but a
-        // missing leaf under them is not evidence of an incomplete install.
-        let numbered = version
-            .split(['.', ' '])
-            .any(|part| part.parse::<u64>().is_ok());
-        let key = version_key(version);
-        let mut candidate = entry.path();
-        // Tested through the path, not `DirEntry::file_type`, which reports a
-        // directory junction as a symlink rather than a directory — Adobe installs
-        // are routinely junctioned to another drive.
-        if !candidate.is_dir() {
-            // A plain file is clutter. A reparse point that will not resolve is an
-            // install we simply could not see this launch, which must not read as
-            // "its plug-ins are gone".
-            let unresolved = candidate
-                .symlink_metadata()
-                .is_ok_and(|meta| meta.file_type().is_symlink());
-            if numbered && unresolved {
-                leafless.push(key);
-            }
-            continue;
-        }
-        candidate.extend(leaf);
-        if !candidate.is_dir() {
-            if numbered {
-                leafless.push(key);
-            }
-            continue;
-        }
-        if best.as_ref().is_none_or(|(best_key, _)| key > *best_key) {
-            best = Some((key, candidate));
-        }
-    }
-    // A leafless version above the pick means the newest install is not fully
-    // visible this launch, so its absence is not evidence its plug-ins are gone.
-    let best_key = best.as_ref().map(|(key, _)| key);
-    complete &= !leafless
-        .iter()
-        .any(|key| best_key.is_none_or(|best_key| key > best_key));
-    (best.map(|(_, path)| path), complete)
 }
 
 /// Why a launch's picture of what is on disk is not authoritative. Each cause

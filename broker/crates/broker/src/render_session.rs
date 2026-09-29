@@ -4187,7 +4187,9 @@ pub fn run_video_batch(
         layers: &layers,
         dependencies: Vec::new(),
         companions: Vec::new(),
-        dependency_search_dirs: vec![plugin_directory],
+        dependency_search_dirs: crate::after_effects_install::in_place_dependency_search_dirs(
+            &plugin_directory,
+        ),
         width,
         height,
         pixel_format: request.pixel_format,
