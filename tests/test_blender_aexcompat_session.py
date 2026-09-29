@@ -340,7 +340,7 @@ def test_real_render_mode_classifies_missing_aex(fake_render_environment):
     assert error.value.failure_class == "aex_not_loaded"
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS process-group cleanup")
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
 def test_real_render_mode_classifies_timeout(fake_render_environment):
     harness = Path(SESSION.os.environ["AEXCOMPAT_HARNESS"])
     harness.write_text("#!/bin/sh\nsleep 3\n", encoding="utf-8")
@@ -353,7 +353,7 @@ def test_real_render_mode_classifies_timeout(fake_render_environment):
     assert error.value.failure_class == "session_timeout"
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS harness execution")
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
 def test_real_render_mode_classifies_harness_failure(fake_render_environment):
     harness = Path(SESSION.os.environ["AEXCOMPAT_HARNESS"])
     harness.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
@@ -365,7 +365,7 @@ def test_real_render_mode_classifies_harness_failure(fake_render_environment):
     assert error.value.failure_class == "worker_failure"
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS harness execution")
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
 def test_real_render_mode_classifies_unlaunchable_harness(fake_render_environment):
     harness = Path(SESSION.os.environ["AEXCOMPAT_HARNESS"])
     harness.chmod(0o644)
@@ -376,7 +376,7 @@ def test_real_render_mode_classifies_unlaunchable_harness(fake_render_environmen
     assert error.value.failure_class == "worker_crash"
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS harness execution")
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behavior")
 def test_real_render_mode_bounds_harness_report(fake_render_environment):
     harness = Path(SESSION.os.environ["AEXCOMPAT_HARNESS"])
     harness.write_text(
