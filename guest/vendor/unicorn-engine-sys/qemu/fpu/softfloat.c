@@ -2648,6 +2648,26 @@ float32 int64_to_float32(int64_t a, float_status *status)
 
 float32 int32_to_float32(int32_t a, float_status *status)
 {
+    /* Every integer in [-2^24, 2^24] is exactly representable as binary32.
+     * This path leaves the floating-point status untouched, as the generic
+     * packer does for an exact finite result, including all rounding modes.
+     */
+    if (a >= -(1 << 24) && a <= (1 << 24)) {
+        uint32_t magnitude;
+        int exponent;
+        uint32_t fraction;
+
+        if (a == 0) {
+            return float32_zero;
+        }
+        magnitude = a < 0 ? (uint32_t)-a : (uint32_t)a;
+        exponent = 31 - clz32(magnitude);
+        fraction = exponent == 24 ? 0
+            : (magnitude << (23 - exponent)) & 0x7fffff;
+        return make_float32(((uint32_t)(a < 0) << 31)
+                            | ((uint32_t)(exponent + 127) << 23)
+                            | fraction);
+    }
     return int64_to_float32_scalbn(a, 0, status);
 }
 

@@ -13185,6 +13185,62 @@ fn win64_crt_floorf_translated_stub_preserves_mxcsr_and_upper_lanes() {
 }
 
 #[test]
+fn cvtsi2ss_exact_integer_range_preserves_mxcsr_and_upper_lanes() {
+    // CVTSI2SS xmm0, ecx; ret. The instruction uses QEMU's
+    // int32_to_float32 helper, including the exact-integer fast path.
+    let mut engine = test_engine(&[0xf3, 0x0f, 0x2a, 0xc1, 0xc3]);
+    let mut values = vec![
+        0, 1, -1, 255, -255, 65_535, -65_535, 8_388_607,
+        -8_388_607, 8_388_608, -8_388_608, 16_777_215,
+        -16_777_215, 16_777_216, -16_777_216,
+    ];
+    for bit in 1..=24 {
+        let power = 1i32 << bit;
+        for value in [power - 1, power, (power + 1).min(1 << 24)] {
+            values.extend([value, -value]);
+        }
+    }
+    for mxcsr in [0x1f80u64, 0x3f80, 0x5f80, 0x7f80, 0x9fc0] {
+        for &value in &values {
+            let before = [0xa5; 16];
+            engine
+                .unicorn
+                .reg_write_long(RegisterX86::XMM0, &before)
+                .unwrap();
+            engine.unicorn.reg_write(RegisterX86::MXCSR, mxcsr).unwrap();
+            engine.call_win64(TEST_CODE, [value as u32 as u64, 0, 0, 0, 0, 0]).unwrap();
+            let after = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            assert_eq!(
+                u32::from_le_bytes(after[..4].try_into().unwrap()),
+                (value as f32).to_bits(),
+                "CVTSI2SS {value}, MXCSR={mxcsr:#x}",
+            );
+            assert_eq!(&after[4..], &before[4..]);
+            assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap(), mxcsr);
+        }
+    }
+}
+
+#[test]
+fn cvtsi2ss_just_outside_exact_range_uses_guest_rounding_mode() {
+    let mut engine = test_engine(&[0xf3, 0x0f, 0x2a, 0xc1, 0xc3]);
+    for (mxcsr, positive, negative) in [
+        (0x1f80u64, 0x4b80_0000u32, 0xcb80_0000u32),
+        (0x3f80, 0x4b80_0000, 0xcb80_0001),
+        (0x5f80, 0x4b80_0001, 0xcb80_0000),
+        (0x7f80, 0x4b80_0000, 0xcb80_0000),
+    ] {
+        for (value, expected) in [(16_777_217i32, positive), (-16_777_217, negative)] {
+            engine.unicorn.reg_write(RegisterX86::MXCSR, mxcsr).unwrap();
+            engine.call_win64(TEST_CODE, [value as u32 as u64, 0, 0, 0, 0, 0]).unwrap();
+            let xmm0 = engine.unicorn.reg_read_long(RegisterX86::XMM0).unwrap();
+            assert_eq!(u32::from_le_bytes(xmm0[..4].try_into().unwrap()), expected);
+            assert_eq!(engine.unicorn.reg_read(RegisterX86::MXCSR).unwrap() & 0x6000, mxcsr & 0x6000);
+        }
+    }
+}
+
+#[test]
 fn win64_crt_roundf_translated_routine_matches_ties_away_and_preserves_upper_lanes() {
     const ROUNDF: u64 = STUB_BASE + 0x1d0;
     let mut engine = test_engine(&[0xc3]);
