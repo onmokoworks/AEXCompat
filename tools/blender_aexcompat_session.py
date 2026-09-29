@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
 import signal
 import struct
@@ -61,6 +62,15 @@ def _require_int(value: Any, name: str, *, minimum: int = 1) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise SessionRequestError(f"{name} must be an integer >= {minimum}")
     return value
+
+
+def _finite_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def _validate_relative_plugin_path(value: Any) -> str | None:
@@ -139,7 +149,10 @@ def _strict_json(data: str | bytes) -> Any:
         return result
 
     try:
-        return json.loads(data, object_pairs_hook=unique)
+        return json.loads(
+            data, object_pairs_hook=unique,
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError("non-finite JSON number")),
+        )
     except (ValueError, UnicodeError) as exc:
         raise SessionRequestError("invalid JSON render artifact", "artifact_mismatch") from exc
 
@@ -176,7 +189,10 @@ def _argb_to_rgba(argb: bytes) -> bytes:
     return bytes(rgba)
 
 
-def _invoke_harness(command: list[str], environment: dict[str, str], timeout_ms: int) -> bytes:
+def _invoke_harness(
+    command: list[str], environment: dict[str, str], timeout_ms: int,
+    failure_class: str = "worker_failure",
+) -> bytes:
     global _ACTIVE_HARNESS_PID
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         try:
@@ -199,7 +215,7 @@ def _invoke_harness(command: list[str], environment: dict[str, str], timeout_ms:
         finally:
             _ACTIVE_HARNESS_PID = None
         if process.returncode != 0:
-            raise SessionRequestError("harness or AEX render failed", "worker_failure")
+            raise SessionRequestError("harness command failed", failure_class)
         stdout.seek(0)
         packet = stdout.read(MAX_RENDER_METADATA_BYTES + 1)
         if len(packet) > MAX_RENDER_METADATA_BYTES:
@@ -208,7 +224,8 @@ def _invoke_harness(command: list[str], environment: dict[str, str], timeout_ms:
 
 
 def _checked_artifact(
-    case_dir: Path, stage: str, width: int, height: int, plugin_sha: str, case_identity: dict[str, Any]
+    case_dir: Path, stage: str, width: int, height: int, plugin_sha: str,
+    case_identity: dict[str, Any], render_path: str = "classic",
 ) -> tuple[bytes, dict[str, Any]]:
     artifact = (case_dir / stage).resolve()
     if not artifact.is_relative_to(case_dir):
@@ -248,10 +265,159 @@ def _checked_artifact(
         or identity.get("plugin_sha256") != plugin_sha
         or identity.get("fixture_case") != case_identity
         or identity.get("pixel_format") != "argb8"
-        or identity.get("render_path") != "classic"
+        or identity.get("render_path") != render_path
     ):
         raise SessionRequestError("render artifact identity mismatch", "artifact_mismatch")
     return raw, metadata
+
+
+_DESCRIPTION_PARAMETER_KEYS = {
+    "slot", "name", "kind", "minimum", "maximum", "value", "choices", "color",
+    "components", "component_count", "layer_path", "enabled", "visible", "supervised",
+    "debug_summary", "custom_ui_events", "control_size",
+}
+_DESCRIPTION_KINDS = {
+    "layer", "integer", "float", "angle", "color", "point", "custom", "no_data",
+    "arbitrary_data", "path", "group_start", "group_end", "button", "point3d",
+}
+
+
+def _valid_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _valid_description_parameter(parameter: Any) -> bool:
+    if not isinstance(parameter, dict) or set(parameter) != _DESCRIPTION_PARAMETER_KEYS:
+        return False
+    color, components, control_size = parameter["color"], parameter["components"], parameter["control_size"]
+    return (
+        type(parameter["slot"]) is int and parameter["slot"] >= 1
+        and isinstance(parameter["name"], str)
+        and isinstance(parameter["kind"], str) and parameter["kind"] in _DESCRIPTION_KINDS
+        and all(_finite_number(parameter[key]) for key in ("minimum", "maximum", "value"))
+        and isinstance(parameter["choices"], list)
+        and all(isinstance(choice, str) for choice in parameter["choices"])
+        and isinstance(color, list) and len(color) == 4
+        and all(type(channel) is int and 0 <= channel <= 255 for channel in color)
+        and isinstance(components, list) and len(components) == 3
+        and all(_finite_number(component) for component in components)
+        and type(parameter["component_count"]) is int and 0 <= parameter["component_count"] <= 3
+        and parameter["layer_path"] is None
+        and all(type(parameter[key]) is bool for key in ("enabled", "visible", "supervised"))
+        and parameter["debug_summary"] is None
+        and type(parameter["custom_ui_events"]) is int and parameter["custom_ui_events"] >= 0
+        and isinstance(control_size, list) and len(control_size) == 2
+        and all(type(size) is int and 0 <= size <= 65535 for size in control_size)
+    )
+
+
+def _valid_description(description: Any) -> bool:
+    if not isinstance(description, dict) or set(description) != {
+        "schema", "schema_version", "plugin_identity", "parameters", "defaults",
+    }:
+        return False
+    identity = description["plugin_identity"]
+    if not isinstance(identity, dict) or set(identity) != {"sha256", "post_setup_sha256", "files_unchanged"}:
+        return False
+    post_setup = identity["post_setup_sha256"]
+    if (
+        description["schema"] != "aexcompat.macos_aex_description"
+        or type(description["schema_version"]) is not int or description["schema_version"] != 1
+        or not _valid_sha256(identity["sha256"])
+        or (post_setup is not None and not _valid_sha256(post_setup))
+        or type(identity["files_unchanged"]) not in (bool, type(None))
+    ):
+        return False
+    for key in ("parameters", "defaults"):
+        records = description[key]
+        if not isinstance(records, list) or len(records) > 256 or not all(
+            _valid_description_parameter(record) for record in records
+        ):
+            return False
+    return True
+
+
+def _resolve_parameter_override(
+    override: Any, harness: Path, plugin: Path, worker: Path,
+    plugin_sha: str, timeout_ms: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    if override is None:
+        return [], None
+    if not isinstance(override, dict) or set(override) != {"slot", "value"}:
+        raise SessionRequestError("parameter_override requires slot and value")
+    slot = _require_int(override["slot"], "parameter_override.slot")
+    value = override["value"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SessionRequestError("parameter_override.value must be finite")
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise SessionRequestError("parameter_override.value must be finite") from exc
+    if not math.isfinite(value):
+        raise SessionRequestError("parameter_override.value must be finite")
+    environment = os.environ.copy()
+    environment["AEXCOMPAT_GUEST_WORKER"] = str(worker)
+    try:
+        raw = _invoke_harness(
+            [str(harness), "--headless", "--describe-aex", str(plugin)],
+            environment, timeout_ms, "parameter_description_error",
+        )
+    except SessionRequestError as exc:
+        if exc.failure_class == "artifact_mismatch":
+            raise SessionRequestError("AEX parameter description exceeds bounded size", "parameter_description_error") from exc
+        raise
+    try:
+        description = _strict_json(raw)
+    except SessionRequestError as exc:
+        raise SessionRequestError("invalid AEX parameter description", "parameter_description_error") from exc
+    if not _valid_description(description):
+        raise SessionRequestError("invalid AEX parameter description", "parameter_description_error")
+    identity = description["plugin_identity"]
+    parameters = description["parameters"]
+    staged_sha = identity["sha256"]
+    matches = [
+        parameter for parameter in parameters
+        if isinstance(parameter, dict) and type(parameter.get("slot")) is int and parameter["slot"] == slot
+    ]
+    if len(matches) != 1:
+        raise SessionRequestError("parameter_override.slot is not uniquely editable")
+    parameter = dict(matches[0])
+    kind = parameter.get("kind")
+    if kind not in {"integer", "float", "angle"}:
+        raise SessionRequestError("parameter_override.kind is not scalar")
+    if kind == "angle":
+        if not -32768 <= value <= 32768 or parameter.get("component_count") != 1:
+            raise SessionRequestError("parameter_override.angle is outside the supported range")
+        components = parameter.get("components")
+        if (
+            not isinstance(components, list) or len(components) != 3
+            or any(not _finite_number(component) for component in components)
+        ):
+            raise SessionRequestError("invalid angle descriptor", "parameter_description_error")
+        parameter["components"] = [float(value), *components[1:]]
+    else:
+        minimum, maximum = parameter.get("minimum"), parameter.get("maximum")
+        if (
+            not _finite_number(minimum) or not _finite_number(maximum)
+        ):
+            raise SessionRequestError("invalid scalar descriptor", "parameter_description_error")
+        minimum, maximum = float(minimum), float(maximum)
+        if minimum > maximum:
+            raise SessionRequestError("invalid scalar descriptor", "parameter_description_error")
+        if (
+            not minimum <= value <= maximum
+            or (kind == "integer" and (not value.is_integer() or not -(2**31) <= value < 2**31))
+        ):
+            raise SessionRequestError("parameter_override.value is outside the declared range")
+        parameter["value"] = int(value) if kind == "integer" else float(value)
+    record = {
+        "slot": slot, "kind": kind, "value": float(value),
+        "description_sha256": _sha256(raw),
+        "description_plugin_sha256": staged_sha,
+        "description_files_unchanged": identity["files_unchanged"],
+        "description_matches_render_plugin": staged_sha == plugin_sha,
+    }
+    return [parameter], record
 
 
 def _render_aex(
@@ -275,6 +441,9 @@ def _render_aex(
     timeout_ms = request.get("timeout_ms", MAX_RENDER_TIMEOUT_MS)
     if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 1000 <= timeout_ms <= MAX_RENDER_TIMEOUT_MS:
         raise SessionRequestError("timeout_ms is outside the bounded render range")
+    render_path = request.get("render_path", "classic")
+    if render_path not in {"classic", "smart"}:
+        raise SessionRequestError("render_path must be classic or smart")
     harness = _require_file("AEXCOMPAT_HARNESS", "worker_unavailable")
     worker = _require_file("AEXCOMPAT_GUEST_WORKER", "worker_unavailable")
     root_value = os.environ.get("AEXCOMPAT_PLUGIN_ROOT")
@@ -289,14 +458,18 @@ def _render_aex(
     plugin_sha = _sha256_file(plugin)
     harness_sha_before = _sha256_file(harness)
     worker_sha_before = _sha256_file(worker)
+    parameters, applied_override = _resolve_parameter_override(
+        request.get("parameter_override"), harness, plugin, worker, plugin_sha, timeout_ms,
+    )
+    artifact_render_path = "smartfx" if render_path == "smart" else "classic"
     fixture = {
         "schema": "aexcompat.render_fixture", "schema_version": 2,
-        "primary_layer": "input.png", "parameters": [], "matrix": [],
-        "pixel_format": "argb8", "render_path": "classic",
+        "primary_layer": "input.png", "parameters": parameters, "matrix": [],
+        "pixel_format": "argb8", "render_path": render_path,
         "premultiplication": "straight",
         "timing": {"current_time": ticks, "time_step": 1, "total_time": max(1, ticks), "time_scale": 1000},
         "final_artifact": "raw",
-        "checkpoints": [{"id": "input", "stage": "classic-input"}],
+        "checkpoints": [{"id": "input", "stage": f"{render_path}-input"}],
     }
     with tempfile.TemporaryDirectory(prefix="aexcompat-blender-") as temporary:
         scratch = Path(temporary)
@@ -328,7 +501,7 @@ def _render_aex(
             or identity.get("fixture_sha256") != _sha256(fixture_bytes)
             or identity.get("case_index") != 0
             or identity.get("pixel_format") != "argb8"
-            or identity.get("render_path") != "classic"
+            or identity.get("render_path") != render_path
             or not isinstance(identity.get("sha256"), str)
             or len(identity["sha256"]) != 64
             or any(character not in "0123456789abcdef" for character in identity["sha256"])
@@ -339,15 +512,15 @@ def _render_aex(
         case_dir = (output_root / case["artifact_directory"]).resolve()
         if not case_dir.is_relative_to(output_root):
             raise SessionRequestError("fixture case path escapes output", "artifact_mismatch")
-        raw_input, input_meta = _checked_artifact(case_dir, "checkpoints/input", frame["width"], frame["height"], plugin_sha, identity)
-        raw_output, output_meta = _checked_artifact(case_dir, "final", frame["width"], frame["height"], plugin_sha, identity)
+        raw_input, input_meta = _checked_artifact(case_dir, "checkpoints/input", frame["width"], frame["height"], plugin_sha, identity, artifact_render_path)
+        raw_output, output_meta = _checked_artifact(case_dir, "final", frame["width"], frame["height"], plugin_sha, identity, artifact_render_path)
         case_report = case.get("report")
         if (
             not isinstance(case_report, dict)
             or case_report.get("schema") != "aexcompat.render_fixture_report"
             or case_report.get("schema_version") != 1
             or case_report.get("pixel_format") != "argb8"
-            or case_report.get("render_path") != "classic"
+            or case_report.get("render_path") != render_path
             or case_report.get("final_artifact") != output_meta
             or case_report.get("checkpoints") != {"input": input_meta}
         ):
@@ -376,9 +549,10 @@ def _render_aex(
         and harness_sha_before == harness_sha_after
         and worker_sha_before == worker_sha_after
     )
-    return {
+    response = {
         "schema_version": SCHEMA_VERSION, "response_kind": "aexcompat_blender_session_result",
         "status": "rendered", "failure_class": "none",
+        "render_path": render_path,
         "aex_render_performed": True, "host_success": True,
         "worker_identity": _worker_identity(),
         "render_identity": {
@@ -402,6 +576,9 @@ def _render_aex(
             if not files_unchanged else "file hashes unchanged before and after render",
         ],
     }
+    if applied_override is not None:
+        response["parameter_override"] = applied_override
+    return response
 
 
 def build_response(request: dict[str, Any]) -> dict[str, Any]:
@@ -417,6 +594,8 @@ def build_response(request: dict[str, Any]) -> dict[str, Any]:
     mode = request.get("mode", "identity_no_aex")
     if mode == "render_aex":
         return _render_aex(request, pixels, frame, source_relative_path)
+    if "parameter_override" in request or "render_path" in request:
+        raise SessionRequestError("AEX parameters and render_path require render_aex")
     if mode not in {"identity_no_aex", "fixture_invert_no_aex"}:
         return {
             "schema_version": SCHEMA_VERSION,

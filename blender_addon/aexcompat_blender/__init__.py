@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 
 ADDON_VERSION = (1, 0, 0)
@@ -61,6 +61,7 @@ def _run_session(request: dict[str, Any], timeout_ms: int = 5000) -> dict[str, A
     wrapper = _wrapper_path()
     if not wrapper.is_file():
         raise AEXCompatSessionError("blender_session_wrapper_missing")
+    harness_calls = 2 if request.get("mode") == "render_aex" and "parameter_override" in request else 1
     try:
         process = subprocess.Popen(
             _python_command() + [str(wrapper)],
@@ -74,7 +75,7 @@ def _run_session(request: dict[str, Any], timeout_ms: int = 5000) -> dict[str, A
         try:
             stdout, _stderr = process.communicate(
                 json.dumps(request, sort_keys=True) + "\n",
-                timeout=(max(1, timeout_ms) + 15_000) / 1000.0,
+                timeout=(max(1, timeout_ms) * harness_calls + 15_000) / 1000.0,
             )
         except subprocess.TimeoutExpired as exc:
             try:
@@ -118,6 +119,8 @@ def evaluate_rgba8(
     plugin_source: str | None = None,
     mode: str = "identity_no_aex",
     timeout_ms: int | None = None,
+    render_path: str = "classic",
+    parameter_override: dict[str, int | float] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Validate one RGBA8 frame and return only verified worker pixels."""
 
@@ -151,6 +154,12 @@ def evaluate_rgba8(
             "sha256": hashlib.sha256(raw).hexdigest(),
         },
     }
+    if mode == "render_aex":
+        request["render_path"] = render_path
+        if parameter_override is not None:
+            request["parameter_override"] = parameter_override
+    elif parameter_override is not None:
+        raise AEXCompatSessionError("parameter_override requires render_aex")
     response = _run_session(request, timeout_ms=timeout_ms)
     expected_statuses = {"rendered"} if mode == "render_aex" else {"identity_only", "fixture_transform"}
     expected_success = mode == "render_aex"
@@ -168,7 +177,8 @@ def evaluate_rgba8(
         render_identity = response.get("render_identity")
         post_run = render_identity.get("post_run") if isinstance(render_identity, dict) else None
         if (
-            not isinstance(identity, dict)
+            response.get("render_path") != render_path
+            or not isinstance(identity, dict)
             or identity.get("state") != "loaded"
             or identity.get("source_relative_path") != plugin_source
             or not isinstance(identity.get("sha256"), str)
@@ -182,6 +192,24 @@ def evaluate_rgba8(
                 post_run["plugin_sha256"] == identity["sha256"]
                 and post_run["harness_sha256"] == render_identity["harness_sha256"]
                 and post_run["guest_worker_sha256"] == render_identity["guest_worker_sha256"]
+            )
+        ):
+            raise AEXCompatSessionError("worker_protocol_error")
+        applied = response.get("parameter_override")
+        if parameter_override is None and applied is not None:
+            raise AEXCompatSessionError("worker_protocol_error")
+        if parameter_override is not None and (
+            not isinstance(applied, dict)
+            or applied.get("slot") != parameter_override.get("slot")
+            or applied.get("value") != parameter_override.get("value")
+            or applied.get("kind") not in {"integer", "float", "angle"}
+            or not isinstance(applied.get("description_sha256"), str)
+            or len(applied["description_sha256"]) != 64
+            or not isinstance(applied.get("description_plugin_sha256"), str)
+            or len(applied["description_plugin_sha256"]) != 64
+            or type(applied.get("description_files_unchanged")) not in (bool, type(None))
+            or applied.get("description_matches_render_plugin") is not (
+                applied["description_plugin_sha256"] == identity["sha256"]
             )
         ):
             raise AEXCompatSessionError("worker_protocol_error")
@@ -207,6 +235,9 @@ def _configure_bake_button(node: Any, button: Any) -> None:
     button.plugin_source = node.plugin_source
     button.mode = node.transport_mode
     button.frame_time = node.frame_time
+    button.render_path = node.render_path
+    button.parameter_slot = node.parameter_slot
+    button.parameter_value = node.parameter_value
 
 
 class AEXCompatCompositorNode(bpy.types.CompositorNode):
@@ -227,6 +258,13 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
         default="identity_no_aex",
     )
     frame_time: FloatProperty(name="Frame time", default=0.0)
+    render_path: EnumProperty(
+        name="AEX render path",
+        items=(("classic", "Classic", "Classic AEX rendering"), ("smart", "SmartFX", "SmartFX rendering")),
+        default="classic",
+    )
+    parameter_slot: IntProperty(name="Parameter number (0 uses defaults)", default=0, min=0)
+    parameter_value: FloatProperty(name="Parameter value", default=0.0)
 
     def init(self, _context: Any) -> None:
         self.inputs.new("NodeSocketColor", "Image")
@@ -238,10 +276,19 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
         layout.prop(self, "output_image_name")
         layout.prop(self, "transport_mode")
         layout.prop(self, "frame_time")
+        if self.transport_mode == "render_aex":
+            layout.prop(self, "render_path")
+            layout.prop(self, "parameter_slot")
+            if self.parameter_slot:
+                layout.prop(self, "parameter_value")
         bake = layout.operator("aexcompat.bake_image", text="Bake image through worker")
         _configure_bake_button(self, bake)
 
     def evaluate_rgba8(self, rgba: bytes, width: int, height: int, **kwargs: Any) -> tuple[bytes, dict[str, Any]]:
+        options = dict(kwargs)
+        options.setdefault("render_path", self.render_path)
+        if self.transport_mode == "render_aex" and self.parameter_slot:
+            options.setdefault("parameter_override", {"slot": self.parameter_slot, "value": self.parameter_value})
         return evaluate_rgba8(
             rgba,
             width,
@@ -249,7 +296,7 @@ class AEXCompatCompositorNode(bpy.types.CompositorNode):
             frame_time=self.frame_time,
             plugin_source=self.plugin_source or None,
             mode=self.transport_mode,
-            **kwargs,
+            **options,
         )
 
 
@@ -273,6 +320,7 @@ def _rgba8_to_image(name: str, raw: bytes, width: int, height: int) -> Any:
         raise AEXCompatSessionError("blender_addon_error: output_image_dimensions")
     image.pixels = [value / 255.0 for value in raw]
     image.pack()
+    image.use_fake_user = True
     return image
 
 
@@ -304,6 +352,13 @@ class AEXCompatBakeImageOperator(bpy.types.Operator):
         default="identity_no_aex",
     )
     connect_native: BoolProperty(name="Connect native compositor", default=True)
+    render_path: EnumProperty(
+        name="AEX render path",
+        items=(("classic", "Classic", "Classic AEX rendering"), ("smart", "SmartFX", "SmartFX rendering")),
+        default="classic",
+    )
+    parameter_slot: IntProperty(name="Parameter number (0 uses defaults)", default=0, min=0)
+    parameter_value: FloatProperty(name="Parameter value", default=0.0)
 
     def execute(self, context: Any):
         source = bpy.data.images.get(self.source_image_name)
@@ -323,6 +378,9 @@ class AEXCompatBakeImageOperator(bpy.types.Operator):
                 plugin_source=self.plugin_source or None,
                 mode=self.mode,
                 frame_time=self.frame_time,
+                render_path=self.render_path,
+                parameter_override={"slot": self.parameter_slot, "value": self.parameter_value}
+                if self.mode == "render_aex" and self.parameter_slot else None,
             )
             output_image = _rgba8_to_image(self.output_image_name, output, width, height)
             if self.connect_native:
