@@ -348,10 +348,13 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
         "input_pattern": "normalized_xy_xor_v1",
         "worker_admitted_plugin_sha256_per_session": [],
     });
-    let parent = request
-        .plugin_path
-        .parent()
-        .ok_or_else(|| invalid("performance plug-in has no parent directory"))?;
+    if request.plugin_path.parent().is_none() {
+        return Err(invalid("performance plug-in has no parent directory"));
+    }
+    // Resolved once, outside every timed region, so each session searches the
+    // same roots and `session_open_ns` measures the open rather than this scan.
+    let dependency_search_dirs =
+        crate::after_effects_install::in_place_dependency_search_dirs(request.plugin_path);
     let mut samples = Vec::new();
     let mut session_open_ns = Vec::new();
     let mut worker_admitted_hashes = Vec::new();
@@ -392,9 +395,7 @@ pub fn run(request: RunRequest<'_>) -> std::io::Result<Value> {
             gpu_runtime_policy: None,
             dependencies: Vec::new(),
             companions: Vec::new(),
-            dependency_search_dirs: crate::after_effects_install::in_place_dependency_search_dirs(
-                parent,
-            ),
+            dependency_search_dirs: dependency_search_dirs.clone(),
             width,
             height,
             pixel_format: request.pixel_format,

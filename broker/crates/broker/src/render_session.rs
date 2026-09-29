@@ -4119,10 +4119,9 @@ pub fn run_video_batch(
     );
 
     let plugin_path = PathBuf::from(&request.plugin);
-    let plugin_directory = plugin_path
-        .parent()
-        .ok_or_else(|| invalid("batch plugin path has no parent directory"))?
-        .to_path_buf();
+    if plugin_path.parent().is_none() {
+        return Err(invalid("batch plugin path has no parent directory"));
+    }
     let plugin_bytes = fs::read(&plugin_path)?;
     if plugin_bytes.is_empty() {
         return Err(invalid("plugin file is empty"));
@@ -4188,7 +4187,7 @@ pub fn run_video_batch(
         dependencies: Vec::new(),
         companions: Vec::new(),
         dependency_search_dirs: crate::after_effects_install::in_place_dependency_search_dirs(
-            &plugin_directory,
+            &plugin_path,
         ),
         width,
         height,

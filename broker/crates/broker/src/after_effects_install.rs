@@ -123,19 +123,78 @@ fn newest_support_files_under(adobe: &Path) -> Option<PathBuf> {
         .filter(|support_files| support_files.is_dir())
 }
 
-/// The dependency search roots an in-place session gives a plug-in when the
-/// caller has nothing more specific: the plug-in's own folder first, then the
-/// newest installed AE `Support Files`, which is where After Effects itself
-/// would have let the plug-in's by-name imports resolve. Without an AE install
-/// only the plug-in's folder remains, as before.
-pub fn in_place_dependency_search_dirs(plugin_directory: &Path) -> Vec<PathBuf> {
-    search_dirs_with(plugin_directory, latest_after_effects_support_files())
+/// The `Support Files` of the After Effects install whose own `Plug-ins` tree
+/// holds `plugin`, or `None` when the plug-in is not inside one. That install,
+/// not the newest one, is the runtime the plug-in was installed against.
+pub fn ae_support_files_for_plugin(plugin: &Path) -> Option<&Path> {
+    let plugins = plugin.ancestors().find(|dir| {
+        dir.file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Plug-ins"))
+    })?;
+    let support = plugins.parent()?;
+    if !support
+        .file_name()?
+        .to_string_lossy()
+        .eq_ignore_ascii_case("Support Files")
+    {
+        return None;
+    }
+    let ae = support.parent()?;
+    if !ae
+        .file_name()?
+        .to_string_lossy()
+        .starts_with("Adobe After Effects ")
+    {
+        return None;
+    }
+    if !ae
+        .parent()?
+        .file_name()?
+        .to_string_lossy()
+        .eq_ignore_ascii_case("Adobe")
+    {
+        return None;
+    }
+    Some(support)
 }
 
-fn search_dirs_with(plugin_directory: &Path, support_files: Option<PathBuf>) -> Vec<PathBuf> {
-    std::iter::once(plugin_directory.to_path_buf())
-        .chain(support_files)
+/// The dependency search roots an in-place session gives a plug-in when the
+/// caller has nothing more specific: the plug-in's own folder, plus the
+/// `Support Files` After Effects itself would have put on the plug-in's DLL
+/// search path. That is the install the plug-in lives in when it lives in one,
+/// else the newest installed AE; without an AE install only the plug-in's
+/// folder remains, as before.
+///
+/// This fixes the set, not an order. The worker admits these as
+/// `LOAD_LIBRARY_SEARCH_USER_DIRS`, among which the loader defines no
+/// precedence, so only the plug-in's own static imports are guaranteed to try
+/// its folder first (`LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR`).
+///
+/// A `Support Files` folder the worker's search-root transport could not carry
+/// (unresolvable, not UTF-8, containing the `;` separator) is left out rather
+/// than failing the session: a plug-in that never needed it must not stop
+/// opening because of it.
+pub fn in_place_dependency_search_dirs(plugin: &Path) -> Vec<PathBuf> {
+    let support_files = ae_support_files_for_plugin(plugin)
+        .map(Path::to_path_buf)
+        .or_else(latest_after_effects_support_files);
+    search_dirs_with(plugin, support_files)
+}
+
+fn search_dirs_with(plugin: &Path, support_files: Option<PathBuf>) -> Vec<PathBuf> {
+    plugin
+        .parent()
+        .map(Path::to_path_buf)
+        .into_iter()
+        .chain(support_files.filter(|dir| transportable_search_dir(dir)))
         .collect()
+}
+
+fn transportable_search_dir(dir: &Path) -> bool {
+    dir.is_absolute()
+        && std::fs::canonicalize(dir).is_ok_and(|canonical| {
+            canonical.is_dir() && canonical.to_str().is_some_and(|text| !text.contains(';'))
+        })
 }
 
 /// A numerically-comparable key for a version token ("25.0" > "7.0", unlike a
@@ -204,14 +263,50 @@ mod tests {
         assert_eq!(newest_support_files_under(&root.0.join("missing")), None);
     }
 
+    fn after_effects_tree(root: &Path, year: &str) -> PathBuf {
+        let support = root
+            .join("Adobe")
+            .join(format!("Adobe After Effects {year}"))
+            .join("Support Files");
+        std::fs::create_dir_all(support.join("Plug-ins").join("Effects")).unwrap();
+        support
+    }
+
     #[test]
-    fn the_plugin_folder_is_searched_before_support_files() {
-        let plugin = PathBuf::from(r"C:\Plugins\Vendor");
-        let support = PathBuf::from(r"C:\Adobe\Adobe After Effects 2026\Support Files");
+    fn a_plugin_inside_an_install_belongs_to_that_install() {
+        let root = temp_root("owning");
+        let support = after_effects_tree(&root.0, "2024");
+        let plugin = support.join("Plug-ins").join("Effects").join("effect.aex");
+        assert_eq!(
+            ae_support_files_for_plugin(&plugin),
+            Some(support.as_path())
+        );
+
+        let outside = root.0.join("Vendor").join("Plug-ins").join("effect.aex");
+        assert_eq!(ae_support_files_for_plugin(&outside), None);
+    }
+
+    #[test]
+    fn search_dirs_hold_the_plugin_folder_and_a_usable_support_files() {
+        let root = temp_root("dirs");
+        let support = after_effects_tree(&root.0, "2026");
+        let plugin_dir = root.0.join("Vendor");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let plugin = plugin_dir.join("effect.aex");
         assert_eq!(
             search_dirs_with(&plugin, Some(support.clone())),
-            vec![plugin.clone(), support]
+            vec![plugin_dir.clone(), support]
         );
-        assert_eq!(search_dirs_with(&plugin, None), vec![plugin]);
+        assert_eq!(search_dirs_with(&plugin, None), vec![plugin_dir.clone()]);
+
+        // A candidate the worker transport would reject is dropped, not fatal.
+        let missing = root.0.join("missing");
+        assert_eq!(
+            search_dirs_with(&plugin, Some(missing)),
+            vec![plugin_dir.clone()]
+        );
+        let separator = root.0.join("a;b");
+        std::fs::create_dir_all(&separator).unwrap();
+        assert_eq!(search_dirs_with(&plugin, Some(separator)), vec![plugin_dir]);
     }
 }

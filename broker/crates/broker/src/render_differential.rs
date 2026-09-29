@@ -26,7 +26,7 @@ use std::fs::File;
 #[cfg(windows)]
 use std::io::{self, Read};
 #[cfg(windows)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::time::Duration;
 
@@ -320,6 +320,7 @@ fn shift_rgba_source_to_origin(input: &[u8], width: u32, height: u32, dx: u32, d
 #[cfg(windows)]
 fn render_variant(
     request: &DifferentialRequest<'_>,
+    dependency_search_dirs: &[PathBuf],
     input_rgba: &[u8],
     width: u32,
     height: u32,
@@ -332,10 +333,9 @@ fn render_variant(
     let plugin_before = digest_file(request.plugin_path).ok();
     let host_path = std::env::current_exe().ok();
     let host_before = host_path.as_ref().and_then(|path| digest_file(path).ok());
-    let parent = request
-        .plugin_path
-        .parent()
-        .ok_or_else(|| json!({"stage":"session_open", "reason":"plugin_has_no_parent"}))?;
+    if request.plugin_path.parent().is_none() {
+        return Err(json!({"stage":"session_open", "reason":"plugin_has_no_parent"}));
+    }
     let open = SessionOpenRequest {
         repository: request.repository,
         plugin_path: request.plugin_path,
@@ -355,9 +355,7 @@ fn render_variant(
         layers: &[],
         dependencies: Vec::new(),
         companions: Vec::new(),
-        dependency_search_dirs: crate::after_effects_install::in_place_dependency_search_dirs(
-            parent,
-        ),
+        dependency_search_dirs: dependency_search_dirs.to_vec(),
         width,
         height,
         pixel_format: request.format,
@@ -620,7 +618,18 @@ pub fn run_native_differential(request: DifferentialRequest<'_>) -> io::Result<V
         "time_scale":timing.time_scale,
         "gpu_backend":"cpu",
     });
-    let baseline = match render_variant(&request, &input_rgba, width, height, None) {
+    // One root set for every variant, so an AE install changing mid-run
+    // cannot give the variants of one comparison different runtimes.
+    let dependency_search_dirs =
+        crate::after_effects_install::in_place_dependency_search_dirs(request.plugin_path);
+    let baseline = match render_variant(
+        &request,
+        &dependency_search_dirs,
+        &input_rgba,
+        width,
+        height,
+        None,
+    ) {
         Ok(baseline) => baseline,
         Err(failure) => {
             return Ok(json!({
@@ -644,6 +653,7 @@ pub fn run_native_differential(request: DifferentialRequest<'_>) -> io::Result<V
         &baseline,
         vec![render_variant(
             &request,
+            &dependency_search_dirs,
             &input_rgba,
             width,
             height,
@@ -674,6 +684,7 @@ pub fn run_native_differential(request: DifferentialRequest<'_>) -> io::Result<V
                 &baseline,
                 vec![render_variant(
                     &request,
+                    &dependency_search_dirs,
                     &translated,
                     width,
                     height,
@@ -719,6 +730,7 @@ pub fn run_native_differential(request: DifferentialRequest<'_>) -> io::Result<V
                 &baseline,
                 vec![render_variant(
                     &request,
+                    &dependency_search_dirs,
                     &input_rgba,
                     width,
                     height,
@@ -742,6 +754,7 @@ pub fn run_native_differential(request: DifferentialRequest<'_>) -> io::Result<V
                 &baseline,
                 vec![render_variant(
                     &request,
+                    &dependency_search_dirs,
                     &input_rgba,
                     width,
                     height,
@@ -791,6 +804,7 @@ pub fn run_native_differential(request: DifferentialRequest<'_>) -> io::Result<V
                 .map(|rect| {
                     render_variant(
                         &request,
+                        &dependency_search_dirs,
                         &input_rgba,
                         width,
                         height,

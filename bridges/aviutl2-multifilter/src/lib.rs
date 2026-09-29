@@ -26,7 +26,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use aexcompat_broker::after_effects_install::{
-    latest_after_effects_plugins, latest_after_effects_support_files, mediacore_dir,
+    ae_support_files_for_plugin, latest_after_effects_plugins, latest_after_effects_support_files,
+    mediacore_dir,
 };
 use aexcompat_broker::companion_manifest::{ApprovedCompanion, CompanionSuiteIdentity};
 use aexcompat_broker::image_render::{

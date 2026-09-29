@@ -1262,38 +1262,6 @@ fn default_dependency_dirs() -> Vec<PathBuf> {
 /// would only turn a stale config line into "nothing discovers at all". Too
 /// *many* folders is not softened — the resolver rejects that, so a config over
 /// the root limit fails loudly instead of silently ignoring the tail.
-fn ae_support_files_for_plugin(plugin: &Path) -> Option<&Path> {
-    let plugins = plugin.ancestors().find(|dir| {
-        dir.file_name()
-            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("Plug-ins"))
-    })?;
-    let support = plugins.parent()?;
-    if !support
-        .file_name()?
-        .to_string_lossy()
-        .eq_ignore_ascii_case("Support Files")
-    {
-        return None;
-    }
-    let ae = support.parent()?;
-    if !ae
-        .file_name()?
-        .to_string_lossy()
-        .starts_with("Adobe After Effects ")
-    {
-        return None;
-    }
-    if !ae
-        .parent()?
-        .file_name()?
-        .to_string_lossy()
-        .eq_ignore_ascii_case("Adobe")
-    {
-        return None;
-    }
-    Some(support)
-}
-
 fn search_roots_for(
     plugin: &Path,
     dependency_dirs: &[PathBuf],
