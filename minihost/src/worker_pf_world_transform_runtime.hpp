@@ -54,6 +54,8 @@ int32_t __cdecl convolve_world(void*, void*, const LegacyRect*, uint32_t, int32_
                                void*, void*, void*, void*, void*);
 int32_t __cdecl blend_world(void*, const void*, const void*, int32_t, void*);
 int32_t __cdecl copy_world8(void*, void*, void*, const LegacyRect*, const LegacyRect*);
+int32_t __cdecl private_copy_world_area8(void*, void*, void*, const LegacyRect*,
+                                         const LegacyRect*);
 int32_t __cdecl copy_world_hq(void*, void*, void*, const LegacyRect*, const LegacyRect*);
 int32_t __cdecl transform_world(void*, int32_t, uint32_t, int32_t, const void*,
                                 const void*, const void*, const void*, int32_t, uint8_t,

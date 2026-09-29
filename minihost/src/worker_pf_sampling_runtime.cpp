@@ -75,7 +75,7 @@ void configure_pf_sampling_runtime(const PfSamplingHostHooks& hooks) noexcept {
   g_hooks = hooks;
 }
 
-int32_t __cdecl get_callback_addr(void*, int32_t, uint32_t mode_flags, int32_t callback_id,
+int32_t __cdecl get_callback_addr(void*, int32_t quality, uint32_t mode_flags, int32_t callback_id,
                                   void** callback) {
   if (!callback) return kPfBadCallbackParam;
   *callback = nullptr;
@@ -105,7 +105,10 @@ int32_t __cdecl get_callback_addr(void*, int32_t, uint32_t mode_flags, int32_t c
     }
     case 2: *callback = reinterpret_cast<void*>(&subpixel_sample8); break;
     case 3: *callback = reinterpret_cast<void*>(&area_sample8); break;
-    case 9: *callback = reinterpret_cast<void*>(&copy_world8); break;
+    case 9:
+      *callback = reinterpret_cast<void*>(
+          quality == 1 && mode_flags == 1 ? &private_copy_world_area8 : &copy_world8);
+      break;
     case 31: *callback = reinterpret_cast<void*>(&subpixel_sample16); break;
     case 32: *callback = reinterpret_cast<void*>(&area_sample16); break;
     default: return kPfBadCallbackParam;

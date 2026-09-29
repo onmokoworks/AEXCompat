@@ -527,6 +527,17 @@ int32_t __cdecl diag_copy_world(void* effect_ref, void* source, void* destinatio
           ? aexcompat::callback_diagnostics::Reason::MissingWorld
           : aexcompat::callback_diagnostics::Reason::CallbackError);
 }
+int32_t __cdecl diag_private_copy_world_area8(void* effect_ref, void* source,
+                                              void* destination,
+                                              const ::LegacyRect* source_rect,
+                                              const ::LegacyRect* destination_rect) {
+  return utility_callback_result(aexcompat::callback_diagnostics::Callback::Copy,
+      private_copy_world_area8(effect_ref, source, destination,
+                               source_rect, destination_rect),
+      !source || !destination
+          ? aexcompat::callback_diagnostics::Reason::MissingWorld
+          : aexcompat::callback_diagnostics::Reason::CallbackError);
+}
 int32_t __cdecl diag_fill_world(void* effect_ref, const void* color,
                                const ::LegacyRect* area, void* world) {
   return utility_callback_result(aexcompat::callback_diagnostics::Callback::Fill,
@@ -641,7 +652,9 @@ int32_t __cdecl diag_get_callback_addr(void* effect_ref, int32_t quality,
   // it indirectly instead of reading utils.copy; sampling IDs already point at
   // their directly instrumented implementations.
   if (result == 0 && callback && id == 9)
-    *callback = reinterpret_cast<void*>(&diag_copy_world);
+    *callback = *callback == reinterpret_cast<void*>(&private_copy_world_area8)
+        ? reinterpret_cast<void*>(&diag_private_copy_world_area8)
+        : reinterpret_cast<void*>(&diag_copy_world);
   std::string request_text;
   if (result != 0 || extended_diag_enabled()) {
     std::ostringstream request;
@@ -1259,6 +1272,8 @@ bool verify_pf_private_callbacks() {
   using GetCallbackAddr = int32_t(__cdecl*)(void*, int32_t, uint32_t, int32_t, void**);
   using Easing = double(__cdecl*)(double);
   using PrivateBlur = int32_t(__cdecl*)(void*, void*, double, void*, int32_t, void*);
+  using PrivateCopy = int32_t(__cdecl*)(void*, void*, void*, const LegacyRect*,
+                                        const LegacyRect*);
   boot::State state{};
   boot::install_callback_tables(state, ::make_bootstrap_abi_hooks());
   void* utils{};
@@ -1321,6 +1336,106 @@ bool verify_pf_private_callbacks() {
   void* raw_unknown = reinterpret_cast<void*>(1);
   check(get_callback_addr(effect_ref, 1, 0, -3, &raw_unknown) == kPfBadCallbackParam && raw_unknown == nullptr,
         "id -3 answered");
+  // #1681: the private id-9 q1/m1 entry is not the public overlap-copy
+  // contract. AE's 2x2 downsample averages the four source pixels.
+  {
+    void* raw_copy{};
+    void* raw_other_copy{};
+    check(get_callback_addr(effect_ref, 1, 1, 9, &raw_copy) == 0 && raw_copy,
+          "id 9 q1/m1 refused");
+    check(get_callback_addr(effect_ref, 0, 1, 9, &raw_other_copy) == 0 && raw_other_copy,
+          "id 9 q0/m1 refused");
+    if (raw_copy && raw_other_copy) {
+      DispatchWorldFormatScope copy_worlds;
+      std::array<unsigned char, 16> copy_source_pixels{
+          255, 10, 0, 0, 255, 20, 0, 0,
+          255, 30, 0, 0, 255, 40, 0, 0};
+      std::array<unsigned char, 4> copy_destination_pixels{};
+      std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> copy_source{};
+      std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> copy_destination{};
+      auto make_copy_world = [&](auto& storage, unsigned char* data,
+                                 int32_t rowbytes, int32_t width, int32_t height) {
+        std::memcpy(storage.data() + contract::LAYER_DATA_OFFSET, &data, sizeof(data));
+        std::memcpy(storage.data() + contract::LAYER_ROWBYTES_OFFSET, &rowbytes, sizeof(rowbytes));
+        std::memcpy(storage.data() + contract::LAYER_WIDTH_OFFSET, &width, sizeof(width));
+        std::memcpy(storage.data() + contract::LAYER_HEIGHT_OFFSET, &height, sizeof(height));
+      };
+      make_copy_world(copy_source, copy_source_pixels.data(), 8, 2, 2);
+      make_copy_world(copy_destination, copy_destination_pixels.data(), 4, 1, 1);
+      check(copy_worlds.register_world(copy_source.data(), kPixelFormatArgb32) &&
+                copy_worlds.register_world(copy_destination.data(), kPixelFormatArgb32),
+            "id 9 world registration");
+      const auto area_copy = reinterpret_cast<PrivateCopy>(raw_copy);
+      const auto other_copy = reinterpret_cast<PrivateCopy>(raw_other_copy);
+      const int32_t copy_result = area_copy(effect_ref, copy_source.data(),
+                                            copy_destination.data(), nullptr, nullptr);
+      check(copy_result == 0 &&
+                copy_destination_pixels == std::array<unsigned char, 4>{255, 25, 0, 0},
+            "id 9 q1/m1 did not average 2x2 pixels");
+      copy_destination_pixels.fill(0);
+      check(other_copy(effect_ref, copy_source.data(), copy_destination.data(),
+                       nullptr, nullptr) == 0 &&
+                copy_destination_pixels == std::array<unsigned char, 4>{255, 10, 0, 0},
+            "id 9 q0/m1 changed overlap behavior");
+      for (uint32_t mode : std::array<uint32_t, 2>{0, 2}) {
+        void* raw_other_mode{};
+        check(get_callback_addr(effect_ref, 1, mode, 9, &raw_other_mode) == 0 &&
+                  raw_other_mode,
+              "id 9 q1 other mode refused");
+        if (!raw_other_mode) continue;
+        copy_destination_pixels.fill(0);
+        const auto copy_other_mode = reinterpret_cast<PrivateCopy>(raw_other_mode);
+        check(copy_other_mode(effect_ref, copy_source.data(),
+                              copy_destination.data(), nullptr, nullptr) == 0 &&
+                  copy_destination_pixels ==
+                      std::array<unsigned char, 4>{255, 10, 0, 0},
+              "id 9 q1 other mode changed overlap behavior");
+      }
+      copy_destination_pixels.fill(0);
+      const LegacyRect one_pixel{0, 0, 1, 1};
+      check(area_copy(effect_ref, copy_source.data(), copy_destination.data(),
+                      &one_pixel, &one_pixel) == 0 &&
+                copy_destination_pixels == std::array<unsigned char, 4>{255, 10, 0, 0},
+            "id 9 q1/m1 changed explicit-rectangle behavior");
+      std::array<unsigned char, 16> same_size_pixels{};
+      std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> same_size_world{};
+      make_copy_world(same_size_world, same_size_pixels.data(), 8, 2, 2);
+      check(copy_worlds.register_world(same_size_world.data(), kPixelFormatArgb32),
+            "id 9 same-size world registration");
+      check(area_copy(effect_ref, copy_source.data(), same_size_world.data(),
+                      nullptr, nullptr) == 0 &&
+                same_size_pixels == copy_source_pixels,
+            "id 9 q1/m1 changed same-size behavior");
+
+      // Noninteger height ratio: the first destination row covers source
+      // rows [0, 1.5), the second [1.5, 3). Area weights are 1:0.5 and
+      // 0.5:1 respectively, so 0/20/40 becomes 7/33 after rounding.
+      std::array<unsigned char, 24> uneven_source_pixels{
+          255, 0, 0, 0, 255, 0, 0, 0,
+          255, 20, 0, 0, 255, 20, 0, 0,
+          255, 40, 0, 0, 255, 40, 0, 0};
+      std::array<unsigned char, 8> uneven_destination_pixels{};
+      std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> uneven_source{};
+      std::array<std::byte, aexcompat::world_safety::kEffectWorldSize> uneven_destination{};
+      make_copy_world(uneven_source, uneven_source_pixels.data(), 8, 2, 3);
+      make_copy_world(uneven_destination, uneven_destination_pixels.data(), 4, 1, 2);
+      check(copy_worlds.register_world(uneven_source.data(), kPixelFormatArgb32) &&
+                copy_worlds.register_world(uneven_destination.data(), kPixelFormatArgb32),
+            "id 9 uneven world registration");
+      check(area_copy(effect_ref, uneven_source.data(), uneven_destination.data(),
+                      nullptr, nullptr) == 0 &&
+                uneven_destination_pixels ==
+                    std::array<unsigned char, 8>{255, 7, 0, 0, 255, 33, 0, 0},
+            "id 9 q1/m1 noninteger area weights");
+      uneven_destination_pixels.fill(0xA5);
+      check(area_copy(effect_ref, nullptr, uneven_destination.data(),
+                      nullptr, nullptr) == kPfBadCallbackParam &&
+                std::all_of(uneven_destination_pixels.begin(),
+                            uneven_destination_pixels.end(),
+                            [](unsigned char value) { return value == 0xA5; }),
+            "id 9 malformed source modified destination");
+    }
+  }
   if (!raw_straight || !raw_premul) return false;
   const auto blur_straight = reinterpret_cast<PrivateBlur>(raw_straight);
   const auto blur_premul = reinterpret_cast<PrivateBlur>(raw_premul);
