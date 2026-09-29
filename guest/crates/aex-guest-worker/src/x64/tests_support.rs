@@ -12727,12 +12727,14 @@ fn win64_crt_log2f_uses_scalar_xmm_abi_and_preserves_special_values() {
     assert_eq!(call_log2f(&mut engine, f32::INFINITY), f32::INFINITY);
     assert!(call_log2f(&mut engine, -1.0).is_nan());
     assert!(call_log2f(&mut engine, f32::NAN).is_nan());
-    assert!(engine
-        .unicorn
-        .get_data()
-        .math_calls
-        .iter()
-        .any(|call| call.starts_with("log2f(")));
+    assert!(
+        engine
+            .unicorn
+            .get_data()
+            .math_calls
+            .iter()
+            .any(|call| call.starts_with("log2f("))
+    );
 }
 
 #[test]
