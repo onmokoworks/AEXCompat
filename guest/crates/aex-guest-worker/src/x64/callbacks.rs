@@ -601,6 +601,34 @@ fn install_float_binary_import(
     .map(|_| ())
 }
 
+fn install_atan2f_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc(
+        "install atan2f import",
+        unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+            if let (Ok(mut xmm0), Ok(xmm1)) = (
+                unicorn.reg_read_long(RegisterX86::XMM0),
+                unicorn.reg_read_long(RegisterX86::XMM1),
+            ) {
+                let y = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
+                let x = f32::from_le_bytes(xmm1[..4].try_into().unwrap());
+                let output = y.atan2(x);
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("atan2f({y},{x})={output}"));
+                }
+                xmm0[..4].copy_from_slice(&output.to_le_bytes());
+                let _ = unicorn.reg_write_long(RegisterX86::XMM0, &xmm0);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
 fn deterministic_fmodf(left: f32, right: f32) -> f32 {
     const SIGN: u32 = 0x8000_0000;
     const ABS: u32 = 0x7fff_ffff;
