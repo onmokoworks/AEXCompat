@@ -114,6 +114,10 @@ pub struct PnpOpenClCandidate {
     pub classification: PnpOpenClClassification,
     pub identity: Option<RuntimeModuleIdentityEvidence>,
     pub status: PnpOpenClBindingStatus,
+    /// The exact PnP display adapter that supplied this software-key value.
+    /// Kept even when the generic catalog collector cannot prove membership;
+    /// the direct active-catalog verifier may supply that missing proof.
+    pub registration_adapter_luid: Option<u64>,
     pub adapter: Option<GpuPlatformIdentity>,
     pub legacy_merge: LegacyMergeStatus,
 }
@@ -330,6 +334,7 @@ fn classify_candidate<I: IdentitySource>(
             Err(IdentityFailure::Io) => classification = PnpOpenClClassification::IdentityIoFailure,
         }
     }
+    let registration_adapter_luid = raw.adapter.as_ref().map(|adapter| adapter.adapter_luid);
     let (status, adapter) = bind_candidate(
         raw.loader_selected,
         classification,
@@ -345,6 +350,7 @@ fn classify_candidate<I: IdentitySource>(
         classification,
         identity,
         status,
+        registration_adapter_luid,
         adapter,
         legacy_merge,
     }
@@ -1347,6 +1353,34 @@ mod tests {
             PnpOpenClBindingStatus::UnverifiedCandidate
         );
         assert!(result.candidates[0].adapter.is_none());
+    }
+
+    #[test]
+    fn missing_generic_catalog_evidence_keeps_only_the_registration_luid() {
+        let path = r"C:\Vendor\opencl.dll";
+        let adapter = platform(7, 0xaa);
+        let observed = identity(path, native_machine(), 1, None);
+        let fixture = FixtureIdentities {
+            outcomes: BTreeMap::from([(path.to_ascii_lowercase(), Ok(observed))]),
+        };
+        let result = collect_with(
+            vec![raw(
+                PnpOpenClSourceClass::SoftwareComponent,
+                PnpOpenClArchitecture::Native,
+                RawPnpValue::Path(path.into()),
+                Some(adapter),
+            )],
+            Vec::new(),
+            &fixture,
+            &[],
+        );
+        let candidate = &result.candidates[0];
+        assert_eq!(
+            candidate.status,
+            PnpOpenClBindingStatus::UnverifiedNoCatalogEvidence
+        );
+        assert!(candidate.adapter.is_none());
+        assert_eq!(candidate.registration_adapter_luid, Some(7));
     }
 
     #[test]

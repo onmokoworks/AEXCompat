@@ -2051,6 +2051,27 @@ impl HarnessApp {
                     &parameters,
                     timing,
                 )
+            } else if smart
+                && pixel_format == aexcompat_broker::image_render::RenderPixelFormat::Argb32f
+                && gpu_backend == aexcompat_broker::image_render::RenderGpuBackend::OpenCl
+            {
+                // The explicit OpenCL GUI choice uses the same active-driver
+                // policy and authenticated preflight as the shipping CLI. An
+                // unavailable/ambiguous driver fails explicitly; it never
+                // becomes a policy-free GPU launch or a silent CPU success.
+                aexcompat_broker::image_render::render_experimental_image_with_auto_opencl_policy(
+                    &repository,
+                    &plugin_path,
+                    &hash,
+                    &input,
+                    &output,
+                    &parameters,
+                    timing,
+                    host_context.as_ref(),
+                    custom_ui_action,
+                    dependencies,
+                    dependency_search_dirs,
+                )
             } else {
                 aexcompat_broker::image_render::render_experimental_image_with_approved_dependencies_and_search_dirs(
                     &repository,

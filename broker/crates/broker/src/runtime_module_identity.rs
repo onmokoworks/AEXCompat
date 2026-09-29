@@ -169,6 +169,18 @@ pub fn capture_runtime_module_identity(
     capture_impl(path)
 }
 
+/// Captures a module only when its opened bytes are a verified member of one
+/// exact, already-selected driver catalog. The caller must independently bind
+/// that catalog to the active adapter package; an embedded signature alone is
+/// never sufficient for this route.
+pub(crate) fn capture_runtime_module_identity_in_catalog(
+    path: &Path,
+    catalog_path: &Path,
+    expected_catalog_sha256: &[u8; 32],
+) -> Result<RuntimeModuleIdentityEvidence, IdentityEvidenceError> {
+    capture_impl_with_catalog(path, Some((catalog_path, expected_catalog_sha256)))
+}
+
 pub fn require_verified_authenticode(
     evidence: &RuntimeModuleIdentityEvidence,
 ) -> Result<(), IdentityEvidenceError> {
@@ -179,6 +191,14 @@ pub fn require_verified_authenticode(
 
 #[cfg(windows)]
 fn capture_impl(path: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEvidenceError> {
+    capture_impl_with_catalog(path, None)
+}
+
+#[cfg(windows)]
+fn capture_impl_with_catalog(
+    path: &Path,
+    expected_catalog: Option<(&Path, &[u8; 32])>,
+) -> Result<RuntimeModuleIdentityEvidence, IdentityEvidenceError> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -222,7 +242,13 @@ fn capture_impl(path: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEv
     let sha256: [u8; 32] = hash.finalize().into();
 
     verify_open_file_identity(path, &canonical_path, &file, &info)?;
-    let (authenticode, signing_catalog_sha256) = verify_authenticode(&file, &canonical_path)?;
+    let (authenticode, signing_catalog_sha256) = match expected_catalog {
+        Some((catalog_path, expected_sha256)) => {
+            verify_exact_catalog_membership(&file, &canonical_path, catalog_path, expected_sha256)?;
+            (AuthenticodeEvidence::Catalog, Some(*expected_sha256))
+        }
+        None => verify_authenticode(&file, &canonical_path)?,
+    };
     verify_open_file_identity(path, &canonical_path, &file, &info)?;
     Ok(RuntimeModuleIdentityEvidence {
         canonical_path,
@@ -236,6 +262,98 @@ fn capture_impl(path: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEv
         authenticode,
         signing_catalog_sha256,
     })
+}
+
+#[cfg(windows)]
+fn verify_exact_catalog_membership(
+    file: &File,
+    canonical_path: &Path,
+    catalog_path: &Path,
+    expected_catalog_sha256: &[u8; 32],
+) -> Result<(), IdentityEvidenceError> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Security::Cryptography::Catalog::{
+        CryptCATAdminAcquireContext2, CryptCATAdminCalcHashFromFileHandle2,
+        CryptCATAdminReleaseContext,
+    };
+    use windows_sys::Win32::Security::WinTrust::{
+        WINTRUST_CATALOG_INFO, WINTRUST_DATA_0, WTD_CHOICE_CATALOG,
+    };
+
+    struct CatalogAdmin(isize);
+    impl Drop for CatalogAdmin {
+        fn drop(&mut self) {
+            unsafe { CryptCATAdminReleaseContext(self.0, 0) };
+        }
+    }
+    let mut admin = 0isize;
+    if unsafe {
+        CryptCATAdminAcquireContext2(
+            &mut admin,
+            std::ptr::null(),
+            windows_sys::core::w!("SHA256"),
+            std::ptr::null(),
+            0,
+        )
+    } == 0
+    {
+        return Err(untrusted("failed to acquire the Windows catalog context"));
+    }
+    let admin = CatalogAdmin(admin);
+    let handle = file.as_raw_handle() as _;
+    let mut hash_len = 0u32;
+    if unsafe {
+        CryptCATAdminCalcHashFromFileHandle2(
+            admin.0,
+            handle,
+            &mut hash_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0
+        || hash_len == 0
+    {
+        return Err(untrusted("failed to size the catalog member hash"));
+    }
+    let mut hash = vec![0u8; hash_len as usize];
+    if unsafe {
+        CryptCATAdminCalcHashFromFileHandle2(admin.0, handle, &mut hash_len, hash.as_mut_ptr(), 0)
+    } == 0
+    {
+        return Err(untrusted("failed to calculate the catalog member hash"));
+    }
+    hash.truncate(hash_len as usize);
+    let member_tag = hash
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    let member_tag_wide: Vec<u16> = member_tag.encode_utf16().chain(Some(0)).collect();
+    let path_wide = wide_null(canonical_path.as_os_str());
+    let digest = verified_catalog_digest(catalog_path, |trusted_catalog_path| {
+        let trusted_catalog_path_wide = wide_null(trusted_catalog_path.as_os_str());
+        let mut catalog_info = WINTRUST_CATALOG_INFO {
+            cbStruct: std::mem::size_of::<WINTRUST_CATALOG_INFO>() as u32,
+            dwCatalogVersion: 0,
+            pcwszCatalogFilePath: trusted_catalog_path_wide.as_ptr(),
+            pcwszMemberTag: member_tag_wide.as_ptr(),
+            pcwszMemberFilePath: path_wide.as_ptr(),
+            hMemberFile: handle,
+            pbCalculatedFileHash: hash.as_mut_ptr(),
+            cbCalculatedFileHash: hash_len,
+            pcCatalogContext: std::ptr::null_mut(),
+            hCatAdmin: admin.0,
+        };
+        let mut catalog_data = trust_data(WTD_CHOICE_CATALOG);
+        catalog_data.Anonymous = WINTRUST_DATA_0 {
+            pCatalog: &mut catalog_info,
+        };
+        verify_and_close(&mut catalog_data) == 0
+    })?
+    .ok_or_else(|| untrusted("module is not a verified member of the selected catalog"))?;
+    if &digest != expected_catalog_sha256 {
+        return Err(untrusted("selected catalog digest changed"));
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -642,6 +760,17 @@ fn capture_impl(_: &Path) -> Result<RuntimeModuleIdentityEvidence, IdentityEvide
     Err(error(
         IdentityEvidenceErrorKind::Unsupported,
         "runtime module identity evidence is only supported on Windows",
+    ))
+}
+
+#[cfg(not(windows))]
+fn capture_impl_with_catalog(
+    _: &Path,
+    _: Option<(&Path, &[u8; 32])>,
+) -> Result<RuntimeModuleIdentityEvidence, IdentityEvidenceError> {
+    Err(error(
+        IdentityEvidenceErrorKind::Unsupported,
+        "runtime module catalog membership requires Windows",
     ))
 }
 

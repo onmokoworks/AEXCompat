@@ -1,3 +1,6 @@
+use crate::runtime_module_identity::{
+    AuthenticodeEvidence, FileIdentity, PeMachine, RuntimeModuleIdentityEvidence,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -64,6 +67,9 @@ pub struct RuntimeModule {
     pub basename: String,
     pub sha256: [u8; 32],
     pub size: u64,
+    /// Open-file identity retained by locally generated policies. Recorded
+    /// policy JSON has no such evidence and cannot claim it by serialization.
+    pub file_identity: Option<FileIdentity>,
     pub backend: RuntimeBackend,
     pub signer_thumbprint: Option<String>,
     pub version: Option<String>,
@@ -102,6 +108,71 @@ impl RuntimeModulePolicy {
     }
     pub fn platform(&self) -> Option<&GpuPlatformIdentity> {
         self.platform.as_ref()
+    }
+
+    /// Builds a short-lived policy from module evidence already bound to this
+    /// exact active driver catalog by the platform collector. Rechecks the
+    /// canonical module bytes here; dispatch performs its own check again.
+    pub(crate) fn from_authenticated_modules_at(
+        platform: GpuPlatformIdentity,
+        evidence: &[RuntimeModuleIdentityEvidence],
+        ttl: Duration,
+        now: SystemTime,
+    ) -> io::Result<Self> {
+        if platform.backend == RuntimeBackend::Cpu {
+            return Err(invalid("CPU has no GPU runtime policy"));
+        }
+        if ttl.is_zero() || ttl > Duration::from_secs(300) {
+            return Err(invalid(
+                "GPU runtime policy lifetime must be at most five minutes",
+            ));
+        }
+        if evidence.is_empty() || evidence.len() > MAX_RUNTIME_MODULES {
+            return Err(invalid("GPU runtime policy module count is invalid"));
+        }
+        let mut paths = HashSet::new();
+        let mut names = HashSet::new();
+        let mut modules = Vec::with_capacity(evidence.len());
+        for module in evidence {
+            if module.authenticode != AuthenticodeEvidence::Catalog
+                || module.signing_catalog_sha256 != Some(platform.driver_catalog_sha256)
+                || module.pe_machine != PeMachine::Amd64
+                || module.size == 0
+            {
+                return Err(invalid(
+                    "GPU module is not bound to the active x64 driver catalog",
+                ));
+            }
+            let path = canonical_exact(&module.canonical_path)?;
+            let basename = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| invalid("GPU module basename is not valid Unicode"))?
+                .to_owned();
+            validate_basename(&basename)?;
+            if !paths.insert(fold_path(&path)) || !names.insert(basename.to_lowercase()) {
+                return Err(invalid("GPU runtime policy module collision"));
+            }
+            authenticate_file(&path, module.size, &module.sha256)?;
+            modules.push(RuntimeModule {
+                path,
+                basename,
+                sha256: module.sha256,
+                size: module.size,
+                file_identity: Some(module.file_identity),
+                backend: platform.backend,
+                signer_thumbprint: None,
+                version: None,
+            });
+        }
+        let expires = now
+            .checked_add(ttl)
+            .ok_or_else(|| invalid("GPU runtime policy expiry overflow"))?;
+        Ok(Self {
+            expires,
+            platform: Some(platform),
+            modules,
+        })
     }
 }
 
@@ -208,6 +279,7 @@ fn parse_and_validate_with_platform_at(
             basename: module.basename,
             sha256,
             size: module.size,
+            file_identity: None,
             backend: module.backend,
             signer_thumbprint: module.signer_thumbprint,
             version: module.version,

@@ -34,6 +34,7 @@ INDEPENDENT_BROKER_TARGETS = {
     "cuda_compute_probe",
     "descriptor_manifest",
     "gpu_platform_collector",
+    "gpu_runtime_policy_generator",
     "opencl_icd_adapter_binding",
     "opencl_icd_collector",
     "opencl_runtime_probe",
