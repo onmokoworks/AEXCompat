@@ -2115,6 +2115,7 @@ mod tests {
         let nested_plugin = first.join("Plug-ins").join("effect.aex");
         fs::create_dir_all(nested_plugin.parent().unwrap()).unwrap();
         fs::write(&nested_plugin, b"fixture AEX").unwrap();
+        let nested_plugin = canonical_deverbatim(&nested_plugin).unwrap();
         assert_eq!(
             registered_cli_runtime_roots_for_unresolved(&nested_plugin, &[]).unwrap(),
             vec![nested_plugin.parent().unwrap().to_path_buf()]
