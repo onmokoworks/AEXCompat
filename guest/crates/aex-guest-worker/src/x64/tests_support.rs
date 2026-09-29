@@ -13537,6 +13537,37 @@ fn import_trace_records_twelve_total_win64_arguments() {
 }
 
 #[test]
+fn suite_name_reader_stops_at_nul_and_preserves_page_boundaries() {
+    let mut engine = test_engine(&[0xc3]);
+    engine
+        .write(DATA_BASE + 0x100, b"PF Iterate8 Suite\0ignored")
+        .unwrap();
+    assert_eq!(
+        read_suite_name(&engine.unicorn, DATA_BASE + 0x100),
+        b"PF Iterate8 Suite"
+    );
+    assert!(read_suite_name(&engine.unicorn, 0).is_empty());
+
+    let end_of_page = DATA_BASE + PAGE_SIZE - 3;
+    engine.write(end_of_page, b"AB\0").unwrap();
+    assert_eq!(read_suite_name(&engine.unicorn, end_of_page), b"AB");
+    engine.write(end_of_page, b"ABC").unwrap();
+    assert_eq!(read_suite_name(&engine.unicorn, end_of_page), b"ABC");
+
+    engine
+        .unicorn
+        .mem_map(DATA_BASE + PAGE_SIZE, PAGE_SIZE, Prot::READ | Prot::WRITE)
+        .unwrap();
+    engine.write(DATA_BASE + PAGE_SIZE, b"DEF\0").unwrap();
+    assert_eq!(read_suite_name(&engine.unicorn, end_of_page), b"ABCDEF");
+    engine.write(DATA_BASE + 0x200, &[b'X'; 256]).unwrap();
+    assert_eq!(
+        read_suite_name(&engine.unicorn, DATA_BASE + 0x200).len(),
+        256
+    );
+}
+
+#[test]
 fn selector_call_converts_unsupported_suite_cxx_throw_to_selector_abort() {
     const CODE: u64 = 0x1000_0000;
     let error_pointer = DATA_BASE + 0x300;

@@ -1689,19 +1689,36 @@ fn try_emulate_selector_abort(unicorn: &mut Unicorn<'_, GuestState>) -> bool {
     true
 }
 
+fn read_suite_name(unicorn: &Unicorn<'_, GuestState>, pointer: u64) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if pointer == 0 {
+        return bytes;
+    }
+    while bytes.len() < 256 {
+        let Some(address) = pointer.checked_add(bytes.len() as u64) else {
+            break;
+        };
+        // Guest mappings are page based. Stay on the current page so a valid
+        // NUL-terminated name at its end does not probe an unmapped next page.
+        let page_remaining = (PAGE_SIZE - (address & (PAGE_SIZE - 1))) as usize;
+        let length = page_remaining.min(256 - bytes.len());
+        let mut chunk = [0u8; 256];
+        if unicorn.mem_read(address, &mut chunk[..length]).is_err() {
+            break;
+        }
+        if let Some(nul) = chunk[..length].iter().position(|byte| *byte == 0) {
+            bytes.extend_from_slice(&chunk[..nul]);
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..length]);
+    }
+    bytes
+}
+
 fn emulate_acquire_suite(unicorn: &mut Unicorn<'_, GuestState>, _: u64, _: u32) {
     let name_pointer = unicorn.reg_read(RegisterX86::RCX).unwrap_or_default();
     let version = unicorn.reg_read(RegisterX86::RDX).unwrap_or_default();
-    let mut bytes = Vec::new();
-    if name_pointer != 0 {
-        for offset in 0..256u64 {
-            let mut byte = [0u8; 1];
-            if unicorn.mem_read(name_pointer + offset, &mut byte).is_err() || byte[0] == 0 {
-                break;
-            }
-            bytes.push(byte[0]);
-        }
-    }
+    let bytes = read_suite_name(unicorn, name_pointer);
     let name = String::from_utf8_lossy(&bytes);
     record_suite_request(
         &mut unicorn.get_data_mut().suite_requests,
