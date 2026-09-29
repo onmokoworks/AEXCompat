@@ -435,6 +435,30 @@ fn install_float_import(
     .map(|_| ())
 }
 
+fn install_log2f_import(
+    unicorn: &mut Unicorn<'static, GuestState>,
+    address: u64,
+) -> Result<(), GuestError> {
+    uc(
+        "install log2f import",
+        unicorn.add_code_hook(address, address, move |unicorn, _, _| {
+            if let Ok(mut xmm0) = unicorn.reg_read_long(RegisterX86::XMM0) {
+                let value = f32::from_le_bytes(xmm0[..4].try_into().unwrap());
+                let output = value.log2();
+                if unicorn.get_data().math_calls.len() < 32 {
+                    unicorn
+                        .get_data_mut()
+                        .math_calls
+                        .push(format!("log2f({value})={output}"));
+                }
+                xmm0[..4].copy_from_slice(&output.to_le_bytes());
+                let _ = unicorn.reg_write_long(RegisterX86::XMM0, &xmm0);
+            }
+        }),
+    )
+    .map(|_| ())
+}
+
 fn install_roundf_import(
     unicorn: &mut Unicorn<'static, GuestState>,
     address: u64,
