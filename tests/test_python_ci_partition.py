@@ -24,10 +24,14 @@ def test_trusted_python_ci_partitions_classic_evidence_exactly_once():
     assert main.count(RUNNER.CLASSIC_FAILURE_EVIDENCE_NODE) == 1
     node_index = main.index(RUNNER.CLASSIC_FAILURE_EVIDENCE_NODE)
     assert main[node_index - 1] == "--deselect"
+    assert main.count(RUNNER.PERFORMANCE_DIAGNOSTICS_NODE) == 1
+    performance_index = main.index(RUNNER.PERFORMANCE_DIAGNOSTICS_NODE)
+    assert main[performance_index - 1] == "--deselect"
     assert evidence == [
         "-q",
         "-rs",
         RUNNER.CLASSIC_FAILURE_EVIDENCE_NODE,
+        RUNNER.PERFORMANCE_DIAGNOSTICS_NODE,
         "--run-built-artifact-tests",
     ]
     assert main.count(RUNNER.SDK_BACKWARDS_BUILD_NODE) == 1
@@ -54,6 +58,7 @@ def test_fork_python_ci_keeps_evidence_in_main_policy_run():
     main = RUNNER.pytest_arguments("main", sdk_ready=False)
 
     assert RUNNER.CLASSIC_FAILURE_EVIDENCE_NODE not in main
+    assert RUNNER.PERFORMANCE_DIAGNOSTICS_NODE not in main
     assert RUNNER.SDK_BACKWARDS_BUILD_NODE not in main
     assert RUNNER.SDK_GRABBA_BUILD_NODE not in main
     assert RUNNER.AEGP_RENDER_OPTIONS_LIFECYCLE_NODE not in main
@@ -71,8 +76,9 @@ def _collect_nodes(arguments):
     # dynamically, so comparing command strings alone cannot prove coverage.
     arguments = list(arguments)
     for flag in ("-n", "--dist"):
-        index = arguments.index(flag)
-        del arguments[index:index + 2]
+        if flag in arguments:
+            index = arguments.index(flag)
+            del arguments[index:index + 2]
     arguments = [value for value in arguments if not value.startswith("--durations=")]
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", *arguments],
@@ -105,6 +111,22 @@ def test_early_and_main_collect_every_previous_ci_node_exactly_once():
     assert main_nodes
     assert early_nodes.isdisjoint(main_nodes)
     assert early_nodes | main_nodes == before
+
+
+def test_native_performance_diagnostics_moves_to_parallel_evidence_job():
+    node = (
+        "tests/test_performance_diagnostics.py::"
+        "test_native_performance_modes_separate_scaling_and_live_memory"
+    )
+    early_nodes = _collect_nodes(RUNNER.pytest_arguments("early", sdk_ready=False))
+    main_nodes = _collect_nodes(RUNNER.pytest_arguments("main", sdk_ready=True))
+    evidence_nodes = _collect_nodes(
+        RUNNER.pytest_arguments("classic-evidence", sdk_ready=True)
+    )
+    assert node not in early_nodes
+    assert node not in main_nodes
+    assert node in evidence_nodes
+    assert sum(node in group for group in (early_nodes, main_nodes, evidence_nodes)) == 1
 
 
 @pytest.mark.parametrize("partition", ("early", "main", "classic-evidence"))
