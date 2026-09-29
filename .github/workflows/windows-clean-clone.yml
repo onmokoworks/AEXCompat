@@ -558,6 +558,7 @@ jobs:
             'build-pf-layer-param-probe'
             'build-pf-param-utils-animation-probe'
             'build-pf-smart-geometry-probe'
+            'build-pf-empty-layer-contract-probe'
             'build-pf-smart-param-time-probe'
             'build-pf-transfer-mask-probe'
             'build-pf-transfer-rect-probe'
